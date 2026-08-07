@@ -56,13 +56,19 @@ Measured on the default 60 s short run at 1000 msg/s:
 Build a minimal raw `reqwest` + `eventsource-stream` client.
 
 - Connect to an actual SSE endpoint (OpenRouter streaming completion or a local mock server).
-- Start receiving chunks. At a random mid-stream point, drop the response future / stream.
+- Start receiving chunks. At a random mid-stream point, cancel by aborting the request
+  future (`Response`, which drops the byte stream). Because dropping **only** the SSE
+  `eventsource` adapter does not reliably close the underlying socket (§8 Pitfall #8),
+  the spike verifies **three distinct mechanisms** — adapter-only drop, adapter + `Response`
+  drop, and `CancellationToken` abort — and reports which actually closes the connection.
 - Verify via `netstat`/`lsof` that the TCP connection closes immediately.
 - Verify no zombie tokio tasks remain by inspecting the runtime task count.
 - Repeat for both OpenRouter and Ollama (`/v1/chat/completions`) endpoints.
 
 **Success criteria:**
-- Dropping the stream future aborts the underlying HTTP connection (no `CLOSE_WAIT` or `ESTABLISHED` linger).
+- Aborting the **request future** closes the underlying HTTP connection immediately (no
+  `CLOSE_WAIT` or `ESTABLISHED` linger). The SSE-**adapter-only** drop case is measured
+  separately so the §4A cancellation path is proven rather than assumed (see §8 Pitfall #8).
 - The tokio runtime shows zero leaked tasks.
 - `CancellationToken` integration works reliably (no race between `cancelled()` and `stream.next()`).
 
