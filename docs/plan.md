@@ -14,14 +14,15 @@ Before building the full architecture, validate the two riskiest assumptions thr
 Create a minimal `ratatui` + `tokio` application that simulates an LLM stream.
 
 - A tokio task generates artificial `StreamEvent::Text` tokens at **1000+ messages/sec**.
-- The TUI event loop (`spawn_blocking` for crossterm + `select!`) receives these via `mpsc` and appends them to a scrolling buffer.
-- Draw at ~60 FPS. Log frame times to verify no dropped frames, no input latency, and no channel backpressure.
+- The TUI event loop (`spawn_blocking` for crossterm + `select!`) receives these via `mpsc` and appends them to a scrolling buffer. The draw loop **batch-drains** all available tokens per frame via `try_recv()` (bounded per-frame cap) rather than one at a time, so it sustains ~60 FPS at high injection rates.
+- Draw at ~60 FPS. Log frame times to verify no dropped frames, no input latency, and no consumer starvation. "No channel backpressure" is measured as **steady-state queue depth ≤ 1 frame's worth (~20 tokens) at 1000+ msg/s** — i.e. the consumer never falls behind — not as the producer never waiting on a full channel. A bounded channel (`send().await` throttles the generator under overload) keeps memory flat regardless.
 - Test rapid steering: send a mid-stream `AgentCommand::Prompt` — verify the old stream is cancelled and the new one starts without UI glitches.
 
 **Success criteria:**
 - Frame time consistently ≤ 17 ms.
 - Keyboard input (Enter, Ctrl+C, typing) responds instantly regardless of stream volume.
-- No memory growth after 10 minutes of continuous token injection.
+- Steady-state channel queue depth ≤ ~20 tokens at 1000+ msg/s (no consumer starvation / no effective backpressure).
+- No memory growth (flat peak buffered memory) after 10 minutes of continuous token injection.
 
 ### Spike 2: HTTP Stream Cancellation
 
