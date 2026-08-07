@@ -1,2 +1,3 @@
-# ylva
-Rust based agent-harness
+# Ylva
+
+A Rust based TUI & CLI agent-harness.

@@ -1,4 +1,4 @@
-# Agent Harness Naming Research
+# Agent-Harness Naming Research
 
 Name criterias ( weak filter ):
 
@@ -77,7 +77,7 @@ Source provenance: domains via WHOIS / RDAP (rdap.org) / DNS NS (a returned-only
 
 - **Etymology & root**: feminine of the Old Norse / Old Swedish masculine name **Ulf**, from Proto-Germanic **`*wulfaz`** → Old Norse **`úlfr`** "wolf", with the feminine suffix **`-a`**. Literally "she-wolf". Sources: Swedish Academy almanackan, Historiska museet (Statens historiska museer), Behind the Name, Wiktionary.
 - **Living, established given name** — not a coined/made-up coinage: a Swedish female given name with a **name day (April 11 in Sweden/Norway; Sept 13 in Swedish-speaking Finland)** and Wikipedia notability page. Also used in Norway, Denmark, Iceland, and Finland. This makes the name culturally grounded and pronounceable in the Nordic region, reducing "made-up brand" risk.
-- **Thematic fit for an agent harness**:
+- **Thematic fit for an agent-harness**:
   - Wolves in Norse symbolism connote strength, intelligence, pack loyalty, and ferocity — the harness is the loyal pack-coordinator that channels an agent's tool calls.
   - "She-wolf" specifically evokes the protective/nurturing guide archetype (cf. the she-wolf suckling Romulus & Remus in Roman myth), reinforcing the "harness that tames the wild model" metaphor.
   - Feminine-form naming mirrors the existing female-name convention used in this research (Nerida, Hagia, Tirzah, etc.) and matches the "female-like" filter.
@@ -93,7 +93,7 @@ Source provenance: domains via WHOIS / RDAP (rdap.org) / DNS NS (a returned-only
   - **Ylva (keelboat)** — a 1973 Danish 12.68 m sailboat class designed by Steen Kjølhede (~100 built). Maritime, unrelated to software/agents; no trademark conflict with Class 9/42.
   - The name is rare in the US (≈35–500 bearers depending on source; SSA rank ≈ #15,163 in 2024, peak 7 births/yr in 2017) → distinctive in an English-speaking tech context without being unpronounceable.
 - **Why this beats shortlist peers on the "background" axis**:
-  - vs **Nerida** (LOW-MED): Ylva has a richer attested historical+literary record (Wikipedia given-name page + nameday + medieval noblewoman) and tighter thematic coupling to "agent harness" (she-wolf = guided ferocity) than the generic "sea-nymph" Nerida.
+  - vs **Nerida** (LOW-MED): Ylva has a richer attested historical+literary record (Wikipedia given-name page + nameday + medieval noblewoman) and tighter thematic coupling to "agent-harness" (she-wolf = guided ferocity) than the generic "sea-nymph" Nerida.
   - vs **Hagia** (LOW-MED): Hagia's only AI namesake ("Hagia Labs", hagiaproject.com) is a direct same-field collision; Ylva has **no** AI/agent/software namesake found in ddgr or on Wikipedia.
   - vs **Tirzah** (LOW): Tirzah is also clean, but tied to a specific Hebrew-Bible/city identity and a UK musician; Ylva's mythic-wolf framing maps better onto a tech-agent persona.
 - **Net**: Real Nordic given name with medieval attestation, name day, literary pedigree, and a thematically apt "she-wolf" meaning — at no IP cost in the software classes. The only real cost is the two taken gTLDs (`.dev`/`.io`), which is a registrar problem, not a legal or naming-fit problem.
@@ -161,7 +161,7 @@ Resolved and moved into the entry above: GitHub handle/org, package indexes (PyP
 
 ### Clotho — MED (weaver-on-theme, but taken)
 
-- Meaning: the Greek Fate who **spins the thread** — thematically perfect for an agent harness (weaves tool calls).
+- Meaning: the Greek Fate who **spins the thread** — thematically perfect for an agent-harness (weaves tool calls).
 - brew: none · npm: **taken** · PyPI: **taken** (200) · GitHub: 371 repos
 - Assessment: registry collision. Runner-up only.
 
