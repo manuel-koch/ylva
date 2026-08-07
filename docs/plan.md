@@ -24,6 +24,33 @@ Create a minimal `ratatui` + `tokio` application that simulates an LLM stream.
 - Steady-state channel queue depth ≤ ~20 tokens at 1000+ msg/s (no consumer starvation / no effective backpressure).
 - No memory growth (flat peak buffered memory) after 10 minutes of continuous token injection.
 
+#### Spike 1 Outcome
+
+Implemented as a standalone crate at `spikes/spike-tui-responsiveness`
+(binary `ylva-spike-tui-responsiveness`), with run instructions and controls in
+[`spikes/spike-tui-responsiveness/README.md`](../spikes/spike-tui-responsiveness/README.md).
+The core pattern (bounded `mpsc` + `spawn_blocking` crossterm bridge +
+`tokio::select!` + batch-drain per frame) works and validates the §4B design.
+
+Measured on the default 60 s short run at 1000 msg/s:
+
+- **Frame time:** avg ~1.3 ms (min ~0.1 ms, max ~2.5 ms), **0** frames above
+  17 ms, histogram entirely in the `<8 ms` bucket → "≤ 17 ms" criterion **met**.
+- **Queue depth:** peak ≤ 1 token (target ~20) → no consumer starvation, the
+  "no effective backpressure" criterion **met** at 1000 msg/s.
+- **Memory:** scrolling ring is capacity-bounded and peak buffered bytes stay
+  flat on the short run → criterion is consistent with the design; the
+  mandated 10-minute (`--duration 600`) soak with a flat peak is still to be
+  confirmed manually/CI.
+- **Steering:** an auto `Prompt` fires ~3 s into the run and cancels/restarts
+  the generator cleanly (verified via the exit summary); live visuals for
+  "no UI glitches" require an interactive terminal.
+- **Implementation notes:** an initial bug (the generator's `send().await`
+  was not cancel-aware) could deadlock shutdown/steering when the bounded
+  channel was full; fixed by `select!`-ing the send against the
+  `CancellationToken`. Frames are counted only on event-driven redraws, so
+  the window tracks actual draw cadence, not a fixed timer.
+
 ### Spike 2: HTTP Stream Cancellation
 
 Build a minimal raw `reqwest` + `eventsource-stream` client.
