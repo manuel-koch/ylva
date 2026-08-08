@@ -107,6 +107,11 @@ Build a minimal raw `reqwest` + `eventsource-stream` client.
 
 ## 1. Vision & Architecture
 
+> **Agent-harness naming decision: Ylva.** The agent-harness is named **Ylva** (see
+> [naming-research.md](./naming-research.md)). Default config files live under
+> `~/.ylva/`. The term "Ylva" refers to the harness itself; "agent" is the runtime
+> loop that Ylva hosts.
+
 The application is a **ReAct agent** embedded inside a **TUI event loop**.
 The LLM streams responses asynchronously while the UI thread remains responsive
 at ~60 FPS. The user can **interrupt** the model or **send steering messages**
@@ -231,7 +236,7 @@ works even if crossterm's event queue is momentarily stuck.
 
 | Crate                  | Role                                              |
 | ---------------------- | ------------------------------------------------- |
-| `dirs`                 | Find `~/.config/your-app/` cross-platform         |
+| `dirs`                 | Find `~/.ylva/` cross-platform                    |
 | `config`               | Hierarchical configuration (default < file < env) |
 | `toml`                 | Config serialization                              |
 | `serde` / `serde_json` | Messages, tool schemas, config serialization      |
@@ -1169,7 +1174,7 @@ Those are defined in the user's config hierarchy.
 ##### Directory Layout
 
 ```text
-~/.config/agent/
+~/.ylva/
 ├── subagents/                 # global, shared behavior definitions
 │   ├── research.toml          # or .md with TOML frontmatter
 │   └── code_edit.toml
@@ -1182,11 +1187,11 @@ Those are defined in the user's config hierarchy.
         └── config.toml
 ```
 
-**Global subagents** (`~/.config/agent/subagents/`) define _behavior_: tools,
+**Global subagents** (`~/.ylva/subagents/`) define _behavior_: tools,
 prompts, max iterations, timeouts. They are fully self-contained and shared
 across all profiles.
 
-**Profiles** (`~/.config/agent/profiles/<name>/`) define _infrastructure_:
+**Profiles** (`~/.ylva/profiles/<name>/`) define _infrastructure_:
 which engine (provider/model/temperature/context-size) each subagent uses, and
 can optionally override behavioral settings or disable subagents entirely.
 
@@ -1451,7 +1456,7 @@ exchanges to it.
 # Default: stateless, text output to stdout, status to stderr
 agent --prompt "summarize src/main.rs"
 
-# Use a specific profile (loads ~/.config/agent/profiles/work/config.toml)
+# Use a specific profile (loads ~/.ylva/profiles/work/config.toml)
 agent --prompt "audit security" --profile work
 
 # Resume existing conversation
@@ -1731,7 +1736,7 @@ The input widget must never be "disabled."
 
 - [ ] Resume previous conversation on startup
 
-- [ ] Config hierarchy (`~/.config/agent/profiles/default/config.toml`) for
+- [ ] Config hierarchy (`~/.ylva/profiles/default/config.toml`) for
       default model, theme, keybindings, and subagent engine assignments
 
 - [ ] Tiered context management: System (never drop), InitialContext (never drop initially),
