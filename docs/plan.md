@@ -1176,8 +1176,8 @@ Those are defined in the user's config hierarchy.
 ```text
 ~/.ylva/
 ├── subagents/                 # global, shared behavior definitions
-│   ├── research.toml          # or .md with TOML frontmatter
-│   └── code_edit.toml
+│   ├── research.md            # .md with +++ frontmatter (seeded format)
+│   └── code_edit.md
 └── profiles/
     ├── default/
     │   └── config.toml        # default profile (always exists)
@@ -1186,6 +1186,69 @@ Those are defined in the user's config hierarchy.
     └── work/
         └── config.toml
 ```
+
+##### Config Source of Truth & Distribution
+
+The `~/.ylva/` layout above is the **runtime** home-directory tree. Its
+canonical contents are **maintained in the repo** as a `config/` tree that
+**mirrors this layout exactly**, and embedded into the binary via
+`include_str!`:
+
+```text
+config/                        # source of truth (versioned, embedded)
+├── subagents/
+│   ├── research.md
+│   └── code_edit.md
+└── profiles/
+    └── default/
+        └── config.toml
+```
+
+Themes are **not** files — they are compiled into the binary and
+name-selectable (`dark | light | monokai`), not seeded into any scope (§4F).
+
+**Three-layer fallback chain**, resolved per-file with **whole-layer replace**
+(highest layer that defines a file wins; lower layers ignored for that file):
+
+```text
+project  .ylva/        (current project, cwd/git-root scope)
+  → home  ~/.ylva/     (per-user, shared across projects)
+  → built-in  config/  (embedded defaults — always the guaranteed floor)
+```
+
+- A file missing from a higher layer falls through to the next lower layer.
+- Missing everywhere is **never a hard error** — built-in always supplies the
+  standard default profile and subagents, so an empty `~/.ylva/` or a fresh
+  project still runs out of the box.
+- Project scope is discovered by walking up from cwd to the nearest ancestor
+  containing a `.ylva/` (or the project's git root).
+
+**Distribution — `ylva init`:**
+
+- `ylva init` seeds the **full standard set** (default profile `config.toml`,
+  `subagents/research.md`, and `subagents/code_edit.md`) into `~/.ylva/`.
+- `ylva init --project` seeds **only** a minimal
+  `.ylva/profiles/default/config.toml` with placeholder values into the
+  project root. Subagents and additional profiles are added manually only when
+  the project explicitly wants to override (inheritance covers the rest).
+- Both are **write-if-missing** by default; `--force` reseeds a built-in file.
+
+**Canonical paths, no synonyms:** there is exactly one location per file
+(e.g. `.ylva/profiles/default/config.toml`); `.ylva/config.toml` is _not_ a
+synonym for the default profile. Profile names are referenced by value
+(e.g. `--profile default`), never by path.
+
+The project `.ylva/` is meant to be **committed** to the project repo (shared,
+team-consistent config).
+
+**Secrets — never stored in config files.** API keys come only from the
+environment. Optional per-scope `.env` files (e.g.
+`~/.ylva/profiles/default/.env` or `.ylva/profiles/default/.env`) are
+auto-loaded at startup, with an already-exported environment variable taking
+precedence over the `.env` value. `ylva init --project` also deploys a
+`.gitignore` inside the project's `.ylva/` (write-if-missing / `--force`) that
+ignores `.env`, so secrets stay uncommitted while the rest of the config is
+committed.
 
 **Global subagents** (`~/.ylva/subagents/`) define _behavior_: tools,
 prompts, max iterations, timeouts. They are fully self-contained and shared
@@ -1198,7 +1261,9 @@ can optionally override behavioral settings or disable subagents entirely.
 ##### Subagent File Formats
 
 Each global subagent is defined by a file in `subagents/` named after its type.
-Two formats are supported:
+The **built-in/seeded** subagents (research, code_edit) ship as Markdown with
+frontmatter (format 2 below); pure TOML remains supported for hand-authored
+files. Two formats are supported:
 
 1. **Pure TOML** (`.toml`):
 
@@ -1427,7 +1492,7 @@ terminal UI.
 
 ### Architecture
 
-Headless mode is **stateless by default**: each `agent --prompt "..."` starts a
+Headless mode is **stateless by default**: each `ylva --prompt "..."` starts a
 new conversation thread in SQLite, runs the ReAct loop, and exits.
 Use `--conversation-id <id>` to resume an existing thread and append new
 exchanges to it.
@@ -1454,25 +1519,25 @@ exchanges to it.
 
 ```bash
 # Default: stateless, text output to stdout, status to stderr
-agent --prompt "summarize src/main.rs"
+ylva --prompt "summarize src/main.rs"
 
 # Use a specific profile (loads ~/.ylva/profiles/work/config.toml)
-agent --prompt "audit security" --profile work
+ylva --prompt "audit security" --profile work
 
 # Resume existing conversation
-agent --prompt "what about error handling?" --conversation-id 42
+ylva --prompt "what about error handling?" --conversation-id 42
 
 # JSON output (buffered, emitted at end)
-agent --prompt "generate tests" --format json
+ylva --prompt "generate tests" --format json
 
 # Auto-approve by tool category
-agent --prompt "refactor everything" \
+ylva --prompt "refactor everything" \
   --auto-approve-read \
   --auto-approve-write \
   --auto-approve-shell
 
 # Suppress stderr progress indicators
-agent --prompt "quick check" --quiet
+ylva --prompt "quick check" --quiet
 ```
 
 ### Output Streams
