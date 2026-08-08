@@ -26,7 +26,7 @@ struct Options {
     rate: usize,
 }
 
-fn parse_args() -> Options {
+fn parse_args() -> Result<Options, String> {
     let mut args = std::env::args().skip(1);
     let mut options = Options {
         duration_secs: 60,
@@ -35,25 +35,39 @@ fn parse_args() -> Options {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--duration" => {
-                options.duration_secs = args
+                let value = args
                     .next()
-                    .and_then(|v| v.parse().ok())
-                    .expect("--duration needs a seconds value");
+                    .ok_or_else(|| "--duration needs a value (seconds)".to_string())?;
+                options.duration_secs = value
+                    .parse()
+                    .map_err(|_| format!("--duration needs a seconds value, got '{value}'"))?;
             }
             "--rate" => {
-                options.rate = args
+                let value = args
                     .next()
-                    .and_then(|v| v.parse().ok())
-                    .expect("--rate needs a msgs/sec value");
+                    .ok_or_else(|| "--rate needs a value (msgs/sec)".to_string())?;
+                options.rate = value
+                    .parse()
+                    .map_err(|_| format!("--rate needs a msgs/sec value, got '{value}'"))?;
             }
-            other => panic!("unknown argument: {other} (use --duration <secs> and --rate <n>)"),
+            other => {
+                return Err(format!(
+                    "unknown argument: {other} (use --duration <secs> and --rate <n>)"
+                ))
+            }
         }
     }
-    options
+    Ok(options)
 }
 
 fn main() -> io::Result<()> {
-    let options = parse_args();
+    let options = match parse_args() {
+        Ok(options) => options,
+        Err(message) => {
+            eprintln!("error: {message}");
+            std::process::exit(2);
+        }
+    };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_time()
         .build()
