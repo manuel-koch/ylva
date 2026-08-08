@@ -22,8 +22,10 @@ Create a minimal `ratatui` + `tokio` application that simulates an LLM stream.
   "No channel backpressure" is measured as **steady-state queue depth ≤ 1 frame's worth (~20 tokens) at 1000+ msg/s**,
   i.e. the consumer never falls behind — not as the producer never waiting on a full channel.
   A bounded channel (`send().await` throttles the generator under overload) keeps memory flat regardless.
-- Test rapid steering: send a mid-stream `AgentCommand::Prompt` — verify the old stream is cancelled
-  and the new one starts without UI glitches.
+- Test rapid steering: send a mid-stream `AgentCommand::Prompt` — verify the stream is **not**
+  cancelled (the steer is queued and injected at the next natural point) and the UI stays glitch-free.
+- Test interruption: send a mid-stream `AgentCommand::Stop` — verify the stream cancels cleanly
+  and a subsequent prompt restarts without UI glitches.
 
 **Success criteria:**
 
@@ -117,13 +119,23 @@ The LLM streams responses asynchronously while the UI thread remains responsive
 at ~60 FPS. The user can **interrupt** the model or **send steering messages**
 at any time without waiting for the stream to finish.
 
-When the user sends a new message mid-stream, the old stream is cancelled via `CancellationToken`,
-the outer agent loop waits for proper synchronisation, flushes the partial response
-to conversation history, appends the new user message, and immediately starts a
-fresh request. The outer agent loop owns the `Context`; the inner streaming task
-sends events back via a dedicated channel and is never a direct writer to the
-message buffer. This single-writer design eliminates lock contention on every
-token and prevents race conditions.
+**Steering and interruption are distinct:**
+
+- **Steer** (user sends a new message while the agent is busy): never aborts a live
+  generation. The message is drawn as a pending bubble and queued; it is injected at
+  the next natural point — a model hand-off pause (`clarify` / tool-approval), a
+  completed tool-call boundary, or the end of the current assistant response. Queued
+  steers are appended in order (after flushing any partial assistant text to history)
+  and then the agent starts a fresh request. Verified: no OpenAI-compatible SSE provider
+  supports true mid-stream message injection, so a steer can only *wait for a natural
+  point* or *abort-and-restart* — never splice into a live completion.
+- **Interrupt** (`Ctrl+C` / `Esc`): hard-aborts the current round via `CancellationToken`,
+  discards any pending steer queue, flushes the partial response to history, and returns
+  to idle.
+
+The outer agent loop owns the `Context`; the inner streaming task sends events back via a
+dedicated channel and is never a direct writer to the message buffer. This single-writer
+design eliminates lock contention on every token and prevents race conditions.
 
 For OS-level interruption, install a `ctrlc` handler that sends `AgentCommand::Stop`
 via the same `cmd_tx` channel used for keyboard events. Double-fire is safe because
@@ -163,10 +175,10 @@ works even if crossterm's event queue is momentarily stuck.
                     │      cmd = cmd_rx.recv() =>   │
                     │        match cmd {            │
                     │          Prompt(text) => {    │
-                    │            // STEER: abort    │
-                    │            // current stream, │
-                    │            // append user msg,│
-                    │            // restart loop    │
+                    │            // STEER: queue    │
+                    │            // user msg,        │
+                    │            // inject at next   │
+                    │            // natural point    │
                     │          }                    │
                     │          Stop => {            │
                     │            // INTERRUPT:      │
@@ -186,11 +198,11 @@ works even if crossterm's event queue is momentarily stuck.
 
 1. **The TUI thread never blocks on I/O.** All LLM and tool I/O runs in a `tokio` task and communicates back via channels.
 2. **The input box is never disabled.** The user can type and hit Enter at any moment — even while tokens are streaming.
-3. **Interruption is cooperative.** The agent uses `CancellationToken` to abort the HTTP stream and
-   preserve whatever partial response was received.
-4. **Steering aborts and restarts.** When a new user message arrives mid-stream, the current request
-   is cancelled, the partial assistant message is saved to history, the new user message is appended,
-   and the agent immediately starts a fresh request.
+3. **Interruption is cooperative.** `Ctrl+C` / `Esc` fires the `CancellationToken` to abort the HTTP
+   stream and any running tool, preserve whatever partial response was received, and return to idle.
+4. **Steering never aborts.** A new user message sent while the agent is busy is queued and injected
+   at the next natural point (model hand-off, completed tool call, or response end) — never by
+   cancelling a live generation.
 
 ## 2. Crate Ecosystem
 
@@ -465,6 +477,8 @@ enum UiUpdate {
     StreamStarted,
     StreamDone,
     StreamCancelled,
+    SteerQueued,        // A steer is queued; its bubble renders as pending until injected
+    SteerApplied,       // Queued steers injected; their bubbles become normal user messages
     Error(String),
 }
 
@@ -475,12 +489,76 @@ enum AgentMode {
     ToolExecuting,      // Tool running in background task
 }
 
+// Builds a request from an immutable snapshot and spawns the inner streaming task.
+// The inner task owns only the `partial` buffer and tool-call accumulators; it never
+// writes `Context`. Returns the fresh `CancellationToken` so the outer loop tracks it.
+fn start_request(
+    context: &Context,
+    tools: &ToolRegistry,
+    provider: Arc<dyn Provider>,
+    mode: &AgentMode,
+    ui_tx: mpsc::Sender<UiUpdate>,
+    agent_tx: mpsc::Sender<AgentEvent>,
+) -> CancellationToken {
+    let cancel = CancellationToken::new();
+    let ctx = context.messages().clone(); // read-only snapshot
+    let schemas = tools.filter_for_mode(mode).schemas();
+    tokio::spawn(async move {
+        let mut stream = provider.chat(ctx, schemas, cancel.clone()).await?;
+        let _ = ui_tx.send(UiUpdate::StreamStarted).await;
+        let mut partial = String::new();
+        let mut accums: HashMap<usize, ToolCallAccumulator> = HashMap::new();
+        let mut done_calls: Vec<AssembledToolCall> = Vec::new();
+        while let Some(event) = stream.recv().await {
+            match event {
+                StreamEvent::Text(s) => { partial.push_str(&s); ui_tx.send(UiUpdate::AppendText(s)).await.ok(); }
+                StreamEvent::Delta(chunk) => { accums.entry(chunk.tool_call_index).or_default().feed(chunk); }
+                StreamEvent::Done => {
+                    if accums.values().any(|a| a.has_incomplete()) {
+                        agent_tx.send(AgentEvent::StreamError("Incomplete tool call JSON".into())).await.ok();
+                    } else {
+                        ui_tx.send(UiUpdate::StreamDone).await.ok();
+                        for a in accums.into_values() { done_calls.push(a.into_tool_call()); }
+                        for call in &done_calls { agent_tx.send(AgentEvent::ToolCall(call.clone())).await.ok(); }
+                        agent_tx.send(AgentEvent::StreamDone { partial }).await.ok();
+                    }
+                    break;
+                }
+                StreamEvent::Cancelled => {
+                    ui_tx.send(UiUpdate::StreamCancelled).await.ok();
+                    agent_tx.send(AgentEvent::StreamCancelled { partial }).await.ok();
+                    break;
+                }
+                StreamEvent::Error(e) => {
+                    ui_tx.send(UiUpdate::Error(e.clone())).await.ok();
+                    agent_tx.send(AgentEvent::StreamError(e)).await.ok();
+                    break;
+                }
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    });
+    cancel
+}
+
+// Drains queued steers into context as user messages; returns true if any were injected.
+// Injecting is the ONLY way a steer reaches the LLM — it never cancels a live stream.
+fn inject_pending_steers(pending_steers: &mut VecDeque<String>, context: &mut Context) -> bool {
+    if pending_steers.is_empty() { return false; }
+    while let Some(msg) = pending_steers.pop_front() {
+        context.push_user(msg); // flushes any partial assistant buffer first
+    }
+    true
+}
+
 // Spawn agent
 let agent_handle = tokio::spawn(async move {
     let mut context = Context::new();
     let mut mode = AgentMode::Idle;
     let mut current_cancel: Option<CancellationToken> = None;
     let mut current_tool_cancel: Option<CancellationToken> = None;
+    // Steers awaiting injection at the next natural point. Drawn as pending bubbles.
+    let mut pending_steers: VecDeque<String> = VecDeque::new();
     // A single LLM message may request several tool calls. They are executed
     // SERIALLY, one after another, from this FIFO queue (never in parallel).
     let mut pending_tools: VecDeque<PendingTool> = VecDeque::new();
@@ -491,86 +569,37 @@ let agent_handle = tokio::spawn(async move {
             Some(cmd) = cmd_rx.recv() => {
                 match cmd {
                     AgentCommand::Prompt(text) => {
-                        // === STEERING: abort anything in flight ===
-                        if let Some(ct) = current_cancel.take() {
-                            ct.cancel();
-                            // The old task will send StreamCancelled later.
-                            // We ignore it if current_cancel has been replaced.
-                        }
+                        let is_internal_continuation = text.is_empty();
 
-                        // Append new user message (flushes any partial assistant buffer first)
-                        context.push_user(text);
-
-                        // === Start fresh request ===
-                        let cancel = CancellationToken::new();
-                        current_cancel = Some(cancel.clone());
-                        mode = AgentMode::Streaming;
-
-                        let provider = provider.clone();
-                        let tools = tools.filter_for_mode(&mode); // dynamic filtering
-                        let ui_tx = ui_tx.clone();
-                        let agent_tx = agent_tx.clone();
-
-                        tokio::spawn(async move {
-                            let mut stream = provider.chat(
-                                context.messages().clone(), // read-only clone for request
-                                tools.schemas(),
-                                cancel,
-                            ).await?;
-
-                            let _ = ui_tx.send(UiUpdate::StreamStarted).await;
-                            let mut partial = String::new();
-                            // One accumulator per requested tool call, keyed by tool_call_index.
-                            let mut accums: HashMap<usize, ToolCallAccumulator> = HashMap::new();
-                            let mut done_calls: Vec<AssembledToolCall> = Vec::new();
-
-                            while let Some(event) = stream.recv().await {
-                                match event {
-                                    StreamEvent::Text(s) => {
-                                        partial.push_str(&s);
-                                        ui_tx.send(UiUpdate::AppendText(s)).await.ok();
-                                    }
-                                    StreamEvent::Delta(chunk) => {
-                                        // Accumulate raw fragments keyed by index (may interleave with Text)
-                                        let a = accums.entry(chunk.tool_call_index).or_default();
-                                        a.feed(chunk); // parses name + arguments fragments
-                                    }
-                                    StreamEvent::Done => {
-                                        if accums.values().any(|a| a.has_incomplete()) {
-                                            agent_tx.send(AgentEvent::StreamError(
-                                                "Incomplete tool call JSON".into()
-                                            )).await.ok();
-                                        } else {
-                                            ui_tx.send(UiUpdate::StreamDone).await.ok();
-                                            // Emit the WHOLE batch of assembled tool calls, then the
-                                            // completion event. Outer loop drains them serially.
-                                            for a in accums.into_values() {
-                                                done_calls.push(a.into_tool_call());
-                                            }
-                                            for call in &done_calls {
-                                                agent_tx.send(AgentEvent::ToolCall(call.clone())).await.ok();
-                                            }
-                                            agent_tx.send(AgentEvent::StreamDone { partial }).await.ok();
-                                        }
-                                        break;
-                                    }
-                                    StreamEvent::Cancelled => {
-                                        ui_tx.send(UiUpdate::StreamCancelled).await.ok();
-                                        agent_tx.send(AgentEvent::StreamCancelled { partial }).await.ok();
-                                        break;
-                                    }
-                                    StreamEvent::Error(e) => {
-                                        ui_tx.send(UiUpdate::Error(e.clone())).await.ok();
-                                        agent_tx.send(AgentEvent::StreamError(e)).await.ok();
-                                        break;
-                                    }
-                                }
+                        if mode == AgentMode::Idle && !is_internal_continuation {
+                            // Fresh user turn while idle: append and start immediately.
+                            context.push_user(text);
+                            mode = AgentMode::Streaming;
+                            current_cancel = Some(start_request(&context, &tools, provider.clone(),
+                                &mode, ui_tx.clone(), agent_tx.clone()));
+                        } else if is_internal_continuation {
+                            // Internal deferred re-prompt (tool batch drained, or a natural
+                            // point reached with queued steers): inject any steers, start fresh.
+                            if inject_pending_steers(&mut pending_steers, &mut context) {
+                                ui_tx.send(UiUpdate::SteerApplied).await.ok();
                             }
-                            Ok::<_, anyhow::Error>(())
-                        });
+                            mode = AgentMode::Streaming;
+                            current_cancel = Some(start_request(&context, &tools, provider.clone(),
+                                &mode, ui_tx.clone(), agent_tx.clone()));
+                        } else {
+                            // === STEERING is cooperative: never cancel the live stream ===
+                            // Queue the message; it is injected at the next natural point
+                            // (model hand-off, completed tool call, or end of response).
+                            // The TUI already drew the user bubble as "pending".
+                            pending_steers.push_back(text);
+                            ui_tx.send(UiUpdate::SteerQueued).await.ok();
+                        }
                     }
 
                     AgentCommand::Stop => {
+                        // INTERRUPT: hard-abort the current round; a steer never does this.
+                        // Discard any queued steers (the redirection is abandoned).
+                        pending_steers.clear();
                         // Cancel streaming LLM request if in flight
                         if let Some(ct) = current_cancel.take() {
                             ct.cancel();
@@ -642,35 +671,64 @@ let agent_handle = tokio::spawn(async move {
             Some(evt) = agent_rx.recv() => {
                 match evt {
                     AgentEvent::StreamDone { partial } => {
+                        // Natural point: the current response ended.
                         context.push_assistant(partial);
-                        mode = AgentMode::Idle;
+                        if inject_pending_steers(&mut pending_steers, &mut context) {
+                            // Steers queued during the response: inject and start a fresh turn.
+                            ui_tx.send(UiUpdate::SteerApplied).await.ok();
+                            mode = AgentMode::Streaming;
+                            current_cancel = Some(start_request(&context, &tools, provider.clone(),
+                                &mode, ui_tx.clone(), agent_tx.clone()));
+                        } else {
+                            mode = AgentMode::Idle;
+                        }
                     }
                     AgentEvent::StreamCancelled { partial } => {
-                        // If a new stream is already in flight, this is a stale cancellation
+                        // Only reachable after a genuine interrupt (Stop) — a steer never aborts.
+                        // If a new stream is already in flight, this is a stale cancellation.
                         if current_cancel.is_none() {
                             context.push_assistant_interrupted(partial);
                             mode = AgentMode::Idle;
                         }
-                        // else: ignore; the new Prompt handler already replaced current_cancel
+                        // else: ignore; the new request already replaced current_cancel
                     }
                     AgentEvent::ToolCall(call) => {
-                        // Enqueue; present for approval only if not already presenting one.
-                        pending_tools.push_back(PendingTool {
-                            name: call.name, arguments: call.arguments, id: call.id,
-                        });
-                        if mode != AgentMode::ToolPending {
-                            mode = AgentMode::ToolPending;
-                            if let Some(head) = pending_tools.front() {
-                                ui_tx.send(UiUpdate::ToolPending {
-                                    name: head.name.clone(), id: head.id,
-                                }).await.ok();
+                        if !pending_steers.is_empty() {
+                            // STEER supersedes the pause (natural point): descope all queued
+                            // tools, deliver the steers as the answer/redirect, re-prompt fresh.
+                            pending_tools.clear();
+                            context.descope_pending_tools();
+                            inject_pending_steers(&mut pending_steers, &mut context);
+                            ui_tx.send(UiUpdate::SteerApplied).await.ok();
+                            mode = AgentMode::Streaming;
+                            current_cancel = Some(start_request(&context, &tools, provider.clone(),
+                                &mode, ui_tx.clone(), agent_tx.clone()));
+                        } else {
+                            // Enqueue; present for approval only if not already presenting one.
+                            pending_tools.push_back(PendingTool {
+                                name: call.name, arguments: call.arguments, id: call.id,
+                            });
+                            if mode != AgentMode::ToolPending {
+                                mode = AgentMode::ToolPending;
+                                if let Some(head) = pending_tools.front() {
+                                    ui_tx.send(UiUpdate::ToolPending {
+                                        name: head.name.clone(), id: head.id,
+                                    }).await.ok();
+                                }
                             }
                         }
                     }
                     AgentEvent::ToolDone { id, result } => {
+                        // Natural point: a tool-call boundary was reached.
                         context.push_tool_result(id, result);
-                        // SERIAL: drain the queue one tool at a time.
-                        if let Some(next) = pending_tools.front() {
+                        if inject_pending_steers(&mut pending_steers, &mut context) {
+                            // STEER supersedes the rest of the batch; inject and re-prompt.
+                            pending_tools.clear();
+                            ui_tx.send(UiUpdate::SteerApplied).await.ok();
+                            mode = AgentMode::Streaming;
+                            current_cancel = Some(start_request(&context, &tools, provider.clone(),
+                                &mode, ui_tx.clone(), agent_tx.clone()));
+                        } else if let Some(next) = pending_tools.front() {
                             mode = AgentMode::ToolPending; // present next queued call for approval
                             ui_tx.send(UiUpdate::ToolPending {
                                 name: next.name.clone(), id: next.id,
@@ -684,7 +742,13 @@ let agent_handle = tokio::spawn(async move {
                     }
                     AgentEvent::ToolError { id, error } => {
                         context.push_tool_error(id, error);
-                        if let Some(next) = pending_tools.front() {
+                        if inject_pending_steers(&mut pending_steers, &mut context) {
+                            pending_tools.clear();
+                            ui_tx.send(UiUpdate::SteerApplied).await.ok();
+                            mode = AgentMode::Streaming;
+                            current_cancel = Some(start_request(&context, &tools, provider.clone(),
+                                &mode, ui_tx.clone(), agent_tx.clone()));
+                        } else if let Some(next) = pending_tools.front() {
                             mode = AgentMode::ToolPending;
                             ui_tx.send(UiUpdate::ToolPending {
                                 name: next.name.clone(), id: next.id,
@@ -698,9 +762,11 @@ let agent_handle = tokio::spawn(async move {
                     AgentEvent::ToolKilled { id } => {
                         context.push_tool_error(id, "Cancelled by user".into());
                         pending_tools.clear(); // user aborted the turn; drop the rest of the batch
+                        pending_steers.clear(); // interrupt abandons any pending redirection
                         mode = AgentMode::Idle;
                     }
                     AgentEvent::StreamError(e) => {
+                        pending_steers.clear(); // errored turn; abandon pending steers
                         mode = AgentMode::Idle;
                         // Error already sent to UI; wait for user
                     }
@@ -748,10 +814,10 @@ loop {
 **Key observations:**
 
 - `Enter` works **unconditionally**. There is no "busy state" that disables input.
-- `Ctrl+C` sends `Stop` which fires the `CancellationToken`. The provider drops the HTTP connection.
-- When steering (`Prompt` while streaming), the old stream is cancelled. The agent loop waits for
-  `AgentEvent::StreamCancelled` from the completion channel, flushes the partial message, appends
-  the new user message, and starts a fresh request.
+- `Ctrl+C` / `Esc` sends `Stop` which fires the `CancellationToken`. The provider drops the HTTP connection.
+- Steering (`Prompt` while busy) **never cancels** the live stream. The message is queued as a pending
+  steer and injected at the next natural point (model hand-off, completed tool call, or end of the
+  current response); only then are the queued steers appended and a fresh request started.
 - The streaming task is fire-and-forget **but sends a single completion event** (`AgentEvent`) back
   to the outer agent loop. The loop is the sole owner of the `AgentMode` state machine and decides all
   transitions (Idle → Streaming, Streaming → ToolPending, etc.).
@@ -798,15 +864,13 @@ fn main() -> anyhow::Result<()> {
 
 **State machine & rapid steering:** Track explicit `AgentMode` states (`Idle`, `Streaming`,
 `ToolPending`) to eliminate overlap bugs: `ApproveTool` is only processed
-in `ToolPending`. Rapid steering uses **two complementary mechanisms**:
-(i) `current_cancel.take()` + immediate new request — stale `StreamCancelled`
-events from the old task are ignored because `current_cancel` is already occupied
-by the new token, which prevents overlapping requests; and (ii) a restart guard
-that coalesces queued `Prompt`s (in case multiple `Enter`s arrive in `cmd_rx`
-before the loop drains them) so only the latest user thought is acted on.
-Together these prevent overlapping requests without an explicit `Restarting`
-state, but the coalescing is a real, separate responsibility and must not be
-assumed away by the channel topology.
+in `ToolPending`. Because a steer never aborts or restarts a live stream, it introduces
+no overlap risk: multiple `Prompt`s in `cmd_rx` are simply queued into `pending_steers`
+and injected together at the next natural point (never cancelling anything). The only
+abort path is `Stop` (interrupt), which uses `current_cancel.take()` so a stale
+`StreamCancelled` from the old task is ignored once the round has been aborted.
+No explicit `Restarting` state is needed: injection only ever happens at a natural
+point when the loop is not mid-flight, and it always starts exactly one fresh request.
 
 ### C. Tiered Context State Machine
 
@@ -907,20 +971,26 @@ misbehaves in practice.
 **Steering behavior:**  
 When the user types "No, use `Arc` instead of `Rc`" while the model is still generating:
 
-1. Cancel the current HTTP stream.
-2. `flush_buffer()` → the partial response becomes the last assistant message.
-3. Append the user's steering message.
-4. Start a new `provider.chat()` with the full updated context.
+1. The message is drawn as a **pending bubble** and queued as a steer — the live stream
+   is **not** cancelled.
+2. At the next natural point — the current response ends (`StreamDone`), a tool call
+   completes, or a hand-off pause is reached — `flush_buffer()` makes the (now complete)
+   partial the last assistant message.
+3. The queued steer(s) are appended as user messages.
+4. A new `provider.chat()` starts with the full updated context.
 
-The model sees:
+The model sees (the assistant turn is complete rather than mid-word cut off):
 
 ```text
 [User]: Write a thread-safe counter.
-[Assistant]: Here is a simple counter using `Rc`... <cut off>
+[Assistant]: Here is a simple counter using `Rc`... (completed turn)
 [User]: No, use `Arc` instead of `Rc`
 ```
 
-This works remarkably well with modern instruction-tuned models.
+If the agent is stuck at a hand-off (tool approval or `clarify`) the steer supersedes it:
+pending tools are descoped, and the message is delivered as the redirect (or the `clarify`
+answer). This works remarkably well with modern instruction-tuned models. Aborting a
+generation is reserved for the explicit interrupt (`Ctrl+C` / `Esc`).
 
 **Token counting:** Use `tiktoken-rs` for OpenAI-compatible models and a byte-length
 heuristic (4 chars ≈ 1 token) for Ollama as a cheap fallback. Maintain a rolling
@@ -1080,8 +1150,9 @@ A terminal agent that can run `rm -rf` or `curl | sh` must ask for approval.
 5. Agent resumes: executes tool, appends result, re-prompts LLM
 
 **Important:** The input box remains active during tool approval. The user can
-even steer ("change the commit message to...") by typing and hitting Enter,
-which would append their message and restart the loop.
+even steer ("change the commit message to...") by typing and hitting Enter, which
+queues a steer and injects it at the next natural point rather than cancelling
+anything.
 
 **Headless mode safety:** Mutating tools (`write_file`, `edit_file`, `bash`) require
 explicit `--auto-approve-write` or `--auto-approve-shell` flags. If invoked without
@@ -1416,9 +1487,10 @@ sub-agents as well.
 #### Steering While a Sub-Agent Runs
 
 The input box is never disabled. If the user sends a new message while a
-sub-agent is running, the message is **immediately appended** to the main
-conversation history, and the main LLM starts a new request (or continues its
-existing stream) with the updated context.
+sub-agent is running, the message is **queued as a cooperative steer** — it is
+never injected into a live main stream. It is appended to the main conversation
+at the next natural point (a completed tool-call boundary / hand-off), and the
+main LLM starts a fresh request with the updated context then.
 
 The sub-agent continues to completion in the background. Its live events flow
 through `subagent_ui_rx` to the sidebar panel. Its final result is appended to
@@ -1640,18 +1712,24 @@ top of a proven agent loop.
   - Outer loop is the **sole writer** to `Context`.
 
 - [ ] **Steering from first compile:** `main()` sends `AgentCommand::Prompt` mid-stream after a
-      hardcoded `tokio::time::sleep`. Prove the handoff: cancel old stream → receive `StreamCancelled`
-      → flush partial → append new user message → start fresh stream.
+      hardcoded `tokio::time::sleep`. Prove the cooperative handoff: the stream is **not** cancelled,
+      the steer is queued, and at the next natural point (`StreamDone`) it is injected — flushed
+      partial (now complete) → append steer → start fresh stream.
 
 - [ ] **Interrupt test:** `main()` sends `AgentCommand::Stop`; verify `StreamCancelled` arrives,
-      partial is flushed, state returns to `Idle`.
+      partial is flushed, pending steer queue is cleared, state returns to `Idle`.
+
+- [ ] **Steer-supersedes-pause test:** send a `Prompt` while paused at a `ToolPending`/`clarify`;
+      verify pending tools are descoped and the steer is injected as the next turn.
 
 - [ ] Print final conversation history on exit to verify state transitions.
 
 **Success criteria:**
 
-- Steering does not panic or deadlock.
-- Final context contains exactly: system message, first partial assistant (interrupted), second user prompt.
+- Steering never aborts a live stream and does not panic or deadlock.
+- Final context (no interrupt) contains exactly: system message, first assistant (completed to its
+  natural end), the queued steering user message(s).
+- Interrupt path: system message, first partial assistant (interrupted), no leftover pending steers.
 - No `Arc<Mutex<Context>>`, no shared mutable state.
 
 **Key crates:** `tokio`, `tokio-util`, `futures`, `thiserror`, `anyhow`
@@ -1742,7 +1820,11 @@ layer, not a core architectural change.
 
 - [ ] **Re-use the same `AgentLoop` struct** from Phase 3. The TUI is just another consumer of `UiUpdate`.
 
-- [ ] **Steering in TUI:** `Enter` sends unconditionally, even while streaming. `Ctrl+C` sends `Stop`.
+- [ ] **Steering in TUI:** `Enter` sends unconditionally, even while streaming — queued as a
+      pending steer when busy. `Ctrl+C`/`Esc` sends `Stop` (interrupt; clears the steer queue).
+- [ ] **Pending-steer rendering:** user bubbles for queued steers show a pending style until a
+      `SteerApplied` `UiUpdate` converts them to normal; a `SteerApplied` clears the "steer queued"
+      indicator.
 
 **CRITICAL:** Ensure `Enter` and `Ctrl+C` are handled **regardless** of `is_streaming` flag.
 The input widget must never be "disabled."
@@ -1855,11 +1937,13 @@ for scripting and automation.
    `rm`, `curl | sh`, `git push`, etc.
 5. **Streaming parse errors.** LLMs may emit malformed JSON for tool arguments. Be ready to catch
    parse errors, show the raw output, and ask the user or retry.
-6. **Race condition on steer.** If the user hits Enter twice in rapid succession, you must serialise
-   the requests. Two distinct mechanisms with separate jobs: (i) `current_cancel.take()` in the loop
-   owns the in-flight stream and ensures a stale `StreamCancelled` from the old task is ignored; (ii)
-   a restart/coalescing guard at the coordinator/UI boundary drains the queued `Prompt`s in `cmd_rx`
-   so only the latest is acted on. Do not conflate them — neither alone covers the other's job.
+6. **Race on steer/injection.** A steer never aborts, so it cannot overlap a live stream by
+   construction — queued `Prompt`s accumulate in `pending_steers` and are injected only at a
+   natural point, and injection always starts exactly one fresh request. The remaining race is
+   on **interrupt**: `current_cancel.take()` owns the in-flight stream so a stale `StreamCancelled`
+   from the aborted task is ignored once `current_cancel` is `None`. Do not conflate the two jobs:
+   the steer queue is for *cooperative redirection*; `current_cancel.take()` is only for the
+   *abort* path.
 7. **Lost partial messages on abort.** When cancelling a stream, always capture the `partial` string
    from the streaming task and append it to history before starting the next request. If you drop it,
    the conversation becomes incoherent.
@@ -1930,9 +2014,9 @@ Study these for patterns:
 
 - [ ] **Can interrupt model generation at any time with** `Ctrl+C`
 
-- [ ] **Can type and send new messages while the model is still streaming**
+- [ ] **Can type and send new messages while the model is still streaming** (queued and injected at the next natural point)
 
-- [ ] Interrupted partial messages are preserved in conversation history
+- [ ] Interrupted partial messages are preserved in conversation history; queued steers are shown as pending until injected
 
 - [ ] Reads and proposes file edits with diff preview
 
@@ -1972,7 +2056,7 @@ where they are documented in the body of this document.
 | **Tool call streaming**        | Provider emits raw `Delta`s; the agent's streaming task owns a `ToolCallAccumulator` per index, assembles calls, emits batch on `Done`                                                         | §4A Unified Provider Trait, §4B ReAct Loop   |
 | **HTTP cancellation**          | Drop the **request future** to abort the TCP connection                                                                                                                                        | §4A Unified Provider Trait                   |
 | **HTTP retry**                 | Pre-stream failures only (`429`/`5xx`/connect) with bounded exponential backoff honoring `Retry-After`; never retry mid-stream                                                                 | §4A Unified Provider Trait                   |
-| **Rapid steering**             | Two mechanisms: `current_cancel.take()` owns stream / ignores stale `StreamCancelled`; coalescing guard drains queued `Prompt`s so only the latest is acted on                                 | §4B ReAct Loop, §8 Pitfalls                  |
+| **Steering semantics**        | Cooperative: a steer never aborts a live generation; queued steers inject at the next natural point (hand-off, completed tool call, end of response). Interrupt (`Stop`) is the only abort path. `current_cancel.take()` ignores stale `StreamCancelled` | §1 Vision, §4B ReAct Loop, §8 Pitfalls |
 | **State overlap**              | Explicit `AgentMode` enum (`Idle`, `Streaming`, `ToolPending`)                                                                                                                                 | §4B ReAct Loop                               |
 | **Multi tool call execution**  | One message's calls accumulate by `tool_call_index`, queued, drained **serially** (approval inline at each call); deferred single re-prompt on empty queue; never parallel                     | §4A, §4B ReAct Loop                          |
 | **Tool process cleanup**       | `process_group(0)` + kill the process group (`killpg`) for shell tools; `kill()` alone leaks grandchildren                                                                                     | §4D Tool Registry                            |
@@ -2006,7 +2090,7 @@ where they are documented in the body of this document.
 | **Sub-agent briefing**         | Hybrid system + user message; curated by main agent                                                                                                                                            | §4G Sub-Agent Delegation                     |
 | **Sub-agent nesting**          | Forbidden; one level only                                                                                                                                                                      | §4G Sub-Agent Delegation                     |
 | **Sub-agent execution**        | One sub-agent at a time; runs **in parallel** with the main agent, which never blocks                                                                                                          | §4G Sub-Agent Delegation                     |
-| **Sub-agent steering**         | User message inserts immediately; sub-agent finishes naturally                                                                                                                                 | §4G Sub-Agent Delegation                     |
+| **Sub-agent steering**         | Main steer queues and injects at the next natural point; sub-agent finishes naturally in the background                                                                    | §4G Sub-Agent Delegation                     |
 | **Sub-agent result**           | Tool-based `finish` with unstructured fallback                                                                                                                                                 | §4G Sub-Agent Delegation                     |
 | **Sub-agent tools**            | Global subagent files define whitelist; profiles can override                                                                                                                                  | §4G Sub-Agent Delegation                     |
 | **Sub-agent config format**    | `.toml` flat or `.md` with TOML frontmatter (body = system_prompt)                                                                                                                             | §4G Sub-Agent Delegation                     |
@@ -2018,5 +2102,5 @@ where they are documented in the body of this document.
 | **Minimal build**              | No CLI surface, no config parsing, no TOML in Phase 1                                                                                                                                          | §7 Phase 1                                   |
 | **Provider verification**      | Mock provider before real HTTP; real `reqwest` in Phase 2                                                                                                                                      | §7 Phase 1, §7 Phase 2                       |
 | **Channel topology**           | Dual channels (`ui_tx` + `agent_tx`) proven from first compile                                                                                                                                 | §7 Phase 1                                   |
-| **Steering**                   | Included in Phase 1 minimal build to prove state machine transitions                                                                                                                           | §7 Phase 1                                   |
+| **Steering**                   | Cooperative-inject at natural points included in early headless build to prove state-machine injection transitions                                                                             | §7 Phase 1                                   |
 | **Context ownership**          | Single-writer rule enforced immediately; read-only clone passed to inner task                                                                                                                  | §7 Phase 1, §4C Context                      |
