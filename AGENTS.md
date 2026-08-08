@@ -54,6 +54,8 @@ Out-of-date docs are treated as bugs.
 If you notice a stale doc while working on something else, report it; do not fix it unless
 asked (consent rule applies).
 
+Check markdown documents using linter `runmdl` with its configuration `.rumdl.toml`.
+
 Maintain configured test coverage threshold as noted in [development-workflow](./docs/development-workflow.md).
 
 ## Coding Conventions
