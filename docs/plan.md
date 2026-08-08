@@ -14,11 +14,19 @@ Before building the full architecture, validate the two riskiest assumptions thr
 Create a minimal `ratatui` + `tokio` application that simulates an LLM stream.
 
 - A tokio task generates artificial `StreamEvent::Text` tokens at **1000+ messages/sec**.
-- The TUI event loop (`spawn_blocking` for crossterm + `select!`) receives these via `mpsc` and appends them to a scrolling buffer. The draw loop **batch-drains** all available tokens per frame via `try_recv()` (bounded per-frame cap) rather than one at a time, so it sustains ~60 FPS at high injection rates.
-- Draw at ~60 FPS. Log frame times to verify no dropped frames, no input latency, and no consumer starvation. "No channel backpressure" is measured as **steady-state queue depth ≤ 1 frame's worth (~20 tokens) at 1000+ msg/s** — i.e. the consumer never falls behind — not as the producer never waiting on a full channel. A bounded channel (`send().await` throttles the generator under overload) keeps memory flat regardless.
-- Test rapid steering: send a mid-stream `AgentCommand::Prompt` — verify the old stream is cancelled and the new one starts without UI glitches.
+- The TUI event loop (`spawn_blocking` for crossterm + `select!`) receives these via `mpsc` and appends
+  them to a scrolling buffer. The draw loop **batch-drains** all available tokens per frame via
+  `try_recv()` (bounded per-frame cap) rather than one at a time, so it sustains ~60 FPS at high
+  injection rates.
+- Draw at ~60 FPS. Log frame times to verify no dropped frames, no input latency, and no consumer starvation.
+  "No channel backpressure" is measured as **steady-state queue depth ≤ 1 frame's worth (~20 tokens) at 1000+ msg/s**,
+  i.e. the consumer never falls behind — not as the producer never waiting on a full channel.
+  A bounded channel (`send().await` throttles the generator under overload) keeps memory flat regardless.
+- Test rapid steering: send a mid-stream `AgentCommand::Prompt` — verify the old stream is cancelled
+  and the new one starts without UI glitches.
 
 **Success criteria:**
+
 - Frame time consistently ≤ 17 ms.
 - Keyboard input (Enter, Ctrl+C, typing) responds instantly regardless of stream volume.
 - Steady-state channel queue depth ≤ ~20 tokens at 1000+ msg/s (no consumer starvation / no effective backpressure).
@@ -66,11 +74,34 @@ Build a minimal raw `reqwest` + `eventsource-stream` client.
 - Repeat for both OpenRouter and Ollama (`/v1/chat/completions`) endpoints.
 
 **Success criteria:**
+
 - Aborting the **request future** closes the underlying HTTP connection immediately (no
   `CLOSE_WAIT` or `ESTABLISHED` linger). The SSE-**adapter-only** drop case is measured
   separately so the §4A cancellation path is proven rather than assumed (see §8 Pitfall #8).
 - The tokio runtime shows zero leaked tasks.
 - `CancellationToken` integration works reliably (no race between `cancelled()` and `stream.next()`).
+
+**Spike 2 outcome** (verified against the hermetic mock in
+`spikes/spike-http-stream-cancel/`, `cargo run --release`):
+
+- **Pass — immediate close.** All three mechanisms (`drop:adapter-only`,
+  `drop:adapter+response`, `token`) close the connection: the mock server's
+  live-connection counter returns to `0` and `lsof`/`netstat` show no
+  `ESTABLISHED`/`CLOSE_WAIT` linger. Measured server-side close latency is
+  ~2 ms (the earlier ~100 ms reading was `lsof` subprocess spawn overhead, not
+  connection linger).
+- **Pass — zero leaked tasks.** `num_alive_tasks()` returns to the pre-run
+  baseline after a 339-connection sweep, and `shutdown_timeout` completes.
+- **Pass — no cancel race.** A 300-iteration `biased`-select token sweep fired
+  the token at a tight mid-stream boundary with **zero** deliveries of more
+  than the tolerated single in-flight chunk after the token fired.
+- **Pitfall #8 adjudication:** with `reqwest`, `Response::bytes_stream(self)`
+  **consumes** the `Response`, so the SSE adapter owns the byte stream and a
+  bare adapter-only drop already drops the whole request future — all three
+  mechanisms behave identically and never leak the socket for this exact stack.
+  The §4A cancellation pattern (§4A note lines ~287-311) is therefore sound.
+- Default/CI runs are hermetic; OpenRouter (`OPENROUTER_API_KEY`) and Ollama
+  (`/v1/chat/completions`) remain opt-in real-endpoint targets via `--endpoint`.
 
 ---
 
@@ -104,7 +135,7 @@ works even if crossterm's event queue is momentarily stuck.
 │  ┌────────────────────────────────────────────────────────┐  │
 │  │ Input Box  [Always active — type + Enter anytime]      │  │
 │  └────────────────────────────────────────────────────────┘  │
-│  [Ctrl+C] Stop Stream  |  [Enter] Send / Steer  |  Status    │ 
+│  [Ctrl+C] Stop Stream  |  [Enter] Send / Steer  |  Status    │
 └──────────────────────┬──────────────────────▲────────────────┘
                        │                      │
            ┌───────────┴──────────────────────┴───────────┐
@@ -150,59 +181,62 @@ works even if crossterm's event queue is momentarily stuck.
 
 1. **The TUI thread never blocks on I/O.** All LLM and tool I/O runs in a `tokio` task and communicates back via channels.
 2. **The input box is never disabled.** The user can type and hit Enter at any moment — even while tokens are streaming.
-3. **Interruption is cooperative.** The agent uses `CancellationToken` to abort the HTTP stream and preserve whatever partial response was received.
-4. **Steering aborts and restarts.** When a new user message arrives mid-stream, the current request is cancelled, the partial assistant message is saved to history, the new user message is appended, and the agent immediately starts a fresh request.
+3. **Interruption is cooperative.** The agent uses `CancellationToken` to abort the HTTP stream and
+   preserve whatever partial response was received.
+4. **Steering aborts and restarts.** When a new user message arrives mid-stream, the current request
+   is cancelled, the partial assistant message is saved to history, the new user message is appended,
+   and the agent immediately starts a fresh request.
 
 ## 2. Crate Ecosystem
 
 ### TUI & Terminal
 
-| Crate | Role |
-| --- | --- |
-| `ratatui` | Modern standard for Rust TUIs: layouts, widgets, buffers |
-| `crossterm` | Event handling, backend for ratatui, clear/flush |
-| `tui-textarea` | Multi-line input with history and vim-like keybindings |
-| `syntect` | Syntax highlighting for code blocks in chat bubbles |
-| `pulldown-cmark` | Parse markdown to render headers/code blocks distinctly |
-| `textwrap` | Intelligent wrapping of LLM output to terminal width |
-| `unicode-width` | Correct width measurement for CJK/emoji |
+| Crate            | Role                                                     |
+| ---------------- | -------------------------------------------------------- |
+| `ratatui`        | Modern standard for Rust TUIs: layouts, widgets, buffers |
+| `crossterm`      | Event handling, backend for ratatui, clear/flush         |
+| `tui-textarea`   | Multi-line input with history and vim-like keybindings   |
+| `syntect`        | Syntax highlighting for code blocks in chat bubbles      |
+| `pulldown-cmark` | Parse markdown to render headers/code blocks distinctly  |
+| `textwrap`       | Intelligent wrapping of LLM output to terminal width     |
+| `unicode-width`  | Correct width measurement for CJK/emoji                  |
 
 ### Async & LLM
 
-| Crate | Role |
-| --- | --- |
-| `tokio` | Async runtime. Agent runs in a task; TUI on main thread |
-| `tokio-util` | `CancellationToken` for cooperative cancellation of streams |
-| `futures` | `StreamExt::next()` inside `tokio::select!` for the agent loop |
-| `async-openai` | ~~Primary for OpenRouter~~ **REMOVED** — see unified provider decision below |
-| `ollama-rs` | ~~Native Ollama client~~ **REMOVED** — Ollama supports OpenAI-compatible API |
+| Crate                            | Role                                                                                                       |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `tokio`                          | Async runtime. Agent runs in a task; TUI on main thread                                                    |
+| `tokio-util`                     | `CancellationToken` for cooperative cancellation of streams                                                |
+| `futures`                        | `StreamExt::next()` inside `tokio::select!` for the agent loop                                             |
+| `async-openai`                   | ~~Primary for OpenRouter~~ **REMOVED** — see unified provider decision below                               |
+| `ollama-rs`                      | ~~Native Ollama client~~ **REMOVED** — Ollama supports OpenAI-compatible API                               |
 | `reqwest` + `eventsource-stream` | **Primary.** Custom unified streaming client for all backends. Direct HTTP control guarantees cancellation |
-| `serde` / `serde_json` | Messages, tool schemas, config serialization |
-| `schemars` | **Critical.** Derive JSON Schemas from structs for LLM function calling |
-| `tiktoken-rs` | Token counting for OpenAI-compatible models |
-| `ctrlc` | SIGINT handler that forwards `AgentCommand::Stop` into the agent channel |
+| `serde` / `serde_json`           | Messages, tool schemas, config serialization                                                               |
+| `schemars`                       | **Critical.** Derive JSON Schemas from structs for LLM function calling                                    |
+| `tiktoken-rs`                    | Token counting for OpenAI-compatible models                                                                |
+| `ctrlc`                          | SIGINT handler that forwards `AgentCommand::Stop` into the agent channel                                   |
 
 ### Tooling & Agent Logic
 
-| Crate | Role |
-| --- | --- |
-| `thiserror` / `anyhow` | Error handling across tools and LLM calls |
-| `tokio::sync::mpsc` | Send tokens & tool results from agent task to UI |
-| `which` | Validate that `bash`, `git`, `rg` exist before offering shell tools |
-| `ignore` | Respect `.gitignore` when building file tree or searching |
-| `tempfile` | Safe scratchpads for agent drafts before disk writes |
-| `walkdir` | Recursive directory traversal for the file explorer |
+| Crate                  | Role                                                                |
+| ---------------------- | ------------------------------------------------------------------- |
+| `thiserror` / `anyhow` | Error handling across tools and LLM calls                           |
+| `tokio::sync::mpsc`    | Send tokens & tool results from agent task to UI                    |
+| `which`                | Validate that `bash`, `git`, `rg` exist before offering shell tools |
+| `ignore`               | Respect `.gitignore` when building file tree or searching           |
+| `tempfile`             | Safe scratchpads for agent drafts before disk writes                |
+| `walkdir`              | Recursive directory traversal for the file explorer                 |
 
 ### Persistence & Config
 
-| Crate | Role |
-| --- | --- |
-| `dirs` | Find `~/.config/your-app/` cross-platform |
-| `config` | Hierarchical configuration (default < file < env) |
-| `toml` | Config serialization |
-| `serde` / `serde_json` | Messages, tool schemas, config serialization |
-| `chrono` | Message timestamps |
-| `clap` | CLI argument parsing for headless mode |
+| Crate                  | Role                                              |
+| ---------------------- | ------------------------------------------------- |
+| `dirs`                 | Find `~/.config/your-app/` cross-platform         |
+| `config`               | Hierarchical configuration (default < file < env) |
+| `toml`                 | Config serialization                              |
+| `serde` / `serde_json` | Messages, tool schemas, config serialization      |
+| `chrono`               | Message timestamps                                |
+| `clap`                 | CLI argument parsing for headless mode            |
 
 ## 3. Project Structure
 
@@ -236,7 +270,11 @@ src/
 
 ## 4. Core Implementation Patterns
 
-**Unified provider decision:** Ollama exposes an OpenAI-compatible API at `/v1/chat/completions` (since v0.1.24). Therefore, we do **not** need separate provider crates. A **single** raw `reqwest` + `eventsource-stream` implementation targets the OpenAI chat-completions spec and works for both OpenRouter and Ollama via configuration (`base_url`, `api_key`, `model`). This eliminates:
+**Unified provider decision:** Ollama exposes an OpenAI-compatible API at `/v1/chat/completions` (since v0.1.24).
+Therefore, we do **not** need separate provider crates. A **single** raw `reqwest` + `eventsource-stream`
+implementation targets the OpenAI chat-completions spec and works for both OpenRouter and Ollama via
+configuration (`base_url`, `api_key`, `model`). This eliminates:
+
 - Code duplication between two provider implementations.
 - Hidden cancellation semantics inside convenience wrappers (`async-openai`, `ollama-rs`).
 - The risk that one crate's stream adapter leaks connections when dropped.
@@ -245,9 +283,13 @@ All streaming logic — SSE parsing, `CancellationToken` polling, `ToolCallAccum
 
 ### A. Unified Provider Trait (with Abort)
 
-The runtime abstraction is a **single** raw HTTP implementation targeting the OpenAI completions spec. It supports **dropping the in-flight request** when the user interrupts or steers.
+The runtime abstraction is a **single** raw HTTP implementation targeting the OpenAI completions spec.
+It supports **dropping the in-flight request** when the user interrupts or steers.
 
-> **Terminology mapping:** The config calls this an **engine** (a named bundle of `base_url`, `model`, `temperature`, etc.). At startup the `Config` module builds a `HashMap<String, Arc<dyn Provider>>` from `Engine` definitions. The rest of the code only knows the `Provider` trait; "engine" is strictly a config concept.
+> **Terminology mapping:** The config calls this an **engine** (a named bundle of `base_url`, `model`,
+> `temperature`, etc.). At startup the `Config` module builds a `HashMap<String, Arc<dyn Provider>>`
+> from `Engine` definitions. The rest of the code only knows the `Provider` trait; "engine" is strictly
+> a config concept.
 
 ```rust
 use async_trait::async_trait;
@@ -364,13 +406,13 @@ impl ToolCallAccumulator {
 }
 ```
 
-
 ### B. Non-Blocking ReAct Loop with Interruption & Steering
 
 This is the heart of the application. The agent loop is a `tokio::select!` that
 simultaneously listens for LLM tokens **and** user commands.
 
 The outer agent loop is a `tokio::select!` on **two** inputs:
+
 1. `cmd_rx.recv()` — user commands (Prompt, Stop, ApproveTool)
 2. `agent_rx.recv()` — lifecycle events from the inner streaming task (Done, Cancelled, ToolCall, Error)
 
@@ -702,9 +744,14 @@ loop {
 
 - `Enter` works **unconditionally**. There is no "busy state" that disables input.
 - `Ctrl+C` sends `Stop` which fires the `CancellationToken`. The provider drops the HTTP connection.
-- When steering (`Prompt` while streaming), the old stream is cancelled. The agent loop waits for `AgentEvent::StreamCancelled` from the completion channel, flushes the partial message, appends the new user message, and starts a fresh request.
-- The streaming task is fire-and-forget **but sends a single completion event** (`AgentEvent`) back to the outer agent loop. The loop is the sole owner of the `AgentMode` state machine and decides all transitions (Idle → Streaming, Streaming → ToolPending, etc.).
-- The TUI thread is a **dumb view model**: it receives `UiUpdate` and renders, but never decides when to start or stop streams. No logic lives in the draw loop.
+- When steering (`Prompt` while streaming), the old stream is cancelled. The agent loop waits for
+  `AgentEvent::StreamCancelled` from the completion channel, flushes the partial message, appends
+  the new user message, and starts a fresh request.
+- The streaming task is fire-and-forget **but sends a single completion event** (`AgentEvent`) back
+  to the outer agent loop. The loop is the sole owner of the `AgentMode` state machine and decides all
+  transitions (Idle → Streaming, Streaming → ToolPending, etc.).
+- The TUI thread is a **dumb view model**: it receives `UiUpdate` and renders, but never decides when
+  to start or stop streams. No logic lives in the draw loop.
 
 **TUI event loop:** For a fully async TUI, use `spawn_blocking` for crossterm events,
 then `select!` on `ui_rx` + `event_rx` in the main TUI thread. Redraw only when
@@ -786,6 +833,7 @@ struct TieredMessage {
 ```
 
 **Insertion rules:**
+
 - `push_system(text)` → `TieredMessage { tier: System, token_count: counted }`
 - `push_initial_context(text)` → `TieredMessage { tier: InitialContext, token_count: counted }`
 - `push_user(text)` → `flush_buffer()` + `TieredMessage { tier: Recent, ... }`
@@ -793,6 +841,7 @@ struct TieredMessage {
 - `push_compacted(summary)` → `TieredMessage { tier: Compacted, ... }`
 
 **Compaction (initial: drop only):**
+
 ```rust
 impl Context {
     fn maybe_compact(&mut self) {
@@ -981,11 +1030,22 @@ not just at startup. If `ripgrep` is missing when `search` is invoked, catch the
 error and show a helpful TUI message. Gracefully degrade: if `rg` is missing,
 fall back to a slower `walkdir` + `regex` search.
 
-**Tool execution strategy:** Every tool invocation runs in a dedicated `tokio::spawn` task with its own `CancellationToken` (`current_tool_cancel`). The agent loop remains responsive to `Stop` commands and steering messages while the tool executes. A `tokio::time::timeout` bounds the execution (default 30s for shell, 5s for file I/O). If the user hits `Ctrl+C` while a tool runs, the `Stop` handler fires the tool's `CancellationToken`, killing the process. The task then sends `AgentEvent::ToolKilled` back to the loop.
+**Tool execution strategy:** Every tool invocation runs in a dedicated `tokio::spawn` task with its
+own `CancellationToken` (`current_tool_cancel`). The agent loop remains responsive to `Stop`
+commands and steering messages while the tool executes. A `tokio::time::timeout` bounds the execution
+(default 30s for shell, 5s for file I/O). If the user hits `Ctrl+C` while a tool runs, the `Stop`
+handler fires the tool's `CancellationToken`, killing the process. The task then sends
+`AgentEvent::ToolKilled` back to the loop.
 
-**Process-group termination:** For shell/spawning tools (`bash`, and any tool that runs subprocesses such as `curl | sh` or a script with backgrounded `&` jobs), `tokio::process::Command::kill()` alone only kills the direct child, leaving orphaned grandchildren. Use `Command::process_group(0)` so the child runs in its own process group, and on timeout/cancel kill the **process group** (kill the group id, e.g. via `nix::sys::signal::killpg`) to tear down the whole tree. Plain file tools need no process-group treatment.
+**Process-group termination:** For shell/spawning tools (`bash`, and any tool that runs subprocesses
+such as `curl | sh` or a script with backgrounded `&` jobs), `tokio::process::Command::kill()` alone
+only kills the direct child, leaving orphaned grandchildren. Use `Command::process_group(0)` so the
+child runs in its own process group, and on timeout/cancel kill the **process group** (kill the group id,
+e.g. via `nix::sys::signal::killpg`) to tear down the whole tree. Plain file tools need no
+process-group treatment.
 
-This pattern mirrors the LLM stream cancellation strategy: cooperative cancellation via `CancellationToken`, no blocking in the main loop, and lifecycle events reported back via `agent_rx`.
+This pattern mirrors the LLM stream cancellation strategy: cooperative cancellation via `CancellationToken`,
+no blocking in the main loop, and lifecycle events reported back via `agent_rx`.
 
 **Tool timeouts:** Use `tokio::time::timeout` around `tokio::process::Command::output`.
 Default: 30s for shell commands, 5s for file I/O. Display a TUI spinner while the
@@ -998,18 +1058,19 @@ in `UiUpdate` so the user sees what went wrong instead of a silent hang.
 
 A terminal agent that can run `rm -rf` or `curl | sh` must ask for approval.
 
-| Tool | Confirmation Level |
-| --- | --- |
-| `read_file`, `list_dir` | `Auto` |
-| `write_file`, `edit_file` | `Ask` (show diff first) |
-| `bash`, `git push` | `Strict` (modal confirmation) |
-| `clarify` | `Interactive` (rendered as question banner; user answers via input box) |
+| Tool                      | Confirmation Level                                                      |
+| ------------------------- | ----------------------------------------------------------------------- |
+| `read_file`, `list_dir`   | `Auto`                                                                  |
+| `write_file`, `edit_file` | `Ask` (show diff first)                                                 |
+| `bash`, `git push`        | `Strict` (modal confirmation)                                           |
+| `clarify`                 | `Interactive` (rendered as question banner; user answers via input box) |
 
 **Flow:**
 
 1. Agent emits `ToolCall("bash", { command: "..." })` or `ToolCall("clarify", { question: "..." })`
 2. Agent loop **pauses** (does not start a new LLM request)
-3. TUI renders modal or question banner: `Execute: git commit -m "..." ? [Y/n/e(edit)]` or `Clarify: Which API version do you want to use?`
+3. TUI renders modal or question banner: `Execute: git commit -m "..." ? [Y/n/e(edit)]`
+   or `Clarify: Which API version do you want to use?`
 4. User sends approval or answer via `cmd_tx`
 5. Agent resumes: executes tool, appends result, re-prompts LLM
 
@@ -1030,7 +1091,7 @@ Parse the markdown stream with `pulldown-cmark` and render distinctly:
 - **Code blocks:** wrapped in `Block` borders, highlighted via `syntect`
 - **Tool proposals:** distinct color block (e.g., cyan background)
 - **Partial / interrupted messages:** subtle indicator (e.g., `…` or faded text)
-to show the response was cut off
+  to show the response was cut off
 
 Use `ratatui::widgets::Paragraph` with `Line`/`Span` composition.
 Cache highlighted lines to avoid re-tokenizing every frame.
@@ -1057,7 +1118,7 @@ result injected as a system message.
 **One sub-agent at a time.** A sub-agent runs in parallel with the main agent,
 but the main agent cannot spawn a second sub-agent while the first is still
 running. This prevents resource contention and keeps the UX predictable. If the
-main LLM calls  while another sub-agent is active, the call is
+main LLM calls while another sub-agent is active, the call is
 queued or returns an error (configurable).
 
 **No nesting.** Sub-agents are forbidden from calling `spawn_subagent`. The
@@ -1084,6 +1145,7 @@ task. The main agent loop immediately returns to listening for user commands and
 steering — it does **not** block on the sub-agent.
 
 The sub-agent is a fully independent ReAct agent with:
+
 - Its own `Context` (seeded from the briefing)
 - Its own filtered `ToolRegistry` (whitelist from config)
 - Its own `Provider` (from the engine assigned in the profile)
@@ -1120,11 +1182,11 @@ Those are defined in the user's config hierarchy.
         └── config.toml
 ```
 
-**Global subagents** (`~/.config/agent/subagents/`) define *behavior*: tools,
+**Global subagents** (`~/.config/agent/subagents/`) define _behavior_: tools,
 prompts, max iterations, timeouts. They are fully self-contained and shared
 across all profiles.
 
-**Profiles** (`~/.config/agent/profiles/<name>/`) define *infrastructure*:
+**Profiles** (`~/.config/agent/profiles/<name>/`) define _infrastructure_:
 which engine (provider/model/temperature/context-size) each subagent uses, and
 can optionally override behavioral settings or disable subagents entirely.
 
@@ -1164,7 +1226,9 @@ quotes and indentation battles.
 
 ##### Engine Definitions (Model Plumbing)
 
-An **engine** is the configuration name for a reusable bundle of LLM connection and sampling parameters. At runtime, each engine definition is used to build a concrete `Provider` trait object. The terms are separate concepts: **engine** = configuration data; **Provider** = runtime trait.
+An **engine** is the configuration name for a reusable bundle of LLM connection and sampling parameters.
+At runtime, each engine definition is used to build a concrete `Provider` trait object. The terms are
+separate concepts: **engine** = configuration data; **Provider** = runtime trait.
 
 ```toml
 # profiles/work/config.toml
@@ -1205,7 +1269,7 @@ Profiles can **adapt** global subagents by overriding specific fields:
 [subagents.research]
 engine = "openrouter_fast"
 allowed_tools = ["read_file", "search"]      # override: removed "list_dir"
-timeout_secs = 60                              # override from global 120
+timeout_secs = 60                            # override from global 120
 ```
 
 Profiles can **disable** a global subagent:
@@ -1250,13 +1314,14 @@ sub-agents as well.
    - A new `CancellationToken`
    - Its own `subagent_ui_tx` for live sidebar updates
    - Its own `agent_tx` for sending the final result back to the parent
-   The sub-agent runs its own ReAct loop in a `tokio::spawn` task.
+     The sub-agent runs its own ReAct loop in a `tokio::spawn` task.
 3. **Parallel execution:** The main agent loop does NOT wait. It continues to
    process `Prompt` (steering) and `Stop` commands from the user. The sub-agent
    and main agent run concurrently. If the main LLM produces new tokens while
    the sub-agent is working, both appear in the TUI (main chat + sidebar panel).
 4. **Finish:** The sub-agent must call a special `finish` tool to return its
    result. The `finish` schema is:
+
    ```rust
    #[derive(JsonSchema, Deserialize)]
    struct FinishArgs {
@@ -1268,11 +1333,12 @@ sub-agents as well.
        sources: Vec<String>,
    }
    ```
+
    The `finish` call is **exempt** from the iteration cap; it is the natural
    termination state. If the sub-agent never calls `finish` (timeout, max
    iterations, or user abort), the system extracts the last assistant message as
-   raw text, wraps it in a synthetic `{"status": "unstructured", "result":
-   "..."}` object, and returns that to the parent.
+   raw text, wraps it in a synthetic `{"status": "unstructured", "result": "..."}`
+   object, and returns that to the parent.
 5. **Re-integration:** The `result` field of the structured output is injected
    into the main conversation as a `Message::System` (or a dedicated
    `Message::SubagentResult`) so the main LLM can use it on its next turn.
@@ -1324,24 +1390,27 @@ collapsible sidebar panel or by querying the database.
   SQLite for audit).
 - **Headless:** Sub-agents are **disabled by default**. Enable with
   `--allow-subagents`. When enabled, stderr prints `Spawned sub-agent
-  'research'...` and completion status. The `--auto-approve-*` flags inherited
+'research'...` and completion status. The `--auto-approve-*` flags inherited
   by the parent also apply to sub-agents.
 
 ## 5. OpenRouter vs Ollama
 
-| Feature | OpenRouter | Ollama |
-| --- | --- | --- |
-| **Setup** | `OPENROUTER_API_KEY` env var | Ollama server running locally |
-| **Models** | 100+ (Claude, GPT-4, Mistral, etc.) | Downloaded GGUFs |
-| **Function Calling** | Native OpenAI `tools` spec | Native since v0.3+ (needs tool-trained models) |
-| **Streaming** | SSE with `delta.tool_calls` chunks | SSE via `/api/chat` |
-| **Abort / Cancel** | Drop HTTP request body | Drop HTTP request body |
-| **Cost** | Pay-per-token | Free (your hardware) |
+| Feature              | OpenRouter                          | Ollama                                         |
+| -------------------- | ----------------------------------- | ---------------------------------------------- |
+| **Setup**            | `OPENROUTER_API_KEY` env var        | Ollama server running locally                  |
+| **Models**           | 100+ (Claude, GPT-4, Mistral, etc.) | Downloaded GGUFs                               |
+| **Function Calling** | Native OpenAI `tools` spec          | Native since v0.3+ (needs tool-trained models) |
+| **Streaming**        | SSE with `delta.tool_calls` chunks  | SSE via `/api/chat`                            |
+| **Abort / Cancel**   | Drop HTTP request body              | Drop HTTP request body                         |
+| **Cost**             | Pay-per-token                       | Free (your hardware)                           |
 
 **Strategy:** Start with OpenRouter + `mistralai/mistral-small` or `anthropic/claude-3.5-haiku`
 for cheap, reliable tool use while debugging the TUI. Once solid, test locally with Ollama + `llama3.1:8b`.
 
-**Ollama implementation note:** If you need full control over the request body and streaming response parsing, you can also implement the Ollama provider using raw `reqwest` + `serde_json` to POST to `/api/chat`. This avoids any abstraction mismatch with tool calling, though `ollama-rs` remains a convenient choice for model listing and discovery.
+**Ollama implementation note:** If you need full control over the request body and streaming response
+parsing, you can also implement the Ollama provider using raw `reqwest` + `serde_json` to POST to
+`/api/chat`. This avoids any abstraction mismatch with tool calling, though `ollama-rs` remains a
+convenient choice for model listing and discovery.
 
 ## 6. Headless / CLI Mode
 
@@ -1403,10 +1472,10 @@ agent --prompt "quick check" --quiet
 
 ### Output Streams
 
-| Stream | Content | Destination |
-|--------|---------|-------------|
+| Stream     | Content                                                        | Destination                  |
+| ---------- | -------------------------------------------------------------- | ---------------------------- |
 | **stdout** | LLM response text (text mode) or final JSON object (json mode) | Piped to files / other tools |
-| **stderr** | Status messages, tool annotations, progress indicators | User-facing diagnostics |
+| **stderr** | Status messages, tool annotations, progress indicators         | User-facing diagnostics      |
 
 **Example stderr output:**
 
@@ -1420,17 +1489,18 @@ Done.
 
 ### Exit Codes
 
-| Code | Meaning |
-|------|---------|
-| `0` | Success — LLM completed, all tools executed |
-| `1` | General error — API failure, network error, panic |
-| `2` | User interruption (Ctrl+C / SIGINT) |
-| `3` | Tool failure — tool execution returned error |
-| `4` | Approval required but denied — mutating tool invoked without `--auto-approve-*` |
+| Code | Meaning                                                                         |
+| ---- | ------------------------------------------------------------------------------- |
+| `0`  | Success — LLM completed, all tools executed                                     |
+| `1`  | General error — API failure, network error, panic                               |
+| `2`  | User interruption (Ctrl+C / SIGINT)                                             |
+| `3`  | Tool failure — tool execution returned error                                    |
+| `4`  | Approval required but denied — mutating tool invoked without `--auto-approve-*` |
 
 ### Tool Approval in Headless Mode
 
-Read-only tools (`read_file`, `list_dir`, `search`) execute automatically. Mutating tools require explicit flags:
+Read-only tools (`read_file`, `list_dir`, `search`) execute automatically. Mutating tools require
+explicit flags:
 
 - `--auto-approve-write` → `write_file`, `edit_file`
 - `--auto-approve-shell` → `bash`
@@ -1441,33 +1511,47 @@ if a decision is needed, the model must make a best-effort guess or error out.
 If a mutating tool is invoked without the corresponding flag, the agent emits
 exit code `4` and a descriptive error to stderr.
 
-**Model selection:** Use `--profile <name>` to load a predefined engine configuration. Override explicitly with `--provider` + `--model` flags (e.g., `--provider openrouter --model anthropic/claude-3.5-haiku`) for one-off scripts. No hidden defaults.
+**Model selection:** Use `--profile <name>` to load a predefined engine configuration. Override explicitly
+with `--provider` + `--model` flags (e.g., `--provider openrouter --model anthropic/claude-3.5-haiku`)
+for one-off scripts. No hidden defaults.
 
-**Commands:** Slash commands (`/model`, `/tools`, `/clear`, `/save`) are only recognised at the start of a line to avoid triggering inside pasted code.
+**Commands:** Slash commands (`/model`, `/tools`, `/clear`, `/save`) are only recognised at the start
+of a line to avoid triggering inside pasted code.
 
-**Conversation titles:** Generated from `ID + timestamp` so headless runs are easy to find later in the SQLite history.
+**Conversation titles:** Generated from `ID + timestamp` so headless runs are easy to find later in
+the SQLite history.
 
-**Persistence:** Always persists to SQLite; there is no `--no-persist` flag. Every run leaves a trace for later review.
+**Persistence:** Always persists to SQLite; there is no `--no-persist` flag. Every run leaves a trace
+for later review.
 
-**Buffering strategy:** Buffer everything and emit at the end. For `--format text`, the user sees status on stderr in real-time ("Streaming response...") but the actual LLM text is buffered and flushed to stdout on completion. For `--format json`, the entire JSON object is emitted at the end. This guarantees well-formed output for downstream tools and avoids partial output on interrupt.
+**Buffering strategy:** Buffer everything and emit at the end. For `--format text`, the user sees
+status on stderr in real-time ("Streaming response...") but the actual LLM text is buffered and flushed
+to stdout on completion. For `--format json`, the entire JSON object is emitted at the end.
+This guarantees well-formed output for downstream tools and avoids partial output on interrupt.
 
 ## 7. Phased Build Plan
 
 ### Phase 0: Proof-of-Concept Spikes
 
-See §0 for the two pre-build spikes (TUI responsiveness and HTTP stream cancellation). These are standalone experiments, not part of the production code path.
+See §0 for the two pre-build spikes (TUI responsiveness and HTTP stream cancellation).
+These are standalone experiments, not part of the production code path.
 
 ### Phase 1: Minimal Headless Build (The Agent Kernel)
 
-**Decision:** Build headless first. The TUI is deferred to Phase 4 and added as a rendering layer on top of a proven agent loop.
+**Decision:** Build headless first. The TUI is deferred to Phase 4 and added as a rendering layer on
+top of a proven agent loop.
 
-- [ ] **Goal:** A working headless agent loop in ~300 lines that proves the core architecture: mock provider, dual channels, steering, cancellation, and context ownership.
+- [ ] **Goal:** A working headless agent loop in ~300 lines that proves the core architecture:
+      mock provider, dual channels, steering, cancellation, and context ownership.
 
-- [ ] **No CLI surface yet.** `main.rs` hardcodes a prompt and a steering trigger. No `clap`, no config parsing, no TOML.
+- [ ] **No CLI surface yet.** `main.rs` hardcodes a prompt and a steering trigger. No `clap`,
+      no config parsing, no TOML.
 
-- [ ] **Mock provider** — a tokio task that emits artificial `StreamEvent::Text` tokens with `sleep` delays and respects `CancellationToken`. No `reqwest`, no SSE parsing, no API keys needed.
+- [ ] **Mock provider** — a tokio task that emits artificial `StreamEvent::Text` tokens with
+      `sleep` delays and respects `CancellationToken`. No `reqwest`, no SSE parsing, no API keys needed.
 
-- [ ] **Minimal `Context`** — `Vec<Message>` enum (`System`, `User`, `Assistant`) with `push_user()` and `push_assistant_interrupted(partial)`. ~25 lines.
+- [ ] **Minimal `Context`** — `Vec<Message>` enum (`System`, `User`, `Assistant`) with `push_user()`
+      and `push_assistant_interrupted(partial)`. ~25 lines.
 
 - [ ] **Three spawned tasks** (proving channel topology):
   1. `main()` coordinator: owns `Context`, `select!` on `agent_rx` + `cmd_rx`.
@@ -1485,13 +1569,17 @@ See §0 for the two pre-build spikes (TUI responsiveness and HTTP stream cancell
   - It returns the final/cancelled `partial` via `AgentEvent` to the outer loop.
   - Outer loop is the **sole writer** to `Context`.
 
-- [ ] **Steering from first compile:** `main()` sends `AgentCommand::Prompt` mid-stream after a hardcoded `tokio::time::sleep`. Prove the handoff: cancel old stream → receive `StreamCancelled` → flush partial → append new user message → start fresh stream.
+- [ ] **Steering from first compile:** `main()` sends `AgentCommand::Prompt` mid-stream after a
+      hardcoded `tokio::time::sleep`. Prove the handoff: cancel old stream → receive `StreamCancelled`
+      → flush partial → append new user message → start fresh stream.
 
-- [ ] **Interrupt test:** `main()` sends `AgentCommand::Stop`; verify `StreamCancelled` arrives, partial is flushed, state returns to `Idle`.
+- [ ] **Interrupt test:** `main()` sends `AgentCommand::Stop`; verify `StreamCancelled` arrives,
+      partial is flushed, state returns to `Idle`.
 
 - [ ] Print final conversation history on exit to verify state transitions.
 
 **Success criteria:**
+
 - Steering does not panic or deadlock.
 - Final context contains exactly: system message, first partial assistant (interrupted), second user prompt.
 - No `Arc<Mutex<Context>>`, no shared mutable state.
@@ -1500,7 +1588,8 @@ See §0 for the two pre-build spikes (TUI responsiveness and HTTP stream cancell
 
 ### Phase 2: Real HTTP Provider (Still Headless)
 
-- [ ] **Goal:** Replace the mock provider with a real `reqwest` + `eventsource-stream` implementation targeting the OpenAI chat-completions spec.
+- [ ] **Goal:** Replace the mock provider with a real `reqwest` + `eventsource-stream` implementation
+      targeting the OpenAI chat-completions spec.
 
 - [ ] Define unified `Provider` trait with `CancellationToken` parameter and `StreamEvent::Cancelled`
 
@@ -1508,11 +1597,13 @@ See §0 for the two pre-build spikes (TUI responsiveness and HTTP stream cancell
 
 - [ ] Implement one provider using raw `reqwest` + `eventsource-stream`
 
-- [ ] Verify provider works for both OpenRouter (`base_url` override) and Ollama (`/v1` endpoint) via config switch
+- [ ] Verify provider works for both OpenRouter (`base_url` override) and Ollama (`/v1` endpoint)
+      via config switch
 
 - [ ] Spawn chat in a `tokio::task`; send `StreamEvent::Text` chunks over `mpsc`
 
-- [ ] **Cancellation verified with real TCP:** Drop the stream future and confirm via `netstat`/`lsof` that the connection closes immediately (no `CLOSE_WAIT` linger)
+- [ ] **Cancellation verified with real TCP:** Drop the stream future and confirm via `netstat`/`lsof`
+      that the connection closes immediately (no `CLOSE_WAIT` linger)
 
 - [ ] Handle `StreamEvent::Cancelled` in the headless UI printer (mark message as interrupted in stdout)
 
@@ -1533,7 +1624,8 @@ See §0 for the two pre-build spikes (TUI responsiveness and HTTP stream cancell
   - `write_file`
   - `list_dir`
 
-- [ ] Implement ReAct loop inside the `select!` block with explicit `AgentMode` state machine (`Idle`, `Streaming`, `ToolPending`):
+- [ ] Implement ReAct loop inside the `select!` block with explicit `AgentMode` state machine
+      (`Idle`, `Streaming`, `ToolPending`):
 
   1. Stream LLM response
   2. Detect `tool_calls` in stream or final message
@@ -1551,7 +1643,7 @@ See §0 for the two pre-build spikes (TUI responsiveness and HTTP stream cancell
 - [ ] Add `ToolError` variant to `UiUpdate` for failed tool invocations
 
 - [ ] Extract `AgentLoop` as a reusable struct (provider + registry + context)
-  so Phase 5 sub-agents can instantiate it with a restricted tool whitelist
+      so Phase 5 sub-agents can instantiate it with a restricted tool whitelist
 
 - [ ] Prevent infinite loops: max iterations = 15 (configurable per engine)
 
@@ -1561,7 +1653,8 @@ See §0 for the two pre-build spikes (TUI responsiveness and HTTP stream cancell
 
 ### Phase 4: TUI Skeleton (Rendering Layer Added)
 
-**Decision:** The TUI is added only after the agent loop is proven headless. The TUI is a rendering layer, not a core architectural change.
+**Decision:** The TUI is added only after the agent loop is proven headless. The TUI is a rendering
+layer, not a core architectural change.
 
 - [ ] **Goal:** A responsive terminal interface where the input box is **never** disabled.
 
@@ -1581,7 +1674,8 @@ See §0 for the two pre-build spikes (TUI responsiveness and HTTP stream cancell
 
 - [ ] **Steering in TUI:** `Enter` sends unconditionally, even while streaming. `Ctrl+C` sends `Stop`.
 
-**CRITICAL:** Ensure `Enter` and `Ctrl+C` are handled **regardless** of `is_streaming` flag. The input widget must never be "disabled."
+**CRITICAL:** Ensure `Enter` and `Ctrl+C` are handled **regardless** of `is_streaming` flag.
+The input widget must never be "disabled."
 
 **Key crates:** `ratatui`, `crossterm`, `tui-textarea`, `textwrap`, `ctrlc`
 
@@ -1590,17 +1684,21 @@ See §0 for the two pre-build spikes (TUI responsiveness and HTTP stream cancell
 - [ ] **Goal:** Make it a true coding agent.
 
 - [ ] `bash` tool wrapping `tokio::process::Command` with `tokio::time::timeout` (default 30s)
-- [ ] Launch `bash` with `process_group(0)` and kill the process **group** on timeout/`Stop` (prevents orphaned grandchildren)
+
+- [ ] Launch `bash` with `process_group(0)` and kill the process **group** on timeout/`Stop`
+      (prevents orphaned grandchildren)
 
 - [ ] Confirmation modal for `bash` and `write_file` (human-in-the-loop)
 
 - [ ] `search` tool wrapping `ripgrep` via `std::process` with lazy binary check and graceful fallback
 
-- [ ] `clarify` tool for interactive open-ended questions; render question banner in TUI, user answers via input box; not available in headless mode
+- [ ] `clarify` tool for interactive open-ended questions; render question banner in TUI, user answers
+      via input box; not available in headless mode
 
 - [ ] File tree sidebar using `ignore` + `walkdir`
 
-- [ ] **Diff view:** When `write_file` is proposed, render a side-by-side or unified diff in chat before approval
+- [ ] **Diff view:** When `write_file` is proposed, render a side-by-side or unified diff in chat
+      before approval
 
 - [ ] Add `edit_file` tool (line-based or search-and-replace) to reduce full-file rewrite tokens
 
@@ -1624,7 +1722,8 @@ See §0 for the two pre-build spikes (TUI responsiveness and HTTP stream cancell
 
 - [ ] **Goal:** Usable daily driver.
 
-- [ ] `syntect` highlighting for all Markdown code fences; render raw text while streaming, parse markdown only after `Done`
+- [ ] `syntect` highlighting for all Markdown code fences; render raw text while streaming,
+      parse markdown only after `Done`
 
 - [ ] Three built-in themes: dark, light, monokai
 
@@ -1633,11 +1732,15 @@ See §0 for the two pre-build spikes (TUI responsiveness and HTTP stream cancell
 - [ ] Resume previous conversation on startup
 
 - [ ] Config hierarchy (`~/.config/agent/profiles/default/config.toml`) for
-  default model, theme, keybindings, and subagent engine assignments
+      default model, theme, keybindings, and subagent engine assignments
 
-- [ ] Tiered context management: System (never drop), InitialContext (never drop initially), Recent (drop oldest first), Compacted (summarization placeholder)
+- [ ] Tiered context management: System (never drop), InitialContext (never drop initially),
+      Recent (drop oldest first), Compacted (summarization placeholder)
+
 - [ ] Token counting with cached counts per `TieredMessage` (re-count on insertion, not every request)
+
 - [ ] Context window compaction: drop oldest `Recent`/`Compacted` messages when total > context_size × 0.9
+
 - [ ] Phase 6 extension: replace "drop" with on-the-fly summarization via a cheap local model
 
 - [ ] `/commands` in input box (e.g., `/model`, `/tools`, `/clear`, `/save`)
@@ -1646,11 +1749,13 @@ See §0 for the two pre-build spikes (TUI responsiveness and HTTP stream cancell
 
 ### Phase 7: CLI Surface
 
-**Decision:** Headless mode already works from Phase 1. This phase adds the full `clap` CLI interface for scripting and automation.
+**Decision:** Headless mode already works from Phase 1. This phase adds the full `clap` CLI interface
+for scripting and automation.
 
 - [ ] **Goal:** Automation and scripting support.
 
-- [ ] Add `clap` for CLI argument parsing (`--prompt`, `--profile`, `--format`, `--conversation-id`, `--provider`, `--model`, `--auto-approve-*`, `--quiet`)
+- [ ] Add `clap` for CLI argument parsing (`--prompt`, `--profile`, `--format`, `--conversation-id`,
+      `--provider`, `--model`, `--auto-approve-*`, `--quiet`)
 
 - [ ] Implement `FakeTuiWrapper` that receives `UiUpdate` events and prints to stdout/stderr
 
@@ -1670,17 +1775,35 @@ See §0 for the two pre-build spikes (TUI responsiveness and HTTP stream cancell
 
 ## 8. Critical Pitfalls to Avoid
 
-1. **Never block the TUI thread.** Always use `tokio::spawn` + `mpsc`. If the agent blocks, the terminal freezes and `Ctrl+C` feels broken.
-2. **Tool schemas must stay in sync.** Use `schemars` derive. Do not hand-edit JSON schemas when adding a tool.
-3. **Context window overflow.** Count tokens (or estimate) and implement a sliding window or summary strategy before the LLM truncates from the wrong end.
-4. **Untrusted bash commands.** Always require confirmation for shell execution. Never auto-execute `rm`, `curl | sh`, `git push`, etc.
-5. **Streaming parse errors.** LLMs may emit malformed JSON for tool arguments. Be ready to catch parse errors, show the raw output, and ask the user or retry.
-6. **Race condition on steer.** If the user hits Enter twice in rapid succession, you must serialise the requests. Two distinct mechanisms with separate jobs: (i) `current_cancel.take()` in the loop owns the in-flight stream and ensures a stale `StreamCancelled` from the old task is ignored; (ii) a restart/coalescing guard at the coordinator/UI boundary drains the queued `Prompt`s in `cmd_rx` so only the latest is acted on. Do not conflate them — neither alone covers the other's job.
-7. **Lost partial messages on abort.** When cancelling a stream, always capture the `partial` string from the streaming task and append it to history before starting the next request. If you drop it, the conversation becomes incoherent.
-8. **HTTP connection leaks.** Dropping the SSE stream adapter does not necessarily drop the underlying TCP socket. Abort the **request future** to ensure the connection is actually closed.
-9. **Double-append on Cancelled → Done race.** If the cancel fires just as the stream naturally ends, ensure you don't append the assistant message twice. Use a `stream_finished: AtomicBool` inside the streaming task.
-10. **Headless mode must never auto-approve dangerous tools by default.** If `--auto-approve-shell` is not passed, `bash` must exit with code `4` and a clear error. A script that forgets the flag should fail loudly, not silently execute `rm -rf /`.
-11. **Context ownership confusion.** The inner streaming task must never hold a mutable reference to `Context`. Send completion events back to the outer agent loop via channel so the outer loop remains the sole writer.
+1. **Never block the TUI thread.** Always use `tokio::spawn` + `mpsc`. If the agent blocks, the terminal
+   freezes and `Ctrl+C` feels broken.
+2. **Tool schemas must stay in sync.** Use `schemars` derive. Do not hand-edit JSON schemas when
+   adding a tool.
+3. **Context window overflow.** Count tokens (or estimate) and implement a sliding window or
+   summary strategy before the LLM truncates from the wrong end.
+4. **Untrusted bash commands.** Always require confirmation for shell execution. Never auto-execute
+   `rm`, `curl | sh`, `git push`, etc.
+5. **Streaming parse errors.** LLMs may emit malformed JSON for tool arguments. Be ready to catch
+   parse errors, show the raw output, and ask the user or retry.
+6. **Race condition on steer.** If the user hits Enter twice in rapid succession, you must serialise
+   the requests. Two distinct mechanisms with separate jobs: (i) `current_cancel.take()` in the loop
+   owns the in-flight stream and ensures a stale `StreamCancelled` from the old task is ignored; (ii)
+   a restart/coalescing guard at the coordinator/UI boundary drains the queued `Prompt`s in `cmd_rx`
+   so only the latest is acted on. Do not conflate them — neither alone covers the other's job.
+7. **Lost partial messages on abort.** When cancelling a stream, always capture the `partial` string
+   from the streaming task and append it to history before starting the next request. If you drop it,
+   the conversation becomes incoherent.
+8. **HTTP connection leaks.** Dropping the SSE stream adapter does not necessarily drop the underlying
+   TCP socket. Abort the **request future** to ensure the connection is actually closed.
+9. **Double-append on Cancelled → Done race.** If the cancel fires just as the stream naturally ends,
+   ensure you don't append the assistant message twice. Use a `stream_finished: AtomicBool` inside
+   the streaming task.
+10. **Headless mode must never auto-approve dangerous tools by default.** If `--auto-approve-shell`
+    is not passed, `bash` must exit with code `4` and a clear error. A script that forgets the flag
+    should fail loudly, not silently execute `rm -rf /`.
+11. **Context ownership confusion.** The inner streaming task must never hold a mutable reference to
+    `Context`. Send completion events back to the outer agent loop via channel so the outer loop
+    remains the sole writer.
 
 ## 9. Starter `Cargo.toml`
 
@@ -1768,62 +1891,62 @@ Study these for patterns:
 The following table lists the major design decisions made during planning and
 where they are documented in the body of this document.
 
-| Area | Decision | Location |
-| --- | --- | --- |
-| **Tool schema compilation** | `schemars` derive at compile time; `ToolRegistry` holds all schemas | §4D Tool Registry |
-| **Tool visibility** | **Dynamic filtering:** runtime subset built per request based on mode/profile/whitelist | §4D Tool Registry |
-| **Agent loop architecture** | Outer `tokio::select!` on `cmd_rx` + `agent_rx`; inner streaming task sends `AgentEvent` back to loop for state transitions | §4B ReAct Loop |
-| **Context ownership** | Outer agent loop owns `Context`; inner task sends events via channel | §1 Vision, §4B ReAct Loop, §4C Context |
-| **Multi-line input** | `Enter` sends; `Shift+Enter` inserts newline | §4B ReAct Loop |
-| **Markdown parsing** | Render raw text while streaming; parse markdown only after `Done` | §4F Rich Chat Rendering |
-| **Tool call streaming** | Provider emits raw `Delta`s; the agent's streaming task owns a `ToolCallAccumulator` per index, assembles calls, emits batch on `Done` | §4A Unified Provider Trait, §4B ReAct Loop |
-| **HTTP cancellation** | Drop the **request future** to abort the TCP connection | §4A Unified Provider Trait |
-| **HTTP retry** | Pre-stream failures only (`429`/`5xx`/connect) with bounded exponential backoff honoring `Retry-After`; never retry mid-stream | §4A Unified Provider Trait |
-| **Rapid steering** | Two mechanisms: `current_cancel.take()` owns stream / ignores stale `StreamCancelled`; coalescing guard drains queued `Prompt`s so only the latest is acted on | §4B ReAct Loop, §8 Pitfalls |
-| **State overlap** | Explicit `AgentMode` enum (`Idle`, `Streaming`, `ToolPending`) | §4B ReAct Loop |
-| **Multi tool call execution** | One message's calls accumulate by `tool_call_index`, queued, drained **serially** (approval inline at each call); deferred single re-prompt on empty queue; never parallel | §4A, §4B ReAct Loop |
-| **Tool process cleanup** | `process_group(0)` + kill the process group (`killpg`) for shell tools; `kill()` alone leaks grandchildren | §4D Tool Registry |
-| **Tool result size** | Truncate at insertion (tunable cap + marker); `maybe_compact` prefers oversized results | §4C Context, §4D Tool Registry |
-| **TUI event loop** | `spawn_blocking` for crossterm + `select!` on `ui_rx` + `subagent_ui_rx` + `event_rx` | §4B ReAct Loop |
-| **TUI async context** | `main.rs` uses `rt.block_on` for the TUI loop | §4B ReAct Loop |
-| **Token counting** | `tiktoken-rs` for OpenAI; byte heuristic for Ollama; cached per `TieredMessage`. Counts are **approximate/advisory** (encoding is model-family dependent); rely on `context_size × 0.9` margin | §4C Context State Machine |
-| **Context tiers** | `System` (never drop), `InitialContext` (never drop), `Recent` (drop oldest), `Compacted` (summarize in Phase 6) | §4C Context State Machine |
-| **Ollama tools** | Unified OpenAI-compatible provider using raw `reqwest` to `/v1/chat/completions`; no separate `ollama-rs` crate | §2 Crate Ecosystem, §5 OpenRouter vs Ollama |
-| **OS signals** | `ctrlc` handler mapped to `AgentCommand::Stop` | §1 Vision, §2 Crate Ecosystem |
-| **Tool binary checks** | Lazy check at invocation with graceful fallback | §4D Tool Registry |
-| **Tool timeouts** | `tokio::time::timeout` around `Command::output` with user-visible defaults | §4D Tool Registry |
-| **Tool errors** | `ToolError` variant in `UiUpdate` for visible failure reporting | §4B ReAct Loop, §4D Tool Registry |
-| **Headless mode** | Full CLI with `--prompt`, `--format`, `--conversation-id`, granular `--auto-approve-*`, exit codes `0–4` | §7 CLI Surface |
-| **Output streams** | Split stdout (content) / stderr (status); `--quiet` flag; buffer and emit at end | §7 CLI Surface |
-| **Headless safety** | Mutating tools require `--auto-approve-*`; exit code `4` if denied | §4E Safety, §7 CLI Surface |
-| **Conversation titles** | ID + timestamp | §7 CLI Surface |
-| **Model switching** | Supported mid-conversation; `SwitchModel` is a documented placeholder, not yet wired — arrives via `/model` in the slash-command phase | §4B ReAct Loop, §7 CLI Surface |
-| **App state** | Dumb view model; agent loop owns state machine | §4B ReAct Loop |
-| **Config format** | TOML for all config files; YAML explicitly rejected | §2 Crate Ecosystem, §4G Sub-Agent Delegation |
-| **Engine vs Provider mapping** | `Engine` = config data (static, named); `Provider` = runtime trait object built from Engine at startup | §4A Provider Trait, §4G Engine Definitions |
-| **Syntect themes** | 3 built-in: dark, light, monokai | §4F Rich Chat Rendering |
-| **edit_file tool** | Both search-and-replace and line-range modes | §4D Tool Registry |
-| **Slash commands** | Only recognised at start of line | §7 CLI Surface |
-| **Headless buffering** | Buffer everything; emit at end | §7 CLI Surface |
-| **Clarify tool** | Free-text only; no multiple-choice options | §4D Tool Registry |
-| **Sub-agent delegation** | Tool-based `spawn_subagent` using reusable `AgentLoop` | §4G Sub-Agent Delegation |
-| **Sub-agent parallelism** | Sub-agent runs in parallel with main agent; main loop never blocks | §4G Sub-Agent Lifecycle |
-| **Sub-agent channels** | Dedicated `subagent_ui_tx`/`subagent_ui_rx` for live sidebar updates; SQLite only for audit | §4G UI & Headless |
-| **Sub-agent types** | Profile-driven with global behavior + local engine assignment | §4G Sub-Agent Delegation |
-| **Sub-agent briefing** | Hybrid system + user message; curated by main agent | §4G Sub-Agent Delegation |
-| **Sub-agent nesting** | Forbidden; one level only | §4G Sub-Agent Delegation |
-| **Sub-agent execution** | One sub-agent at a time; runs **in parallel** with the main agent, which never blocks | §4G Sub-Agent Delegation |
-| **Sub-agent steering** | User message inserts immediately; sub-agent finishes naturally | §4G Sub-Agent Delegation |
-| **Sub-agent result** | Tool-based `finish` with unstructured fallback | §4G Sub-Agent Delegation |
-| **Sub-agent tools** | Global subagent files define whitelist; profiles can override | §4G Sub-Agent Delegation |
-| **Sub-agent config format** | `.toml` flat or `.md` with TOML frontmatter (body = system_prompt) | §4G Sub-Agent Delegation |
-| **Sub-agent safety** | Inherits parent safety settings | §4G Sub-Agent Delegation |
-| **Sub-agent persistence** | `subagent_runs` table linking parent conversation | §4G Sub-Agent Delegation |
-| **Sub-agent UI** | Collapsible sidebar panel + status bar line | §4G Sub-Agent Delegation |
-| **Sub-agent headless** | `--allow-subagents` flag, disabled by default | §7 CLI Surface |
-| **Build order** | Headless first (Phase 1–3), TUI added as rendering layer in Phase 4 | §7 Phased Build Plan |
-| **Minimal build** | No CLI surface, no config parsing, no TOML in Phase 1 | §7 Phase 1 |
-| **Provider verification** | Mock provider before real HTTP; real `reqwest` in Phase 2 | §7 Phase 1, §7 Phase 2 |
-| **Channel topology** | Dual channels (`ui_tx` + `agent_tx`) proven from first compile | §7 Phase 1 |
-| **Steering** | Included in Phase 1 minimal build to prove state machine transitions | §7 Phase 1 |
-| **Context ownership** | Single-writer rule enforced immediately; read-only clone passed to inner task | §7 Phase 1, §4C Context |
+| Area                           | Decision                                                                                                                                                                                       | Location                                     |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| **Tool schema compilation**    | `schemars` derive at compile time; `ToolRegistry` holds all schemas                                                                                                                            | §4D Tool Registry                            |
+| **Tool visibility**            | **Dynamic filtering:** runtime subset built per request based on mode/profile/whitelist                                                                                                        | §4D Tool Registry                            |
+| **Agent loop architecture**    | Outer `tokio::select!` on `cmd_rx` + `agent_rx`; inner streaming task sends `AgentEvent` back to loop for state transitions                                                                    | §4B ReAct Loop                               |
+| **Context ownership**          | Outer agent loop owns `Context`; inner task sends events via channel                                                                                                                           | §1 Vision, §4B ReAct Loop, §4C Context       |
+| **Multi-line input**           | `Enter` sends; `Shift+Enter` inserts newline                                                                                                                                                   | §4B ReAct Loop                               |
+| **Markdown parsing**           | Render raw text while streaming; parse markdown only after `Done`                                                                                                                              | §4F Rich Chat Rendering                      |
+| **Tool call streaming**        | Provider emits raw `Delta`s; the agent's streaming task owns a `ToolCallAccumulator` per index, assembles calls, emits batch on `Done`                                                         | §4A Unified Provider Trait, §4B ReAct Loop   |
+| **HTTP cancellation**          | Drop the **request future** to abort the TCP connection                                                                                                                                        | §4A Unified Provider Trait                   |
+| **HTTP retry**                 | Pre-stream failures only (`429`/`5xx`/connect) with bounded exponential backoff honoring `Retry-After`; never retry mid-stream                                                                 | §4A Unified Provider Trait                   |
+| **Rapid steering**             | Two mechanisms: `current_cancel.take()` owns stream / ignores stale `StreamCancelled`; coalescing guard drains queued `Prompt`s so only the latest is acted on                                 | §4B ReAct Loop, §8 Pitfalls                  |
+| **State overlap**              | Explicit `AgentMode` enum (`Idle`, `Streaming`, `ToolPending`)                                                                                                                                 | §4B ReAct Loop                               |
+| **Multi tool call execution**  | One message's calls accumulate by `tool_call_index`, queued, drained **serially** (approval inline at each call); deferred single re-prompt on empty queue; never parallel                     | §4A, §4B ReAct Loop                          |
+| **Tool process cleanup**       | `process_group(0)` + kill the process group (`killpg`) for shell tools; `kill()` alone leaks grandchildren                                                                                     | §4D Tool Registry                            |
+| **Tool result size**           | Truncate at insertion (tunable cap + marker); `maybe_compact` prefers oversized results                                                                                                        | §4C Context, §4D Tool Registry               |
+| **TUI event loop**             | `spawn_blocking` for crossterm + `select!` on `ui_rx` + `subagent_ui_rx` + `event_rx`                                                                                                          | §4B ReAct Loop                               |
+| **TUI async context**          | `main.rs` uses `rt.block_on` for the TUI loop                                                                                                                                                  | §4B ReAct Loop                               |
+| **Token counting**             | `tiktoken-rs` for OpenAI; byte heuristic for Ollama; cached per `TieredMessage`. Counts are **approximate/advisory** (encoding is model-family dependent); rely on `context_size × 0.9` margin | §4C Context State Machine                    |
+| **Context tiers**              | `System` (never drop), `InitialContext` (never drop), `Recent` (drop oldest), `Compacted` (summarize in Phase 6)                                                                               | §4C Context State Machine                    |
+| **Ollama tools**               | Unified OpenAI-compatible provider using raw `reqwest` to `/v1/chat/completions`; no separate `ollama-rs` crate                                                                                | §2 Crate Ecosystem, §5 OpenRouter vs Ollama  |
+| **OS signals**                 | `ctrlc` handler mapped to `AgentCommand::Stop`                                                                                                                                                 | §1 Vision, §2 Crate Ecosystem                |
+| **Tool binary checks**         | Lazy check at invocation with graceful fallback                                                                                                                                                | §4D Tool Registry                            |
+| **Tool timeouts**              | `tokio::time::timeout` around `Command::output` with user-visible defaults                                                                                                                     | §4D Tool Registry                            |
+| **Tool errors**                | `ToolError` variant in `UiUpdate` for visible failure reporting                                                                                                                                | §4B ReAct Loop, §4D Tool Registry            |
+| **Headless mode**              | Full CLI with `--prompt`, `--format`, `--conversation-id`, granular `--auto-approve-*`, exit codes `0–4`                                                                                       | §7 CLI Surface                               |
+| **Output streams**             | Split stdout (content) / stderr (status); `--quiet` flag; buffer and emit at end                                                                                                               | §7 CLI Surface                               |
+| **Headless safety**            | Mutating tools require `--auto-approve-*`; exit code `4` if denied                                                                                                                             | §4E Safety, §7 CLI Surface                   |
+| **Conversation titles**        | ID + timestamp                                                                                                                                                                                 | §7 CLI Surface                               |
+| **Model switching**            | Supported mid-conversation; `SwitchModel` is a documented placeholder, not yet wired — arrives via `/model` in the slash-command phase                                                         | §4B ReAct Loop, §7 CLI Surface               |
+| **App state**                  | Dumb view model; agent loop owns state machine                                                                                                                                                 | §4B ReAct Loop                               |
+| **Config format**              | TOML for all config files; YAML explicitly rejected                                                                                                                                            | §2 Crate Ecosystem, §4G Sub-Agent Delegation |
+| **Engine vs Provider mapping** | `Engine` = config data (static, named); `Provider` = runtime trait object built from Engine at startup                                                                                         | §4A Provider Trait, §4G Engine Definitions   |
+| **Syntect themes**             | 3 built-in: dark, light, monokai                                                                                                                                                               | §4F Rich Chat Rendering                      |
+| **edit_file tool**             | Both search-and-replace and line-range modes                                                                                                                                                   | §4D Tool Registry                            |
+| **Slash commands**             | Only recognised at start of line                                                                                                                                                               | §7 CLI Surface                               |
+| **Headless buffering**         | Buffer everything; emit at end                                                                                                                                                                 | §7 CLI Surface                               |
+| **Clarify tool**               | Free-text only; no multiple-choice options                                                                                                                                                     | §4D Tool Registry                            |
+| **Sub-agent delegation**       | Tool-based `spawn_subagent` using reusable `AgentLoop`                                                                                                                                         | §4G Sub-Agent Delegation                     |
+| **Sub-agent parallelism**      | Sub-agent runs in parallel with main agent; main loop never blocks                                                                                                                             | §4G Sub-Agent Lifecycle                      |
+| **Sub-agent channels**         | Dedicated `subagent_ui_tx`/`subagent_ui_rx` for live sidebar updates; SQLite only for audit                                                                                                    | §4G UI & Headless                            |
+| **Sub-agent types**            | Profile-driven with global behavior + local engine assignment                                                                                                                                  | §4G Sub-Agent Delegation                     |
+| **Sub-agent briefing**         | Hybrid system + user message; curated by main agent                                                                                                                                            | §4G Sub-Agent Delegation                     |
+| **Sub-agent nesting**          | Forbidden; one level only                                                                                                                                                                      | §4G Sub-Agent Delegation                     |
+| **Sub-agent execution**        | One sub-agent at a time; runs **in parallel** with the main agent, which never blocks                                                                                                          | §4G Sub-Agent Delegation                     |
+| **Sub-agent steering**         | User message inserts immediately; sub-agent finishes naturally                                                                                                                                 | §4G Sub-Agent Delegation                     |
+| **Sub-agent result**           | Tool-based `finish` with unstructured fallback                                                                                                                                                 | §4G Sub-Agent Delegation                     |
+| **Sub-agent tools**            | Global subagent files define whitelist; profiles can override                                                                                                                                  | §4G Sub-Agent Delegation                     |
+| **Sub-agent config format**    | `.toml` flat or `.md` with TOML frontmatter (body = system_prompt)                                                                                                                             | §4G Sub-Agent Delegation                     |
+| **Sub-agent safety**           | Inherits parent safety settings                                                                                                                                                                | §4G Sub-Agent Delegation                     |
+| **Sub-agent persistence**      | `subagent_runs` table linking parent conversation                                                                                                                                              | §4G Sub-Agent Delegation                     |
+| **Sub-agent UI**               | Collapsible sidebar panel + status bar line                                                                                                                                                    | §4G Sub-Agent Delegation                     |
+| **Sub-agent headless**         | `--allow-subagents` flag, disabled by default                                                                                                                                                  | §7 CLI Surface                               |
+| **Build order**                | Headless first (Phase 1–3), TUI added as rendering layer in Phase 4                                                                                                                            | §7 Phased Build Plan                         |
+| **Minimal build**              | No CLI surface, no config parsing, no TOML in Phase 1                                                                                                                                          | §7 Phase 1                                   |
+| **Provider verification**      | Mock provider before real HTTP; real `reqwest` in Phase 2                                                                                                                                      | §7 Phase 1, §7 Phase 2                       |
+| **Channel topology**           | Dual channels (`ui_tx` + `agent_tx`) proven from first compile                                                                                                                                 | §7 Phase 1                                   |
+| **Steering**                   | Included in Phase 1 minimal build to prove state machine transitions                                                                                                                           | §7 Phase 1                                   |
+| **Context ownership**          | Single-writer rule enforced immediately; read-only clone passed to inner task                                                                                                                  | §7 Phase 1, §4C Context                      |

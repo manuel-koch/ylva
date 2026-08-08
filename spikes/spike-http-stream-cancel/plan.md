@@ -26,6 +26,7 @@ tree (per `docs/plan.md` §Phase 0). Unliked Spike 1, this experiment is **headl
 and via OS socket inspection, so no live terminal is required.
 
 **Acceptance criteria (verbatim from `docs/plan.md` §Spike 2):**
+
 - Dropping the stream future aborts the underlying HTTP connection (no `CLOSE_WAIT` or
   `ESTABLISHED` linger).
 - The tokio runtime shows zero leaked tasks.
@@ -33,6 +34,7 @@ and via OS socket inspection, so no live terminal is required.
   `stream.next()`).
 
 **Key constraints:**
+
 - Raw `reqwest` (features `json`, `stream`) + `eventsource-stream` — the exact
   provider stack chosen in `docs/plan.md` §2/§4A. No convenience LLM crates.
 - Cooperatively cancel via a `CancellationToken` polled in a `tokio::select!`
@@ -177,4 +179,4 @@ and via OS socket inspection, so no live terminal is required.
   any other new doc file. The Makefile/`make test-coverage` gate at the repo root
   (`cargo llvm-cov`, `--fail-under-lines 80`, excluding `ui.rs`/`main.rs`) targets the
   root crate and does not by itself cover spike crates — run the spike's own
-   `cargo test`/`clippy`/`fmt` inside its directory.
+  `cargo test`/`clippy`/`fmt` inside its directory.
