@@ -7,7 +7,7 @@ while the user steers the stream mid-flight.
 
 This is a **spike, not production code**. It lives in the dedicated `spikes/`
 directory, is a separate crate, and is **not** wired into any future `src/`
-tree (see `docs/plan.md` §Phase 0 / §Spike 1). The full intent and the
+tree (see `docs/blueprint.md` §Phase 0 / §Spike 1). The full intent and the
 acceptance criteria are recorded in [plan.md](./plan.md).
 
 ## What it proves

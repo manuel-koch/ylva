@@ -34,3 +34,34 @@ or its command changes, update this section in the same commit (see
 [AGENTS](../AGENTS.md) → *Docs are part of the change set*).
 Other documents that reference `make` targets must delegate here rather than
 re-list targets, otherwise the lists drift the next time the `Makefile` changes.
+
+## Planned implementations
+
+Each implementation is driven by a dedicated plan document kept in
+`docs/plans/<topic>.md` — one file per subject/feature. A plan states:
+
+- the goal and scope (what "done" means),
+- an ordered, independently-verifiable task checklist,
+- for each task, the tests that must verify it,
+- a **documentation step** that lists every `docs/*` file the change touches.
+
+The plan is the source of truth for the work.
+
+## Plan execution
+
+When executing a plan:
+
+- complete tasks in order; verify each via the test suite and linter before
+  moving on (Testing Pyramid / TDD semantics).
+- each committed change bundles implementation + tests + the **documentation
+  update named in the plan's documentation step** — never commit code without
+  its doc changes (see [AGENTS](../AGENTS.md) → *Docs are part of the change set*).
+- before executing, check the change against the recorded decisions in
+  [architecture-design-records](../docs/architecture-design-records/) and keep
+  the implementation consistent with them; introduce a new record when the
+  change deviates.
+- if a plan doc is found to be out of date, update the plan to match the work;
+  stale docs are bugs.
+
+A plan step is "done" only when its docs are updated too. Partial completion is
+not completion.

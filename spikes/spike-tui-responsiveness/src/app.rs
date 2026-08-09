@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 /// A user command routed from the TUI into the agent/generator layer.
 ///
-/// Mirrors the command naming in `docs/plan.md` §4B (`Prompt`, `Stop`) for
+/// Mirrors the command naming in `docs/blueprint.md` §4B (`Prompt`, `Stop`) for
 /// spike fidelity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentCommand {

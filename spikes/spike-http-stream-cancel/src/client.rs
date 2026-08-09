@@ -197,7 +197,7 @@ pub async fn stream_and_drop(
 
 /// Stream from an endpoint and cooperatively abort via a `CancellationToken`
 /// polled with `biased` priority in a `tokio::select!` — mirroring
-/// `docs/plan.md` §4A.
+/// `docs/blueprint.md` §4A.
 ///
 /// The token is fired from within the loop once `cancel_at_event` events have
 /// been received, which maximises contention between `cancel.cancelled()` and

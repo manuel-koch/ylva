@@ -9,7 +9,7 @@ without leaking sockets or background tasks in the real agent.
 
 This is a **spike, not production code**. It lives in the dedicated `spikes/`
 directory, is a separate crate, and is **not** wired into any future `src/`
-tree (see `docs/plan.md` §Phase 0 / §Spike 2). The full intent and the
+tree (see `docs/blueprint.md` §Phase 0 / §Spike 2). The full intent and the
 acceptance criteria are recorded in [plan.md](./plan.md).
 
 Unlike Spike 1 this experiment is **headless** (a plain binary, no TUI):
@@ -25,12 +25,12 @@ socket inspection, so no live terminal is required.
   (no race between `cancelled()` and `stream.next()`).
 
 Three cancellation mechanisms are compared to adjudicate the Pitfall #8
-question from `docs/plan.md` §8 / §Spike 2:
+question from `docs/blueprint.md` §8 / §Spike 2:
 
 1. `drop:adapter-only` — drop only the `eventsource`/`bytes_stream` adapter.
 2. `drop:adapter+response` — drop the adapter and the `Response` together.
 3. `token` — cooperatively abort via a `CancellationToken` polled in a `biased`
-   `tokio::select!`, mirroring `docs/plan.md` §4A.
+   `tokio::select!`, mirroring `docs/blueprint.md` §4A.
 
 ## Build
 
@@ -115,7 +115,7 @@ On exit the spike prints a per-criterion `PASS`/`FAIL` summary to stderr:
 
 A direct-drop vs token-abort comparison table reports per-mechanism mean/p90
 close-latency and whether each sub-case closed the connection (this adjudicates
-`docs/plan.md` §8 Pitfall #8). The process exits non-zero if any criterion
+`docs/blueprint.md` §8 Pitfall #8). The process exits non-zero if any criterion
 fails, so the spike is CI-assertable.
 
 ## Test / lint

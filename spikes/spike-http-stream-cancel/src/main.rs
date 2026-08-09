@@ -580,7 +580,7 @@ fn main() {
 
     let code = runtime.block_on(run(options));
     // Secondary clean-shutdown signal: waits up to 5s for tasks to finish (see
-    // docs/plan.md §Spike 2). A hang here would block exit and fail a CI timeout.
+    // docs/blueprint.md §Spike 2). A hang here would block exit and fail a CI timeout.
     runtime.shutdown_timeout(Duration::from_secs(5));
 
     std::process::exit(code);

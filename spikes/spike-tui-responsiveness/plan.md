@@ -4,26 +4,26 @@
 
 **System being changed:** The Ylva agent-harness repo currently contains only
 documentation (no `Cargo.toml`, no `src/`). This task adds the first piece of
-executable code: Spike 1 from `docs/plan.md` §0 / Phase 0 — a **standalone
+executable code: Spike 1 from `docs/blueprint.md` §0 / Phase 0 — a **standalone
 proof-of-concept** proving that a `ratatui` + `tokio` TUI can stay responsive
 while an artificial LLM stream injects tokens at very high volume and while the
 user steers the stream mid-flight.
 
-**Goal & motivation:** Before building the full agent architecture, `docs/plan.md`
+**Goal & motivation:** Before building the full agent architecture, `docs/blueprint.md`
 mandates validating the two riskiest assumptions via isolated spikes. Spike 1
 validates the core responsiveness claim that underpins the entire design:
 the TUI thread never blocks on I/O, tokens arrive via an `mpsc` channel from a
 tokio task, input is never disabled, and interruption/steering is cooperative.
 If the TUI cannot hold ~60 FPS under a 1000+ messages/sec stream without input
-latency or unbounded memory growth, the architecture in `docs/plan.md` §4B needs
+latency or unbounded memory growth, the architecture in `docs/blueprint.md` §4B needs
 to change before production work begins.
 
 **Scope discipline:** This is a spike, not production code. It lives in a
 dedicated `spikes/` directory, is a separate crate, and is **not** wired into any
 future `src/` tree. It is explicitly called out as "standalone experiments, not
-part of the production code path" in `docs/plan.md` §Phase 0.
+part of the production code path" in `docs/blueprint.md` §Phase 0.
 
-**Acceptance criteria (verbatim from `docs/plan.md` §Spike 1 success criteria):**
+**Acceptance criteria (verbatim from `docs/blueprint.md` §Spike 1 success criteria):**
 - Frame time consistently ≤ 17 ms.
 - Keyboard input (Enter, Ctrl+C, typing) responds instantly regardless of stream volume.
 - No memory growth after 10 minutes of continuous token injection.
@@ -34,7 +34,7 @@ part of the production code path" in `docs/plan.md` §Phase 0.
 - Single-writer design: the generator task sends text over `mpsc`; the TUI task
   is the only consumer/renders. No shared mutable state, no `Arc<Mutex<_>>`.
 - Crossterm input is read on a `spawn_blocking` thread and bridged to the async
-  TUI loop via a channel + `tokio::select!` (pattern from `docs/plan.md` §4B).
+  TUI loop via a channel + `tokio::select!` (pattern from `docs/blueprint.md` §4B).
 - Redraw is event-driven: `terminal.draw()` runs only when a channel fires
   (token updates or input events), not on a fixed timer.
 - Bounded `mpsc` capacity so a producer faster than the consumer is throttled
@@ -45,7 +45,7 @@ part of the production code path" in `docs/plan.md` §Phase 0.
 1. **Scaffold the spike crate.** Create `spikes/spike-tui-responsiveness/` as a standalone binary
    Cargo crate. Write `spikes/spike-tui-responsiveness/Cargo.toml` with package name `spike1`
    (edition matching the installed toolchain) and dependencies from
-   `docs/plan.md` §2: `ratatui`, `crossterm`, `tokio` (features
+   `docs/blueprint.md` §2: `ratatui`, `crossterm`, `tokio` (features
    `rt-multi-thread`, `macros`, `time`), `tokio-util` (for
    `CancellationToken`), and `futures`. Pin to latest stable versions at
    implementation time (the repo has no `Cargo.lock` yet). Verify with
@@ -84,7 +84,7 @@ part of the production code path" in `docs/plan.md` §Phase 0.
 6. **Assemble `main.rs`.** Build a tokio `Runtime`, call `ratatui::init()`,
    spawn the generator, and run the event loop with
    `tokio::select! { ui_rx.recv(), event_rx.recv() }` per the pattern in
-   `docs/plan.md` §4B (lines ~675–711). **Batch-drain per frame (Resolution 2):**
+   `docs/blueprint.md` §4B (lines ~675–711). **Batch-drain per frame (Resolution 2):**
    when the token channel fires, drain *all* available tokens via `try_recv()`
    in a loop (bounded by a per-frame cap) and append them to the buffer in one
    batch, instead of `recv().await`-ing one token at a time — this amortizes
@@ -117,7 +117,7 @@ part of the production code path" in `docs/plan.md` §Phase 0.
    clean.
 
 9. **Update affected documentation.** Append a brief "Spike 1 outcome" note to
-   `docs/plan.md` under the Spike 1 heading (§0) recording which success
+   `docs/blueprint.md` under the Spike 1 heading (§0) recording which success
    criteria were met/not met (frame time, input latency/queue depth, memory over
    10 min, steering behavior) and any architectural implications. Per
    `AGENTS.md` (*Docs are part of the change set*), the doc change ships with
@@ -143,24 +143,24 @@ part of the production code path" in `docs/plan.md` §Phase 0.
 - `.gitignore` already ignores `target` and `debug` (patterns match at any
   depth), so spike build artifacts will not be tracked.
 - Reuse the exact channel/event-loop patterns already specified in
-  `docs/plan.md`:
+  `docs/blueprint.md`:
   - `spawn_blocking` crossterm bridge + `select!` over `ui_rx` + `event_rx`,
-    redrawing only when a channel fires — `docs/plan.md` §4B lines ~675–697.
+    redrawing only when a channel fires — `docs/blueprint.md` §4B lines ~675–697.
   - `ratatui::init()` / runtime / `ratatui::restore()` scaffolding — §4B lines
     ~699–711.
   - Command enum naming: `AgentCommand::Prompt`, `AgentCommand::Stop`,
     `AgentCommand::ApproveTool` — §4B lines ~357–365. Use the same names for
     spike fidelity.
-- Deps to use (from `docs/plan.md` §2): `ratatui`, `crossterm`, `tokio`,
+- Deps to use (from `docs/blueprint.md` §2): `ratatui`, `crossterm`, `tokio`,
   `tokio-util`, `futures`. No `reqwest`, `serde`, or LLM crates are needed for
   Spark 1; the stream is artificial.
-- `docs/plan.md` §Spike 1 says "Log frame times to verify no dropped frames":
+- `docs/blueprint.md` §Spike 1 says "Log frame times to verify no dropped frames":
   the exit summary (step 7) is where this durability lives.
 - `AGENTS.md` notes that `ui.rs`/`main.rs` are excluded from the ≥80% coverage
   gate (they need a live terminal); the spike follows the same reasoning — only
   test the pure logic in `app.rs`.
 - **Confirmed:** the spike **shall** record a short outcome note into
-  `docs/plan.md` under the Spike 1 heading (step 9) — the doc edit is part of
+  `docs/blueprint.md` under the Spike 1 heading (step 9) — the doc edit is part of
   the change set and is authorized.
 - **Confirmed:** the verification run for this task uses the default **short**
   run (60 s). The 10-minute soak is a separate, later manual/CI verification

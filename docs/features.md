@@ -2,5 +2,5 @@
 
 ## General
 
-- Rust-based terminal UI application
+- Rust-based terminal UI application, runnable as a CLI too
 - Implements agent-harness functionality
