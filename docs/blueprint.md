@@ -134,7 +134,48 @@ prompting) and the "unified provider" claim must be revised.
   `ollama_native` provider to the Phase 2 plan, and remove the
   "single provider serves both backends" claim from §4A and §5.
 
-**Spike 3 outcome:** *(to be recorded after running the validation)*
+**Spike 3 outcome:** **PASS** — the unified-provider assumption is validated; keep the
+single provider serving both backends for Ollama and OpenRouter via the OpenAI
+`/v1/chat/completions` spec. Recorded from
+[`spikes/spike-ollama-tool-calling/`](../spikes/spike-ollama-tool-calling/) (SSE logs in
+`out/`).
+
+- **Criterion A (accepts `tools`, streams `delta.tool_calls`) — PASS.** HTTP 200 with at
+  least one chunk carrying `choices[0].delta.tool_calls` with `function.name` and
+  `function.arguments`:
+  - Ollama `gemma4:e2b-mlx` (ID `e98b54fe1913`): `get_weather` →
+    `{"location":"Berlin","unit":"fahrenheit"}`. All in a single chunk.
+  - Ollama `gpt-oss:20b` (ID `17052f91a42e`): `get_weather` →
+    `{"location":"Berlin, Germany","unit":"Fahrenheit"}`. Single chunk.
+  - OpenRouter `deepseek/deepseek-v4-flash-0731`: `get_weather` →
+    `{"location": "Berlin, Germany", "unit": "fahrenheit"}`. Streamed over 7 chunks with
+    incremental arguments (5 fragments) — the direct evidence of incremental
+    `function.arguments`. The model emits `reasoning`/`reasoning_details` deltas before the
+    tool call.
+  - OpenRouter `moonshotai/kimi-k2.6`: `get_weather` →
+    `{"location":"Berlin, Germany","unit":"fahrenheit"}`. Streamed over 14 chunks with
+    incremental arguments (12 fragments).
+- **Criterion B (byte-for-byte OpenRouter-compatible shape) — PASS (live diff).**
+  `inspect_sse.py --shape` of the Ollama and live OpenRouter captures yields an **empty
+  diff** for **both** OpenRouter models (`deepseek/deepseek-v4-flash-0731` and
+  `moonshotai/kimi-k2.6`): all produce
+  `tool_calls[].{id,index,type,function}.function.{name,arguments}`
+  with no backend-specific keys. The OpenRouter captures also confirm the incremental
+  arguments accumulate identically to the documented shape. Note: an SSE stream may begin
+  with comment lines (OpenRouter emits `: OPENROUTER PROCESSING`), so a stream must be
+  judged by the presence of `data:` events, not by its first non-empty line. The
+  parser-facing consequences of these runs (comment-line tolerance, reasoning deltas
+  without `tool_calls`) are captured as an implementation note in §4A.
+- **Architectural consequence:** keep the unified provider (§2, §4A, §5). No `ollama_native`
+  provider is required. **Base URL / HTTP constraint to note:** per-backend `base_url`
+  differs (Ollama `http://localhost:11434/v1/chat/completions` vs OpenRouter
+  `https://openrouter.ai/api/v1/chat/completions`), so the provider takes `base_url` as a
+  config parameter while sharing one client and one request/parse path. Local Ollama holds
+  the connection until the stream ends; unload via `ollama stop <model>` between model
+  switches.
+- **Models actually used:** `gemma4:e2b-mlx` (primary) and `gpt-oss:20b` (confirmation);
+  the models named in §Spike 3 text (`llama3.1:8b`, `qwen2.5`, `mistral-nemo`) were not
+  pulled and were not used. Raw capture: `spikes/spike-ollama-tool-calling/out/sse_*.log`.
 
 ---
 
@@ -420,6 +461,23 @@ emitting a `ToolCall` event (via `agent_tx`) once the full JSON is parseable —
 the outer loop never sees raw deltas and stays the sole writer of `Context`.
 If the stream ends with incomplete tool JSON, the accumulator emits an error
 with the raw fragment for inspection.
+
+**SSE robustness & non-tool-call deltas (Spike 3):** local validation against Ollama
+and live OpenRouter (`deepseek/deepseek-v4-flash-0731`, `moonshotai/kimi-k2.6`) showed
+two parser-facing facts the unified provider must respect:
+
+- **Comment lines.** OpenRouter emits SSE comment lines (`: OPENROUTER PROCESSING` text) —
+  including mid-stream, not only at the head — so a stream must be judged by the presence
+  of `data:` events, and any non-`data:` line (comments, keepalives, malformed frames) must
+  be skipped, never treated as a payload.
+- **Reasoning deltas.** Reasoning-capable models stream `delta.reasoning` /
+  `delta.reasoning_details` (+ `content`, `role`) **before** the tool call. These arrive as
+  deltas with **no** `tool_calls`. Consequence for the provider: a chunk with neither
+  `content` nor `tool_calls` must not be emitted as `StreamEvent::Text` (it is not
+  user-facing content) nor as `StreamEvent::Delta` (it carries no tool-call fragment); the
+  accumulator ignores deltas without `tool_calls`. Whether to surface reasoning to the user
+  later is a separate product decision (see §7 CLI); the provider keeps tolerance for
+  unknown `delta` keys, consistent with §4H's unknown-fields handling.
 
 ```rust
 struct ToolCallAccumulator {
