@@ -66,6 +66,7 @@ Using an *architecture-decision-record* skill is encouraged to analyze and
 resolve plan-vs-ADR and source-vs-ADR inconsistencies and gaps.
 
 Check markdown documents using linter `rumdl` with its configuration `.rumdl.toml`.
+To automatically fix possible issues and format markdown files, run `rumdl fmt [PATH]+`.
 
 Maintain configured test coverage threshold as noted in [development-workflow](./docs/development-workflow.md).
 

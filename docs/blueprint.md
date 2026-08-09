@@ -105,6 +105,37 @@ Build a minimal raw `reqwest` + `eventsource-stream` client.
 - Default/CI runs are hermetic; OpenRouter (`OPENROUTER_API_KEY`) and Ollama
   (`/v1/chat/completions`) remain opt-in real-endpoint targets via `--endpoint`.
 
+### Spike 3: Ollama OpenAI-Compatible Tool Calling
+
+Before Phase 2 commits to a **single** unified provider targeting the OpenAI
+chat-completions spec, validate that Ollama's `/v1/chat/completions` endpoint
+actually supports the `tools` parameter and streams `delta.tool_calls` chunks
+identically to OpenRouter. If it does not, Phase 2 must add a second
+`ollama_native` provider (POST to `/api/chat` with manual tool-injection
+prompting) and the "unified provider" claim must be revised.
+
+- Send a raw `curl` POST to `http://localhost:11434/v1/chat/completions` with
+  a `tools` array and a `tool_choice` of `auto`.
+- Use a tool-capable local model (e.g. `llama3.1:8b`, `qwen2.5`, or
+  `mistral-nemo`). Verify the model is pulled and running before the test.
+- Inspect the SSE stream for `delta.tool_calls` fragments (the same shape
+  OpenRouter returns: `tool_calls[0].function.name` and `.arguments`).
+- If the endpoint rejects the request (HTTP 400/422) or ignores `tools` and
+  returns plain text, the unified-provider assumption is **invalidated**.
+
+**Success criteria:**
+
+- Ollama `/v1/chat/completions` accepts a `tools` array in the request body
+  and returns SSE chunks containing `delta.tool_calls` with incremental
+  `function.name` and `function.arguments` fields.
+- The streaming shape is **byte-for-byte compatible** with OpenRouter's
+  `delta.tool_calls` format (no custom Ollama field names or nesting).
+- If **any** criterion fails: document the failure mode, add a
+  `ollama_native` provider to the Phase 2 plan, and remove the
+  "single provider serves both backends" claim from §4A and §5.
+
+**Spike 3 outcome:** *(to be recorded after running the validation)*
+
 ---
 
 ## 1. Vision & Architecture
@@ -309,22 +340,23 @@ It supports **dropping the in-flight request** when the user interrupts or steer
 > a config concept.
 
 ```rust
-use async_trait::async_trait;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-#[async_trait]
+/// Native async trait (Rust 1.75+). The Provider creates an internal
+/// `mpsc::channel` and returns the receiver, so retry logic and SSE
+/// parsing live inside the implementation and never leak to the caller.
 trait Provider: Send + Sync {
     /// Stream back partial text + potential tool_calls.
     /// The implementation polls the CancellationToken; when it fires,
     /// the underlying HTTP connection is dropped.
-    async fn chat(
+    fn chat(
         &self,
         messages: Vec<Message>,
         tools: Vec<ToolSchema>,
         cancel: CancellationToken,
-    ) -> anyhow::Result<mpsc::Receiver<StreamEvent>>;
+    ) -> impl std::future::Future<Output = anyhow::Result<mpsc::Receiver<StreamEvent>>> + Send;
 }
 
 enum StreamEvent {
@@ -342,6 +374,12 @@ struct DeltaChunk {
     arguments_fragment: Option<String>,
 }
 ```
+
+**HTTP retry:** Pre-stream failures only (`429`/`5xx`/connect) with bounded exponential
+backoff (max 3 retries, base 1 s, max 30 s, with jitter) honoring `Retry-After`;
+never retry mid-stream. Retry logic lives inside the `Provider` implementation
+wrapping the initial `send().await` before SSE begins; mid-stream errors emit
+`StreamEvent::Error` and the agent loop surfaces them to the user.
 
 **Implementation note for raw `reqwest`:**
 The client builds a `reqwest::Request`, starts the SSE stream, and wraps the chunk polling inside `tokio::select!`:
@@ -433,10 +471,42 @@ The outer agent loop is a `tokio::select!` on **two** inputs:
 1. `cmd_rx.recv()` — user commands (Prompt, Stop, ApproveTool)
 2. `agent_rx.recv()` — lifecycle events from the inner streaming task (Done, Cancelled, ToolCall, Error)
 
-This is the only way to own the state machine correctly. The inner streaming task
-sends per-token updates to the TUI via `ui_tx`, but it **must** send a single
-completion event back to the agent loop via `agent_tx` so the loop knows when to
-transition `AgentMode` and trigger the next action (re-prompt, tool approval, etc.).
+This is the only way to own the state machine correctly.
+
+```rust
+enum AssistantStatus {
+    Complete,
+    Interrupted,
+}
+
+/// In-memory conversation message.  Persistence uses a separate `StoreEvent`
+/// enum (§4H) so the domain model never carries disk-format metadata.
+enum Message {
+    System { content: String },
+    User   { content: String },
+    Assistant {
+        content: String,
+        status: AssistantStatus,
+        tool_calls: Vec<ToolCallRequest>,
+    },
+    ToolResult {
+        id: uuid::Uuid,
+        name: String,
+        result: String,
+    },
+    ToolError {
+        id: uuid::Uuid,
+        name: String,
+        error: String,
+    },
+}
+
+struct ToolCallRequest {
+    id: uuid::Uuid,
+    name: String,
+    arguments: serde_json::Value,
+}
+```
 
 ```rust
 use tokio::sync::mpsc;
@@ -450,78 +520,105 @@ let (cmd_tx, mut cmd_rx) = mpsc::channel::<AgentCommand>(10);   // ← TUI / ctr
 enum AgentCommand {
     Prompt(String),          // New user message (steer)
     Stop,                    // Interrupt current generation
-    ApproveTool { id: Uuid }, // Approve a pending tool
-    SwitchModel(String),     // PLACEHOLDER: intentionally not yet wired anywhere in the
-                             // select! match (only Prompt/Stop/ApproveTool are handled).
-                             // Kept to document intent; wired to a /model slash command in
-                             // the slash-command phase (Phase 6/7).
+    // The following variants are deferred to Phase 3 (tools):
+    // ApproveTool { id: Uuid },
+    // SwitchModel(String),   // wired via /model slash command in Phase 6
 }
 
 enum AgentEvent {
     StreamDone { partial: String },              // Natural completion
     StreamCancelled { partial: String },         // User aborted mid-stream
-    ToolCall { name: String, arguments: Value, id: Uuid },
-    ToolDone { id: Uuid, result: String },       // Tool executed successfully
-    ToolError { id: Uuid, error: String },       // Tool failed or timed out
-    ToolKilled { id: Uuid },                     // User cancelled tool via Stop
+    // The following variants are deferred to Phase 3 (tools):
+    // ToolCall { name: String, arguments: Value, id: Uuid },
+    // ToolDone { id: Uuid, result: String },
+    // ToolError { id: Uuid, error: String },
+    // ToolKilled { id: Uuid },
     StreamError(String),     // Provider or network error
 }
 
+/// Phase 1 `UiUpdate` is minimal: AppendText, StreamStarted, StreamDone,
+/// StreamCancelled, Error.  Tool and steering variants are added in later phases.
 enum UiUpdate {
     AppendText(String),
-    ToolStart { name: String, id: Uuid },
-    ToolPending { name: String, id: Uuid }, // waiting for approval
-    ToolDone { id: Uuid, result: String },
-    ToolError { id: Uuid, error: String },
-    ToolKilled { id: Uuid },              // User cancelled tool via Ctrl+C
+    // ToolStart { name: String, id: Uuid },        // Phase 3
+    // ToolPending { name: String, id: Uuid },      // Phase 3
+    // ToolDone { id: Uuid, result: String },       // Phase 3
+    // ToolError { id: Uuid, error: String },       // Phase 3
+    // ToolKilled { id: Uuid },                     // Phase 3
     StreamStarted,
     StreamDone,
     StreamCancelled,
-    SteerQueued,        // A steer is queued; its bubble renders as pending until injected
-    SteerApplied,       // Queued steers injected; their bubbles become normal user messages
+    // SteerQueued,                                 // Phase 3+
+    // SteerApplied,                                // Phase 3+
     Error(String),
 }
 
 enum AgentMode {
     Idle,               // Waiting for user
     Streaming,          // LLM tokens in flight
-    ToolPending,        // Waiting for user to approve/deny tool
-    ToolExecuting,      // Tool running in background task
+    // ToolPending,     // Phase 3
+    // ToolExecuting,   // Phase 3
+}
+
+/// A fully assembled, validated tool call, ready for the outer loop to queue
+/// for serial (one-at-a-time) execution.
+struct AssembledToolCall {
+    id: uuid::Uuid,
+    name: String,
+    arguments: serde_json::Value, // parsed JSON arguments
+}
+
+/// Finalize ONE accumulator once its JSON is complete/parseable.
+impl ToolCallAccumulator {
+    fn into_tool_call(self) -> AssembledToolCall {
+        AssembledToolCall {
+            id: self.id,
+            name: self.name.unwrap_or_default(),
+            arguments: serde_json::from_str(&self.arguments)
+                .unwrap_or(serde_json::Value::Null), // caller validates completeness before calling
+        }
+    }
+}
+
+/// Pending tool awaiting approval and execution.
+struct PendingTool {
+    call: AssembledToolCall,
+    timeout_secs: Option<u64>,
+}
+
+impl PendingTool {
+    async fn execute(&self) -> Result<String, String> {
+        // Dispatches to ToolRegistry (Phase 3)
+        todo!()
+    }
 }
 
 // Builds a request from an immutable snapshot and spawns the inner streaming task.
-// The inner task owns only the `partial` buffer and tool-call accumulators; it never
-// writes `Context`. Returns the fresh `CancellationToken` so the outer loop tracks it.
+// Phase 1: no tools, no tool-call accumulation.  Phase 3 adds ToolRegistry + accumulators.
 fn start_request(
     context: &Context,
-    tools: &ToolRegistry,
     provider: Arc<dyn Provider>,
-    mode: &AgentMode,
     ui_tx: mpsc::Sender<UiUpdate>,
     agent_tx: mpsc::Sender<AgentEvent>,
 ) -> CancellationToken {
     let cancel = CancellationToken::new();
     let ctx = context.messages().clone(); // read-only snapshot
-    let schemas = tools.filter_for_mode(mode).schemas();
     tokio::spawn(async move {
-        let mut stream = provider.chat(ctx, schemas, cancel.clone()).await?;
+        let mut stream = provider.chat(ctx, vec![], cancel.clone()).await?;
         let _ = ui_tx.send(UiUpdate::StreamStarted).await;
         let mut partial = String::new();
-        let mut accums: HashMap<usize, ToolCallAccumulator> = HashMap::new();
-        let mut done_calls: Vec<AssembledToolCall> = Vec::new();
+        // Phase 3: HashMap<usize, ToolCallAccumulator> and done_calls go here
         while let Some(event) = stream.recv().await {
             match event {
-                StreamEvent::Text(s) => { partial.push_str(&s); ui_tx.send(UiUpdate::AppendText(s)).await.ok(); }
-                StreamEvent::Delta(chunk) => { accums.entry(chunk.tool_call_index).or_default().feed(chunk); }
+                StreamEvent::Text(s) => {
+                    partial.push_str(&s);
+                    ui_tx.send(UiUpdate::AppendText(s)).await.ok();
+                }
+                // Phase 3: StreamEvent::Delta => tool-call accumulation
                 StreamEvent::Done => {
-                    if accums.values().any(|a| a.has_incomplete()) {
-                        agent_tx.send(AgentEvent::StreamError("Incomplete tool call JSON".into())).await.ok();
-                    } else {
-                        ui_tx.send(UiUpdate::StreamDone).await.ok();
-                        for a in accums.into_values() { done_calls.push(a.into_tool_call()); }
-                        for call in &done_calls { agent_tx.send(AgentEvent::ToolCall(call.clone())).await.ok(); }
-                        agent_tx.send(AgentEvent::StreamDone { partial }).await.ok();
-                    }
+                    ui_tx.send(UiUpdate::StreamDone).await.ok();
+                    // Phase 3: assemble tool calls, emit AgentEvent::ToolCall
+                    agent_tx.send(AgentEvent::StreamDone { partial }).await.ok();
                     break;
                 }
                 StreamEvent::Cancelled => {
@@ -551,230 +648,125 @@ fn inject_pending_steers(pending_steers: &mut VecDeque<String>, context: &mut Co
     true
 }
 
-// Spawn agent
-let agent_handle = tokio::spawn(async move {
-    let mut context = Context::new();
-    let mut mode = AgentMode::Idle;
-    let mut current_cancel: Option<CancellationToken> = None;
-    let mut current_tool_cancel: Option<CancellationToken> = None;
-    // Steers awaiting injection at the next natural point. Drawn as pending bubbles.
-    let mut pending_steers: VecDeque<String> = VecDeque::new();
-    // A single LLM message may request several tool calls. They are executed
-    // SERIALLY, one after another, from this FIFO queue (never in parallel).
-    let mut pending_tools: VecDeque<PendingTool> = VecDeque::new();
+// AgentLoop constructor and channel topology (settled in Q9/Q12/Q18)
+//
+//   let (agent, mut ui_rx) = AgentLoop::new(provider);
+//   agent.send_command(AgentCommand::Prompt("hello".into())).await;
+//   let handle = agent.run();  // spawns outer task, returns JoinHandle
+//
+// `AgentLoop` internally creates `cmd_tx`/`cmd_rx`, `ui_tx`/`ui_rx`, and
+// `agent_tx`/`agent_rx`.  Tests drive it via `send_command()` and consume
+// `UiUpdate` events from `ui_rx`.  `main.rs` does the same and awaits `handle`.
 
-    loop {
-        tokio::select! {
-            // 1. User commands
-            Some(cmd) = cmd_rx.recv() => {
-                match cmd {
-                    AgentCommand::Prompt(text) => {
-                        let is_internal_continuation = text.is_empty();
+pub struct AgentLoop {
+    provider: Arc<dyn Provider>,
+    cmd_tx: mpsc::Sender<AgentCommand>,
+    ui_rx: mpsc::Receiver<UiUpdate>,
+}
 
-                        if mode == AgentMode::Idle && !is_internal_continuation {
-                            // Fresh user turn while idle: append and start immediately.
-                            context.push_user(text);
-                            mode = AgentMode::Streaming;
-                            current_cancel = Some(start_request(&context, &tools, provider.clone(),
-                                &mode, ui_tx.clone(), agent_tx.clone()));
-                        } else if is_internal_continuation {
-                            // Internal deferred re-prompt (tool batch drained, or a natural
-                            // point reached with queued steers): inject any steers, start fresh.
-                            if inject_pending_steers(&mut pending_steers, &mut context) {
-                                ui_tx.send(UiUpdate::SteerApplied).await.ok();
-                            }
-                            mode = AgentMode::Streaming;
-                            current_cancel = Some(start_request(&context, &tools, provider.clone(),
-                                &mode, ui_tx.clone(), agent_tx.clone()));
-                        } else {
-                            // === STEERING is cooperative: never cancel the live stream ===
-                            // Queue the message; it is injected at the next natural point
-                            // (model hand-off, completed tool call, or end of response).
-                            // The TUI already drew the user bubble as "pending".
-                            pending_steers.push_back(text);
-                            ui_tx.send(UiUpdate::SteerQueued).await.ok();
-                        }
-                    }
+impl AgentLoop {
+    pub fn new(provider: Arc<dyn Provider>) -> (Self, mpsc::Receiver<UiUpdate>) {
+        let (cmd_tx, cmd_rx) = mpsc::channel::<AgentCommand>(10);
+        let (ui_tx, ui_rx) = mpsc::channel::<UiUpdate>(100);
+        let agent = AgentLoop { provider, cmd_tx, ui_rx };
+        (agent, ui_rx)
+    }
 
-                    AgentCommand::Stop => {
-                        // INTERRUPT: hard-abort the current round; a steer never does this.
-                        // Discard any queued steers (the redirection is abandoned).
-                        pending_steers.clear();
-                        // Cancel streaming LLM request if in flight
-                        if let Some(ct) = current_cancel.take() {
-                            ct.cancel();
-                            // StreamCancelled handler will detect current_cancel is None
-                            // and transition mode to Idle after appending partial
-                        }
-                        // Cancel running tool if in flight
-                        if let Some(tool_ct) = current_tool_cancel.take() {
-                            tool_ct.cancel();
-                            // ToolKilled event will arrive via agent_rx
-                        }
-                    }
+    pub async fn send_command(&self, cmd: AgentCommand) {
+        let _ = self.cmd_tx.send(cmd).await;
+    }
 
-                    AgentCommand::ApproveTool { id } => {
-                        if matches!(mode, AgentMode::ToolPending) {
-                            // Approve/execute the HEAD of the serial queue (the one being presented).
-                            if let Some(pending) = pending_tools.pop_front() {
-                                if pending.id != id {
-                                    // Out-of-order approval guard: put it back and ignore.
-                                    pending_tools.push_front(pending);
+    pub fn ui_updates(&self) -> mpsc::Receiver<UiUpdate> {
+        self.ui_rx  // ownership transferred to caller
+    }
+
+    pub fn run(self) -> tokio::task::JoinHandle<anyhow::Result<()>> {
+        tokio::spawn(async move {
+            let mut context = Context::new();
+            let mut mode = AgentMode::Idle;
+            let mut current_cancel: Option<CancellationToken> = None;
+            let mut pending_steers: VecDeque<String> = VecDeque::new();
+            // Phase 3 adds: ToolRegistry, pending_tools, current_tool_cancel
+
+            loop {
+                tokio::select! {
+                    // 1. User commands
+                    Some(cmd) = cmd_rx.recv() => {
+                        match cmd {
+                            AgentCommand::Prompt(text) => {
+                                if text.is_empty() {
+                                    // Phase 1: ignore empty prompts (Q26).
+                                    // Phase 3: internal deferred re-prompt after tool batch.
+                                    continue;
+                                }
+
+                                if mode == AgentMode::Idle {
+                                    // Fresh user turn while idle: append and start immediately.
+                                    context.push_user(text);
+                                    mode = AgentMode::Streaming;
+                                    current_cancel = Some(start_request(
+                                        &context, provider.clone(),
+                                        ui_tx.clone(), agent_tx.clone(),
+                                    ));
                                 } else {
-                                    // Spawn tool execution in a separate task so the
-                                    // agent loop stays responsive to Stop / steering.
-                                let tool_cancel = CancellationToken::new();
-                                current_tool_cancel = Some(tool_cancel.clone());
-                                mode = AgentMode::ToolExecuting;
-                                let ui_tx = ui_tx.clone();
-                                let agent_tx = agent_tx.clone();
-
-                                tokio::spawn(async move {
-                                    let timeout = tokio::time::Duration::from_secs(
-                                        pending.timeout_secs.unwrap_or(30)
-                                    );
-                                    let result = tokio::select! {
-                                        biased;
-                                        _ = tool_cancel.cancelled() => {
-                                            ui_tx.send(UiUpdate::ToolKilled { id }).await.ok();
-                                            agent_tx.send(AgentEvent::ToolKilled { id }).await.ok();
-                                            return;
-                                        }
-                                        res = tokio::time::timeout(timeout, pending.execute()) => {
-                                            match res {
-                                                Ok(Ok(output)) => {
-                                                    ui_tx.send(UiUpdate::ToolDone { id, result: output.clone() }).await.ok();
-                                                    AgentEvent::ToolDone { id, result: output }
-                                                }
-                                                Ok(Err(e)) => {
-                                                    ui_tx.send(UiUpdate::ToolError { id, error: e.clone() }).await.ok();
-                                                    AgentEvent::ToolError { id, error: e }
-                                                }
-                                                Err(_) => {
-                                                    let msg = format!("Tool timed out after {}s", timeout.as_secs());
-                                                    ui_tx.send(UiUpdate::ToolError { id, error: msg.clone() }).await.ok();
-                                                    AgentEvent::ToolError { id, error: msg }
-                                                }
-                                            }
-                                        }
-                                    };
-                                    agent_tx.send(result).await.ok();
-                                });
-                                } // end else (id matched)
-                            } // end if let Some(pending)
-                        } // end if matches! ToolPending
-                    } // end ApproveTool arm
-                } // end match cmd
-            }
-
-            // 2. Lifecycle events from streaming task AND tool executor
-            Some(evt) = agent_rx.recv() => {
-                match evt {
-                    AgentEvent::StreamDone { partial } => {
-                        // Natural point: the current response ended.
-                        context.push_assistant(partial);
-                        if inject_pending_steers(&mut pending_steers, &mut context) {
-                            // Steers queued during the response: inject and start a fresh turn.
-                            ui_tx.send(UiUpdate::SteerApplied).await.ok();
-                            mode = AgentMode::Streaming;
-                            current_cancel = Some(start_request(&context, &tools, provider.clone(),
-                                &mode, ui_tx.clone(), agent_tx.clone()));
-                        } else {
-                            mode = AgentMode::Idle;
-                        }
-                    }
-                    AgentEvent::StreamCancelled { partial } => {
-                        // Only reachable after a genuine interrupt (Stop) — a steer never aborts.
-                        // If a new stream is already in flight, this is a stale cancellation.
-                        if current_cancel.is_none() {
-                            context.push_assistant_interrupted(partial);
-                            mode = AgentMode::Idle;
-                        }
-                        // else: ignore; the new request already replaced current_cancel
-                    }
-                    AgentEvent::ToolCall(call) => {
-                        if !pending_steers.is_empty() {
-                            // STEER supersedes the pause (natural point): descope all queued
-                            // tools, deliver the steers as the answer/redirect, re-prompt fresh.
-                            pending_tools.clear();
-                            context.descope_pending_tools();
-                            inject_pending_steers(&mut pending_steers, &mut context);
-                            ui_tx.send(UiUpdate::SteerApplied).await.ok();
-                            mode = AgentMode::Streaming;
-                            current_cancel = Some(start_request(&context, &tools, provider.clone(),
-                                &mode, ui_tx.clone(), agent_tx.clone()));
-                        } else {
-                            // Enqueue; present for approval only if not already presenting one.
-                            pending_tools.push_back(PendingTool {
-                                name: call.name, arguments: call.arguments, id: call.id,
-                            });
-                            if mode != AgentMode::ToolPending {
-                                mode = AgentMode::ToolPending;
-                                if let Some(head) = pending_tools.front() {
-                                    ui_tx.send(UiUpdate::ToolPending {
-                                        name: head.name.clone(), id: head.id,
-                                    }).await.ok();
+                                    // === STEERING is cooperative: never cancel the live stream ===
+                                    // Queue the message; it is injected at the next natural point.
+                                    pending_steers.push_back(text);
+                                    // Phase 3: ui_tx.send(UiUpdate::SteerQueued).await.ok();
                                 }
                             }
+
+                            AgentCommand::Stop => {
+                                // INTERRUPT: hard-abort the current round; a steer never does this.
+                                pending_steers.clear();
+                                if let Some(ct) = current_cancel.take() {
+                                    ct.cancel();
+                                }
+                                // Phase 3: also cancel current_tool_cancel
+                            }
+
+                            // Phase 3: AgentCommand::ApproveTool arm removed
                         }
                     }
-                    AgentEvent::ToolDone { id, result } => {
-                        // Natural point: a tool-call boundary was reached.
-                        context.push_tool_result(id, result);
-                        if inject_pending_steers(&mut pending_steers, &mut context) {
-                            // STEER supersedes the rest of the batch; inject and re-prompt.
-                            pending_tools.clear();
-                            ui_tx.send(UiUpdate::SteerApplied).await.ok();
-                            mode = AgentMode::Streaming;
-                            current_cancel = Some(start_request(&context, &tools, provider.clone(),
-                                &mode, ui_tx.clone(), agent_tx.clone()));
-                        } else if let Some(next) = pending_tools.front() {
-                            mode = AgentMode::ToolPending; // present next queued call for approval
-                            ui_tx.send(UiUpdate::ToolPending {
-                                name: next.name.clone(), id: next.id,
-                            }).await.ok();
-                        } else {
-                            mode = AgentMode::Idle;
-                            // Queue drained: DEFERRED re-prompt — all batch results are now in
-                            // context, so a single follow-up call sees every result.
-                            cmd_tx.send(AgentCommand::Prompt("".to_string())).await.ok();
+
+                    // 2. Lifecycle events from inner streaming task
+                    Some(evt) = agent_rx.recv() => {
+                        match evt {
+                            AgentEvent::StreamDone { partial } => {
+                                // Natural point: the current response ended.
+                                context.push_assistant(partial, AssistantStatus::Complete, vec![]);
+                                if inject_pending_steers(&mut pending_steers, &mut context) {
+                                    // Phase 3: ui_tx.send(UiUpdate::SteerApplied).await.ok();
+                                    mode = AgentMode::Streaming;
+                                    current_cancel = Some(start_request(
+                                        &context, provider.clone(),
+                                        ui_tx.clone(), agent_tx.clone(),
+                                    ));
+                                } else {
+                                    mode = AgentMode::Idle;
+                                }
+                            }
+                            AgentEvent::StreamCancelled { partial } => {
+                                // Only reachable after a genuine interrupt (Stop).
+                                if current_cancel.is_none() {
+                                    context.push_assistant(partial, AssistantStatus::Interrupted, vec![]);
+                                    mode = AgentMode::Idle;
+                                }
+                                // else: stale cancellation from a replaced stream; ignore
+                            }
+                            AgentEvent::StreamError(e) => {
+                                pending_steers.clear();
+                                mode = AgentMode::Idle;
+                                ui_tx.send(UiUpdate::Error(e)).await.ok();
+                            }
+                            // Phase 3: ToolCall, ToolDone, ToolError, ToolKilled arms
                         }
-                    }
-                    AgentEvent::ToolError { id, error } => {
-                        context.push_tool_error(id, error);
-                        if inject_pending_steers(&mut pending_steers, &mut context) {
-                            pending_tools.clear();
-                            ui_tx.send(UiUpdate::SteerApplied).await.ok();
-                            mode = AgentMode::Streaming;
-                            current_cancel = Some(start_request(&context, &tools, provider.clone(),
-                                &mode, ui_tx.clone(), agent_tx.clone()));
-                        } else if let Some(next) = pending_tools.front() {
-                            mode = AgentMode::ToolPending;
-                            ui_tx.send(UiUpdate::ToolPending {
-                                name: next.name.clone(), id: next.id,
-                            }).await.ok();
-                        } else {
-                            mode = AgentMode::Idle;
-                            // Re-prompt so LLM sees the error and can recover
-                            cmd_tx.send(AgentCommand::Prompt("".to_string())).await.ok();
-                        }
-                    }
-                    AgentEvent::ToolKilled { id } => {
-                        context.push_tool_error(id, "Cancelled by user".into());
-                        pending_tools.clear(); // user aborted the turn; drop the rest of the batch
-                        pending_steers.clear(); // interrupt abandons any pending redirection
-                        mode = AgentMode::Idle;
-                    }
-                    AgentEvent::StreamError(e) => {
-                        pending_steers.clear(); // errored turn; abandon pending steers
-                        mode = AgentMode::Idle;
-                        // Error already sent to UI; wait for user
                     }
                 }
             }
-        }
+        })
     }
-});
+}
 
 // In TUI thread (crossterm event loop)
 loop {
@@ -888,63 +880,51 @@ enum MessageTier {
 }
 
 struct Context {
-    messages: Vec<TieredMessage>,  // Ordered: [System, InitialContext, Compacted..., Recent...]
-    buffer: String,                // Assistant message currently being streamed
-    total_tokens: usize,           // Rolling token count (approximate)
-    max_tokens: usize,             // From engine config (context_size × 0.9 safety margin)
+    messages: Vec<Message>,  // Phase 1: simple Vec.  Phase 6 adds TieredMessage + token_count.
 }
 
-struct TieredMessage {
-    tier: MessageTier,
-    msg: Message,
-    token_count: usize,
-}
-```
-
-**Insertion rules:**
-
-- `push_system(text)` → `TieredMessage { tier: System, token_count: counted }`
-- `push_initial_context(text)` → `TieredMessage { tier: InitialContext, token_count: counted }`
-- `push_user(text)` → `flush_buffer()` + `TieredMessage { tier: Recent, ... }`
-- `push_assistant(text)` → `TieredMessage { tier: Recent, ... }`
-- `push_compacted(summary)` → `TieredMessage { tier: Compacted, ... }`
-
-**Compaction (initial: drop only):**
-
-```rust
 impl Context {
-    fn maybe_compact(&mut self) {
-        while self.total_tokens > self.max_tokens {
-            // Prefer dropping oversized tool results first, then oldest Recent/Compacted.
-            if let Some(idx) = self.find_oversized_result().or_else(|| self.find_oldest_droppable()) {
-                let removed = self.messages.remove(idx);
-                self.total_tokens -= removed.token_count;
-            } else {
-                break; // Only System and InitialContext remain; cannot drop further
-            }
-        }
+    fn new() -> Self {
+        Context { messages: vec![] }
     }
-
-    fn find_oldest_droppable(&self) -> Option<usize> {
-        self.messages.iter()
-            .position(|m| matches!(m.tier, MessageTier::Compacted | MessageTier::Recent))
+    fn push_user(&mut self, text: String) {
+        self.messages.push(Message::User { content: text });
     }
-
-    // Q6c: a single oversized result must not crowd out many normal turns.
-    fn find_oversized_result(&self) -> Option<usize> {
-        self.messages.iter()
-            .position(|m| m.is_tool_result && m.token_count > self.oversized_threshold)
+    fn push_assistant(&mut self, content: String, status: AssistantStatus, tool_calls: Vec<ToolCallRequest>) {
+        self.messages.push(Message::Assistant { content, status, tool_calls });
     }
+    fn messages(&self) -> &[Message] {
+        &self.messages
+    }
+    // Phase 3 adds: push_tool_result, push_tool_error, descope_pending_tools
+    // Phase 6 adds: push_system, push_initial_context, maybe_compact, token counting
 }
 ```
 
-**Tool-result truncation:** Tool results are **truncated at insertion** to a
-configurable cap (default ~8–16 KB / engine-tunable), with a clear marker such
-as `… [truncated M of K chars]`. This bounds a single result regardless of tool
-(`bash` output, large `read_file`, huge diffs). Combined with `maybe_compact`
-preferring oversized results, a large result neither swallows the window nor
-forces many older turns to be dropped. If the model needs more of a file, it
-re-calls `read_file`/`edit_file` with `offset`/`limit` — the existing tool contract.
+**Insertion rules (Phase 1 subset):**
+
+- `push_user(text)` → `Message::User { content: text }`
+- `push_assistant(content, status, tool_calls)` → `Message::Assistant { content, status, tool_calls }`
+
+**Phase 6 (future):** Replace `Vec<Message>` with `Vec<TieredMessage>`, add
+`push_system`, `push_initial_context`, `push_compacted`, `maybe_compact`,
+`find_oldest_droppable`, and `find_oversized_result`.
+
+**Context ownership rule (HARD):** The outer agent loop is the **sole writer** to `Context`.
+
+**Compaction (Phase 6 future):**
+
+Phase 1 does not implement compaction or token counting. The full algorithm
+(`maybe_compact`, `find_oldest_droppable`, `find_oversized_result`) is deferred
+until Phase 6 when `TieredMessage` and `tiktoken-rs` are introduced.
+
+**Tool-result truncation (Phase 6 future):** Tool results are **truncated at
+insertion** to a configurable cap (default ~8–16 KB / engine-tunable), with a
+clear marker such as `… [truncated M of K chars]`. Combined with
+`maybe_compact` preferring oversized results, a large result neither swallows
+the window nor forces many older turns to be dropped. If the model needs more
+of a file, it re-calls `read_file`/`edit_file` with `offset`/`limit` — the
+existing tool contract.
 
 **Phase 6 (future):** Replace `find_oldest_droppable` + `remove` with a
 summarization pass: collect K oldest `Recent` messages, spawn a background
@@ -968,15 +948,16 @@ rough estimate. The design tolerates this via the `context_size × 0.9` safety
 margin; engine config can also override `context_size` as a lever if compaction
 misbehaves in practice.
 
-**Steering behavior:**  
+**Steering behavior:**
 When the user types "No, use `Arc` instead of `Rc`" while the model is still generating:
 
 1. The message is drawn as a **pending bubble** and queued as a steer — the live stream
    is **not** cancelled.
 2. At the next natural point — the current response ends (`StreamDone`), a tool call
-   completes, or a hand-off pause is reached — `flush_buffer()` makes the (now complete)
-   partial the last assistant message.
-3. The queued steer(s) are appended as user messages.
+   completes, or a hand-off pause is reached — the outer loop calls
+   `push_assistant(partial, Complete, tool_calls)` to make the partial response a
+   committed message in `Context`.
+3. The queued steer(s) are appended as user messages via `push_user`.
 4. A new `provider.chat()` starts with the full updated context.
 
 The model sees (the assistant turn is complete rather than mid-word cut off):
@@ -1305,7 +1286,7 @@ project  .ylva/        (current project, cwd/git-root scope)
 - Both are **write-if-missing** by default; `--force` reseeds a built-in file.
 
 **Canonical paths, no synonyms:** there is exactly one location per file
-(e.g. `.ylva/profiles/default/config.toml`); `.ylva/config.toml` is _not_ a
+(e.g. `.ylva/profiles/default/config.toml`); `.ylva/config.toml` is *not* a
 synonym for the default profile. Profile names are referenced by value
 (e.g. `--profile default`), never by path.
 
@@ -1321,11 +1302,11 @@ precedence over the `.env` value. `ylva init --project` also deploys a
 ignores `.env`, so secrets stay uncommitted while the rest of the config is
 committed.
 
-**Global subagents** (`~/.ylva/subagents/`) define _behavior_: tools,
+**Global subagents** (`~/.ylva/subagents/`) define *behavior*: tools,
 prompts, max iterations, timeouts. They are fully self-contained and shared
 across all profiles.
 
-**Profiles** (`~/.ylva/profiles/<name>/`) define _infrastructure_:
+**Profiles** (`~/.ylva/profiles/<name>/`) define *infrastructure*:
 which engine (provider/model/temperature/context-size) each subagent uses, and
 can optionally override behavioral settings or disable subagents entirely.
 
@@ -1545,16 +1526,20 @@ stored.
 
 **Design decisions settled so far (Q&A):**
 
+- **Memory vs disk:** `Message` is the in-memory domain model (§4B, Q1). Persistence uses a separate `StoreEvent` enum with `Meta`, `MessageEvent { msg: Message }`, `SubagentStart`, and `SubagentResult` variants. The `Store` module (Phase 6) owns the JSONL schema, `meta` header, and append-only writer; it converts `Message` → `MessageEvent` at commit time.
+
 1. **Scope — one global store, not per-project:**
    History is cross-project user data, so it is stored once, globally, under
    `~/.ylva/chats/`. Project-scoped `.ylva/` stays config-only (and committed);
    chat data is never mixed into it.
 
 2. **Project grouping — hash of the raw CWD, not git root:**
-   ```
+
+   ```text
    ~/.ylva/chats/<project_key>/
    └── <session_id>.jsonl        # one file per conversation
    ```
+
    - `<project_key>` = a stable content-hash (e.g. SHA-256, hex) of the
      **exact CWD** at session start. Hashed (not path-encoded) so it is opaque
      but collision-free and robust to any characters; keying on CWD (rather
@@ -1570,12 +1555,14 @@ stored.
 
 3. **Per-conversation format — append-only JSONL, one file per session:**
    - Directory shape:
-     ```
+
+     ```text
      ~/.ylva/chats/<project_key>/
      ├── <session_a>.jsonl
      ├── <session_b>.jsonl
      └── ...
      ```
+
    - The **first line** of every file is a version/metadata header record;
      every subsequent line is one committed event, appended immediately (with
      `flush`) when it is posted to history. Never rewritten, never a
@@ -1591,11 +1578,13 @@ stored.
    Every JSON line is a discriminated union with a `type` tag and a per-event
    `v` field; the **first line of every session file is the version/metadata
    header**:
+
    ```json
    {"type":"meta","v":1,"schema_version":3,"app_version":"0.6.2","created_at":"…","cwd_hash":"…","engine":"…"}
    {"type": "user", "v": 1, "text": "…"}
    {"type": "assistant", "v": 2, "text": "…"}
    ```
+
    - **Reader tolerance (A):** `#[serde(tag = "type")]`, *never*
      `#[serde(deny_unknown_fields)]`. Unknown/extra fields are ignored;
      unknown `type` values are skipped or rendered as raw. Old readers load
@@ -1752,6 +1741,13 @@ stored.
 **Strategy:** Start with OpenRouter + `mistralai/mistral-small` or `anthropic/claude-3.5-haiku`
 for cheap, reliable tool use while debugging the TUI. Once solid, test locally with Ollama + `llama3.1:8b`.
 
+> **Assumption check — Spike 3 (§0):** The unified-provider architecture assumes
+> Ollama's `/v1/chat/completions` endpoint supports the OpenAI `tools` spec
+> identically to OpenRouter. This is **unverified**. Run Spike 3 before Phase 2
+> begins; if it fails, the plan must add a second `ollama_native` provider
+> targeting `/api/chat` and the "single provider serves both backends" claim
+> in §4A must be revised.
+
 **Ollama implementation note:** If you need full control over the request body and streaming response
 parsing, you can also implement the Ollama provider using raw `reqwest` + `serde_json` to POST to
 `/api/chat`. This avoids any abstraction mismatch with tool calling, though `ollama-rs` remains a
@@ -1890,54 +1886,55 @@ top of a proven agent loop.
 
 - [ ] **Goal:** A working headless agent loop in ~300 lines that proves the core architecture:
       mock provider, dual channels, steering, cancellation, and context ownership.
+      No CLI surface, no config parsing, no TOML.
 
-- [ ] **No CLI surface yet.** `main.rs` hardcodes a prompt and a steering trigger. No `clap`,
-      no config parsing, no TOML.
+- [ ] **`lib.rs` exports:** `pub mod agent; pub mod llm;` with `AgentLoop` struct
+      (`new()`, `run()`, `send_command()`, `ui_updates()`).
+      `main.rs` is a thin wrapper: `rt.block_on(AgentLoop::new(mock_provider).run())`.
 
-- [ ] **Mock provider** — a tokio task that emits artificial `StreamEvent::Text` tokens with
-      `sleep` delays and respects `CancellationToken`. No `reqwest`, no SSE parsing, no API keys needed.
+- [ ] **`Message` enum (Q1):** `System`, `User`, `Assistant { content, status, tool_calls }`,
+      `ToolResult`, `ToolError`. Phase 1 only uses `System`, `User`, `Assistant`.
 
-- [ ] **Minimal `Context`** — `Vec<Message>` enum (`System`, `User`, `Assistant`) with `push_user()`
-      and `push_assistant_interrupted(partial)`. ~25 lines.
+- [ ] **`Context` (Q2, Q13):** Simple `Vec<Message>` owned by `AgentLoop`. No `buffer` field,
+      no `TieredMessage`, no token counting.
 
-- [ ] **Three spawned tasks** (proving channel topology):
-  1. `main()` coordinator: owns `Context`, `select!` on `agent_rx` + `cmd_rx`.
-  2. Agent loop task: executes `provider.chat()`, sends `UiUpdate` to UI task and `AgentEvent` back to coordinator.
-  3. UI task: `while let Some(update) = ui_rx.recv().await { println!(...) }`.
+- [ ] **`AgentLoop` channels (Q9, Q18, Q22):** Internally creates `cmd_tx`/`cmd_rx`,
+      `ui_tx`/`ui_rx`, `agent_tx`/`agent_rx`. Two spawned tasks:
+      1. Outer task: `select!` on `cmd_rx` + `agent_rx`, owns `Context` and `AgentMode`.
+      2. Inner streaming task: `provider.chat()` → `stream.recv()` loop, sends `UiUpdate`
+      and `AgentEvent` back to outer task.
 
-- [ ] **Dual channels from day one:**
-  - `ui_tx` → `UiUpdate` (high-frequency per-token updates to UI task)
-  - `agent_tx` → `AgentEvent` (lifecycle events: `StreamDone`, `StreamCancelled`, `ToolCall`)
-  - `cmd_rx` ← `AgentCommand` (`Prompt`, `Stop` from main thread)
+- [ ] **Mock provider (Q8, Q12, Q21):** `MockProvider::new(tokens: Vec<String>, interval: Duration)`
+      emits `StreamStarted`, `Text`, `Done`. Tests use `tokio::time::pause` + `advance`
+      for deterministic, instant verification.
 
-- [ ] **Single-writer rule enforced immediately:**
-  - Inner streaming task receives `context.messages().clone()` (read-only snapshot).
-  - It accumulates `partial` assistant response locally.
-  - It returns the final/cancelled `partial` via `AgentEvent` to the outer loop.
-  - Outer loop is the **sole writer** to `Context`.
+- [ ] **`Provider` trait (Q12):** Native async trait (no `async-trait` crate). The Provider
+      creates its own internal `mpsc::channel` and returns the receiver.
 
-- [ ] **Steering from first compile:** `main()` sends `AgentCommand::Prompt` mid-stream after a
-      hardcoded `tokio::time::sleep`. Prove the cooperative handoff: the stream is **not** cancelled,
-      the steer is queued, and at the next natural point (`StreamDone`) it is injected — flushed
-      partial (now complete) → append steer → start fresh stream.
+- [ ] **Cancellation flow (Q20):** Outer loop creates `CancellationToken`, passes clone to
+      Provider. On `Stop`, `current_cancel.take()?.cancel()`. Provider detects and emits
+      `StreamEvent::Cancelled`. Inner task forwards as `AgentEvent::StreamCancelled`.
+      Outer loop ignores stale cancellation when `current_cancel` is `Some`.
 
-- [ ] **Interrupt test:** `main()` sends `AgentCommand::Stop`; verify `StreamCancelled` arrives,
-      partial is flushed, pending steer queue is cleared, state returns to `Idle`.
+- [ ] **Empty `Prompt` ignored (Q26):** `AgentCommand::Prompt("")` is a no-op in Phase 1.
 
-- [ ] **Steer-supersedes-pause test:** send a `Prompt` while paused at a `ToolPending`/`clarify`;
-      verify pending tools are descoped and the steer is injected as the next turn.
+- [ ] **Steering test:** Send `Prompt` mid-stream → verify cooperative handoff (stream not
+      cancelled, steer queued, injected at `StreamDone` → new request starts).
 
-- [ ] Print final conversation history on exit to verify state transitions.
+- [ ] **Interrupt test:** Send `Stop` mid-stream → verify `StreamCancelled`, partial
+      flushed as `Assistant { status: Interrupted, … }`, pending steers cleared.
+
+- [ ] **Print final conversation history** to verify state transitions.
 
 **Success criteria:**
 
 - Steering never aborts a live stream and does not panic or deadlock.
-- Final context (no interrupt) contains exactly: system message, first assistant (completed to its
-  natural end), the queued steering user message(s).
+- Final context (no interrupt) contains exactly: system message, first assistant (completed),
+  the queued steering user message(s).
 - Interrupt path: system message, first partial assistant (interrupted), no leftover pending steers.
 - No `Arc<Mutex<Context>>`, no shared mutable state.
 
-**Key crates:** `tokio`, `tokio-util`, `futures`, `thiserror`, `anyhow`
+**Key crates (Q23):** `tokio`, `tokio-util`, `futures`, `thiserror`, `anyhow`
 
 ### Phase 2: Real HTTP Provider (Still Headless)
 
@@ -1951,7 +1948,10 @@ top of a proven agent loop.
 - [ ] Implement one provider using raw `reqwest` + `eventsource-stream`
 
 - [ ] Verify provider works for both OpenRouter (`base_url` override) and Ollama (`/v1` endpoint)
-      via config switch
+      via config switch. **Blocked until Spike 3 (§0) validates Ollama tool-calling support.**
+      If Spike 3 fails, replace this step with: implement a second `ollama_native`
+      provider targeting `/api/chat` with manual tool-injection prompting, and
+      remove the "unified provider" claim from §4A and §5.
 
 - [ ] Spawn chat in a `tokio::task`; send `StreamEvent::Text` chunks over `mpsc`
 
@@ -2027,6 +2027,7 @@ layer, not a core architectural change.
 
 - [ ] **Steering in TUI:** `Enter` sends unconditionally, even while streaming — queued as a
       pending steer when busy. `Ctrl+C`/`Esc` sends `Stop` (interrupt; clears the steer queue).
+
 - [ ] **Pending-steer rendering:** user bubbles for queued steers show a pending style until a
       `SteerApplied` `UiUpdate` converts them to normal; a `SteerApplied` clears the "steer queued"
       indicator.
@@ -2169,6 +2170,24 @@ for scripting and automation.
 
 ## 9. Starter `Cargo.toml`
 
+**Phase 1 minimal (Q23):**
+
+```toml
+[package]
+name = "ylva"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+futures = "0.3"
+thiserror = "1"
+anyhow = "1"
+```
+
+**Full dependency list (all phases):**
+
 ```toml
 [dependencies]
 tokio = { version = "1", features = ["full", "process"] }
@@ -2197,7 +2216,6 @@ walkdir = "2"
 ignore = "0.4"
 which = "7"
 tempfile = "3"
-async-trait = "0.1"
 uuid = { version = "1", features = ["v4"] }
 nix = { version = "0.29", features = ["process", "signal"] }
 clap = { version = "4", features = ["derive"] }
@@ -2321,3 +2339,22 @@ where they are documented in the body of this document.
 | **Compression**                | Raw when new; auto-compress old unlocked sessions; `ylva compress`/`decompress` manual override                                                                                                 | §4H decision 11                              |
 | **Durability**                 | `flush` per line, no per-line `fsync`; dedicated writer channel so loops never block on disk                                                                                                    | §4H decision 10                              |
 | **Retention/deletion**         | History kept forever (no auto-delete); explicit `ylva delete … --dry-run`; auto-compression bounds disk                                                                                        | §4H decisions 11–12                          |
+| **Message enum**               | `System`, `User`, `Assistant { content, status, tool_calls }`, `ToolResult`, `ToolError` (Q1)                                                                                               | §4B ReAct Loop                               |
+| **Context Phase 1**            | Simple `Vec<Message>`; no `buffer`, no `TieredMessage` (Q2, Q13)                                                                                                                              | §4C Context                                  |
+| **Ollama tools validation**    | Spike required before Phase 2; fallback to native provider if `/v1` lacks tool support (Q3)                                                                                                | §5 OpenRouter vs Ollama                      |
+| **HTTP retry**                 | Inside Provider; 3 retries, base 1 s, max 30 s, exponential with jitter, honoring `Retry-After`; pre-stream only (Q4)                                                                         | §4A Unified Provider Trait                   |
+| **lib.rs API**                 | `AgentLoop::new(provider) -> (AgentLoop, Receiver<UiUpdate>)`; `run()` spawns outer task; `send_command()` + `ui_updates()` (Q5, Q9)                                                        | §4B ReAct Loop, §7 Phase 1                   |
+| **PendingTool**                | `AssembledToolCall` + `timeout_secs`, with `execute()` method dispatching to `ToolRegistry` (Q6)                                                                                           | §4D Tool Registry                            |
+| **Persistence**                | Separate `StoreEvent` enum (`Meta`, `MessageEvent`, `SubagentStart`, `SubagentResult`) (Q7)                                                                                                 | §4H Persistence                              |
+| **Mock determinism**           | `tokio::time::pause` + `advance` in tests; `MockProvider::new(tokens, interval)` (Q8, Q21)                                                                                                    | §7 Phase 1                                   |
+| **Native async trait**         | Rust 1.75+ native async trait; no `async-trait` crate (Q12)                                                                                                                                   | §4A Unified Provider Trait                   |
+| **Interrupted assistant**      | `push_assistant(partial, Interrupted, vec![])` — drops incomplete tool calls (Q14)                                                                                                             | §4C Context                                  |
+| **Agent loop shutdown**        | Infinite loop; drop `AgentLoop` to exit; `StreamError` → `Idle` (Q15)                                                                                                                         | §4B ReAct Loop                               |
+| **Phase 1 scope**              | No tools, no registry, no schemars, no TUI (Q16)                                                                                                                                             | §7 Phase 1                                   |
+| **Task structure**             | Two tasks: outer loop (select! on cmd_rx + agent_rx) + inner streaming task (Q18, Q22)                                                                                                      | §4B ReAct Loop                               |
+| **OpenAI serialization**       | Free function in provider module; `Message` decoupled from wire format (Q19)                                                                                                               | §4A Unified Provider Trait                   |
+| **CancellationToken**          | Outer loop creates it; passes clone to Provider; `take().cancel()` on `Stop` (Q20)                                                                                                         | §4B ReAct Loop                               |
+| **Phase 1 Cargo.toml**         | 5 crates only: `tokio`, `tokio-util`, `futures`, `thiserror`, `anyhow` (Q23)                                                                                                                  | §7 Phase 1, §9 Cargo.toml                    |
+| **File layout**                | Flat files for Phase 1 (`src/agent.rs`, `src/llm.rs`); directories when >150 lines (Q24)                                                                                                     | §7 Phase 1                                   |
+| **Shared mock**                | `tests/common/mock_provider.rs` with `MockProvider` (Q25)                                                                                                                                     | §7 Phase 1                                   |
+| **Empty Prompt**               | Ignored in Phase 1; `is_internal_continuation` deferred to Phase 3 (Q26)                                                                                                                       | §4B ReAct Loop                               |
