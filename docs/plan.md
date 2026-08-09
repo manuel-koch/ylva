@@ -264,7 +264,7 @@ src/
 ├── ui.rs                # All ratatui widgets and layout math
 ├── events.rs            # Crossterm key → AppAction mapping (Ctrl+C, Enter)
 ├── config.rs            # Settings, API keys, model selection
-├── db.rs                # SQLite persistence for chats
+├── store.rs              # JSONL persistence for chats (see §4H)
 ├── cli.rs               # Headless mode: arg parsing, fake TUI wrapper, exit codes
 ├── llm/
 │   ├── mod.rs           # trait Provider { async fn chat(...) }
@@ -1502,38 +1502,241 @@ behavior — no special merge logic is required.
 
 #### Persistence
 
-Every sub-agent run is recorded in SQLite via a dedicated `subagent_runs` table:
+Every sub-agent run is recorded as a structured record in the global chat
+store (see §4H). Two JSONL record shapes are written per parent session file:
 
-```sql
-CREATE TABLE subagent_runs (
-    id INTEGER PRIMARY KEY,
-    parent_conversation_id INTEGER REFERENCES conversations(id),
-    parent_message_index INTEGER,
-    subagent_type TEXT,
-    task TEXT,
-    result_json TEXT,
-    status TEXT, -- success, timeout, max_iterations, error, aborted_by_user
-    created_at TIMESTAMP,
-    completed_at TIMESTAMP
-);
+```json
+{"type":"subagent_start","v":1,"id":"<run-uuid>","parent_session":"<uuid>","subagent_type":"research","task":"…","created_at":"…"}
+{"type":"subagent_result","v":1,"id":"<run-uuid>","parent_session":"<uuid>","status":"success|timeout|max_iterations|error|aborted_by_user","result":"…","sources":["…"],"completed_at":"…"}
 ```
 
-The full sub-agent conversation is stored under a distinct `conversation_id`
-with a parent linkage. The user can later inspect sub-agent reasoning via a
-collapsible sidebar panel or by querying the database.
+- The parent-session link is explicit (`parent_session`, `parent_message_index`).
+- The full sub-agent conversation is stored as its **own session file** under
+  the same `project_key` (its own `<sub-session_id>.jsonl`) with its own
+  `meta` header (auto-title = the sub-agent `task`), mirroring §4H layout —
+  so sub-agent reasoning stays inspectable and audit-able without a
+  relational table. Per §4H decision 9, this sub-session is written **once at
+  completion**, not streamed live.
+- Querying by run id / parent is a scan of the project directory's session
+  files (the `meta`/`subagent_*` lines), which is cheap at the single-user,
+  per-project scale involved here.
 
 #### UI & Headless
 
 - **TUI:** A dedicated collapsible sidebar panel shows **live** sub-agent
   activity: streaming tokens, tool calls, and status. It receives events via
-  `subagent_ui_rx`, not by polling SQLite. The status bar shows
+  `subagent_ui_rx`, not by polling disk. The status bar shows
   `🔍 Sub-agent 'research' running... (14s / 120s)`. When finished, the panel
-  shows the result summary and a link to view the full thread (queried from
-  SQLite for audit).
+  shows the result summary and a link to view the full thread (loaded from the
+  sub-session file for audit).
 - **Headless:** Sub-agents are **disabled by default**. Enable with
   `--allow-subagents`. When enabled, stderr prints `Spawned sub-agent
 'research'...` and completion status. The `--auto-approve-*` flags inherited
   by the parent also apply to sub-agents.
+
+Sub-agent persistence is recorded via the unified store (§4H); there is **no**
+separate SQLite table.
+
+### H. Persistence & Chat History
+
+This section replaces the earlier "SQLite persistence" mentions. It is the
+single source of truth for how chats, sub-agent runs, and audit data are
+stored.
+
+**Design decisions settled so far (Q&A):**
+
+1. **Scope — one global store, not per-project:**
+   History is cross-project user data, so it is stored once, globally, under
+   `~/.ylva/chats/`. Project-scoped `.ylva/` stays config-only (and committed);
+   chat data is never mixed into it.
+
+2. **Project grouping — hash of the raw CWD, not git root:**
+   ```
+   ~/.ylva/chats/<project_key>/
+   └── <session_id>.jsonl        # one file per conversation
+   ```
+   - `<project_key>` = a stable content-hash (e.g. SHA-256, hex) of the
+     **exact CWD** at session start. Hashed (not path-encoded) so it is opaque
+     but collision-free and robust to any characters; keying on CWD (rather
+     than the plan's git-root/`.ylva` discovery) means **non-git projects are
+     first-class** — a plain directory still gets its own history.
+   - `<session_id>` = a UUID per conversation.
+   - A project directory holds **many** session files; there is **no
+     per-session subdirectory**.
+   - Consequence (accepted): launching from a *different* cwd within the same
+     repo yields a different `project_key`, so history is grouped per launch
+     directory, not per repository. Mirrors Claude Code's per-cwd session
+     grouping.
+
+3. **Per-conversation format — append-only JSONL, one file per session:**
+   - Directory shape:
+     ```
+     ~/.ylva/chats/<project_key>/
+     ├── <session_a>.jsonl
+     ├── <session_b>.jsonl
+     └── ...
+     ```
+   - The **first line** of every file is a version/metadata header record;
+     every subsequent line is one committed event, appended immediately (with
+     `flush`) when it is posted to history. Never rewritten, never a
+     whole-document rewrite. This gives **crash-safe incremental durability**
+     mid-chat (a killed process leaves every already-committed line intact)
+     and is grep-able/human-inspectable by design.
+   - Only **committed** events are written (user message,
+     completed/interrupted assistant response, tool call + result, sub-agent
+     record). Live streaming `partial`s are ephemeral UI state and never touch
+     disk until committed.
+
+4. **Schema versioning — tolerant events + header metadata (A+B):**
+   Every JSON line is a discriminated union with a `type` tag and a per-event
+   `v` field; the **first line of every session file is the version/metadata
+   header**:
+   ```json
+   {"type":"meta","v":1,"schema_version":3,"app_version":"0.6.2","created_at":"…","cwd_hash":"…","engine":"…"}
+   {"type": "user", "v": 1, "text": "…"}
+   {"type": "assistant", "v": 2, "text": "…"}
+   ```
+   - **Reader tolerance (A):** `#[serde(tag = "type")]`, *never*
+     `#[serde(deny_unknown_fields)]`. Unknown/extra fields are ignored;
+     unknown `type` values are skipped or rendered as raw. Old readers load
+     new files and vice versa. Additive field additions are one-line diffs
+     with a `#[serde(default)]`.
+   - **Idempotent upgraders (B):** the `meta` header's `schema_version` is the
+     file's version marker. On load, a chain of small idempotent upgrader
+     functions rewrites the file once if a true semantic break requires it;
+     Per-line `v` lets an old reader take an event-type-specific path even
+     without the header.
+   - **Coherency invariant:** the `meta` header line governs the whole file;
+     all subsequent lines are assumed coherent with it.
+   - **Upgrade writes are atomic:** if an upgrader rewrites a file, it writes
+     a temp file and `rename()`s it over the original, so a crash mid-upgrade
+     can never corrupt a session.
+
+5. **Resume model — explicit id only, no auto-resume, no startup picker:**
+   - The **TUI always starts a fresh session** on launch: never auto-resumes,
+     never shows a startup session picker.
+   - Re-attaching an existing session is **explicit** via `--conversation-id
+     <session_id>` (available in both headless and TUI modes). Headless
+     without a `--conversation-id` is a new session by default.
+   - **Browsing is not ruled out** (see decision 8): discoverability is
+     grep-based today; a future `/sessions`-style feature can layer on
+     without layout change since the `meta` header already carries
+     `created_at`.
+   - **Consequence:** "remembers conversation history across restarts" is
+     scoped to explicit resume. A user who wants continuity passes
+     `--conversation-id`; otherwise each launch is a new session.
+
+6. **Trailing-corruption recovery — repair-on-open, read-only reads:**
+   - **Cause:** even though only full committed messages are written, a single
+     `write()`/`flush()` syscall can be cut short by a kill/power-loss,
+     leaving a truncated final JSON line. Rare, but must never block loading.
+   - **Rule:** pure reads (listing sessions) **never mutate** files. When a
+     session file is opened and its final line fails JSON parse, the invalid
+     tail is **truncated before append-only resume** so the repaired file has
+     no mid-file corruption going forward. A session opened read-only skips
+     the bad line in memory without touching disk; a session opened for
+     resume+append repairs first, then appends.
+
+7. **Write serialization — flock every open, fail-fast on conflict:**
+   - A per-session advisory lock (`flock`, exclusive) is taken on **every**
+     session-file open — fresh creation *and* resume — because a fresh
+     session's meta header is already discoverable on disk, so a second
+     process could otherwise list it and collide with the live writer.
+   - Taking the lock: non-blocking `try_lock`-style; on conflict the opener
+     gets a clear error ("session `<uuid>` is open in another Ylva process")
+     rather than silently interleaving.
+   - A listing scan never blocks the active writer: it attempts the lock
+     non-blockingly and only marks a session as "currently active" if the
+     lock is held; locked-out sessions appear in listings but cannot be
+     resumed until the holder releases.
+
+8. **Findability — no index file; the session abstract is the grep surface:**
+   - **No separate per-project index/`.index` file** and no runtime browsing
+     built-in.
+   - Every session's `meta` header carries an **auto-generated title**: the
+     first user message, truncated to a configurable length (e.g. first 40–80
+     chars, on one line). The title is derived and written once, when the
+     first user turn is committed.
+   - The **sidecar — a file that is the session's abstract**: a small,
+     human-readable, always-plaintext summary record per session that carries
+     the session's discoverable essence (title, meta fields, status, size,
+     counts). For a **raw** session the abstract lives as the `meta` first
+     line of the `.jsonl` (no separate file — SSOT, no duplicate write). For
+     a **compressed/archived** session the abstract is materialized as a
+     **`.meta.json` sidecar** (`<uuid>.jsonl.gz` + `<uuid>.meta.json`) so it
+     stays greppable after compression; the sidecar is generated *from* the
+     meta line, never hand-maintained.
+   - **Discovery invariant:** every session — raw or archived — is findable
+     via plain grep:
+     `rg '"type":"meta"' ~/.ylva/chats/ -g '*.jsonl' -g '*.meta.json'`.
+     One tool, one command, no binary reading.
+   - Archive write order (crash-safe): write the `.meta.json` sidecar
+     **first**, then gzip, then delete the original `.jsonl`. An interrupt
+     after the sidecar leaves a benign duplicate (raw JSONL still source of
+     truth); both never diverge because the sidecar is derived, never edited.
+   - A future interactive `/sessions` picker can be built later from the same
+     grep-able abstracts; nothing here blocks it.
+
+9. **Sub-agent recording — at-completion, not live:**
+   - The parent session file gets a `subagent_start` line **before** the run
+     begins (crash evidence even if the run dies), then a single
+     `subagent_result` line at completion — see §4G `Persistence`.
+   - The full sub-agent transcript is written **once, at completion**, to its
+     own `<sub-session>.jsonl` (same `project_key`, own `meta` header with an
+     auto-title = sub-agent `task`). Not streamed live.
+   - Rationale: sub-agents are short and loss-tolerant (their result is already
+     summarized into the parent context by `finish`); avoiding a second live
+     flocked append stream per sub-agent keeps the machinery simple. A
+     mid-run killed sub-agent loses only its reasoning transcript; its start
+     line still marks that a run occurred.
+
+10. **Durability & I/O — flush per line via a dedicated writer:**
+    - **Durability bar = process-crash-safe, not power-cut-safe.** Each
+      committed line is appended and followed by `flush()` (pushes the writer's
+      buffer to the OS page cache), but **not** `fsync` per line. A process
+      crash (panic/SIGKILL) loses nothing already flushed; a machine **power
+      loss** can drop only the un-flushed tail, which the trailing-corruption
+      repair (decision 6) already handles. This matches agent-harness practice
+      and keeps the cost off the stream's critical path.
+    - **Non-blocking I/O:** all store writes go through a **dedicated writer
+      (an `mpsc` channel to a writer task)** owned/invoked by the agent loop,
+      so the streaming and TUI threads never block on disk. The single-writer
+      ordering of the agent loop is preserved: the loop enqueues committed
+      events in order; the writer appends them serially.
+
+11. **Compression lifecycle — raw when new, auto-compress old, manual override:**
+    - **Newer sessions stay raw JSONL** (byte-addressable, tail-visible,
+      `tail`-able, tail-repairable per decisions 3/6).
+    - **Older sessions are automatically compressed** beyond an age/size
+      threshold (config-driven, e.g. `compress_after_days`). On compression a
+      session's **abstract is materialized** as `<uuid>.meta.json` (decision 8)
+      and the body becomes `<uuid>.jsonl.gz`.
+    - **Never compress a locked session:** the compressor (decision 7's flock
+      rules) skips any session currently held by an active writer — it
+      attempts the lock non-blockingly, and only compresses sessions it can
+      exclusively lock. This guarantees no live writer ever has its file
+      gzipped under it.
+    - **Manual override:** the user can `ylva compress` / `ylva decompress
+      --all | --before <date> | <session-id>`. Decompress restores a
+      `.jsonl.gz` to raw `.jsonl` (dropping the now-redundant sidecar or
+      demoting it back to the in-file meta line).
+    - The archive write order (decision 8) is followed: write sidecar first,
+      then gzip, then remove the raw `.jsonl`.
+    - **Retention/deletion:** no automatic deletion; history is kept forever.
+      Old sessions are compacted in place by auto-compression (decision 11),
+      and deletion is always an explicit user act via the CLI (decision 12).
+
+12. **Deletion — explicit CLI only, with dry-run:**
+    - History is never auto-deleted. Deleting a session is an explicit,
+      user-triggered act: `ylva delete <session-id>…` (or
+      `ylva delete --before <date>` / `--all`), supported by a **`--dry-run`
+      flag** that lists exactly which `<uuid>.jsonl[.gz]` (+ `.meta.json`)
+      files *would* be removed without touching anything.
+    - Deletion respects the lock (decision 7): a session held by an active
+      writer is refused or skipped, never deleted from under it.
+    - Deletion removes the session's body and its sidecar together; the
+      session is then gone (only `--before`/`--all`/explicit id make it
+      destructive — no background sweep).
 
 ## 5. OpenRouter vs Ollama
 
@@ -1565,7 +1768,8 @@ terminal UI.
 ### Architecture
 
 Headless mode is **stateless by default**: each `ylva --prompt "..."` starts a
-new conversation thread in SQLite, runs the ReAct loop, and exits.
+new conversation thread as a fresh JSONL session file (see §4H), runs the
+ReAct loop, and exits.
 Use `--conversation-id <id>` to resume an existing thread and append new
 exchanges to it.
 
@@ -1596,8 +1800,8 @@ ylva --prompt "summarize src/main.rs"
 # Use a specific profile (loads ~/.ylva/profiles/work/config.toml)
 ylva --prompt "audit security" --profile work
 
-# Resume existing conversation
-ylva --prompt "what about error handling?" --conversation-id 42
+# Resume existing conversation (UUID session id, §4H)
+ylva --prompt "what about error handling?" --conversation-id 3f2a9c81-9b1e-4a7d-8c44-9b9c63d7f2b1
 
 # JSON output (buffered, emitted at end)
 ylva --prompt "generate tests" --format json
@@ -1660,10 +1864,11 @@ for one-off scripts. No hidden defaults.
 **Commands:** Slash commands (`/model`, `/tools`, `/clear`, `/save`) are only recognised at the start
 of a line to avoid triggering inside pasted code.
 
-**Conversation titles:** Generated from `ID + timestamp` so headless runs are easy to find later in
-the SQLite history.
+**Conversation titles:** The `meta` header carries an auto-generated title —
+the first user message, truncated and single-line (see §4H decision 8) — so
+headless runs are easy to find later via `rg '"type":"meta"' ~/.ylva/chats/`.
 
-**Persistence:** Always persists to SQLite; there is no `--no-persist` flag. Every run leaves a trace
+**Persistence:** Always persists to a JSONL session file (§4H); there is no `--no-persist` flag. Every run leaves a trace
 for later review.
 
 **Buffering strategy:** Buffer everything and emit at the end. For `--format text`, the user sees
@@ -1860,7 +2065,7 @@ The input widget must never be "disabled."
 
 - [ ] `finish` tool available only inside sub-agent runs; fallback to unstructured text if never called
 
-- [ ] `subagent_runs` SQLite table with parent conversation linkage
+- [ ] Sub-agent persistence records (`subagent_start` / `subagent_result`) with parent session linkage (§4H)
 
 - [ ] Sub-agent inherits parent safety settings (`--auto-approve-*` in headless)
 
@@ -1879,9 +2084,9 @@ The input widget must never be "disabled."
 
 - [ ] Three built-in themes: dark, light, monokai
 
-- [ ] SQLite persistence for conversations (`rusqlite`)
+- [ ] JSONL persistence for conversations, sub-agents, and schema-version handling (§4H)
 
-- [ ] Resume previous conversation on startup
+- [ ] Resume an existing session via explicit `--conversation-id` (no auto-resume, no picker)
 
 - [ ] Config hierarchy (`~/.ylva/profiles/default/config.toml`) for
       default model, theme, keybindings, and subagent engine assignments
@@ -1897,7 +2102,7 @@ The input widget must never be "disabled."
 
 - [ ] `/commands` in input box (e.g., `/model`, `/tools`, `/clear`, `/save`)
 
-**Key crates:** `rusqlite`, `config`, `toml`, `chrono`, `tiktoken-rs`
+**Key crates:** `serde_json`, `sha2`, `config`, `toml`, `chrono`, `tiktoken-rs`
 
 ### Phase 7: CLI Surface
 
@@ -1919,9 +2124,12 @@ for scripting and automation.
 
 - [ ] Support `--conversation-id <id>` to resume and append to existing threads
 
+- [ ] Store-management subcommands: `ylva compress` / `ylva decompress [--all|--before <date>|<session-id>]`,
+      `ylva delete [<session-id>…|--before <date>|--all] --dry-run` (§4H decisions 11–12)
+
 - [ ] Print minimal status to stderr by default; `--quiet` to suppress
 
-- [ ] Always persist to SQLite (no `--no-persist` flag)
+- [ ] Always persist to a JSONL session file (no `--no-persist` flag)
 
 **Key crates:** `clap`
 
@@ -1983,7 +2191,7 @@ unicode-width = "0.2"
 dirs = "5"
 config = "0.14"
 toml = "0.8"
-rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
 chrono = "0.4"
 walkdir = "2"
 ignore = "0.4"
@@ -2026,9 +2234,9 @@ Study these for patterns:
 
 - [ ] **Can delegate focused tasks to sub-agents with curated briefing and config-driven types**
 
-- [ ] **Sub-agent runs are persisted and auditable via the `subagent_runs` SQLite table**
+- [ ] **Sub-agent runs are persisted and auditable via the unified JSONL store (§4H)**
 
-- [ ] Remembers conversation history across restarts
+- [ ] Conversation history is retained across restarts; resuming an old session works via explicit `--conversation-id`
 
 - [ ] Respects `.gitignore` when showing file trees and searching
 
@@ -2073,7 +2281,7 @@ where they are documented in the body of this document.
 | **Headless mode**              | Full CLI with `--prompt`, `--format`, `--conversation-id`, granular `--auto-approve-*`, exit codes `0–4`                                                                                       | §7 CLI Surface                               |
 | **Output streams**             | Split stdout (content) / stderr (status); `--quiet` flag; buffer and emit at end                                                                                                               | §7 CLI Surface                               |
 | **Headless safety**            | Mutating tools require `--auto-approve-*`; exit code `4` if denied                                                                                                                             | §4E Safety, §7 CLI Surface                   |
-| **Conversation titles**        | ID + timestamp                                                                                                                                                                                 | §7 CLI Surface                               |
+| **Conversation titles**        | Auto-generated from first user message, truncated single-line in the `meta` header (§4H decision 8)                                                                                                     | §7 CLI Surface, §4H decision 8               |
 | **Model switching**            | Supported mid-conversation; `SwitchModel` is a documented placeholder, not yet wired — arrives via `/model` in the slash-command phase                                                         | §4B ReAct Loop, §7 CLI Surface               |
 | **App state**                  | Dumb view model; agent loop owns state machine                                                                                                                                                 | §4B ReAct Loop                               |
 | **Config format**              | TOML for all config files; YAML explicitly rejected                                                                                                                                            | §2 Crate Ecosystem, §4G Sub-Agent Delegation |
@@ -2085,7 +2293,7 @@ where they are documented in the body of this document.
 | **Clarify tool**               | Free-text only; no multiple-choice options                                                                                                                                                     | §4D Tool Registry                            |
 | **Sub-agent delegation**       | Tool-based `spawn_subagent` using reusable `AgentLoop`                                                                                                                                         | §4G Sub-Agent Delegation                     |
 | **Sub-agent parallelism**      | Sub-agent runs in parallel with main agent; main loop never blocks                                                                                                                             | §4G Sub-Agent Lifecycle                      |
-| **Sub-agent channels**         | Dedicated `subagent_ui_tx`/`subagent_ui_rx` for live sidebar updates; SQLite only for audit                                                                                                    | §4G UI & Headless                            |
+| **Sub-agent channels**         | Dedicated `subagent_ui_tx`/`subagent_ui_rx` for live sidebar updates; store only for audit                                                                                                    | §4G UI & Headless                            |
 | **Sub-agent types**            | Profile-driven with global behavior + local engine assignment                                                                                                                                  | §4G Sub-Agent Delegation                     |
 | **Sub-agent briefing**         | Hybrid system + user message; curated by main agent                                                                                                                                            | §4G Sub-Agent Delegation                     |
 | **Sub-agent nesting**          | Forbidden; one level only                                                                                                                                                                      | §4G Sub-Agent Delegation                     |
@@ -2095,7 +2303,7 @@ where they are documented in the body of this document.
 | **Sub-agent tools**            | Global subagent files define whitelist; profiles can override                                                                                                                                  | §4G Sub-Agent Delegation                     |
 | **Sub-agent config format**    | `.toml` flat or `.md` with TOML frontmatter (body = system_prompt)                                                                                                                             | §4G Sub-Agent Delegation                     |
 | **Sub-agent safety**           | Inherits parent safety settings                                                                                                                                                                | §4G Sub-Agent Delegation                     |
-| **Sub-agent persistence**      | `subagent_runs` table linking parent conversation                                                                                                                                              | §4G Sub-Agent Delegation                     |
+| **Sub-agent persistence**      | `subagent_start` / `subagent_result` JSONL records in the parent session + dedicated sub-session file (§4H)                                                                                    | §4G Sub-Agent Delegation, §4H                |
 | **Sub-agent UI**               | Collapsible sidebar panel + status bar line                                                                                                                                                    | §4G Sub-Agent Delegation                     |
 | **Sub-agent headless**         | `--allow-subagents` flag, disabled by default                                                                                                                                                  | §7 CLI Surface                               |
 | **Build order**                | Headless first (Phase 1–3), TUI added as rendering layer in Phase 4                                                                                                                            | §7 Phased Build Plan                         |
@@ -2104,3 +2312,12 @@ where they are documented in the body of this document.
 | **Channel topology**           | Dual channels (`ui_tx` + `agent_tx`) proven from first compile                                                                                                                                 | §7 Phase 1                                   |
 | **Steering**                   | Cooperative-inject at natural points included in early headless build to prove state-machine injection transitions                                                                             | §7 Phase 1                                   |
 | **Context ownership**          | Single-writer rule enforced immediately; read-only clone passed to inner task                                                                                                                  | §7 Phase 1, §4C Context                      |
+| **Persistence store**          | Plain append-only JSONL (no SQLite): global `~/.ylva/chats/<hash-of-cwd>/<uuid>.jsonl`; raw-rich, archive-compressible                                                                          | §4H decisions 1–3                            |
+| **Schema evolution**           | Tolerant typed events + `meta` header `schema_version` + idempotent atomic upgraders; unknown fields/`type` ignored                                                                             | §4H decision 4                               |
+| **Resume/session model**       | Explicit `--conversation-id` (UUID) only; no auto-resume, no startup picker                                                                                                                    | §4H decision 5                               |
+| **Corruption recovery**        | Repair-on-open (truncate invalid tail before resume+append); reads never mutate                                                                                                                 | §4H decision 6                               |
+| **Concurrent writers**         | `flock` every session open; fail-fast on conflict; listings never disturb active writer                                                                                                        | §4H decision 7                               |
+| **Session findability**        | Sidecar = session abstract, greppable: in-file `meta` line when raw, `.meta.json` when compressed; `rg '"type":"meta"'`                                                                       | §4H decision 8                               |
+| **Compression**                | Raw when new; auto-compress old unlocked sessions; `ylva compress`/`decompress` manual override                                                                                                 | §4H decision 11                              |
+| **Durability**                 | `flush` per line, no per-line `fsync`; dedicated writer channel so loops never block on disk                                                                                                    | §4H decision 10                              |
+| **Retention/deletion**         | History kept forever (no auto-delete); explicit `ylva delete … --dry-run`; auto-compression bounds disk                                                                                        | §4H decisions 11–12                          |
