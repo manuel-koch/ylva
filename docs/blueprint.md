@@ -1960,47 +1960,48 @@ These are standalone experiments, not part of the production code path.
 **Decision:** Build headless first. The TUI is deferred to Phase 4 and added as a rendering layer on
 top of a proven agent loop.
 
-- [ ] **Goal:** A working headless agent loop in ~300 lines that proves the core architecture:
+- [x] **Goal:** A working headless agent loop in ~300 lines that proves the core architecture:
       mock provider, dual channels, steering, cancellation, and context ownership.
       No CLI surface, no config parsing, no TOML.
 
-- [ ] **`lib.rs` exports:** `pub mod agent; pub mod llm;` with `AgentLoop` struct
+- [x] **`lib.rs` exports:** `pub mod agent; pub mod llm;` with `AgentLoop` struct
       (`new()`, `run()`, `send_command()`, `ui_updates()`).
       `main.rs` is a thin wrapper: `rt.block_on(AgentLoop::new(mock_provider).run())`.
 
-- [ ] **`Message` enum (Q1):** `System`, `User`, `Assistant { content, status, tool_calls }`,
+- [x] **`Message` enum (Q1):** `System`, `User`, `Assistant { content, status, tool_calls }`,
       `ToolResult`, `ToolError`. Phase 1 only uses `System`, `User`, `Assistant`.
 
-- [ ] **`Context` (Q2, Q13):** Simple `Vec<Message>` owned by `AgentLoop`. No `buffer` field,
+- [x] **`Context` (Q2, Q13):** Simple `Vec<Message>` owned by `AgentLoop`. No `buffer` field,
       no `TieredMessage`, no token counting.
 
-- [ ] **`AgentLoop` channels (Q9, Q18, Q22):** Internally creates `cmd_tx`/`cmd_rx`,
+- [x] **`AgentLoop` channels (Q9, Q18, Q22):** Internally creates `cmd_tx`/`cmd_rx`,
       `ui_tx`/`ui_rx`, `agent_tx`/`agent_rx`. Two spawned tasks:
       1. Outer task: `select!` on `cmd_rx` + `agent_rx`, owns `Context` and `AgentMode`.
       2. Inner streaming task: `provider.chat()` → `stream.recv()` loop, sends `UiUpdate`
       and `AgentEvent` back to outer task.
 
-- [ ] **Mock provider (Q8, Q12, Q21):** `MockProvider::new(tokens: Vec<String>, interval: Duration)`
-      emits `StreamStarted`, `Text`, `Done`. Tests use `tokio::time::pause` + `advance`
+- [x] **Mock provider (Q8, Q12, Q21):** `MockProvider::new(tokens: Vec<String>, interval: Duration)`
+      emits `Text`, `Done` (the `UiUpdate::StreamStarted` marker is emitted by the inner
+      streaming task, per the Phase 1 plan). Tests use `tokio::time::pause` + `advance`
       for deterministic, instant verification.
 
-- [ ] **`Provider` trait (Q12):** Native async trait (no `async-trait` crate). The Provider
+- [x] **`Provider` trait (Q12):** Native async trait (no `async-trait` crate). The Provider
       creates its own internal `mpsc::channel` and returns the receiver.
 
-- [ ] **Cancellation flow (Q20):** Outer loop creates `CancellationToken`, passes clone to
+- [x] **Cancellation flow (Q20):** Outer loop creates `CancellationToken`, passes clone to
       Provider. On `Stop`, `current_cancel.take()?.cancel()`. Provider detects and emits
       `StreamEvent::Cancelled`. Inner task forwards as `AgentEvent::StreamCancelled`.
       Outer loop ignores stale cancellation when `current_cancel` is `Some`.
 
-- [ ] **Empty `Prompt` ignored (Q26):** `AgentCommand::Prompt("")` is a no-op in Phase 1.
+- [x] **Empty `Prompt` ignored (Q26):** `AgentCommand::Prompt("")` is a no-op in Phase 1.
 
-- [ ] **Steering test:** Send `Prompt` mid-stream → verify cooperative handoff (stream not
+- [x] **Steering test:** Send `Prompt` mid-stream → verify cooperative handoff (stream not
       cancelled, steer queued, injected at `StreamDone` → new request starts).
 
-- [ ] **Interrupt test:** Send `Stop` mid-stream → verify `StreamCancelled`, partial
+- [x] **Interrupt test:** Send `Stop` mid-stream → verify `StreamCancelled`, partial
       flushed as `Assistant { status: Interrupted, … }`, pending steers cleared.
 
-- [ ] **Print final conversation history** to verify state transitions.
+- [x] **Print final conversation history** to verify state transitions.
 
 **Success criteria:**
 

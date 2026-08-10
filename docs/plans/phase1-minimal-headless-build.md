@@ -394,6 +394,33 @@ Update, in the same commits as the code:
 
 ---
 
+## Execution Notes
+
+Recorded while executing this plan (the implemented code is the source of
+truth; these notes keep the plan from being the stale doc):
+
+- **`Provider::chat` returns a boxed future.** The planned
+  `-> impl Future + Send` return position (RPITIT) makes the trait **not**
+  `dyn`-compatible, so `Arc<dyn Provider>` (required by `AgentLoop`/`main`)
+  cannot be built. Implemented as `BoxFuture<'a, …>` (via the `futures`
+  crate) — still a native async trait, no `async-trait` crate.
+- **`AgentLoop` run/shutdown shape.** The planned struct field `ui_rx` cannot
+  coexist with `new() -> (Self, Receiver<UiUpdate>)` (a single mpsc receiver
+  cannot be moved twice), and `run(self)` would move `cmd_tx` into the task,
+  making "drop the `AgentLoop` to shut down" impossible. Implemented:
+  `run(&mut self)` takes `cmd_rx`/`agent_rx` out of the struct via
+  `Option::take`; the caller keeps `AgentLoop` (and thus `cmd_tx`) and shuts
+  the loop down by dropping it. `ui_updates()` was omitted since `new()`
+  already hands the receiver to the caller.
+- **`tokio::select!` is `biased` with the `agent_rx` branch first** so a
+  queued lifecycle event (e.g. the final `StreamDone`) is applied to the
+  context before the loop returns it on shutdown — makes final-history
+  assertions deterministic.
+- **Coverage at execution time:** `agent.rs` 94.96% lines, `llm.rs` 98.85%
+  lines, total 91.69% (≥ 80% threshold).
+
+---
+
 ## Proposed Improvements
 
 - **Deterministic clock in all tests:** use `tokio::time::pause` + `advance`
