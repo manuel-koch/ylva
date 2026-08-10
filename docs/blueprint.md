@@ -738,7 +738,7 @@ impl AgentLoop {
         self.ui_rx  // ownership transferred to caller
     }
 
-    pub fn run(self) -> tokio::task::JoinHandle<anyhow::Result<()>> {
+    pub fn run(self) -> tokio::task::JoinHandle<anyhow::Result<Context>> {
         tokio::spawn(async move {
             let mut context = Context::new();
             let mut mode = AgentMode::Idle;
@@ -749,7 +749,12 @@ impl AgentLoop {
             loop {
                 tokio::select! {
                     // 1. User commands
-                    Some(cmd) = cmd_rx.recv() => {
+                    cmd = cmd_rx.recv() => {
+                        let Some(cmd) = cmd else {
+                            // AgentLoop dropped → clean shutdown: return the
+                            // final committed Context (read-only final history).
+                            return Ok(context);
+                        };
                         match cmd {
                             AgentCommand::Prompt(text) => {
                                 if text.is_empty() {
@@ -961,6 +966,10 @@ impl Context {
 
 **Insertion rules (Phase 1 subset):**
 
+- `Context::new()` seeds the initial system message `Message::System { content:
+  "You are Ylva, a helpful agent with tool capabilities." }` (SSOT constant for
+  Phase 1; a future config phase sources this from a customizable **SOUL.md**,
+  see §4G).
 - `push_user(text)` → `Message::User { content: text }`
 - `push_assistant(content, status, tool_calls)` → `Message::Assistant { content, status, tool_calls }`
 
@@ -1285,12 +1294,13 @@ Those are defined in the user's config hierarchy.
 
 ```text
 ~/.ylva/
-├── subagents/                 # global, shared behavior definitions
-│   ├── research.md            # .md with +++ frontmatter (seeded format)
+├── SOUL.md                     # optional persona / initial system message (built-in default)
+├── subagents/                  # global, shared behavior definitions
+│   ├── research.md             # .md with +++ frontmatter (seeded format)
 │   └── code_edit.md
 └── profiles/
     ├── default/
-    │   └── config.toml        # default profile (always exists)
+    │   └── config.toml         # default profile (always exists)
     ├── local/
     │   └── config.toml
     └── work/
@@ -1316,6 +1326,14 @@ config/                        # source of truth (versioned, embedded)
 
 Themes are **not** files — they are compiled into the binary and
 name-selectable (`dark | light | monokai`), not seeded into any scope (§4F).
+
+**Persona / initial system message (SOUL.md):** the initial system message of
+a chat (the agent's persona) follows the same scopes, expressed as a
+**`SOUL.md`** in the project `.ylva/` and home `~/.ylva/` layers with a
+built-in default. It resolves through the same three-layer fallback chain
+below. Phase 1 hard-codes the default message (`"You are Ylva, a helpful agent
+with tool capabilities."`) as an SSOT constant; the SOUL.md loader replaces
+that constant's source in the config phase (§4C, §7 Phase 6).
 
 **Three-layer fallback chain**, resolved per-file with **whole-layer replace**
 (highest layer that defines a file wins; lower layers ignored for that file):
@@ -1934,7 +1952,7 @@ This guarantees well-formed output for downstream tools and avoids partial outpu
 
 ### Phase 0: Proof-of-Concept Spikes
 
-See §0 for the two pre-build spikes (TUI responsiveness and HTTP stream cancellation).
+See §0 for the three pre-build spikes (TUI responsiveness and HTTP stream cancellation).
 These are standalone experiments, not part of the production code path.
 
 ### Phase 1: Minimal Headless Build (The Agent Kernel)
@@ -1987,12 +2005,15 @@ top of a proven agent loop.
 **Success criteria:**
 
 - Steering never aborts a live stream and does not panic or deadlock.
-- Final context (no interrupt) contains exactly: system message, first assistant (completed),
-  the queued steering user message(s).
+- Final context (no interrupt) contains exactly: the seeded system message
+  (`Context::new()`, "You are Ylva, a helpful agent with tool capabilities."), first assistant
+  (completed), the queued steering user message(s).
 - Interrupt path: system message, first partial assistant (interrupted), no leftover pending steers.
 - No `Arc<Mutex<Context>>`, no shared mutable state.
 
-**Key crates (Q23):** `tokio`, `tokio-util`, `futures`, `thiserror`, `anyhow`
+**Key crates (Q23):** `tokio`, `tokio-util`, `futures`, `thiserror`, `anyhow`,
+`uuid` (`v4`), `serde_json` — the extra two carry the full `Message`/
+`ToolCallRequest` skeleton (no placeholders, no `todo!()`)
 
 ### Phase 2: Real HTTP Provider (Still Headless)
 
@@ -2230,6 +2251,10 @@ for scripting and automation.
 
 **Phase 1 minimal (Q23):**
 
+**Phase 1 adds `uuid` (v4) and `serde_json` to the minimal set** so the full
+§4B `Message`/`ToolCallRequest` skeleton is real typed API from first compile
+(decision — no placeholders, dead-code, or `todo!()`):
+
 ```toml
 [package]
 name = "ylva"
@@ -2242,6 +2267,8 @@ tokio-util = "0.7"
 futures = "0.3"
 thiserror = "1"
 anyhow = "1"
+uuid = { version = "1", features = ["v4"] }
+serde_json = "1"
 ```
 
 **Full dependency list (all phases):**
@@ -2399,9 +2426,10 @@ where they are documented in the body of this document.
 | **Retention/deletion**         | History kept forever (no auto-delete); explicit `ylva delete … --dry-run`; auto-compression bounds disk                                                                                        | §4H decisions 11–12                          |
 | **Message enum**               | `System`, `User`, `Assistant { content, status, tool_calls }`, `ToolResult`, `ToolError` (Q1)                                                                                               | §4B ReAct Loop                               |
 | **Context Phase 1**            | Simple `Vec<Message>`; no `buffer`, no `TieredMessage` (Q2, Q13)                                                                                                                              | §4C Context                                  |
+| **Persona / system message**   | `Context::new()` seeds `Message::System` = "You are Ylva, a helpful agent with tool capabilities." (SSOT constant); a config phase loads it from a `SOUL.md` (project `.ylva/` / home `~/.ylva/`, three-layer fallback)                                                                                      | §4C Context, §4G Config, §7 Phase 1/6        |
 | **Ollama tools validation**    | Spike required before Phase 2; fallback to native provider if `/v1` lacks tool support (Q3)                                                                                                | §5 OpenRouter vs Ollama                      |
 | **HTTP retry**                 | Inside Provider; 3 retries, base 1 s, max 30 s, exponential with jitter, honoring `Retry-After`; pre-stream only (Q4)                                                                         | §4A Unified Provider Trait                   |
-| **lib.rs API**                 | `AgentLoop::new(provider) -> (AgentLoop, Receiver<UiUpdate>)`; `run()` spawns outer task; `send_command()` + `ui_updates()` (Q5, Q9)                                                        | §4B ReAct Loop, §7 Phase 1                   |
+| **lib.rs API**                 | `AgentLoop::new(provider) -> (AgentLoop, Receiver<UiUpdate>)`; `run()` spawns outer task, returns `JoinHandle<Result<Context>>` (final history on shutdown via drop of `AgentLoop` → closed cmd channel); `send_command()` + `ui_updates()` (Q5, Q9)                                                | §4B ReAct Loop, §7 Phase 1                   |
 | **PendingTool**                | `AssembledToolCall` + `timeout_secs`, with `execute()` method dispatching to `ToolRegistry` (Q6)                                                                                           | §4D Tool Registry                            |
 | **Persistence**                | Separate `StoreEvent` enum (`Meta`, `MessageEvent`, `SubagentStart`, `SubagentResult`) (Q7)                                                                                                 | §4H Persistence                              |
 | **Mock determinism**           | `tokio::time::pause` + `advance` in tests; `MockProvider::new(tokens, interval)` (Q8, Q21)                                                                                                    | §7 Phase 1                                   |
@@ -2412,7 +2440,7 @@ where they are documented in the body of this document.
 | **Task structure**             | Two tasks: outer loop (select! on cmd_rx + agent_rx) + inner streaming task (Q18, Q22)                                                                                                      | §4B ReAct Loop                               |
 | **OpenAI serialization**       | Free function in provider module; `Message` decoupled from wire format (Q19)                                                                                                               | §4A Unified Provider Trait                   |
 | **CancellationToken**          | Outer loop creates it; passes clone to Provider; `take().cancel()` on `Stop` (Q20)                                                                                                         | §4B ReAct Loop                               |
-| **Phase 1 Cargo.toml**         | 5 crates only: `tokio`, `tokio-util`, `futures`, `thiserror`, `anyhow` (Q23)                                                                                                                  | §7 Phase 1, §9 Cargo.toml                    |
+| **Phase 1 Cargo.toml**         | `tokio`, `tokio-util`, `futures`, `thiserror`, `anyhow` plus `uuid` (`v4`) and `serde_json` for the full `Message` skeleton (Q23)                                                | §7 Phase 1, §9 Cargo.toml                    |
 | **File layout**                | Flat files for Phase 1 (`src/agent.rs`, `src/llm.rs`); directories when >150 lines (Q24)                                                                                                     | §7 Phase 1                                   |
 | **Shared mock**                | `tests/common/mock_provider.rs` with `MockProvider` (Q25)                                                                                                                                     | §7 Phase 1                                   |
 | **Empty Prompt**               | Ignored in Phase 1; `is_internal_continuation` deferred to Phase 3 (Q26)                                                                                                                       | §4B ReAct Loop                               |
