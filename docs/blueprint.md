@@ -379,6 +379,15 @@ It supports **dropping the in-flight request** when the user interrupts or steer
 > `temperature`, etc.). At startup the `Config` module builds a `HashMap<String, Arc<dyn Provider>>`
 > from `Engine` definitions. The rest of the code only knows the `Provider` trait; "engine" is strictly
 > a config concept.
+>
+> **`base_url` semantics (Phase 2 refinement):** `base_url` is a **generic provider concept**, not an
+> OpenAI-endpoint string. Its meaning — which endpoints and request paths exist under that base — is
+> defined **only inside the concrete provider implementation**, never in the `Provider` trait. The fact
+> that Ylva currently ships an OpenAI-compatible provider must not leak the OpenAI path structure into
+> the trait or into `base_url`'s meaning. The concrete `OpenAiProvider` receives a `base_url` that
+> includes the backend origin and version prefix (OpenRouter `https://openrouter.ai/api/v1`, Ollama
+> `http://localhost:11434/v1`) and internally appends `/chat/completions`. This  leaves room for future provider-side queries (e.g. model listing) under the
+> same `base_url`.
 
 ```rust
 use serde_json::Value;
@@ -2021,26 +2030,46 @@ top of a proven agent loop.
 - [ ] **Goal:** Replace the mock provider with a real `reqwest` + `eventsource-stream` implementation
       targeting the OpenAI chat-completions spec.
 
-- [ ] Define unified `Provider` trait with `CancellationToken` parameter and `StreamEvent::Cancelled`
+- [ ] The unified `Provider` trait (already defined in Phase 1 with the `CancellationToken` parameter
+      and `StreamEvent::Cancelled`) stays **unchanged** — no `Delta` variant, no tool-call pipeline
+      (see Step 3 refinement below).
 
-- [ ] Add `ToolCallAccumulator` inside the provider for fragmented `delta.tool_calls` chunks
+- [ ] **Step 3 refinement (deferred tool-call assembly):** implement **one** provider
+      (`OpenAiProvider`) using raw `reqwest` + `eventsource-stream`. The provider emits only
+      `StreamEvent::Text` for `delta.content`; it **skips** non-content deltas (`reasoning`/`role`-only
+      and `tool_calls`-only chunks). It does **not** emit `StreamEvent::Delta`. The
+      `ToolCallAccumulator` and tool-call assembly move to **Phase 3** and live in the **agent's
+      streaming task** per §4A — never "inside the provider" (this supersedes the earlier Phase 2
+      bullet that placed the accumulator in the provider).
 
-- [ ] Implement one provider using raw `reqwest` + `eventsource-stream`
+- [ ] Implement the `OpenAiProvider` struct (`base_url`, `model`, `api_key`, `reqwest::Client`) with
+      helper function `serialize_messages(&[Message]) -> Value` (skip `ToolResult`/`ToolError`
+      silently — unreachable in Phase 2). Append `/chat/completions` to `base_url` internally per the
+      §4A `base_url` semantics note.
 
 - [ ] Verify provider works for both OpenRouter (`base_url` override) and Ollama (`/v1` endpoint)
       via config switch. **Blocked until Spike 3 (§0) validates Ollama tool-calling support.**
       If Spike 3 fails, replace this step with: implement a second `ollama_native`
       provider targeting `/api/chat` with manual tool-injection prompting, and
       remove the "unified provider" claim from §4A and §5.
+      Spike 3 has **passed** — the unified provider is kept, no `ollama_native` provider.
 
 - [ ] Spawn chat in a `tokio::task`; send `StreamEvent::Text` chunks over `mpsc`
 
 - [ ] **Cancellation verified with real TCP:** Drop the stream future and confirm via `netstat`/`lsof`
-      that the connection closes immediately (no `CLOSE_WAIT` linger)
+      that the connection closes immediately (no `CLOSE_WAIT` linger); verified hermetically in tests
+      via a mock server's live-connection counter (Spike 2 pattern).
 
 - [ ] Handle `StreamEvent::Cancelled` in the headless UI printer (mark message as interrupted in stdout)
 
 - [ ] Handle `StreamEvent::Error` gracefully (print error to stderr, return to `Idle`)
+
+- [ ] **Pre-stream HTTP retry** (`429`/`5xx`/connect): bounded exponential backoff, up to 3 retries,
+      base 1 s, max 30 s, jitter, honoring `Retry-After`; never retry mid-stream (§4A).
+
+- [ ] **Demo wiring (Phase 2, no CLI/config):** `main.rs` selects the provider from env vars with
+      **Ollama-first** precedence — `OLLAMA_BASE_URL`/`OLLAMA_MODEL`/`OLLAMA_API_KEY`, then
+      `OPENROUTER_BASE_URL`/`OPENROUTER_MODEL`/`OPENROUTER_API_KEY`, else fall back to `MockProvider`.
 
 - [ ] No TUI yet. Still stdout/stderr only.
 
@@ -2428,7 +2457,8 @@ where they are documented in the body of this document.
 | **Message enum**               | `System`, `User`, `Assistant { content, status, tool_calls }`, `ToolResult`, `ToolError` (Q1)                                                                                               | §4B ReAct Loop                               |
 | **Context Phase 1**            | Simple `Vec<Message>`; no `buffer`, no `TieredMessage` (Q2, Q13)                                                                                                                              | §4C Context                                  |
 | **Persona / system message**   | `Context::new()` seeds `Message::System` = "You are Ylva, a helpful agent with tool capabilities." (SSOT constant); a config phase loads it from a `SOUL.md` (project `.ylva/` / home `~/.ylva/`, three-layer fallback)                                                                                      | §4C Context, §4G Config, §7 Phase 1/6        |
-| **Ollama tools validation**    | Spike required before Phase 2; fallback to native provider if `/v1` lacks tool support (Q3)                                                                                                | §5 OpenRouter vs Ollama                      |
+| **Ollama tools validation**    | Spike required before Phase 2; fallback to native provider if `/v1` lacks tool support (Q3). **Spike 3 PASSED** — unified provider kept, no `ollama_native` fallback                                                                                                | §5 OpenRouter vs Ollama, §0 Spike 3                      |
+| **`base_url` semantics**       | `base_url` is a generic provider concept: endpoint/path interpretation lives only in the concrete provider; OpenAI compatibility never enters the `Provider` trait. `OpenAiProvider` receives a base incl. the origin+version prefix and internally appends `/chat/completions` (Phase 2 refinement) | §4A Unified Provider Trait |
 | **HTTP retry**                 | Inside Provider; 3 retries, base 1 s, max 30 s, exponential with jitter, honoring `Retry-After`; pre-stream only (Q4)                                                                         | §4A Unified Provider Trait                   |
 | **lib.rs API**                 | `AgentLoop::new(provider) -> (AgentLoop, Receiver<UiUpdate>)`; `run()` spawns outer task, returns `JoinHandle<Result<Context>>` (final history on shutdown via drop of `AgentLoop` → closed cmd channel); `send_command()` + `ui_updates()` (Q5, Q9)                                                | §4B ReAct Loop, §7 Phase 1                   |
 | **PendingTool**                | `AssembledToolCall` + `timeout_secs`, with `execute()` method dispatching to `ToolRegistry` (Q6)                                                                                           | §4D Tool Registry                            |
