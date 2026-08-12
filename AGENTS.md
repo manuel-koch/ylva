@@ -83,6 +83,8 @@ re-exported through `src/lib.rs` — `tests/*.rs` cannot `use` items from `src/m
 
 Keep `main.rs` thin (event loop, key handling).
 
+**Module layout.** Use Rust 2018+ file-per-module style: `foo.rs`, not `foo/mod.rs`.
+
 ## Guidelines for Implementation, Testing and Bugfixing
 
 These are well-known concepts (**Semantic Anchors**).

@@ -1,5 +1,5 @@
 // Test-support module: compiled into every integration-test crate via
-// `tests/common/mod.rs`, but only consumed by some of them. Allow dead code so
+// `tests/common.rs`, but only consumed by some of them. Allow dead code so
 // a test binary that pulls in `mod common;` without using the mock server does
 // not warn about helper items it never references.
 #![allow(dead_code)]

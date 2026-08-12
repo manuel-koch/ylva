@@ -1,3 +1,5 @@
+// Cargo compiles this file as a top-level test crate named 'common'; the attribute forces the submodule resolution to match what the other tests expect via `mod common;`. See AGENTS.md "Module layout" for context.
+#[path = "common/mock_llm_server.rs"]
 pub mod mock_llm_server;
 
 use tokio::sync::mpsc;

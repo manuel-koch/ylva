@@ -336,21 +336,22 @@ src/
 ├── ui.rs                # All ratatui widgets and layout math
 ├── events.rs            # Crossterm key → AppAction mapping (Ctrl+C, Enter)
 ├── config.rs            # Settings, API keys, model selection
-├── store.rs              # JSONL persistence for chats (see §4H)
+├── store.rs             # JSONL persistence for chats (see §4H)
 ├── cli.rs               # Headless mode: arg parsing, fake TUI wrapper, exit codes
+├── llm.rs               # trait Provider { async fn chat(...) }
 ├── llm/
-│   ├── mod.rs           # trait Provider { async fn chat(...) }
-│   └── openai_provider.rs    # Raw reqwest + eventsource-stream targeting OpenAI spec
-│                            # Works for both OpenRouter and Ollama via config
+│   └── openai_provider.rs  # Raw reqwest + eventsource-stream targeting OpenAI spec
+│                           # Works for both OpenRouter and Ollama via config
+├── agent.rs             # ReAct loop: select! { stream, cmd_rx }
 ├── agent/
-│   ├── mod.rs           # ReAct loop: select! { stream, cmd_rx }
 │   ├── context.rs       # Message buffer, token counting, summarization,
 │   │                    # PARTIAL message handling on abort
+│   ├── tools.rs         # Tool trait + Registry
 │   └── tools/
-│       ├── mod.rs       # Tool trait + Registry
 │       ├── fs.rs        # read, write, glob, edit
 │       ├── shell.rs     # execute_command (with user confirmation!)
 │       └── search.rs    # grep/ripgrep via std::process
+├── widgets.rs           # module root (re-exports, shared widget state)
 └── widgets/
     ├── chat_bubble.rs   # Custom ratatui widget for assistant messages
     ├── code_block.rs    # Syntect-highlighted block

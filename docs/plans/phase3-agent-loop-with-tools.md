@@ -128,7 +128,8 @@ as `StreamEvent::Delta`, and the agent's inner streaming task owns the
 
 Open `src/agent.rs`: it currently defines `AgentMode` (only `Idle`/`Streaming`),
 `AgentCommand`, `AgentEvent`, `Message`, `Context`, and `AgentLoop`. Add
-schemars and create a `src/agent/tools/` module (blueprint §3 layout) with the
+schemars and create a `src/agent/tools.rs` module + `src/agent/tools/fs.rs`
+submodule (blueprint §3 layout, file-per-module style per `AGENTS.md`) with the
 `Tool` trait and `ToolRegistry`. First edits: extend `AgentMode`, `AgentCommand`,
 `AgentEvent`, `UiUpdate`, `StreamEvent`, and `Context` to the Phase 3 shapes
 below, then add the `tools` module and the `Provider` signature change.
@@ -171,8 +172,8 @@ below, then add the `tools` module and the `Provider` signature change.
      never awaits a tool task directly.
    Add/adjust unit tests for the new variants and the `Context` methods.
 
-3. **Add the `tools` module** at `src/agent/tools/` (blueprint §3):
-   - `mod.rs`: a `Tool` trait (native-async via `BoxFuture`, consistent with
+3. **Add the `tools` module** at `src/agent/tools.rs` (blueprint §3):
+   - `tools.rs`: a `Tool` trait (native-async via `BoxFuture`, consistent with
      `Provider`) exposing `name()`, a `schemars`-derived parameter schema, a
      `needs_approval()` flag, and an async `run(&self, arguments: Value) ->
      Result<String, ToolError>`. `ToolRegistry` holds `HashMap<String, Arc<dyn
@@ -189,7 +190,7 @@ below, then add the `tools` module and the `Provider` signature change.
    Unit test each tool against `tempfile` scratch dirs (create → read → glob).
 
 4. **Extend `Provider` and the providers** for tools:
-   - `src/llm/mod.rs`: change `Provider::chat` to take `tools: Vec<ToolSchema>`
+   - `src/llm.rs`: change `Provider::chat` to take `tools: Vec<ToolSchema>`
      (define `ToolSchema` — the OpenAI `{"type":"function","function":{name,
      description, parameters}}` envelope wrapping a `schemars` root schema).
      Keep the native-async `BoxFuture` shape.
@@ -381,14 +382,14 @@ below, then add the `tools` module and the `Provider` signature change.
 
 ## Implementation Hints
 
-- **`Provider` trait** (`src/llm/mod.rs:23`) is currently `fn chat<'a>(&'a self,
+- **`Provider` trait** (`src/llm.rs:23`) is currently `fn chat<'a>(&'a self,
   messages: Vec<Message>, cancel: CancellationToken) ->
   BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>>`. The `tools: Vec<
   ToolSchema>` parameter replaces `messages: Vec<Message>`'s position or is added
   after it — agree on argument order and update all callers. `MockProvider`
-  (`src/llm/mod.rs:39`) and `OpenAiProvider` (`src/llm/openai_provider.rs:63`)
+  (`src/llm.rs:39`) and `OpenAiProvider` (`src/llm/openai_provider.rs:63`)
   both implement it.
-- **`serialize_messages`** (`src/llm/mod.rs:92`) currently skips
+- **`serialize_messages`** (`src/llm.rs:92`) currently skips
   `ToolResult`/`ToolError` and serializes `Assistant` content only. Phase 3 moves
   tool messages into the wire format as `role:"tool"` with `tool_call_id`;
   `Assistant` gains `tool_calls`. The OpenAI chat-completions shape for a tool
@@ -426,7 +427,7 @@ below, then add the `tools` module and the `Provider` signature change.
   Deserialize)]` structs (blueprint §4D). `schema_for!(ReadFileArgs)` yields a
   `RootSchema`; wrap its `schema` into the OpenAI `{"type":"function","function":
   {name, description, parameters}}` envelope when building `ToolSchema`.
-- **Existing `MockProvider` script** (`src/llm/mod.rs:44`): to keep tests
+- **Existing `MockProvider` script** (`src/llm.rs:44`): to keep tests
   deterministic under `tokio::time::pause`, the extended script must sleep on a
   fixed interval between events and still be cancel-aware (`select!` the send
   against `CancellationToken`), matching the current implementation.
@@ -444,7 +445,7 @@ below, then add the `tools` module and the `Provider` signature change.
 - **Iteration guard**: a single `MAX_ITERATIONS: usize = 15` const suffices for
   Phase 3 (per-engine configurability is Phase 5's `EngineConfig`). Reset the
   counter when a fresh user turn (rather than a tool re-prompt) starts the loop.
-- **Test helpers**: `tests/common/mod.rs` provides `collect_until`; the mock SSE
+- **Test helpers**: `tests/common.rs` provides `collect_until`; the mock SSE
   server `tests/common/mock_llm_server.rs` already supports custom `frames`
   (via `content_frame`) and a status list — extend it, if needed, with a
   `tool_call_frame` helper that builds a `delta.tool_calls` SSE frame so a real
