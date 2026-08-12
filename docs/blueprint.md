@@ -348,7 +348,7 @@ src/
 │   │                    # PARTIAL message handling on abort
 │   └── tools/
 │       ├── mod.rs       # Tool trait + Registry
-│       ├── fs.rs        # read_file, write_file, list_dir, edit_file
+│       ├── fs.rs        # read, write, glob, edit
 │       ├── shell.rs     # execute_command (with user confirmation!)
 │       └── search.rs    # grep/ripgrep via std::process
 └── widgets/
@@ -1073,7 +1073,7 @@ insertion** to a configurable cap (default ~8–16 KB / engine-tunable), with a
 clear marker such as `… [truncated M of K chars]`. Combined with
 `maybe_compact` preferring oversized results, a large result neither swallows
 the window nor forces many older turns to be dropped. If the model needs more
-of a file, it re-calls `read_file`/`edit_file` with `offset`/`limit` — the
+of a file, it re-calls `read`/`edit` with `offset`/`limit` — the
 existing tool contract.
 
 **Phase 7 (future):** Replace `find_oldest_droppable` + `remove` with a
@@ -1177,9 +1177,9 @@ enum EditMode {
 }
 
 // Register at startup:
-registry.register("read_file", schema_for!(ReadFileArgs), read_file_handler);
+registry.register("read", schema_for!(ReadFileArgs), read_file_handler);
 registry.register("bash", schema_for!(BashArgs), bash_handler);
-registry.register("edit_file", schema_for!(EditFileArgs), edit_file_handler);
+registry.register("edit", schema_for!(EditFileArgs), edit_file_handler);
 ```
 
 **`clarify` tool:** An interactive tool that lets the model ask the user an
@@ -1266,8 +1266,8 @@ A terminal agent that can run `rm -rf` or `curl | sh` must ask for approval.
 
 | Tool                      | Confirmation Level                                                      |
 | ------------------------- | ----------------------------------------------------------------------- |
-| `read_file`, `list_dir`   | `Auto`                                                                  |
-| `write_file`, `edit_file` | `Ask` (show diff first)                                                 |
+| `read`, `glob`   | `Auto`                                                                  |
+| `write`, `edit` | `Ask` (show diff first)                                                 |
 | `bash`, `git push`        | `Strict` (modal confirmation)                                           |
 | `clarify`                 | `Interactive` (rendered as question banner; user answers via input box) |
 
@@ -1285,7 +1285,7 @@ even steer ("change the commit message to...") by typing and hitting Enter, whic
 queues a steer and injects it at the next natural point rather than cancelling
 anything.
 
-**Headless mode safety:** Mutating tools (`write_file`, `edit_file`, `bash`) require
+**Headless mode safety:** Mutating tools (`write`, `edit`, `bash`) require
 explicit `--auto-approve-write` or `--auto-approve-shell` flags. If invoked without
 the corresponding flag, the agent emits exit code `4` and a descriptive error to
 stderr. A script that forgets the flag fails loudly, never silently executes `rm -rf /`.
@@ -1523,7 +1523,7 @@ files. Two formats are supported:
 # agents/research.toml
 max_iterations = 10
 timeout_secs = 120
-allowed_tools = ["read_file", "search", "list_dir"]
+allowed_tools = ["read", "search", "glob"]
 can_spawn = false
 system_prompt = """You are a deep research assistant.
 Be thorough. Cite file paths when referencing code."""
@@ -1535,7 +1535,7 @@ Be thorough. Cite file paths when referencing code."""
 +++
 max_iterations = 10
 timeout_secs = 120
-allowed_tools = ["read_file", "search", "list_dir"]
+allowed_tools = ["read", "search", "glob"]
 can_spawn = false
 +++
 
@@ -1578,7 +1578,7 @@ context_length = 8192
 ```
 
 Engines are named and referenced by string. They contain **only** model
-specific properties (`provider`, `model`, `temperature`, `context_length`, `api_base`,
+specific properties (`provider`, `model`, `temperature`, `context_length`, `api_base_url`,
 optionally `api_key`). They do **not** contain tools, prompts, or agent logic.
 
 **Quoted keys (optional):** TOML allows quoted keys containing `/` or `:` for
@@ -1644,7 +1644,7 @@ Profiles can **adapt** global agent types by overriding specific fields:
 ```toml
 [agents.research]
 engine = "openrouter_fast"
-allowed_tools = ["read_file", "search"]      # override: removed "list_dir"
+allowed_tools = ["read", "search"]      # override: removed "glob"
 timeout_secs = 60                            # override from global 120
 ```
 
@@ -2112,8 +2112,8 @@ ylva --prompt "quick check" --quiet
 
 ```text
 Streaming response...
-Executing tool: read_file("src/main.rs") → 87 lines
-Executing tool: write_file("src/lib.rs") → pending approval
+Executing tool: read("src/main.rs") → 87 lines
+Executing tool: write("src/lib.rs") → pending approval
 Error: Tool 'bash' requires --auto-approve-shell or interactive mode
 Done.
 ```
@@ -2130,10 +2130,10 @@ Done.
 
 ### Tool Approval in Headless Mode
 
-Read-only tools (`read_file`, `list_dir`, `search`) execute automatically. Mutating tools require
+Read-only tools (`read`, `glob`, `search`) execute automatically. Mutating tools require
 explicit flags:
 
-- `--auto-approve-write` → `write_file`, `edit_file`
+- `--auto-approve-write` → `write`, `edit`
 - `--auto-approve-shell` → `bash`
 
 The `clarify` tool is **not registered** in headless mode. The model never sees it;
@@ -2281,14 +2281,14 @@ top of a proven agent loop.
 
 ### Phase 3: The Agent Loop with Tools (Still Headless)
 
-- [ ] **Goal:** First working ReAct agent with file system tools and human approval.
+- [ ] **Goal:** First working ReAct agent with file system tools and faked approval (no effective human approval in CLI-only mode; see Phase 3 plan).
 
 - [ ] Add `schemars` and `ToolRegistry`
 
 - [ ] Build 3 core tools with typed arguments:
-  - `read_file`
-  - `write_file`
-  - `list_dir`
+  - `read`
+  - `write`
+  - `glob`
 
 - [ ] Implement ReAct loop inside the `select!` block with explicit `AgentMode` state machine
       (`Idle`, `Streaming`, `ToolPending`):
@@ -2390,7 +2390,7 @@ The input widget must never be "disabled."
 - [ ] Launch `bash` with `process_group(0)` and kill the process **group** on timeout/`Stop`
       (prevents orphaned grandchildren)
 
-- [ ] Confirmation modal for `bash` and `write_file` (human-in-the-loop)
+- [ ] Confirmation modal for `bash` and `write` (human-in-the-loop)
 
 - [ ] `search` tool wrapping `ripgrep` via `std::process` with lazy binary check and graceful fallback
 
@@ -2399,10 +2399,10 @@ The input widget must never be "disabled."
 
 - [ ] File tree sidebar using `ignore` + `walkdir`
 
-- [ ] **Diff view:** When `write_file` is proposed, render a side-by-side or unified diff in chat
+- [ ] **Diff view:** When `write` is proposed, render a side-by-side or unified diff in chat
       before approval
 
-- [ ] Add `edit_file` tool (line-based or search-and-replace) to reduce full-file rewrite tokens
+- [ ] Add `edit` tool (line-based or search-and-replace) to reduce full-file rewrite tokens
 
 - [ ] `spawn_subagent` tool in `ToolRegistry` with config-driven types and tool whitelists
 
@@ -2655,7 +2655,7 @@ where they are documented in the body of this document.
 | **Config format**              | TOML for all config files; YAML explicitly rejected                                                                                                                                            | §2 Crate Ecosystem, §4G Agent Types & Delegation |
 | **Engine vs Provider mapping** | `Engine` = config data (static, named); `Provider` = runtime trait object built from Engine at startup                                                                                         | §4A Provider Trait, §4G Engine Definitions   |
 | **Syntect themes**             | 3 built-in: dark, light, monokai                                                                                                                                                               | §4F Rich Chat Rendering                      |
-| **edit_file tool**             | Both search-and-replace and line-range modes                                                                                                                                                   | §4D Tool Registry                            |
+| **edit tool**             | Both search-and-replace and line-range modes                                                                                                                                                   | §4D Tool Registry                            |
 | **Slash commands**             | Only recognised at start of line                                                                                                                                                               | §7 CLI Surface                               |
 | **Headless buffering**         | Buffer everything; emit at end                                                                                                                                                                 | §7 CLI Surface                               |
 | **Clarify tool**               | Free-text only; no multiple-choice options                                                                                                                                                     | §4D Tool Registry                            |

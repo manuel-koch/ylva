@@ -29,6 +29,11 @@ classDiagram
             +Root
             +Child(parent_cancel, subagent_ui_tx, agent_tx, briefing)
         }
+        class ChildAgentManager {
+            -factory: Arc~AgentFactory~
+            -profile: ProfileConfig
+            +spawn(agent_type, briefing, parent_cancel, subagent_ui_tx, agent_tx)
+        }
         class AgentLoop {
             -engine: Arc~dyn Engine~
             -tools: ToolRegistry
@@ -65,9 +70,9 @@ classDiagram
             +context_length: Option~usize~
         }
         class OpenAiProvider {
-            -base_url: String
-            -model: String
+            -api_base_url: String
             -api_key: Option~String~
+            -model: String
             -client: reqwest::Client
         }
     }
@@ -78,7 +83,7 @@ classDiagram
             +model: String
             +temperature: f32
             +context_length: usize
-            +api_base: Option~String~
+            +api_base_url: Option~String~
             +api_key: Option~String~
         }
         class ProfileConfig {
@@ -100,9 +105,12 @@ classDiagram
     ConsoleApp ..|> App
     AgentFactory ..> AgentLoop : creates
     AgentFactory ..> Role : reads
+    ChildAgentManager *-- AgentFactory
+    ChildAgentManager ..> Role : builds Child
+    ChildAgentManager ..> AgentFactory : child-agent creation
+    ChildAgentManager ..> AgentLoop : spawns child
     AgentLoop *-- ToolRegistry
     AgentLoop *-- Context
-    AgentLoop o--> AgentLoop : child-agent
     EngineImpl ..|> Engine
     EngineImpl *-- EngineConfig
     OpenAiProvider ..|> Provider
@@ -113,4 +121,3 @@ classDiagram
     AgentFactory *-- Engine
     AgentLoop *-- Engine
     EngineImpl *-- Provider
-    AgentLoop ..> AgentFactory : child-agent creation
