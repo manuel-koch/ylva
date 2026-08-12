@@ -40,7 +40,11 @@ the right files.
   (`git ls-files 'src/**/mod.rs' 'tests/**/mod.rs'` returns nothing).
 - `src/llm/mod.rs` is moved to `src/llm.rs` (contents unchanged modulo the
   intra-crate path references the move implies — see Implementation Hints).
-- `tests/common/mod.rs` is moved to `tests/common.rs`.
+- `tests/common/mod.rs` is moved to `tests/common.rs` and a
+  `#[path = "common/mock_llm_server.rs"]` attribute is added as the
+  first line (with an inline comment above it explaining the
+  Cargo-imposed reason — see *Consistency Issues* and Implementation
+  Plan step 2).
 - `cargo build`, `make lint`, `make test`, and `make test-coverage` (≥80% on
   testable files) all pass unchanged from before the refactor.
 - `AGENTS.md` gains a short "Module layout" subsection under *Coding
@@ -77,11 +81,17 @@ the right files.
   into a directory. This plan only (a) sets the convention Phase 3 must follow
   and (b) fixes Phase 3's plan doc so it follows it. Do **not** create
   `src/agent/` here — that is Phase 3's step 3.
-- **`tests/common/mod.rs` move is mechanical** but the integration tests
-  (`tests/*.rs`) declare `mod common;` which resolves to either
-  `tests/common/mod.rs` or `tests/common.rs` — no `#[path]` attribute is in use
-  today, so the move needs no test-side edit. Verify by `grep -rn 'mod common'
-  tests/` before/after.
+- **`tests/common/mod.rs` move is NOT mechanical.** Cargo auto-discovers
+  `tests/common.rs` as a top-level test crate, while the integration tests
+  (`tests/steering.rs`, `tests/interrupt.rs`, `tests/http_provider.rs`)
+  load it as an inline submodule via `mod common;`. The two crate-root
+  contexts disagree on `mod mock_llm_server;` resolution, so the move
+  requires a `#[path = "common/mock_llm_server.rs"]` attribute on
+  `tests/common.rs` to reconcile them. See *Consistency Issues* and
+  Implementation Plan step 2 for the full resolution. No
+  `#[path]` attribute is in use today, so the move adds one
+  attribute (not a test-side edit); the three `mod common;` declarations
+  resolve to `tests/common.rs` unchanged.
 - **`docs/blueprint.md` §3 is a forward-looking design tree**, not a snapshot
   of the current tree. It currently advertises `llm/mod.rs`, `agent/mod.rs`,
   `agent/tools/mod.rs`, `context.rs`, `widgets/`, `store.rs`, etc. — many of
@@ -119,11 +129,30 @@ files, proving the move is semantically a no-op.
    hard-coded somewhere (search for `llm/mod` in `src/`); fix the reference,
    not the move.
 
-2. **Move `tests/common/mod.rs` → `tests/common.rs`.** `git mv` again. Verify
-   no `#[path = "common/mod.rs"]` attribute exists in `tests/*.rs` (search
-   `tests/` for `#[path`). Run `cargo test --no-run`; expect success. The
-   existing `mod common;` declarations in the integration tests resolve to
-   `tests/common.rs` unchanged.
+2. **Move `tests/common/mod.rs` → `tests/common.rs`.** This step is
+   **NOT mechanical** — see *Consistency Issues* below for the chosen
+   resolution (Option A: add `#[path]` attribute).
+
+   Concretely:
+
+   1. `git mv tests/common/mod.rs tests/common.rs` (history-preserving rename).
+   2. Add `#[path = "common/mock_llm_server.rs"]` as the **first line** of
+      `tests/common.rs`, immediately above `pub mod mock_llm_server;`.
+   3. Add a one-line inline comment immediately above the `#[path]`
+      attribute: `// Cargo compiles this file as a top-level test crate named 'common'; the attribute forces the submodule resolution to match what the other tests expect via `mod common;`. See AGENTS.md "Module layout" for context.`
+      (The comment is local-to-the-line and points readers at AGENTS.md
+      for the full rule; the AGENTS.md bullet stays generic.)
+   4. `cargo test --no-run`; expect success. Verify both that the
+      `common` test binary compiles AND that the three other
+      integration tests (`tests/steering.rs`, `tests/interrupt.rs`,
+      `tests/http_provider.rs`) compile — they use `mod common;` and
+      need the `#[path]` attribute to find `mock_llm_server.rs`.
+   5. Confirm `tests/common.rs` line 1 is `#[path = "common/mock_llm_server.rs"]`
+      and line 2 is the inline comment (catch a typo in the attribute
+      before moving on).
+   6. Confirm `tests/common/mock_llm_server.rs` exists at that path
+      (do **not** move it — the `#[path]` attribute requires it
+      there).
 
 3. **Confirm the tree is clean.** Run
    `git ls-files 'src/**/mod.rs' 'tests/**/mod.rs'` — it must return nothing.
@@ -139,7 +168,13 @@ files, proving the move is semantically a no-op.
    - Rationale: the flat file surfaces a module's exports without opening a
      directory; Rust 2018+ resolves both identically, so this is convention
      only.
-   - Applies to `src/` and `tests/` alike.
+   - Applies to `src/` and `tests/` alike, with one documented exception:
+     integration-test shared helpers under `tests/<name>/` may use
+     `#[path = "<name>/<sub>.rs"]` on the helper's root file because Cargo
+     also auto-discovers `tests/<name>.rs` as a top-level test crate and the
+     two crate-root contexts disagree on submodule paths. The single
+     instance in this repo today is `tests/common.rs`. See the inline
+     comment above the `#[path]` attribute for the in-context explanation.
    Keep it to ~5 bullets; no prose essay (AGENTS.md style is bullets).
 
 5. **Update `docs/plans/phase3-agent-loop-with-tools.md`** so every path
@@ -246,6 +281,25 @@ files, proving the move is semantically a no-op.
   coexist without a `src/agent/mod.rs`. Step 5 rewords the Phase 3 plan to
   make this explicit so an implementer does not fabricate a `src/agent/mod.rs`
   to "bridge" them. No design change to Phase 3.
+- [medium] **`tests/common/mod.rs` cannot become `tests/common.rs` without
+  a Cargo conflict.** Empirical reproduction (see Implementation Hints)
+  shows that any `tests/<name>.rs` file is automatically compiled by
+  Cargo as a top-level integration test crate named `<name>`. That crate's
+  crate root is `tests/<name>.rs`, so `mod foo;` inside it looks for
+  `tests/foo.rs` — not `tests/<name>/foo.rs`. But the integration tests
+  that `mod common;` still want `mod mock_llm_server;` in
+  `tests/common.rs` to resolve to `tests/common/mock_llm_server.rs`.
+  No single file location satisfies both. **Resolution: Option A.**
+  Add `#[path = "common/mock_llm_server.rs"]` to `tests/common.rs`
+  (smallest diff, retains the new convention everywhere; the "no
+  `#[path]` attributes" rule is relaxed as a Cargo-imposed exception).
+  An inline comment above the attribute and a generic bullet in
+  `AGENTS.md` *Module layout* document the rule for future readers;
+  the `docs/blueprint.md` §3 file tree stays clean (no quirk note).
+  The empty `common` test binary that Cargo produces from
+  `tests/common.rs` is accepted as a harmless dead artifact (no
+  `#[test]` functions, so it adds <1s to `cargo test --no-run` and
+  zero runtime cost).
 
 ## Implementation Hints
 
@@ -264,11 +318,45 @@ files, proving the move is semantically a no-op.
   `llm/mod.rs` by string; the file is self-contained and moves as-is.
 - **`tests/common/mod.rs`**: provides `collect_until` and the
   `mock_llm_server` submodule (`mod mock_llm_server;` resolving to
-  `tests/common/mock_llm_server.rs`). After the move, `tests/common.rs`
-  still declares `mod mock_llm_server;` and it resolves to
-  `tests/common/mock_llm_server.rs` unchanged (same Rust 2018 rule, now one
-  level deep from `tests/common.rs`). No `#[path]` attributes are in use
-  (verified by search).
+  `tests/common/mock_llm_server.rs`).
+
+  **Verified during execution: the move is NOT mechanical and creates
+  an unavoidable Cargo conflict.** Empirical reproduction in
+  `/tmp/rust-mod-test` with a minimal library crate containing exactly
+  `tests/common.rs` + `tests/common/mock_llm_server.rs` + a sibling
+  integration test that uses `mod common;`:
+
+  - `cargo test --no-run` fails with **two** `E0583` errors from the
+    same `tests/common.rs:1` declaration, but with **different**
+    suggested paths:
+    - `(test "common")` — Cargo also compiles `tests/common.rs` as a
+      top-level integration test crate (its mere presence in `tests/`
+      triggers that). For that crate, `mod mock_llm_server;` looks
+      for `tests/mock_llm_server.rs` (same directory as the crate
+      root).
+    - `(test "other")` — the sibling test that does `mod common;`
+      loads `tests/common.rs` as a submodule. For that crate,
+      `mod mock_llm_server;` looks for `tests/common/mock_llm_server.rs`
+      (sibling directory of the file).
+
+  No single file location satisfies both. Three ways out:
+
+  1. Add `#[path = "common/mock_llm_server.rs"]` to `tests/common.rs`
+     so both crates agree on the submodule path (works; adds one
+     `#[path]` attribute — the plan's "no `#[path]` attributes" rule
+     is the *verification* claim, not an absolute ban; discuss in step
+     2).
+  2. Keep `tests/common/mod.rs` and accept that the convention does
+     not apply to integration-test shared helpers (one documented
+     exception in `AGENTS.md`).
+  3. Rename `tests/common/` to `tests/<other-name>/` (e.g.
+     `tests/shared_helpers/`) and update the three integration tests
+     that declare `mod common;` to declare the new module name. Larger
+     diff but convention-clean.
+
+  **Resolution chosen: option 1** (add `#[path = "common/mock_llm_server.rs"]`
+  to `tests/common.rs`). See *Consistency Issues* for the rationale and
+  Implementation Plan step 2 for the exact edits.
 - **`src/lib.rs` re-exports** (`pub use agent::{…}; pub use llm::{…}`) are
   path-based on the *module* (`agent`, `llm`), not on file paths — they need
   no edit.
