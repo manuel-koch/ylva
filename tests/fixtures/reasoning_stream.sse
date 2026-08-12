@@ -1,0 +1,6 @@
+data: {"choices":[{"delta":{"role":"assistant","reasoning":"thinking about the answer..."}}]}
+
+data: {"choices":[{"delta":{"content":"final"}}]}
+
+data: [DONE]
+

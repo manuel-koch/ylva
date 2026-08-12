@@ -1,3 +1,5 @@
+pub mod mock_llm_server;
+
 use tokio::sync::mpsc;
 use ylva::UiUpdate;
 

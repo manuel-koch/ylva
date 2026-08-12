@@ -49,7 +49,7 @@ and grading, then prints the observed `delta.tool_calls` shape via
 | Env var        | Default              | Meaning                        |
 | ---            | ---                  | ---                            |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Base URL of the Ollama server. |
-| `OLLAMA_MODEL` | `gemma4:e2b-mlx`     | Ollama model to test (tool-capable). |
+| `OLLAMA_MODEL` | `gemma4:e4b-mlx`     | Ollama model to test (tool-capable). |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | OpenRouter base URL. |
 | `OPENROUTER_MODEL` | `deepseek/deepseek-v4-flash-0731` | OpenRouter model. |
 | `OPENROUTER_API_KEY` | — | Required by `inspect_openrouter_tool_calls.sh`. |
@@ -59,7 +59,7 @@ and grading, then prints the observed `delta.tool_calls` shape via
 Examples:
 
 ```shell
-# Ollama: gemma4:e2b-mlx against local Ollama.
+# Ollama: gemma4:e4b-mlx against local Ollama.
 ./inspect_ollama_tool_calls.sh
 
 # Confirm with the fallback Ollama model.
@@ -107,7 +107,7 @@ toward the required `ollama_native` provider when the endpoint silently ignores
 
 ## Outcome
 
-**Criterion A: PASS** on live Ollama for `gemma4:e2b-mlx` and `gpt-oss:20b`.
+**Criterion A: PASS** on live Ollama for `gemma4:e4b-mlx` and `gpt-oss:20b`.
 **Criterion B: structural PASS** — the Ollama shape matches the documented OpenRouter
 reference (`tool_calls[i].{id,index,type,function}.function.{name,arguments}`).
 The **live byte-for-byte OpenRouter diff is not yet run** (requires

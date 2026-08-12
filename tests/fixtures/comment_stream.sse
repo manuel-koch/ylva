@@ -1,0 +1,10 @@
+: OPENROUTER PROCESSING
+
+data: {"choices":[{"delta":{"content":"One"}}]}
+
+: mid-stream comment line, must be tolerated
+
+data: {"choices":[{"delta":{"content":"Two"}}]}
+
+data: [DONE]
+

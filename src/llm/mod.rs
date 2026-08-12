@@ -6,6 +6,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent::{Message, StreamEvent};
 
+pub mod openai_provider;
+
+pub use openai_provider::OpenAiProvider;
+
 /// Runtime abstraction over a chat-completions-style streaming provider.
 ///
 /// Native async trait (Rust 1.75+): no `async-trait` crate. The Provider
@@ -77,6 +81,36 @@ impl Provider for MockProvider {
     }
 }
 
+/// Maps the domain `Message` history onto the OpenAI chat-completions wire
+/// format. The domain model stays decoupled from the wire format (blueprint
+/// §4A): this is the only place the two communicate.
+///
+/// Phase 2 maps `System`/`User`/`Assistant`; `Assistant` serializes only its
+/// `content` (tool-call serialization is Phase 3). `ToolResult`/`ToolError`
+/// cannot occur in Phase 2 and are **skipped silently**; Phase 3 adds their
+/// serialization when tools become reachable.
+pub fn serialize_messages(messages: &[Message]) -> serde_json::Value {
+    let serialized: Vec<serde_json::Value> = messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::System { content } => Some(serde_json::json!({
+                "role": "system",
+                "content": content,
+            })),
+            Message::User { content } => Some(serde_json::json!({
+                "role": "user",
+                "content": content,
+            })),
+            Message::Assistant { content, .. } => Some(serde_json::json!({
+                "role": "assistant",
+                "content": content,
+            })),
+            Message::ToolResult { .. } | Message::ToolError { .. } => None,
+        })
+        .collect();
+    serde_json::Value::Array(serialized)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,5 +167,70 @@ mod tests {
             .unwrap();
         assert_received_text(&mut rx, "instant").await;
         assert!(matches!(rx.recv().await, Some(StreamEvent::Done)));
+    }
+
+    #[test]
+    fn serialize_messages_maps_system_user_assistant() {
+        use crate::agent::AssistantStatus;
+        let messages = vec![
+            Message::System {
+                content: "sys".into(),
+            },
+            Message::User {
+                content: "usr".into(),
+            },
+            Message::Assistant {
+                content: "ast".into(),
+                status: AssistantStatus::Complete,
+                tool_calls: Vec::new(),
+            },
+        ];
+        let value = serialize_messages(&messages);
+        assert_eq!(
+            value,
+            serde_json::json!([
+                { "role": "system", "content": "sys" },
+                { "role": "user", "content": "usr" },
+                { "role": "assistant", "content": "ast" },
+            ])
+        );
+    }
+
+    #[test]
+    fn serialize_messages_skips_tool_messages_silently() {
+        use crate::agent::AssistantStatus;
+        let messages = vec![
+            Message::User {
+                content: "keep".into(),
+            },
+            Message::ToolResult {
+                id: uuid::Uuid::new_v4(),
+                name: "tool".into(),
+                result: "ok".into(),
+            },
+            Message::ToolError {
+                id: uuid::Uuid::new_v4(),
+                name: "tool".into(),
+                error: "err".into(),
+            },
+            Message::Assistant {
+                content: "also-kept".into(),
+                status: AssistantStatus::Interrupted,
+                tool_calls: Vec::new(),
+            },
+        ];
+        let value = serialize_messages(&messages);
+        assert_eq!(
+            value,
+            serde_json::json!([
+                { "role": "user", "content": "keep" },
+                { "role": "assistant", "content": "also-kept" },
+            ])
+        );
+    }
+
+    #[test]
+    fn serialize_messages_empty_slice_yields_empty_array() {
+        assert_eq!(serialize_messages(&[]), serde_json::json!([]));
     }
 }

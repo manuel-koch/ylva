@@ -1,0 +1,10 @@
+data: {"choices":[{"delta":{"content":"Hello"}}]}
+
+data: {"choices":[{"delta":{"content":" "}}]}
+
+data: {"choices":[{"delta":{"content":"there"}}]}
+
+data: {"choices":[{"delta":{"content":" "}}]}
+
+data: [DONE]
+

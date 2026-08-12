@@ -143,7 +143,7 @@ single provider serving both backends for Ollama and OpenRouter via the OpenAI
 - **Criterion A (accepts `tools`, streams `delta.tool_calls`) — PASS.** HTTP 200 with at
   least one chunk carrying `choices[0].delta.tool_calls` with `function.name` and
   `function.arguments`:
-  - Ollama `gemma4:e2b-mlx` (ID `e98b54fe1913`): `get_weather` →
+  - Ollama `gemma4:e4b-mlx` (ID `e98b54fe1913`): `get_weather` →
     `{"location":"Berlin","unit":"fahrenheit"}`. All in a single chunk.
   - Ollama `gpt-oss:20b` (ID `17052f91a42e`): `get_weather` →
     `{"location":"Berlin, Germany","unit":"Fahrenheit"}`. Single chunk.
@@ -173,7 +173,7 @@ single provider serving both backends for Ollama and OpenRouter via the OpenAI
   config parameter while sharing one client and one request/parse path. Local Ollama holds
   the connection until the stream ends; unload via `ollama stop <model>` between model
   switches.
-- **Models actually used:** `gemma4:e2b-mlx` (primary) and `gpt-oss:20b` (confirmation);
+- **Models actually used:** `gemma4:e4b-mlx` (primary) and `gpt-oss:20b` (confirmation);
   the models named in §Spike 3 text (`llama3.1:8b`, `qwen2.5`, `mistral-nemo`) were not
   pulled and were not used. Raw capture: `spikes/spike-ollama-tool-calling/out/sse_*.log`.
 
@@ -386,7 +386,7 @@ It supports **dropping the in-flight request** when the user interrupts or steer
 > that Ylva currently ships an OpenAI-compatible provider must not leak the OpenAI path structure into
 > the trait or into `base_url`'s meaning. The concrete `OpenAiProvider` receives a `base_url` that
 > includes the backend origin and version prefix (OpenRouter `https://openrouter.ai/api/v1`, Ollama
-> `http://localhost:11434/v1`) and internally appends `/chat/completions`. This  leaves room for future provider-side queries (e.g. model listing) under the
+> `http://localhost:11434/v1`) and internally appends `/chat/completions`. This leaves room for future provider-side queries (e.g. model listing) under the
 > same `base_url`.
 
 ```rust
@@ -2027,14 +2027,14 @@ top of a proven agent loop.
 
 ### Phase 2: Real HTTP Provider (Still Headless)
 
-- [ ] **Goal:** Replace the mock provider with a real `reqwest` + `eventsource-stream` implementation
+- [x] **Goal:** Replace the mock provider with a real `reqwest` + `eventsource-stream` implementation
       targeting the OpenAI chat-completions spec.
 
-- [ ] The unified `Provider` trait (already defined in Phase 1 with the `CancellationToken` parameter
+- [x] The unified `Provider` trait (already defined in Phase 1 with the `CancellationToken` parameter
       and `StreamEvent::Cancelled`) stays **unchanged** — no `Delta` variant, no tool-call pipeline
       (see Step 3 refinement below).
 
-- [ ] **Step 3 refinement (deferred tool-call assembly):** implement **one** provider
+- [x] **Step 3 refinement (deferred tool-call assembly):** implement **one** provider
       (`OpenAiProvider`) using raw `reqwest` + `eventsource-stream`. The provider emits only
       `StreamEvent::Text` for `delta.content`; it **skips** non-content deltas (`reasoning`/`role`-only
       and `tool_calls`-only chunks). It does **not** emit `StreamEvent::Delta`. The
@@ -2042,36 +2042,36 @@ top of a proven agent loop.
       streaming task** per §4A — never "inside the provider" (this supersedes the earlier Phase 2
       bullet that placed the accumulator in the provider).
 
-- [ ] Implement the `OpenAiProvider` struct (`base_url`, `model`, `api_key`, `reqwest::Client`) with
+- [x] Implement the `OpenAiProvider` struct (`base_url`, `model`, `api_key`, `reqwest::Client`) with
       helper function `serialize_messages(&[Message]) -> Value` (skip `ToolResult`/`ToolError`
       silently — unreachable in Phase 2). Append `/chat/completions` to `base_url` internally per the
       §4A `base_url` semantics note.
 
-- [ ] Verify provider works for both OpenRouter (`base_url` override) and Ollama (`/v1` endpoint)
+- [x] Verify provider works for both OpenRouter (`base_url` override) and Ollama (`/v1` endpoint)
       via config switch. **Blocked until Spike 3 (§0) validates Ollama tool-calling support.**
       If Spike 3 fails, replace this step with: implement a second `ollama_native`
       provider targeting `/api/chat` with manual tool-injection prompting, and
       remove the "unified provider" claim from §4A and §5.
       Spike 3 has **passed** — the unified provider is kept, no `ollama_native` provider.
 
-- [ ] Spawn chat in a `tokio::task`; send `StreamEvent::Text` chunks over `mpsc`
+- [x] Spawn chat in a `tokio::task`; send `StreamEvent::Text` chunks over `mpsc`
 
-- [ ] **Cancellation verified with real TCP:** Drop the stream future and confirm via `netstat`/`lsof`
+- [x] **Cancellation verified with real TCP:** Drop the stream future and confirm via `netstat`/`lsof`
       that the connection closes immediately (no `CLOSE_WAIT` linger); verified hermetically in tests
       via a mock server's live-connection counter (Spike 2 pattern).
 
-- [ ] Handle `StreamEvent::Cancelled` in the headless UI printer (mark message as interrupted in stdout)
+- [x] Handle `StreamEvent::Cancelled` in the headless UI printer (mark message as interrupted in stdout)
 
-- [ ] Handle `StreamEvent::Error` gracefully (print error to stderr, return to `Idle`)
+- [x] Handle `StreamEvent::Error` gracefully (print error to stderr, return to `Idle`)
 
-- [ ] **Pre-stream HTTP retry** (`429`/`5xx`/connect): bounded exponential backoff, up to 3 retries,
+- [x] **Pre-stream HTTP retry** (`429`/`5xx`/connect): bounded exponential backoff, up to 3 retries,
       base 1 s, max 30 s, jitter, honoring `Retry-After`; never retry mid-stream (§4A).
 
-- [ ] **Demo wiring (Phase 2, no CLI/config):** `main.rs` selects the provider from env vars with
+- [x] **Demo wiring (Phase 2, no CLI/config):** `main.rs` selects the provider from env vars with
       **Ollama-first** precedence — `OLLAMA_BASE_URL`/`OLLAMA_MODEL`/`OLLAMA_API_KEY`, then
       `OPENROUTER_BASE_URL`/`OPENROUTER_MODEL`/`OPENROUTER_API_KEY`, else fall back to `MockProvider`.
 
-- [ ] No TUI yet. Still stdout/stderr only.
+- [x] No TUI yet. Still stdout/stderr only.
 
 **Key crates:** `tokio`, `tokio-util`, `reqwest`, `eventsource-stream`, `futures`, `serde`
 

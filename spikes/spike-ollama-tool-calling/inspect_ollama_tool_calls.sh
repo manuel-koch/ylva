@@ -12,7 +12,7 @@
 #
 # Env overrides:
 #   OLLAMA_BASE_URL   base URL (default http://localhost:11434)
-#   OLLAMA_MODEL      Ollama model name (default gemma4:e2b-mlx; gpt-oss:20b confirms)
+#   OLLAMA_MODEL      Ollama model name (default gemma4:e4b-mlx; gpt-oss:20b confirms)
 #   TOOL_CHOICE       tool_choice value (default auto)
 #   SPIKE_OUT_DIR     output dir for the raw SSE log (default <script>/out)
 #
@@ -22,7 +22,7 @@
 set -euo pipefail
 
 OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://localhost:11434}"
-OLLAMA_MODEL="${OLLAMA_MODEL:-gemma4:e2b-mlx}"
+OLLAMA_MODEL="${OLLAMA_MODEL:-gemma4:e4b-mlx}"
 TOOL_CHOICE="${TOOL_CHOICE:-auto}"
 
 SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
