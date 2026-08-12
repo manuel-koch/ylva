@@ -83,7 +83,7 @@ pub enum Message {
 }
 
 /// Single source of truth for the default system prompt in Phase 1. A later
-/// config phase (Phase 6 §4G layering) may source this from a SOUL.md file
+/// config phase (Phase 7 §4G layering) may source this from a SOUL.md file
 /// without changing call sites.
 pub const DEFAULT_SYSTEM_PROMPT: &str = "You are Ylva, a helpful agent with tool capabilities.";
 

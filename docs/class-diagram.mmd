@@ -1,0 +1,116 @@
+---
+title: Interfaces and implementations for Ylva.
+layout: elk
+---
+
+classDiagram
+    direction LR
+
+    namespace Application {
+        class App {
+            <<interface>>
+            +run() Result~u8~
+        }
+        class TuiApp {
+            +run() Result~u8~
+        }
+        class ConsoleApp {
+            +run() Result~u8~
+        }
+    }
+
+    namespace Agent {
+        class AgentFactory {
+            -engines: HashMap~String, Arc~dyn Engine~~
+            +create(profile, agent_type, role) AgentLoop
+        }
+        class Role {
+            <<runtime>>
+            +Root
+            +Child(parent_cancel, subagent_ui_tx, agent_tx, briefing)
+        }
+        class AgentLoop {
+            -engine: Arc~dyn Engine~
+            -tools: ToolRegistry
+            -context: Context
+            +new(engine) Self
+            +send_command(cmd)
+            +run() JoinHandle
+        }
+        class ToolRegistry {}
+        class Context {}
+    }
+
+    namespace Runtime {
+        class EngineImpl {
+            -provider: Arc~dyn Provider~
+            -config: EngineConfig
+        }
+        class Engine {
+            <<interface>>
+            +chat(messages, tools, cancel) Future~Receiver~StreamEvent~~
+            +config() EngineConfig
+        }
+    }
+
+    namespace Backends {
+        class Provider {
+            <<interface>>
+            +chat(messages, tools, cancel) Future~Receiver~StreamEvent~~
+            +list_models() Future~Vec~ModelInfo~~
+        }
+        class ModelInfo {
+            +id: String
+            +name: Option~String~
+            +context_length: Option~usize~
+        }
+        class OpenAiProvider {
+            -base_url: String
+            -model: String
+            -api_key: Option~String~
+            -client: reqwest::Client
+        }
+    }
+
+    namespace Config {
+        class EngineConfig {
+            +provider: String
+            +model: String
+            +temperature: f32
+            +context_length: usize
+            +api_base: Option~String~
+            +api_key: Option~String~
+        }
+        class ProfileConfig {
+            +default_engine: String
+            +compact_engine: Option~String~
+            +agents: HashMap~String, AgentConfig~
+        }
+        class AgentConfig {
+            +engine: Option~String~
+            +allowed_tools: Option~Vec~String~~
+            +timeout_secs: Option~u64~
+            +persona: Option~String~
+            +can_spawn: bool
+        }
+    }
+
+    %% ---- Relationships ----
+    TuiApp ..|> App
+    ConsoleApp ..|> App
+    AgentFactory ..> AgentLoop : creates
+    AgentFactory ..> Role : reads
+    AgentLoop *-- ToolRegistry
+    AgentLoop *-- Context
+    AgentLoop o--> AgentLoop : child-agent
+    EngineImpl ..|> Engine
+    EngineImpl *-- EngineConfig
+    OpenAiProvider ..|> Provider
+    Provider ..> ModelInfo : returns
+    ProfileConfig *-- AgentConfig
+    TuiApp ..> AgentFactory : builds via
+    ConsoleApp ..> AgentFactory : builds via
+    AgentFactory *-- Engine
+    AgentLoop *-- Engine
+    EngineImpl *-- Provider
+    AgentLoop ..> AgentFactory : child-agent creation

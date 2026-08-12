@@ -370,15 +370,21 @@ configuration (`base_url`, `api_key`, `model`). This eliminates:
 
 All streaming logic — SSE parsing, `CancellationToken` polling, `ToolCallAccumulator` — lives in one place.
 
-### A. Unified Provider Trait (with Abort)
+### A. Unified Provider & Engine Traits (with Abort)
 
-The runtime abstraction is a **single** raw HTTP implementation targeting the OpenAI completions spec.
-It supports **dropping the in-flight request** when the user interrupts or steers.
+The runtime exposes **two** layers (see [class-diagram.mmd](./class-diagram.mmd)):
 
-> **Terminology mapping:** The config calls this an **engine** (a named bundle of `base_url`, `model`,
-> `temperature`, etc.). At startup the `Config` module builds a `HashMap<String, Arc<dyn Provider>>`
-> from `Engine` definitions. The rest of the code only knows the `Provider` trait; "engine" is strictly
-> a config concept.
+- **`Provider`** — low-level backend trait. A single raw HTTP implementation targets the OpenAI
+  completions spec and supports **dropping the in-flight request** when the user interrupts or steers.
+  Also exposes backend discovery (`list_models`).
+- **`Engine`** — the runtime abstraction an `AgentLoop` depends on. A thin `EngineImpl` wraps a
+  `Provider` plus the `EngineConfig` (model, temperature, `context_length`, ...), so the agent loop
+  talks to one seam and can read sampling parameters without separately holding config data.
+
+> **Terminology mapping:** the config calls this an **engine** (a named bundle of `base_url`, `model`,
+> `temperature`, etc.). At startup the `Config` module builds a `HashMap<String, Arc<dyn Engine>>`
+> from `EngineConfig` definitions + the resolved `Provider` per engine. The rest of the code only knows
+> the `Engine` trait; "engine" is the config concept, `Engine` the runtime trait, `Provider` the backend.
 >
 > **`base_url` semantics (Phase 2 refinement):** `base_url` is a **generic provider concept**, not an
 > OpenAI-endpoint string. Its meaning — which endpoints and request paths exist under that base — is
@@ -407,6 +413,42 @@ trait Provider: Send + Sync {
         tools: Vec<ToolSchema>,
         cancel: CancellationToken,
     ) -> impl std::future::Future<Output = anyhow::Result<mpsc::Receiver<StreamEvent>>> + Send;
+
+    /// Query the backend for available models (OpenRouter `/models`, Ollama `/api/tags`).
+    /// Used by a future `/models` slash command and config auto-completion.
+    fn list_models(
+        &self,
+    ) -> impl std::future::Future<Output = anyhow::Result<Vec<ModelInfo>>> + Send;
+}
+
+/// Backend-reported model descriptor. All fields except `id` are optional because
+/// backends return inconsistent metadata. `context_length` here is **advisory,
+/// display-only** (e.g. a future `/models` slash command shows it); the
+/// `EngineConfig.context_length` from TOML is the SSOT for engine construction.
+struct ModelInfo {
+    id: String,
+    name: Option<String>,
+    context_length: Option<usize>,
+}
+
+/// Runtime abstraction an AgentLoop depends on. A thin `EngineImpl` wraps a
+/// `Provider` plus the `EngineConfig` so the agent reads sampling parameters
+/// (`engine.config().context_length`) without holding config data separately.
+trait Engine: Send + Sync {
+    fn chat(
+        &self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+    ) -> impl std::future::Future<Output = anyhow::Result<mpsc::Receiver<StreamEvent>>> + Send;
+
+    fn config(&self) -> &EngineConfig;
+}
+
+/// Concrete `Engine` impl: a Provider + the config the engine was built from.
+struct EngineImpl {
+    provider: Arc<dyn Provider>,
+    config: EngineConfig,
 }
 
 enum StreamEvent {
@@ -589,7 +631,7 @@ enum AgentCommand {
     Stop,                    // Interrupt current generation
     // The following variants are deferred to Phase 3 (tools):
     // ApproveTool { id: Uuid },
-    // SwitchModel(String),   // wired via /model slash command in Phase 6
+    // SwitchModel(String),   // wired via /model slash command in Phase 7
 }
 
 enum AgentEvent {
@@ -724,6 +766,19 @@ fn inject_pending_steers(pending_steers: &mut VecDeque<String>, context: &mut Co
 // `AgentLoop` internally creates `cmd_tx`/`cmd_rx`, `ui_tx`/`ui_rx`, and
 // `agent_tx`/`agent_rx`.  Tests drive it via `send_command()` and consume
 // `UiUpdate` events from `ui_rx`.  `main.rs` does the same and awaits `handle`.
+//
+// NOTE — target seams (see class-diagram.mmd and §4A): Phase 1's `AgentLoop`
+// depends on `Provider` directly. The target architecture introduces three
+// seams above it:
+//   - `Engine` trait: `AgentLoop` will hold `Arc<dyn Engine>` instead of
+//     `Arc<dyn Provider>`, gaining `config()` access to sampling parameters.
+//   - `AgentFactory` struct: owns the resolved `HashMap<String, Arc<dyn Engine>>`
+//     and exposes `create(profile, agent_type, role) -> AgentLoop`. Child agents
+//     are built by the same factory in a `Role::Child` (§4G).
+//   - `App` trait: `async fn run(self) -> Result<u8>`; `TuiApp` and `ConsoleApp`
+//     implement it (§6). `main.rs` dispatches on CLI mode.
+// Phase 1's `AgentLoop::new(provider)` is the baseline; the refactor onto
+// these seams lands with the config/profile phase.
 
 pub struct AgentLoop {
     provider: Arc<dyn Provider>,
@@ -843,15 +898,15 @@ impl AgentLoop {
 // In TUI thread (crossterm event loop)
 loop {
     tokio::select! {
-        // 1. UI updates from main agent
+        // 1. UI updates from root agent
         Some(update) = ui_rx.recv() => {
-            self.apply_main_ui_update(update);
+            self.apply_root_ui_update(update);
             terminal.draw(|f| ui.draw(f, &self)).ok();
         }
 
-        // 2. Live updates from sub-agent sidebar
+        // 2. Live updates from child-agent sidebar
         Some(sub_update) = subagent_ui_rx.recv() => {
-            self.apply_subagent_ui_update(sub_update);
+            self.apply_child_ui_update(sub_update);
             terminal.draw(|f| ui.draw(f, &self)).ok();
         }
 
@@ -952,7 +1007,7 @@ enum MessageTier {
 }
 
 struct Context {
-    messages: Vec<Message>,  // Phase 1: simple Vec.  Phase 6 adds TieredMessage + token_count.
+    messages: Vec<Message>,  // Phase 1: simple Vec.  Phase 7 adds TieredMessage + token_count.
 }
 
 impl Context {
@@ -969,7 +1024,7 @@ impl Context {
         &self.messages
     }
     // Phase 3 adds: push_tool_result, push_tool_error, descope_pending_tools
-    // Phase 6 adds: push_system, push_initial_context, maybe_compact, token counting
+    // Phase 7 adds: push_system, push_initial_context, maybe_compact, token counting
 }
 ```
 
@@ -982,19 +1037,38 @@ impl Context {
 - `push_user(text)` → `Message::User { content: text }`
 - `push_assistant(content, status, tool_calls)` → `Message::Assistant { content, status, tool_calls }`
 
-**Phase 6 (future):** Replace `Vec<Message>` with `Vec<TieredMessage>`, add
+**Phase 7 (future):** Replace `Vec<Message>` with `Vec<TieredMessage>`, add
 `push_system`, `push_initial_context`, `push_compacted`, `maybe_compact`,
 `find_oldest_droppable`, and `find_oversized_result`.
 
 **Context ownership rule (HARD):** The outer agent loop is the **sole writer** to `Context`.
 
-**Compaction (Phase 6 future):**
+**Compaction (Phase 7 future):**
 
 Phase 1 does not implement compaction or token counting. The full algorithm
 (`maybe_compact`, `find_oldest_droppable`, `find_oversized_result`) is deferred
-until Phase 6 when `TieredMessage` and `tiktoken-rs` are introduced.
+until Phase 7 when `TieredMessage` and `tiktoken-rs` are introduced.
 
-**Tool-result truncation (Phase 6 future):** Tool results are **truncated at
+**Compaction trigger and target:** `maybe_compact` uses a **hysteresis** model
+with a single control, `compact_target_ratio` (fraction of `context_length`):
+
+- **Trigger (high-water mark):** when `total_tokens > context_length × 0.9`.
+- **Target (low-water mark):** compact down to **≤ `context_length × compact_target_ratio`**.
+  Default `compact_target_ratio = 0.5` → ~0.4L headroom after compaction,
+  preventing thrash on the next turn.
+- The target is an **upper bound**: the result may end up smaller (e.g. one
+  oversized tool result dropped can overshoot), but the algorithm performs
+  **minimal intervention** — drops/summarizes the least amount needed to reach
+  the target. It never aims smaller than the target.
+- The ratio (not an absolute token count) auto-scales across engines: an 8 KB
+  Ollama model and a 200 KB OpenRouter model use the same parameter.
+- Both `context_length` and `compact_target_ratio` come from `EngineConfig`
+  (per-engine), since a small-window model may want a tighter ratio.
+- A "minimum drop ratio" guardrail is **not** added now (YAGNI); if compaction
+  in practice over-discards, add `max_drop_ratio` ("never drop more than X% of
+  current in one pass") then.
+
+**Tool-result truncation (Phase 7 future):** Tool results are **truncated at
 insertion** to a configurable cap (default ~8–16 KB / engine-tunable), with a
 clear marker such as `… [truncated M of K chars]`. Combined with
 `maybe_compact` preferring oversized results, a large result neither swallows
@@ -1002,7 +1076,7 @@ the window nor forces many older turns to be dropped. If the model needs more
 of a file, it re-calls `read_file`/`edit_file` with `offset`/`limit` — the
 existing tool contract.
 
-**Phase 6 (future):** Replace `find_oldest_droppable` + `remove` with a
+**Phase 7 (future):** Replace `find_oldest_droppable` + `remove` with a
 summarization pass: collect K oldest `Recent` messages, spawn a background
 summarizer model, and replace them with one `Compacted` system message.
 
@@ -1020,8 +1094,8 @@ heuristic (4 chars ≈ 1 token) for Ollama. Count at insertion time and cache in
 Counts are **approximate and advisory**, not exact: `tiktoken` encoding is
 model-family dependent (one fixed encoding is only exact for the corresponding
 OpenAI models; OpenRouter spans several families), and the byte heuristic is a
-rough estimate. The design tolerates this via the `context_size × 0.9` safety
-margin; engine config can also override `context_size` as a lever if compaction
+rough estimate. The design tolerates this via the `context_length × 0.9` safety
+margin; engine config can also override `context_length` as a lever if compaction
 misbehaves in practice.
 
 **Steering behavior:**
@@ -1052,7 +1126,7 @@ generation is reserved for the explicit interrupt (`Ctrl+C` / `Esc`).
 **Token counting:** Use `tiktoken-rs` for OpenAI-compatible models and a byte-length
 heuristic (4 chars ≈ 1 token) for Ollama as a cheap fallback. Maintain a rolling
 window that trims the oldest user/assistant pairs (never the system prompt) when
-the total exceeds the model limit. For a more advanced solution (Phase 6), summarise
+the total exceeds the model limit. For a more advanced solution (Phase 7), summarise
 dropped messages via a cheap summariser model call and prepend a system message
 with the summary.
 
@@ -1146,8 +1220,8 @@ based on active mode and configuration:
 - **TUI mode:** All registered tools (including `clarify`) are available unless
   a profile explicitly restricts them.
 - **Headless mode:** `clarify` is automatically excluded.
-- **Sub-agents:** The `SubagentManager` passes the `allowed_tools` list from the
-  subagent config; only those schemas are included in the request.
+- **Child agents:** the `ChildAgentManager` passes the `allowed_tools` list from
+  the agent type's config; only those schemas are included in the request.
 
 This is deterministic: if a tool is not in the filtered list, the model literally
 cannot call it. No prompt-engineering required.
@@ -1177,7 +1251,7 @@ e.g. via `nix::sys::signal::killpg`) to tear down the whole tree. Plain file too
 process-group treatment.
 
 This pattern mirrors the LLM stream cancellation strategy: cooperative cancellation via `CancellationToken`,
-no blocking in the main loop, and lifecycle events reported back via `agent_rx`.
+no blocking in the root loop, and lifecycle events reported back via `agent_rx`.
 
 **Tool timeouts:** Use `tokio::time::timeout` around `tokio::process::Command::output`.
 Default: 30s for shell commands, 5s for file I/O. Display a TUI spinner while the
@@ -1240,59 +1314,99 @@ with `syntect` and convert it to a `CodeBlock`.
 **Syntect themes:** Ship three built-in themes — dark, light, and monokai — selectable
 via config.
 
-### G. Sub-Agent Delegation
+### G. Agent Types & Delegation
 
-The agent can spawn **sub-agents** — focused, short-lived ReAct agents that run
-with curated context and return structured results. Sub-agents are treated as a
-regular tool (`spawn_subagent`) in the main agent's `ToolRegistry`; when the LLM
-calls it, the main loop pauses, executes the sub-agent, and resumes with the
-result injected as a system message.
+Ylva models a **single pool of typed agents**. An agent type (e.g. `research`,
+`code_edit`, `default`) is a named bundle of behavior — persona, tool whitelist,
+engine override, timeout — declared once in config and usable in **any role**.
+There is no separate "main agent" vs "sub-agent" category: a `research` agent
+can run as the root conversation (the user types `ylva --agent research`) or as
+a child spawned by a coding root. The same config entry, the same factory call.
 
-**One sub-agent at a time.** A sub-agent runs in parallel with the main agent,
-but the main agent cannot spawn a second sub-agent while the first is still
-running. This prevents resource contention and keeps the UX predictable. If the
-main LLM calls while another sub-agent is active, the call is
-queued or returns an error (configurable).
+What differs between those two cases is the agent's **role** — its position in
+the spawn tree. Role carries the runtime plumbing that the type config cannot
+hold (live channels, a parent's `CancellationToken`, a curated briefing):
 
-**No nesting.** Sub-agents are forbidden from calling `spawn_subagent`. The
-maximimum delegation depth is one.
+| Concern | Decided by | Why |
+|---|---|---|
+| persona, tool whitelist, engine, timeout | **agent type** | static, TOML-deserialized |
+| `parent_cancel: CancellationToken` | **role** | only a child has a parent |
+| output channels (App UI vs. sidebar + parent) | **role** | depends on caller |
+| initial `Context` (user prompt vs. curated briefing) | **role** | briefing comes from parent |
+| `spawn_subagent` tool available? | **role ∩ type** | see "No nesting" below |
+
+Two roles exist:
+
+- **`Role::Root`** — the top of a spawn tree. Constructed by the `App`
+  (`TuiApp` / `ConsoleApp`); owns its own `CancellationToken`; writes to the
+  App's UI channel; its `ToolRegistry` includes `spawn_subagent` (when its type
+  permits).
+- **`Role::Child { parent_cancel, subagent_ui_tx, agent_tx, briefing }`** —
+  constructed by a parent `AgentLoop`; its cancellation is linked to the
+  parent's tool cancel; writes live updates to `subagent_ui_tx` and its final
+  result to `agent_tx`; its `Context` is seeded from `briefing`; its
+  `ToolRegistry` never includes `spawn_subagent`.
+
+Both are built by a single factory method (see
+[class-diagram.mmd](./class-diagram.mmd)):
+
+```rust
+impl AgentFactory {
+    pub fn create(&self, profile: &ProfileConfig,
+                  agent_type: &str, role: Role) -> AgentLoop { ... }
+}
+```
+
+**One child at a time.** A root runs in parallel with at most one child. The
+root cannot spawn a second child while the first is still running. This
+prevents resource contention and keeps the UX predictable. If the root LLM
+calls `spawn_subagent` while a child is active, the call is queued or returns
+an error (configurable).
+
+**No nesting.** Children are forbidden from calling `spawn_subagent`. The
+maximum delegation depth is one. This is enforced **structurally**: a `Child`'s
+`ToolRegistry` is built without the `spawn_subagent` tool, regardless of the
+type's `can_spawn` flag. `can_spawn` on `AgentConfig` only governs whether a
+`Root` of that type may spawn children at all.
 
 #### Spawn Mechanism
 
-The LLM triggers a sub-agent via a standard tool call:
+The LLM triggers a child agent via a standard tool call:
 
 ```rust
 #[derive(JsonSchema, Deserialize)]
 struct SpawnSubagentArgs {
     task: String,       // concise description of what to do
-    briefing: String,   // curated context extracted from main conversation
-    #[serde(default = "default_subagent_type")]
-    subagent_type: String, // e.g. "research", "code_edit"
+    briefing: String,   // curated context extracted from the root conversation
+    #[serde(default = "default_agent_type")]
+    agent_type: String, // e.g. "research", "code_edit"
 }
 ```
 
-The main agent loop handles `ToolCall("spawn_subagent", ...)` like any other
-pending tool: it emits `UiUpdate::ToolPending` and waits for user approval. Once
-approved, the `SubagentManager` spawns a **separate** `AgentLoop` in a `tokio::spawn`
-task. The main agent loop immediately returns to listening for user commands and
-steering — it does **not** block on the sub-agent.
+The root agent loop handles `ToolCall("spawn_subagent", ...)` like any other
+pending tool: it emits `UiUpdate::ToolPending` and waits for user approval.
+Once approved, the `ChildAgentManager` builds a `Role::Child` and calls
+`AgentFactory::create(profile, agent_type, role)`, which spawns a **separate**
+`AgentLoop` in a `tokio::spawn` task. The root loop immediately returns to
+listening for user commands and steering — it does **not** block on the child.
 
-The sub-agent is a fully independent ReAct agent with:
+The child is a fully independent ReAct agent with:
 
 - Its own `Context` (seeded from the briefing)
-- Its own filtered `ToolRegistry` (whitelist from config)
-- Its own `Provider` (from the engine assigned in the profile)
+- A filtered `ToolRegistry` (whitelist from the type's config; `spawn_subagent`
+  stripped because role = `Child`)
+- Its own `Provider` (from the engine assigned to the type in the profile)
 - Its own `CancellationToken` (linked to the parent's tool cancel)
 - Its own `subagent_ui_tx` channel for live updates to the TUI sidebar
 
-When the sub-agent finishes (via `finish` tool, timeout, or user cancellation),
-it sends `AgentEvent::ToolDone` back to the main agent loop via `agent_rx`.
-The main loop appends the result to its own `Context` and re-prompts.
+When the child finishes (via `finish` tool, timeout, or user cancellation),
+it sends `AgentEvent::ToolDone` back to the root agent loop via `agent_rx`.
+The root loop appends the result to its own `Context` and re-prompts.
 
-**Channel isolation:** The sub-agent's live events flow through `subagent_ui_tx`
-(a dedicated MPSC channel created by `SubagentManager`). The TUI's `tokio::select!`
-listens to three sources: `ui_rx` (main agent), `subagent_ui_rx` (sub-agent),
-and `event_rx` (crossterm).
+**Channel isolation:** the child's live events flow through `subagent_ui_tx`
+(a dedicated MPSC channel created by `ChildAgentManager`). The TUI's
+`tokio::select!` listens to three sources: `ui_rx` (root agent),
+`subagent_ui_rx` (child agent), and `event_rx` (crossterm).
 
 #### Config-Driven Types
 
@@ -1304,7 +1418,7 @@ Those are defined in the user's config hierarchy.
 ```text
 ~/.ylva/
 ├── SOUL.md                     # optional persona / initial system message (built-in default)
-├── subagents/                  # global, shared behavior definitions
+├── agents/                     # global, shared agent-type definitions
 │   ├── research.md             # .md with +++ frontmatter (seeded format)
 │   └── code_edit.md
 └── profiles/
@@ -1325,7 +1439,7 @@ canonical contents are **maintained in the repo** as a `config/` tree that
 
 ```text
 config/                        # source of truth (versioned, embedded)
-├── subagents/
+├── agents/
 │   ├── research.md
 │   └── code_edit.md
 └── profiles/
@@ -1337,12 +1451,12 @@ Themes are **not** files — they are compiled into the binary and
 name-selectable (`dark | light | monokai`), not seeded into any scope (§4F).
 
 **Persona / initial system message (SOUL.md):** the initial system message of
-a chat (the agent's persona) follows the same scopes, expressed as a
+a chat (the root agent's persona) follows the same scopes, expressed as a
 **`SOUL.md`** in the project `.ylva/` and home `~/.ylva/` layers with a
 built-in default. It resolves through the same three-layer fallback chain
 below. Phase 1 hard-codes the default message (`"You are Ylva, a helpful agent
 with tool capabilities."`) as an SSOT constant; the SOUL.md loader replaces
-that constant's source in the config phase (§4C, §7 Phase 6).
+that constant's source in the config phase (§4C, §7 Phase 7).
 
 **Three-layer fallback chain**, resolved per-file with **whole-layer replace**
 (highest layer that defines a file wins; lower layers ignored for that file):
@@ -1355,7 +1469,7 @@ project  .ylva/        (current project, cwd/git-root scope)
 
 - A file missing from a higher layer falls through to the next lower layer.
 - Missing everywhere is **never a hard error** — built-in always supplies the
-  standard default profile and subagents, so an empty `~/.ylva/` or a fresh
+  standard default profile and agent types, so an empty `~/.ylva/` or a fresh
   project still runs out of the box.
 - Project scope is discovered by walking up from cwd to the nearest ancestor
   containing a `.ylva/` (or the project's git root).
@@ -1363,11 +1477,11 @@ project  .ylva/        (current project, cwd/git-root scope)
 **Distribution — `ylva init`:**
 
 - `ylva init` seeds the **full standard set** (default profile `config.toml`,
-  `subagents/research.md`, and `subagents/code_edit.md`) into `~/.ylva/`.
+  `agents/research.md`, and `agents/code_edit.md`) into `~/.ylva/`.
 - `ylva init --project` seeds **only** a minimal
   `.ylva/profiles/default/config.toml` with placeholder values into the
-  project root. Subagents and additional profiles are added manually only when
-  the project explicitly wants to override (inheritance covers the rest).
+  project root. Agent types and additional profiles are added manually only
+  when the project explicitly wants to override (inheritance covers the rest).
 - Both are **write-if-missing** by default; `--force` reseeds a built-in file.
 
 **Canonical paths, no synonyms:** there is exactly one location per file
@@ -1387,28 +1501,30 @@ precedence over the `.env` value. `ylva init --project` also deploys a
 ignores `.env`, so secrets stay uncommitted while the rest of the config is
 committed.
 
-**Global subagents** (`~/.ylva/subagents/`) define *behavior*: tools,
-prompts, max iterations, timeouts. They are fully self-contained and shared
-across all profiles.
+**Global agent types** (`~/.ylva/agents/`) define *behavior*: tools,
+prompts, max iterations, timeouts, `can_spawn`. They are fully self-contained
+and shared across all profiles, and the same entries are usable as root or
+child.
 
 **Profiles** (`~/.ylva/profiles/<name>/`) define *infrastructure*:
-which engine (provider/model/temperature/context-size) each subagent uses, and
-can optionally override behavioral settings or disable subagents entirely.
+which engine (provider/model/temperature/context-size) each agent type uses,
+and can optionally override behavioral settings or disable a type entirely.
 
-##### Subagent File Formats
+##### Agent-Type File Formats
 
-Each global subagent is defined by a file in `subagents/` named after its type.
-The **built-in/seeded** subagents (research, code_edit) ship as Markdown with
+Each global agent type is defined by a file in `agents/` named after its type.
+The **built-in/seeded** types (research, code_edit) ship as Markdown with
 frontmatter (format 2 below); pure TOML remains supported for hand-authored
 files. Two formats are supported:
 
 1. **Pure TOML** (`.toml`):
 
 ```toml
-# subagents/research.toml
+# agents/research.toml
 max_iterations = 10
 timeout_secs = 120
 allowed_tools = ["read_file", "search", "list_dir"]
+can_spawn = false
 system_prompt = """You are a deep research assistant.
 Be thorough. Cite file paths when referencing code."""
 ```
@@ -1420,6 +1536,7 @@ Be thorough. Cite file paths when referencing code."""
 max_iterations = 10
 timeout_secs = 120
 allowed_tools = ["read_file", "search", "list_dir"]
+can_spawn = false
 +++
 
 You are a deep research assistant. Be thorough. Cite file paths when
@@ -1431,102 +1548,157 @@ a parse error. The body (after the closing `+++`) becomes the `system_prompt`.
 This format is ideal for long, evolving prompts because it avoids escaped
 quotes and indentation battles.
 
+The **default** agent type is always available (seeded under
+`config/agents/default.md`, overridable like any other type). It carries a
+full tool whitelist and `can_spawn = true`, so a bare `ylva` invocation runs
+the default agent as a `Root` that can delegate. This is the single
+out-of-the-box experience.
+
 ##### Engine Definitions (Model Plumbing)
 
 An **engine** is the configuration name for a reusable bundle of LLM connection and sampling parameters.
-At runtime, each engine definition is used to build a concrete `Provider` trait object. The terms are
-separate concepts: **engine** = configuration data; **Provider** = runtime trait.
+At runtime, each engine definition is built into a concrete `Engine` trait object (a thin wrapper
+around a `Provider` plus the `EngineConfig`). The terms are separate concepts: **engine** = configuration
+data; **Engine** = runtime trait the agent depends on; **Provider** = low-level backend trait (see
+[class-diagram.mmd](./class-diagram.mmd)).
 
 ```toml
 # profiles/work/config.toml
 [engines.openrouter_fast]
-provider_type = "openrouter"  # maps to Provider implementation (not the trait name)
+provider = "openrouter"  # maps to Provider implementation (not the trait name)
 model = "mistralai/mistral-small"
 temperature = 0.2
-context_size = 128000
+context_length = 128000
 
 [engines.ollama_local]
-provider_type = "ollama"
+provider = "ollama"
 model = "llama3.1:8b"
 temperature = 0.7
-context_size = 8192
+context_length = 8192
 ```
 
 Engines are named and referenced by string. They contain **only** model
-specific properties (`provider_type`, `model`, `temperature`, `context_size`, `api_base`,
+specific properties (`provider`, `model`, `temperature`, `context_length`, `api_base`,
 optionally `api_key`). They do **not** contain tools, prompts, or agent logic.
 
-##### Profile Subagent Assignment & Overrides
+**Quoted keys (optional):** TOML allows quoted keys containing `/` or `:` for
+human-readable provider/model hints. The dotted form (`openrouter_fast`) is the
+recommended default and works with all TOML tooling; quoted keys are an opt-in
+for readability and carry no extra semantics:
 
-Each profile declares which subagents are available and which engine runs them:
+```toml
+[engines."ollama/local"]
+provider = "ollama"
+model = "llama3.1:8b"
+```
+
+##### Default Engine & Role-Based Engine Resolution
+
+Each profile declares a top-level `default_engine`. Any agent type that
+omits its `engine` field inherits `default_engine`. This lets a user change one
+engine and have every agent type that did not explicitly override follow along.
 
 ```toml
 # profiles/work/config.toml
-[agent]
-engine = "openrouter_fast"   # main conversation agent engine
+default_engine = "openrouter_fast"
 
-[subagents]
-research = { engine = "openrouter_fast" }
-code_edit = { engine = "ollama_local" }
+[agents.default]
+# engine omitted → uses default_engine
+
+[agents.research]
+engine = "ollama_local"  # explicit override
 ```
 
-Profiles can **adapt** global subagents by overriding specific fields:
+Resolution order for any agent type's `engine` field:
+explicit `engine` → `default_engine` → hard error at startup.
+
+**Role-based engine fields:** specialized background engines may be declared as
+ad-hoc top-level `<role>_engine` fields as the features that need them land
+(YAGNI — add only when the feature ships). Each resolves the same way:
+explicit `<role>_engine` → `default_engine` → hard error.
 
 ```toml
-[subagents.research]
+# Future roles, added when the corresponding feature is implemented:
+compact_engine = "openrouter_small"   # context compaction summarizer (Phase 7)
+# curator_engine = "openrouter_small" # reserved for a future curator child agent
+```
+
+##### Profile Agent-Type Assignment & Overrides
+
+Each profile declares which agent types are available and which engine runs them:
+
+```toml
+# profiles/work/config.toml
+[agents.default]
+engine = "openrouter_fast"   # root conversation agent engine (omit to use default_engine)
+
+[agents.research]
+engine = "openrouter_fast"
+
+[agents.code_edit]
+engine = "ollama_local"
+```
+
+Profiles can **adapt** global agent types by overriding specific fields:
+
+```toml
+[agents.research]
 engine = "openrouter_fast"
 allowed_tools = ["read_file", "search"]      # override: removed "list_dir"
 timeout_secs = 60                            # override from global 120
 ```
 
-Profiles can **disable** a global subagent:
+Profiles can **disable** a global agent type:
 
 ```toml
-[subagents.research]
+[agents.research]
 enabled = false
 ```
 
-If a global subagent is not mentioned in a profile, it is available with its
+If a global agent type is not mentioned in a profile, it is available with its
 global defaults.
 
-Profiles can **add** local-only subagents by placing files in the profile's own
-`subagents/` directory:
+Profiles can **add** local-only agent types by placing files in the profile's own
+`agents/` directory:
 
 ```text
 profiles/work/
 ├── config.toml
-└── subagents/
+└── agents/
     └── compliance_audit.toml   # only visible to 'work' profile
 ```
 
-A local subagent with the same name as a global one **shadows** the global
+A local agent type with the same name as a global one **shadows** the global
 definition for that profile only.
 
 ##### Safety Inheritance
 
 Safety settings (e.g., whether `bash` requires approval) are **inherited** from
 the parent agent. In headless mode, `--auto-approve-shell` applies to
-sub-agents as well.
+child agents as well.
 
-#### Sub-Agent Lifecycle
+#### Child-Agent Lifecycle
 
-1. **Briefing:** The `SubagentManager` constructs a new `Context` with a
+1. **Briefing:** the `ChildAgentManager` constructs a new `Context` with a
    **hybrid** prompt: a system message containing the type's persona,
    constraints, available tools, and output format; and a user message
    containing the curated `briefing`.
-2. **Spawn:** A reusable `AgentLoop` (extracted in Phase 3) is instantiated.
-   It receives:
-   - A filtered `ToolRegistry` (whitelist from subagent config)
-   - The configured `Provider` (from the engine assigned in the profile)
+2. **Spawn:** the `ChildAgentManager` builds a `Role::Child` and calls
+   `AgentFactory::create(profile, agent_type, role)`. The returned
+   `AgentLoop` receives:
+   - A filtered `ToolRegistry` (whitelist from the type's config;
+     `spawn_subagent` stripped because role = `Child`)
+   - The configured `Provider` (from the engine assigned to the type in the
+     profile)
    - A new `CancellationToken`
    - Its own `subagent_ui_tx` for live sidebar updates
    - Its own `agent_tx` for sending the final result back to the parent
-     The sub-agent runs its own ReAct loop in a `tokio::spawn` task.
-3. **Parallel execution:** The main agent loop does NOT wait. It continues to
-   process `Prompt` (steering) and `Stop` commands from the user. The sub-agent
-   and main agent run concurrently. If the main LLM produces new tokens while
-   the sub-agent is working, both appear in the TUI (main chat + sidebar panel).
-4. **Finish:** The sub-agent must call a special `finish` tool to return its
+     The child runs its own ReAct loop in a `tokio::spawn` task.
+3. **Parallel execution:** the root agent loop does NOT wait. It continues to
+   process `Prompt` (steering) and `Stop` commands from the user. The child
+   and root run concurrently. If the root LLM produces new tokens while the
+   child is working, both appear in the TUI (main chat + sidebar panel).
+4. **Finish:** the child must call a special `finish` tool to return its
    result. The `finish` schema is:
 
    ```rust
@@ -1542,76 +1714,80 @@ sub-agents as well.
    ```
 
    The `finish` call is **exempt** from the iteration cap; it is the natural
-   termination state. If the sub-agent never calls `finish` (timeout, max
+   termination state. If the child never calls `finish` (timeout, max
    iterations, or user abort), the system extracts the last assistant message as
    raw text, wraps it in a synthetic `{"status": "unstructured", "result": "..."}`
    object, and returns that to the parent.
-5. **Re-integration:** The `result` field of the structured output is injected
-   into the main conversation as a `Message::System` (or a dedicated
-   `Message::SubagentResult`) so the main LLM can use it on its next turn.
+5. **Re-integration:** the `result` field of the structured output is injected
+   into the root conversation as a `Message::System` (or a dedicated
+   `Message::ChildResult`) so the root LLM can use it on its next turn.
 
-#### Steering While a Sub-Agent Runs
+#### Steering While a Child Agent Runs
 
 The input box is never disabled. If the user sends a new message while a
-sub-agent is running, the message is **queued as a cooperative steer** — it is
-never injected into a live main stream. It is appended to the main conversation
+child is running, the message is **queued as a cooperative steer** — it is
+never injected into a live root stream. It is appended to the root conversation
 at the next natural point (a completed tool-call boundary / hand-off), and the
-main LLM starts a fresh request with the updated context then.
+root LLM starts a fresh request with the updated context then.
 
-The sub-agent continues to completion in the background. Its live events flow
+The child continues to completion in the background. Its live events flow
 through `subagent_ui_rx` to the sidebar panel. Its final result is appended to
-the main history when it arrives via `agent_rx`.
+the root history when it arrives via `agent_rx`.
 
-**The main LLM then sees both the user's steering message and the sub-agent
+**The root LLM then sees both the user's steering message and the child
 result on its next turn**, and decides how to reconcile them. This is emergent
 behavior — no special merge logic is required.
 
 #### Persistence
 
-Every sub-agent run is recorded as a structured record in the global chat
+Every child-agent run is recorded as a structured record in the global chat
 store (see §4H). Two JSONL record shapes are written per parent session file:
 
 ```json
-{"type":"subagent_start","v":1,"id":"<run-uuid>","parent_session":"<uuid>","subagent_type":"research","task":"…","created_at":"…"}
-{"type":"subagent_result","v":1,"id":"<run-uuid>","parent_session":"<uuid>","status":"success|timeout|max_iterations|error|aborted_by_user","result":"…","sources":["…"],"completed_at":"…"}
+{"type":"child_start","v":1,"id":"<run-uuid>","parent_session":"<uuid>","agent_type":"research","task":"…","created_at":"…"}
+{"type":"child_result","v":1,"id":"<run-uuid>","parent_session":"<uuid>","status":"success|timeout|max_iterations|error|aborted_by_user","result":"…","sources":["…"],"completed_at":"…"}
 ```
 
 - The parent-session link is explicit (`parent_session`, `parent_message_index`).
-- The full sub-agent conversation is stored as its **own session file** under
+- The full child conversation is stored as its **own session file** under
   the same `project_key` (its own `<sub-session_id>.jsonl`) with its own
-  `meta` header (auto-title = the sub-agent `task`), mirroring §4H layout —
-  so sub-agent reasoning stays inspectable and audit-able without a
+  `meta` header (auto-title = the child `task`), mirroring §4H layout —
+  so child reasoning stays inspectable and audit-able without a
   relational table. Per §4H decision 9, this sub-session is written **once at
   completion**, not streamed live.
 - Querying by run id / parent is a scan of the project directory's session
-  files (the `meta`/`subagent_*` lines), which is cheap at the single-user,
+  files (the `meta`/`child_*` lines), which is cheap at the single-user,
   per-project scale involved here.
 
 #### UI & Headless
 
-- **TUI:** A dedicated collapsible sidebar panel shows **live** sub-agent
+- **TUI:** a dedicated collapsible sidebar panel shows **live** child-agent
   activity: streaming tokens, tool calls, and status. It receives events via
   `subagent_ui_rx`, not by polling disk. The status bar shows
-  `🔍 Sub-agent 'research' running... (14s / 120s)`. When finished, the panel
+  `🔍 Child agent 'research' running... (14s / 120s)`. When finished, the panel
   shows the result summary and a link to view the full thread (loaded from the
   sub-session file for audit).
-- **Headless:** Sub-agents are **disabled by default**. Enable with
-  `--allow-subagents`. When enabled, stderr prints `Spawned sub-agent
-'research'...` and completion status. The `--auto-approve-*` flags inherited
-  by the parent also apply to sub-agents.
+- **Headless:** child agents are **disabled by default**. Enable with
+  `--allow-child-agents`. When enabled, stderr prints `Spawned child agent
+  'research'...` and completion status. The `--auto-approve-*` flags inherited
+  by the parent also apply to child agents.
 
-Sub-agent persistence is recorded via the unified store (§4H); there is **no**
+Child-agent persistence is recorded via the unified store (§4H); there is **no**
 separate SQLite table.
 
 ### H. Persistence & Chat History
 
 This section replaces the earlier "SQLite persistence" mentions. It is the
-single source of truth for how chats, sub-agent runs, and audit data are
+single source of truth for how chats, child-agent runs, and audit data are
 stored.
 
 **Design decisions settled so far (Q&A):**
 
-- **Memory vs disk:** `Message` is the in-memory domain model (§4B, Q1). Persistence uses a separate `StoreEvent` enum with `Meta`, `MessageEvent { msg: Message }`, `SubagentStart`, and `SubagentResult` variants. The `Store` module (Phase 6) owns the JSONL schema, `meta` header, and append-only writer; it converts `Message` → `MessageEvent` at commit time.
+- **Memory vs disk:** `Message` is the in-memory domain model (§4B, Q1).
+  Persistence uses a separate `StoreEvent` enum with `Meta`, `MessageEvent
+  { msg: Message }`, `ChildStart`, and `ChildResult` variants. The `Store`
+  module (Phase 7) owns the JSONL schema, `meta` header, and append-only writer;
+  it converts `Message` → `MessageEvent` at commit time.
 
 1. **Scope — one global store, not per-project:**
    History is cross-project user data, so it is stored once, globally, under
@@ -1655,7 +1831,7 @@ stored.
      mid-chat (a killed process leaves every already-committed line intact)
      and is grep-able/human-inspectable by design.
    - Only **committed** events are written (user message,
-     completed/interrupted assistant response, tool call + result, sub-agent
+     completed/interrupted assistant response, tool call + result, child-agent
      record). Live streaming `partial`s are ephemeral UI state and never touch
      disk until committed.
 
@@ -1751,17 +1927,17 @@ stored.
    - A future interactive `/sessions` picker can be built later from the same
      grep-able abstracts; nothing here blocks it.
 
-9. **Sub-agent recording — at-completion, not live:**
-   - The parent session file gets a `subagent_start` line **before** the run
+9. **Child-agent recording — at-completion, not live:**
+   - The parent session file gets a `child_start` line **before** the run
      begins (crash evidence even if the run dies), then a single
-     `subagent_result` line at completion — see §4G `Persistence`.
-   - The full sub-agent transcript is written **once, at completion**, to its
+     `child_result` line at completion — see §4G `Persistence`.
+   - The full child-agent transcript is written **once, at completion**, to its
      own `<sub-session>.jsonl` (same `project_key`, own `meta` header with an
-     auto-title = sub-agent `task`). Not streamed live.
-   - Rationale: sub-agents are short and loss-tolerant (their result is already
+     auto-title = child-agent `task`). Not streamed live.
+   - Rationale: child agents are short and loss-tolerant (their result is already
      summarized into the parent context by `finish`); avoiding a second live
-     flocked append stream per sub-agent keeps the machinery simple. A
-     mid-run killed sub-agent loses only its reasoning transcript; its start
+     flocked append stream per child agent keeps the machinery simple. A
+     mid-run killed child agent loses only its reasoning transcript; its start
      line still marks that a run occurred.
 
 10. **Durability & I/O — flush per line via a dedicated writer:**
@@ -1846,6 +2022,31 @@ and `AgentState` machine as the TUI, but drives them through a minimal
 "fake TUI" wrapper that prints to stdout/stderr instead of rendering a
 terminal UI.
 
+**Mode dispatch:** `main.rs` selects an `App` implementation (see
+[class-diagram.mmd](./class-diagram.mmd)). The `App` trait is a single seam:
+
+```rust
+trait App {
+    async fn run(self) -> anyhow::Result<u8>;
+}
+```
+
+`TuiApp` owns the ratatui terminal + crossterm event bridge; `ConsoleApp` owns
+the CLI args + stdout/stderr buffering. Each constructs its root `AgentLoop`
+via `AgentFactory::create(profile, agent_type, Role::Root)`, drives it, and
+returns an exit code. Constructors are not on the trait — the two modes take
+different inputs (terminal handle vs CLI flags). The root `agent_type`
+defaults to `default` (the built-in seeded type, see §4G) and is overridable
+via `--agent <type>` in both modes.
+
+```rust
+let agent_type = cli_args.agent_type().unwrap_or("default");
+match mode {
+    Mode::Tui => TuiApp::new(factory, profile, agent_type).run().await,
+    Mode::Cli => ConsoleApp::new(factory, profile, agent_type, cli_args).run().await,
+}
+```
+
 ### Architecture
 
 Headless mode is **stateless by default**: each `ylva --prompt "..."` starts a
@@ -1877,6 +2078,9 @@ exchanges to it.
 ```bash
 # Default: stateless, text output to stdout, status to stderr
 ylva --prompt "summarize src/main.rs"
+
+# Run a specific agent type as the root (default agent type is "default")
+ylva --prompt "audit security" --agent research
 
 # Use a specific profile (loads ~/.ylva/profiles/work/config.toml)
 ylva --prompt "audit security" --profile work
@@ -2105,7 +2309,7 @@ top of a proven agent loop.
 - [ ] Add `ToolError` variant to `UiUpdate` for failed tool invocations
 
 - [ ] Extract `AgentLoop` as a reusable struct (provider + registry + context)
-      so Phase 5 sub-agents can instantiate it with a restricted tool whitelist
+      so Phase 6 child agents can instantiate it with a restricted tool whitelist
 
 - [ ] Prevent infinite loops: max iterations = 15 (configurable per engine)
 
@@ -2146,7 +2350,38 @@ The input widget must never be "disabled."
 
 **Key crates:** `ratatui`, `crossterm`, `tui-textarea`, `textwrap`, `ctrlc`
 
-### Phase 5: Terminal Superpowers
+### Phase 5: Interface Seams
+
+- [ ] **Goal:** Introduce the runtime interface layer (§4A, [class-diagram.mmd](./class-diagram.mmd))
+      so Phase 6 child agents build against `AgentFactory` and `Engine` from the start,
+      not against the Phase 1 `Provider`-direct seam.
+
+- [ ] **`Engine` trait + `EngineImpl`:** thin wrapper holding `Arc<dyn Provider>` +
+      `EngineConfig`; exposes `chat()` and `config()`. `AgentLoop` migrates from
+      `Arc<dyn Provider>` to `Arc<dyn Engine>`.
+
+- [ ] **`AgentFactory` struct:** owns the resolved `HashMap<String, Arc<dyn Engine>>`
+      built from `EngineConfig` definitions + profile resolution. Exposes
+      `create(profile, agent_type, role) -> AgentLoop` (single method; §4G).
+
+- [ ] **`App` trait:** `async fn run(self) -> anyhow::Result<u8>`. `TuiApp` and
+      `ConsoleApp` implement it (§6). `main.rs` dispatches on CLI mode.
+
+- [ ] **`Provider::list_models()`:** add to the `Provider` trait; `OpenAiProvider`
+      queries `/models` (OpenRouter) or `/api/tags` (Ollama). Returns `Vec<ModelInfo>`
+      for a future `/models` slash command.
+
+- [ ] **Config refactor:** rename `provider_type` → `provider` in `EngineConfig`;
+      add profile-level `default_engine` (required) and `compact_engine` (optional,
+      resolves to `default_engine`); document quoted-key engine names
+      (`[engines."ollama/local"]`) as opt-in.
+
+- [ ] **Child-agent construction** (§4G) uses `AgentFactory::create(profile, agent_type, Role::Child { ... })` from
+      the start — no `AgentLoop::new()` direct calls for child agents.
+
+**Key crates:** none new (uses existing `tokio`, `reqwest`, `serde`).
+
+### Phase 6: Terminal Superpowers
 
 - [ ] **Goal:** Make it a true coding agent.
 
@@ -2171,21 +2406,21 @@ The input widget must never be "disabled."
 
 - [ ] `spawn_subagent` tool in `ToolRegistry` with config-driven types and tool whitelists
 
-- [ ] `SubagentManager` that owns sub-agent lifecycle (spawn, timeout, cancel via `CancellationToken`)
+- [ ] `ChildAgentManager` that owns child-agent lifecycle (spawn, timeout, cancel via `CancellationToken`)
 
-- [ ] `finish` tool available only inside sub-agent runs; fallback to unstructured text if never called
+- [ ] `finish` tool available only inside child-agent runs; fallback to unstructured text if never called
 
-- [ ] Sub-agent persistence records (`subagent_start` / `subagent_result`) with parent session linkage (§4H)
+- [ ] Child-agent persistence records (`child_start` / `child_result`) with parent session linkage (§4H)
 
-- [ ] Sub-agent inherits parent safety settings (`--auto-approve-*` in headless)
+- [ ] Child agent inherits parent safety settings (`--auto-approve-*` in headless)
 
-- [ ] TUI sidebar panel for active/past sub-agent runs (collapsible, shows runtime & status)
+- [ ] TUI sidebar panel for active/past child-agent runs (collapsible, shows runtime & status)
 
-- [ ] Headless: `--allow-subagents` flag (disabled by default) + stderr status lines
+- [ ] Headless: `--allow-child-agents` flag (disabled by default) + stderr status lines
 
 **Key crates:** `which`, `ignore`, `tempfile`
 
-### Phase 6: Polish & Persistence
+### Phase 7: Polish & Persistence
 
 - [ ] **Goal:** Usable daily driver.
 
@@ -2194,27 +2429,27 @@ The input widget must never be "disabled."
 
 - [ ] Three built-in themes: dark, light, monokai
 
-- [ ] JSONL persistence for conversations, sub-agents, and schema-version handling (§4H)
+- [ ] JSONL persistence for conversations, child agents, and schema-version handling (§4H)
 
 - [ ] Resume an existing session via explicit `--conversation-id` (no auto-resume, no picker)
 
 - [ ] Config hierarchy (`~/.ylva/profiles/default/config.toml`) for
-      default model, theme, keybindings, and subagent engine assignments
+      default model, theme, keybindings, and agent-type engine assignments
 
 - [ ] Tiered context management: System (never drop), InitialContext (never drop initially),
       Recent (drop oldest first), Compacted (summarization placeholder)
 
 - [ ] Token counting with cached counts per `TieredMessage` (re-count on insertion, not every request)
 
-- [ ] Context window compaction: drop oldest `Recent`/`Compacted` messages when total > context_size × 0.9
+- [ ] Context window compaction: when total > `context_length × 0.9`, compact to ≤ `context_length × compact_target_ratio` (default 0.5, per `EngineConfig`); minimal intervention, drops/summarizes oldest `Recent`/`Compacted` messages (`maybe_compact`)
 
-- [ ] Phase 6 extension: replace "drop" with on-the-fly summarization via a cheap local model
+- [ ] Phase 7 extension: replace "drop" with on-the-fly summarization via a cheap local model (engine = `compact_engine`, §4G)
 
 - [ ] `/commands` in input box (e.g., `/model`, `/tools`, `/clear`, `/save`)
 
 **Key crates:** `serde_json`, `sha2`, `config`, `toml`, `chrono`, `tiktoken-rs`
 
-### Phase 7: CLI Surface
+### Phase 8: CLI Surface
 
 **Decision:** Headless mode already works from Phase 1. This phase adds the full `clap` CLI interface
 for scripting and automation.
@@ -2365,9 +2600,9 @@ Study these for patterns:
 
 - [ ] **Can ask the user clarifying questions via the `clarify` tool when uncertain**
 
-- [ ] **Can delegate focused tasks to sub-agents with curated briefing and config-driven types**
+- [ ] **Can delegate focused tasks to child agents with curated briefing and config-driven types**
 
-- [ ] **Sub-agent runs are persisted and auditable via the unified JSONL store (§4H)**
+- [ ] **Child-agent runs are persisted and auditable via the unified JSONL store (§4H)**
 
 - [ ] Conversation history is retained across restarts; resuming an old session works via explicit `--conversation-id`
 
@@ -2404,8 +2639,8 @@ where they are documented in the body of this document.
 | **Tool result size**           | Truncate at insertion (tunable cap + marker); `maybe_compact` prefers oversized results                                                                                                        | §4C Context, §4D Tool Registry               |
 | **TUI event loop**             | `spawn_blocking` for crossterm + `select!` on `ui_rx` + `subagent_ui_rx` + `event_rx`                                                                                                          | §4B ReAct Loop                               |
 | **TUI async context**          | `main.rs` uses `rt.block_on` for the TUI loop                                                                                                                                                  | §4B ReAct Loop                               |
-| **Token counting**             | `tiktoken-rs` for OpenAI; byte heuristic for Ollama; cached per `TieredMessage`. Counts are **approximate/advisory** (encoding is model-family dependent); rely on `context_size × 0.9` margin | §4C Context State Machine                    |
-| **Context tiers**              | `System` (never drop), `InitialContext` (never drop), `Recent` (drop oldest), `Compacted` (summarize in Phase 6)                                                                               | §4C Context State Machine                    |
+| **Token counting**             | `tiktoken-rs` for OpenAI; byte heuristic for Ollama; cached per `TieredMessage`. Counts are **approximate/advisory** (encoding is model-family dependent); rely on `context_length × 0.9` margin | §4C Context State Machine                    |
+| **Context tiers**              | `System` (never drop), `InitialContext` (never drop), `Recent` (drop oldest), `Compacted` (summarize in Phase 7)                                                                               | §4C Context State Machine                    |
 | **Ollama tools**               | Unified OpenAI-compatible provider using raw `reqwest` to `/v1/chat/completions`; no separate `ollama-rs` crate                                                                                | §2 Crate Ecosystem, §5 OpenRouter vs Ollama  |
 | **OS signals**                 | `ctrlc` handler mapped to `AgentCommand::Stop`                                                                                                                                                 | §1 Vision, §2 Crate Ecosystem                |
 | **Tool binary checks**         | Lazy check at invocation with graceful fallback                                                                                                                                                | §4D Tool Registry                            |
@@ -2417,28 +2652,28 @@ where they are documented in the body of this document.
 | **Conversation titles**        | Auto-generated from first user message, truncated single-line in the `meta` header (§4H decision 8)                                                                                                     | §7 CLI Surface, §4H decision 8               |
 | **Model switching**            | Supported mid-conversation; `SwitchModel` is a documented placeholder, not yet wired — arrives via `/model` in the slash-command phase                                                         | §4B ReAct Loop, §7 CLI Surface               |
 | **App state**                  | Dumb view model; agent loop owns state machine                                                                                                                                                 | §4B ReAct Loop                               |
-| **Config format**              | TOML for all config files; YAML explicitly rejected                                                                                                                                            | §2 Crate Ecosystem, §4G Sub-Agent Delegation |
+| **Config format**              | TOML for all config files; YAML explicitly rejected                                                                                                                                            | §2 Crate Ecosystem, §4G Agent Types & Delegation |
 | **Engine vs Provider mapping** | `Engine` = config data (static, named); `Provider` = runtime trait object built from Engine at startup                                                                                         | §4A Provider Trait, §4G Engine Definitions   |
 | **Syntect themes**             | 3 built-in: dark, light, monokai                                                                                                                                                               | §4F Rich Chat Rendering                      |
 | **edit_file tool**             | Both search-and-replace and line-range modes                                                                                                                                                   | §4D Tool Registry                            |
 | **Slash commands**             | Only recognised at start of line                                                                                                                                                               | §7 CLI Surface                               |
 | **Headless buffering**         | Buffer everything; emit at end                                                                                                                                                                 | §7 CLI Surface                               |
 | **Clarify tool**               | Free-text only; no multiple-choice options                                                                                                                                                     | §4D Tool Registry                            |
-| **Sub-agent delegation**       | Tool-based `spawn_subagent` using reusable `AgentLoop`                                                                                                                                         | §4G Sub-Agent Delegation                     |
-| **Sub-agent parallelism**      | Sub-agent runs in parallel with main agent; main loop never blocks                                                                                                                             | §4G Sub-Agent Lifecycle                      |
-| **Sub-agent channels**         | Dedicated `subagent_ui_tx`/`subagent_ui_rx` for live sidebar updates; store only for audit                                                                                                    | §4G UI & Headless                            |
-| **Sub-agent types**            | Profile-driven with global behavior + local engine assignment                                                                                                                                  | §4G Sub-Agent Delegation                     |
-| **Sub-agent briefing**         | Hybrid system + user message; curated by main agent                                                                                                                                            | §4G Sub-Agent Delegation                     |
-| **Sub-agent nesting**          | Forbidden; one level only                                                                                                                                                                      | §4G Sub-Agent Delegation                     |
-| **Sub-agent execution**        | One sub-agent at a time; runs **in parallel** with the main agent, which never blocks                                                                                                          | §4G Sub-Agent Delegation                     |
-| **Sub-agent steering**         | Main steer queues and injects at the next natural point; sub-agent finishes naturally in the background                                                                    | §4G Sub-Agent Delegation                     |
-| **Sub-agent result**           | Tool-based `finish` with unstructured fallback                                                                                                                                                 | §4G Sub-Agent Delegation                     |
-| **Sub-agent tools**            | Global subagent files define whitelist; profiles can override                                                                                                                                  | §4G Sub-Agent Delegation                     |
-| **Sub-agent config format**    | `.toml` flat or `.md` with TOML frontmatter (body = system_prompt)                                                                                                                             | §4G Sub-Agent Delegation                     |
-| **Sub-agent safety**           | Inherits parent safety settings                                                                                                                                                                | §4G Sub-Agent Delegation                     |
-| **Sub-agent persistence**      | `subagent_start` / `subagent_result` JSONL records in the parent session + dedicated sub-session file (§4H)                                                                                    | §4G Sub-Agent Delegation, §4H                |
-| **Sub-agent UI**               | Collapsible sidebar panel + status bar line                                                                                                                                                    | §4G Sub-Agent Delegation                     |
-| **Sub-agent headless**         | `--allow-subagents` flag, disabled by default                                                                                                                                                  | §7 CLI Surface                               |
+| **Child-agent delegation**      | Tool-based `spawn_subagent` using reusable `AgentLoop`                                                                                                                                         | §4G Agent Types & Delegation                  |
+| **Child-agent parallelism**     | Child agent runs in parallel with root agent; root loop never blocks                                                                                                                          | §4G Child-Agent Lifecycle                    |
+| **Child-agent channels**        | Dedicated `subagent_ui_tx`/`subagent_ui_rx` for live sidebar updates; store only for audit                                                                                                    | §4G UI & Headless                            |
+| **Agent types**                 | Single pool; profile-driven with global behavior + local engine assignment                                                                                                                     | §4G Agent Types & Delegation                  |
+| **Child-agent briefing**        | Hybrid system + user message; curated by root agent                                                                                                                                           | §4G Agent Types & Delegation                  |
+| **Child-agent nesting**         | Forbidden; one level only (structural: `Child` role strips `spawn_subagent`)                                                                                                                   | §4G Agent Types & Delegation                  |
+| **Child-agent execution**       | One child at a time; runs **in parallel** with the root agent, which never blocks                                                                                                               | §4G Agent Types & Delegation                  |
+| **Child-agent steering**        | Root steer queues and injects at the next natural point; child finishes naturally in the background                                                                                            | §4G Agent Types & Delegation                  |
+| **Child-agent result**          | Tool-based `finish` with unstructured fallback                                                                                                                                                | §4G Child-Agent Lifecycle                    |
+| **Agent-type tools**            | Global agent files define whitelist; profiles can override                                                                                                                                      | §4G Agent-Type File Formats                  |
+| **Agent-type config format**    | `.toml` flat or `.md` with TOML frontmatter (body = system_prompt)                                                                                                                              | §4G Agent-Type File Formats                   |
+| **Child-agent safety**          | Inherits parent safety settings                                                                                                                                                                | §4G Safety Inheritance                        |
+| **Child-agent persistence**     | `child_start` / `child_result` JSONL records in the parent session + dedicated sub-session file (§4H)                                                                                          | §4G Agent Types & Delegation, §4H            |
+| **Child-agent UI**              | Collapsible sidebar panel + status bar line                                                                                                                                                    | §4G Agent Types & Delegation                  |
+| **Child-agent headless**        | `--allow-child-agents` flag, disabled by default                                                                                                                                              | §7 CLI Surface                               |
 | **Build order**                | Headless first (Phase 1–3), TUI added as rendering layer in Phase 4                                                                                                                            | §7 Phased Build Plan                         |
 | **Minimal build**              | No CLI surface, no config parsing, no TOML in Phase 1                                                                                                                                          | §7 Phase 1                                   |
 | **Provider verification**      | Mock provider before real HTTP; real `reqwest` in Phase 2                                                                                                                                      | §7 Phase 1, §7 Phase 2                       |
@@ -2462,7 +2697,7 @@ where they are documented in the body of this document.
 | **HTTP retry**                 | Inside Provider; 3 retries, base 1 s, max 30 s, exponential with jitter, honoring `Retry-After`; pre-stream only (Q4)                                                                         | §4A Unified Provider Trait                   |
 | **lib.rs API**                 | `AgentLoop::new(provider) -> (AgentLoop, Receiver<UiUpdate>)`; `run()` spawns outer task, returns `JoinHandle<Result<Context>>` (final history on shutdown via drop of `AgentLoop` → closed cmd channel); `send_command()` + `ui_updates()` (Q5, Q9)                                                | §4B ReAct Loop, §7 Phase 1                   |
 | **PendingTool**                | `AssembledToolCall` + `timeout_secs`, with `execute()` method dispatching to `ToolRegistry` (Q6)                                                                                           | §4D Tool Registry                            |
-| **Persistence**                | Separate `StoreEvent` enum (`Meta`, `MessageEvent`, `SubagentStart`, `SubagentResult`) (Q7)                                                                                                 | §4H Persistence                              |
+| **Persistence**                | Separate `StoreEvent` enum (`Meta`, `MessageEvent`, `ChildStart`, `ChildResult`) (Q7)                                                                                                         | §4H Persistence                              |
 | **Mock determinism**           | `tokio::time::pause` + `advance` in tests; `MockProvider::new(tokens, interval)` (Q8, Q21)                                                                                                    | §7 Phase 1                                   |
 | **Native async trait**         | Rust 1.75+ native async trait; no `async-trait` crate (Q12)                                                                                                                                   | §4A Unified Provider Trait                   |
 | **Interrupted assistant**      | `push_assistant(partial, Interrupted, vec![])` — drops incomplete tool calls (Q14)                                                                                                             | §4C Context                                  |
