@@ -175,19 +175,39 @@ below, then add the `tools` module and the `Provider` signature change.
 3. **Add the `tools` module** at `src/agent/tools.rs` (blueprint §3):
    - `tools.rs`: a `Tool` trait (native-async via `BoxFuture`, consistent with
      `Provider`) exposing `name()`, a `schemars`-derived parameter schema, a
-     `needs_approval()` flag, and an async `run(&self, arguments: Value) ->
-     Result<String, ToolError>`. `ToolRegistry` holds `HashMap<String, Arc<dyn
-     Tool>>` with `register`, `get`, and `names`/`schemas` accessors so the
-     `AgentLoop` builds the `tools` array by runtime filtering (§4D dynamic
+     `needs_approval()` flag (with a **default of `true`**, safe-by-default;
+     read-only tools override to `false`), and an async `run(&self, arguments:
+     Value) -> Result<String, ToolError>`. `ToolRegistry` holds `HashMap<String,
+     Arc<dyn Tool>>` with `register`, `get`, and `names`/`schemas` accessors so
+     the `AgentLoop` builds the `tools` array by runtime filtering (§4D dynamic
      filtering; Phase 3 filters nothing yet, but keep the seam).
-   - `fs.rs`: `read` (`{ path: String, offset: Option<usize>, limit: Option<usize> }`
-     per `ReadFileArgs` §4D — optional `offset`/`limit`), `write`
-     (`{ path: String, content: String }`, `needs_approval() == true`), and
-     `glob` (`{ pattern: String }`). Use `tokio::fs` for I/O; wrap in
-     `tokio::time::timeout` (default 5s for file I/O, §4D).
+   - `fs.rs`:
+      - `read`: args `{ path: String, mode: ReadMode, offset: Option<usize>,
+        limit: Option<usize> }` where `ReadMode { Bytes, Lines, Chars }` (default
+        `Bytes`). `offset`/`limit` count the selected unit (see Q2 resolved notes
+        in Implementation Hints). `needs_approval() == false` — but see Q5: this
+        is an **interim/fake** read-only marker; comment it as such, since the
+        real policy (Phase 6 sandbox) is path-based and an out-of-workspace
+        `read` may require approval.
+      - `write`: args `{ path: String, content: String }`, `needs_approval() ==
+        true`, `timeout_secs` per `WriteFileArgs` with
+        `#[serde(default = "default_timeout")]`.
+      - `glob`: args `{ pattern: String }`; `needs_approval() == false` (same
+        interim-marker comment as `read`). Only the **glob dialect** is
+        accepted (`*`, `?`, `**`, `[...]`), never regexp — document this in the
+        tool `description`. Patterns resolve **CWD-relative**, and absolute
+        path patterns are supported; a workspace root/base arg is **deferred to
+        Phase 6** (see Q7).
+      - Per-tool timeout override keeps the **`0 == use-default`** sentinel
+        (`u64`); comment explicitly that a timeout is **always enforced — there
+        is no "no-timeout" value**; `0` just selects `DEFAULT_TIMEOUT_SECS` (see
+        Q6).
+      - Use `tokio::fs` for I/O; wrap in `tokio::time::timeout` (default 5s for
+        file I/O, §4D).
    - `ToolError`: a small `thiserror` enum mapping to the flat `String`-returning
      `PendingTool::execute` contract and to `UiUpdate::ToolError`/`Message::ToolError`.
-   Unit test each tool against `tempfile` scratch dirs (create → read → glob).
+   Unit test each tool against `tempfile` scratch dirs (create → read → glob),
+   including the `read` `mode` selector (`Bytes`/`Lines`/`Chars`).
 
 4. **Extend `Provider` and the providers** for tools:
    - `src/llm.rs`: change `Provider::chat` to take `tools: Vec<ToolSchema>`
@@ -285,7 +305,12 @@ below, then add the `tools` module and the `Provider` signature change.
      denial is fed back to the model as a `ToolError` and the agent re-prompts.
    (Blueprint: "No TUI yet. Approval flow is stdin-based or hardcoded for now." —
    this plan resolves it to **no interactive approval at all in the CLI-only
-   phase**.) Construct the `AgentLoop` with a `ToolRegistry` containing
+   phase**.) For live ReAct/tool demos, parse a **minimal `--prompt <text>` CLI
+   argument** in `main.rs` (keep it thin — a single optional arg, not a full CLI
+   parse; no clap in Phase 3); when absent, fall back to the hardcoded demo
+   prompt. This makes a real `write`/`glob`/`read` tool round-trip runnable
+   per-invocation against Ollama/OpenRouter instead of only the fixed demo
+   string. Construct the `AgentLoop` with a `ToolRegistry` containing
    `read`/`write`/`glob`, and wire it to the **same provider selection `main.rs`
    already uses**: Ollama-first (`OLLAMA_*`), then OpenRouter (`OPENROUTER_*`),
    else `MockProvider`. The live `OpenAiProvider` must drive a real ReAct+tool
@@ -361,10 +386,16 @@ below, then add the `tools` module and the `Provider` signature change.
 ## Proposed Improvements
 
 - **Workspace/sandbox containment (Phase 6+):** replace the Phase 3
-  read/glob-auto / write-denied approximation with real path containment —
-  auto-approve only inside the current workspace and its subdirs, deny
-  out-of-workspace paths. This is a refinement of the same
-  `approval_scope()`/permission predicate; Phase 3 does not build it.
+  read/glob-auto / write-denied approximation with real **path** containment —
+  auto-approve only inside the current workspace root and its subdirs, deny
+  out-of-workspace paths. This makes approval **path-dependent**: an
+  out-of-workspace `read`/`glob` would then require approval (so `read`/`glob`
+  `needs_approval() == false` is only an interim marker, not the final policy —
+  see Q5). It also introduces the workspace **root/base directory** that
+  `glob` currently resolves from CWD (see Q7). Defines what counts as
+  "inside the workspace" and supplies a base for relative file-tool paths.
+  This is a refinement of the same `approval_scope()`/permission predicate;
+  Phase 3 does not build it.
 - **Keep `ToolSchema`/`ToolRegistry` behind a small seam** (an `allowed_tools`
   filter on registry read) so Phase 6 child agents and Phase 5's runtime
   filtering plug in without changing `AgentLoop`.
@@ -454,3 +485,75 @@ below, then add the `tools` module and the `Provider` signature change.
   steering in CLI-only mode). Phase 3 keeps the existing Phase 1/2 steer
   behavior (`Prompt` → `pending_steers` → inject at next natural point) and
   does not build `descope_pending_tools`; note this in `docs/features.md`.
+- **`read` `mode`/`unit` selector** (`src/agent/tools/fs.rs` `ReadFileArgs`):
+  add `mode: ReadMode { Bytes, Lines, Chars }` defaulting to `Bytes`
+  (`#[serde(default)]`). `Bytes` = raw byte slice; `Lines` = split on `\n`
+  (lossy decode then line-slice); `Chars` = count UTF-8 code points via
+  `char_indices()`/lossy decode. Only decode when the selected mode needs it
+  (`Lines`/`Chars`), not for `Bytes` (binary-safe). The tool `description`
+  must state the units so the model chooses correctly.
+- **`glob` (`src/agent/tools/fs.rs` `GlobArgs`)** uses the `glob` crate
+  (Cargo.toml already adds `glob = "0.3"`), so only wildcard patterns are
+  valid; a leading `[` is a `PatternError` (the existing
+  `glob_invalid_pattern_is_error` test). Patterns are CWD-relative; the test
+  `glob_matches_pattern_in_scratch_dir` passes an absolute
+  `"{dir.path()}/*.txt"` pattern, confirming absolute-path support.
+- **`needs_approval()`** (`src/agent/tools.rs` `Tool` trait) currently has no
+  default and all three tools implement it (`read`/`glob` → `false`,
+  `write` → `true`). Change the trait to provide a default of `true` and have
+  `read`/`glob` override with `false` plus a comment labeling it an
+  interim/fake read-only marker pending Phase 6 path-based approval (Q4/Q5).
+- **`timeout_secs`** (`src/agent/tools/fs.rs`): each tool struct carries a
+  `timeout_secs: u64` field where `0` selects `DEFAULT_TIMEOUT_SECS` (the
+  `ReadTool::with_timeout`/`timeout_secs()` pattern). This is the agreed
+  `0 == use-default` sentinel; add a doc comment stating a timeout is always
+  enforced and there is no "no-timeout" value (Q6).
+
+## Resolved Post-Implementation Questions
+
+These were raised after the first Phase 3 implementation pass and are now
+resolved. The resolutions are folded into Implementation Plan steps 3 and 7,
+the sandbox note in Proposed Improvements, and the Implementation Hints below.
+
+- **Q1 — Live-provider testing / setting the prompt from the CLI.**
+  Add a minimal `--prompt <text>` CLI argument to `main.rs` (a single optional
+  arg; no full CLI/clap parse in Phase 3). It falls back to the hardcoded demo
+  prompt when absent. This lets a real `write`/`glob`/`read` ReAct round-trip be
+  driven against Ollama/OpenRouter per invocation instead of only the fixed
+  "sky looks blue" demo string. (See step 7.)
+- **Q2 — `ReadFileArgs` `offset`/`limit`: bytes or lines?**
+  A `mode`/`unit` selector `{ Bytes, Lines, Chars }` (default `Bytes`) is added
+  so the model chooses the unit. `Chars` counts **UTF-8 code points** via lossy
+  decode — one can only know what a "char" is given an encoding, and Rust
+  `str`/`char` semantics are defined for UTF-8 only; for binary files only
+  `Bytes` is meaningful. No encoding *detection* is added (out of scope). The
+  tool description tells the model the units. (See step 3.)
+- **Q3 — `GlobArgs` `pattern`: glob chars or regexp?**
+  Glob (wildcard) dialect only (`*`, `?`, `**`, `[...]`), never regexp, matching
+  the `glob` crate and the blueprint example `src/**/*.rs`. Documented in the
+  tool description. (See step 3.)
+- **Q4 — default `Tool::needs_approval()` should be `true`.**
+  Safe-by-default: any tool requires approval unless it explicitly opts out with
+  `false` (read-only marker). A future tool like `clarify` overrides as needed;
+  a forgotten mutating tool is denied, never silently auto-approved. (See
+  step 3.)
+- **Q5 — `read`/`glob` returning `false` is the *interim* (fake) flow.**
+  The loop protocol is uniform — every tool pauses at `ToolPending` and receives
+  `ApproveTool`/`DenyTool`/`Stop`. `needs_approval() == false` on `read`/`glob`
+  is only the *driver hint* that makes it auto-approve today; it is **not** the
+  final policy. Once the Phase 6 sandbox lands, an out-of-workspace `read`/
+  `glob` will require approval, so even read-only tools can report
+  `needs_approval() == true` per-path. Mark the `false` with a comment stating
+  it is interim/fake and path-independent-for-now. (See step 3 + sandbox note.)
+- **Q6 — `timeout_secs` keeps `0 == use-default` (u64), not `Option<u64>`.**
+  `0` is the "use `DEFAULT_TIMEOUT_SECS`" sentinel. Comment explicitly that a
+  timeout is **always enforced — there is no "no-timeout" value**; `0` merely
+  selects the module default. `#[serde(default = "default_timeout")]` gives the
+  same clean default for parsed args without an `Option`. (See step 3.)
+- **Q7 — `glob` base directory is CWD-relative.**
+  Patterns resolve relative to the process CWD (`src/**/*.rs`); absolute-path
+  patterns (`/abs/path/*.rs`) search outside the workspace. Phase 3 has **no
+  workspace root** concept yet — a base directory arg and the notion of
+  "in/out of workspace" are deferred to the Phase 6 sandbox
+  (see Proposed Improvements). Document the CWD-relative behavior in the tool
+  description. (See step 3.)

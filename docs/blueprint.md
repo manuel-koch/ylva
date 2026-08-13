@@ -514,6 +514,15 @@ the outer loop never sees raw deltas and stays the sole writer of `Context`.
 If the stream ends with incomplete tool JSON, the accumulator emits an error
 with the raw fragment for inspection.
 
+> **Phase 3 outcome (reconciles the Phase 2 "provider does not emit Delta"
+> refinement):** `Provider::chat` now takes a `tools: Vec<ToolSchema>` parameter
+> and the request body sends `tools` (+ `tool_choice: "auto"`). The provider
+> **returns to emitting `StreamEvent::Delta`** for `delta.tool_calls` chunks
+> (raw fragments only, never assembled) — superseding the Phase 2 bullet — while
+> the `ToolCallAccumulator` and assembly stay in the **agent's streaming task**,
+> exactly as this §4A refinement and §7 Phase 2 Step 3 refinement describe.
+> Chunks with neither `content` nor `tool_calls` are still skipped.
+
 **SSE robustness & non-tool-call deltas (Spike 3):** local validation against Ollama
 and live OpenRouter (`deepseek/deepseek-v4-flash-0731`, `moonshotai/kimi-k2.6`) showed
 two parser-facing facts the unified provider must respect:
@@ -691,9 +700,14 @@ impl ToolCallAccumulator {
 }
 
 /// Pending tool awaiting approval and execution.
+///
+/// A per-tool timeout is **always enforced** — there is no "no-timeout" value.
+/// `timeout_secs == 0` selects the tool/module default (5s for file I/O), never
+/// "unbounded" (Q6). Parsed args use `#[serde(default = "default_timeout")]`
+/// rather than `Option<u64>`, consistent with `BashArgs.timeout_secs`.
 struct PendingTool {
     call: AssembledToolCall,
-    timeout_secs: Option<u64>,
+    timeout_secs: u64,
 }
 
 impl PendingTool {
@@ -1139,9 +1153,19 @@ Never hand-write JSON schemas. Use `schemars` to derive them from structs.
 use schemars::{schema_for, JsonSchema};
 use serde::Deserialize;
 
+#[derive(JsonSchema, Deserialize, Default)]
+enum ReadMode {
+    #[default]
+    Bytes, // default; byte offset/limit, binary-safe
+    Lines, // lossy-decode, then line offset/limit
+    Chars, // UTF-8 code points (lossy decode)
+}
+
 #[derive(JsonSchema, Deserialize)]
 struct ReadFileArgs {
     path: String,
+    #[serde(default)]
+    mode: ReadMode,          // default Bytes (see ReadMode); model chooses the unit
     #[serde(default)]
     offset: Option<usize>,
     #[serde(default)]
@@ -1182,6 +1206,13 @@ registry.register("read", schema_for!(ReadFileArgs), read_file_handler);
 registry.register("bash", schema_for!(BashArgs), bash_handler);
 registry.register("edit", schema_for!(EditFileArgs), edit_file_handler);
 ```
+
+**Glob dialect and base directory:** the `glob` tool accepts only the glob
+(wildcard) dialect — `*`, `?`, `**`, `[...]` — never regexp, matching the `glob`
+crate and the example `src/**/*.rs` (Q3). Patterns resolve **relative to the
+process CWD**; absolute-path patterns (`/abs/path/*.rs`) reach outside the
+workspace. Phase 3 defines **no workspace root** — a base-directory argument and
+the notion of "in/out of workspace" arrive with the sandbox in Phase 6 (Q7).
 
 **`clarify` tool:** An interactive tool that lets the model ask the user an
 open-ended question when it is uncertain. The agent loop pauses, the TUI
@@ -1271,6 +1302,15 @@ A terminal agent that can run `rm -rf` or `curl | sh` must ask for approval.
 | `write`, `edit` | `Ask` (show diff first)                                                 |
 | `bash`, `git push`        | `Strict` (modal confirmation)                                           |
 | `clarify`                 | `Interactive` (rendered as question banner; user answers via input box) |
+
+**Interim vs. path-based approval (Q5):** the `Auto` level for `read`/`glob` is an
+**interim/fake** marker for Phase 3 — the loop protocol is uniform (every tool
+pauses at `ToolPending` and receives `ApproveTool`/`DenyTool`/`Stop`; the driver
+just auto-approves `read`/`glob`). This is **not** the final policy: once the
+Phase 6 sandbox defines a workspace root, approval becomes **path-dependent** —
+an out-of-workspace `read`/`glob` will require approval, so those tools can
+report `needs_approval() == true` per-path. Phase 3 marks them `false` only as a
+read-only convenience, never a permanent exemption.
 
 **Flow:**
 
@@ -2282,16 +2322,26 @@ top of a proven agent loop.
 
 ### Phase 3: The Agent Loop with Tools (Still Headless)
 
-- [ ] **Goal:** First working ReAct agent with file system tools and faked approval (no effective human approval in CLI-only mode; see Phase 3 plan).
+- [x] **Goal:** first working ReAct agent with file-system tools and **faked
+      approval** (no effective human approval in CLI-only mode; see plan).
 
-- [ ] Add `schemars` and `ToolRegistry`
+- [x] **Minimal `--prompt` (Q1):** `main.rs` accepts a single optional
+      `--prompt <text>` argument (no full CLI/clap parse in Phase 3) so a real
+      `write`/`glob`/`read` ReAct round-trip can be driven against Ollama/
+      OpenRouter per invocation; it falls back to a hardcoded demo prompt when
+      absent. This refines the broader "no CLI in Phase 3" stance to
+      "no CLI *surface/config* — a single `--prompt` arg is allowed for live
+      tool demos"; full `--provider`/`--auto-approve-*`/`--format` arrive with
+      the Phase 5/7 CLI.
 
-- [ ] Build 3 core tools with typed arguments:
+- [x] Add `schemars` and `ToolRegistry`
+
+- [x] Build 3 core tools with typed arguments:
   - `read`
   - `write`
   - `glob`
 
-- [ ] Implement ReAct loop inside the `select!` block with explicit `AgentMode` state machine
+- [x] Implement ReAct loop inside the `select!` block with explicit `AgentMode` state machine
       (`Idle`, `Streaming`, `ToolPending`):
 
   1. Stream LLM response
@@ -2305,18 +2355,20 @@ top of a proven agent loop.
   Multiple tool calls in one message are queued (`VecDeque<PendingTool>`), drained
   **serially**, and re-prompt only after the queue empties (see §4B).
 
-- [ ] Show tool execution status in the headless UI (print to stderr)
+- [x] Show tool execution status in the headless UI (print to stderr)
 
-- [ ] Add `ToolError` variant to `UiUpdate` for failed tool invocations
+- [x] Add `ToolError` variant to `UiUpdate` for failed tool invocations
 
-- [ ] Extract `AgentLoop` as a reusable struct (provider + registry + context)
+- [x] Extract `AgentLoop` as a reusable struct (provider + registry + context)
       so Phase 6 child agents can instantiate it with a restricted tool whitelist
 
-- [ ] Prevent infinite loops: max iterations = 15 (configurable per engine)
+- [x] Prevent infinite loops: max iterations = 15 (configurable per engine)
 
-- [ ] No TUI yet. Approval flow is stdin-based or hardcoded for now.
+- [x] No TUI yet. Approval flow is **hardcoded, not interactive** (CLI-only): every
+      tool call pauses for `ApproveTool`/`DenyTool`/`Stop`; the driver auto-approves
+      `read`/`glob` and denies `write`, denying fed back to the model as a `ToolError`.
 
-**Key crates:** `schemars`, `serde_json`, `walkdir`, `tempfile`
+**Key crates:** `schemars`, `serde_json`, `glob`, `tempfile`
 
 ### Phase 4: TUI Skeleton (Rendering Layer Added)
 
