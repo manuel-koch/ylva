@@ -23,6 +23,7 @@ use crate::agent::{DeltaChunk, Message, StreamEvent};
 use schemars::JsonSchema;
 use serde::Serialize;
 
+pub mod http;
 pub mod openai_provider;
 
 pub use openai_provider::OpenAiProvider;

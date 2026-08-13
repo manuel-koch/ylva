@@ -45,7 +45,8 @@ Use `ylva --version` to print build provenance (`Version`, `Commit`,
   retries, base 1 s, max 30 s, jitter), honoring `Retry-After`; never retried
   mid-stream. Terminal pre-stream errors include a bounded snippet of the
   backend's response body (e.g. Ollama's `model not found`), not just the
-  status code.
+  status code. The retry/backoff helpers live in the generic
+  `src/llm/http.rs` module, shared by providers.
 - Cancellation: firing the `CancellationToken` drops the request future, closing
   the underlying TCP socket promptly (verified hermetically via the mock
   server's live-connection counter)

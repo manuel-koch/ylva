@@ -12,23 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
 use eventsource_stream::Eventsource;
 use futures::future::BoxFuture;
 use futures::StreamExt;
+use reqwest::header::{HeaderMap, AUTHORIZATION};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{DeltaChunk, Message, StreamEvent};
 use crate::llm::{serialize_messages, Provider, ToolSchema};
-
-/// Maximum number of pre-stream retries (after the initial attempt).
-const MAX_RETRIES: usize = 3;
-/// Base backoff for the first retry, in seconds.
-const RETRY_BASE_SECONDS: u64 = 1;
-/// Upper bound on a single backoff delay, in seconds.
-const RETRY_MAX_SECONDS: u64 = 30;
 
 /// A streaming provider targeting the OpenAI chat-completions spec, serving
 /// both OpenRouter and local Ollama via constructor configuration.
@@ -81,7 +73,6 @@ impl Provider for OpenAiProvider {
         tools: Vec<ToolSchema>,
         cancel: CancellationToken,
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
-        let completions_url = self.completions_url();
         let model = self.model.clone();
         let api_key = self.api_key.clone();
         let client = self.client.clone();
@@ -100,9 +91,19 @@ impl Provider for OpenAiProvider {
                 request_body["tools"] = serde_json::Value::Array(tools);
                 request_body["tool_choice"] = serde_json::json!("auto");
             }
-            let response =
-                send_with_retry(&client, &completions_url, &api_key, &request_body, &cancel)
-                    .await?;
+            let completions_url = self.completions_url();
+            let mut headers = HeaderMap::new();
+            if let Some(key) = &api_key {
+                headers.insert(AUTHORIZATION, format!("Bearer {key}").parse()?);
+            }
+            let response = super::http::post_with_retry(
+                &client,
+                &completions_url,
+                &headers,
+                &request_body,
+                &cancel,
+            )
+            .await?;
 
             let (tx, rx) = mpsc::channel(16);
             tokio::spawn(async move {
@@ -220,143 +221,6 @@ pub(crate) fn parse_sse_payload(data: &str) -> Option<StreamEvent> {
     }
 
     None
-}
-
-/// Perform the initial `POST` with bounded exponential backoff retry for
-/// pre-stream failures (`429`/`5xx`/connect), honoring `Retry-After` when
-/// present. Returns the first successful response or a terminal [`anyhow::Error`].
-async fn send_with_retry(
-    client: &reqwest::Client,
-    completions_url: &str,
-    api_key: &Option<String>,
-    body: &serde_json::Value,
-    cancel: &CancellationToken,
-) -> anyhow::Result<reqwest::Response> {
-    let mut attempts = 0usize;
-    loop {
-        let mut request = client.post(completions_url).json(body);
-        if let Some(key) = api_key {
-            request = request.bearer_auth(key);
-        }
-
-        let response = match request.send().await {
-            Ok(response) => response,
-            Err(error) => {
-                if attempts >= MAX_RETRIES {
-                    return Err(anyhow::anyhow!(
-                        "request to {completions_url} failed after {MAX_RETRIES} retries: {error}"
-                    ));
-                }
-                attempts += 1;
-                if sleep_cancel_aware(cancel, retry_delay(attempts, None))
-                    .await
-                    .is_none()
-                {
-                    return Err(anyhow::anyhow!("cancelled while waiting to retry"));
-                }
-                continue;
-            }
-        };
-
-        let status = response.status();
-        if status.is_success() {
-            return Ok(response);
-        }
-
-        if !should_retry(status) {
-            let detail = response_body_detail(response).await;
-            return Err(anyhow::anyhow!(
-                "provider returned HTTP {}{} for {completions_url}",
-                status.as_u16(),
-                detail,
-            ));
-        }
-
-        if attempts >= MAX_RETRIES {
-            let detail = response_body_detail(response).await;
-            return Err(anyhow::anyhow!(
-                "provider returned HTTP {}{} for {completions_url} after {MAX_RETRIES} retries",
-                status.as_u16(),
-                detail,
-            ));
-        }
-
-        let retry_after = response
-            .headers()
-            .get("retry-after")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<u64>().ok());
-        attempts += 1;
-        if sleep_cancel_aware(cancel, retry_delay(attempts, retry_after))
-            .await
-            .is_none()
-        {
-            return Err(anyhow::anyhow!("cancelled while waiting to retry"));
-        }
-    }
-}
-
-/// Whether an HTTP status is worth a pre-stream retry: rate limit or server
-/// error (the provider never retries once streaming has begun).
-fn should_retry(status: reqwest::StatusCode) -> bool {
-    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
-}
-
-/// Read a bounded snippet of the response body to attach to a pre-stream error
-/// message, so backend-specific explanations (e.g. Ollama's `model not found`)
-/// surface instead of a bare status code. Returns an empty string when the body
-/// cannot be read or is blank.
-async fn response_body_detail(response: reqwest::Response) -> String {
-    match response.bytes().await {
-        Ok(body) => {
-            let text = String::from_utf8_lossy(&body);
-            let text = text.trim();
-            if text.is_empty() {
-                return String::new();
-            }
-            let snippet: String = text.chars().take(512).collect();
-            format!(": {snippet}")
-        }
-        Err(_) => String::new(),
-    }
-}
-
-/// Compute the next pre-stream backoff delay. `Retry-After` (in seconds) wins
-/// when present; otherwise exponential backoff (`base * 2^(attempt-1)`) capped
-/// at [`RETRY_MAX_SECONDS`], with a small jitter.
-fn retry_delay(attempt: usize, retry_after: Option<u64>) -> Duration {
-    if let Some(seconds) = retry_after {
-        return Duration::from_secs(seconds.min(RETRY_MAX_SECONDS));
-    }
-    let exponent = attempt.saturating_sub(1).min(63);
-    let base = RETRY_BASE_SECONDS.saturating_mul(1u64 << exponent);
-    let capped = base.min(RETRY_MAX_SECONDS);
-    let jitter = jitter_fraction();
-    Duration::from_millis((capped as f64 * jitter * 1000.0) as u64)
-}
-
-/// A tiny deterministic-per-call jitter in `[0, 1)`, seeded from the wall clock
-/// so successive attempts back off differently without a dedicated RNG crate.
-fn jitter_fraction() -> f64 {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    let mut state = (nanos & 0xFFFF_FFFF) as u64 | 1;
-    state ^= state >> 12;
-    state ^= state << 25;
-    state ^= state >> 27;
-    state.wrapping_mul(0x2545_F491_4F6C_DD1D) as f64 / u64::MAX as f64
-}
-
-/// Sleep for `delay` unless `cancel` fires first; returns `Some` only when the
-/// full delay elapsed, so a stop aborts a retry wait promptly.
-async fn sleep_cancel_aware(cancel: &CancellationToken, delay: Duration) -> Option<()> {
-    tokio::select! {
-        biased;
-        _ = cancel.cancelled() => None,
-        _ = tokio::time::sleep(delay) => Some(()),
-    }
 }
 
 #[cfg(test)]
@@ -504,34 +368,5 @@ mod tests {
         // The reasoning-only delta carries no content and is skipped; only the
         // final `content` delta surfaces as user-visible text.
         assert_eq!(texts, vec!["final"]);
-    }
-
-    #[test]
-    fn retry_delay_honors_retry_after() {
-        assert_eq!(retry_delay(1, Some(2)), Duration::from_secs(2));
-        assert_eq!(
-            retry_delay(5, Some(9999)),
-            Duration::from_secs(RETRY_MAX_SECONDS)
-        );
-    }
-
-    #[test]
-    fn retry_delay_backs_off_bounded_by_max() {
-        assert!(retry_delay(1, None) < Duration::from_secs(2));
-        let first = retry_delay(2, None);
-        assert!(first >= Duration::from_millis(1));
-        let late = retry_delay(40, None);
-        assert!(late <= Duration::from_secs(RETRY_MAX_SECONDS));
-    }
-
-    #[test]
-    fn should_retry_marks_ratelimit_and_server_errors() {
-        use reqwest::StatusCode;
-        assert!(should_retry(StatusCode::TOO_MANY_REQUESTS));
-        assert!(should_retry(StatusCode::INTERNAL_SERVER_ERROR));
-        assert!(should_retry(StatusCode::SERVICE_UNAVAILABLE));
-        assert!(!should_retry(StatusCode::OK));
-        assert!(!should_retry(StatusCode::BAD_REQUEST));
-        assert!(!should_retry(StatusCode::UNAUTHORIZED));
     }
 }
