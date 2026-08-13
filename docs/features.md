@@ -5,6 +5,11 @@
 - Rust-based terminal AI agent application, runnable as a CLI
 - Implements agent-harness functionality
 
+## Build Info
+
+Use `ylva --version` to print build provenance (`Version`, `Commit`,
+`Built`, `Profile`).
+
 ## Current: headless agent (the kernel + real HTTP provider)
 
 - Headless agent loop (`AgentLoop`): outer `tokio::select!` task owning

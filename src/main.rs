@@ -23,6 +23,11 @@ use ylva::{default_registry, AgentCommand, AgentLoop, Tool, UiUpdate};
 const DEFAULT_DEMO_PROMPT: &str = "What makes the sky look blue?";
 
 fn main() {
+    if std::env::args().any(|arg| arg == "--version") {
+        println!("{}", ylva::BUILD_INFO.render());
+        return;
+    }
+
     let provider: Arc<dyn Provider> = select_provider();
     let registry = Arc::new(default_registry());
     let (mut agent, mut ui_rx) = AgentLoop::new(provider, Arc::clone(&registry));

@@ -2257,6 +2257,12 @@ top of a proven agent loop.
 
 - [x] **Print final conversation history** to verify state transitions.
 
+- [x] **Build provenance surfaced via `--version`:** `ylva --version` prints
+      `Version` / `Commit` / `Built` / `Profile` (from the `BUILD_INFO` const in
+      `src/build_info.rs`, compiled in via `build.rs`) to stdout and exits `0`
+      before the runtime or provider are touched. The TUI "About" popup that renders
+      the same values is Phase 4.
+
 **Success criteria:**
 
 - Steering never aborts a live stream and does not panic or deadlock.

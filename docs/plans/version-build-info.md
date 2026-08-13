@@ -42,9 +42,9 @@ Concretely:
   implementation). The struct derives `Debug, Clone, Copy, PartialEq, Eq`
   and is populated from compile-time `env!`/`option_env!` values.
 - `version` is sourced from `CARGO_PKG_VERSION` (`Cargo.toml`,
-  currently `0.3.0`).
-- `git_commit` is the 40-character SHA-1 of `HEAD` at compile time,
-  derived from `git rev-parse HEAD` and injected via a `build.rs` (or
+  currently `0.3.1`).
+- `git_commit` is the short (8-character) SHA-1 of `HEAD` at compile time,
+  derived from `git rev-parse --short=8 HEAD` and injected via a `build.rs` (or
   `cargo:rerun-if-changed` + a committed git command) so the value lives
   in the binary. Fall back to `"unknown"` when not in a git checkout
   (e.g. a `cargo install` from a tarball).
@@ -118,8 +118,9 @@ followed by `cargo test`.
 ## Implementation Plan
 
 1. **Add a `build.rs`** at the repo root that:
-   - Runs `git rev-parse HEAD` and writes the trimmed SHA-1 (40 hex chars)
-     to `OUT_DIR` as `GIT_COMMIT`. When `git` is missing or the working
+   - Runs `git rev-parse --short=8 HEAD` and writes the trimmed short SHA-1
+     (8 hex chars — short form, per adopted decision) to `OUT_DIR` as
+     `GIT_COMMIT`. When `git` is missing or the working
      directory is not a git checkout (`!Command::new("git").status().is_ok()`
      or the rev-parse fails), write the literal string `"unknown"`.
    - Writes the current UTC timestamp formatted as `"%Y-%m-%dT%H:%M:%S+Z"`
@@ -154,7 +155,7 @@ followed by `cargo test`.
    from `src/main.rs`). Add a small `tests/build_info.rs` integration
    test that:
    - Asserts `BUILD_INFO.version` equals `env!("CARGO_PKG_VERSION")`.
-   - Asserts `git_commit` is either 40 hex chars or the literal
+   - Asserts `git_commit` is either 8 hex chars or the literal
      `"unknown"`.
    - Asserts `build_timestamp_utc` matches the regex
      `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+Z$` (anchor the `+Z` so
@@ -192,10 +193,10 @@ followed by `cargo test`.
      `cargo run --quiet -- --version` (prefer `assert_cmd` for
      hermetic capture; if it is not already a dev-dependency, add it
      to `Cargo.toml`).
-      - Asserts the exit code is `0`, stdout contains the `version:`
-        line with `0.3.0`, contains a `commit:` line with either a
-        40-char hex hash or `unknown`, a `built:` line matching the
-        timestamp regex above, and a `profile:` line with `debug` or
+      - Asserts the exit code is `0`, stdout contains the `Version:`
+        line with `v0.3.1`, contains a `Commit:` line with either a
+        8-char hex hash or `unknown`, a `Built:` line matching the
+        timestamp regex above, and a `Profile:` line with `debug` or
         `release`.
       - Asserts the binary **does not** emit any provider wiring to
         stderr in this path (i.e. no `[ylva] provider=…` line — the
@@ -298,7 +299,7 @@ followed by `cargo test`.
   decide how to present it.
 - **Test the `BuildInfo` shape, not the values**: unit tests should
   not assert a specific SHA-1 or timestamp (those change on every
-  commit). Assert the *shape*: 40 hex chars or `"unknown"`, the
+  commit). Assert the *shape*: 8 hex chars or `"unknown"`, the
   timestamp regex, and the version equals `CARGO_PKG_VERSION`.
 - **Spawning the binary in integration tests**: the existing `tests/`
   tree uses `assert_cmd` only if it is already a dev-dep; check
