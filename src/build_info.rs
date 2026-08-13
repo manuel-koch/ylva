@@ -23,7 +23,7 @@
 //!
 //! - `YLVA_GIT_COMMIT` — short (8-char) SHA-1 of `HEAD` at compile time, or
 //!   `"unknown"` when not built in a git checkout.
-//! - `YLVA_BUILD_TIMESTAMP_UTC` — UTC compile time, `%Y-%m-%dT%H:%M:%S+Z`.
+//! - `YLVA_BUILD_TIMESTAMP_UTC` — UTC compile time, `%Y-%m-%dT%H:%M:%SZ`.
 //! - `YLVA_PROFILE` — `debug` or `release`.
 //!
 //! `[env!]` is used so a missing value is a compile error rather than a silent
@@ -40,7 +40,7 @@ pub struct BuildInfo {
     pub version: &'static str,
     /// Short (8-char) SHA-1 of `HEAD` at compile time, or `"unknown"`.
     pub git_commit: &'static str,
-    /// UTC compile time in `%Y-%m-%dT%H:%M:%S+Z` shape.
+    /// UTC compile time in `%Y-%m-%dT%H:%M:%SZ` shape.
     pub build_timestamp_utc: &'static str,
     /// Build profile: `debug` or `release`.
     pub profile: &'static str,
@@ -75,7 +75,7 @@ mod tests {
         BuildInfo {
             version: "9.9.9",
             git_commit: "01234567",
-            build_timestamp_utc: "2026-08-13T16:45:00+Z",
+            build_timestamp_utc: "2026-08-13T16:45:00Z",
             profile: "debug",
         }
     }
@@ -85,7 +85,7 @@ mod tests {
         let rendered = fixture().render();
         assert_eq!(
             rendered,
-            "Ylva - Agent-Harness\nVersion: v9.9.9\nCommit:  01234567\nBuilt:   2026-08-13T16:45:00+Z\nProfile: debug"
+            "Ylva - Agent-Harness\nVersion: v9.9.9\nCommit:  01234567\nBuilt:   2026-08-13T16:45:00Z\nProfile: debug"
         );
         assert!(rendered.starts_with("Ylva - Agent-Harness\n"));
         assert!(rendered.contains("\nVersion: v"));

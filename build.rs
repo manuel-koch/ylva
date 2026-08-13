@@ -17,7 +17,7 @@
 // `src/build_info.rs`). The env var names are the contract:
 //
 //   YLVA_GIT_COMMIT         Short (8-char) SHA-1 of HEAD, or "unknown"
-//   YLVA_BUILD_TIMESTAMP_UTC UTC compile time as "%Y-%m-%dT%H:%M:%S+Z"
+//   YLVA_BUILD_TIMESTAMP_UTC UTC compile time as "%Y-%m-%dT%H:%M:%SZ"
 //   YLVA_PROFILE             Cargo build profile ("debug"/"release")
 
 use std::env;
@@ -30,7 +30,7 @@ fn main() {
     let git_commit = git_short_commit_hash();
     println!("cargo:rustc-env=YLVA_GIT_COMMIT={git_commit}");
 
-    let utc_format = format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]+Z");
+    let utc_format = format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z");
     let build_timestamp_utc = time::OffsetDateTime::now_utc()
         .format(&utc_format)
         .expect("UTC timestamp formats with the fixed description");

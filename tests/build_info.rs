@@ -1,3 +1,6 @@
+mod common;
+
+use common::matches_utc_shape;
 use ylva::BUILD_INFO;
 
 /// The compiled-in `version` must equal the manifest's package version.
@@ -18,33 +21,12 @@ fn git_commit_is_short_sha_or_unknown() {
     );
 }
 
-/// `build_timestamp_utc` matches `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+Z$`
-/// (the trailing `+Z` is literal — a `+00:00` style must fail).
+/// `build_timestamp_utc` matches `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\Z$`
+/// (the trailing `Z` is literal — a `+00:00` style must fail).
 #[test]
 fn build_timestamp_utc_matches_utc_shape() {
     let timestamp = BUILD_INFO.build_timestamp_utc;
     assert!(matches_utc_shape(timestamp), "got: {timestamp:?}");
-}
-
-fn matches_utc_shape(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    if bytes.len() != 21 {
-        return false;
-    }
-    let digit_groups = [(0, 4), (5, 2), (8, 2), (11, 2), (14, 2), (17, 2)];
-    for (offset, count) in digit_groups {
-        let slice = &bytes[offset..offset + count];
-        if !slice.iter().all(u8::is_ascii_digit) {
-            return false;
-        }
-    }
-    bytes[4] == b'-'
-        && bytes[7] == b'-'
-        && bytes[10] == b'T'
-        && bytes[13] == b':'
-        && bytes[16] == b':'
-        && bytes[19] == b'+'
-        && bytes[20] == b'Z'
 }
 
 /// `profile` is one of the two Cargo build profiles.

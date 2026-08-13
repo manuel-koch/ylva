@@ -1,5 +1,9 @@
 use std::process::Command;
 
+mod common;
+
+use common::matches_utc_shape;
+
 /// `--version` prints build provenance to stdout and exits 0 immediately,
 /// short-circuiting before any provider wiring, Tokio runtime, or agent loop.
 #[test]
@@ -73,25 +77,4 @@ fn version_flag_wins_over_prompt_arg() {
         "version path must not emit provider wiring: {:?}",
         String::from_utf8_lossy(&output.stderr)
     );
-}
-
-fn matches_utc_shape(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    if bytes.len() != 21 {
-        return false;
-    }
-    let digit_groups = [(0, 4), (5, 2), (8, 2), (11, 2), (14, 2), (17, 2)];
-    for (offset, count) in digit_groups {
-        let slice = &bytes[offset..offset + count];
-        if !slice.iter().all(u8::is_ascii_digit) {
-            return false;
-        }
-    }
-    bytes[4] == b'-'
-        && bytes[7] == b'-'
-        && bytes[10] == b'T'
-        && bytes[13] == b':'
-        && bytes[16] == b':'
-        && bytes[19] == b'+'
-        && bytes[20] == b'Z'
 }

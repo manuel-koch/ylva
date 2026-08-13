@@ -12,12 +12,40 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Test-support module: compiled into every integration-test crate via
+// `mod common;`, but only some of its items are used by any given test.
+// Allow dead code so a test binary that pulls in `mod common;` without
+// using every helper does not warn about the ones it never references.
+#![allow(dead_code)]
+
 // Cargo compiles this file as a top-level test crate named 'common'; the attribute forces the submodule resolution to match what the other tests expect via `mod common;`. See AGENTS.md "Module layout" for context.
 #[path = "common/mock_llm_server.rs"]
 pub mod mock_llm_server;
 
 use tokio::sync::mpsc;
 use ylva::UiUpdate;
+
+/// Whether `value` matches `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$`
+/// (the trailing `Z` is literal — a `+00:00` style must fail).
+pub fn matches_utc_shape(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 20 {
+        return false;
+    }
+    let digit_groups = [(0, 4), (5, 2), (8, 2), (11, 2), (14, 2), (17, 2)];
+    for (offset, count) in digit_groups {
+        let slice = &bytes[offset..offset + count];
+        if !slice.iter().all(u8::is_ascii_digit) {
+            return false;
+        }
+    }
+    bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[10] == b'T'
+        && bytes[13] == b':'
+        && bytes[16] == b':'
+        && bytes[19] == b'Z'
+}
 
 /// Consumes `ui_rx` until `done` matches an update, returning every consumed
 /// update in order. Panics if more than `budget` updates pass without a match
