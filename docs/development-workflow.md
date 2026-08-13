@@ -65,3 +65,25 @@ When executing a plan:
 
 A plan step is "done" only when its docs are updated too. Partial completion is
 not completion.
+
+## Integration-test shared helpers (`tests/common`)
+
+Shared test-support code lives in `tests/common.rs` and is pulled into each
+integration test (`tests/*.rs`) via `mod common;`, with helpers reached as
+`common::<item>`.
+
+- **Location.** `tests/common.rs`, **not** `tests/common/mod.rs` — a
+  `tests/common.rs` + `tests/common/` directory pair is the established layout;
+  adding `tests/common/mod.rs` collides and triggers `E0761]::file for module
+  \`common\` found at both ...`.
+- **Submodules.** Larger helpers go in `tests/common/<name>.rs` and are wired
+  from `tests/common.rs` with `#[path = "common/<name>.rs"] pub mod <name>;`
+  (see `mock_llm_server`).
+- **Dead code.** Cargo compiles `tests/common.rs` into *every* test crate that
+  declares `mod common;`, so any helper unused by a given test crate would warn
+  as dead code. Therefore `tests/common.rs` and every submodule under
+  `tests/common/` must start with `#![allow(dead_code)]`
+  (see `tests/common/mock_llm_server.rs` for the established form).
+- **No duplication.** Add a new shared helper to `tests/common.rs` (small) or a
+  new `tests/common/<name>.rs` submodule (larger); never copy a helper across
+  test files. SSOT applies here.

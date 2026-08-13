@@ -84,6 +84,7 @@ re-exported through `src/lib.rs` — `tests/*.rs` cannot `use` items from `src/m
 Keep `main.rs` thin (event loop, key handling).
 
 **Module layout.** Use Rust 2018+ file-per-module style: `foo.rs`, not `foo/mod.rs`.
+For the integration-test shared module see [Integration-test shared helpers (`tests/common`)](./docs/development-workflow.md#integration-test-shared-helpers-testscommon).
 
 ## Guidelines for Implementation, Testing and Bugfixing
 
