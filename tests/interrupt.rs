@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ylva::{
-    AgentCommand, AgentLoop, AssistantStatus, Message, MockProvider, UiUpdate,
-    DEFAULT_SYSTEM_PROMPT,
+    AgentCommand, AgentLoop, AssistantStatus, Message, MockProvider, ToolRegistry, UiUpdate,
+    DEFAULT_SYSTEM_PROMPT, TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
 
 mod common;
@@ -16,7 +16,7 @@ async fn stop_aborts_stream_flushes_partial_and_clears_pending_steers() {
         vec!["par-".into(), "tial".into(), "!".into()],
         Duration::from_millis(10),
     );
-    let (mut agent, mut ui_rx) = AgentLoop::new(Arc::new(provider));
+    let (mut agent, mut ui_rx) = AgentLoop::new(Arc::new(provider), Arc::new(ToolRegistry::new()));
 
     agent
         .send_command(AgentCommand::Prompt("first".into()))
@@ -68,6 +68,9 @@ async fn stop_aborts_stream_flushes_partial_and_clears_pending_steers() {
             Message::System {
                 content: DEFAULT_SYSTEM_PROMPT.to_string(),
             },
+            Message::System {
+                content: TOOL_PROTOCOL_SYSTEM_PROMPT.to_string(),
+            },
             Message::User {
                 content: "first".to_string(),
             },
@@ -86,7 +89,7 @@ async fn stop_of_two_tokened_stream_commits_only_first_token() {
         vec!["only-".into(), "rest".into()],
         Duration::from_millis(10),
     );
-    let (mut agent, mut ui_rx) = AgentLoop::new(Arc::new(provider));
+    let (mut agent, mut ui_rx) = AgentLoop::new(Arc::new(provider), Arc::new(ToolRegistry::new()));
 
     agent.send_command(AgentCommand::Prompt("go".into())).await;
     let handle = agent.run();
@@ -111,6 +114,9 @@ async fn stop_of_two_tokened_stream_commits_only_first_token() {
         &[
             Message::System {
                 content: DEFAULT_SYSTEM_PROMPT.to_string(),
+            },
+            Message::System {
+                content: TOOL_PROTOCOL_SYSTEM_PROMPT.to_string(),
             },
             Message::User {
                 content: "go".to_string(),

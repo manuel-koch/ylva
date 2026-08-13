@@ -7,11 +7,11 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use ylva::{
     AgentCommand, AgentLoop, AssistantStatus, Message, OpenAiProvider, Provider, StreamEvent,
-    UiUpdate, DEFAULT_SYSTEM_PROMPT,
+    ToolRegistry, UiUpdate, DEFAULT_SYSTEM_PROMPT, TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
 
 use common::collect_until;
-use common::mock_llm_server::{content_frame, MockLlmConfig, MockLlmServer};
+use common::mock_llm_server::{content_frame, tool_call_frame, MockLlmConfig, MockLlmServer};
 
 /// A provider (`Provider` trait object) pointed at a running [`MockLlmServer`]
 /// with a fixed model. Trait-typed so consumers are decoupled from the concrete
@@ -61,7 +61,11 @@ async fn text_streaming_emits_chunks_in_order_then_done() {
 
     let provider = openai_provider_for(&server);
     let mut rx = provider
-        .chat(Vec::new(), tokio_util::sync::CancellationToken::new())
+        .chat(
+            Vec::new(),
+            Vec::new(),
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .unwrap_or_else(|error| {
             panic!("provider chat should succeed against a 200 mock: {error:#?}")
@@ -88,7 +92,7 @@ async fn cancel_mid_stream_yields_cancelled_and_releases_connection() {
     let provider = openai_provider_for(&server);
     let cancel = tokio_util::sync::CancellationToken::new();
     let mut rx = provider
-        .chat(Vec::new(), cancel.clone())
+        .chat(Vec::new(), Vec::new(), cancel.clone())
         .await
         .expect("provider chat should succeed");
 
@@ -131,7 +135,11 @@ async fn retry_after_500_then_succeeds() {
 
     let provider = openai_provider_for(&server);
     let mut rx = provider
-        .chat(Vec::new(), tokio_util::sync::CancellationToken::new())
+        .chat(
+            Vec::new(),
+            Vec::new(),
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .expect("chat should eventually succeed after a retry");
 
@@ -158,7 +166,11 @@ async fn persistent_500_yields_pre_stream_error() {
     let provider = openai_provider_for(&server);
     let result = tokio::time::timeout(
         Duration::from_secs(40),
-        provider.chat(Vec::new(), tokio_util::sync::CancellationToken::new()),
+        provider.chat(
+            Vec::new(),
+            Vec::new(),
+            tokio_util::sync::CancellationToken::new(),
+        ),
     )
     .await
     .expect("retries must finish within timeout");
@@ -185,7 +197,11 @@ async fn non_retryable_status_reports_error_with_backend_body() {
 
     let provider = openai_provider_for(&server);
     let message = provider
-        .chat(Vec::new(), tokio_util::sync::CancellationToken::new())
+        .chat(
+            Vec::new(),
+            Vec::new(),
+            tokio_util::sync::CancellationToken::new(),
+        )
         .await
         .expect_err("a 4xx is a terminal pre-stream failure")
         .to_string();
@@ -215,7 +231,7 @@ async fn agent_loop_round_trip_commits_streamed_text() {
     let server = MockLlmServer::start(config).await.expect("bind failed");
     let provider = provider_for(&server);
 
-    let (mut agent, mut ui_rx) = AgentLoop::new(provider);
+    let (mut agent, mut ui_rx) = AgentLoop::new(provider, Arc::new(ToolRegistry::new()));
     agent
         .send_command(AgentCommand::Prompt("question".into()))
         .await;
@@ -235,6 +251,9 @@ async fn agent_loop_round_trip_commits_streamed_text() {
             Message::System {
                 content: DEFAULT_SYSTEM_PROMPT.to_string(),
             },
+            Message::System {
+                content: TOOL_PROTOCOL_SYSTEM_PROMPT.to_string(),
+            },
             Message::User {
                 content: "question".to_string(),
             },
@@ -245,6 +264,43 @@ async fn agent_loop_round_trip_commits_streamed_text() {
             },
         ]
     );
+    server.abort();
+}
+
+/// The real `OpenAiProvider` surfaces a `delta.tool_calls` SSE frame as a raw
+/// `StreamEvent::Delta` (assembly stays in the agent; this proves the
+/// provider-level tool-call path over real HTTP/SSE, complementing the
+/// `parse_sse_payload` unit tests). The full ReAct+tool loop on the live
+/// provider is the `main.rs` demo path.
+#[tokio::test]
+async fn real_provider_surfaces_tool_call_delta_over_http() {
+    let config = MockLlmConfig {
+        frames: vec![tool_call_frame(0, "read", "{\"path\":\"a.txt\"}")],
+        end_after_frames: true,
+        ..Default::default()
+    };
+    let server = MockLlmServer::start(config).await.expect("bind failed");
+    let provider = openai_provider_for(&server);
+    let mut rx = provider
+        .chat(
+            Vec::new(),
+            Vec::new(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("chat should succeed");
+    match rx.recv().await {
+        Some(StreamEvent::Delta(delta)) => {
+            assert_eq!(delta.tool_call_index, 0);
+            assert_eq!(delta.function_name.as_deref(), Some("read"));
+            assert_eq!(
+                delta.arguments_fragment.as_deref(),
+                Some("{\"path\":\"a.txt\"}")
+            );
+        }
+        other => panic!("expected Delta, got {other:?}"),
+    }
+    assert!(matches!(rx.recv().await, Some(StreamEvent::Done)));
     server.abort();
 }
 
@@ -279,7 +335,7 @@ async fn cancel_closes_socket_verified_via_os_tools() {
     let provider = openai_provider_for(&server);
     let cancel = tokio_util::sync::CancellationToken::new();
     let mut rx = provider
-        .chat(Vec::new(), cancel.clone())
+        .chat(Vec::new(), Vec::new(), cancel.clone())
         .await
         .expect("provider chat should succeed");
 

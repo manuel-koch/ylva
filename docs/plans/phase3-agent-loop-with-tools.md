@@ -151,9 +151,9 @@ below, then add the `tools` module and the `Provider` signature change.
      `DenyTool { id: Uuid }` (a denial is fed back to the model as a
      `ToolError` + re-prompt, distinct from the hard-interrupt `Stop`).
    - `AgentEvent`: add `ToolCall { calls: Vec<AssembledToolCall> }`.
-   - `UiUpdate`: add `ToolStart { name: String, id: Uuid }`,
+   - `UiUpdate`: add `ToolStart { name: String, id: Uuid, arguments: Value }`,
      `ToolPending { name: String, id: Uuid }`,
-     `ToolDone { id: Uuid, result: String }`,
+     `ToolDone { id: Uuid, name: String, result: String }`,
      `ToolError { id: Uuid, error: String }`, `ToolKilled { id: Uuid }`.
    - `StreamEvent`: add `Delta(DeltaChunk)` where `DeltaChunk {
      tool_call_index: usize, tool_call_id: Option<String>,
@@ -305,10 +305,12 @@ below, then add the `tools` module and the `Provider` signature change.
      denial is fed back to the model as a `ToolError` and the agent re-prompts.
    (Blueprint: "No TUI yet. Approval flow is stdin-based or hardcoded for now." —
    this plan resolves it to **no interactive approval at all in the CLI-only
-   phase**.) For live ReAct/tool demos, parse a **minimal `--prompt <text>` CLI
+   phase**.) For live ReAct/tool demos, accept a **minimal `--prompt <text>` CLI
    argument** in `main.rs` (keep it thin — a single optional arg, not a full CLI
-   parse; no clap in Phase 3); when absent, fall back to the hardcoded demo
-   prompt. This makes a real `write`/`glob`/`read` tool round-trip runnable
+   parse; no clap in Phase 3); when absent, read **all of stdio piped into the
+   process** (only when stdin is not a terminal) to fill the prompt; when there
+   is no piped input either, fall back to the hardcoded
+   demo prompt. This makes a real `write`/`glob`/`read` tool round-trip runnable
    per-invocation against Ollama/OpenRouter instead of only the fixed demo
    string. Construct the `AgentLoop` with a `ToolRegistry` containing
    `read`/`write`/`glob`, and wire it to the **same provider selection `main.rs`
@@ -517,8 +519,10 @@ the sandbox note in Proposed Improvements, and the Implementation Hints below.
 
 - **Q1 — Live-provider testing / setting the prompt from the CLI.**
   Add a minimal `--prompt <text>` CLI argument to `main.rs` (a single optional
-  arg; no full CLI/clap parse in Phase 3). It falls back to the hardcoded demo
-  prompt when absent. This lets a real `write`/`glob`/`read` ReAct round-trip be
+  arg; no full CLI/clap parse in Phase 3). When absent, read **all of stdin**
+  (piped input, i.e. when stdin is not a terminal) to fill the prompt; when
+  neither `--prompt` nor piped stdin provides input, fall back to the hardcoded
+  demo prompt. This lets a real `write`/`glob`/`read` ReAct round-trip be
   driven against Ollama/OpenRouter per invocation instead of only the fixed
   "sky looks blue" demo string. (See step 7.)
 - **Q2 — `ReadFileArgs` `offset`/`limit`: bytes or lines?**

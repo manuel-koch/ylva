@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ylva::{
-    AgentCommand, AgentLoop, AssistantStatus, Message, MockProvider, UiUpdate,
-    DEFAULT_SYSTEM_PROMPT,
+    AgentCommand, AgentLoop, AssistantStatus, Message, MockProvider, ToolRegistry, UiUpdate,
+    DEFAULT_SYSTEM_PROMPT, TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
 
 use common::collect_until;
@@ -20,7 +20,7 @@ async fn steer_is_injected_at_natural_point_without_cancelling_stream() {
         vec!["first-".into(), "response".into()],
         Duration::from_millis(10),
     );
-    let (mut agent, mut ui_rx) = AgentLoop::new(Arc::new(provider));
+    let (mut agent, mut ui_rx) = AgentLoop::new(Arc::new(provider), Arc::new(ToolRegistry::new()));
 
     agent
         .send_command(AgentCommand::Prompt("first".into()))
@@ -66,6 +66,9 @@ async fn steer_is_injected_at_natural_point_without_cancelling_stream() {
             Message::System {
                 content: DEFAULT_SYSTEM_PROMPT.to_string(),
             },
+            Message::System {
+                content: TOOL_PROTOCOL_SYSTEM_PROMPT.to_string(),
+            },
             Message::User {
                 content: "first".to_string(),
             },
@@ -84,7 +87,7 @@ async fn steer_is_injected_at_natural_point_without_cancelling_stream() {
 #[tokio::test(start_paused = true)]
 async fn two_steers_batch_injected_before_the_next_request() {
     let provider = MockProvider::new(vec!["ok".into()], Duration::from_millis(5));
-    let (mut agent, mut ui_rx) = AgentLoop::new(Arc::new(provider));
+    let (mut agent, mut ui_rx) = AgentLoop::new(Arc::new(provider), Arc::new(ToolRegistry::new()));
 
     agent
         .send_command(AgentCommand::Prompt("first".into()))
@@ -128,7 +131,7 @@ async fn two_steers_batch_injected_before_the_next_request() {
 #[tokio::test(start_paused = true)]
 async fn steer_after_stream_ended_starts_new_request() {
     let provider = MockProvider::new(vec!["done".into()], Duration::from_millis(5));
-    let (mut agent, mut ui_rx) = AgentLoop::new(Arc::new(provider));
+    let (mut agent, mut ui_rx) = AgentLoop::new(Arc::new(provider), Arc::new(ToolRegistry::new()));
 
     agent
         .send_command(AgentCommand::Prompt("first".into()))

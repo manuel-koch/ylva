@@ -1167,7 +1167,7 @@ struct ReadFileArgs {
     #[serde(default)]
     mode: ReadMode,          // default Bytes (see ReadMode); model chooses the unit
     #[serde(default)]
-    offset: Option<usize>,
+    offset: Option<usize>,   // 0-based index of the first unit; line 1 is offset 0
     #[serde(default)]
     limit: Option<usize>,
 }

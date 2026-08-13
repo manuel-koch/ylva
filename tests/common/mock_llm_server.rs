@@ -42,6 +42,30 @@ pub fn content_frame(text: &str) -> String {
     format!("data: {payload}\n\n")
 }
 
+/// Build an OpenAI-style SSE frame carrying a `delta.tool_calls` fragment for
+/// one tool call (`index`, `name`, and a JSON `arguments` string).
+pub fn tool_call_frame(index: usize, name: &str, arguments: &str) -> String {
+    let payload = serde_json::json!({
+        "id": "chatcmpl-mock",
+        "object": "chat.completion.chunk",
+        "created": 0,
+        "model": "mock",
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "tool_calls": [{
+                    "index": index,
+                    "id": format!("call_{index}"),
+                    "type": "function",
+                    "function": { "name": name, "arguments": arguments }
+                }]
+            },
+            "finish_reason": serde_json::Value::Null
+        }]
+    });
+    format!("data: {payload}\n\n")
+}
+
 /// The default generated frame used when a connection has no explicit frames.
 fn default_frame(index: usize) -> String {
     content_frame(&format!("token-{index} "))

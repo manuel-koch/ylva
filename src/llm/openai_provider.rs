@@ -6,8 +6,8 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::{Message, StreamEvent};
-use crate::llm::{serialize_messages, Provider};
+use crate::agent::{DeltaChunk, Message, StreamEvent};
+use crate::llm::{serialize_messages, Provider, ToolSchema};
 
 /// Maximum number of pre-stream retries (after the initial attempt).
 const MAX_RETRIES: usize = 3;
@@ -64,18 +64,28 @@ impl Provider for OpenAiProvider {
     fn chat<'a>(
         &'a self,
         messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
         cancel: CancellationToken,
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
         let completions_url = self.completions_url();
         let model = self.model.clone();
         let api_key = self.api_key.clone();
         let client = self.client.clone();
+        let tools: Vec<serde_json::Value> = if tools.is_empty() {
+            Vec::new()
+        } else {
+            tools.iter().map(ToolSchema::to_request_value).collect()
+        };
         Box::pin(async move {
-            let request_body = serde_json::json!({
+            let mut request_body = serde_json::json!({
                 "model": model,
                 "messages": serialize_messages(&messages),
                 "stream": true,
             });
+            if !tools.is_empty() {
+                request_body["tools"] = serde_json::Value::Array(tools);
+                request_body["tool_choice"] = serde_json::json!("auto");
+            }
             let response =
                 send_with_retry(&client, &completions_url, &api_key, &request_body, &cancel)
                     .await?;
@@ -138,9 +148,12 @@ impl Provider for OpenAiProvider {
 ///
 /// Returns [`None`] for frames that must be silently skipped — comment lines
 /// (already dropped by the SSE parser, but blank `data:` frames can still
-/// arrive) and deltas with no user-facing `content` (reasoning deltas, the
-/// `role`-only first chunk, or `tool_calls`-only chunks). These must never be
-/// emitted as `StreamEvent::Text`. Malformed JSON yields [`StreamEvent::Error`].
+/// arrive) and deltas with no user-facing `content` and no `tool_calls`
+/// (reasoning deltas, the `role`-only first chunk). These must never be
+/// emitted as `StreamEvent::Text`. A `delta.tool_calls` chunk becomes a
+/// [`StreamEvent::Delta`] (raw fragment; assembly is the agent's task). A
+/// chunk with both `content` and `tool_calls` prefers `content` (the text is
+/// user-facing). Malformed JSON yields [`StreamEvent::Error`].
 pub(crate) fn parse_sse_payload(data: &str) -> Option<StreamEvent> {
     if data.is_empty() {
         return None;
@@ -156,17 +169,43 @@ pub(crate) fn parse_sse_payload(data: &str) -> Option<StreamEvent> {
             )));
         }
     };
-    match value
+    let delta = value
         .get("choices")
         .and_then(|choices| choices.get(0))
-        .and_then(|choice| choice.get("delta"))
-        .and_then(|delta| delta.get("content"))
-    {
-        Some(serde_json::Value::String(content)) if !content.is_empty() => {
-            Some(StreamEvent::Text(content.clone()))
+        .and_then(|choice| choice.get("delta"));
+
+    if let Some(serde_json::Value::String(content)) = delta.and_then(|d| d.get("content")) {
+        if !content.is_empty() {
+            return Some(StreamEvent::Text(content.clone()));
         }
-        _ => None,
     }
+
+    if let Some(call) = delta
+        .and_then(|d| d.get("tool_calls"))
+        .and_then(|calls| calls.as_array())
+        .and_then(|calls| calls.first())
+    {
+        let tool_call_index = call.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+        let tool_call_id = call.get("id").and_then(|id| id.as_str()).map(String::from);
+        let function_name = call
+            .pointer("/function/name")
+            .and_then(|name| name.as_str())
+            .map(String::from);
+        let arguments_fragment = call
+            .pointer("/function/arguments")
+            .and_then(|arguments| arguments.as_str())
+            .map(String::from);
+        if tool_call_id.is_some() || function_name.is_some() || arguments_fragment.is_some() {
+            return Some(StreamEvent::Delta(DeltaChunk {
+                tool_call_index,
+                tool_call_id,
+                function_name,
+                arguments_fragment,
+            }));
+        }
+    }
+
+    None
 }
 
 /// Perform the initial `POST` with bounded exponential backoff retry for
@@ -339,11 +378,46 @@ mod tests {
     fn parse_delta_without_content_is_skipped() {
         // `role`-only first chunk.
         assert!(parse_sse_payload(r#"{"choices":[{"delta":{"role":"assistant"}}]}"#).is_none());
-        // `tool_calls`-only chunk (Phase 2 skips; assembly is Phase 3).
-        assert!(parse_sse_payload(
-            r#"{"choices":[{"delta":{"tool_calls":[{"function":{"name":"x"}}]}}]}"#
-        )
-        .is_none());
+        // Reasoning delta with neither content nor tool_calls.
+        assert!(parse_sse_payload(r#"{"choices":[{"delta":{"reasoning":"thinking"}}]}"#).is_none());
+    }
+
+    #[test]
+    fn parse_tool_call_chunk_emits_delta() {
+        let event = parse_sse_payload(
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read","arguments":""}}]}}]}"#,
+        );
+        match event {
+            Some(StreamEvent::Delta(delta)) => {
+                assert_eq!(delta.tool_call_index, 0);
+                assert_eq!(delta.tool_call_id.as_deref(), Some("call_1"));
+                assert_eq!(delta.function_name.as_deref(), Some("read"));
+                assert_eq!(delta.arguments_fragment.as_deref(), Some(""));
+            }
+            other => panic!("expected Delta, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_arguments_fragment_delta_has_no_name_or_id() {
+        let payload = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{ "index": 0, "function": { "arguments": "{\"path\"" } }]
+                }
+            }]
+        })
+        .to_string();
+        let event = parse_sse_payload(&payload);
+        match event {
+            Some(StreamEvent::Delta(delta)) => {
+                assert_eq!(delta.tool_call_index, 0);
+                assert_eq!(delta.tool_call_id, None);
+                assert_eq!(delta.function_name, None);
+                assert_eq!(delta.arguments_fragment.as_deref(), Some("{\"path\""));
+            }
+            other => panic!("expected Delta, got {other:?}"),
+        }
     }
 
     #[test]
@@ -386,6 +460,7 @@ mod tests {
                     Some(StreamEvent::Done) => done = true,
                     Some(StreamEvent::Error(_)) => panic!("comment fixture must not error"),
                     Some(StreamEvent::Cancelled) => {}
+                    Some(StreamEvent::Delta(_)) => {}
                     None => {}
                 }
             }
@@ -406,6 +481,7 @@ mod tests {
                     Some(StreamEvent::Done) => done = true,
                     Some(StreamEvent::Error(_)) => panic!("reasoning fixture must not error"),
                     Some(StreamEvent::Cancelled) => {}
+                    Some(StreamEvent::Delta(_)) => {}
                     None => {}
                 }
             }
