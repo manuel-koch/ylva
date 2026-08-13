@@ -2,6 +2,8 @@
 name = "ylva"
 version = "0.3.0"
 edition = "2021"
+license = "Apache-2.0"
+authors = ["Manuel Koch"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }

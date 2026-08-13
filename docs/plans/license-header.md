@@ -1,5 +1,10 @@
 # Roll out the Apache-2.0 license header to all Rust source files
 
+**Status: executed (2026-08-13).** All 15 `.rs` files in the main crate now carry the
+canonical Apache-2.0 header on line 1; `Cargo.toml` declares `license = "Apache-2.0"`
+and `authors = ["Manuel Koch"]`. `make format`, `make lint`, `make test`, and
+`make test-coverage` (91.33% line coverage, ≥80% threshold) all pass.
+
 ## Goal and scope
 
 Prefix every `.rs` file with a standard Apache-2.0 copyright header owned by "Manuel Koch" for the
@@ -13,6 +18,7 @@ carries a header (verified: `grep -rl "Copyright"` across `.rs` files returns no
 `target/`).
 
 **Done means:**
+
 - Every `.rs` file in the main crate (15 total: 7 under `src/`, 8 under `tests/`) begins with
   exactly the header block defined below on its very first line.
 - No existing code, module doc comments, or file content is altered except for the inserted header.
@@ -20,6 +26,7 @@ carries a header (verified: `grep -rl "Copyright"` across `.rs` files returns no
 - A verification step confirms no `.rs` file is missing the header.
 
 **Key constraints:**
+
 - The header text and its placement are prescribed below; do not reformat or reword it.
 - For the two files that begin with an inner-doc comment (`//!`), the header goes *above* the
   `//!` block.
@@ -29,7 +36,7 @@ carries a header (verified: `grep -rl "Copyright"` across `.rs` files returns no
 
 Use exactly the following block (each line is a `//` comment; the block ends with one blank line):
 
-```
+```text
 // Copyright © 2026 Manuel Koch
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
