@@ -20,7 +20,7 @@ COVERAGE_THRESHOLD := 80
 # Run cargo check/clippy and report all warnings
 lint:
 	cargo check
-	cargo clippy
+	cargo clippy --all-targets
 
 # Run cargo fmt to enforce consistent formatting
 format:
