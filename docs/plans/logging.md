@@ -15,7 +15,7 @@ library (`src/agent/`, `src/llm/`).
   without coupling to any output mechanism;
 - routes those events to a caller-configured, runtime-selectable log file;
 - supports both human-readable text and JSONL output formats, each including timestamp,
-  severity, source file + line, and message;
+  severity, target and line number, and message;
 - exposes three new CLI flags (`--log-file`, `--log-level`, `--log-format`) so users can
   control where, at what verbosity, and in what format logs are written;
 - removes the bespoke `YLVA_VERBOSE` / `report_provider` mechanism entirely, replacing it
@@ -87,13 +87,17 @@ independently of console output, and they leave library internals unobservable.
      - `log_file: Option<PathBuf>` — path to the log file; `None` means no output.
      - `log_level: tracing::Level` — minimum severity to emit (default: `Level::INFO`).
      - `log_format: LogFormat` — output format (default: `LogFormat::Text`).
-   - Define a public `init_logging(config: LogConfig) -> Option<WorkerGuard>` function that:
-     - When `config.log_file` is `None`: does not install any subscriber; returns `None`.
-     - When `config.log_file` is `Some(path)`: opens the file in truncate/write mode
-       (overwrite on each start), wraps it with `tracing_appender::non_blocking`, and
-       installs a `tracing_subscriber::fmt` layer with the configured level filter and
-       target/file/line fields enabled. The format is `json()` when `LogFormat::Json`, or
-       the default human-readable formatter when `LogFormat::Text`.
+   - Define a public `init_logging(config: LogConfig)
+     -> Result<Option<WorkerGuard>, String>` function that:
+     - When `config.log_file` is `None`: does not install any subscriber; returns `Ok(None)`.
+     - When `config.log_file` is `Some(path)`: first checks the containing directory
+       exists, then opens the file in truncate/write mode (overwrite on each start), wraps
+       it with `tracing_appender::non_blocking`, and installs a `tracing_subscriber::fmt`
+       layer with the configured level filter. Text output is plain (no ANSI) and the
+       source location is condensed to the file basename and line number; the format is
+       `json()` when `LogFormat::Json`, or the custom `CondensedText` event formatter when
+       `LogFormat::Text`. Any failure to set up the file (missing directory, unwritable
+       path) is reported as an `Err` naming the attempted path rather than a panic.
    - Export `LogConfig`, `LogFormat`, and `init_logging` from `src/lib.rs`.
 
 4. **Replace `YLVA_VERBOSE` / `report_provider` with `tracing` calls in `src/main.rs`.**
@@ -121,9 +125,10 @@ independently of console output, and they leave library internals unobservable.
    - Extend the existing manual `std::env::args()` parsing (no `clap` in this phase) to
      extract `--log-file <path>`, `--log-level <level>`, and `--log-format <format>`
      arguments.
-   - Construct a `LogConfig` from the parsed values and call `init_logging(config)`.
-   - Hold the returned `Option<WorkerGuard>` in a binding that lives until `main` returns
-     (so the async writer is flushed on exit).
+   - Construct a `LogConfig` from the parsed values and call `init_logging(config)`; on
+     `Err`, print the reported path/error to stderr and exit with a non-zero code.
+- Hold the returned `Option<WorkerGuard>` in a binding that lives until `main` returns
+      (so the async writer is flushed on exit).
    - Invalid `--log-level` or `--log-format` values must print a usage error to stderr and
      exit with a non-zero code.
 
@@ -148,8 +153,8 @@ independently of console output, and they leave library internals unobservable.
 8. **Update `docs/features.md`.**
    Add a "Logging" subsection under "General" describing: opt-in file-based logging, the
    three CLI flags (`--log-file`, `--log-level`, `--log-format`), defaults (`info`, `text`),
-   the overwrite-on-start behaviour, and the field set in each record (timestamp, severity,
-   target, file, line, message).
+the overwrite-on-start behaviour, and the record shape: timestamp, severity, target,
+   message, and (in `text` format) the condensed `file.rs:line` source location.
 
 9. **Update `docs/configuration.md`.**
    Add a "Logging" section documenting `--log-file`, `--log-level`, and `--log-format` with
@@ -184,10 +189,12 @@ independently of console output, and they leave library internals unobservable.
   `std::fs::OpenOptions::new().write(true).create(true).truncate(true)`
   before passing the handle to `tracing_appender::non_blocking`.
 - `tracing_subscriber::fmt().json()` emits JSONL records with fields `timestamp`, `level`,
-  `target`, `filename`, `line_number`, and `message` when `with_file(true)`,
-  `with_line_number(true)`, and `with_target(true)` are set on the layer.
-- `tracing_subscriber::fmt()` (no `.json()`) emits human-readable lines; same field
-  configuration applies.
+  `target`, `line_number`, and `message` when `with_line_number(true)` and
+  `with_target(true)` are set on the layer (no `filename`, to keep lines short).
+- For `text` output a custom `FormatEvent` (`CondensedText`) emits
+  `timestamp level target: file.rs:line: message`, where `file.rs` is the basename of the
+  source file (never the absolute build path). It writes plain text (no ANSI) by setting
+  `with_ansi(false)` on the layer.
 - Level hierarchy (lowest → highest): `TRACE < DEBUG < INFO < WARN < ERROR`.
   `EnvFilter::new("info")` passes `info`, `warn`, and `error` and blocks `trace` and
   `debug` — this is the correct primitive for implementing the "level or greater"

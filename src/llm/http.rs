@@ -44,11 +44,13 @@ pub(crate) async fn post_with_retry(
             Ok(response) => response,
             Err(error) => {
                 if retries >= MAX_RETRIES {
+                    tracing::error!(url, retry = retries, error = %error, "request failed after retries");
                     return Err(anyhow::anyhow!(
                         "request to {url} failed after {MAX_RETRIES} retries: {error}"
                     ));
                 }
                 retries += 1;
+                tracing::warn!(url, retry = retries, error = %error, "request failed; retrying");
                 if sleep_cancel_aware(cancel, retry_delay(retries, None))
                     .await
                     .is_none()
@@ -66,11 +68,18 @@ pub(crate) async fn post_with_retry(
 
         if !should_retry(status) {
             let detail = response_body_detail(response).await;
+            tracing::error!(url, status = status.as_u16(), "non-retryable status");
             return Err(provider_status_error(status, url, &detail, retries));
         }
 
         if retries >= MAX_RETRIES {
             let detail = response_body_detail(response).await;
+            tracing::error!(
+                url,
+                status = status.as_u16(),
+                retry = retries,
+                "retryable status but retries exhausted"
+            );
             return Err(provider_status_error(status, url, &detail, retries));
         }
 
@@ -80,6 +89,12 @@ pub(crate) async fn post_with_retry(
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<u64>().ok());
         retries += 1;
+        tracing::warn!(
+            url,
+            status = status.as_u16(),
+            retry = retries,
+            "retryable status; retrying"
+        );
         if sleep_cancel_aware(cancel, retry_delay(retries, retry_after))
             .await
             .is_none()

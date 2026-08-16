@@ -96,6 +96,9 @@ impl Provider for OpenAiProvider {
             if let Some(key) = &api_key {
                 headers.insert(AUTHORIZATION, format!("Bearer {key}").parse()?);
             }
+            // Only the URL and model are logged — never the request headers
+            // (which carry the `Authorization`/API-key value) or the body.
+            tracing::debug!(url = %completions_url, model = %model, "chat request started");
             let response = super::http::post_with_retry(
                 &client,
                 &completions_url,
@@ -130,6 +133,7 @@ impl Provider for OpenAiProvider {
                                 Ok(event) => {
                                     match parse_sse_payload(&event.data) {
                                         Some(StreamEvent::Done) => {
+                                            tracing::debug!("stream ended with [DONE]");
                                             let _ = tx.send(StreamEvent::Done).await;
                                             break;
                                         }

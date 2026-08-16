@@ -31,6 +31,7 @@ use schemars::schema::RootSchema;
 use schemars::{schema_for, JsonSchema};
 use serde::Deserialize;
 use serde_json::Value;
+use tracing::Instrument;
 
 use super::{Tool, ToolError, DEFAULT_TIMEOUT_SECS};
 
@@ -125,6 +126,13 @@ impl Tool for ReadTool {
         }
     }
 
+    fn non_default_redacted_arguments(&self, arguments: &Value) -> Vec<(String, Value)> {
+        self.non_default_arguments(arguments)
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value.clone()))
+            .collect()
+    }
+
     fn timeout_secs(&self) -> u64 {
         if self.timeout_secs == 0 {
             DEFAULT_TIMEOUT_SECS
@@ -134,12 +142,16 @@ impl Tool for ReadTool {
     }
 
     fn run<'a>(&'a self, arguments: Value) -> BoxFuture<'a, Result<String, ToolError>> {
-        Box::pin(async move {
-            let args = serde_json::from_value::<ReadFileArgs>(arguments).map_err(|error| {
-                ToolError::failed("read", format!("invalid arguments: {error}"))
-            })?;
-            read_file(args).await
-        })
+        let span = super::span_for_invocation(self, &arguments);
+        Box::pin(
+            async move {
+                let args = serde_json::from_value::<ReadFileArgs>(arguments).map_err(|error| {
+                    ToolError::failed("read", format!("invalid arguments: {error}"))
+                })?;
+                read_file(args).await
+            }
+            .instrument(span),
+        )
     }
 }
 
@@ -177,6 +189,26 @@ impl Tool for WriteTool {
         true
     }
 
+    fn non_default_redacted_arguments(&self, arguments: &Value) -> Vec<(String, Value)> {
+        self.non_default_arguments(arguments)
+            .into_iter()
+            .map(|(key, value)| match key {
+                "content" => {
+                    let content = value.as_str().unwrap_or_default();
+                    (
+                        key.to_string(),
+                        Value::String(format!(
+                            "REDACTED(size={},lines={})",
+                            content.len(),
+                            content.lines().count()
+                        )),
+                    )
+                }
+                _ => (key.to_string(), value.clone()),
+            })
+            .collect()
+    }
+
     fn timeout_secs(&self) -> u64 {
         if self.timeout_secs == 0 {
             DEFAULT_TIMEOUT_SECS
@@ -186,12 +218,16 @@ impl Tool for WriteTool {
     }
 
     fn run<'a>(&'a self, arguments: Value) -> BoxFuture<'a, Result<String, ToolError>> {
-        Box::pin(async move {
-            let args = serde_json::from_value::<WriteFileArgs>(arguments).map_err(|error| {
-                ToolError::failed("write", format!("invalid arguments: {error}"))
-            })?;
-            write_file(args).await
-        })
+        let span = super::span_for_invocation(self, &arguments);
+        Box::pin(
+            async move {
+                let args = serde_json::from_value::<WriteFileArgs>(arguments).map_err(|error| {
+                    ToolError::failed("write", format!("invalid arguments: {error}"))
+                })?;
+                write_file(args).await
+            }
+            .instrument(span),
+        )
     }
 }
 
@@ -231,6 +267,13 @@ impl Tool for GlobTool {
         false
     }
 
+    fn non_default_redacted_arguments(&self, arguments: &Value) -> Vec<(String, Value)> {
+        self.non_default_arguments(arguments)
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value.clone()))
+            .collect()
+    }
+
     fn timeout_secs(&self) -> u64 {
         if self.timeout_secs == 0 {
             DEFAULT_TIMEOUT_SECS
@@ -240,17 +283,26 @@ impl Tool for GlobTool {
     }
 
     fn run<'a>(&'a self, arguments: Value) -> BoxFuture<'a, Result<String, ToolError>> {
-        Box::pin(async move {
-            let args = serde_json::from_value::<GlobArgs>(arguments).map_err(|error| {
-                ToolError::failed("glob", format!("invalid arguments: {error}"))
-            })?;
-            glob_files(&args.pattern).await
-        })
+        let span = super::span_for_invocation(self, &arguments);
+        Box::pin(
+            async move {
+                let args = serde_json::from_value::<GlobArgs>(arguments).map_err(|error| {
+                    ToolError::failed("glob", format!("invalid arguments: {error}"))
+                })?;
+                glob_files(&args.pattern).await
+            }
+            .instrument(span),
+        )
     }
 }
 
 async fn read_file(args: ReadFileArgs) -> Result<String, ToolError> {
+    tracing::debug!("reading file");
+    // TODO: should we really read the whole file into memory
+    //       and get the chunks afterwards ?
+    //       Could eat much memory on really big files !?
     let bytes = tokio::fs::read(&args.path).await.map_err(|error| {
+        tracing::error!(error = %error,"failed to read");
         ToolError::failed("read", format!("failed to read '{}': {error}", args.path))
     })?;
     match args.mode {
@@ -260,7 +312,13 @@ async fn read_file(args: ReadFileArgs) -> Result<String, ToolError> {
             if let Some(limit) = args.limit {
                 slice = &slice[..limit.min(slice.len())];
             }
-            Ok(String::from_utf8_lossy(slice).to_string())
+            let content = String::from_utf8_lossy(slice).to_string();
+            tracing::debug!(
+                size = content.len(),
+                lines = content.lines().count(),
+                "read file"
+            );
+            Ok(content)
         }
         ReadMode::Lines => {
             let text = String::from_utf8_lossy(&bytes).to_string();
@@ -270,10 +328,17 @@ async fn read_file(args: ReadFileArgs) -> Result<String, ToolError> {
                 .limit
                 .map(|limit| (start + limit).min(lines.len()))
                 .unwrap_or(lines.len());
-            if start >= end {
-                return Ok(String::new());
-            }
-            Ok(lines[start..end].join("\n"))
+            let content = if start < end {
+                lines[start..end].join("\n")
+            } else {
+                String::new()
+            };
+            tracing::debug!(
+                size = content.len(),
+                lines = content.lines().count(),
+                "read file"
+            );
+            Ok(content)
         }
         ReadMode::Chars => {
             let text = String::from_utf8_lossy(&bytes).to_string();
@@ -283,18 +348,31 @@ async fn read_file(args: ReadFileArgs) -> Result<String, ToolError> {
                 .limit
                 .map(|limit| (start + limit).min(chars.len()))
                 .unwrap_or(chars.len());
-            if start >= end {
-                return Ok(String::new());
-            }
-            Ok(chars[start..end].iter().collect())
+            let content = if start < end {
+                chars[start..end].iter().collect()
+            } else {
+                String::new()
+            };
+            tracing::debug!(
+                size = content.len(),
+                lines = content.lines().count(),
+                "read file"
+            );
+            Ok(content)
         }
     }
 }
 
 async fn write_file(args: WriteFileArgs) -> Result<String, ToolError> {
+    tracing::debug!("writing file");
     if let Some(parent) = Path::new(&args.path).parent() {
         if !parent.as_os_str().is_empty() {
             tokio::fs::create_dir_all(parent).await.map_err(|error| {
+                tracing::error!(
+                    error = %error,
+                    path = %parent.display(),
+                    "failed to create directory"
+                );
                 ToolError::failed(
                     "write",
                     format!("failed to create '{}': {error}", parent.display()),
@@ -305,8 +383,10 @@ async fn write_file(args: WriteFileArgs) -> Result<String, ToolError> {
     tokio::fs::write(&args.path, &args.content)
         .await
         .map_err(|error| {
+            tracing::error!(error = %error, "failed to write");
             ToolError::failed("write", format!("failed to write '{}': {error}", args.path))
         })?;
+    tracing::debug!("wrote file");
     Ok(format!(
         "wrote {} bytes to '{}'",
         args.content.len(),
@@ -315,6 +395,7 @@ async fn write_file(args: WriteFileArgs) -> Result<String, ToolError> {
 }
 
 async fn glob_files(pattern: &str) -> Result<String, ToolError> {
+    tracing::debug!(pattern = %pattern, "glob searching");
     let paths = glob::glob(pattern)
         .map_err(|error| {
             ToolError::failed("glob", format!("invalid pattern '{pattern}': {error}"))
@@ -324,12 +405,14 @@ async fn glob_files(pattern: &str) -> Result<String, ToolError> {
         .collect::<Vec<_>>();
     let mut sorted = paths;
     sorted.sort();
+    tracing::debug!(matches = sorted.len(), "glob searched");
     Ok(sorted.join("\n"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::capture_logs;
     use tempfile::TempDir;
 
     #[test]
@@ -543,5 +626,175 @@ mod tests {
                 < WriteTool::default().argument_order("content")
         );
         assert_eq!(GlobTool::default().argument_order("pattern"), 0);
+    }
+
+    /// A `tracing` log target that appends to an in-memory buffer
+    /// synchronously in the calling thread, plus a `capture_logs` helper that
+    /// runs an async body under it; both live in shared test-support
+    /// (`src/test_support.rs`), SSOT.
+    #[test]
+    fn read_file_logs_start_and_result_size() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "hello world").expect("seed file");
+        let log = capture_logs(async {
+            let result = read_file(ReadFileArgs {
+                path: path.display().to_string(),
+                mode: ReadMode::Bytes,
+                offset: None,
+                limit: None,
+            })
+            .await;
+            assert!(result.is_ok());
+        });
+        assert!(
+            log.contains("reading file"),
+            "read_file must log its start: {log}"
+        );
+        assert!(log.contains("read file"), "read_file must log: {log}");
+        assert!(
+            log.contains("size="),
+            "read_file must log the returned content size: {log}"
+        );
+        assert!(
+            log.contains("lines="),
+            "read_file must log the returned content line count: {log}"
+        );
+    }
+
+    #[test]
+    fn write_file_logs_completion_but_not_content() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("out.txt");
+        let log = capture_logs(async {
+            let result = write_file(WriteFileArgs {
+                path: path.display().to_string(),
+                content: "TOP-SECRET-DATA".to_string(),
+            })
+            .await;
+            assert!(result.is_ok());
+        });
+        assert!(
+            log.contains("writing file"),
+            "write_file must log its start: {log}"
+        );
+        assert!(
+            log.contains("wrote file"),
+            "write_file must log its completion: {log}"
+        );
+        assert!(
+            !log.contains("TOP-SECRET-DATA"),
+            "write_file must never log the written content: {log}"
+        );
+    }
+
+    #[test]
+    fn glob_files_logs_pattern_and_match_count() {
+        let dir = TempDir::new().expect("tempdir");
+        std::fs::write(dir.path().join("a.txt"), "a").expect("seed file");
+        std::fs::write(dir.path().join("b.txt"), "b").expect("seed file");
+        let pattern = format!("{}/*.txt", dir.path().display());
+        let log = capture_logs(async move {
+            let result = glob_files(&pattern).await;
+            assert!(result.is_ok());
+        });
+        assert!(
+            log.contains("glob searched"),
+            "glob_files must log its result: {log}"
+        );
+        assert!(
+            log.contains("matches=2"),
+            "glob_files must log the match count: {log}"
+        );
+    }
+
+    #[test]
+    fn read_tool_run_records_non_default_arguments_in_span() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "hello world").expect("seed file");
+        let log = capture_logs(async {
+            let result = ReadTool::default()
+                .run(serde_json::json!({
+                    "path": path.display().to_string(),
+                    "mode": "bytes",
+                    "offset": 0,
+                }))
+                .await;
+            assert!(result.is_ok());
+        });
+        assert!(
+            log.contains("tool_args"),
+            "run must open an args span: {log}"
+        );
+        assert!(
+            log.contains("\"path\""),
+            "the non-default path argument must be recorded: {log}"
+        );
+        assert!(
+            !log.contains("\"mode\"") && !log.contains("\"offset\""),
+            "defaulted arguments must be dropped from the span: {log}"
+        );
+    }
+
+    #[test]
+    fn write_tool_run_redacts_content_in_span_arguments() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("out.txt");
+        let log = capture_logs(async {
+            let result = WriteTool::default()
+                .run(serde_json::json!({
+                    "path": path.display().to_string(),
+                    "content": "TOP-SECRET-DATA",
+                }))
+                .await;
+            assert!(result.is_ok());
+        });
+        assert!(
+            log.contains("tool_args"),
+            "run must open an args span: {log}"
+        );
+        assert!(
+            log.contains("\"path\""),
+            "the non-default path argument must be recorded: {log}"
+        );
+        assert!(
+            log.contains("REDACTED(size=15,lines=1)"),
+            "the write content must be replaced by a size/lines summary: {log}"
+        );
+        assert!(
+            !log.contains("TOP-SECRET-DATA"),
+            "the write content must never be recorded in the span: {log}"
+        );
+    }
+
+    #[test]
+    fn read_non_default_redacted_arguments_drop_defaults_and_keep_path() {
+        let tool = ReadTool::default();
+        let arguments = serde_json::json!({
+            "path": "a.txt",
+            "mode": "bytes",
+            "offset": 0,
+            "limit": serde_json::Value::Null,
+        });
+        let redacted = tool.non_default_redacted_arguments(&arguments);
+        let keys: Vec<&str> = redacted.iter().map(|(key, _)| key.as_str()).collect();
+        assert_eq!(keys, vec!["path"]);
+    }
+
+    #[test]
+    fn write_non_default_redacted_arguments_redact_content() {
+        let tool = WriteTool::default();
+        let arguments = serde_json::json!({
+            "path": "out.txt",
+            "content": "TOP-SECRET-DATA",
+        });
+        let redacted = tool.non_default_redacted_arguments(&arguments);
+        let by_key: std::collections::HashMap<String, Value> = redacted.into_iter().collect();
+        assert_eq!(by_key.get("path"), Some(&Value::String("out.txt".into())));
+        assert_eq!(
+            by_key.get("content"),
+            Some(&Value::String("REDACTED(size=15,lines=1)".into()))
+        );
     }
 }

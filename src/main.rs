@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ylva::llm::{serialize_messages, MockProvider, OpenAiProvider, Provider};
+use ylva::logging::{init_logging, LogConfig, LogFormat};
 use ylva::{default_registry, AgentCommand, AgentLoop, Tool, UiUpdate};
 
 /// Fallback demo prompt used when neither `--prompt` nor piped stdin supplies
@@ -28,11 +29,30 @@ fn main() {
         return;
     }
 
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let log_config = match logging_from_args(&args) {
+        Ok(config) => config,
+        Err(message) => {
+            eprintln!("error: {message}");
+            std::process::exit(2);
+        }
+    };
+    // The guard must outlive the whole run so buffered log events are flushed
+    // on exit. Logging is opt-in: `init_logging` installs nothing and returns
+    // `None` when no `--log-file` was given.
+    let _log_guard = match init_logging(log_config) {
+        Ok(guard) => guard,
+        Err(message) => {
+            eprintln!("error: {message}");
+            std::process::exit(2);
+        }
+    };
+
     let provider: Arc<dyn Provider> = select_provider();
     let registry = Arc::new(default_registry());
     let (mut agent, mut ui_rx) = AgentLoop::new(provider, Arc::clone(&registry));
 
-    let prompt = initial_prompt(std::env::args().skip(1).collect());
+    let prompt = initial_prompt(args);
     let runtime = tokio::runtime::Runtime::new().expect("failed to start Tokio runtime");
     runtime.block_on(async {
         // Echo the user's turn before sending the request, so it appears even
@@ -165,6 +185,79 @@ fn prompt_from_arg(args: &[String]) -> Option<String> {
     None
 }
 
+/// Build the logging configuration from the CLI arguments, parsing
+/// `--log-file <path>`, `--log-level <level>`, and `--log-format <format>`.
+///
+/// Missing flags fall back to the `LogConfig` defaults (no file, `info` level,
+/// `text` format). An unknown `--log-level` or `--log-format` value is an
+/// error. Values are matched case-insensitively (`"iNFo"`, `"TEXT"` are
+/// accepted); the canonical forms are lowercase. All other arguments are
+/// ignored here.
+fn logging_from_args(args: &[String]) -> Result<LogConfig, String> {
+    let mut log_file = None;
+    let mut log_level = None;
+    let mut log_format = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--log-file" => {
+                log_file = Some(
+                    iter.next()
+                        .ok_or("--log-file requires a path value")?
+                        .into(),
+                );
+            }
+            "--log-level" => {
+                log_level = Some(
+                    iter.next()
+                        .ok_or("--log-level requires a value")?
+                        .to_string(),
+                );
+            }
+            "--log-format" => {
+                log_format = Some(
+                    iter.next()
+                        .ok_or("--log-format requires a value")?
+                        .to_string(),
+                );
+            }
+            _ => {}
+        }
+    }
+    let log_level = match log_level.as_deref().map(str::to_ascii_lowercase).as_deref() {
+        None => tracing::Level::INFO,
+        Some("trace") => tracing::Level::TRACE,
+        Some("debug") => tracing::Level::DEBUG,
+        Some("info") => tracing::Level::INFO,
+        Some("warn") => tracing::Level::WARN,
+        Some("error") => tracing::Level::ERROR,
+        Some(other) => {
+            return Err(format!(
+                "invalid --log-level '{other}': expected trace, debug, info, warn, or error"
+            ));
+        }
+    };
+    let log_format = match log_format
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        None => LogFormat::Text,
+        Some("text") => LogFormat::Text,
+        Some("json") => LogFormat::Json,
+        Some(other) => {
+            return Err(format!(
+                "invalid --log-format '{other}': expected text or json"
+            ));
+        }
+    };
+    Ok(LogConfig {
+        log_file,
+        log_level,
+        log_format,
+    })
+}
+
 /// Read all of stdin when it is not a terminal. Returns `None` when stdin is a
 /// terminal (no piped input to consume) or contains only whitespace.
 fn prompt_from_stdin() -> Option<String> {
@@ -188,13 +281,25 @@ const DEFAULT_OPENROUTER_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
 /// Select the Phase 2 demo provider from environment variables with
 /// **Ollama-first** precedence. Falls back to the `MockProvider` when no
 /// backend is configured (still headless; no CLI/config parsing in Phase 2).
+///
+/// The chosen wiring is reported as a `debug!` log event (visible when the
+/// user enables file logging at `--log-level debug`), so a misconfigured
+/// backend (wrong `base_url`, model, or auth) is traceable at startup instead
+/// of surfacing only as a confusing downstream error. Only the *presence* of an
+/// API key is logged — `"set"`/`"unset"` — never the key value itself.
 fn select_provider() -> Arc<dyn Provider> {
     if let Ok(base_url) = std::env::var("OLLAMA_BASE_URL") {
         if !base_url.is_empty() {
             let model =
                 std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| DEFAULT_OLLAMA_MODEL.to_string());
             let api_key = std::env::var("OLLAMA_API_KEY").ok();
-            report_provider("ollama", Some(&base_url), Some(&model), api_key.is_some());
+            tracing::debug!(
+                provider = "ollama",
+                base_url,
+                model,
+                api_key = if api_key.is_some() { "set" } else { "unset" },
+                "provider selected"
+            );
             return Arc::new(OpenAiProvider::new(base_url, model, api_key));
         }
     }
@@ -203,16 +308,23 @@ fn select_provider() -> Arc<dyn Provider> {
             let model = std::env::var("OPENROUTER_MODEL")
                 .unwrap_or_else(|_| DEFAULT_OPENROUTER_MODEL.to_string());
             let api_key = std::env::var("OPENROUTER_API_KEY").ok();
-            report_provider(
-                "openrouter",
-                Some(&base_url),
-                Some(&model),
-                api_key.is_some(),
+            tracing::debug!(
+                provider = "openrouter",
+                base_url,
+                model,
+                api_key = if api_key.is_some() { "set" } else { "unset" },
+                "provider selected"
             );
             return Arc::new(OpenAiProvider::new(base_url, model, api_key));
         }
     }
-    report_provider("mock", None, None, false);
+    tracing::debug!(
+        provider = "mock",
+        base_url = "-",
+        model = "-",
+        api_key = "unset",
+        "provider selected"
+    );
     Arc::new(MockProvider::new(
         vec![
             "The sky looks blue ".to_string(),
@@ -221,23 +333,6 @@ fn select_provider() -> Arc<dyn Provider> {
         ],
         Duration::from_millis(60),
     ))
-}
-
-/// Print the selected provider wiring to stderr when `YLVA_VERBOSE` is set, so
-/// a misconfigured backend (wrong `base_url`, model, or auth) is visible at
-/// startup instead of surfacing as a confusing downstream error.
-fn report_provider(kind: &str, base_url: Option<&str>, model: Option<&str>, has_api_key: bool) {
-    if !verbose_enabled() {
-        return;
-    }
-    let base = base_url.unwrap_or("-");
-    let model = model.unwrap_or("-");
-    let auth = if has_api_key { "set" } else { "unset" };
-    eprintln!("[ylva] provider={kind} base_url={base} model={model} api_key={auth}");
-}
-
-fn verbose_enabled() -> bool {
-    std::env::var("YLVA_VERBOSE").is_ok_and(|value| !value.is_empty())
 }
 
 /// Length beyond which a string value is treated as "long" and elided when
@@ -299,6 +394,49 @@ mod tests {
 
     fn read_tool() -> Arc<dyn Tool> {
         Arc::new(ylva::agent::tools::fs::ReadTool::default())
+    }
+
+    #[test]
+    fn logging_from_args_accepts_mixed_case_values() {
+        let args = vec![
+            "--log-level".to_string(),
+            "iNFo".to_string(),
+            "--log-format".to_string(),
+            "Text".to_string(),
+        ];
+        let config = logging_from_args(&args).expect("mixed-case values accepted");
+        assert_eq!(config.log_level, tracing::Level::INFO);
+        assert_eq!(config.log_format, LogFormat::Text);
+    }
+
+    #[test]
+    fn logging_from_args_accepts_all_levels_case_insensitively() {
+        for (raw, level) in [
+            ("Trace", tracing::Level::TRACE),
+            ("DEBUG", tracing::Level::DEBUG),
+            ("InFo", tracing::Level::INFO),
+            ("Warn", tracing::Level::WARN),
+            ("Error", tracing::Level::ERROR),
+        ] {
+            let config = logging_from_args(&["--log-level".to_string(), raw.to_string()])
+                .expect("valid level");
+            assert_eq!(config.log_level, level, "for input {raw:?}");
+        }
+    }
+
+    #[test]
+    fn logging_from_args_accepts_json_case_insensitively() {
+        let config = logging_from_args(&["--log-format".to_string(), "JSON".to_string()])
+            .expect("valid format");
+        assert_eq!(config.log_format, LogFormat::Json);
+    }
+
+    #[test]
+    fn logging_from_args_rejects_unknown_values() {
+        let bad_level = logging_from_args(&["--log-level".to_string(), "verbose".to_string()]);
+        assert!(bad_level.is_err());
+        let bad_format = logging_from_args(&["--log-format".to_string(), "xml".to_string()]);
+        assert!(bad_format.is_err());
     }
 
     #[test]

@@ -15,6 +15,12 @@
 pub mod agent;
 pub mod build_info;
 pub mod llm;
+pub mod logging;
+
+#[cfg(test)]
+mod test_support;
+
+pub use logging::{init_logging, LogConfig, LogFormat, LogGuards};
 
 pub use agent::tools::{default_registry, Tool, ToolError, ToolRegistry};
 pub use agent::{

@@ -35,6 +35,25 @@ or its command changes, update this section in the same commit (see
 Other documents that reference `make` targets must delegate here rather than
 re-list targets, otherwise the lists drift the next time the `Makefile` changes.
 
+## Logging
+
+Diagnostics are emitted exclusively through the `tracing` facade macros
+(`trace!`/`debug!`/`info!`/`warn!`/`error!`) with structured fields — never
+`println!`/`eprintln!` (console output is user-facing) and never a subscriber
+call; `src/logging.rs` owns the subscriber (level filter, a single file in the
+`text` or `json` format selected via `--log-format`).
+
+Correlate related events inside a `tracing` span so every log line is
+attributable to its context. E.g. tool execution runs inside a `tool_execute`
+span (carrying `tool` and `tool_call_id` fields) with a nested `tool_args` span.
+Span context renders inline in text and as the `spans` array in JSONL (see
+`docs/features.md`). Use spans the same way for other long-running scopes
+(e.g. a request/stream), and only for data safe to log.
+
+Sensitive values (API keys, credentials) MUST NOT be written to the log: call
+sites MUST reduce them to a presence indicator (`set`/`unset`/`???`/`***`) before passing
+them to a `tracing` macro.
+
 ## Planned implementations
 
 Each implementation is driven by a dedicated plan document kept in
@@ -87,3 +106,19 @@ integration test (`tests/*.rs`) via `mod common;`, with helpers reached as
 - **No duplication.** Add a new shared helper to `tests/common.rs` (small) or a
   new `tests/common/<name>.rs` submodule (larger); never copy a helper across
   test files. SSOT applies here.
+
+## Unit-test shared helpers (`src/test_support.rs`)
+
+Helpers shared only by unit tests (`#[cfg(test)]` modules inside `src/*.rs`)
+live in `src/test_support.rs`, wired from `src/lib.rs` via
+`#[cfg(test)] mod test_support;` so the module is compiled into test builds
+only. It currently provides `SharedLog` and `capture_logs`: `SharedLog` is a
+synchronous in-memory `tracing` writer, and `capture_logs` runs an async body
+under it and returns the captured text. The in-memory buffer is deliberate — a
+file-backed `tracing_appender::non_blocking` writer races its worker thread, so
+its output is not deterministic point-in-time.
+
+Since integration tests run in their own crate, they cannot use this module —
+shared integration-test helpers go in `tests/common` (see above). Never copy
+`SharedLog`/`capture_logs` (or any other helper) into a per-module test block;
+SSOT applies here as well.

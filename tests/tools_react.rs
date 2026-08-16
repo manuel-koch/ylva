@@ -399,6 +399,12 @@ impl Tool for SleepTool {
     fn timeout_secs(&self) -> u64 {
         600
     }
+    fn non_default_redacted_arguments(&self, arguments: &Value) -> Vec<(String, Value)> {
+        self.non_default_arguments(arguments)
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value.clone()))
+            .collect()
+    }
     fn run<'a>(&'a self, _arguments: Value) -> BoxFuture<'a, Result<String, ToolError>> {
         Box::pin(async move {
             tokio::time::sleep(Duration::from_secs(600)).await;

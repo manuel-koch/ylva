@@ -19,6 +19,7 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::llm::{Provider, ToolEnvelope, ToolSchema};
@@ -286,55 +287,59 @@ impl PendingTool {
         let name = self.call.name.clone();
         let id = self.call.id;
         let timeout_secs = self.timeout_secs.unwrap_or(DEFAULT_TOOL_TIMEOUT_SECS);
-        tokio::spawn(async move {
-            let outcome = tokio::select! {
-                biased;
-                _ = run_cancel.cancelled() => {
-                    let _ = agent_tx
-                        .send(AgentEvent::ToolKilled {
-                            id,
-                            name: name.clone(),
-                        })
-                        .await;
-                    return;
-                }
-                result = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
-                    match registry.get(&name) {
-                        Some(tool) => tool.run(self.call.arguments).await,
-                        None => Err(ToolError::failed(
-                            &name,
-                            format!("unknown tool '{name}'"),
-                        )),
+        let span = tracing::info_span!("tool_execute", tool = %name, tool_call_id = %id);
+        tokio::spawn(
+            async move {
+                let outcome = tokio::select! {
+                    biased;
+                    _ = run_cancel.cancelled() => {
+                        let _ = agent_tx
+                            .send(AgentEvent::ToolKilled {
+                                id,
+                                name: name.clone(),
+                            })
+                            .await;
+                        return;
                     }
-                }) => result
-            };
-            match outcome {
-                Ok(Ok(result)) => {
-                    let _ = agent_tx
-                        .send(AgentEvent::ToolDone { id, name, result })
-                        .await;
-                }
-                Ok(Err(error)) => {
-                    let _ = agent_tx
-                        .send(AgentEvent::ToolError {
-                            id,
-                            name,
-                            error: error.to_string(),
-                        })
-                        .await;
-                }
-                Err(_elapsed) => {
-                    let message = format!("tool '{name}' timed out after {timeout_secs}s");
-                    let _ = agent_tx
-                        .send(AgentEvent::ToolError {
-                            id,
-                            name,
-                            error: message,
-                        })
-                        .await;
+                    result = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
+                        match registry.get(&name) {
+                            Some(tool) => tool.run(self.call.arguments).await,
+                            None => Err(ToolError::failed(
+                                &name,
+                                format!("unknown tool '{name}'"),
+                            )),
+                        }
+                    }) => result
+                };
+                match outcome {
+                    Ok(Ok(result)) => {
+                        let _ = agent_tx
+                            .send(AgentEvent::ToolDone { id, name, result })
+                            .await;
+                    }
+                    Ok(Err(error)) => {
+                        let _ = agent_tx
+                            .send(AgentEvent::ToolError {
+                                id,
+                                name,
+                                error: error.to_string(),
+                            })
+                            .await;
+                    }
+                    Err(_elapsed) => {
+                        let message = format!("tool '{name}' timed out after {timeout_secs}s");
+                        let _ = agent_tx
+                            .send(AgentEvent::ToolError {
+                                id,
+                                name,
+                                error: message,
+                            })
+                            .await;
+                    }
                 }
             }
-        });
+            .instrument(span),
+        );
         cancel
     }
 }
@@ -447,6 +452,7 @@ impl AgentLoop {
                             AgentEvent::StreamError(error) => {
                                 pending_steers.clear();
                                 mode = AgentMode::Idle;
+                                tracing::error!(message = %error, "agent stream error");
                                 let _ = ui_tx.send(UiUpdate::Error(error)).await;
                             }
                             AgentEvent::ToolCall { calls } => {
@@ -538,6 +544,7 @@ impl AgentLoop {
                                 if text.is_empty() {
                                     continue;
                                 }
+                                tracing::debug!(text_len = text.len(), "command: prompt");
                                 if mode == AgentMode::Idle {
                                     iterations = 1;
                                     context.push_user(text);
@@ -568,6 +575,7 @@ impl AgentLoop {
                                     let name = pending.call.name.clone();
                                     let call_id = pending.call.id;
                                     let arguments = pending.call.arguments.clone();
+                                    tracing::debug!(tool = %name, "tool approved");
                                     current_tool_cancel = Some(PendingTool::execute(
                                         pending,
                                         registry.clone(),
@@ -593,6 +601,7 @@ impl AgentLoop {
                                         pending_tools.pop_front().expect("checked front");
                                     let name = denied.call.name;
                                     let call_id = denied.call.id;
+                                    tracing::debug!(tool = %name, "tool denied");
                                     let error = format!(
                                         "tool '{name}' was denied (no auto-approve configured)"
                                     );
@@ -662,7 +671,9 @@ async fn advance_tool_queue(
         return;
     }
     *iterations += 1;
+    tracing::debug!(iterations = *iterations, "advancing tool queue");
     if *iterations > MAX_ITERATIONS {
+        tracing::warn!(iterations = *iterations, "max ReAct iterations exceeded");
         let _ = ui_tx
             .send(UiUpdate::Error("max ReAct iterations exceeded".to_string()))
             .await;
@@ -696,6 +707,7 @@ fn start_request(
             Ok(stream) => stream,
             Err(error) => {
                 let message = format!("{error}");
+                tracing::error!(message = %message, "provider chat failed");
                 let _ = ui_tx.send(UiUpdate::Error(message.clone())).await;
                 let _ = agent_tx.send(AgentEvent::StreamError(message)).await;
                 return;
@@ -825,6 +837,8 @@ fn inject_pending_steers(pending_steers: &mut VecDeque<String>, context: &mut Co
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::test_support::capture_logs;
 
     #[test]
     fn constructs_message_variants() {
@@ -1118,5 +1132,55 @@ mod tests {
         };
         let call = acc.into_tool_call_checked().expect("empty is valid");
         assert_eq!(call.arguments, Value::Null);
+    }
+
+    #[test]
+    fn tool_execution_log_events_carry_spanned_tool_call_id() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let write_path = dir.path().join("out.txt");
+        let log = capture_logs(async {
+            let id = Uuid::new_v4();
+            let (agent_tx, mut agent_rx) = mpsc::channel(8);
+            let pending = PendingTool {
+                call: AssembledToolCall {
+                    id,
+                    name: "write".into(),
+                    arguments: serde_json::json!({
+                        "path": write_path.display().to_string(),
+                        "content": "abc",
+                    }),
+                },
+                timeout_secs: None,
+            };
+            let _cancel = pending.execute(Arc::new(tools::default_registry()), agent_tx);
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while let Some(event) = agent_rx.recv().await {
+                    if matches!(event, AgentEvent::ToolDone { .. }) {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("tool completes in time");
+        });
+        let contents = log;
+        assert!(
+            contents.contains("tool_execute{tool=write"),
+            "tool span with its tool field must be rendered: {contents}"
+        );
+        assert!(
+            contents.contains("tool_call_id="),
+            "tool call id must be attached to the tool's log events: {contents}"
+        );
+        assert!(
+            contents.contains("wrote file"),
+            "the write tool's log event must be inside the tool span: {contents}"
+        );
+        assert!(
+            !contents.contains("abc"),
+            "the write tool must not log the written content: {contents}"
+        );
+        let written = std::fs::read_to_string(&write_path).expect("read written file");
+        assert_eq!(written, "abc");
     }
 }

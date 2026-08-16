@@ -124,6 +124,12 @@ pub trait Tool: Send + Sync {
             .collect()
     }
 
+    /// The tool's non-default arguments, with any values that must not reach a
+    /// span/log context filtered out or replaced (e.g. `write` drops its
+    /// `content`). Every tool implements it so redaction policy sits next to
+    /// its argument definitions and stays explicit.
+    fn non_default_redacted_arguments(&self, arguments: &Value) -> Vec<(String, Value)>;
+
     /// Default execution timeout (seconds) for this tool.
     fn timeout_secs(&self) -> u64;
 
@@ -177,6 +183,18 @@ fn to_tool_schema(tool: &dyn Tool) -> ToolSchema {
     }
 }
 
+/// The span opened for a tool invocation, recording the tool's redacted
+/// non-default arguments (serialized compactly). The value is a single JSON
+/// string so any tool's arguments fit a fixed span field.
+pub(crate) fn span_for_invocation(tool: &dyn Tool, arguments: &Value) -> tracing::Span {
+    let recorded: serde_json::Map<String, Value> = tool
+        .non_default_redacted_arguments(arguments)
+        .into_iter()
+        .collect();
+    let serialized = serde_json::to_string(&recorded).unwrap_or_else(|_| "{}".to_string());
+    tracing::info_span!("tool_args", args = %serialized)
+}
+
 /// Convenience: build the Phase 3 registry with the three file-system tools.
 pub fn default_registry() -> ToolRegistry {
     let mut registry = ToolRegistry::new();
@@ -217,6 +235,12 @@ mod tests {
         }
         fn timeout_secs(&self) -> u64 {
             5
+        }
+        fn non_default_redacted_arguments(&self, arguments: &Value) -> Vec<(String, Value)> {
+            self.non_default_arguments(arguments)
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value.clone()))
+                .collect()
         }
         fn run<'a>(&'a self, _arguments: Value) -> BoxFuture<'a, Result<String, ToolError>> {
             Box::pin(async move { Ok("ok".to_string()) })

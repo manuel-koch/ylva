@@ -1917,6 +1917,16 @@ stored.
      scoped to explicit resume. A user who wants continuity passes
      `--conversation-id`; otherwise each launch is a new session.
 
+   > **Future tracing note (log correlation per session):** once the TUI can
+   > clear/reset/continue a session in-process (not just restart with an explicit
+   > `--conversation-id`), the agent must carry the current `session_id` as a
+   > field on its root `tracing` span, so it propagates into every JSONL log
+   > line's `spans` chain and all logs of one session stay correlatable. Today
+   > each launch is a distinct process and `tool_call_id` (agent.rs, `tool_execute`
+   > span) is the only per-run correlation key — adequate because logs never mix
+   > sessions in one process. In-process session switching would break that
+   > assumption, hence the future span argument.
+
 6. **Trailing-corruption recovery — repair-on-open, read-only reads:**
    - **Cause:** even though only full committed messages are written, a single
      `write()`/`flush()` syscall can be cut short by a kill/power-loss,
