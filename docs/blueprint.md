@@ -2395,29 +2395,60 @@ layer, not a core architectural change.
 
 - [ ] Set up `ratatui` + `crossterm` event loop via `spawn_blocking` + `select!`
 
-- [ ] Three UI areas: chat history (scrollable), sidebar (optional), input box
+- [ ] Two UI areas: chat history (scrollable) and input box. Sidebar is deferred to Phase 6.
 
-- [ ] Integrate `tui-textarea` for bottom input with history
+- [ ] Integrate `ratatui-textarea` (renamed from `tui-textarea`) for bottom input with history
+      navigation (`↑`/`↓` on boundary lines loads previous/next sent message; draft is saved).
 
-- [ ] Echo user input back into the chat view to test scrolling/wrapping
+- [ ] Echo user input back into the chat view; user messages rendered as a block with a
+      colored left border and soft background — no text prefix. Border color encodes
+      `UserMessageState`: Blue = Sent, Yellow = Queued (pending steer), DarkGray = Cancelled.
+      Colors are named constants, ready to be extracted into a `Theme` struct.
 
-- [ ] Status bar showing current mode / connection state
+- [ ] 2-row footer: mode indicator + steer count (row 1); key hints (row 2).
 
-- [ ] Install `ctrlc` handler that sends `AgentCommand::Stop` via channel
+- [ ] Install `ctrlc` handler that sends `AgentCommand::Stop` via channel immediately — no
+      double-press required for OS-level SIGINT.
 
-- [ ] **Re-use the same `AgentLoop` struct** from Phase 3. The TUI is just another consumer of `UiUpdate`.
+- [ ] **Re-use the same `AgentLoop` struct** from Phase 3. The TUI is just another consumer
+      of `UiUpdate`.
 
 - [ ] **Steering in TUI:** `Enter` sends unconditionally, even while streaming — queued as a
-      pending steer when busy. `Ctrl+C`/`Esc` sends `Stop` (interrupt; clears the steer queue).
+      pending steer when busy and shown with a `Queued` (yellow) border style.
 
-- [ ] **Pending-steer rendering:** user bubbles for queued steers show a pending style until a
-      `SteerApplied` `UiUpdate` converts them to normal; a `SteerApplied` clears the "steer queued"
-      indicator.
+- [ ] **Interrupt — double-press confirm with 2-second window:**
+      `Ctrl+C` and `Esc` use a key-agnostic double-press: the first press of either key sets
+      confirm state; the second press of either key within `CONFIRM_TIMEOUT` (2 s) triggers the
+      action. A natural transition to `Idle` (via `StreamDone`, `StreamCancelled`, or `Error`)
+      clears confirm state immediately.
+      - While streaming / `ToolPending`: first press → footer hint `"Press again to cancel"`;
+      second press ≤ 2 s → `AgentCommand::Stop`.
+      - While idle: `Ctrl+C` first press → hint `"Press again to quit"`; second press ≤ 2 s →
+      quit TUI. `Esc` while idle → clear input field only (no confirm, no quit).
+      - Help popup open → `Esc` closes popup immediately; confirm state is unchanged.
 
-**CRITICAL:** Ensure `Enter` and `Ctrl+C` are handled **regardless** of `is_streaming` flag.
+- [ ] **Pending-steer rendering:** `Queued` bubbles convert to `Sent` (blue) when `SteerApplied`
+      arrives. Interrupting marks all `Queued` bubbles as `Cancelled` (grey) with a dimmed
+      `"Not sent."` annotation; cancelled texts are retained in `input_history` so the user
+      can recover them via `↑`.
+
+- [ ] **Tool approval sub-mode:** when `UiUpdate::ToolPending` arrives, the footer switches to
+      `[ ✓ Approve (Enter) ]  [ ✗ Deny (Esc) ]` with mouse-clickable buttons. In this sub-mode
+      `Enter` sends `ApproveTool`, `Esc` sends `DenyTool` immediately (no double-press). `Ctrl+C`
+      still follows the double-press confirm → `AgentCommand::Stop`. Clicking outside the buttons
+      is a no-op.
+
+- [ ] **F1 Help popup:** opens/closes a centered popup (60 % × 70 %) showing the full keybinding
+      table and `BuildInfo` values (version, commit, build timestamp, profile).
+
+- [ ] **Mode dispatch:** `std::io::stdout().is_terminal()` in `main.rs` selects between
+      `tui_runner::run_tui_on_stdout` and `headless_runner::run_headless`. No `App` trait yet
+      (deferred to Phase 5).
+
+**CRITICAL:** Ensure `Enter`, `Ctrl+C`, and `Esc` are handled **regardless** of streaming state.
 The input widget must never be "disabled."
 
-**Key crates:** `ratatui`, `crossterm`, `tui-textarea`, `textwrap`, `ctrlc`
+**Key crates:** `ratatui 0.30`, `crossterm 0.29`, `ratatui-textarea 0.9`, `textwrap`, `ctrlc`
 
 ### Phase 5: Interface Seams
 
