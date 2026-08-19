@@ -1030,7 +1030,7 @@ Update the following docs **in the same commit** as the code changes:
       textarea content before passing it to `push_user_bubble` and the agent
       command, so the bubble and the provider both receive the same trimmed text.)
 
-- [ ] Scrolling in conversation is not possible when a tool approval is currently
+- [x] Scrolling in conversation is not possible when a tool approval is currently
       pending.
       This is not ideal when multiple tool calls have been requested by the model.
       The first call needs approval, runs and produces result.

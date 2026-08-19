@@ -33,7 +33,7 @@ pub use agent::{
     DeltaChunk, Message, PendingTool, StreamEvent, ToolCallRequest, UiUpdate,
     DEFAULT_SYSTEM_PROMPT, DEFAULT_TOOL_TIMEOUT_SECS, MAX_ITERATIONS, TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
-pub use app::{ChatEntry, ChatSelection, TuiState, UserMessageState};
+pub use app::{ChatEntry, ChatSelection, ToolBubbleState, TuiState, UserMessageState};
 pub use build_info::{BuildInfo, BUILD_INFO};
 pub use events::AppAction;
 pub use headless_runner::{run_headless, run_headless_to};

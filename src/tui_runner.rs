@@ -468,6 +468,20 @@ fn handle_mouse_input(
     use crossterm::event::MouseEventKind;
 
     if state.pending_approval.is_some() {
+        // Scroll events are allowed even during pending approval so the user
+        // can review earlier conversation context before deciding.
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                state.scroll_up(1);
+                return ActionOutcome::Continue;
+            }
+            MouseEventKind::ScrollDown => {
+                state.scroll_down(1);
+                return ActionOutcome::Continue;
+            }
+            _ => {}
+        }
+
         if let MouseEventKind::Down(button) = mouse.kind {
             if button == crossterm::event::MouseButton::Left {
                 let position = ratatui::layout::Position::new(mouse.column, mouse.row);
@@ -487,7 +501,7 @@ fn handle_mouse_input(
                 }
             }
         }
-        // Clicking outside the approval buttons is a no-op.
+        // All other events outside the approval buttons are a no-op.
         return ActionOutcome::Continue;
     }
 
@@ -1453,6 +1467,59 @@ mod tests {
         );
         assert_eq!(state.scroll_offset, 0);
         assert!(!state.scroll_locked);
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_chat_during_pending_approval() {
+        // Scroll events must be forwarded even when a tool approval is pending.
+        let (mut state, mut textarea, cmd_tx, mut cmd_rx) = setup();
+        let id = uuid::Uuid::new_v4();
+        state.pending_approval = Some((id, "read".to_string(), serde_json::json!({})));
+        let mut confirm = None;
+        let button_areas = Some(ButtonAreas {
+            approve: ratatui::layout::Rect::new(0, 20, 10, 1),
+            deny: ratatui::layout::Rect::new(11, 20, 10, 1),
+        });
+
+        let wheel_down = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 5,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_action(
+            AppAction::MouseInput(wheel_down),
+            &mut state,
+            &mut textarea,
+            &mut confirm,
+            &mut MouseDrag::default(),
+            &mut None,
+            &button_areas,
+            &cmd_tx,
+        );
+        assert_eq!(state.scroll_offset, 1);
+        // Approval must still be pending — scroll did not consume it.
+        assert!(state.pending_approval.is_some());
+        assert_eq!(cmd_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+
+        let wheel_up = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 5,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_action(
+            AppAction::MouseInput(wheel_up),
+            &mut state,
+            &mut textarea,
+            &mut confirm,
+            &mut MouseDrag::default(),
+            &mut None,
+            &button_areas,
+            &cmd_tx,
+        );
+        assert_eq!(state.scroll_offset, 0);
+        assert!(state.pending_approval.is_some());
     }
 
     #[test]

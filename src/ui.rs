@@ -173,6 +173,10 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
     // Queued (steer) user messages are deferred until after the in-progress
     // stream bubble so they appear visually after the current response.
     let mut deferred_queued_messages: Vec<String> = Vec::new();
+    // Pending tool bubbles (awaiting approval) are deferred to the very end
+    // of the conversation so they stay close to the approve/deny footer
+    // regardless of how many earlier entries exist.
+    let mut deferred_pending_tool_bubbles: Vec<(String, ToolBubbleState)> = Vec::new();
     // Show the logo wordmark only when the conversation is empty; once
     // the user has submitted a message the logo is hidden.
     if state.chat_entries.is_empty() {
@@ -203,6 +207,12 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
                 append_assistant_lines(&mut lines, text, *interrupted, msg_width, row_width);
             }
             ChatEntry::ToolBubble { name, state, .. } => {
+                // Pending tool bubbles are deferred so they render at the bottom,
+                // close to the approve/deny footer buttons.
+                if matches!(state, ToolBubbleState::Pending { .. }) {
+                    deferred_pending_tool_bubbles.push((name.clone(), state.clone()));
+                    continue;
+                }
                 append_tool_bubble_lines(&mut lines, name, state, wrap_width, row_width);
             }
             ChatEntry::ErrorLine { message } => {
@@ -243,6 +253,13 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
             user_width,
             row_width,
         );
+        lines.push(Line::default());
+    }
+
+    // Flush pending-approval tool bubbles last so they always sit at the
+    // bottom of the conversation, directly above the approve/deny footer.
+    for (name, bubble_state) in &deferred_pending_tool_bubbles {
+        append_tool_bubble_lines(&mut lines, name, bubble_state, wrap_width, row_width);
         lines.push(Line::default());
     }
 

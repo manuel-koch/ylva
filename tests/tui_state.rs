@@ -633,3 +633,73 @@ async fn message_sent_while_submitted_is_queued_not_sent() {
         "entry[3] should be assistant response to b"
     );
 }
+
+#[test]
+fn pending_tool_bubble_renders_after_completed_entries() {
+    // A ToolBubble in Pending state must be deferred to the end of the
+    // rendered conversation so it sits close to the approve/deny footer,
+    // even when there are earlier completed entries above it.
+    use ratatui_textarea::TextArea;
+    use ylva::ui;
+    use ylva::{ToolBubbleState, UiUpdate};
+
+    let backend = TestBackend::new(60, 30);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+
+    let mut state = ylva::TuiState::new();
+    let mut textarea = TextArea::default();
+
+    // An assistant message comes first, then a tool is requested.
+    state.push_user_bubble("run something".to_string(), UserMessageState::Sent);
+    state.apply_update(&UiUpdate::StreamStarted);
+    state.apply_update(&UiUpdate::AppendText("I will use a tool".to_string()));
+    state.apply_update(&UiUpdate::StreamDone);
+
+    let tool_id = uuid::Uuid::new_v4();
+    state.apply_update(&UiUpdate::ToolPending {
+        id: tool_id,
+        name: "glob".to_string(),
+        arguments: serde_json::json!({"pattern": "**/*.rs"}),
+    });
+
+    terminal
+        .draw(|frame| {
+            ui::draw(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("draw");
+
+    let buf = terminal.backend().buffer().clone();
+    let rows: Vec<String> = (0..30u16)
+        .map(|y| {
+            (0..60u16)
+                .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
+                .collect::<String>()
+        })
+        .collect();
+
+    let assistant_row = rows
+        .iter()
+        .position(|r| r.contains("I will use a tool"))
+        .expect("assistant text should be visible");
+    let tool_row = rows
+        .iter()
+        .position(|r| r.contains("glob"))
+        .expect("pending tool bubble should be visible");
+
+    assert!(
+        tool_row > assistant_row,
+        "pending tool bubble (row {tool_row}) should render BELOW assistant text (row {assistant_row})"
+    );
+
+    // The tool bubble state in chat_entries must still be Pending.
+    let has_pending = state.chat_entries.iter().any(|entry| {
+        matches!(
+            entry,
+            ChatEntry::ToolBubble {
+                state: ToolBubbleState::Pending { .. },
+                ..
+            }
+        )
+    });
+    assert!(has_pending, "chat_entries should still contain a Pending tool bubble");
+}
