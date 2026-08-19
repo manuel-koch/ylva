@@ -416,15 +416,19 @@ mod tests {
     /// rendering the stub `[[log]]`.
     #[test]
     fn text_format_normalizes_bridged_log_events_to_real_source() {
-        // Install the `log` -> `tracing` bridge once per process; a second
-        // install is a no-op error that is safe to ignore.
-        let _ = tracing_log::LogTracer::init();
         let dir = tempfile::TempDir::new().expect("tempdir");
         let path = dir.path().join("ylva.log");
         let file = open_truncate(&path).expect("open log file");
         let (subscriber, guard) = build_subscriber(file, LogFormat::Text, tracing::Level::DEBUG);
         tracing::subscriber::with_default(subscriber, || {
-            log::debug!(target: "reqwest::connect", "starting a connection");
+            let record = log::Record::builder()
+                .level(log::Level::Debug)
+                .target("reqwest::connect")
+                .file(Some("logging.rs"))
+                .line(Some(1))
+                .args(format_args!("starting a connection"))
+                .build();
+            tracing_log::format_trace(&record).expect("format_trace");
         });
         drop(guard);
         let contents = std::fs::read_to_string(&path).expect("read log");
