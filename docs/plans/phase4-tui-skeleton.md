@@ -1020,7 +1020,7 @@ Update the following docs **in the same commit** as the code changes:
       (All keybinding strings in `src/ui.rs` (help popup) and `docs/keybindings.md`
       updated to lowercase hyphen-separated notation; F1 remains uppercase.)
 
-- [ ] Remove the "Ylva" logo in conversation list once a message has been submitted.
+- [x] Remove the "Ylva" logo in conversation list once a message has been submitted.
 
 - [ ] Leading and trailing empty lines are preserved in the rendered bubbles of
       user messages. These strings should be trimmed on submission.

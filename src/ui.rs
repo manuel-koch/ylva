@@ -52,8 +52,8 @@ const TOOL_BUBBLE_BG_COLOR: Color = Color::Rgb(30, 0, 30);
 /// Braille spinner animation frames, cycled while the agent is busy.
 const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
-/// ASCII-art "Ylva" wordmark rendered as the first element of the chat list so
-/// the initial frame is never empty. Each line must be the same width.
+/// ASCII-art "Ylva" wordmark shown while the conversation is empty so the
+/// initial frame is never blank. Each line must be the same width.
 const LOGO: [&str; 6] = [
     "██╗   ██╗██╗     ██╗   ██╗ █████╗ ",
     "╚██╗ ██╔╝██║     ██║   ██║██╔══██╗",
@@ -173,8 +173,13 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
     // Queued (steer) user messages are deferred until after the in-progress
     // stream bubble so they appear visually after the current response.
     let mut deferred_queued_messages: Vec<String> = Vec::new();
-    // The logo wordmark is always the first element of the chat list.
-    append_logo(&mut lines);
+    // Show the logo wordmark only when the conversation is empty; once
+    // the user has submitted a message the logo is hidden.
+    if state.chat_entries.is_empty() {
+        append_logo(&mut lines);
+    } else {
+        lines.push(Line::default());
+    }
     for entry in &state.chat_entries {
         match entry {
             ChatEntry::UserMessage {
@@ -316,15 +321,31 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
     }
 }
 
-/// Render the Ylva wordmark, horizontally centered, as the leading chat lines.
+/// Render the Ylva wordmark, horizontally centered. Only shown when the
+/// conversation is still empty (no messages submitted yet).
 fn append_logo(lines: &mut Vec<Line>) {
+    lines.push(Line::default());
+    lines.push(Line::default());
     let style = Style::default()
         .fg(Color::Blue)
         .add_modifier(Modifier::BOLD);
     for row in LOGO {
         lines.push(Line::styled(row.to_string(), style).alignment(Alignment::Center));
     }
-    // A blank spacer separates the wordmark from the conversation.
+    // One blank line, then build-info centered below the wordmark.
+    lines.push(Line::default());
+    let build_info_text = format!(
+        "v{}  {}",
+        BUILD_INFO.version, BUILD_INFO.git_commit
+    );
+    lines.push(
+        Line::styled(
+            build_info_text,
+            Style::default().fg(Color::DarkGray),
+        )
+        .alignment(Alignment::Center),
+    );
+    // A blank spacer separates the wordmark block from the conversation.
     lines.push(Line::default());
 }
 
