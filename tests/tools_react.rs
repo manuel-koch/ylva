@@ -80,7 +80,7 @@ where
     let mut collected = Vec::new();
     loop {
         if let Ok(update) = ui_rx.try_recv() {
-            if let UiUpdate::ToolPending { id, name } = &update {
+            if let UiUpdate::ToolPending { id, name, .. } = &update {
                 let needs_approval = registry.get(name).is_some_and(|tool| tool.needs_approval());
                 let command = if needs_approval {
                     AgentCommand::DenyTool { id: *id }

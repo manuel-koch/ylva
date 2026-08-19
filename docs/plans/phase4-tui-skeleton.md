@@ -805,3 +805,232 @@ Update the following docs **in the same commit** as the code changes:
 - **`tests/e2e/` contains shell scripts** (`.zsh`), not Rust integration tests.
   New Rust integration tests go in `tests/tui_state.rs` and
   `tests/headless_runner.rs` at the crate root.
+
+## Bugs / Follow-Up Changes
+
+- [x] in ZED terminal, shift-enter doesn't insert a newline into input field,
+      alt-enter does.
+
+- [x] in iterm2 terminal neither shift-enter nor alt-enter inserts a newline
+      into input field
+      (Both fixed by enabling the kitty keyboard protocol
+      `KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES` on terminal setup, so
+      ZED/iTerm2 send distinguishable CSI-u sequences that crossterm parses as
+      `Enter + SHIFT` / `Enter + ALT`; `Shift+Enter`/`Alt+Enter` then insert a
+      newline as documented.)
+
+- [x] When input field contains multiline text, cmd-left or cmd-right only jumps
+      to the next line start/end on current line, it doesn't advance to prev/next
+      line.
+      (Cmd+Left/Cmd+Right now wrap across line starts/ends — covered by
+      `cmd_right_and_left_navigate_line_starts_and_ends`.)
+
+- [x] Can't drag'n'drop text via mouse to select it.
+      (Mouse drag inside the input box starts a selection and extends it as the
+      cursor moves; a plain click just places the cursor. Covered by
+      `drag_in_input_selects_text` and `click_in_input_places_cursor`.)
+
+- [x] Click inside input field doesn't move the cursor.
+      (A left-button click inside the input box places the cursor at the clicked
+      character, accounting for word-wrapping; `cursor_for_click` unit-tested.)
+
+- [x] Just starting TUI immediately uses default prompt
+      "What makes the sky look blue?".
+      TUI should start with no inital user input though.
+      (The default demo prompt is now headless-only. The TUI starts with an empty
+      input box; only an explicit `--prompt` or piped stdin auto-sends.)
+
+- [x] Scroll indicator looks odd, although I've scrolled to the end of the list,
+      the indicator is not at the bottom of vertical scrollable list.
+      (The chat scrollbar's `content_length` was the total line count; ratatui's
+      thumb proportion never reached the bottom when the viewport spans >1 row.
+      Now `content_length = max_offset + 1`, so the thumb sits at the bottom at max
+      offset — covered by `vertical_scrollbar_thumb_reaches_bottom_at_max_offset`.)
+
+- [x] Add top/bottom 1 char padding to sent user message rendering
+
+- [x] Add 2-char margin between left border and content of sent user
+      message rendering
+
+- [x] Render input field like a sent message (but differernt left border color),
+      no full border around content, no "Input" label.
+      (User bubbles get 1-char top/bottom padding and a 2-char margin after the
+      left bar; the input box is now a left-border bubble in Cyan with no title and
+      word-wraps long lines instead of growing a horizontal scrollbar.)
+
+- [x] Sending new input via enter, insert a new bubble, but the footer indicator
+      is still showing "[mode] idle" although the new message has been sent
+      to the model and we are waiting for the response. Only when streaming of
+      response starts, the footer shows "[model] Streaming".
+      (A new `TuiState.submitted` flag is set when a prompt is sent from idle and
+      cleared on `StreamStarted`; the footer shows "Sending…" during the gap.)
+      Should we introduce a dedicated `UiUpdate` event that indicates a request
+      to the provider was sent and we are waiting for response/stream or are even
+      retrying the request nth attempt ?
+
+- [x] Change style of rendered buttons, so that a mouse hover changes its
+      background or border.
+      (Mouse position is tracked in the driver and passed to `ui::draw` /
+      `draw_approval_footer`; hovering over a button changes its background from
+      Green/Red to LightGreen/LightRed with bold text.)
+
+- [x] in ZED terminal pressing cmd-left or cmd-right always only jumps to start/end
+      of current row, never jumps to prev/next row.
+      Using ctrl-left and ctrl-right allows my to cycle thru the word boundaries
+      prev/next over all lines though.
+      (`Cmd+Left` and `Cmd+Right` are intercepted by iTerm2 (tab switching) and
+      ZED before reaching the terminal app — no fix is possible at that level.
+      Instead the SUPER/META handlers were removed entirely. `Home` / `Fn+Left`
+      and `End` / `Fn+Right` now carry the cross-line navigation: `Home` moves
+      to the start of the current line, wrapping to the end of the previous
+      line when already at column 0; `End` moves to the end of the current
+      line, wrapping to the start of the next line when already at the line
+      end. `End` no longer scrolls chat; `PageDown` reaches the bottom instead.
+      Updated keybindings.md and the help popup.)
+
+- [x] There is always an empty line in the prompt input field ( if height is 2 rows,
+      the 2nd row is empty and I can't even move the cursor into it. )
+      (The `+1` added to `wrapped_rows` when computing `input_height` in `ui.rs`
+      created a phantom extra row; the minimum `clamp` was also raised from 2 to 1.
+      Fixed by using `(wrapped_rows as u16).clamp(1, max_input)` so the box height
+      exactly matches the visible content rows.)
+
+- [x] Text in prompt input field is underlined, should not be decorated.
+      (ratatui-textarea's default `cursor_line_style` is
+      `Style::default().add_modifier(Modifier::UNDERLINED)`, which underlines the
+      entire line the cursor is on. Added a `configure_textarea` helper that calls
+      `set_cursor_line_style(Style::default())` (and `set_wrap_mode`) on every
+      `TextArea` creation or reset so no underline decoration is applied.)
+
+- [x] After sending a message, the bubble of the message uses a darker background
+      color, but only where there are actual characters.
+      The background should fill the whole rect of the bubble though.
+      (`append_user_lines` now calls `.patch_style(Style::default().bg(USER_MESSAGE_BG_COLOR))`
+      on every `Line` so the dark shade fills the entire terminal row, not just the
+      cells that contain span characters.)
+
+- [x] Use lowercase keybinding hints: "enter: send", "ctrl-c/esc: cancel/quit".
+      But keep it uppercase for the special keys like "F1" keybinding.
+      (Footer hint string updated to lower-case for regular keys; `F1` stays
+      upper-case per the guideline.)
+
+- [x] selecting text in input field, but I can't copy it. Neither cmd-c for
+      right-click for a context-menu allows me to copy selected text.
+      Can we automatically add mouse-selected text to clipboard ( with a small
+      toast message that text was copied )?
+      (On `MouseUp` after a drag-select, `textarea.copy()` yanks the selection and
+      `arboard` copies it to the OS clipboard; `TuiState::set_toast` shows a
+      "✓ Copied to clipboard" overlay for 2 s; `clear_expired_toast` dismisses
+      it each frame. Clipboard failures are logged and silently skipped.)
+
+- [x] Rethink color-scheme.
+      Rendering the ylva title in TUI in blue and using blue-border for send
+      user-messages will likely cause a user to think that blue stuff comes from
+      agent instead of user.
+      (`USER_MESSAGE_BORDER_COLOR` changed from `Color::Blue` to `Color::Green`
+      so sent user-message bubbles are clearly distinct from the blue Ylva logo.
+      The input-box border stays Cyan — "drafting" vs "sent" distinction.)
+
+- [x] TUI conversion list should insert an empty row between any item in the list.
+      Currently the model reply is directly below the user-message bubble.
+      (The `draw_chat` loop now pushes `Line::default()` after every `ChatEntry`
+      so all consecutive entries — user bubble, assistant reply, tool line, error
+      line — are separated by one blank row.)
+
+- [x] First mouse-wheel event seems to scroll the conversation-list to the top in a
+      single step.
+      consecutive mouse-wheel do scroll one-line at a time though.
+      (While `scroll_locked` is true `draw_chat` kept `scroll_offset` at 0 even
+      though the viewport was pinned to `max_offset`. The first `scroll_up(1)` call
+      set `scroll_locked = false` and left `scroll_offset = 0`, jumping the view
+      to the top. Fixed by syncing `state.scroll_offset = max_offset` inside the
+      locked branch of `draw_chat` each frame so the offset always matches the
+      rendered position before any user scroll event.)
+
+- [x] Sending a steer-message while streaming has not yet arrived or is in progress:
+      Adds the pending user-message before the currently active stream-response in
+      the conversion-list.
+      But that steering message is logically after the current in-progress-streaming,
+      it will be send when the stream has finished, won't it ?
+      (`draw_chat` now collects all `UserMessage { state: Queued }` entries into
+      a `deferred_queued_messages` vec while iterating `state.chat_entries` and
+      renders them _after_ the in-progress streaming bubble, so the conversation
+      reads: `[previous entries] → [streaming bubble] → [queued steer bubble(s)]`.)
+
+- [x] Ensure a blank line between the botom of the scrollable conversion list and the
+      input-field
+      (The `draw_chat` loop already appends `Line::default()` after every entry,
+      including the last streaming bubble, so a blank line is always present at
+      the bottom of the scrollable content. No extra layout spacer is needed —
+      the existing trailing blank is the separator.)
+
+- [x] Can not drag'n'drop with mouse to select text ( and copy it ) in
+      response bubble ( neither in streaming nor in finished state ).
+      (Added `ChatSelection`, `chat_area`, `chat_rendered_lines`, `chat_selection`,
+      and `chat_drag_active` to `TuiState`. `draw_chat` saves the plain text of
+      every rendered line and applies a selection-highlight background to selected
+      lines. `handle_mouse_input` starts a chat selection on `MouseDown` in the
+      chat area, extends it on `MouseDrag`, and on `MouseUp` copies the selected
+      text to the OS clipboard via `arboard` and shows a "✓ Copied to clipboard"
+      toast — matching the behaviour of the input-field drag-select.)
+
+- [x] Footer needs some animation/progress while agent is doing something.
+      It would indicate if agent is actually idle.
+      Maybe an animated dot running round a circle/rect of 3x3 chars ?
+      Or a little ball/dot bouncing off the ground in a 1 width x 3 height area ?
+      (Done: Added `spinner_frame: u8` to `TuiState`. `tui_runner.rs` advances it
+      every 150 ms via a `tokio::time::sleep` arm in the `select!` loop when the
+      agent is not `Idle`. `ui.rs` cycles through a 10-frame braille spinner
+      (`⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`) in `draw_normal_footer` as a prefix to the mode word.)
+
+- [x] Pasting a multiline text into input field immediately submits it.
+      This prevents further editing a pasted text and should not happen.
+      If the pasted text is multiline every line is submitted individually
+      instead of capturing the whole pasted text in the input-field.
+      (Done: Enabled bracketed paste (`EnableBracketedPaste`/`DisableBracketedPaste`)
+      in `run_tui_on_stdout` and `TerminalGuard`. Added `AppAction::Paste(String)` to
+      `events.rs` and mapped `Event::Paste`. `handle_paste` in `tui_runner.rs`
+      inserts pasted text character-by-character, using `Shift+Enter` for newlines.)
+
+- [x] render tool pending/result in the same bubble, use magenta left-border
+      like in user/agent message.
+      (Done: Replaced `ChatEntry::ToolLine` with `ChatEntry::ToolBubble { id, name,
+      state }` and `ToolBubbleState` enum (`Pending`, `Running`, `Done`, `Error`,
+      `Killed`, `Denied`). `apply_update` mutates the existing bubble in-place via
+      `find_tool_bubble_mut`. `ui.rs` renders all states with a magenta `▌` border
+      and dark-magenta background in `append_tool_bubble_lines`.)
+
+- [x] Bubble for a pending tool approval should render the tool args, so
+      user can see what requires approval, not just which tool.
+      (Done: Added `arguments: serde_json::Value` to `UiUpdate::ToolPending` and
+      both send sites in `agent.rs`. `TuiState::pending_approval` extended to a
+      3-tuple `(Uuid, String, Value)`. The `Pending` bubble state stores and
+      renders the arguments as a one-liner JSON string beneath the title.)
+
+- [x] need 2-char spacer between "approve" and "deny" buttons when rendered in footer.
+      Title for the approval should be like "Tool 'read' requests your approval:"
+      (Done: Changed title format string to `" Tool '{tool_name}' requests your
+      approval:"` and updated the layout in `draw_approval_footer` to
+      `[approve_width, 2, deny_width]` constraints, ignoring the middle area.)
+
+- [ ] Use only lowercase keybinding notation: ctrl-c, fn-left etc.
+      alt-shift-n ( not used, just an example ).
+      Only F-Keys like F1 should use uppercase letters.
+      Update all docs and text used as keybinding help in code to follow this notation.
+
+- [ ] Leading and trailing empty lines are preserved in the rendered bubbles of
+      user messages. These strings should be trimmed on submission.
+      They are trimmed before sending to provider, but the TUI shouldn't even
+      see those leading/trailing spaces.
+
+- [ ] Scrolling in conversation is not possible when a tool approval is currently
+      pending.
+      This is not ideal when multiple tool calls have been requested by the model.
+      The first call needs approval, runs and produces result.
+      The output of the tool call is currently rendered _after_ any of the other
+      requested tool calls.
+      Non active tool calls ( requested by model but not yet 1st entry in the
+      tool call chain ) should always be rendered as last entries in the
+      conversation list, like steering user message that have not been sent yet.
+      This will result in a pending tool to be at the end of the conversation list
+      and close to the approve/deny buttons ( no scrolling needed likely ).

@@ -69,6 +69,25 @@ async fn steer_is_injected_at_natural_point_without_cancelling_stream() {
     );
     assert_eq!(around_steer.last(), Some(&UiUpdate::StreamStarted));
 
+    // SteerQueued arrives right after the steer is queued (before StreamDone);
+    // SteerApplied arrives after the injection that follows StreamDone.
+    let steer_queued_index = around_steer
+        .iter()
+        .position(|update| matches!(update, UiUpdate::SteerQueued))
+        .expect("SteerQueued emitted");
+    let stream_done_index = around_steer
+        .iter()
+        .position(|update| matches!(update, UiUpdate::StreamDone))
+        .expect("StreamDone emitted");
+    let steer_applied_index = around_steer
+        .iter()
+        .position(|update| matches!(update, UiUpdate::SteerApplied))
+        .expect("SteerApplied emitted");
+    assert!(
+        steer_queued_index < stream_done_index && stream_done_index < steer_applied_index,
+        "order: SteerQueued < StreamDone < SteerApplied"
+    );
+
     drop(agent);
     let context = handle
         .await

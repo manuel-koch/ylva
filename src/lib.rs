@@ -13,9 +13,14 @@
 // limitations under the License.
 
 pub mod agent;
+pub mod app;
 pub mod build_info;
+pub mod events;
+pub mod headless_runner;
 pub mod llm;
 pub mod logging;
+pub mod tui_runner;
+pub mod ui;
 
 #[cfg(test)]
 mod test_support;
@@ -28,5 +33,8 @@ pub use agent::{
     DeltaChunk, Message, PendingTool, StreamEvent, ToolCallRequest, UiUpdate,
     DEFAULT_SYSTEM_PROMPT, DEFAULT_TOOL_TIMEOUT_SECS, MAX_ITERATIONS, TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
+pub use app::{ChatEntry, ChatSelection, TuiState, UserMessageState};
 pub use build_info::{BuildInfo, BUILD_INFO};
+pub use events::AppAction;
+pub use headless_runner::{run_headless, run_headless_to};
 pub use llm::{MockEvent, MockProvider, OpenAiProvider, Provider, ToolSchema};

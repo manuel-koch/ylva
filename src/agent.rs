@@ -36,6 +36,9 @@ pub const MAX_ITERATIONS: usize = 15;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentMode {
     Idle,
+    /// Prompt sent to the provider; waiting for the first `StreamStarted`
+    /// event. The agent is busy — a second message typed now is a steer.
+    Pending,
     Streaming,
     ToolPending,
 }
@@ -91,6 +94,7 @@ pub enum UiUpdate {
     ToolPending {
         name: String,
         id: Uuid,
+        arguments: serde_json::Value,
     },
     ToolDone {
         id: Uuid,
@@ -104,6 +108,11 @@ pub enum UiUpdate {
     ToolKilled {
         id: Uuid,
     },
+    /// A steer (user message while busy) was queued. No payload — the TUI
+    /// driver creates the pending bubble itself before sending the command.
+    SteerQueued,
+    /// All previously queued steers have been injected into the LLM context.
+    SteerApplied,
 }
 
 /// A raw tool-call fragment emitted by a provider, to be assembled by the
@@ -397,6 +406,12 @@ impl AgentLoop {
         let _ = self.cmd_tx.send(cmd).await;
     }
 
+    /// Clone of the command channel sender, for consumers (e.g. the TUI
+    /// driver and the SIGINT relay) that send commands without a `&self`.
+    pub fn command_sender(&self) -> mpsc::Sender<AgentCommand> {
+        self.cmd_tx.clone()
+    }
+
     pub fn run(&mut self) -> tokio::task::JoinHandle<anyhow::Result<Context>> {
         let provider = self.provider.clone();
         let registry = self.registry.clone();
@@ -428,6 +443,7 @@ impl AgentLoop {
                             AgentEvent::StreamDone { partial } => {
                                 context.push_assistant(partial, AssistantStatus::Complete);
                                 if inject_pending_steers(&mut pending_steers, &mut context) {
+                                    let _ = ui_tx.send(UiUpdate::SteerApplied).await;
                                     mode = AgentMode::Streaming;
                                     current_cancel = Some(start_request(
                                         &context,
@@ -481,6 +497,7 @@ impl AgentLoop {
                                         .send(UiUpdate::ToolPending {
                                             name: first.call.name.clone(),
                                             id: first.call.id,
+                                            arguments: first.call.arguments.clone(),
                                         })
                                         .await;
                                 }
@@ -561,6 +578,7 @@ impl AgentLoop {
                                     // stream. Queued from ToolPending too; injection
                                     // is deferred (Phase 4 adds descope_pending_tools).
                                     pending_steers.push_back(text);
+                                    let _ = ui_tx.send(UiUpdate::SteerQueued).await;
                                 }
                             }
                             AgentCommand::ApproveTool { id } => {
@@ -666,6 +684,7 @@ async fn advance_tool_queue(
             .send(UiUpdate::ToolPending {
                 name: next.call.name.clone(),
                 id: next.call.id,
+                arguments: next.call.arguments.clone(),
             })
             .await;
         return;

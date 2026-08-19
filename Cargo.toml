@@ -1,6 +1,6 @@
 [package]
 name = "ylva"
-version = "0.3.4"
+version = "0.4.0"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["Manuel Koch"]
@@ -23,6 +23,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
 tracing-log = "0.2"
+ratatui = { version = "0.30", features = ["crossterm"] }
+crossterm = "0.29"
+ratatui-textarea = { version = "0.9", features = ["crossterm"] }
+textwrap = "0.16"
+ctrlc = { version = "3", features = ["termination"] }
+arboard = "3"
 
 [build-dependencies]
 time = { version = "0.3", features = ["formatting", "macros"] }
