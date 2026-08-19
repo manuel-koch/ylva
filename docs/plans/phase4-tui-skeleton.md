@@ -1022,10 +1022,13 @@ Update the following docs **in the same commit** as the code changes:
 
 - [x] Remove the "Ylva" logo in conversation list once a message has been submitted.
 
-- [ ] Leading and trailing empty lines are preserved in the rendered bubbles of
+- [x] Leading and trailing empty lines are preserved in the rendered bubbles of
       user messages. These strings should be trimmed on submission.
       They are trimmed before sending to provider, but the TUI shouldn't even
       see those leading/trailing spaces.
+      (`trim_empty_lines` strips blank-only lines from head and tail of the
+      textarea content before passing it to `push_user_bubble` and the agent
+      command, so the bubble and the provider both receive the same trimmed text.)
 
 - [ ] Scrolling in conversation is not possible when a tool approval is currently
       pending.

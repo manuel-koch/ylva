@@ -351,10 +351,13 @@ fn handle_key_input(
             ActionOutcome::Continue
         }
         KeyCode::Enter => {
-            let text = textarea.lines().join("\n");
-            if text.trim().is_empty() {
+            let raw_text = textarea.lines().join("\n");
+            if raw_text.trim().is_empty() {
                 return ActionOutcome::Continue;
             }
+            // Strip leading/trailing blank lines and common indentation so the
+            // bubble and the provider both receive clean, dedented text.
+            let text = dedent(&raw_text);
             let queued = state.agent_mode != AgentMode::Idle;
             let bubble_state = if queued {
                 UserMessageState::Queued
@@ -615,6 +618,22 @@ fn handle_mouse_input(
 struct MouseDrag {
     active: bool,
     moved: bool,
+}
+
+/// Dedent `text`: remove the common leading whitespace from all non-empty
+/// lines (via `textwrap::dedent`), then strip leading/trailing blank-only lines.
+fn dedent(text: &str) -> String {
+    let dedented = textwrap::dedent(text);
+    let lines: Vec<&str> = dedented.lines().collect();
+    let Some(start) = lines.iter().position(|l| !l.trim().is_empty()) else {
+        return String::new();
+    };
+    let end = lines
+        .iter()
+        .rposition(|l| !l.trim().is_empty())
+        .map(|i| i + 1)
+        .unwrap_or(lines.len());
+    lines[start..end].join("\n")
 }
 
 /// Translate a mouse `(column, row)` inside the input box `area` into a
@@ -1125,6 +1144,56 @@ mod tests {
         );
         assert_eq!(cmd_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty));
         assert!(state.chat_entries.is_empty());
+    }
+
+    #[test]
+    fn enter_trims_leading_and_trailing_blank_lines_from_bubble_and_prompt() {
+        let (mut state, _textarea, cmd_tx, mut cmd_rx) = setup();
+        let mut textarea = TextArea::from(vec![
+            "".to_string(),
+            "  ".to_string(),
+            "hello world".to_string(),
+            "".to_string(),
+        ]);
+        let mut confirm = None;
+
+        handle_action(
+            AppAction::KeyInput(key(KeyCode::Enter)),
+            &mut state,
+            &mut textarea,
+            &mut confirm,
+            &mut MouseDrag::default(),
+            &mut None,
+            &None,
+            &cmd_tx,
+        );
+        assert_eq!(
+            cmd_rx.try_recv(),
+            Ok(AgentCommand::Prompt("hello world".to_string()))
+        );
+        assert_eq!(
+            state.chat_entries[0],
+            ChatEntry::UserMessage {
+                text: "hello world".to_string(),
+                state: UserMessageState::Sent
+            }
+        );
+    }
+
+    #[test]
+    fn trim_empty_lines_removes_surrounding_blank_lines() {
+        assert_eq!(dedent("\n\nhello\nworld\n\n"), "hello\nworld");
+        assert_eq!(dedent("  \nhello\n  "), "hello");
+        assert_eq!(dedent("hello"), "hello");
+        assert_eq!(dedent("\n\n"), "");
+    }
+
+    #[test]
+    fn dedent_removes_common_leading_whitespace() {
+        assert_eq!(dedent("   hello\n   world"), "hello\nworld");
+        assert_eq!(dedent("\n   hello\n   world\n"), "hello\nworld");
+        assert_eq!(dedent("   hello\n     world"), "hello\n  world");
+        assert_eq!(dedent("\t\thello\n\t\tworld"), "hello\nworld");
     }
 
     #[test]
