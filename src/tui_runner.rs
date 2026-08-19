@@ -618,6 +618,10 @@ fn handle_mouse_input(
                             }
                         }
                     }
+                } else {
+                    // Plain click (no drag) — discard the anchor so no stale
+                    // highlight lingers on the next render frame.
+                    state.chat_selection = None;
                 }
             }
         }

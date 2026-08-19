@@ -277,12 +277,18 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
     // Apply selection highlight to lines in the selected range.
     const CHAT_SELECTION_BG: Color = Color::Rgb(60, 80, 120);
     if let Some(sel) = state.chat_selection {
-        let (start_line, _, end_line, _) = sel.normalized();
-        for (index, line) in lines.iter_mut().enumerate() {
-            if index >= start_line && index <= end_line {
-                for span in line.spans.iter_mut() {
-                    span.style = span.style.patch(Style::default().bg(CHAT_SELECTION_BG));
+        if !sel.is_empty() {
+            let (start_line, start_col, end_line, end_col) = sel.normalized();
+            for (index, line) in lines.iter_mut().enumerate() {
+                if index < start_line || index > end_line {
+                    continue;
                 }
+                // Determine which column range to highlight on this line.
+                // Middle lines are fully highlighted (0..MAX); the start and
+                // end lines are highlighted only within the selection columns.
+                let col_start = if index == start_line { start_col } else { 0 };
+                let col_end = if index == end_line { end_col } else { usize::MAX };
+                apply_selection_highlight_to_line(line, col_start, col_end, CHAT_SELECTION_BG);
             }
         }
     }
@@ -336,6 +342,63 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
             &mut scrollbar_state,
         );
     }
+}
+
+/// Apply `background` color to character columns `[col_start, col_end)` on
+/// `line`, splitting existing spans at the selection boundaries as needed.
+/// Pass `col_end = usize::MAX` to highlight through to the end of the line.
+fn apply_selection_highlight_to_line(
+    line: &mut Line<'_>,
+    col_start: usize,
+    col_end: usize,
+    background: Color,
+) {
+    if col_start >= col_end {
+        return;
+    }
+    let original_spans: Vec<_> = std::mem::take(&mut line.spans);
+    let mut new_spans: Vec<Span<'static>> = Vec::new();
+    let mut char_pos = 0usize;
+
+    for span in original_spans {
+        let style = span.style;
+        let text: String = span.content.into_owned();
+        let span_char_len = text.chars().count();
+        let span_end = char_pos + span_char_len;
+        let effective_end = col_end.min(span_end);
+
+        if span_end <= col_start || char_pos >= col_end {
+            new_spans.push(Span::styled(text, style));
+        } else {
+            let overlap_start = col_start.saturating_sub(char_pos);
+            let overlap_end = effective_end.saturating_sub(char_pos).min(span_char_len);
+
+            if overlap_start > 0 {
+                let before: String = text.chars().take(overlap_start).collect();
+                new_spans.push(Span::styled(before, style));
+            }
+            let selected: String = text
+                .chars()
+                .skip(overlap_start)
+                .take(overlap_end - overlap_start)
+                .collect();
+            if !selected.is_empty() {
+                new_spans.push(Span::styled(
+                    selected,
+                    style.patch(Style::default().bg(background)),
+                ));
+            }
+            if overlap_end < span_char_len {
+                let after: String = text.chars().skip(overlap_end).collect();
+                new_spans.push(Span::styled(after, style));
+            }
+        }
+        char_pos = span_end;
+    }
+    line.spans = new_spans
+        .into_iter()
+        .map(|s| Span::styled(s.content, s.style))
+        .collect();
 }
 
 /// Render the Ylva wordmark, horizontally centered. Only shown when the
@@ -917,7 +980,60 @@ esc                         Deny tool (approval mode)";
 mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
+    use ratatui::style::Color;
+    use ratatui::text::{Line, Span};
     use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget};
+
+    use super::apply_selection_highlight_to_line;
+
+    const SEL_BG: Color = Color::Rgb(60, 80, 120);
+
+    fn plain_line(text: &str) -> Line<'static> {
+        Line::from(vec![Span::raw(text.to_owned())])
+    }
+
+    fn highlighted_in(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .filter(|s| s.style.bg == Some(SEL_BG))
+            .map(|s| s.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn selection_highlight_highlights_middle_chars_only() {
+        let mut line = plain_line("Hello, world!");
+        apply_selection_highlight_to_line(&mut line, 7, 12, SEL_BG);
+        assert_eq!(highlighted_in(&line), "world");
+    }
+
+    #[test]
+    fn selection_highlight_empty_range_leaves_line_unchanged() {
+        let mut line = plain_line("Hello");
+        apply_selection_highlight_to_line(&mut line, 3, 3, SEL_BG);
+        assert!(
+            line.spans.iter().all(|s| s.style.bg != Some(SEL_BG)),
+            "no span should be highlighted for an empty range"
+        );
+    }
+
+    #[test]
+    fn selection_highlight_max_col_end_highlights_to_end_of_line() {
+        let mut line = plain_line("Hello");
+        apply_selection_highlight_to_line(&mut line, 2, usize::MAX, SEL_BG);
+        assert_eq!(highlighted_in(&line), "llo");
+    }
+
+    #[test]
+    fn selection_highlight_across_multiple_spans() {
+        let mut line = Line::from(vec![
+            Span::raw("foo".to_owned()),
+            Span::raw("bar".to_owned()),
+        ]);
+        // Select "ob" spanning both spans: cols 2..4.
+        apply_selection_highlight_to_line(&mut line, 2, 4, SEL_BG);
+        assert_eq!(highlighted_in(&line), "ob");
+    }
 
     /// `content_length` must be `max_offset + 1` (the number of scrollable
     /// positions), not the total line count, or the thumb never reaches the

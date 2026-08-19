@@ -1042,7 +1042,7 @@ Update the following docs **in the same commit** as the code changes:
       This will result in a pending tool to be at the end of the conversation list
       and close to the approve/deny buttons ( no scrolling needed likely ).
 
-- [ ] Drag'n'drop in a bubble of the conversation-list is rendered as a full terminal
+- [x] Drag'n'drop in a bubble of the conversation-list is rendered as a full terminal
       width line.
       User can't distinguish where the drag starts and where it ends.
       This seems to be triggered by a click too, I see a selection-like
@@ -1050,6 +1050,11 @@ Update the following docs **in the same commit** as the code changes:
       Though after a specific drag'n'drop only the chars that were dragged are
       actually copied to clipboard.
       Thus it seems only the rendering is not correct.
+      (Fixed: `apply_selection_highlight_to_line` splits spans at selection column
+      boundaries so only the actually-selected characters receive the highlight BG.
+      `draw_chat` now skips rendering when `sel.is_empty()` and passes per-line
+      column ranges to the helper so partial start/end lines are correctly clipped.
+      On `MouseUp` without a real drag the stale `chat_selection` anchor is cleared.)
 
 - [ ] When a tool approval is denied by user the error shown in the
       tool-bubble is misleading: "tool 'glob' was denied (no auto-approve configured"
@@ -1068,3 +1073,5 @@ Update the following docs **in the same commit** as the code changes:
       terminal height. Should have vertical scrolling indicators too.
       Just render "▲" and "▼" ( no vertical indicator inbetween ) when there is
       more up/down content avail.
+
+- [ ] Selecting text while tool pending is not possible
