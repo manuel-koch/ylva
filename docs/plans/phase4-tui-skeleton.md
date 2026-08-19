@@ -1013,10 +1013,14 @@ Update the following docs **in the same commit** as the code changes:
       approval:"` and updated the layout in `draw_approval_footer` to
       `[approve_width, 2, deny_width]` constraints, ignoring the middle area.)
 
-- [ ] Use only lowercase keybinding notation: ctrl-c, fn-left etc.
+- [x] Use only lowercase keybinding notation: ctrl-c, fn-left etc.
       alt-shift-n ( not used, just an example ).
       Only F-Keys like F1 should use uppercase letters.
       Update all docs and text used as keybinding help in code to follow this notation.
+      (All keybinding strings in `src/ui.rs` (help popup) and `docs/keybindings.md`
+      updated to lowercase hyphen-separated notation; F1 remains uppercase.)
+
+- [ ] Remove the "Ylva" logo in conversation list once a message has been submitted.
 
 - [ ] Leading and trailing empty lines are preserved in the rendered bubbles of
       user messages. These strings should be trimmed on submission.
@@ -1034,3 +1038,30 @@ Update the following docs **in the same commit** as the code changes:
       conversation list, like steering user message that have not been sent yet.
       This will result in a pending tool to be at the end of the conversation list
       and close to the approve/deny buttons ( no scrolling needed likely ).
+
+- [ ] Drag'n'drop in a bubble of the conversation-list is rendered as a full terminal
+      width line.
+      User can't distinguish where the drag starts and where it ends.
+      This seems to be triggered by a click too, I see a selection-like
+      line where I have clicked.
+      Though after a specific drag'n'drop only the chars that were dragged are
+      actually copied to clipboard.
+      Thus it seems only the rendering is not correct.
+
+- [ ] When a tool approval is denied by user the error shown in the
+      tool-bubble is misleading: "tool 'glob' was denied (no auto-approve configured"
+      This sounds like there was some auto-approval involved or even required that
+      resulted in denying the tool, while this was a deliberate action of the user in
+      denying the tool.
+
+- [ ] While streaming response tokens are recieved, the progress indicator stops
+      running and appears stuck.
+
+- [ ] Help popup should use 1 char padding and the popup should have a title "Help"
+      at upper-left position of popup ( 2 char indent, not directly at the edge )
+      instead of "F1 or esc to close".
+      Use blue border for the help popup.
+      Help popup content can't be scrolled when its content is bigger than the 
+      terminal height. Should have vertical scrolling indicators too.
+      Just render "▲" and "▼" ( no vertical indicator inbetween ) when there is
+      more up/down content avail.

@@ -740,8 +740,8 @@ fn draw_approval_footer(
         row_1,
     );
 
-    let approve_label = " [ ✓ Approve (Enter) ] ";
-    let deny_label = " [ ✗ Deny (Esc) ] ";
+    let approve_label = " [ ✓ Approve (enter) ] ";
+    let deny_label = " [ ✗ Deny (esc) ] ";
     let approve_width = approve_label.chars().count() as u16;
     let deny_width = deny_label.chars().count() as u16;
 
@@ -837,22 +837,22 @@ fn draw_help_popup(frame: &mut Frame) {
     frame.render_widget(block.clone(), popup);
 
     let keybindings = "\
-Enter                       Send message; queue steer if busy
-Shift+Enter / Alt+Enter     Insert newline
-Ctrl+C / Esc (x1)           Show \"Press again to cancel\" hint (while streaming)
-Ctrl+C / Esc (x2, <=2s)     Interrupt generation
-Ctrl+C (x1)                 Show \"Press again to quit\" hint (idle)
-Ctrl+C (x2, <=2s)           Quit TUI
-Esc                         Clear input (idle)
-Esc                         Close popup
+enter                       Send message; queue steer if busy
+shift-enter / alt-enter     Insert newline
+ctrl-c / esc (x1)           Show \"Press again to cancel\" hint (while streaming)
+ctrl-c / esc (x2, <=2s)     Interrupt generation
+ctrl-c (x1)                 Show \"Press again to quit\" hint (idle)
+ctrl-c (x2, <=2s)           Quit TUI
+esc                         Clear input (idle)
+esc                         Close popup
 F1                          Toggle this help
-Up / Down                   Input history (on boundary lines)
-Home / Fn+Left              Line start; at col 0: end of previous line
-End / Fn+Right              Line end; at line end: start of next line
-PageUp / PageDown           Scroll chat
-Mouse wheel                 Scroll chat
-Enter                       Approve tool (approval mode)
-Esc                         Deny tool (approval mode)";
+up / down                   Input history (on boundary lines)
+home / fn-left              Line start; at col 0: end of previous line
+end / fn-right              Line end; at line end: start of next line
+page-up / page-down         Scroll chat
+mouse wheel                 Scroll chat
+enter                       Approve tool (approval mode)
+esc                         Deny tool (approval mode)";
 
     let build_info = BUILD_INFO.render();
 
@@ -872,7 +872,7 @@ Esc                         Deny tool (approval mode)";
         build_area,
     );
 
-    frame.render_widget(Paragraph::new("F1 or Esc to close"), popup);
+    frame.render_widget(Paragraph::new("F1 or esc to close"), popup);
 }
 
 #[cfg(test)]
