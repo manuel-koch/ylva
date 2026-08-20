@@ -621,7 +621,7 @@ impl AgentLoop {
                                     let call_id = denied.call.id;
                                     tracing::debug!(tool = %name, "tool denied");
                                     let mut error = format!("tool '{name}' was denied");
-                                    if reason.is_empty() {
+                                    if !reason.is_empty() {
                                         error.push_str(&format!(": {reason}"));
                                     }
                                     context.push_tool_error(call_id, name, error.clone());
