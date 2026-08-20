@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use ylva::{
     AgentCommand, AgentLoop, AssistantStatus, Message, MockProvider, ToolRegistry, UiUpdate,
-    DEFAULT_SYSTEM_PROMPT, TOOL_PROTOCOL_SYSTEM_PROMPT,
+    UserMessageKind, DEFAULT_SYSTEM_PROMPT, TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
 
 use common::collect_until;
@@ -104,6 +104,7 @@ async fn steer_is_injected_at_natural_point_without_cancelling_stream() {
             },
             Message::User {
                 content: "first".to_string(),
+                kind: UserMessageKind::Explicit,
             },
             Message::Assistant {
                 content: "first-response".to_string(),
@@ -112,6 +113,7 @@ async fn steer_is_injected_at_natural_point_without_cancelling_stream() {
             },
             Message::User {
                 content: "steer".to_string(),
+                kind: UserMessageKind::Explicit,
             },
         ]
     );
@@ -154,7 +156,7 @@ async fn two_steers_batch_injected_before_the_next_request() {
         .messages()
         .iter()
         .filter_map(|message| match message {
-            Message::User { content } => Some(content.as_str()),
+            Message::User { content, .. } => Some(content.as_str()),
             _ => None,
         })
         .collect();
@@ -192,7 +194,7 @@ async fn steer_after_stream_ended_starts_new_request() {
         .messages()
         .iter()
         .filter_map(|message| match message {
-            Message::User { content } => Some(content.as_str()),
+            Message::User { content, .. } => Some(content.as_str()),
             _ => None,
         })
         .collect();

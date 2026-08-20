@@ -21,7 +21,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use ylva::{
     AgentCommand, AgentLoop, AssistantStatus, Message, OpenAiProvider, Provider, StreamEvent,
-    ToolRegistry, UiUpdate, DEFAULT_SYSTEM_PROMPT, TOOL_PROTOCOL_SYSTEM_PROMPT,
+    ToolRegistry, UiUpdate, UserMessageKind, DEFAULT_SYSTEM_PROMPT, TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
 
 use common::collect_until;
@@ -270,6 +270,7 @@ async fn agent_loop_round_trip_commits_streamed_text() {
             },
             Message::User {
                 content: "question".to_string(),
+                kind: UserMessageKind::Explicit,
             },
             Message::Assistant {
                 content: "The answer.".to_string(),

@@ -354,12 +354,24 @@ fn handle_key_input(
 ) -> ActionOutcome {
     use crossterm::event::{KeyCode, KeyModifiers};
 
-    // Approval sub-mode: Enter approves; Esc is handled by handle_escape; all
-    // other keys edit the input.
+    // Approval sub-mode: Enter approves when the input field is empty; if the
+    // user has typed a denial reason Enter denies with that text as the reason.
+    // Esc is handled by handle_escape; all other keys edit the input.
     if state.pending_approval.is_some() {
         if let KeyCode::Enter = event.code {
+            let typed_reason = textarea.lines().join("\n");
+            let input_is_empty = typed_reason.trim().is_empty();
             if let Some((id, _, _)) = state.pending_approval.take() {
-                let _ = cmd_tx.try_send(AgentCommand::ApproveTool { id });
+                if input_is_empty {
+                    let _ = cmd_tx.try_send(AgentCommand::ApproveTool { id });
+                } else {
+                    textarea.select_all();
+                    textarea.delete_char();
+                    let _ = cmd_tx.try_send(AgentCommand::DenyTool {
+                        id,
+                        reason: typed_reason,
+                    });
+                }
             }
             return ActionOutcome::Continue;
         }

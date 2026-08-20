@@ -1084,11 +1084,24 @@ Update the following docs **in the same commit** as the code changes:
       and the agent is busy re-prompting the model, Ctrl+C falls back to the
       double-press → Stop path.)
 
-- [ ] Ctrl-c to abort TUI while streaming is not possible, the hint for
-      second required keypress is shown, but consecutive ctrl-c does nothing.
-      Additionally the streaming doesn't finish afterwards, likely not properly
-      aborted.
-      Must kill executable from outside, leaving terminal rendering broken afterwards.
+- [x] Change the order of rendered elements with tool approval is pending:
+      ```text
+      <approval title>
+      <approve button> <deny button>
+      <input field>
+      ```
+      (When `pending_approval` is `Some`, `draw` now builds the layout with the
+      two footer rows — title then buttons — placed above the input field, so the
+      approve/deny controls sit immediately above where the user types a denial
+      reason. In normal mode the original order — input above footer rows — is
+      preserved.)
+
+- [x] process of tool approval should be:
+  - On start of tool approval, save the current content of input-field
+    ( need it later to restore it ) and clear input-field.
+  - Use the entered input-field text as "reason" why the tool approval was denied.
+    If tool was approved, don't use input field.
+  - Restore the saved content to input-field after approval is done
 
 - [ ] Selecting text while tool pending is not possible
 

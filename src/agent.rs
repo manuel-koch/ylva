@@ -147,6 +147,20 @@ pub struct ToolCallRequest {
     pub arguments: Value,
 }
 
+/// Distinguishes user messages that were typed explicitly by the user from
+/// those injected by the agent harness as model hints.
+///
+/// `Explicit` messages are rendered in the TUI conversation list and the
+/// headless CLI output. `ImplicitToolNote` messages are sent to the model
+/// as regular `role: "user"` turns but are **never rendered** in any UI —
+/// they exist solely to give the model richer context (e.g. a denial reason).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum UserMessageKind {
+    #[default]
+    Explicit,
+    ImplicitToolNote,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     System {
@@ -154,6 +168,7 @@ pub enum Message {
     },
     User {
         content: String,
+        kind: UserMessageKind,
     },
     Assistant {
         content: String,
@@ -222,7 +237,20 @@ impl Context {
     }
 
     pub fn push_user(&mut self, text: String) {
-        self.messages.push(Message::User { content: text });
+        self.messages.push(Message::User {
+            content: text,
+            kind: UserMessageKind::Explicit,
+        });
+    }
+
+    /// Push a model hint injected by the agent harness. The message is sent
+    /// to the model as a regular `role: "user"` turn but is never rendered in
+    /// any UI (TUI conversation list or headless CLI output).
+    pub fn push_implicit_user(&mut self, text: String) {
+        self.messages.push(Message::User {
+            content: text,
+            kind: UserMessageKind::ImplicitToolNote,
+        });
     }
 
     pub fn push_assistant(&mut self, content: String, status: AssistantStatus) {
@@ -624,7 +652,18 @@ impl AgentLoop {
                                     if !reason.is_empty() {
                                         error.push_str(&format!(": {reason}"));
                                     }
-                                    context.push_tool_error(call_id, name, error.clone());
+                                    context.push_tool_error(call_id, name.clone(), error.clone());
+                                    // When the user supplied a reason, also push a
+                                    // `user` role message so the model reads the
+                                    // correction through the authoritative instruction
+                                    // channel rather than just the tool-error envelope.
+                                    if !reason.is_empty() {
+                                        context.push_implicit_user(format!(
+                                            "I denied the '{name}' tool call \
+                                             ( tool_call_id={call_id} ). \
+                                             Here is my reason for the denial:\n\n{reason}"
+                                        ));
+                                    }
                                     let _ = ui_tx
                                         .send(UiUpdate::ToolError { id: call_id, error })
                                         .await;
@@ -888,6 +927,7 @@ mod tests {
         };
         let user = Message::User {
             content: "user".into(),
+            kind: UserMessageKind::Explicit,
         };
         let assistant = Message::Assistant {
             content: "assistant".into(),
@@ -951,6 +991,7 @@ mod tests {
             context.messages()[2],
             Message::User {
                 content: "first user turn".to_string(),
+                kind: UserMessageKind::Explicit,
             }
         );
         assert_eq!(
@@ -965,6 +1006,7 @@ mod tests {
             context.messages()[4],
             Message::User {
                 content: "second user turn".to_string(),
+                kind: UserMessageKind::Explicit,
             }
         );
     }
@@ -1045,7 +1087,8 @@ mod tests {
         assert_eq!(
             read_back[2],
             Message::User {
-                content: "hello".into()
+                content: "hello".into(),
+                kind: UserMessageKind::Explicit,
             }
         );
     }

@@ -95,16 +95,35 @@ pub fn draw(
         .sum::<usize>();
     let input_height = (wrapped_rows as u16).clamp(1, max_input);
 
-    let [chat_area, _, input_area, footer_row_1, footer_row_2] = Layout::default()
+    // When a tool approval is pending the approval title and buttons appear
+    // ABOVE the input field so the approve/deny controls sit immediately
+    // above where the user types a denial reason.
+    //
+    // The layout produces three variable slots (slot_a / slot_b / slot_c) that
+    // are then mapped to named areas based on the current mode:
+    //
+    //   approval pending          │  normal mode
+    //   ─────────────────────────────────────────
+    //   slot_a → footer_row_1     │  slot_a → input_area
+    //   slot_b → footer_row_2     │  slot_b → footer_row_1
+    //   slot_c → input_area       │  slot_c → footer_row_2
+    let approval_pending = state.pending_approval.is_some();
+    let [chat_area, _, slot_a, slot_b, slot_c] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Fill(1),
             Constraint::Length(1),
-            Constraint::Length(input_height),
+            Constraint::Length(if approval_pending { 1 } else { input_height }),
             Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Length(if approval_pending { input_height } else { 1 }),
         ])
         .areas(area);
+
+    let (input_area, footer_row_1, footer_row_2) = if approval_pending {
+        (slot_c, slot_a, slot_b)
+    } else {
+        (slot_a, slot_b, slot_c)
+    };
 
     draw_chat(frame, chat_area, state);
 
@@ -127,11 +146,41 @@ pub fn draw(
     );
     frame.render_widget(&*textarea, input_area);
 
+    // When a tool approval is pending and the input field is empty, overlay a
+    // dimmed placeholder hint so the user knows the field accepts a denial reason.
+    // The overlay sits one column to the right of the `▌` border character.
+    let input_is_empty = textarea.lines() == [""];
+    if approval_pending && input_is_empty && input_area.width > 1 && input_area.height > 0 {
+        let placeholder_area = Rect {
+            x: input_area.x + 1,
+            y: input_area.y,
+            width: input_area.width - 1,
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                "Enter reason for denial here…",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .bg(USER_MESSAGE_BG_COLOR),
+            )),
+            placeholder_area,
+        );
+    }
+
     // Store the input rect for mouse click/drag handling in the event loop.
     state.input_area = input_area;
 
-    let button_areas = if let Some((_, name, _)) = &state.pending_approval {
-        draw_approval_footer(frame, footer_row_1, footer_row_2, name, mouse_pos, hint)
+    let button_areas = if let Some((_, name, _)) = &state.pending_approval.clone() {
+        draw_approval_footer(
+            frame,
+            footer_row_1,
+            footer_row_2,
+            name,
+            input_is_empty,
+            mouse_pos,
+            hint,
+        )
     } else {
         draw_normal_footer(frame, footer_row_1, footer_row_2, state, hint);
         None
@@ -829,6 +878,7 @@ fn draw_approval_footer(
     row_1: Rect,
     row_2: Rect,
     tool_name: &str,
+    input_is_empty: bool,
     mouse_pos: Option<(u16, u16)>,
     hint: Option<&str>,
 ) -> Option<ButtonAreas> {
@@ -842,11 +892,24 @@ fn draw_approval_footer(
         row_1,
     );
 
+    // When the user is typing a denial reason, Enter will deny rather than
+    // approve — reflect this by disabling the Approve button and adding
+    // "(enter)" to the Deny button label.
     let approve_label = " [ ✓ Approve (enter) ] ";
-    let deny_label = " [ ✗ Deny (esc) ] ";
+    let deny_label = if input_is_empty {
+        " [ ✗ Deny (esc) ] "
+    } else {
+        " [ ✗ Deny (enter/esc) ] "
+    };
     let approve_width = approve_label.chars().count() as u16;
     let deny_width = deny_label.chars().count() as u16;
 
+    // Indent buttons by 1 char so they align with the leading space of the
+    // approval title above.
+    let [_, buttons_area] = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(1), Constraint::Fill(1)])
+        .areas(row_2);
     let [approve_area, _, deny_area] = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -854,13 +917,19 @@ fn draw_approval_footer(
             Constraint::Length(2),
             Constraint::Length(deny_width),
         ])
-        .areas(row_2);
+        .areas(buttons_area);
 
     let pointer = mouse_pos.map(|(col, row)| ratatui::layout::Position::new(col, row));
     let approve_hovered = pointer.is_some_and(|pos| approve_area.contains(pos));
     let deny_hovered = pointer.is_some_and(|pos| deny_area.contains(pos));
 
-    let approve_style = if approve_hovered {
+    // Approve button is disabled (greyed out, no hover) when the user has
+    // typed a denial reason — pressing Enter at that point denies instead.
+    let approve_style = if !input_is_empty {
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::DIM)
+    } else if approve_hovered {
         Style::default()
             .fg(Color::Black)
             .bg(Color::LightGreen)
