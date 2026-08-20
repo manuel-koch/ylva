@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio_util::sync::CancellationToken;
@@ -36,6 +37,10 @@ pub(crate) async fn post_with_retry(
     body: &serde_json::Value,
     cancel: &CancellationToken,
 ) -> anyhow::Result<reqwest::Response> {
+    if let Some(dump_path) = build_request_dump_path() {
+        dump_request_body(body, &dump_path);
+    }
+
     let mut retries = 0usize;
     loop {
         let request = client.post(url).headers(headers.clone()).json(body);
@@ -104,7 +109,80 @@ pub(crate) async fn post_with_retry(
     }
 }
 
-/// Whether an HTTP status is worth a retry: rate limit or server error.
+/// Dump `body` as pretty-printed JSON to `file_path`.
+///
+/// The parent directory of `file_path` is created if it does not yet exist.
+/// Errors are logged at `warn` level and silently ignored so a dump failure
+/// never breaks a live request.
+pub(crate) fn dump_request_body(body: &serde_json::Value, file_path: &Path) {
+    if let Err(error) = std::fs::create_dir_all(file_path.parent().unwrap_or(Path::new("."))) {
+        tracing::warn!(path = %file_path.display(), error = %error, "failed to create request dump dir");
+        return;
+    }
+
+    match serde_json::to_string_pretty(body) {
+        Ok(json_text) => {
+            if let Err(error) = std::fs::write(file_path, json_text) {
+                tracing::warn!(path = %file_path.display(), error = %error, "failed to write request dump file");
+            } else {
+                tracing::debug!(path = %file_path.display(), "dumped request body");
+            }
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to serialize request body for dump");
+        }
+    }
+}
+
+/// Derive a dump file path from the `YLVA_REQUEST_DUMP_PATH` environment variable.
+///
+/// The variable is treated as a path template. The parent directory and stem
+/// are extracted from it; the actual file is named
+/// `<stem>_<unix_seconds>_<millis>.json` (stem falls back to `"ylva_req"` when
+/// absent). A relative parent directory is resolved against the current working
+/// directory.
+///
+/// Returns `None` when the envvar is unset, empty, or the current working
+/// directory cannot be resolved (the latter is logged at `warn` level).
+pub(crate) fn build_request_dump_path() -> Option<PathBuf> {
+    let template = match std::env::var("YLVA_REQUEST_DUMP_PATH") {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => return None,
+    };
+
+    let template_path = Path::new(&template);
+
+    let parent = template_path.parent().unwrap_or(Path::new(""));
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    let dump_dir = if parent.is_absolute() {
+        parent.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(parent),
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to resolve CWD for YLVA_REQUEST_DUMP_PATH");
+                return None;
+            }
+        }
+    };
+
+    let stem = template_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("ylva_req");
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO);
+    let file_name = format!("{stem}_{}_{:03}.json", now.as_secs(), now.subsec_millis());
+    Some(dump_dir.join(file_name))
+}
+
 pub(crate) fn should_retry(status: reqwest::StatusCode) -> bool {
     status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
 }
@@ -286,5 +364,83 @@ mod tests {
     fn response_body_detail_returns_empty_for_blank_body() {
         assert_eq!(snippet_from_body(b"   "), "");
         assert_eq!(snippet_from_body(b""), "");
+    }
+
+    #[test]
+    fn build_request_dump_path_uses_stem_and_absolute_dir() {
+        unsafe { std::env::set_var("YLVA_REQUEST_DUMP_PATH", "/tmp/dumps/my_req") };
+        let path = build_request_dump_path().expect("path");
+        unsafe { std::env::remove_var("YLVA_REQUEST_DUMP_PATH") };
+        let parent = path.parent().expect("parent");
+        let file_name = path.file_name().and_then(|n| n.to_str()).expect("name");
+        assert_eq!(parent, Path::new("/tmp/dumps"));
+        assert!(
+            file_name.starts_with("my_req_"),
+            "expected stem prefix 'my_req_', got {file_name}"
+        );
+        assert!(file_name.ends_with(".json"), "expected .json suffix");
+    }
+
+    #[test]
+    fn build_request_dump_path_returns_none_when_env_var_unset() {
+        unsafe { std::env::remove_var("YLVA_REQUEST_DUMP_PATH") };
+        assert!(build_request_dump_path().is_none());
+    }
+
+    #[test]
+    fn build_request_dump_path_returns_none_when_env_var_is_whitespace_only() {
+        unsafe { std::env::set_var("YLVA_REQUEST_DUMP_PATH", "   ") };
+        let result = build_request_dump_path();
+        unsafe { std::env::remove_var("YLVA_REQUEST_DUMP_PATH") };
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn build_request_dump_path_falls_back_to_default_stem_when_template_has_no_stem() {
+        unsafe { std::env::set_var("YLVA_REQUEST_DUMP_PATH", "/") };
+        let path = build_request_dump_path().expect("path");
+        unsafe { std::env::remove_var("YLVA_REQUEST_DUMP_PATH") };
+        let file_name = path.file_name().and_then(|n| n.to_str()).expect("name");
+        assert!(
+            file_name.starts_with("ylva_req_"),
+            "expected default stem 'ylva_req_', got {file_name}"
+        );
+    }
+
+    #[test]
+    fn build_request_dump_path_resolves_relative_template_against_cwd() {
+        let cwd = std::env::current_dir().expect("cwd");
+        unsafe { std::env::set_var("YLVA_REQUEST_DUMP_PATH", "sub/req") };
+        let path = build_request_dump_path().expect("path");
+        unsafe { std::env::remove_var("YLVA_REQUEST_DUMP_PATH") };
+        assert!(
+            path.starts_with(cwd.join("sub")),
+            "expected path under CWD/sub, got {path:?}"
+        );
+    }
+
+    #[test]
+    fn dump_request_body_writes_pretty_json_to_given_path() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let file_path = temp_dir.path().join("request.json");
+        let body = serde_json::json!({"model": "test", "messages": []});
+
+        dump_request_body(&body, &file_path);
+
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file_path).expect("read file"))
+                .expect("valid json");
+        assert_eq!(written, body);
+    }
+
+    #[test]
+    fn dump_request_body_creates_parent_dir_when_missing() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let file_path = temp_dir.path().join("nested/dir/request.json");
+        let body = serde_json::json!({"nested": true});
+
+        dump_request_body(&body, &file_path);
+
+        assert!(file_path.exists(), "file should have been created");
     }
 }
