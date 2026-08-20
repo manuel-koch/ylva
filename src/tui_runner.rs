@@ -241,7 +241,8 @@ fn handle_action(
 
 fn handle_paste(text: String, state: &mut TuiState, textarea: &mut TextArea<'_>) -> ActionOutcome {
     state.exit_browsing(&textarea.lines().join("\n"));
-    let paste_lines: Vec<&str> = text.split('\n').collect();
+    let dedented_text = dedent(&text);
+    let paste_lines: Vec<&str> = dedented_text.split('\n').collect();
     for (index, line) in paste_lines.iter().enumerate() {
         for character in line.chars() {
             textarea.input(crossterm::event::KeyEvent::new(
@@ -1386,6 +1387,31 @@ mod tests {
         assert_eq!(dedent("\n   hello\n   world\n"), "hello\nworld");
         assert_eq!(dedent("   hello\n     world"), "hello\n  world");
         assert_eq!(dedent("\t\thello\n\t\tworld"), "hello\nworld");
+    }
+
+    #[test]
+    fn paste_dedents_text_before_inserting() {
+        let (mut state, _textarea, cmd_tx, _cmd_rx) = setup();
+        let mut textarea = TextArea::default();
+        let mut confirm = None;
+
+        let indented = "    hello\n    world".to_string();
+        let outcome = handle_action(
+            AppAction::Paste(indented),
+            &mut state,
+            &mut textarea,
+            &mut confirm,
+            &mut MouseDrag::default(),
+            &mut None,
+            &None,
+            &cmd_tx,
+        );
+        assert_eq!(outcome, ActionOutcome::Continue);
+        assert_eq!(
+            textarea.lines(),
+            &["hello", "world"],
+            "pasted text must be dedented before insertion"
+        );
     }
 
     #[test]

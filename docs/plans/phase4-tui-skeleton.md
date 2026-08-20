@@ -1105,8 +1105,12 @@ Update the following docs **in the same commit** as the code changes:
 
 - [x] Selecting text while tool pending is not possible
 
-- [ ] When pasting text into input field, the text should be dedent first using the
+- [x] When pasting text into input field, the text should be dedent first using the
       same function that is used to dedent text before submitting it to agent.
+      (`handle_paste` now calls `dedent(&text)` on the raw pasted string before
+      inserting characters, so common leading whitespace and surrounding blank lines
+      are stripped — exactly like submit-time dedent. Covered by
+      `paste_dedents_text_before_inserting`.)
 
 - [ ] Why is the input-field limited to just 4 lines ? Terminal has height 16.
       If there is a ratio defined, extract it as a constant to locate it easier in
