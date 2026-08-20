@@ -1103,7 +1103,7 @@ Update the following docs **in the same commit** as the code changes:
     If tool was approved, don't use input field.
   - Restore the saved content to input-field after approval is done
 
-- [ ] Selecting text while tool pending is not possible
+- [x] Selecting text while tool pending is not possible
 
 - [ ] When pasting text into input field, the text should be dedent first using the
       same function that is used to dedent text before submitting it to agent.
@@ -1133,3 +1133,5 @@ Update the following docs **in the same commit** as the code changes:
 - [ ] In Footer change the "active indicator to
   - drop the "[mode]" snippet
   - use just "Sending...", "Streaming...", "Idle"
+
+- [ ] render toast messages in lower right edge of app.

@@ -519,9 +519,11 @@ fn handle_mouse_input(
             _ => {}
         }
 
+        let position = ratatui::layout::Position::new(mouse.column, mouse.row);
+        let in_chat = state.chat_area.contains(position);
+
         if let MouseEventKind::Down(button) = mouse.kind {
             if button == crossterm::event::MouseButton::Left {
-                let position = ratatui::layout::Position::new(mouse.column, mouse.row);
                 if let Some(areas) = button_areas {
                     if areas.approve.contains(position) {
                         if let Some((id, _, _)) = state.pending_approval.take() {
@@ -539,9 +541,60 @@ fn handle_mouse_input(
                         return ActionOutcome::Continue;
                     }
                 }
+                // Allow starting a chat drag-selection inside the conversation area.
+                if in_chat {
+                    let anchor_line = state
+                        .scroll_offset
+                        .saturating_add((mouse.row.saturating_sub(state.chat_area.y)) as usize);
+                    let anchor_col = (mouse.column.saturating_sub(state.chat_area.x)) as usize;
+                    state.chat_selection = Some(ChatSelection {
+                        anchor_line,
+                        anchor_col,
+                        cursor_line: anchor_line,
+                        cursor_col: anchor_col,
+                    });
+                    state.chat_drag_active = true;
+                    return ActionOutcome::Continue;
+                }
             }
         }
-        // All other events outside the approval buttons are a no-op.
+
+        if let MouseEventKind::Drag(crossterm::event::MouseButton::Left) = mouse.kind {
+            if state.chat_drag_active {
+                if let Some(sel) = state.chat_selection.as_mut() {
+                    sel.cursor_line = state
+                        .scroll_offset
+                        .saturating_add((mouse.row.saturating_sub(state.chat_area.y)) as usize);
+                    sel.cursor_col = (mouse.column.saturating_sub(state.chat_area.x)) as usize;
+                }
+                return ActionOutcome::Continue;
+            }
+        }
+
+        if let MouseEventKind::Up(crossterm::event::MouseButton::Left) = mouse.kind {
+            if state.chat_drag_active {
+                state.chat_drag_active = false;
+                if let Some(selected_text) = state.extract_chat_selection_text() {
+                    if !selected_text.is_empty() {
+                        match arboard::Clipboard::new() {
+                            Ok(mut clipboard) => {
+                                if clipboard.set_text(selected_text).is_ok() {
+                                    state.set_toast("Copied to clipboard");
+                                }
+                            }
+                            Err(error) => {
+                                tracing::warn!(?error, "clipboard unavailable");
+                            }
+                        }
+                    }
+                } else {
+                    state.chat_selection = None;
+                }
+                return ActionOutcome::Continue;
+            }
+        }
+
+        // All other events outside the approval buttons and chat area are a no-op.
         return ActionOutcome::Continue;
     }
 
@@ -1805,5 +1858,81 @@ mod tests {
             Some((0, 2)),
             "clicking below the last line places the cursor at the end"
         );
+    }
+
+    #[test]
+    fn chat_drag_selection_allowed_during_pending_approval() {
+        // Dragging in the chat area must work even when a tool approval is pending.
+        let (mut state, mut textarea, cmd_tx, mut cmd_rx) = setup();
+        let id = uuid::Uuid::new_v4();
+        state.pending_approval = Some((id, "read".to_string(), serde_json::json!({})));
+        // Position the chat area at rows 0-9, columns 0-19.
+        state.chat_area = ratatui::layout::Rect::new(0, 0, 20, 10);
+        let button_areas = Some(ButtonAreas {
+            approve: ratatui::layout::Rect::new(0, 20, 10, 1),
+            deny: ratatui::layout::Rect::new(11, 20, 10, 1),
+        });
+        let mut confirm = None;
+        let mut drag = MouseDrag::default();
+
+        // Mouse-down inside the chat area starts a selection.
+        handle_action(
+            AppAction::MouseInput(mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 1)),
+            &mut state,
+            &mut textarea,
+            &mut confirm,
+            &mut drag,
+            &mut None,
+            &button_areas,
+            &cmd_tx,
+        );
+        assert!(
+            state.chat_drag_active,
+            "drag should be active after Down in chat area"
+        );
+        assert!(
+            state.chat_selection.is_some(),
+            "selection should be anchored"
+        );
+        assert!(
+            state.pending_approval.is_some(),
+            "approval must still be pending"
+        );
+        assert_eq!(cmd_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+
+        // Mouse-drag extends the selection.
+        handle_action(
+            AppAction::MouseInput(mouse_event(MouseEventKind::Drag(MouseButton::Left), 5, 3)),
+            &mut state,
+            &mut textarea,
+            &mut confirm,
+            &mut drag,
+            &mut None,
+            &button_areas,
+            &cmd_tx,
+        );
+        assert!(
+            state.chat_drag_active,
+            "drag still active during Drag event"
+        );
+        assert!(state.pending_approval.is_some());
+
+        // Mouse-up finalises the selection (chat_drag_active cleared).
+        handle_action(
+            AppAction::MouseInput(mouse_event(MouseEventKind::Up(MouseButton::Left), 5, 3)),
+            &mut state,
+            &mut textarea,
+            &mut confirm,
+            &mut drag,
+            &mut None,
+            &button_areas,
+            &cmd_tx,
+        );
+        assert!(!state.chat_drag_active, "drag must be cleared after Up");
+        assert!(
+            state.pending_approval.is_some(),
+            "approval still pending after chat drag"
+        );
+        assert_eq!(cmd_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty));
     }
 }
