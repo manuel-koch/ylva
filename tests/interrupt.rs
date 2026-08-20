@@ -58,7 +58,11 @@ async fn stop_aborts_stream_flushes_partial_and_clears_pending_steers() {
     agent
         .send_command(AgentCommand::Prompt("dropped steer".into()))
         .await;
-    agent.send_command(AgentCommand::Stop).await;
+    agent
+        .send_command(AgentCommand::Stop {
+            reason: "aborted by user".into(),
+        })
+        .await;
 
     let cancelled = collect_until(&mut ui_rx, |update| {
         matches!(update, UiUpdate::StreamCancelled)
@@ -110,7 +114,11 @@ async fn stop_of_two_tokened_stream_commits_only_first_token() {
 
     let _ = collect_until(&mut ui_rx, is_append_text).await;
 
-    agent.send_command(AgentCommand::Stop).await;
+    agent
+        .send_command(AgentCommand::Stop {
+            reason: "aborted by user".into(),
+        })
+        .await;
 
     let _ = collect_until(&mut ui_rx, |update| {
         matches!(update, UiUpdate::StreamCancelled)

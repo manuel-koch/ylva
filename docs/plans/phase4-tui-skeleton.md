@@ -1074,6 +1074,37 @@ Update the following docs **in the same commit** as the code changes:
       the loop; the interval fires at its own cadence regardless of which
       `select!` arm wins each iteration.)
 
+- [x] Ctrl-c to abort TUI while tool pending is not possible, doesn't hint for
+      second keypress required nor exits on consecutive ctrl-c.
+      Must kill executable from outside, leaving terminal rendering broken afterwards.
+      (Ctrl+C while a tool approval is pending now immediately sends `DenyTool`
+      with `reason: "denied by user"`, identical to pressing Esc or the Deny
+      button. No confirm window is opened. If the agent surfaces another pending
+      tool the next Ctrl+C denies that one too. Once all pending tools are cleared
+      and the agent is busy re-prompting the model, Ctrl+C falls back to the
+      double-press → Stop path.)
+
+- [ ] Ctrl-c to abort TUI while streaming is not possible, the hint for
+      second required keypress is shown, but consecutive ctrl-c does nothing.
+      Additionally the streaming doesn't finish afterwards, likely not properly
+      aborted.
+      Must kill executable from outside, leaving terminal rendering broken afterwards.
+
+- [ ] Selecting text while tool pending is not possible
+
+- [ ] When pasting text into input field, the text should be dedent first using the
+      same function that is used to dedent text before submitting it to agent.
+
+- [ ] Why is the input-field limited to just 4 lines ? Terminal has height 16.
+      If there is a ratio defined, extract it as a constant to locate it easier in
+      the code.
+
+- [ ] Multiline text retrieved via former message from the conversation ( keybinding
+      up/down in input field ) are insert into input field without the original
+      linebreaks.
+      Thus a former multiline prompt ends up as a single long (wraped) string
+      in the input field.
+
 - [ ] Help popup should use 1 char padding and the popup should have a title "Help"
       at upper-left position of popup ( 2 char indent, not directly at the edge )
       instead of "F1 or esc to close".
@@ -1083,21 +1114,9 @@ Update the following docs **in the same commit** as the code changes:
       Just render "▲" and "▼" ( no vertical indicator inbetween ) when there is
       more up/down content avail.
 
-- [ ] Ctrl-c to abort TUI while tool pending is not possible, doesn't hint for
-      second keypress required nor exits on consecutive ctrl-c.
+- [ ] Add a thin solid white line between the lower area ( input-field + footer )
+      and the conversation-list above.
 
-- [ ] Ctrl-c to abort TUI while streaming is not possible, the hint for
-      second required keypress is shown, but consecutive ctrl-c does nothing.
-      Additionally the streaming doesn't finish afterwards, likely not properly
-      aborted.
-
-- [ ] Selecting text while tool pending is not possible
-
-- [ ] When pasting text into input field, the text should be dedent first using the
-      same function that is used to dedent text before submitting it to agent.
-
-- [ ] Multiline text retrieved via former message from the conversation ( keybinding
-      up/down in input field ) are insert into input field without the original
-      linebreaks.
-      Thus a former multiline prompt ends up as a single long (wraped) string
-      in the input field.
+- [ ] In Footer change the "active indicator to
+  - drop the "[mode]" snippet
+  - use just "Sending...", "Streaming...", "Idle"

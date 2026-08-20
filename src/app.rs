@@ -282,6 +282,11 @@ impl TuiState {
     pub fn apply_update(&mut self, update: &UiUpdate) {
         match update {
             UiUpdate::StreamStarted => {
+                // Commit any text that accumulated during the previous stream
+                // (e.g. prose that preceded tool calls) so it is preserved as
+                // a permanent AssistantMessage bubble before the new stream
+                // clears the partial buffer.
+                self.commit_partial(false);
                 self.agent_mode = AgentMode::Streaming;
                 self.partial_assistant_text.clear();
             }
@@ -318,6 +323,10 @@ impl TuiState {
                 id,
                 arguments,
             } => {
+                // Commit any text that arrived in the same stream as the tool
+                // calls (prose before/alongside the call) so it is preserved
+                // as a permanent AssistantMessage bubble.
+                self.commit_partial(false);
                 self.chat_entries.push(ChatEntry::ToolBubble {
                     id: *id,
                     name: name.clone(),
@@ -394,6 +403,17 @@ impl TuiState {
                     self.chat_entries.push(ChatEntry::ErrorLine {
                         message: error.clone(),
                     });
+                }
+                // When the errored tool was the one awaiting approval, the
+                // agent aborted it without reprompting (e.g. via Stop) — clear
+                // the approval footer and return to idle.
+                if self
+                    .pending_approval
+                    .as_ref()
+                    .is_some_and(|(pending_id, _, _)| pending_id == id)
+                {
+                    self.pending_approval = None;
+                    self.agent_mode = AgentMode::Idle;
                 }
             }
             UiUpdate::ToolKilled { id } => {

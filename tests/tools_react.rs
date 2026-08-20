@@ -369,15 +369,37 @@ async fn stop_while_awaiting_approval_clears_pending_tools() {
     );
 
     // Hard interrupt before approving either: pending tools are dropped.
-    agent.send_command(AgentCommand::Stop).await;
-    assert_quiescent(&mut ui_rx, interval).await;
+    agent
+        .send_command(AgentCommand::Stop {
+            reason: "aborted by user".into(),
+        })
+        .await;
+
+    // The agent emits ToolError for the approval-pending tool so the TUI
+    // can clear its approval footer and mark the bubble as aborted.
+    let after_stop = collect_until_advancing(&mut ui_rx, interval, is_tool_error).await;
+    assert!(
+        after_stop
+            .iter()
+            .any(|u| matches!(u, UiUpdate::ToolError { .. })),
+        "expected ToolError after stop while awaiting approval"
+    );
 
     drop(agent);
     let context = handle.await.expect("loop ok").expect("context");
+    // Neither tool ran, so no ToolResult in history.
     assert!(!context
         .messages()
         .iter()
         .any(|m| matches!(m, Message::ToolResult { .. })));
+    // Both pending tools must have a ToolError result so the model history
+    // stays consistent (every tool call must have a corresponding result).
+    let tool_error_count = context
+        .messages()
+        .iter()
+        .filter(|m| matches!(m, Message::ToolError { .. }))
+        .count();
+    assert_eq!(tool_error_count, 2, "expected one error per pending tool");
 }
 
 #[derive(JsonSchema, Deserialize)]
@@ -443,7 +465,11 @@ async fn stop_mid_tool_kills_tool_and_returns_to_idle() {
     assert!(matches!(started.last(), Some(UiUpdate::ToolStart { name, .. }) if name == "sleep"));
 
     // Hard interrupt mid-tool: cancelled task reports ToolKilled, loop is idle.
-    agent.send_command(AgentCommand::Stop).await;
+    agent
+        .send_command(AgentCommand::Stop {
+            reason: "aborted by user".into(),
+        })
+        .await;
     let killed = collect_until_advancing(&mut ui_rx, interval, |u| {
         matches!(u, UiUpdate::ToolKilled { .. })
     })
@@ -510,4 +536,8 @@ fn is_stream_started(update: &UiUpdate) -> bool {
 
 fn is_tool_pending(update: &UiUpdate) -> bool {
     matches!(update, UiUpdate::ToolPending { .. })
+}
+
+fn is_tool_error(update: &UiUpdate) -> bool {
+    matches!(update, UiUpdate::ToolError { .. })
 }

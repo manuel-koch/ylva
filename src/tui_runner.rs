@@ -220,7 +220,9 @@ fn handle_action(
         }
         // OS SIGINT: interrupt the current round immediately, no double-press.
         AppAction::SigInt => {
-            let _ = cmd_tx.try_send(AgentCommand::Stop);
+            let _ = cmd_tx.try_send(AgentCommand::Stop {
+                reason: "aborted by user".into(),
+            });
             ActionOutcome::Continue
         }
         AppAction::Resize { .. } => ActionOutcome::Continue,
@@ -264,8 +266,18 @@ fn handle_ctrl_c(
     confirm_state: &mut Option<Instant>,
     cmd_tx: &mpsc::Sender<AgentCommand>,
 ) -> ActionOutcome {
-    // Approval sub-mode and streaming both follow the double-press → Stop.
-    if state.pending_approval.is_some() || state.agent_mode != AgentMode::Idle {
+    // Tool-pending: Ctrl+C denies immediately, same as Esc or the Deny button.
+    if state.pending_approval.is_some() {
+        if let Some((id, _, _)) = state.pending_approval.take() {
+            let _ = cmd_tx.try_send(AgentCommand::DenyTool {
+                id,
+                reason: "denied by user".into(),
+            });
+        }
+        return ActionOutcome::Continue;
+    }
+    // Busy/streaming: double-press → Stop.
+    if state.agent_mode != AgentMode::Idle {
         return confirm_or_stop(confirm_state, cmd_tx);
     }
     // Idle: double-press → quit.
@@ -325,7 +337,9 @@ fn confirm_or_stop(
         }
         Some(_) => {
             *confirm_state = None;
-            let _ = cmd_tx.try_send(AgentCommand::Stop);
+            let _ = cmd_tx.try_send(AgentCommand::Stop {
+                reason: "aborted by user".into(),
+            });
             ActionOutcome::Continue
         }
     }
@@ -936,7 +950,77 @@ mod tests {
             &cmd_tx,
         );
         assert_eq!(second, ActionOutcome::Continue);
-        assert_eq!(cmd_rx.try_recv(), Ok(AgentCommand::Stop));
+        assert_eq!(
+            cmd_rx.try_recv(),
+            Ok(AgentCommand::Stop {
+                reason: "aborted by user".into()
+            })
+        );
+    }
+
+    #[test]
+    fn tool_pending_ctrl_c_denies_tool_immediately() {
+        let (mut state, mut textarea, cmd_tx, mut cmd_rx) = setup();
+        let id = uuid::Uuid::new_v4();
+        state.pending_approval = Some((id, "read".to_string(), serde_json::json!({})));
+        let mut confirm = None;
+
+        let outcome = handle_action(
+            AppAction::CtrlC,
+            &mut state,
+            &mut textarea,
+            &mut confirm,
+            &mut MouseDrag::default(),
+            &mut None,
+            &None,
+            &cmd_tx,
+        );
+        assert_eq!(outcome, ActionOutcome::Continue);
+        assert!(confirm.is_none(), "no confirm window opened");
+        assert!(state.pending_approval.is_none(), "approval cleared");
+        assert_eq!(
+            cmd_rx.try_recv(),
+            Ok(AgentCommand::DenyTool {
+                id,
+                reason: "denied by user".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn tool_pending_ctrl_c_does_not_send_stop() {
+        let (mut state, mut textarea, cmd_tx, mut cmd_rx) = setup();
+        let id = uuid::Uuid::new_v4();
+        state.pending_approval = Some((id, "read".to_string(), serde_json::json!({})));
+        let mut confirm = None;
+
+        // Two presses: first denies the tool; second is now in idle-ish state
+        // (pending_approval is gone) so confirm window opens — no Stop sent.
+        handle_action(
+            AppAction::CtrlC,
+            &mut state,
+            &mut textarea,
+            &mut confirm,
+            &mut MouseDrag::default(),
+            &mut None,
+            &None,
+            &cmd_tx,
+        );
+        // Drain the DenyTool that was sent.
+        let _ = cmd_rx.try_recv();
+
+        handle_action(
+            AppAction::CtrlC,
+            &mut state,
+            &mut textarea,
+            &mut confirm,
+            &mut MouseDrag::default(),
+            &mut None,
+            &None,
+            &cmd_tx,
+        );
+        // No Stop should have been sent.
+        assert_eq!(cmd_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty));
     }
 
     #[test]
@@ -966,7 +1050,12 @@ mod tests {
             &cmd_tx,
         );
         assert_eq!(second, ActionOutcome::Continue);
-        assert_eq!(cmd_rx.try_recv(), Ok(AgentCommand::Stop));
+        assert_eq!(
+            cmd_rx.try_recv(),
+            Ok(AgentCommand::Stop {
+                reason: "aborted by user".into()
+            })
+        );
     }
 
     #[test]
@@ -1278,7 +1367,12 @@ mod tests {
             &cmd_tx,
         );
         assert_eq!(outcome, ActionOutcome::Continue);
-        assert_eq!(cmd_rx.try_recv(), Ok(AgentCommand::Stop));
+        assert_eq!(
+            cmd_rx.try_recv(),
+            Ok(AgentCommand::Stop {
+                reason: "aborted by user".into()
+            })
+        );
         assert!(
             confirm.is_none(),
             "OS SIGINT must not set the double-press confirm state"

@@ -131,7 +131,7 @@ pub fn draw(
     state.input_area = input_area;
 
     let button_areas = if let Some((_, name, _)) = &state.pending_approval {
-        draw_approval_footer(frame, footer_row_1, footer_row_2, name, mouse_pos)
+        draw_approval_footer(frame, footer_row_1, footer_row_2, name, mouse_pos, hint)
     } else {
         draw_normal_footer(frame, footer_row_1, footer_row_2, state, hint);
         None
@@ -830,12 +830,15 @@ fn draw_approval_footer(
     row_2: Rect,
     tool_name: &str,
     mouse_pos: Option<(u16, u16)>,
+    hint: Option<&str>,
 ) -> Option<ButtonAreas> {
+    let row_1_text = if let Some(hint_text) = hint {
+        hint_text.to_string()
+    } else {
+        format!(" Tool '{tool_name}' requests your approval:")
+    };
     frame.render_widget(
-        Paragraph::new(Line::styled(
-            format!(" Tool '{tool_name}' requests your approval:"),
-            Style::default().fg(Color::Yellow),
-        )),
+        Paragraph::new(Line::styled(row_1_text, Style::default().fg(Color::Yellow))),
         row_1,
     );
 

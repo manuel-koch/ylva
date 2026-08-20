@@ -46,7 +46,7 @@ pub enum AgentMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentCommand {
     Prompt(String),
-    Stop,
+    Stop { reason: String },
     ApproveTool { id: Uuid },
     DenyTool { id: Uuid, reason: String },
 }
@@ -642,7 +642,7 @@ impl AgentLoop {
                                     .await;
                                 }
                             }
-                            AgentCommand::Stop => {
+                            AgentCommand::Stop { reason } => {
                                 // Interrupt: hard-abort the current round.
                                 pending_steers.clear();
                                 if let Some(cancel_token) = current_cancel.take() {
@@ -652,6 +652,27 @@ impl AgentLoop {
                                     tool_cancel.cancel();
                                 }
                                 if mode == AgentMode::ToolPending {
+                                    // Record a denial result for every pending
+                                    // tool so the model history stays consistent
+                                    // (every tool call must have a result).
+                                    // Only the front tool has a visible bubble;
+                                    // the rest are queued without one yet.
+                                    let mut first = true;
+                                    for pending in pending_tools.iter() {
+                                        let name = pending.call.name.clone();
+                                        let id = pending.call.id;
+                                        let mut error = format!("tool '{name}' was denied");
+                                        if !reason.is_empty() {
+                                            error.push_str(&format!(": {reason}"));
+                                        }
+                                        context.push_tool_error(id, name, error.clone());
+                                        if first {
+                                            let _ = ui_tx
+                                                .send(UiUpdate::ToolError { id, error })
+                                                .await;
+                                            first = false;
+                                        }
+                                    }
                                     pending_tools.clear();
                                     mode = AgentMode::Idle;
                                 }
@@ -1035,7 +1056,12 @@ mod tests {
             AgentCommand::Prompt("hello".into()),
             AgentCommand::Prompt(text) if text == "hello"
         ));
-        assert!(matches!(AgentCommand::Stop, AgentCommand::Stop));
+        assert!(matches!(
+            AgentCommand::Stop {
+                reason: String::new()
+            },
+            AgentCommand::Stop { .. }
+        ));
         let id = Uuid::new_v4();
         assert!(matches!(
             AgentCommand::ApproveTool { id },
