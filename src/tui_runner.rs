@@ -108,6 +108,14 @@ where
 
     let handle = agent.run();
 
+    // A persistent interval so the spinner tick fires independently of other
+    // `select!` arms — `tokio::time::sleep` is cancelled on each iteration
+    // when another arm wins, which stalls the spinner during heavy streaming.
+    let mut spinner_tick = tokio::time::interval(SPINNER_TICK_INTERVAL);
+    // Consume the first tick that fires immediately, so the first real tick
+    // is `SPINNER_TICK_INTERVAL` from now.
+    spinner_tick.tick().await;
+
     if let Some(prompt) = initial_prompt {
         if !prompt.is_empty() {
             state.push_user_bubble(prompt.clone(), UserMessageState::Sent);
@@ -154,7 +162,7 @@ where
                 confirm_state = None;
             }
             // Advance the footer spinner while the agent is busy.
-            _ = tokio::time::sleep(SPINNER_TICK_INTERVAL) => {
+            _ = spinner_tick.tick() => {
                 if state.agent_mode != AgentMode::Idle {
                     state.spinner_frame = state.spinner_frame.wrapping_add(1);
                 }

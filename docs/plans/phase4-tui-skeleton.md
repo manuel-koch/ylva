@@ -1066,8 +1066,13 @@ Update the following docs **in the same commit** as the code changes:
       `"no --auto-approve-write configured"`. Agent formats the error as
       `"tool '{name}' was denied: {reason}"`.
 
-- [ ] While streaming response tokens are recieved, the progress indicator stops
+- [x] While streaming response tokens are recieved, the progress indicator stops
       running and appears stuck.
+      (`tokio::time::sleep` inside the `select!` loop was cancelled on every
+      iteration when the `update` arm won, stalling the spinner during heavy
+      streaming. Replaced with a `tokio::time::interval` created once before
+      the loop; the interval fires at its own cadence regardless of which
+      `select!` arm wins each iteration.)
 
 - [ ] Help popup should use 1 char padding and the popup should have a title "Help"
       at upper-left position of popup ( 2 char indent, not directly at the edge )
@@ -1078,4 +1083,21 @@ Update the following docs **in the same commit** as the code changes:
       Just render "▲" and "▼" ( no vertical indicator inbetween ) when there is
       more up/down content avail.
 
+- [ ] Ctrl-c to abort TUI while tool pending is not possible, doesn't hint for
+      second keypress required nor exits on consecutive ctrl-c.
+
+- [ ] Ctrl-c to abort TUI while streaming is not possible, the hint for
+      second required keypress is shown, but consecutive ctrl-c does nothing.
+      Additionally the streaming doesn't finish afterwards, likely not properly
+      aborted.
+
 - [ ] Selecting text while tool pending is not possible
+
+- [ ] When pasting text into input field, the text should be dedent first using the
+      same function that is used to dedent text before submitting it to agent.
+
+- [ ] Multiline text retrieved via former message from the conversation ( keybinding
+      up/down in input field ) are insert into input field without the original
+      linebreaks.
+      Thus a former multiline prompt ends up as a single long (wraped) string
+      in the input field.
