@@ -48,7 +48,7 @@ pub enum AgentCommand {
     Prompt(String),
     Stop,
     ApproveTool { id: Uuid },
-    DenyTool { id: Uuid },
+    DenyTool { id: Uuid, reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -608,7 +608,7 @@ impl AgentLoop {
                                         .await;
                                 }
                             }
-                            AgentCommand::DenyTool { id } => {
+                            AgentCommand::DenyTool { id, reason } => {
                                 // Only valid in `ToolPending`; ignored otherwise.
                                 let is_front = mode == AgentMode::ToolPending
                                     && pending_tools
@@ -620,9 +620,10 @@ impl AgentLoop {
                                     let name = denied.call.name;
                                     let call_id = denied.call.id;
                                     tracing::debug!(tool = %name, "tool denied");
-                                    let error = format!(
-                                        "tool '{name}' was denied (no auto-approve configured)"
-                                    );
+                                    let mut error = format!("tool '{name}' was denied");
+                                    if reason.is_empty() {
+                                        error.push_str(&format!(": {reason}"));
+                                    }
                                     context.push_tool_error(call_id, name, error.clone());
                                     let _ = ui_tx
                                         .send(UiUpdate::ToolError { id: call_id, error })
@@ -1041,8 +1042,8 @@ mod tests {
             AgentCommand::ApproveTool { id: got } if got == id
         ));
         assert!(matches!(
-            AgentCommand::DenyTool { id },
-            AgentCommand::DenyTool { id: got } if got == id
+            AgentCommand::DenyTool { id, reason: "r".into() },
+            AgentCommand::DenyTool { id: got, .. } if got == id
         ));
 
         assert!(matches!(

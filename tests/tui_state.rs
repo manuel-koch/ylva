@@ -701,5 +701,8 @@ fn pending_tool_bubble_renders_after_completed_entries() {
             }
         )
     });
-    assert!(has_pending, "chat_entries should still contain a Pending tool bubble");
+    assert!(
+        has_pending,
+        "chat_entries should still contain a Pending tool bubble"
+    );
 }

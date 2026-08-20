@@ -282,7 +282,10 @@ fn handle_escape(
     if state.pending_approval.is_some() {
         // Approval sub-mode: Esc denies the tool immediately.
         if let Some((id, _, _)) = state.pending_approval.take() {
-            let _ = cmd_tx.try_send(AgentCommand::DenyTool { id });
+            let _ = cmd_tx.try_send(AgentCommand::DenyTool {
+                id,
+                reason: "denied by user".into(),
+            });
         }
         return ActionOutcome::Continue;
     }
@@ -494,7 +497,10 @@ fn handle_mouse_input(
                     }
                     if areas.deny.contains(position) {
                         if let Some((id, _, _)) = state.pending_approval.take() {
-                            let _ = cmd_tx.try_send(AgentCommand::DenyTool { id });
+                            let _ = cmd_tx.try_send(AgentCommand::DenyTool {
+                                id,
+                                reason: "denied by user".into(),
+                            });
                         }
                         return ActionOutcome::Continue;
                     }
@@ -996,7 +1002,13 @@ mod tests {
         );
         assert_eq!(outcome, ActionOutcome::Continue);
         assert_eq!(state.pending_approval, None);
-        assert_eq!(cmd_rx.try_recv(), Ok(AgentCommand::DenyTool { id }));
+        assert_eq!(
+            cmd_rx.try_recv(),
+            Ok(AgentCommand::DenyTool {
+                id,
+                reason: "denied by user".into()
+            })
+        );
     }
 
     #[test]

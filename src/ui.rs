@@ -287,7 +287,11 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
                 // Middle lines are fully highlighted (0..MAX); the start and
                 // end lines are highlighted only within the selection columns.
                 let col_start = if index == start_line { start_col } else { 0 };
-                let col_end = if index == end_line { end_col } else { usize::MAX };
+                let col_end = if index == end_line {
+                    end_col
+                } else {
+                    usize::MAX
+                };
                 apply_selection_highlight_to_line(line, col_start, col_end, CHAT_SELECTION_BG);
             }
         }
@@ -414,16 +418,10 @@ fn append_logo(lines: &mut Vec<Line>) {
     }
     // One blank line, then build-info centered below the wordmark.
     lines.push(Line::default());
-    let build_info_text = format!(
-        "v{}  {}",
-        BUILD_INFO.version, BUILD_INFO.git_commit
-    );
+    let build_info_text = format!("v{}  {}", BUILD_INFO.version, BUILD_INFO.git_commit);
     lines.push(
-        Line::styled(
-            build_info_text,
-            Style::default().fg(Color::DarkGray),
-        )
-        .alignment(Alignment::Center),
+        Line::styled(build_info_text, Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center),
     );
     // A blank spacer separates the wordmark block from the conversation.
     lines.push(Line::default());

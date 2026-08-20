@@ -1056,11 +1056,15 @@ Update the following docs **in the same commit** as the code changes:
       column ranges to the helper so partial start/end lines are correctly clipped.
       On `MouseUp` without a real drag the stale `chat_selection` anchor is cleared.)
 
-- [ ] When a tool approval is denied by user the error shown in the
+- [x] When a tool approval is denied by user the error shown in the
       tool-bubble is misleading: "tool 'glob' was denied (no auto-approve configured"
       This sounds like there was some auto-approval involved or even required that
       resulted in denying the tool, while this was a deliberate action of the user in
       denying the tool.
+      (Changed `AgentCommand::DenyTool` to carry a `reason: String` supplied by
+      the caller. TUI sends `"denied by user"`; headless runner sends
+      `"no --auto-approve-write configured"`. Agent formats the error as
+      `"tool '{name}' was denied: {reason}"`.
 
 - [ ] While streaming response tokens are recieved, the progress indicator stops
       running and appears stuck.

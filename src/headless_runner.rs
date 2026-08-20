@@ -81,7 +81,12 @@ pub async fn run_headless_to(
                         out,
                         "[tool] {title} denied (no --auto-approve-write in Phase 3)"
                     )?;
-                    agent.send_command(AgentCommand::DenyTool { id }).await;
+                    agent
+                        .send_command(AgentCommand::DenyTool {
+                            id,
+                            reason: "no --auto-approve-write configured".into(),
+                        })
+                        .await;
                 } else {
                     writeln!(out, "[tool] {title} auto-approved")?;
                     agent.send_command(AgentCommand::ApproveTool { id }).await;

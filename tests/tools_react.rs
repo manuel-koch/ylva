@@ -83,7 +83,10 @@ where
             if let UiUpdate::ToolPending { id, name, .. } = &update {
                 let needs_approval = registry.get(name).is_some_and(|tool| tool.needs_approval());
                 let command = if needs_approval {
-                    AgentCommand::DenyTool { id: *id }
+                    AgentCommand::DenyTool {
+                        id: *id,
+                        reason: "denied in test".into(),
+                    }
                 } else {
                     AgentCommand::ApproveTool { id: *id }
                 };
