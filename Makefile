@@ -34,6 +34,10 @@ build-debug:
 build-debug-and-run:
 	cargo run
 
+# Build debug binary and launch it with loggin enabled
+build-debug-and-run-with-logs:
+	cargo run -- --log-file ylva_$(shell date +%s).log --log-level trace
+
 # Build optimized release binary (output: ${CARGO_TARGET_DIR}/release/ylva)
 build-release:
 	cargo build --release
