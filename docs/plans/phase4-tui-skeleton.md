@@ -1213,7 +1213,23 @@ Update the following docs **in the same commit** as the code changes:
   Mode words updated to `"Sending…"`, `"Streaming…"`, `"Running Tool…"`,
   `"Aborting…"`, `"Idle"`.)
 
-- [ ] render toast messages in lower right edge of app.
+- [x] render toast messages in lower right edge of app.
+      (Toast popup is now anchored to the lower-right corner: `x = area.right - popup_width - 1`,
+      `y = area.bottom - popup_height - 1`, replacing the previous horizontally-centred,
+      above-footer placement.)
 
 - [ ] Adjust the width of bubbles ( tool, user message, assistent message )
       to not be rendered beneath the conversation-scrollbar but have a 1 char margin between bubble-right-edge and scrollbar.
+
+- [ ] Reformat tool bubble in conversation-list.
+      The bubble title should be "{expand/collaps indicator} {tool title} {props}".
+      Use same colors/dimmed-text as current implementation.
+      Clicking on the tool title line will expand/collapse the bubble
+      (default state of a bubble is collapsed).
+      When the tool is done, update the bubble title to
+      "{expand/collaps indicator} {tool title} {props} {result-summary}".
+      Where result-summary should be a per-tool implementation of dict with string
+      key/value pairs describing the result ( e.g. "read" tool could use
+      {"size":"20 bytes"} to indicated that it read 20 bytes ).
+      When the tool was denied or resulted in error, then include the error message
+      as a second title line (in red).

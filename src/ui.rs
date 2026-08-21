@@ -61,6 +61,8 @@ const HELP_POPUP_HEADING_COLOR: Color = Color::Blue;
 // thumb and active arrows stand out without introducing a second colour.
 const CHAT_SCROLLBAR_COLOR: Color = Color::Blue;
 const SEPARATOR_LINE_COLOR: Color = Color::White;
+const TOAST_BG_COLOR: Color = Color::Blue;
+const TOAST_FG_COLOR: Color = Color::White;
 
 /// Braille spinner animation frames, cycled while the agent is busy.
 const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -1143,23 +1145,22 @@ fn draw_toast(frame: &mut Frame, area: Rect, message: &str) {
     let content = format!(" ✓ {message} ");
     let popup_width = (content.chars().count() as u16 + 2).min(area.width);
     let popup_height = 3u16;
-    let x = area.x + area.width.saturating_sub(popup_width) / 2;
-    // Position above the two footer rows.
-    let y = area.y + area.height.saturating_sub(popup_height + 2);
+    let x = area.x + area.width.saturating_sub(popup_width + 1);
+    let y = area.y + area.height.saturating_sub(popup_height + 1);
     let popup = Rect::new(x, y, popup_width, popup_height);
 
     frame.render_widget(Clear, popup);
     let block = Block::default()
         .borders(Borders::ALL)
-        .style(Style::default().fg(Color::Black).bg(Color::Green));
+        .style(Style::default().fg(TOAST_FG_COLOR).bg(TOAST_BG_COLOR));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     frame.render_widget(
         Paragraph::new(Line::styled(
             content,
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Green)
+                .fg(TOAST_FG_COLOR)
+                .bg(TOAST_BG_COLOR)
                 .add_modifier(Modifier::BOLD),
         ))
         .alignment(Alignment::Center),
