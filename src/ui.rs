@@ -309,7 +309,11 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
     // Pending tool bubbles (awaiting approval) are deferred to the very end
     // of the conversation so they stay close to the approve/deny footer
     // regardless of how many earlier entries exist.
-    let mut deferred_pending_tool_bubbles: Vec<(String, ToolBubbleState)> = Vec::new();
+    let mut deferred_pending_tool_bubbles: Vec<(uuid::Uuid, String, ToolBubbleState, bool)> =
+        Vec::new();
+    // Rebuilt every frame; assigned to state after the loop (avoids a borrow
+    // conflict between iterating state.chat_entries and mutating state).
+    let mut bubble_title_rows_out: Vec<(usize, usize, uuid::Uuid)> = Vec::new();
     // Show the logo wordmark only when the conversation is empty; once
     // the user has submitted a message the logo is hidden.
     if state.chat_entries.is_empty() {
@@ -339,14 +343,36 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
                 let msg_width = bubble_row_width.saturating_sub(3).max(1);
                 append_assistant_lines(&mut lines, text, *interrupted, msg_width, bubble_row_width);
             }
-            ChatEntry::ToolBubble { name, state, .. } => {
+            ChatEntry::ToolBubble {
+                name,
+                state: bubble_state,
+                id,
+                collapsed,
+            } => {
                 // Pending tool bubbles are deferred so they render at the bottom,
                 // close to the approve/deny footer buttons.
-                if matches!(state, ToolBubbleState::Pending { .. }) {
-                    deferred_pending_tool_bubbles.push((name.clone(), state.clone()));
+                if matches!(bubble_state, ToolBubbleState::Pending { .. }) {
+                    deferred_pending_tool_bubbles.push((
+                        *id,
+                        name.clone(),
+                        bubble_state.clone(),
+                        *collapsed,
+                    ));
                     continue;
                 }
-                append_tool_bubble_lines(&mut lines, name, state, wrap_width, bubble_row_width);
+                append_tool_bubble_lines(
+                    &mut lines,
+                    ToolBubbleArgs {
+                        id: *id,
+                        name,
+                        state: bubble_state,
+                        collapsed: *collapsed,
+                        spinner_frame: state.spinner_frame,
+                    },
+                    &mut bubble_title_rows_out,
+                    wrap_width,
+                    bubble_row_width,
+                );
             }
             ChatEntry::ErrorLine { message } => {
                 for wrapped in textwrap::wrap(message, wrap_width) {
@@ -391,10 +417,24 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
 
     // Flush pending-approval tool bubbles last so they always sit at the
     // bottom of the conversation, directly above the approve/deny footer.
-    for (name, bubble_state) in &deferred_pending_tool_bubbles {
-        append_tool_bubble_lines(&mut lines, name, bubble_state, wrap_width, bubble_row_width);
+    for (bubble_id, name, bubble_state, collapsed) in &deferred_pending_tool_bubbles {
+        append_tool_bubble_lines(
+            &mut lines,
+            ToolBubbleArgs {
+                id: *bubble_id,
+                name,
+                state: bubble_state,
+                collapsed: *collapsed,
+                spinner_frame: state.spinner_frame,
+            },
+            &mut bubble_title_rows_out,
+            wrap_width,
+            bubble_row_width,
+        );
         lines.push(Line::default());
     }
+
+    state.bubble_title_rows = bubble_title_rows_out;
 
     // Extract plain text of every line for selection/copy support.
     state.chat_rendered_lines = lines
@@ -891,13 +931,29 @@ fn append_user_lines(
     lines.push(Line::from(vec![bar, margin, trailing_pad(0)]).patch_style(row_bg));
 }
 
+/// Per-bubble inputs for [`append_tool_bubble_lines`].
+struct ToolBubbleArgs<'a> {
+    id: uuid::Uuid,
+    name: &'a str,
+    state: &'a ToolBubbleState,
+    collapsed: bool,
+    spinner_frame: u8,
+}
+
 fn append_tool_bubble_lines(
     lines: &mut Vec<Line>,
-    name: &str,
-    state: &ToolBubbleState,
+    bubble: ToolBubbleArgs<'_>,
+    bubble_title_rows: &mut Vec<(usize, usize, uuid::Uuid)>,
     wrap_width: usize,
     row_width: usize,
 ) {
+    let ToolBubbleArgs {
+        id: bubble_id,
+        name,
+        state,
+        collapsed,
+        spinner_frame,
+    } = bubble;
     let bar = Span::styled(
         "▌",
         Style::default()
@@ -912,104 +968,160 @@ fn append_tool_bubble_lines(
         Span::styled(" ".repeat(pad), Style::default().bg(TOOL_BUBBLE_BG_COLOR))
     };
 
-    // Top padding.
-    lines.push(Line::from(vec![bar.clone(), margin.clone(), trailing_pad(0)]).patch_style(row_bg));
+    let expand_indicator = if collapsed { "▶" } else { "▼" };
 
-    // Title line showing state and tool name.
-    let title = match state {
-        ToolBubbleState::Pending { .. } => format!("[tool pending] {name}"),
-        ToolBubbleState::Running { .. } => format!("[tool] {name}"),
-        ToolBubbleState::Done { .. } => format!("[tool done] {name}"),
-        ToolBubbleState::Error { .. } => format!("[tool error] {name}"),
-        ToolBubbleState::Killed => format!("[tool killed] {name}"),
-        ToolBubbleState::Denied { .. } => format!("[tool denied] {name}"),
+    // Capitalise the tool name for display.
+    let display_title: String = {
+        let mut chars = name.chars();
+        match chars.next() {
+            None => String::new(),
+            Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        }
     };
-    let title_len = title.chars().count();
-    lines.push(
-        Line::from(vec![
-            bar.clone(),
-            margin.clone(),
-            Span::styled(
-                title,
-                Style::default()
-                    .fg(TOOL_BUBBLE_BORDER_COLOR)
-                    .bg(TOOL_BUBBLE_BG_COLOR),
-            ),
-            trailing_pad(title_len),
-        ])
-        .patch_style(row_bg),
-    );
 
-    // Arguments line for states that carry them.
+    // Format non-null argument values as `key=value` pairs for the title.
     let maybe_args = match state {
         ToolBubbleState::Pending { arguments }
         | ToolBubbleState::Running { arguments }
         | ToolBubbleState::Done { arguments, .. } => Some(arguments),
         _ => None,
     };
-    if let Some(arguments) = maybe_args {
-        let args_text = serde_json::to_string(arguments).unwrap_or_default();
-        let truncated: String = args_text.chars().take(wrap_width).collect();
-        let truncated_len = truncated.chars().count();
-        lines.push(
-            Line::from(vec![
-                bar.clone(),
-                margin.clone(),
-                Span::styled(
-                    truncated,
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .bg(TOOL_BUBBLE_BG_COLOR),
-                ),
-                trailing_pad(truncated_len),
-            ])
-            .patch_style(row_bg),
-        );
-    }
+    let props_text: String = if let Some(arguments) = maybe_args {
+        arguments
+            .as_object()
+            .map(|map| {
+                map.iter()
+                    .filter(|(_, v)| !v.is_null())
+                    .map(|(k, v)| {
+                        let val = v.as_str().unwrap_or_default();
+                        format!("{k}={val}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
 
-    // Result for Done state.
-    if let ToolBubbleState::Done { result, .. } = state {
-        for wrapped_line in textwrap::wrap(result, wrap_width) {
-            let line_str = wrapped_line.into_owned();
-            let line_len = line_str.chars().count();
-            lines.push(
-                Line::from(vec![
-                    bar.clone(),
-                    margin.clone(),
-                    Span::styled(line_str, Style::default().bg(TOOL_BUBBLE_BG_COLOR)),
-                    trailing_pad(line_len),
-                ])
-                .patch_style(row_bg),
-            );
-        }
-    }
+    // Result summary appended to the title for Done state.
+    let summary_text: String = if let ToolBubbleState::Done {
+        summary, duration, ..
+    } = state
+    {
+        let duration_seconds = duration.as_secs_f64();
+        let duration_formatted = format!("{duration_seconds:.3}s");
+        let mut parts: Vec<String> = summary
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect();
+        parts.push(duration_formatted);
+        parts.join(" ")
+    } else {
+        String::new()
+    };
 
-    // Error message for Error or Denied state.
+    // Build the indicator + tool-name prefix.
+    let title_prefix = format!("{expand_indicator} {display_title}");
+
+    // Record the bubble's start row (top-padding line) before pushing.
+    let bubble_start_row = lines.len();
+
+    // Top padding.
+    lines.push(Line::from(vec![bar.clone(), margin.clone(), trailing_pad(0)]).patch_style(row_bg));
+
+    // Title line.
+    let title_row_index = lines.len();
+
+    let dim_white = Style::default()
+        .fg(Color::White)
+        .bg(TOOL_BUBBLE_BG_COLOR)
+        .add_modifier(Modifier::DIM);
+
+    let mut title_spans: Vec<Span> = vec![
+        bar.clone(),
+        if matches!(state, ToolBubbleState::Running { .. }) {
+            let spinner_char = SPINNER_FRAMES[spinner_frame as usize % SPINNER_FRAMES.len()];
+            Span::styled(
+                format!("{spinner_char} "),
+                Style::default()
+                    .fg(TOOL_BUBBLE_BORDER_COLOR)
+                    .bg(TOOL_BUBBLE_BG_COLOR),
+            )
+        } else {
+            margin.clone()
+        },
+        Span::styled(
+            title_prefix.clone(),
+            Style::default()
+                .fg(TOOL_BUBBLE_BORDER_COLOR)
+                .bg(TOOL_BUBBLE_BG_COLOR),
+        ),
+    ];
+    let mut title_len = title_prefix.chars().count();
+    if !props_text.is_empty() {
+        let segment = format!(" {props_text}");
+        title_len += segment.chars().count();
+        title_spans.push(Span::styled(segment, dim_white));
+    }
+    if !summary_text.is_empty() {
+        let segment = format!(" {summary_text}");
+        title_len += segment.chars().count();
+        title_spans.push(Span::styled(segment, dim_white));
+    }
+    title_spans.push(trailing_pad(title_len));
+    lines.push(Line::from(title_spans).patch_style(row_bg));
+
+    // Error/Denied second title line (shown even when collapsed).
     let maybe_error = match state {
         ToolBubbleState::Error { error } | ToolBubbleState::Denied { error } => Some(error),
         _ => None,
     };
     if let Some(error) = maybe_error {
-        for wrapped_line in textwrap::wrap(error, wrap_width) {
-            let line_str = wrapped_line.into_owned();
-            let line_len = line_str.chars().count();
-            lines.push(
-                Line::from(vec![
-                    bar.clone(),
-                    margin.clone(),
-                    Span::styled(
-                        line_str,
-                        Style::default().fg(Color::Red).bg(TOOL_BUBBLE_BG_COLOR),
-                    ),
-                    trailing_pad(line_len),
-                ])
-                .patch_style(row_bg),
-            );
+        let error_label = format!("  {error}");
+        let error_len = error_label.chars().count();
+        lines.push(
+            Line::from(vec![
+                bar.clone(),
+                margin.clone(),
+                Span::styled(
+                    error_label,
+                    Style::default().fg(Color::Red).bg(TOOL_BUBBLE_BG_COLOR),
+                ),
+                trailing_pad(error_len),
+            ])
+            .patch_style(row_bg),
+        );
+    }
+
+    // Body (result text) — hidden when collapsed.
+    if !collapsed {
+        if let ToolBubbleState::Done { result, .. } = state {
+            for wrapped_line in textwrap::wrap(result, wrap_width) {
+                let line_str = wrapped_line.into_owned();
+                let line_len = line_str.chars().count();
+                lines.push(
+                    Line::from(vec![
+                        bar.clone(),
+                        margin.clone(),
+                        Span::styled(line_str, Style::default().bg(TOOL_BUBBLE_BG_COLOR)),
+                        trailing_pad(line_len),
+                    ])
+                    .patch_style(row_bg),
+                );
+            }
         }
     }
 
     // Bottom padding.
     lines.push(Line::from(vec![bar, margin, trailing_pad(0)]).patch_style(row_bg));
+
+    // Register the full row span for click-to-toggle: any click in
+    // [bubble_start_row, end_row] at column 0 (border bar) toggles the bubble,
+    // and a click anywhere on the title row also toggles it.
+    let bubble_end_row = lines.len() - 1;
+    bubble_title_rows.push((bubble_start_row, bubble_end_row, bubble_id));
+    let _ = title_row_index; // retained for documentation; hit-testing uses the range
 }
 
 fn draw_normal_footer(

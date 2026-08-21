@@ -733,6 +733,25 @@ fn handle_mouse_input(
                         }
                     }
                 } else {
+                    // Plain click (no drag) — toggle bubble if the click hit a
+                    // title row or the border bar (col 0) of any bubble row.
+                    if let Some(sel) = state.chat_selection {
+                        let clicked_line = sel.anchor_line;
+                        let clicked_col = sel.anchor_col;
+                        if let Some((_, _, bubble_id)) = state
+                            .bubble_title_rows
+                            .iter()
+                            .find(|(start, end, _)| {
+                                clicked_line == start + 1
+                                    || (clicked_col == 0
+                                        && clicked_line >= *start
+                                        && clicked_line <= *end)
+                            })
+                            .copied()
+                        {
+                            state.toggle_tool_bubble_collapsed(bubble_id);
+                        }
+                    }
                     state.chat_selection = None;
                 }
                 return ActionOutcome::Continue;
@@ -886,8 +905,26 @@ fn handle_mouse_input(
                         }
                     }
                 } else {
-                    // Plain click (no drag) — discard the anchor so no stale
-                    // highlight lingers on the next render frame.
+                    // Plain click (no drag) — check if the clicked line is a
+                    // tool-bubble title and toggle its expand/collapse state.
+                    if let Some(sel) = state.chat_selection {
+                        let clicked_line = sel.anchor_line;
+                        let clicked_col = sel.anchor_col;
+                        if let Some((_, _, bubble_id)) = state
+                            .bubble_title_rows
+                            .iter()
+                            .find(|(start, end, _)| {
+                                clicked_line == start + 1
+                                    || (clicked_col == 0
+                                        && clicked_line >= *start
+                                        && clicked_line <= *end)
+                            })
+                            .copied()
+                        {
+                            state.toggle_tool_bubble_collapsed(bubble_id);
+                        }
+                    }
+                    // Discard the anchor so no stale highlight lingers.
                     state.chat_selection = None;
                 }
             }

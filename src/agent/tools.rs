@@ -51,6 +51,53 @@ impl ToolError {
     }
 }
 
+/// Successful output from a tool invocation.
+///
+/// Every tool returns its own concrete type that implements this trait.
+/// The trait exposes two concerns that belong at different layers:
+/// - [`output_text`](ToolOutput::output_text): the LLM-facing text;
+/// - [`result_properties`](ToolOutput::result_properties): domain facts the
+///   result carries (e.g. bytes read, paths matched).  Consumers above the
+///   tool layer — the agent, the TUI — decide how to use these facts; the
+///   tool itself does not know.
+pub trait ToolOutput: Send + Sync + std::fmt::Debug {
+    /// The text returned to the LLM as the tool's result message.
+    fn output_text(&self) -> &str;
+
+    /// Key/value domain properties of the result (e.g. `("bytes_written",
+    /// "42")`).  Returned as an ordered vec so callers can present them in a
+    /// stable, meaningful sequence.  Defaults to an empty vec for tools whose
+    /// output is fully captured by [`output_text`](Self::output_text).
+    fn result_properties(&self) -> Vec<(&'static str, String)> {
+        Vec::new()
+    }
+}
+
+/// Wraps any [`ToolOutput`] and appends a `duration_ms` property capturing
+/// how long the tool's `run()` call took.  Applied by the agent at the single
+/// call site so every tool gets duration tracking automatically.
+#[derive(Debug)]
+pub struct TimedOutput {
+    inner: Box<dyn ToolOutput>,
+    pub duration: std::time::Duration,
+}
+
+impl TimedOutput {
+    pub fn new(inner: Box<dyn ToolOutput>, duration: std::time::Duration) -> Self {
+        TimedOutput { inner, duration }
+    }
+}
+
+impl ToolOutput for TimedOutput {
+    fn output_text(&self) -> &str {
+        self.inner.output_text()
+    }
+
+    fn result_properties(&self) -> Vec<(&'static str, String)> {
+        self.inner.result_properties()
+    }
+}
+
 /// A named, schema-described, async tool the model may call (blueprint §4D).
 ///
 /// The trait exposes tool **data**, behavior, and the argument display
@@ -133,8 +180,11 @@ pub trait Tool: Send + Sync {
     /// Default execution timeout (seconds) for this tool.
     fn timeout_secs(&self) -> u64;
 
-    /// Execute the tool with parsed `arguments`.
-    fn run<'a>(&'a self, arguments: Value) -> BoxFuture<'a, Result<String, ToolError>>;
+    /// Execute the tool with parsed `arguments`, returning a [`ToolOutput`]
+    /// that carries the LLM-facing text and any domain properties the result
+    /// naturally has.
+    fn run<'a>(&'a self, arguments: Value)
+        -> BoxFuture<'a, Result<Box<dyn ToolOutput>, ToolError>>;
 }
 
 /// Central store of every tool the agent may invoke.
@@ -217,6 +267,15 @@ mod tests {
         field: String,
     }
 
+    #[derive(Debug)]
+    struct SimpleOutput(String);
+
+    impl ToolOutput for SimpleOutput {
+        fn output_text(&self) -> &str {
+            &self.0
+        }
+    }
+
     #[derive(Debug, Default)]
     struct TestTool;
 
@@ -242,8 +301,14 @@ mod tests {
                 .map(|(key, value)| (key.to_string(), value.clone()))
                 .collect()
         }
-        fn run<'a>(&'a self, _arguments: Value) -> BoxFuture<'a, Result<String, ToolError>> {
-            Box::pin(async move { Ok("ok".to_string()) })
+        fn run<'a>(
+            &'a self,
+            _arguments: Value,
+        ) -> BoxFuture<'a, Result<Box<dyn ToolOutput>, ToolError>> {
+            Box::pin(async move {
+                let output: Box<dyn ToolOutput> = Box::new(SimpleOutput("ok".to_string()));
+                Ok(output)
+            })
         }
     }
 

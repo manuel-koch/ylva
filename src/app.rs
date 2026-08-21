@@ -103,6 +103,8 @@ pub enum ToolBubbleState {
     Done {
         arguments: serde_json::Value,
         result: String,
+        summary: Vec<(String, String)>,
+        duration: std::time::Duration,
     },
     /// Tool returned an error.
     Error { error: String },
@@ -128,6 +130,9 @@ pub enum ChatEntry {
         id: uuid::Uuid,
         name: String,
         state: ToolBubbleState,
+        /// Whether the bubble body (arguments, result) is hidden; only the title
+        /// line is rendered when `true`. Toggled by clicking the title line.
+        collapsed: bool,
     },
     ErrorLine {
         message: String,
@@ -201,6 +206,13 @@ pub struct TuiState {
     /// so that the input-field scroll indicators reflect the actual rendered
     /// viewport position rather than the cursor row.
     pub input_scroll_top: usize,
+    /// Maps each rendered tool bubble to its absolute line-index range
+    /// `(start_row, end_row, id)` (inclusive, before scroll offset). Populated
+    /// by `ui::draw_chat` every frame. Used to route click events to the
+    /// correct bubble's expand/collapse toggle: a click on any row in
+    /// `[start_row, end_row]` at column 0 (the border bar) toggles the bubble,
+    /// as does a click anywhere on the title row regardless of column.
+    pub bubble_title_rows: Vec<(usize, usize, uuid::Uuid)>,
 }
 
 impl TuiState {
@@ -229,6 +241,7 @@ impl TuiState {
             help_scroll_offset: 0,
             help_scroll_x: 0,
             input_scroll_top: 0,
+            bubble_title_rows: Vec::new(),
         }
     }
 
@@ -296,6 +309,25 @@ impl TuiState {
             .find(|entry| matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == target_id))
     }
 
+    /// Toggle the collapsed/expanded state of the tool bubble with the given
+    /// `id`. A no-op when no matching bubble is found.
+    ///
+    /// Disables auto-scroll so the bubble's top edge stays at the same screen
+    /// position after the content height changes. `draw_chat` writes the
+    /// effective `scroll_offset` back to `state` every frame, so the correct
+    /// offset is already present when this is called.
+    pub fn toggle_tool_bubble_collapsed(&mut self, target_id: Uuid) {
+        for entry in &mut self.chat_entries {
+            if let ChatEntry::ToolBubble { id, collapsed, .. } = entry {
+                if *id == target_id {
+                    *collapsed = !*collapsed;
+                    self.scroll_locked = false;
+                    return;
+                }
+            }
+        }
+    }
+
     /// Apply a single `UiUpdate` to the view state.
     pub fn apply_update(&mut self, update: &UiUpdate) {
         match update {
@@ -361,6 +393,7 @@ impl TuiState {
                     state: ToolBubbleState::Pending {
                         arguments: arguments.clone(),
                     },
+                    collapsed: true,
                 });
                 self.pending_approval = Some((*id, name.clone(), arguments.clone()));
             }
@@ -383,11 +416,18 @@ impl TuiState {
                         state: ToolBubbleState::Running {
                             arguments: arguments.clone(),
                         },
+                        collapsed: true,
                     });
                 }
                 self.pending_approval = None;
             }
-            UiUpdate::ToolDone { id, name, result } => {
+            UiUpdate::ToolDone {
+                id,
+                name,
+                result,
+                summary,
+                duration,
+            } => {
                 let previous_arguments = self
                     .find_tool_bubble_mut(*id)
                     .and_then(|entry| {
@@ -407,6 +447,8 @@ impl TuiState {
                         *state = ToolBubbleState::Done {
                             arguments: previous_arguments,
                             result: result.clone(),
+                            summary: summary.clone(),
+                            duration: *duration,
                         };
                     }
                 } else {
@@ -416,7 +458,10 @@ impl TuiState {
                         state: ToolBubbleState::Done {
                             arguments: serde_json::Value::Null,
                             result: result.clone(),
+                            summary: summary.clone(),
+                            duration: *duration,
                         },
+                        collapsed: true,
                     });
                 }
             }
@@ -454,6 +499,7 @@ impl TuiState {
                         id: *id,
                         name: String::new(),
                         state: ToolBubbleState::Killed,
+                        collapsed: true,
                     });
                 }
                 self.pending_approval = None;
@@ -1093,6 +1139,8 @@ mod tests {
             id,
             name: "read".to_string(),
             result: "file contents".to_string(),
+            summary: Vec::new(),
+            duration: std::time::Duration::from_millis(0),
         });
         assert!(matches!(
             state.chat_entries.last(),

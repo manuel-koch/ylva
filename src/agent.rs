@@ -26,7 +26,7 @@ use crate::llm::{Provider, ToolEnvelope, ToolSchema};
 
 pub mod tools;
 
-use tools::{ToolError, ToolRegistry};
+use tools::{TimedOutput, ToolError, ToolOutput, ToolRegistry};
 
 /// Maximum number of LLM requests the ReAct loop starts within a single user
 /// turn before the guard stops re-prompting. Per-engine configurability is a
@@ -71,6 +71,8 @@ pub enum AgentEvent {
         id: Uuid,
         name: String,
         result: String,
+        summary: Vec<(String, String)>,
+        duration: std::time::Duration,
     },
     ToolError {
         id: Uuid,
@@ -104,6 +106,8 @@ pub enum UiUpdate {
         id: Uuid,
         name: String,
         result: String,
+        summary: Vec<(String, String)>,
+        duration: std::time::Duration,
     },
     ToolError {
         id: Uuid,
@@ -344,7 +348,27 @@ impl PendingTool {
                     }
                     result = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
                         match registry.get(&name) {
-                            Some(tool) => tool.run(self.call.arguments).await,
+                            Some(tool) => {
+                                let start = std::time::Instant::now();
+                                // TODO: remove artificial delay
+                                #[cfg(feature = "artificial-tool-delay")]
+                                {
+                                    let delay_secs = 3
+                                        + (std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .subsec_nanos()
+                                            % 3) as u64;
+                                    tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+                                }
+                                // END TODO
+                                tool.run(self.call.arguments).await.map(|output| {
+                                    let elapsed = start.elapsed();
+                                    let timed = Box::new(TimedOutput::new(output, elapsed))
+                                        as Box<dyn ToolOutput>;
+                                    (timed, elapsed)
+                                })
+                            }
                             None => Err(ToolError::failed(
                                 &name,
                                 format!("unknown tool '{name}'"),
@@ -353,9 +377,21 @@ impl PendingTool {
                     }) => result
                 };
                 match outcome {
-                    Ok(Ok(result)) => {
+                    Ok(Ok((tool_output, duration))) => {
+                        let result = tool_output.output_text().to_string();
+                        let summary = tool_output
+                            .result_properties()
+                            .into_iter()
+                            .map(|(key, value)| (key.to_string(), value))
+                            .collect::<Vec<_>>();
                         let _ = agent_tx
-                            .send(AgentEvent::ToolDone { id, name, result })
+                            .send(AgentEvent::ToolDone {
+                                id,
+                                name,
+                                result,
+                                summary,
+                                duration,
+                            })
                             .await;
                     }
                     Ok(Err(error)) => {
@@ -534,7 +570,7 @@ impl AgentLoop {
                                         .await;
                                 }
                             }
-                            AgentEvent::ToolDone { id, name, result } => {
+                            AgentEvent::ToolDone { id, name, result, summary, duration } => {
                                 current_tool_cancel = None;
                                 context.push_tool_result(id, name.clone(), result.clone());
                                 let _ = ui_tx
@@ -542,6 +578,8 @@ impl AgentLoop {
                                         id,
                                         name,
                                         result,
+                                        summary,
+                                        duration,
                                     })
                                     .await;
                                 advance_tool_queue(

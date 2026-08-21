@@ -27,7 +27,7 @@ mod test_support;
 
 pub use logging::{init_logging, LogConfig, LogFormat, LogGuards};
 
-pub use agent::tools::{default_registry, Tool, ToolError, ToolRegistry};
+pub use agent::tools::{default_registry, Tool, ToolError, ToolOutput, ToolRegistry};
 pub use agent::{
     AgentCommand, AgentEvent, AgentLoop, AgentMode, AssembledToolCall, AssistantStatus, Context,
     DeltaChunk, Message, PendingTool, StreamEvent, ToolCallRequest, UiUpdate, UserMessageKind,

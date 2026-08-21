@@ -811,7 +811,7 @@ Update the following docs **in the same commit** as the code changes:
 - [x] Adjust the width of bubbles ( tool, user message, assistent message )
       to not be rendered beneath the conversation-scrollbar but have a 1 char margin between bubble-right-edge and scrollbar.
 
-- [ ] Reformat tool bubble in conversation-list.
+- [x] Refactor rendering of tool bubble in conversation-list.
       The bubble title should be "{expand/collaps indicator} {tool title} {props}".
       Use same colors/dimmed-text as current implementation.
       Clicking on the tool title line will expand/collapse the bubble
