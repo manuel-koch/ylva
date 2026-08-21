@@ -13,3 +13,6 @@ implementation that abstracts the state and its methods with on-enter, on-exit, 
   - Likely already useful during that planning-phase of this feature.
 - Refactor the various methods that handle/change "state" to be abstracted
   by such FSM state instance(s)
+
+After planning this feature, update `blueprint.md` to insert a new phase
+after phase 4 to consolidate state handling and refactor code base.
