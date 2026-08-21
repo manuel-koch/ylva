@@ -2402,7 +2402,8 @@ layer, not a core architectural change.
 
 - [x] Echo user input back into the chat view; user messages rendered as a block with a
       colored left border and soft background — no text prefix. Border color encodes
-      `UserMessageState`: Blue = Sent, Yellow = Queued (pending steer), DarkGray = Cancelled.
+      `UserMessageState`: Green = Sent, Yellow = Queued (pending steer), LightGreen = Steered
+      (applied steer), DarkGray = Cancelled.
       Colors are named constants, ready to be extracted into a `Theme` struct.
 
 - [x] 2-row footer: mode indicator + steer count (row 1); key hints (row 2).
@@ -2471,8 +2472,8 @@ Decisions recorded during implementation:
   clicking outside is a no-op. `Ctrl+C` still follows the double-press confirm → `Stop`.
 - **User message visual design.** User messages render as blocks with a left-only border and a
   soft background shade (`USER_MESSAGE_BG_COLOR`), with **no text prefix**. Border color encodes
-  `UserMessageState` (Blue/Yellow/DarkGray); colours are named constants ready to be extracted
-  into a `Theme` struct.
+  `UserMessageState` (Green = Sent, Yellow = Queued, LightGreen = Steered, DarkGray = Cancelled);
+  colours are named constants ready to be extracted into a `Theme` struct.
 - **Cancelled steers.** Marked `Cancelled` in `ChatEntry` (ephemeral view state, never persisted)
   and retained in `input_history` for recovery via `↑`.
 - **`SteerQueued`/`SteerApplied` are pure mode signals** — no payload; the TUI driver creates the

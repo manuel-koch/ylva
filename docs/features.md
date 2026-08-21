@@ -76,22 +76,25 @@ architecture is unchanged. It is selected automatically in `main.rs` via
 `std::io::stdout().is_terminal()`.
 
 - **Layout:** a scrollable chat-history area, a variable-height input box
-  (capped at 1/3 of the terminal height), and a 2-row footer (mode/hint row and
-  key-hints row). No sidebar in Phase 4.
+  (capped at 1/3 of the terminal height), a `─` separator line, and a 2-row
+  footer (mode/hint row and key-hints row). No sidebar.
 - **Input always active:** the input box is never disabled. `Enter` sends
   unconditionally — while the model is streaming the message is queued as a
   pending steer, and `Ctrl+C`/`Esc` interrupt the current round.
 - **Steer bubble lifecycle:** a user message appears immediately on `Enter`. It
-  is rendered `Queued` (yellow) while pending, then becomes `Sent` (blue) when
-  `SteerApplied` arrives; `SteerQueued`/`SteerApplied` are the only new
-  `UiUpdate` variants added by this phase.
+  is rendered `Queued` (yellow) while pending, then becomes `Steered` (light
+  green) when `SteerApplied` arrives — visually distinct from a normal `Sent`
+  message to identify mid-stream corrections.
 - **Cancelled steers:** interrupting marks all pending bubbles `Cancelled`
   (grey) with a dimmed "Not sent." line. The text is retained in input history
   so it can be recovered with `↑`.
 - **Tool approval sub-mode:** when a tool awaits approval the footer switches
   to `[ ✓ Approve (Enter) ]  [ ✗ Deny (Esc) ]` (mouse-clickable). `Enter`
   sends `ApproveTool`, `Esc` sends `DenyTool` immediately; `Ctrl+C` still uses
-  the double-press confirm.
+  the double-press confirm. The input field is available to type a reason for
+  denial (a dimmed `"Enter reason for denial here…"` placeholder appears when
+  the field is empty). The user's draft is snapshotted when approval sub-mode
+  starts and restored automatically after the tool is approved or denied.
 - **Double-press `Ctrl+C`/`Esc`:** a key-agnostic confirm with a 2-second
   window (`CONFIRM_TIMEOUT`). While streaming/tool-pending the first press
   shows `"Press again to cancel"` and the second stops the round; while idle
@@ -106,9 +109,10 @@ architecture is unchanged. It is selected automatically in `main.rs` via
   disables auto-scroll; scrolling back down to the bottom (or pressing `End`)
   re-enables it. The scroll offset is clamped to the content height, so
   scrolling past either end never silently drifts.
-- **Wordmark:** the chat history always opens with a horizontally centered
-  ASCII-art "Ylva" wordmark, so the initial frame is never empty while the
-  first response streams in.
+- **Wordmark:** while the conversation is empty (no messages submitted yet), a
+  horizontally centered ASCII-art "Ylva" wordmark is displayed with the version
+  and git commit shown below it in DarkGray. Once the first message is sent,
+  the wordmark disappears and the conversation fills the chat area.
 - **Input history:** `↑` on the first line loads the previous sent message
   (draft is saved); `↓` restores it; any edit while browsing copies the entry
   to a fresh draft.
@@ -129,5 +133,20 @@ architecture is unchanged. It is selected automatically in `main.rs` via
 - **Shift+Enter / Alt+Enter:** insert a newline via the kitty keyboard protocol
   (`DISAMBIGUATE_ESCAPE_CODES`), so terminals that support it (ZED, iTerm2,
   kitty, WezTerm) report the modifier and the newline is not mistaken for send.
+- **Message dedenting:** submitted messages are automatically dedented —
+  common leading whitespace is stripped (via `textwrap::dedent`) and leading
+  and trailing blank-only lines are removed. This makes pasting indented code
+  snippets or quoted text send cleanly.
+- **Multiline paste:** the TUI supports pasting multiline text via the
+  terminal's bracketed-paste protocol (enabled automatically by crossterm).
+  Pasted text is dedented before insertion.
+- **Tool bubble collapse/expand:** clicking a tool bubble's title line or its
+  left-border bar toggles whether the bubble's arguments and result are shown
+  (expanded, `▼`) or hidden (collapsed, `▶`). Collapsed bubbles display only
+  the title line, useful for decluttering long conversations.
+- **Tool duration:** when a tool finishes, its execution time is shown in the
+  bubble title.
+- **Toast notifications:** transient messages appear in the bottom-right corner
+  (e.g., `"Copied to clipboard"`) and auto-dismiss after ~1.5 seconds.
 - **Scrollbar:** the chat scrollbar's thumb reaches the very bottom of the
   track at the end of the list (and the top at the start).

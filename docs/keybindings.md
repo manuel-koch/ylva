@@ -12,9 +12,10 @@ Reference for Ylva's TUI keybindings.
 | `end` / `fn-right` | Input focused | Move to end of line; if already at line end, move to start of next line |
 | `ctrl-c` or `esc` (×1) | Streaming / ToolPending, input empty | Show `"Press again to cancel"` hint |
 | `ctrl-c` or `esc` (×2 ≤ 2 s) | Streaming / ToolPending, input empty | Interrupt conversation |
-| `ctrl-c` or `esc` | Streaming / ToolPending, input non-empty | Clear input field (no interrupt) |
-| `ctrl-c` (×1) | Idle | Show `"Press again to quit"` hint |
-| `ctrl-c` (×2 ≤ 2 s) | Idle | Quit TUI |
+| `ctrl-c` or `esc` | Streaming / ToolPending, input non-empty | Clear input field and exit history browsing (no interrupt) |
+| `ctrl-c` (×1) | Idle, input empty | Show `"Press again to quit"` hint |
+| `ctrl-c` (×2 ≤ 2 s) | Idle, input empty | Quit TUI |
+| `ctrl-c` | Idle, input non-empty | Clear input field (no quit) |
 | `esc` | Idle | Clear input field (no quit) |
 | `esc` | Help popup open | Close popup |
 | `enter` | Approval sub-mode | Approve tool |
@@ -32,6 +33,7 @@ Reference for Ylva's TUI keybindings.
 | Mouse wheel | Any | Scroll chat; when help popup is open, scroll popup (no focus needed) |
 | Left-click | Input focused | Move the cursor to the clicked character (word-wrapping honored) |
 | Left-drag | Input focused | Select text; click (no drag) just places the cursor |
+| Left-click on tool bubble title / border | Any | Toggle tool bubble expand (`▼`) / collapse (`▶`) |
 
 `shift-enter` / `alt-enter` rely on the kitty keyboard protocol: the TUI
 enables `DISAMBIGUATE_ESCAPE_CODES` on startup (pushed with the alternate
