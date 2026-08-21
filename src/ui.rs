@@ -1007,6 +1007,7 @@ fn draw_normal_footer(
         AgentMode::Pending => "Sending…",
         AgentMode::Streaming => "Streaming",
         AgentMode::ToolPending => "ToolPending",
+        AgentMode::Aborting => "Aborting…",
     };
     let spinner_prefix = if state.agent_mode != AgentMode::Idle {
         let index = state.spinner_frame as usize % SPINNER_FRAMES.len();

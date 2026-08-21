@@ -1170,9 +1170,13 @@ Update the following docs **in the same commit** as the code changes:
       help popup is open Esc closes it without touching `pending_approval`.
       Covered by `escape_closes_help_popup_before_denying_pending_approval`.)
 
-- [ ] Double-Ctrl-c while streaming doesn't seem to stop it immediately.
+- [x] Double-Ctrl-c while streaming doesn't seem to stop it immediately.
       I had to keep pressing ctrl-c repeatly until streaming was over before the
       TUI would actually quit.
+      (Second Ctrl+C while streaming now returns `ActionOutcome::Quit` immediately
+      after sending `AgentCommand::Stop`. The TUI exits and cleans up; the agent
+      and in-flight stream task are aborted during shutdown. Esc double-press
+      (stop-only, no quit) is unchanged.)
 
 - [ ] Sent a user message that will trigger a tool call.
       While the message is pending, type yet another message, but don't submit it.

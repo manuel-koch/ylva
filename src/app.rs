@@ -300,7 +300,11 @@ impl TuiState {
                 // a permanent AssistantMessage bubble before the new stream
                 // clears the partial buffer.
                 self.commit_partial(false);
-                self.agent_mode = AgentMode::Streaming;
+                // While aborting, keep the Aborting mode so the TUI can
+                // detect the eventual Idle transition and quit.
+                if self.agent_mode != AgentMode::Aborting {
+                    self.agent_mode = AgentMode::Streaming;
+                }
                 self.partial_assistant_text.clear();
             }
             UiUpdate::AppendText(text) => {
@@ -336,6 +340,12 @@ impl TuiState {
                 id,
                 arguments,
             } => {
+                // While aborting, skip approval sub-mode entirely: the agent
+                // will process the pending Stop command and deny this tool on
+                // its own; showing the approval UI here would be misleading.
+                if self.agent_mode == AgentMode::Aborting {
+                    return;
+                }
                 // Commit any text that arrived in the same stream as the tool
                 // calls (prose before/alongside the call) so it is preserved
                 // as a permanent AssistantMessage bubble.

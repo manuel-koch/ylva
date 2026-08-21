@@ -148,12 +148,22 @@ where
             }
             update = ui_rx.recv() => {
                 let Some(update) = update else { break };
+                let old_mode = state.agent_mode;
+                deny_tool_if_aborting(&state, &update, &cmd_tx);
                 apply_update_with_idle_reset(&mut state, &update, &mut confirm_state);
                 for _ in 0..CHANNEL_CAPACITY {
                     match ui_rx.try_recv() {
-                        Ok(next) => apply_update_with_idle_reset(&mut state, &next, &mut confirm_state),
+                        Ok(next) => {
+                            deny_tool_if_aborting(&state, &next, &cmd_tx);
+                            apply_update_with_idle_reset(&mut state, &next, &mut confirm_state);
+                        }
                         Err(_) => break,
                     }
+                }
+                // Double Ctrl+C sets Aborting; exit as soon as StreamCancelled
+                // transitions the mode to Idle.
+                if old_mode == AgentMode::Aborting && state.agent_mode == AgentMode::Idle {
+                    break;
                 }
             }
             // Expire the confirm hint after the double-press window, even with
@@ -174,6 +184,20 @@ where
     drop(agent);
     handle.await??;
     Ok(state)
+}
+
+/// If the TUI is in `Aborting` mode and a `ToolPending` update arrives, send
+/// `DenyTool` immediately so the agent is not left waiting for user approval
+/// before it can process the queued `Stop` command.
+fn deny_tool_if_aborting(state: &TuiState, update: &UiUpdate, cmd_tx: &mpsc::Sender<AgentCommand>) {
+    if state.agent_mode == AgentMode::Aborting {
+        if let UiUpdate::ToolPending { id, .. } = update {
+            let _ = cmd_tx.try_send(AgentCommand::DenyTool {
+                id: *id,
+                reason: "aborted by user".into(),
+            });
+        }
+    }
 }
 
 /// Apply one `UiUpdate`, then clear the confirm state if the update caused a
@@ -292,9 +316,24 @@ fn handle_ctrl_c(
         *confirm_state = None;
         return ActionOutcome::Continue;
     }
-    // Busy/streaming with empty input: double-press → Stop.
+    // Busy/streaming with empty input: first press shows the confirm hint;
+    // second press sends Stop and sets Aborting. The event loop exits as soon
+    // as StreamCancelled transitions the mode back to Idle.
     if state.agent_mode != AgentMode::Idle {
-        return confirm_or_stop(confirm_state, cmd_tx);
+        return match confirm_state {
+            None => {
+                *confirm_state = Some(Instant::now());
+                ActionOutcome::Continue
+            }
+            Some(_) => {
+                *confirm_state = None;
+                let _ = cmd_tx.try_send(AgentCommand::Stop {
+                    reason: "aborted by user".into(),
+                });
+                state.agent_mode = AgentMode::Aborting;
+                ActionOutcome::Continue
+            }
+        };
     }
     // Idle: double-press → quit.
     match confirm_state {
@@ -900,6 +939,11 @@ fn cursor_for_click(
 
 /// Returns the footer hint string when confirm is active, `None` otherwise.
 fn confirm_hint(confirm_state: &Option<Instant>, mode: &AgentMode) -> Option<String> {
+    // While aborting the mode word itself ("Aborting…") is the feedback;
+    // no confirm overlay is needed.
+    if *mode == AgentMode::Aborting {
+        return None;
+    }
     if confirm_state.is_none() {
         return None;
     }
@@ -1203,6 +1247,11 @@ mod tests {
             Ok(AgentCommand::Stop {
                 reason: "aborted by user".into()
             })
+        );
+        assert_eq!(
+            state.agent_mode,
+            AgentMode::Aborting,
+            "mode should be Aborting so the loop exits once StreamCancelled transitions to Idle"
         );
     }
 

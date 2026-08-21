@@ -41,6 +41,10 @@ pub enum AgentMode {
     Pending,
     Streaming,
     ToolPending,
+    /// User requested abort (double Ctrl+C); `AgentCommand::Stop` has been
+    /// sent. The TUI waits for the resulting `StreamCancelled` / `Idle`
+    /// transition before quitting.
+    Aborting,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
