@@ -1118,11 +1118,24 @@ Update the following docs **in the same commit** as the code changes:
       (`USER_MESSAGE_INPUT_HEIGHT_TERMINAL_FRACTION = 3` constant in `src/ui.rs` caps the input
       field at one-third of the terminal height.)
 
-- [ ] Multiline text retrieved via former message from the conversation ( keybinding
+- [x] Multiline text retrieved via former message from the conversation ( keybinding
       up/down in input field ) are insert into input field without the original
       linebreaks.
-      Thus a former multiline prompt ends up as a single long (wraped) string
+      Thus a former multiline prompt ends up as a single long (wrapped) string
       in the input field.
+
+- [ ] When retrieving former messages from conversation the position of
+      last-picked-historic-message is maintained/saved.
+      Can this index get messed up when queued user messages are removed ( e.g. by ctrl-c while pending ) ?
+      I noticed that while jumping back/forth and pressing esc the next jump back/forth picks up were I "left" the history at the last press of esc.
+      I guess this would be the same if multiple user messages are sent and
+      I start jumping back/forth in conversation history later.
+      This feels strange from UX perspective because I may not track mentally
+      were my current index in the conversion-history is and moving up after
+      multiple conversion-turns should immediately bring back the "last" message,
+      shouldn't it?
+      Should we "reset" the current index in conversation-history after an "esc"
+      press ( to clear current input message ) or whenever a new user message was submitted ?
 
 - [ ] Help popup should use 1 char padding and the popup should have a title "Help"
       at upper-left position of popup ( 2 char indent, not directly at the edge )

@@ -346,6 +346,25 @@ fn confirm_or_stop(
     }
 }
 
+/// Loads a history entry into the textarea, splitting on newlines to restore
+/// original line structure. Returns `true` when a history entry was loaded.
+fn load_history_into_textarea(
+    direction: HistoryDirection,
+    state: &mut TuiState,
+    textarea: &mut TextArea<'_>,
+) -> bool {
+    let current = textarea.lines().join("\n");
+    if let Some(loaded) = state.navigate_history(direction, &current) {
+        let lines: Vec<String> = loaded.split('\n').map(str::to_owned).collect();
+        *textarea = TextArea::from(lines);
+        configure_textarea(textarea);
+        textarea.move_cursor(ratatui_textarea::CursorMove::End);
+        true
+    } else {
+        false
+    }
+}
+
 fn handle_key_input(
     event: crossterm::event::KeyEvent,
     state: &mut TuiState,
@@ -459,12 +478,7 @@ fn handle_key_input(
         KeyCode::Up => {
             let cursor_row = textarea.cursor().0;
             if cursor_row == 0 {
-                let current = textarea.lines().join("\n");
-                if let Some(loaded) = state.navigate_history(HistoryDirection::Up, &current) {
-                    *textarea = TextArea::from(vec![loaded]);
-                    configure_textarea(textarea);
-                    textarea.move_cursor(ratatui_textarea::CursorMove::End);
-                }
+                load_history_into_textarea(HistoryDirection::Up, state, textarea);
             } else {
                 textarea.input(event);
             }
@@ -474,12 +488,7 @@ fn handle_key_input(
             let cursor_row = textarea.cursor().0;
             let line_count = textarea.lines().len().max(1);
             if cursor_row + 1 >= line_count {
-                let current = textarea.lines().join("\n");
-                if let Some(loaded) = state.navigate_history(HistoryDirection::Down, &current) {
-                    *textarea = TextArea::from(vec![loaded]);
-                    configure_textarea(textarea);
-                    textarea.move_cursor(ratatui_textarea::CursorMove::End);
-                }
+                load_history_into_textarea(HistoryDirection::Down, state, textarea);
             } else {
                 textarea.input(event);
             }
@@ -1488,6 +1497,28 @@ mod tests {
         );
         assert_eq!(outcome, ActionOutcome::Continue);
         assert_eq!(textarea.lines(), &["previous"]);
+    }
+
+    #[test]
+    fn up_navigates_multiline_history_preserving_linebreaks() {
+        let (mut state, mut textarea, cmd_tx, _cmd_rx) = setup();
+        state.push_user_bubble(
+            "line one\nline two\nline three".to_string(),
+            UserMessageState::Sent,
+        );
+        let mut confirm = None;
+
+        handle_action(
+            AppAction::KeyInput(key(KeyCode::Up)),
+            &mut state,
+            &mut textarea,
+            &mut confirm,
+            &mut MouseDrag::default(),
+            &mut None,
+            &None,
+            &cmd_tx,
+        );
+        assert_eq!(textarea.lines(), &["line one", "line two", "line three"]);
     }
 
     #[test]
