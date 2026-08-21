@@ -6,6 +6,9 @@ For new features come up with appropriate test case(s) to verify them.
 
 Bugfixes MUST add or strengthen a test that fails before the fix and passes after.
 
+If test runs exhibit flaky results/errors, the tests must fixed immediately,
+don't postpone fixing (pre-existing) flaky tests!
+
 Coverage threshold: **≥80% line coverage** is enforced on testable files
 by `make test-coverage` (below the threshold the command fails).
 `ui.rs` and `main.rs` are excluded because they require a live terminal.
