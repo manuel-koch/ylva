@@ -1199,8 +1199,11 @@ Update the following docs **in the same commit** as the code changes:
       `save_textarea_for_approval_with_empty_textarea_stores_none`, and
       `restore_textarea_after_approval_restores_snapshot_and_clears_it`.)
 
-- [ ] Add a thin solid white line between the lower area ( input-field + footer )
+- [x] Add a thin solid white line between the lower area ( input-field + footer )
       and the conversation-list above.
+      (The `separator_area` slot in the main `Layout` (previously `_`) is now
+      rendered as a full-width `─` line in white, visually dividing the
+      conversation list from the input/footer panel.)
 
 - [ ] In Footer change the "active" indicator:
   - drop the "[mode]" snippet

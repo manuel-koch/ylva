@@ -60,6 +60,7 @@ const HELP_POPUP_HEADING_COLOR: Color = Color::Blue;
 // The track and inactive arrows use the same colour with Modifier::DIM so the
 // thumb and active arrows stand out without introducing a second colour.
 const CHAT_SCROLLBAR_COLOR: Color = Color::Blue;
+const SEPARATOR_LINE_COLOR: Color = Color::White;
 
 /// Braille spinner animation frames, cycled while the agent is busy.
 const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -121,7 +122,7 @@ pub fn draw(
     //   slot_b → footer_row_2     │  slot_b → footer_row_1
     //   slot_c → input_area       │  slot_c → footer_row_2
     let approval_pending = state.pending_approval.is_some();
-    let [chat_area, _, slot_a, slot_b, slot_c] = Layout::default()
+    let [chat_area, separator_area, slot_a, slot_b, slot_c] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Fill(1),
@@ -139,6 +140,18 @@ pub fn draw(
     };
 
     draw_chat(frame, chat_area, state);
+
+    // Thin solid line separating the conversation area from the lower panel.
+    let separator_line = "─".repeat(separator_area.width as usize);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            separator_line,
+            Style::default()
+                .fg(SEPARATOR_LINE_COLOR)
+                .add_modifier(Modifier::DIM),
+        ))),
+        separator_area,
+    );
 
     // The input box is styled like a sent message: a colored left border, no
     // full frame, no "Input" title. The current mode/steer/approval state is
