@@ -1160,12 +1160,15 @@ Update the following docs **in the same commit** as the code changes:
       `PageDown`, and mouse wheel route to `help_scroll_up` / `help_scroll_down`
       while the popup is open. The offset is reset to 0 when the popup is closed.)
 
-- [ ] Submitting a message that entails a tool call.
+- [x] Submitting a message that entails a tool call.
       Message is sent, streaming starts.
       Starting the help popup.
       Tool call arrives, pending approval is shown beneath the help popup.
       Now pressing "esc" denies the approval instead of dismissing the open help
       popup.
+      (`handle_escape` in `tui_runner.rs` now checks `show_help` first; when the
+      help popup is open Esc closes it without touching `pending_approval`.
+      Covered by `escape_closes_help_popup_before_denying_pending_approval`.)
 
 - [ ] Double-Ctrl-c while streaming doesn't seem to stop it immediately.
       I had to keep pressing ctrl-c repeatly until streaming was over before the

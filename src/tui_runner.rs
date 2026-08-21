@@ -315,6 +315,13 @@ fn handle_escape(
     confirm_state: &mut Option<Instant>,
     cmd_tx: &mpsc::Sender<AgentCommand>,
 ) -> ActionOutcome {
+    if state.show_help {
+        // Help popup takes priority: close it regardless of any pending approval.
+        state.show_help = false;
+        state.help_scroll_offset = 0;
+        state.help_scroll_x = 0;
+        return ActionOutcome::Continue;
+    }
     if state.pending_approval.is_some() {
         // Approval sub-mode: Esc denies the tool immediately.
         if let Some((id, _, _)) = state.pending_approval.take() {
@@ -323,13 +330,6 @@ fn handle_escape(
                 reason: "denied by user".into(),
             });
         }
-        return ActionOutcome::Continue;
-    }
-    if state.show_help {
-        // Close the popup; confirm state is unchanged.
-        state.show_help = false;
-        state.help_scroll_offset = 0;
-        state.help_scroll_x = 0;
         return ActionOutcome::Continue;
     }
     if state.agent_mode == AgentMode::Idle {
@@ -1468,6 +1468,40 @@ mod tests {
         );
         assert!(!state.show_help);
         assert!(confirm.is_some());
+    }
+
+    #[test]
+    fn escape_closes_help_popup_before_denying_pending_approval() {
+        // When help popup is open AND a tool approval is pending, Esc must close
+        // the popup first without sending DenyTool.
+        let (mut state, mut textarea, cmd_tx, mut cmd_rx) = setup();
+        let mut confirm = None;
+        let tool_id = uuid::Uuid::new_v4();
+
+        state.show_help = true;
+        state.pending_approval = Some((tool_id, "read".to_string(), serde_json::json!({})));
+
+        handle_action(
+            AppAction::Escape,
+            &mut state,
+            &mut textarea,
+            &mut confirm,
+            &mut MouseDrag::default(),
+            &mut None,
+            &None,
+            &cmd_tx,
+        );
+
+        assert!(!state.show_help, "help popup should be closed");
+        assert!(
+            state.pending_approval.is_some(),
+            "approval should still be pending — not denied"
+        );
+        assert_eq!(
+            cmd_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty),
+            "no DenyTool command should have been sent"
+        );
     }
 
     #[test]
