@@ -149,13 +149,21 @@ where
             update = ui_rx.recv() => {
                 let Some(update) = update else { break };
                 let old_mode = state.agent_mode;
+                let had_approval_before = state.pending_approval.is_some();
                 deny_tool_if_aborting(&state, &update, &cmd_tx);
                 apply_update_with_idle_reset(&mut state, &update, &mut confirm_state);
+                if !had_approval_before && state.pending_approval.is_some() {
+                    save_textarea_for_approval(&mut state, &mut textarea);
+                }
                 for _ in 0..CHANNEL_CAPACITY {
                     match ui_rx.try_recv() {
                         Ok(next) => {
+                            let had_approval_before_next = state.pending_approval.is_some();
                             deny_tool_if_aborting(&state, &next, &cmd_tx);
                             apply_update_with_idle_reset(&mut state, &next, &mut confirm_state);
+                            if !had_approval_before_next && state.pending_approval.is_some() {
+                                save_textarea_for_approval(&mut state, &mut textarea);
+                            }
                         }
                         Err(_) => break,
                     }
@@ -211,6 +219,28 @@ fn apply_update_with_idle_reset(
     state.apply_update(update);
     if old_mode != AgentMode::Idle && state.agent_mode == AgentMode::Idle {
         *confirm_state = None;
+    }
+}
+
+/// Save the current textarea content into `state.pending_approval_input_snapshot`
+/// and clear the textarea. Called when a `ToolPending` approval sub-mode starts
+/// so any unsubmitted draft the user was typing is preserved and can be restored
+/// after the approval is resolved.
+fn save_textarea_for_approval(state: &mut TuiState, textarea: &mut TextArea<'_>) {
+    let lines = textarea.lines().to_vec();
+    let is_empty = lines == vec!["".to_string()];
+    state.pending_approval_input_snapshot = if is_empty { None } else { Some(lines) };
+    *textarea = TextArea::default();
+    configure_textarea(textarea);
+}
+
+/// Restore the snapshot saved by [`save_textarea_for_approval`] into `textarea`.
+/// Clears the snapshot regardless of whether there was anything to restore, so
+/// the field is always clean after an approval is resolved.
+fn restore_textarea_after_approval(state: &mut TuiState, textarea: &mut TextArea<'_>) {
+    if let Some(snapshot) = state.pending_approval_input_snapshot.take() {
+        *textarea = TextArea::from(snapshot);
+        configure_textarea(textarea);
     }
 }
 
@@ -304,6 +334,7 @@ fn handle_ctrl_c(
                 reason: "denied by user".into(),
             });
         }
+        restore_textarea_after_approval(state, textarea);
         return ActionOutcome::Continue;
     }
     // Busy with a non-empty draft: clear the input first, same as Esc.
@@ -369,6 +400,7 @@ fn handle_escape(
                 reason: "denied by user".into(),
             });
         }
+        restore_textarea_after_approval(state, textarea);
         return ActionOutcome::Continue;
     }
     if state.agent_mode == AgentMode::Idle {
@@ -456,14 +488,13 @@ fn handle_key_input(
                 if input_is_empty {
                     let _ = cmd_tx.try_send(AgentCommand::ApproveTool { id });
                 } else {
-                    textarea.select_all();
-                    textarea.delete_char();
                     let _ = cmd_tx.try_send(AgentCommand::DenyTool {
                         id,
                         reason: typed_reason,
                     });
                 }
             }
+            restore_textarea_after_approval(state, textarea);
             return ActionOutcome::Continue;
         }
     }
@@ -641,6 +672,7 @@ fn handle_mouse_input(
                         if let Some((id, _, _)) = state.pending_approval.take() {
                             let _ = cmd_tx.try_send(AgentCommand::ApproveTool { id });
                         }
+                        restore_textarea_after_approval(state, textarea);
                         return ActionOutcome::Continue;
                     }
                     if areas.deny.contains(position) {
@@ -650,6 +682,7 @@ fn handle_mouse_input(
                                 reason: "denied by user".into(),
                             });
                         }
+                        restore_textarea_after_approval(state, textarea);
                         return ActionOutcome::Continue;
                     }
                 }
@@ -1487,6 +1520,192 @@ mod tests {
         assert_eq!(outcome, ActionOutcome::Continue);
         assert!(state.pending_approval.is_some());
         assert_eq!(cmd_rx.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    }
+
+    #[test]
+    fn save_textarea_for_approval_stores_content_and_clears_textarea() {
+        let (mut state, _, _cmd_tx, _cmd_rx) = setup();
+        let mut textarea = TextArea::from(vec!["hello world".to_string()]);
+        configure_textarea(&mut textarea);
+
+        save_textarea_for_approval(&mut state, &mut textarea);
+
+        assert_eq!(
+            state.pending_approval_input_snapshot,
+            Some(vec!["hello world".to_string()])
+        );
+        assert_eq!(
+            textarea.lines(),
+            &[""],
+            "textarea should be empty after save"
+        );
+    }
+
+    #[test]
+    fn save_textarea_for_approval_with_empty_textarea_stores_none() {
+        let (mut state, mut textarea, _cmd_tx, _cmd_rx) = setup();
+
+        save_textarea_for_approval(&mut state, &mut textarea);
+
+        assert_eq!(state.pending_approval_input_snapshot, None);
+        assert_eq!(textarea.lines(), &[""]);
+    }
+
+    #[test]
+    fn restore_textarea_after_approval_restores_snapshot_and_clears_it() {
+        let (mut state, mut textarea, _cmd_tx, _cmd_rx) = setup();
+        state.pending_approval_input_snapshot =
+            Some(vec!["line one".to_string(), "line two".to_string()]);
+
+        restore_textarea_after_approval(&mut state, &mut textarea);
+
+        assert_eq!(
+            textarea.lines(),
+            &["line one", "line two"],
+            "textarea should contain restored lines"
+        );
+        assert_eq!(
+            state.pending_approval_input_snapshot, None,
+            "snapshot cleared after restore"
+        );
+    }
+
+    #[test]
+    fn approval_enter_approve_restores_draft_in_textarea() {
+        let (mut state, mut textarea, cmd_tx, mut cmd_rx) = setup();
+        let id = uuid::Uuid::new_v4();
+        state.pending_approval = Some((id, "read".to_string(), serde_json::json!({})));
+        state.pending_approval_input_snapshot = Some(vec!["my draft".to_string()]);
+        let mut confirm = None;
+
+        let outcome = handle_action(
+            AppAction::KeyInput(key(KeyCode::Enter)),
+            &mut state,
+            &mut textarea,
+            &mut confirm,
+            &mut MouseDrag::default(),
+            &mut None,
+            &None,
+            &cmd_tx,
+        );
+
+        assert_eq!(outcome, ActionOutcome::Continue);
+        assert_eq!(cmd_rx.try_recv(), Ok(AgentCommand::ApproveTool { id }));
+        assert_eq!(
+            textarea.lines(),
+            &["my draft"],
+            "draft restored after approve"
+        );
+        assert_eq!(state.pending_approval_input_snapshot, None);
+    }
+
+    #[test]
+    fn approval_escape_deny_restores_draft_in_textarea() {
+        let (mut state, mut textarea, cmd_tx, mut cmd_rx) = setup();
+        let id = uuid::Uuid::new_v4();
+        state.pending_approval = Some((id, "read".to_string(), serde_json::json!({})));
+        state.pending_approval_input_snapshot = Some(vec!["my draft".to_string()]);
+        let mut confirm = None;
+
+        let outcome = handle_action(
+            AppAction::Escape,
+            &mut state,
+            &mut textarea,
+            &mut confirm,
+            &mut MouseDrag::default(),
+            &mut None,
+            &None,
+            &cmd_tx,
+        );
+
+        assert_eq!(outcome, ActionOutcome::Continue);
+        assert_eq!(
+            cmd_rx.try_recv(),
+            Ok(AgentCommand::DenyTool {
+                id,
+                reason: "denied by user".into()
+            })
+        );
+        assert_eq!(
+            textarea.lines(),
+            &["my draft"],
+            "draft restored after deny via Esc"
+        );
+        assert_eq!(state.pending_approval_input_snapshot, None);
+    }
+
+    #[test]
+    fn approval_ctrl_c_deny_restores_draft_in_textarea() {
+        let (mut state, mut textarea, cmd_tx, mut cmd_rx) = setup();
+        let id = uuid::Uuid::new_v4();
+        state.pending_approval = Some((id, "read".to_string(), serde_json::json!({})));
+        state.pending_approval_input_snapshot = Some(vec!["saved text".to_string()]);
+        let mut confirm = None;
+
+        let outcome = handle_action(
+            AppAction::CtrlC,
+            &mut state,
+            &mut textarea,
+            &mut confirm,
+            &mut MouseDrag::default(),
+            &mut None,
+            &None,
+            &cmd_tx,
+        );
+
+        assert_eq!(outcome, ActionOutcome::Continue);
+        assert_eq!(
+            cmd_rx.try_recv(),
+            Ok(AgentCommand::DenyTool {
+                id,
+                reason: "denied by user".into()
+            })
+        );
+        assert_eq!(
+            textarea.lines(),
+            &["saved text"],
+            "draft restored after deny via ctrl-c"
+        );
+        assert_eq!(state.pending_approval_input_snapshot, None);
+    }
+
+    #[test]
+    fn approval_mouse_approve_restores_draft_in_textarea() {
+        let (mut state, mut textarea, cmd_tx, mut cmd_rx) = setup();
+        let id = uuid::Uuid::new_v4();
+        state.pending_approval = Some((id, "read".to_string(), serde_json::json!({})));
+        state.pending_approval_input_snapshot = Some(vec!["my pending text".to_string()]);
+        let mut confirm = None;
+        let button_areas = Some(ButtonAreas {
+            approve: ratatui::layout::Rect::new(0, 20, 10, 1),
+            deny: ratatui::layout::Rect::new(11, 20, 10, 1),
+        });
+        let mouse = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 3,
+            row: 20,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        let outcome = handle_action(
+            AppAction::MouseInput(mouse),
+            &mut state,
+            &mut textarea,
+            &mut confirm,
+            &mut MouseDrag::default(),
+            &mut None,
+            &button_areas,
+            &cmd_tx,
+        );
+
+        assert_eq!(outcome, ActionOutcome::Continue);
+        assert_eq!(cmd_rx.try_recv(), Ok(AgentCommand::ApproveTool { id }));
+        assert_eq!(
+            textarea.lines(),
+            &["my pending text"],
+            "draft restored after mouse approve"
+        );
+        assert_eq!(state.pending_approval_input_snapshot, None);
     }
 
     #[test]

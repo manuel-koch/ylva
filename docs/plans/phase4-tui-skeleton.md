@@ -1178,12 +1178,26 @@ Update the following docs **in the same commit** as the code changes:
       and in-flight stream task are aborted during shutdown. Esc double-press
       (stop-only, no quit) is unchanged.)
 
-- [ ] Sent a user message that will trigger a tool call.
+- [x] Sent a user message that will trigger a tool call.
       While the message is pending, type yet another message, but don't submit it.
       The tool approval arrives, but the formerly typed text is still in the
       input-field.
       The input-field content should be saved and cleared before showing the
       approval and should be restored after approval was approved/denied.
+      (Added `pending_approval_input_snapshot: Option<Vec<String>>` to `TuiState`.
+      `save_textarea_for_approval` is called from the event loop when a `ToolPending`
+      update transitions `pending_approval` from `None` to `Some`: it saves the
+      current textarea lines into the snapshot and clears the textarea.
+      `restore_textarea_after_approval` is called in every approve/deny path
+      — Esc, Ctrl+C, Enter (approve/deny-with-reason), and mouse approve/deny
+      buttons — restoring the snapshot into the textarea and clearing the field.
+      Covered by `approval_enter_approve_restores_draft_in_textarea`,
+      `approval_escape_deny_restores_draft_in_textarea`,
+      `approval_ctrl_c_deny_restores_draft_in_textarea`,
+      `approval_mouse_approve_restores_draft_in_textarea`,
+      `save_textarea_for_approval_stores_content_and_clears_textarea`,
+      `save_textarea_for_approval_with_empty_textarea_stores_none`, and
+      `restore_textarea_after_approval_restores_snapshot_and_clears_it`.)
 
 - [ ] Add a thin solid white line between the lower area ( input-field + footer )
       and the conversation-list above.

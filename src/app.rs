@@ -158,6 +158,10 @@ pub struct TuiState {
     /// Set by `UiUpdate::ToolPending`; cleared by `ToolStart`/`ToolKilled`/
     /// `StreamCancelled`. While `Some`, the TUI is in approval sub-mode.
     pub pending_approval: Option<(Uuid, String, serde_json::Value)>, // (tool_id, tool_name, arguments)
+    /// Textarea lines saved when a `ToolPending` approval sub-mode starts so
+    /// the unsubmitted draft can be restored once the approval is resolved.
+    /// `None` when no approval is in progress or the input was empty.
+    pub pending_approval_input_snapshot: Option<Vec<String>>,
     /// All `UserMessage` texts, oldest → newest (including pending and
     /// cancelled steers, so the user can recover them via ↑).
     pub input_history: Vec<String>,
@@ -211,6 +215,7 @@ impl TuiState {
             scroll_locked: true,
             chat_area_height: 0,
             pending_approval: None,
+            pending_approval_input_snapshot: None,
             input_history: Vec::new(),
             history_index: None,
             draft: String::new(),
