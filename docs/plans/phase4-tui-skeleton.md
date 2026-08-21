@@ -805,21 +805,3 @@ Update the following docs **in the same commit** as the code changes:
 - **`tests/e2e/` contains shell scripts** (`.zsh`), not Rust integration tests.
   New Rust integration tests go in `tests/tui_state.rs` and
   `tests/headless_runner.rs` at the crate root.
-
-## Bugs / Follow-Up Changes
-
-- [x] Adjust the width of bubbles ( tool, user message, assistent message )
-      to not be rendered beneath the conversation-scrollbar but have a 1 char margin between bubble-right-edge and scrollbar.
-
-- [x] Refactor rendering of tool bubble in conversation-list.
-      The bubble title should be "{expand/collaps indicator} {tool title} {props}".
-      Use same colors/dimmed-text as current implementation.
-      Clicking on the tool title line will expand/collapse the bubble
-      (default state of a bubble is collapsed).
-      When the tool is done, update the bubble title to
-      "{expand/collaps indicator} {tool title} {props} {result-summary}".
-      Where result-summary should be a per-tool implementation of dict with string
-      key/value pairs describing the result ( e.g. "read" tool could use
-      {"size":"20 bytes"} to indicated that it read 20 bytes ).
-      When the tool was denied or resulted in error, then include the error message
-      as a second title line (in red).
