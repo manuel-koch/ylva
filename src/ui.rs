@@ -40,6 +40,10 @@ const USER_MESSAGE_STEERED_BORDER_COLOR: Color = Color::LightGreen;
 const USER_MESSAGE_CANCELLED_BORDER_COLOR: Color = Color::DarkGray;
 // Soft background shade applied to all user message blocks.
 const USER_MESSAGE_BG_COLOR: Color = Color::Rgb(20, 20, 40);
+/// The user-message input field grows with content but is capped at this
+/// fraction of the terminal height (e.g. 3 → one-third).  Adjust here to
+/// change the maximum visible height of the input area.
+const USER_MESSAGE_INPUT_HEIGHT_TERMINAL_FRACTION: u16 = 3;
 
 // Assistant streaming bubble colors.
 const ASSISTANT_STREAM_BORDER_COLOR: Color = Color::Blue;
@@ -86,7 +90,7 @@ pub fn draw(
     // The input box grows to fit its (word-wrapped) content, capped at 1/3 of
     // the terminal height. Wrapped row count, not logical line count, drives
     // the height so long lines grow the box instead of scrolling it.
-    let max_input = (area.height / 3).max(3);
+    let max_input = (area.height / USER_MESSAGE_INPUT_HEIGHT_TERMINAL_FRACTION).max(3);
     let input_width = area.width.saturating_sub(1).max(1) as usize;
     let wrapped_rows = textarea
         .lines()

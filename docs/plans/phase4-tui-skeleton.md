@@ -1112,9 +1112,11 @@ Update the following docs **in the same commit** as the code changes:
       are stripped — exactly like submit-time dedent. Covered by
       `paste_dedents_text_before_inserting`.)
 
-- [ ] Why is the input-field limited to just 4 lines ? Terminal has height 16.
+- [x] Why is the input-field limited to just 4 lines ? Terminal has height 16.
       If there is a ratio defined, extract it as a constant to locate it easier in
       the code.
+      (`USER_MESSAGE_INPUT_HEIGHT_TERMINAL_FRACTION = 3` constant in `src/ui.rs` caps the input
+      field at one-third of the terminal height.)
 
 - [ ] Multiline text retrieved via former message from the conversation ( keybinding
       up/down in input field ) are insert into input field without the original
