@@ -295,9 +295,12 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
     // row_width is the full column count of content_area; bubble helpers pad
     // lines to this width so the background fills every cell on each row.
     let row_width = content_area.width as usize;
+    // bubble_row_width is 1 char narrower than row_width to leave a 1-char
+    // margin between the right edge of each bubble and the scrollbar column.
+    let bubble_row_width = row_width.saturating_sub(1);
     // wrap_width for plain (non-bubble) content — 1 char narrower to avoid
     // running flush against the right edge.
-    let wrap_width = row_width.saturating_sub(1).max(1);
+    let wrap_width = bubble_row_width.saturating_sub(1).max(1);
 
     let mut lines: Vec<Line> = Vec::new();
     // Queued (steer) user messages are deferred until after the in-progress
@@ -329,12 +332,12 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
             ChatEntry::UserMessage { text, state } => {
                 // User bubbles carry a 1-char left border bar plus a 2-char
                 // margin, so wrap to a narrower width to keep lines on-screen.
-                let user_width = row_width.saturating_sub(3).max(1);
-                append_user_lines(&mut lines, text, *state, user_width, row_width);
+                let user_width = bubble_row_width.saturating_sub(3).max(1);
+                append_user_lines(&mut lines, text, *state, user_width, bubble_row_width);
             }
             ChatEntry::AssistantMessage { text, interrupted } => {
-                let msg_width = row_width.saturating_sub(3).max(1);
-                append_assistant_lines(&mut lines, text, *interrupted, msg_width, row_width);
+                let msg_width = bubble_row_width.saturating_sub(3).max(1);
+                append_assistant_lines(&mut lines, text, *interrupted, msg_width, bubble_row_width);
             }
             ChatEntry::ToolBubble { name, state, .. } => {
                 // Pending tool bubbles are deferred so they render at the bottom,
@@ -343,7 +346,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
                     deferred_pending_tool_bubbles.push((name.clone(), state.clone()));
                     continue;
                 }
-                append_tool_bubble_lines(&mut lines, name, state, wrap_width, row_width);
+                append_tool_bubble_lines(&mut lines, name, state, wrap_width, bubble_row_width);
             }
             ChatEntry::ErrorLine { message } => {
                 for wrapped in textwrap::wrap(message, wrap_width) {
@@ -359,12 +362,12 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
     }
 
     if state.agent_mode == AgentMode::Streaming && !state.partial_assistant_text.is_empty() {
-        let stream_width = row_width.saturating_sub(3).max(1);
+        let stream_width = bubble_row_width.saturating_sub(3).max(1);
         append_streaming_lines(
             &mut lines,
             &state.partial_assistant_text.clone(),
             stream_width,
-            row_width,
+            bubble_row_width,
         );
         // Match the blank separator that the committed-entry loop appends so
         // the gap between the bubble and the input field is consistent whether
@@ -375,13 +378,13 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
     // Flush deferred queued steer messages after the stream bubble so they
     // appear visually after the current in-progress response.
     for queued_text in &deferred_queued_messages {
-        let user_width = row_width.saturating_sub(3).max(1);
+        let user_width = bubble_row_width.saturating_sub(3).max(1);
         append_user_lines(
             &mut lines,
             queued_text,
             UserMessageState::Queued,
             user_width,
-            row_width,
+            bubble_row_width,
         );
         lines.push(Line::default());
     }
@@ -389,7 +392,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
     // Flush pending-approval tool bubbles last so they always sit at the
     // bottom of the conversation, directly above the approve/deny footer.
     for (name, bubble_state) in &deferred_pending_tool_bubbles {
-        append_tool_bubble_lines(&mut lines, name, bubble_state, wrap_width, row_width);
+        append_tool_bubble_lines(&mut lines, name, bubble_state, wrap_width, bubble_row_width);
         lines.push(Line::default());
     }
 

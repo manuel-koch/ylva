@@ -808,7 +808,7 @@ Update the following docs **in the same commit** as the code changes:
 
 ## Bugs / Follow-Up Changes
 
-- [ ] Adjust the width of bubbles ( tool, user message, assistent message )
+- [x] Adjust the width of bubbles ( tool, user message, assistent message )
       to not be rendered beneath the conversation-scrollbar but have a 1 char margin between bubble-right-edge and scrollbar.
 
 - [ ] Reformat tool bubble in conversation-list.
