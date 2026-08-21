@@ -34,7 +34,7 @@ use crossterm::terminal::{
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::style::Style;
 use ratatui::Terminal;
-use ratatui_textarea::TextArea;
+use ratatui_textarea::{Scrolling, TextArea};
 use tokio::select;
 use tokio::sync::mpsc;
 
@@ -216,6 +216,10 @@ fn handle_action(
         AppAction::Escape => handle_escape(state, textarea, confirm_state, cmd_tx),
         AppAction::ShowHelp => {
             state.show_help = !state.show_help;
+            if !state.show_help {
+                state.help_scroll_offset = 0;
+                state.help_scroll_x = 0;
+            }
             ActionOutcome::Continue
         }
         // OS SIGINT: interrupt the current round immediately, no double-press.
@@ -324,6 +328,8 @@ fn handle_escape(
     if state.show_help {
         // Close the popup; confirm state is unchanged.
         state.show_help = false;
+        state.help_scroll_offset = 0;
+        state.help_scroll_x = 0;
         return ActionOutcome::Continue;
     }
     if state.agent_mode == AgentMode::Idle {
@@ -423,6 +429,29 @@ fn handle_key_input(
         }
     }
 
+    // While the help popup is open, arrow keys scroll it instead of the input.
+    if state.show_help {
+        match event.code {
+            KeyCode::Up => {
+                state.help_scroll_up(1);
+                return ActionOutcome::Continue;
+            }
+            KeyCode::Down => {
+                state.help_scroll_down(1);
+                return ActionOutcome::Continue;
+            }
+            KeyCode::Left => {
+                state.help_scroll_left(4);
+                return ActionOutcome::Continue;
+            }
+            KeyCode::Right => {
+                state.help_scroll_right(4);
+                return ActionOutcome::Continue;
+            }
+            _ => {}
+        }
+    }
+
     match event.code {
         // Shift+Enter / Alt+Enter insert a newline rather than sending.
         KeyCode::Enter
@@ -460,11 +489,19 @@ fn handle_key_input(
             ActionOutcome::Continue
         }
         KeyCode::PageUp => {
-            state.scroll_up(3);
+            if state.show_help {
+                state.help_scroll_up(3);
+            } else {
+                state.scroll_up(3);
+            }
             ActionOutcome::Continue
         }
         KeyCode::PageDown => {
-            state.scroll_down(3);
+            if state.show_help {
+                state.help_scroll_down(3);
+            } else {
+                state.scroll_down(3);
+            }
             ActionOutcome::Continue
         }
         // Home: move to the start of the current line, wrapping to the end of
@@ -635,13 +672,42 @@ fn handle_mouse_input(
     }
 
     // The chat area scrolls directly with the mouse wheel — no focus needed.
+    // While the help popup is visible the wheel scrolls the popup instead.
+    // When the wheel is over the input field it scrolls the textarea instead.
     match mouse.kind {
-        MouseEventKind::ScrollUp => {
-            state.scroll_up(1);
-            return ActionOutcome::Continue;
-        }
-        MouseEventKind::ScrollDown => {
-            state.scroll_down(1);
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+            let delta = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
+                -1i16
+            } else {
+                1i16
+            };
+            if state.show_help {
+                if delta < 0 {
+                    state.help_scroll_up(1);
+                } else {
+                    state.help_scroll_down(1);
+                }
+            } else {
+                let pos = ratatui::layout::Position::new(mouse.column, mouse.row);
+                if state.input_area.contains(pos) {
+                    textarea.scroll(Scrolling::Delta {
+                        rows: delta,
+                        cols: 0,
+                    });
+                    // Keep input_scroll_top in sync so draw() doesn't revert the scroll.
+                    if delta < 0 {
+                        state.input_scroll_top = state.input_scroll_top.saturating_sub(1);
+                    } else {
+                        state.input_scroll_top = state.input_scroll_top.saturating_add(1);
+                    }
+                } else {
+                    if delta < 0 {
+                        state.scroll_up(1);
+                    } else {
+                        state.scroll_down(1);
+                    }
+                }
+            }
             return ActionOutcome::Continue;
         }
         _ => {}

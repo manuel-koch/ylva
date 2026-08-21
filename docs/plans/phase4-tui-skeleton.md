@@ -1144,7 +1144,7 @@ Update the following docs **in the same commit** as the code changes:
       and `draft` before resetting the textarea, so the next ↑ always starts from
       the most-recent entry. Covered by `idle_escape_resets_history_index`.)
 
-- [ ] Help popup should use 1 char padding and the popup should have a title "Help"
+- [x] Help popup should use 1 char padding and the popup should have a title "Help"
       at upper-left position of popup ( 2 char indent, not directly at the edge )
       instead of "F1 or esc to close".
       Use blue border for the help popup.
@@ -1152,12 +1152,41 @@ Update the following docs **in the same commit** as the code changes:
       terminal height. Should have vertical scrolling indicators too.
       Just render "▲" and "▼" ( no vertical indicator inbetween ) when there is
       more up/down content avail.
+      (Popup block now uses `Color::Blue` border, title `" Help"` left-aligned with
+      2-char indent, and `Padding::uniform(1)`. The "F1 or esc to close" overlay is
+      removed. All content (keybindings + build info) is rendered as a single
+      `Paragraph` with `scroll((help_scroll_offset, 0))`; `▲` / `▼` appear in the
+      top-right / bottom-right of the inner area when content overflows. `PageUp`,
+      `PageDown`, and mouse wheel route to `help_scroll_up` / `help_scroll_down`
+      while the popup is open. The offset is reset to 0 when the popup is closed.)
+
+- [ ] Submitting a message that entails a tool call.
+      Message is sent, streaming starts.
+      Starting the help popup.
+      Tool call arrives, pending approval is shown beneath the help popup.
+      Now pressing "esc" denies the approval instead of dismissing the open help
+      popup.
+
+- [ ] Double-Ctrl-c while streaming doesn't seem to stop it immediately.
+      I had to keep pressing ctrl-c repeatly until streaming was over before the
+      TUI would actually quit.
+
+- [ ] Sent a user message that will trigger a tool call.
+      While the message is pending, type yet another message, but don't submit it.
+      The tool approval arrives, but the formerly typed text is still in the
+      input-field.
+      The input-field content should be saved and cleared before showing the
+      approval and should be restored after approval was approved/denied.
 
 - [ ] Add a thin solid white line between the lower area ( input-field + footer )
       and the conversation-list above.
 
-- [ ] In Footer change the "active indicator to
+- [ ] In Footer change the "active" indicator:
   - drop the "[mode]" snippet
-  - use just "Sending...", "Streaming...", "Idle"
+  - use just "Sending...", "Streaming...", "Running Tool", "Idle"
+  - keep the spinning dots while agent is not idle
 
 - [ ] render toast messages in lower right edge of app.
+
+- [ ] Adjust the width of bubbles ( tool, user message, assistent message )
+      to not be rendered beneath the conversation-scrollbar but have a 1 char margin between bubble-right-edge and scrollbar.

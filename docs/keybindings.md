@@ -25,9 +25,11 @@ Reference for Ylva's TUI keybindings.
 | `↑` (cursor on first line) | Input focused | Load previous user message; save draft |
 | `↓` (cursor on last line) | Input focused | Load next user message; restore draft at newest |
 | Any edit key while browsing | Input focused | Copy browsed entry to draft; exit browsing mode |
-| `page-up` / `fn-up` | Any | Scroll up; disable auto-scroll |
-| `page-down` / `fn-down` | Any | Scroll down; re-enable auto-scroll at bottom |
-| Mouse wheel | Any | Scroll chat (no focus needed) |
+| `↑` / `↓` | Help popup open | Scroll help popup up / down one line |
+| `←` / `→` | Help popup open | Scroll help popup left / right by 4 columns |
+| `page-up` / `fn-up` | Any | Scroll chat up; when help popup is open, scroll popup up |
+| `page-down` / `fn-down` | Any | Scroll chat down; when help popup is open, scroll popup down |
+| Mouse wheel | Any | Scroll chat; when help popup is open, scroll popup (no focus needed) |
 | Left-click | Input focused | Move the cursor to the clicked character (word-wrapping honored) |
 | Left-drag | Input focused | Select text; click (no drag) just places the cursor |
 

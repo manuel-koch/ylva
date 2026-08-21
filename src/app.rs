@@ -187,6 +187,16 @@ pub struct TuiState {
     /// Incremented on every tick while the agent is busy; used to animate the
     /// footer spinner.
     pub spinner_frame: u8,
+    /// Current scroll offset inside the help popup (lines from the top of the
+    /// content). Clamped to the valid range by `draw_help_popup` each frame.
+    pub help_scroll_offset: usize,
+    /// Current horizontal scroll offset inside the help popup (columns from
+    /// the left). Clamped to the valid range by `draw_help_popup` each frame.
+    pub help_scroll_x: usize,
+    /// Mirrors ratatui-textarea's internal scroll-top (in wrapped screen rows)
+    /// so that the input-field scroll indicators reflect the actual rendered
+    /// viewport position rather than the cursor row.
+    pub input_scroll_top: usize,
 }
 
 impl TuiState {
@@ -211,6 +221,9 @@ impl TuiState {
             chat_drag_active: false,
             toast: None,
             spinner_frame: 0,
+            help_scroll_offset: 0,
+            help_scroll_x: 0,
+            input_scroll_top: 0,
         }
     }
 
@@ -464,6 +477,28 @@ impl TuiState {
     pub fn scroll_down(&mut self, lines: usize) {
         self.scroll_locked = false;
         self.scroll_offset = self.scroll_offset.saturating_add(lines);
+    }
+
+    /// Scroll the help popup up (toward earlier content).
+    pub fn help_scroll_up(&mut self, lines: usize) {
+        self.help_scroll_offset = self.help_scroll_offset.saturating_sub(lines);
+    }
+
+    /// Scroll the help popup down (toward later content). The upper bound is
+    /// applied in `draw_help_popup`, which knows the total content height.
+    pub fn help_scroll_down(&mut self, lines: usize) {
+        self.help_scroll_offset = self.help_scroll_offset.saturating_add(lines);
+    }
+
+    /// Scroll the help popup left (toward earlier columns).
+    pub fn help_scroll_left(&mut self, columns: usize) {
+        self.help_scroll_x = self.help_scroll_x.saturating_sub(columns);
+    }
+
+    /// Scroll the help popup right (toward later columns). The upper bound is
+    /// applied in `draw_help_popup`, which knows the maximum line width.
+    pub fn help_scroll_right(&mut self, columns: usize) {
+        self.help_scroll_x = self.help_scroll_x.saturating_add(columns);
     }
 
     /// Called on End key or scroll-to-bottom event — re-enables auto-scroll.

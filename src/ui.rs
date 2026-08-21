@@ -20,9 +20,7 @@
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
-};
+use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 use ratatui::Frame;
 use ratatui_textarea::TextArea;
 
@@ -53,18 +51,29 @@ const ASSISTANT_STREAM_BG_COLOR: Color = Color::Rgb(15, 20, 35);
 const TOOL_BUBBLE_BORDER_COLOR: Color = Color::Magenta;
 const TOOL_BUBBLE_BG_COLOR: Color = Color::Rgb(30, 0, 30);
 
+// Help popup border, title, section headings, and scroll-indicator color.
+const HELP_POPUP_BORDER_COLOR: Color = Color::Blue;
+// Section heading foreground color inside the help popup content area.
+const HELP_POPUP_HEADING_COLOR: Color = Color::Blue;
+
+// Single hue used for all parts of the conversation-list scrollbar.
+// The track and inactive arrows use the same colour with Modifier::DIM so the
+// thumb and active arrows stand out without introducing a second colour.
+const CHAT_SCROLLBAR_COLOR: Color = Color::Blue;
+
 /// Braille spinner animation frames, cycled while the agent is busy.
 const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 /// ASCII-art "Ylva" wordmark shown while the conversation is empty so the
 /// initial frame is never blank. Each line must be the same width.
-const LOGO: [&str; 6] = [
+const LOGO: [&str; 7] = [
     "██╗   ██╗██╗     ██╗   ██╗ █████╗ ",
     "╚██╗ ██╔╝██║     ██║   ██║██╔══██╗",
     " ╚████╔╝ ██║     ██║   ██║███████║",
     "  ╚██╔╝  ██║     ╚██╗ ██╔╝██╔══██║",
     "   ██║   ███████╗ ╚████╔╝ ██║  ██║",
     "   ╚═╝   ╚══════╝  ╚═══╝  ╚═╝  ╚═╝",
+    "    Taming the pack of agents!    ",
 ];
 
 /// Clickable approval button rects returned by `draw` when in approval sub-mode.
@@ -150,6 +159,47 @@ pub fn draw(
     );
     frame.render_widget(&*textarea, input_area);
 
+    // Mirror ratatui-textarea's next_scroll_top algorithm using the public
+    // screen_cursor().row (wrapped screen row) to track which viewport window
+    // the textarea is currently showing. This persists in TuiState across
+    // frames so the state is correct regardless of cursor movement.
+    if wrapped_rows > input_height as usize {
+        let screen_row = textarea.screen_cursor().row;
+        let height = input_height as usize;
+        state.input_scroll_top = if screen_row < state.input_scroll_top {
+            screen_row
+        } else if state.input_scroll_top + height <= screen_row {
+            screen_row + 1 - height
+        } else {
+            state.input_scroll_top
+        };
+    } else {
+        state.input_scroll_top = 0;
+    }
+
+    // Show ↑/↓ based on the tracked viewport position, not the cursor row.
+    if wrapped_rows > input_height as usize && input_area.height >= 1 && input_area.width >= 1 {
+        let input_indicator_style = Style::default().fg(Color::Cyan);
+        if state.input_scroll_top > 0 {
+            frame.render_widget(
+                Paragraph::new("↑").style(input_indicator_style),
+                Rect::new(input_area.x + input_area.width - 1, input_area.y, 1, 1),
+            );
+        }
+        if state.input_scroll_top + (input_height as usize) < wrapped_rows && input_area.height > 1
+        {
+            frame.render_widget(
+                Paragraph::new("↓").style(input_indicator_style),
+                Rect::new(
+                    input_area.x + input_area.width - 1,
+                    input_area.y + input_area.height - 1,
+                    1,
+                    1,
+                ),
+            );
+        }
+    }
+
     // When a tool approval is pending and the input field is empty, overlay a
     // dimmed placeholder hint so the user knows the field accepts a denial reason.
     // The overlay sits one column to the right of the `▌` border character.
@@ -203,7 +253,7 @@ pub fn draw(
     };
 
     if state.show_help {
-        draw_help_popup(frame);
+        draw_help_popup(frame, state);
     }
 
     // Dismiss any toast whose display window has elapsed, then render it.
@@ -396,19 +446,113 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
 
     frame.render_widget(paragraph, content_area);
 
-    // Show a scrollbar only when the content actually overflows the viewport.
+    // Show a custom scrollbar only when the content overflows the viewport.
     if total_lines > visible {
-        // `content_length` must be `max_offset + 1` (the number of scrollable
-        // positions), not the total line count, or ratatui's thumb proportion
-        // never reaches the very bottom of the track when the viewport is more
-        // than one row.
-        let mut scrollbar_state = ScrollbarState::new(max_offset + 1)
-            .position(row_offset)
-            .viewport_content_length(visible);
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight),
+        render_chat_scrollbar(
+            frame,
             scrollbar_area,
-            &mut scrollbar_state,
+            row_offset,
+            max_offset,
+            total_lines,
+            visible,
+        );
+    }
+}
+
+/// Compute the thumb span for the chat scrollbar track.
+///
+/// Returns `(thumb_top, thumb_size)` — both in track-relative row units within
+/// `[0, track_height)`. The thumb always occupies at least one row and never
+/// extends beyond the track.
+fn compute_scrollbar_thumb(
+    track_height: usize,
+    total_lines: usize,
+    visible: usize,
+    row_offset: usize,
+    max_offset: usize,
+) -> (usize, usize) {
+    let thumb_size = ((track_height * visible) / total_lines)
+        .max(1)
+        .min(track_height);
+    let thumb_top = if max_offset == 0 {
+        0
+    } else {
+        (row_offset * (track_height - thumb_size)) / max_offset
+    };
+    (thumb_top, thumb_size)
+}
+
+/// Render the custom chat scrollbar into `scrollbar_area` (1 column wide).
+///
+/// Layout (when height ≥ 4):
+///   row 0                  → ↑ (Blue when can scroll up, DarkGray otherwise)
+///   rows 1 .. height-2     → thin │ track (DarkGray), ┃ thumb (Gray)
+///   row height-1           → ↓ (Blue when can scroll down, DarkGray otherwise)
+///
+/// On very short areas (< 4 rows) the track fills the whole column with no
+/// arrow rows.
+fn render_chat_scrollbar(
+    frame: &mut Frame,
+    scrollbar_area: Rect,
+    row_offset: usize,
+    max_offset: usize,
+    total_lines: usize,
+    visible: usize,
+) {
+    let height = scrollbar_area.height as usize;
+    if height == 0 {
+        return;
+    }
+    let has_arrows = height >= 4;
+    let (track_y, track_height) = if has_arrows {
+        (scrollbar_area.y + 1, height - 2)
+    } else {
+        (scrollbar_area.y, height)
+    };
+    let (thumb_top, thumb_size) =
+        compute_scrollbar_thumb(track_height, total_lines, visible, row_offset, max_offset);
+
+    for row in 0..track_height {
+        let is_thumb = row >= thumb_top && row < thumb_top + thumb_size;
+        let style = if is_thumb {
+            Style::default().fg(CHAT_SCROLLBAR_COLOR)
+        } else {
+            Style::default()
+                .fg(CHAT_SCROLLBAR_COLOR)
+                .add_modifier(Modifier::DIM)
+        };
+        let symbol = if is_thumb { "┃" } else { "│" };
+        frame.render_widget(
+            Paragraph::new(symbol).style(style),
+            Rect::new(scrollbar_area.x, track_y + row as u16, 1, 1),
+        );
+    }
+
+    if has_arrows {
+        let arrow_active = Style::default().fg(CHAT_SCROLLBAR_COLOR);
+        let arrow_dim = Style::default()
+            .fg(CHAT_SCROLLBAR_COLOR)
+            .add_modifier(Modifier::DIM);
+        frame.render_widget(
+            Paragraph::new("↑").style(if row_offset > 0 {
+                arrow_active
+            } else {
+                arrow_dim
+            }),
+            Rect::new(scrollbar_area.x, scrollbar_area.y, 1, 1),
+        );
+        frame.render_widget(
+            Paragraph::new("↓").style(if row_offset < max_offset {
+                arrow_active
+            } else {
+                arrow_dim
+            }),
+            Rect::new(
+                scrollbar_area.x,
+                scrollbar_area.y + scrollbar_area.height - 1,
+                1,
+                1,
+            ),
         );
     }
 }
@@ -1009,70 +1153,176 @@ fn draw_toast(frame: &mut Frame, area: Rect, message: &str) {
     );
 }
 
-fn draw_help_popup(frame: &mut Frame) {
+fn draw_help_popup(frame: &mut Frame, state: &mut TuiState) {
     let area = frame.area();
-    let popup_width = (area.width * 60 / 100).max(20);
+    let popup_width = (area.width * 75 / 100).max(20);
     let popup_height = (area.height * 70 / 100).max(10);
     let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
     let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
     let popup = Rect::new(x, y, popup_width, popup_height);
 
     frame.render_widget(Clear, popup);
-    let block = Block::default().borders(Borders::ALL).title("Help — Ylva");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(HELP_POPUP_BORDER_COLOR))
+        .title(" Help")
+        .title_alignment(Alignment::Left)
+        .padding(Padding::uniform(1));
     let inner = block.inner(popup);
-    // Draw the border so the popup is visually distinct from the content it
-    // overlays (Clear erases what is underneath).
-    frame.render_widget(block.clone(), popup);
+    frame.render_widget(block, popup);
 
-    let keybindings = "\
-enter                       Send message; queue steer if busy
-shift-enter / alt-enter     Insert newline
-ctrl-c / esc (x1)           Show \"Press again to cancel\" hint (busy, empty input)
-ctrl-c / esc (x2, <=2s)     Interrupt generation (busy, empty input)
-ctrl-c / esc                Clear input field (busy, non-empty input)
-ctrl-c (x1)                 Show \"Press again to quit\" hint (idle)
-ctrl-c (x2, <=2s)           Quit TUI
-esc                         Clear input (idle)
-esc                         Close popup
-F1                          Toggle this help
-up / down                   Input history (on boundary lines)
-home / fn-left              Line start; at col 0: end of previous line
-end / fn-right              Line end; at line end: start of next line
-page-up / page-down         Scroll chat
-mouse wheel                 Scroll chat
-enter                       Approve tool (approval mode)
-esc                         Deny tool (approval mode)";
+    // Build content lines grouped into sections. Each section starts with a
+    // heading line followed by its entries; sections are separated by a blank.
+    // No leading space on heading text — the popup padding provides the margin.
+    let heading_style = Style::default()
+        .fg(HELP_POPUP_HEADING_COLOR)
+        .add_modifier(Modifier::BOLD);
 
-    let build_info = BUILD_INFO.render();
+    struct Section<'a> {
+        heading: &'a str,
+        entries: &'a [(&'a str, &'a str)],
+    }
 
-    let [keybind_area, build_area] = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Fill(1), Constraint::Length(6)])
-        .areas(inner);
+    let sections = [
+        Section {
+            heading: "General",
+            entries: &[
+                ("F1", "Toggle this help"),
+                ("ctrl-c (x1)", "Show \"Press again to quit\" hint (idle)"),
+                ("ctrl-c (x2, <=2s)", "Quit TUI"),
+                (
+                    "ctrl-c / esc (x1)",
+                    "Show \"Press again to cancel\" hint (busy, empty input)",
+                ),
+                (
+                    "ctrl-c / esc (x2, <=2s)",
+                    "Interrupt generation (busy, empty input)",
+                ),
+                ("esc", "Close popup"),
+            ],
+        },
+        Section {
+            heading: "Draft message",
+            entries: &[
+                ("enter", "Send message; queue steer if busy"),
+                ("shift-enter / alt-enter", "Insert newline"),
+                ("ctrl-c / esc", "Clear input field (busy, non-empty input)"),
+                ("esc", "Clear input (idle)"),
+                ("↑ (on first line)", "Load previous message from history"),
+                ("↓ (on last line)", "Load next message from history"),
+                (
+                    "home / fn-left",
+                    "Line start; at col 0: end of previous line",
+                ),
+                (
+                    "end / fn-right",
+                    "Line end; at line end: start of next line",
+                ),
+            ],
+        },
+        Section {
+            heading: "Help popup",
+            entries: &[
+                ("↑ / ↓", "Scroll up / down one line"),
+                ("← / →", "Scroll left / right by 4 columns"),
+                ("page-up / page-down", "Scroll up / down"),
+                ("mouse wheel", "Scroll up / down"),
+            ],
+        },
+        Section {
+            heading: "Build",
+            entries: &[],
+        },
+    ];
 
-    let kb_title = Block::default().title(" Keybindings ");
+    let mut all_lines: Vec<Line> = Vec::new();
+    for section in &sections {
+        if !all_lines.is_empty() {
+            all_lines.push(Line::default());
+        }
+        all_lines.push(Line::styled(section.heading, heading_style));
+        if section.heading == "Build" {
+            for bi_line in BUILD_INFO.render().lines() {
+                all_lines.push(Line::from(bi_line.to_owned()));
+            }
+        } else {
+            for (key, desc) in section.entries {
+                all_lines.push(Line::from(format!("  {key:<40}{desc}")));
+            }
+        }
+    }
+
+    let total_lines = all_lines.len();
+    let max_line_width = all_lines.iter().map(|l| l.width()).max().unwrap_or(0);
+
+    let viewport_height = inner.height as usize;
+    let viewport_width = inner.width as usize;
+
+    // Clamp offsets so we never display empty space.
+    let max_scroll_y = total_lines.saturating_sub(viewport_height);
+    let max_scroll_x = max_line_width.saturating_sub(viewport_width);
+    state.help_scroll_offset = state.help_scroll_offset.min(max_scroll_y);
+    state.help_scroll_x = state.help_scroll_x.min(max_scroll_x);
+    let scroll_y = state.help_scroll_offset;
+    let scroll_x = state.help_scroll_x;
+
     frame.render_widget(
-        Paragraph::new(keybindings).block(kb_title).scroll((0, 0)),
-        keybind_area,
-    );
-    let bi_title = Block::default().title(" Build ");
-    frame.render_widget(
-        Paragraph::new(build_info).block(bi_title).scroll((0, 0)),
-        build_area,
+        Paragraph::new(all_lines).scroll((scroll_y as u16, scroll_x as u16)),
+        inner,
     );
 
-    frame.render_widget(Paragraph::new("F1 or esc to close"), popup);
+    // Scroll indicators sit in the 1-char padding strip between the border and
+    // the content, so they never obscure text.
+    //
+    // Right padding column  = popup.x + popup.width  - 2
+    // Left  padding column  = popup.x + 1
+    // Top   padding row     = popup.y + 1
+    // Bottom padding row    = popup.y + popup.height - 2
+    let can_scroll_up = scroll_y > 0;
+    let can_scroll_down = scroll_y < max_scroll_y;
+    let can_scroll_left = scroll_x > 0;
+    let can_scroll_right = scroll_x < max_scroll_x;
+    let indicator_style = Style::default().fg(HELP_POPUP_BORDER_COLOR);
+
+    let pad_col_right = popup.x + popup.width.saturating_sub(2);
+    let pad_col_left = popup.x + 1;
+    let pad_row_top = popup.y + 1;
+    let pad_row_bottom = popup.y + popup.height.saturating_sub(2);
+    let pad_row_mid = popup.y + popup.height / 2;
+
+    if can_scroll_up || can_scroll_right {
+        let symbol = match (can_scroll_up, can_scroll_right) {
+            (true, true) => "↗",
+            (true, false) => "↑",
+            (false, true) => "→",
+            (false, false) => unreachable!(),
+        };
+        frame.render_widget(
+            Paragraph::new(symbol).style(indicator_style),
+            Rect::new(pad_col_right, pad_row_top, 1, 1),
+        );
+    }
+    if can_scroll_down {
+        let symbol = if can_scroll_right { "↘" } else { "↓" };
+        frame.render_widget(
+            Paragraph::new(symbol).style(indicator_style),
+            Rect::new(pad_col_right, pad_row_bottom, 1, 1),
+        );
+    }
+    if can_scroll_left {
+        frame.render_widget(
+            Paragraph::new("←").style(indicator_style),
+            Rect::new(pad_col_left, pad_row_mid, 1, 1),
+        );
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use ratatui::buffer::Buffer;
-    use ratatui::layout::Rect;
+    use super::apply_selection_highlight_to_line;
+    use super::compute_scrollbar_thumb;
     use ratatui::style::Color;
     use ratatui::text::{Line, Span};
-    use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget};
-
-    use super::apply_selection_highlight_to_line;
 
     const SEL_BG: Color = Color::Rgb(60, 80, 120);
 
@@ -1123,45 +1373,45 @@ mod tests {
         assert_eq!(highlighted_in(&line), "ob");
     }
 
-    /// `content_length` must be `max_offset + 1` (the number of scrollable
-    /// positions), not the total line count, or the thumb never reaches the
-    /// bottom of the track when the viewport spans more than one row.
     #[test]
-    fn vertical_scrollbar_thumb_reaches_bottom_at_max_offset() {
+    fn scrollbar_thumb_sits_at_bottom_at_max_offset() {
         let total = 30usize;
         let visible = 10usize;
+        let track_height = visible;
         let max_offset = total - visible;
-        let mut buffer = Buffer::empty(Rect::new(0, 0, 1, visible as u16));
-        let mut state = ScrollbarState::new(max_offset + 1)
-            .position(max_offset)
-            .viewport_content_length(visible);
-        Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .thumb_symbol("█")
-            .track_symbol(Some("│"))
-            .begin_symbol(None)
-            .end_symbol(None)
-            .render(buffer.area, &mut buffer, &mut state);
+        let (thumb_top, thumb_size) =
+            compute_scrollbar_thumb(track_height, total, visible, max_offset, max_offset);
         assert_eq!(
-            buffer[(0, visible as u16 - 1)].symbol(),
-            "█",
-            "the thumb must sit on the last row of the track at max offset"
+            thumb_top + thumb_size,
+            track_height,
+            "thumb bottom must reach the last track row at max offset"
         );
     }
 
     #[test]
-    fn vertical_scrollbar_thumb_is_at_top_at_zero_offset() {
+    fn scrollbar_thumb_sits_at_top_at_zero_offset() {
         let total = 30usize;
         let visible = 10usize;
-        let mut buffer = Buffer::empty(Rect::new(0, 0, 1, visible as u16));
-        let mut state = ScrollbarState::new(total - visible + 1)
-            .position(0)
-            .viewport_content_length(visible);
-        Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .thumb_symbol("█")
-            .track_symbol(Some("│"))
-            .begin_symbol(None)
-            .end_symbol(None)
-            .render(buffer.area, &mut buffer, &mut state);
-        assert_eq!(buffer[(0, 0)].symbol(), "█");
+        let track_height = visible;
+        let max_offset = total - visible;
+        let (thumb_top, _thumb_size) =
+            compute_scrollbar_thumb(track_height, total, visible, 0, max_offset);
+        assert_eq!(thumb_top, 0, "thumb must start at row 0 at zero offset");
+    }
+
+    #[test]
+    fn scrollbar_thumb_never_overflows_track() {
+        let total = 30usize;
+        let visible = 10usize;
+        let track_height = visible;
+        let max_offset = total - visible;
+        for offset in 0..=max_offset {
+            let (thumb_top, thumb_size) =
+                compute_scrollbar_thumb(track_height, total, visible, offset, max_offset);
+            assert!(
+                thumb_top + thumb_size <= track_height,
+                "thumb overflows at offset {offset}: top={thumb_top} size={thumb_size}"
+            );
+        }
     }
 }

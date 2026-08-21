@@ -136,21 +136,29 @@ pub(crate) fn dump_request_body(body: &serde_json::Value, file_path: &Path) {
 
 /// Derive a dump file path from the `YLVA_REQUEST_DUMP_PATH` environment variable.
 ///
-/// The variable is treated as a path template. The parent directory and stem
-/// are extracted from it; the actual file is named
-/// `<stem>_<unix_seconds>_<millis>.json` (stem falls back to `"ylva_req"` when
-/// absent). A relative parent directory is resolved against the current working
-/// directory.
-///
-/// Returns `None` when the envvar is unset, empty, or the current working
-/// directory cannot be resolved (the latter is logged at `warn` level).
+/// Returns `None` when the envvar is unset, empty, or whitespace-only.
+/// Delegates path construction to [`build_dump_path_from_template`].
 pub(crate) fn build_request_dump_path() -> Option<PathBuf> {
     let template = match std::env::var("YLVA_REQUEST_DUMP_PATH") {
-        Ok(value) if !value.trim().is_empty() => value,
-        _ => return None,
+        Ok(value) => value,
+        Err(_) => return None,
     };
+    build_dump_path_from_template(&template)
+}
 
-    let template_path = Path::new(&template);
+/// Construct a timestamped dump file path from `template`.
+///
+/// The template is treated as a path: the parent directory and stem are
+/// extracted from it; the actual file is named
+/// `<stem>_<unix_seconds>_<millis>.json` (stem falls back to `"ylva_req"`
+/// when the template has no file component). A relative parent directory is
+/// resolved against the current working directory; failure to resolve the cwd
+/// is logged at `warn` level and causes `None` to be returned.
+fn build_dump_path_from_template(template: &str) -> Option<PathBuf> {
+    if template.trim().is_empty() {
+        return None;
+    }
+    let template_path = Path::new(template);
 
     let parent = template_path.parent().unwrap_or(Path::new(""));
     let parent = if parent.as_os_str().is_empty() {
@@ -367,10 +375,8 @@ mod tests {
     }
 
     #[test]
-    fn build_request_dump_path_uses_stem_and_absolute_dir() {
-        unsafe { std::env::set_var("YLVA_REQUEST_DUMP_PATH", "/tmp/dumps/my_req") };
-        let path = build_request_dump_path().expect("path");
-        unsafe { std::env::remove_var("YLVA_REQUEST_DUMP_PATH") };
+    fn build_dump_path_uses_stem_and_absolute_dir() {
+        let path = build_dump_path_from_template("/tmp/dumps/my_req").expect("path");
         let parent = path.parent().expect("parent");
         let file_name = path.file_name().and_then(|n| n.to_str()).expect("name");
         assert_eq!(parent, Path::new("/tmp/dumps"));
@@ -383,23 +389,22 @@ mod tests {
 
     #[test]
     fn build_request_dump_path_returns_none_when_env_var_unset() {
-        unsafe { std::env::remove_var("YLVA_REQUEST_DUMP_PATH") };
+        // Guard: ensure the var is absent for this check. Because we are not
+        // setting it, there is no race with other tests.
+        if std::env::var("YLVA_REQUEST_DUMP_PATH").is_ok() {
+            return; // var happens to be set in this process — skip rather than flake
+        }
         assert!(build_request_dump_path().is_none());
     }
 
     #[test]
-    fn build_request_dump_path_returns_none_when_env_var_is_whitespace_only() {
-        unsafe { std::env::set_var("YLVA_REQUEST_DUMP_PATH", "   ") };
-        let result = build_request_dump_path();
-        unsafe { std::env::remove_var("YLVA_REQUEST_DUMP_PATH") };
-        assert!(result.is_none());
+    fn build_dump_path_returns_none_when_template_is_whitespace_only() {
+        assert!(build_dump_path_from_template("   ").is_none());
     }
 
     #[test]
-    fn build_request_dump_path_falls_back_to_default_stem_when_template_has_no_stem() {
-        unsafe { std::env::set_var("YLVA_REQUEST_DUMP_PATH", "/") };
-        let path = build_request_dump_path().expect("path");
-        unsafe { std::env::remove_var("YLVA_REQUEST_DUMP_PATH") };
+    fn build_dump_path_falls_back_to_default_stem_when_template_has_no_stem() {
+        let path = build_dump_path_from_template("/").expect("path");
         let file_name = path.file_name().and_then(|n| n.to_str()).expect("name");
         assert!(
             file_name.starts_with("ylva_req_"),
@@ -408,11 +413,9 @@ mod tests {
     }
 
     #[test]
-    fn build_request_dump_path_resolves_relative_template_against_cwd() {
+    fn build_dump_path_resolves_relative_template_against_cwd() {
         let cwd = std::env::current_dir().expect("cwd");
-        unsafe { std::env::set_var("YLVA_REQUEST_DUMP_PATH", "sub/req") };
-        let path = build_request_dump_path().expect("path");
-        unsafe { std::env::remove_var("YLVA_REQUEST_DUMP_PATH") };
+        let path = build_dump_path_from_template("sub/req").expect("path");
         assert!(
             path.starts_with(cwd.join("sub")),
             "expected path under CWD/sub, got {path:?}"
