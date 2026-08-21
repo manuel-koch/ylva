@@ -981,9 +981,9 @@ fn confirm_hint(confirm_state: &Option<Instant>, mode: &AgentMode) -> Option<Str
         return None;
     }
     let hint = if *mode == AgentMode::Idle {
-        "Press Ctrl+C or Esc again to quit"
+        " Press Ctrl+C or Esc again to quit"
     } else {
-        "Press Ctrl+C or Esc again to cancel"
+        " Press Ctrl+C or Esc again to cancel"
     };
     Some(hint.to_string())
 }
@@ -2261,11 +2261,11 @@ mod tests {
     fn confirm_hint_reflects_mode() {
         assert_eq!(
             confirm_hint(&Some(Instant::now()), &AgentMode::Idle).as_deref(),
-            Some("Press Ctrl+C or Esc again to quit")
+            Some(" Press Ctrl+C or Esc again to quit")
         );
         assert_eq!(
             confirm_hint(&Some(Instant::now()), &AgentMode::Streaming).as_deref(),
-            Some("Press Ctrl+C or Esc again to cancel")
+            Some(" Press Ctrl+C or Esc again to cancel")
         );
         assert_eq!(confirm_hint(&None, &AgentMode::Idle), None);
     }

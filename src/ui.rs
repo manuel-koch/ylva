@@ -1018,8 +1018,8 @@ fn draw_normal_footer(
     let mode_word = match state.agent_mode {
         AgentMode::Idle => "Idle",
         AgentMode::Pending => "Sending…",
-        AgentMode::Streaming => "Streaming",
-        AgentMode::ToolPending => "ToolPending",
+        AgentMode::Streaming => "Streaming…",
+        AgentMode::ToolPending => "Running Tool…",
         AgentMode::Aborting => "Aborting…",
     };
     let spinner_prefix = if state.agent_mode != AgentMode::Idle {
@@ -1031,9 +1031,9 @@ fn draw_normal_footer(
     let row_1_text = if let Some(hint) = hint {
         hint.to_string()
     } else if state.steer_indicator {
-        format!(" {spinner_prefix}[mode] {mode_word}  ⋮ 1 steer queued")
+        format!(" {spinner_prefix}{mode_word}  ⋮ 1 steer queued")
     } else {
-        format!(" {spinner_prefix}[mode] {mode_word}")
+        format!(" {spinner_prefix}{mode_word}")
     };
     frame.render_widget(
         Paragraph::new(Line::styled(row_1_text, Style::default().fg(Color::Yellow))),

@@ -1205,10 +1205,13 @@ Update the following docs **in the same commit** as the code changes:
       rendered as a full-width `─` line in white, visually dividing the
       conversation list from the input/footer panel.)
 
-- [ ] In Footer change the "active" indicator:
+- [x] In Footer change the "active" indicator:
   - drop the "[mode]" snippet
   - use just "Sending...", "Streaming...", "Running Tool", "Idle"
   - keep the spinning dots while agent is not idle
+  (Done: `[mode]` prefix removed from both format strings in `draw_normal_footer`.
+  Mode words updated to `"Sending…"`, `"Streaming…"`, `"Running Tool…"`,
+  `"Aborting…"`, `"Idle"`.)
 
 - [ ] render toast messages in lower right edge of app.
 
