@@ -65,7 +65,7 @@ async fn multiple_steers_during_stream_complete_without_deadlock() {
         .messages()
         .iter()
         .filter_map(|message| match message {
-            Message::User { content } => Some(content.as_str()),
+            Message::User { content, .. } => Some(content.as_str()),
             _ => None,
         })
         .collect();

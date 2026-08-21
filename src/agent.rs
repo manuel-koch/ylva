@@ -26,7 +26,7 @@ use crate::llm::{Provider, ToolEnvelope, ToolSchema};
 
 pub mod tools;
 
-use tools::{ToolError, ToolRegistry};
+use tools::{TimedOutput, ToolError, ToolOutput, ToolRegistry};
 
 /// Maximum number of LLM requests the ReAct loop starts within a single user
 /// turn before the guard stops re-prompting. Per-engine configurability is a
@@ -36,16 +36,23 @@ pub const MAX_ITERATIONS: usize = 15;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentMode {
     Idle,
+    /// Prompt sent to the provider; waiting for the first `StreamStarted`
+    /// event. The agent is busy — a second message typed now is a steer.
+    Pending,
     Streaming,
     ToolPending,
+    /// User requested abort (double Ctrl+C); `AgentCommand::Stop` has been
+    /// sent. The TUI waits for the resulting `StreamCancelled` / `Idle`
+    /// transition before quitting.
+    Aborting,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentCommand {
     Prompt(String),
-    Stop,
+    Stop { reason: String },
     ApproveTool { id: Uuid },
-    DenyTool { id: Uuid },
+    DenyTool { id: Uuid, reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +71,8 @@ pub enum AgentEvent {
         id: Uuid,
         name: String,
         result: String,
+        summary: Vec<(String, String)>,
+        duration: std::time::Duration,
     },
     ToolError {
         id: Uuid,
@@ -91,11 +100,14 @@ pub enum UiUpdate {
     ToolPending {
         name: String,
         id: Uuid,
+        arguments: serde_json::Value,
     },
     ToolDone {
         id: Uuid,
         name: String,
         result: String,
+        summary: Vec<(String, String)>,
+        duration: std::time::Duration,
     },
     ToolError {
         id: Uuid,
@@ -104,6 +116,11 @@ pub enum UiUpdate {
     ToolKilled {
         id: Uuid,
     },
+    /// A steer (user message while busy) was queued. No payload — the TUI
+    /// driver creates the pending bubble itself before sending the command.
+    SteerQueued,
+    /// All previously queued steers have been injected into the LLM context.
+    SteerApplied,
 }
 
 /// A raw tool-call fragment emitted by a provider, to be assembled by the
@@ -138,6 +155,20 @@ pub struct ToolCallRequest {
     pub arguments: Value,
 }
 
+/// Distinguishes user messages that were typed explicitly by the user from
+/// those injected by the agent harness as model hints.
+///
+/// `Explicit` messages are rendered in the TUI conversation list and the
+/// headless CLI output. `ImplicitToolNote` messages are sent to the model
+/// as regular `role: "user"` turns but are **never rendered** in any UI —
+/// they exist solely to give the model richer context (e.g. a denial reason).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum UserMessageKind {
+    #[default]
+    Explicit,
+    ImplicitToolNote,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     System {
@@ -145,6 +176,7 @@ pub enum Message {
     },
     User {
         content: String,
+        kind: UserMessageKind,
     },
     Assistant {
         content: String,
@@ -213,7 +245,20 @@ impl Context {
     }
 
     pub fn push_user(&mut self, text: String) {
-        self.messages.push(Message::User { content: text });
+        self.messages.push(Message::User {
+            content: text,
+            kind: UserMessageKind::Explicit,
+        });
+    }
+
+    /// Push a model hint injected by the agent harness. The message is sent
+    /// to the model as a regular `role: "user"` turn but is never rendered in
+    /// any UI (TUI conversation list or headless CLI output).
+    pub fn push_implicit_user(&mut self, text: String) {
+        self.messages.push(Message::User {
+            content: text,
+            kind: UserMessageKind::ImplicitToolNote,
+        });
     }
 
     pub fn push_assistant(&mut self, content: String, status: AssistantStatus) {
@@ -303,7 +348,27 @@ impl PendingTool {
                     }
                     result = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
                         match registry.get(&name) {
-                            Some(tool) => tool.run(self.call.arguments).await,
+                            Some(tool) => {
+                                let start = std::time::Instant::now();
+                                // TODO: remove artificial delay
+                                #[cfg(feature = "artificial-tool-delay")]
+                                {
+                                    let delay_secs = 3
+                                        + (std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .subsec_nanos()
+                                            % 3) as u64;
+                                    tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+                                }
+                                // END TODO
+                                tool.run(self.call.arguments).await.map(|output| {
+                                    let elapsed = start.elapsed();
+                                    let timed = Box::new(TimedOutput::new(output, elapsed))
+                                        as Box<dyn ToolOutput>;
+                                    (timed, elapsed)
+                                })
+                            }
                             None => Err(ToolError::failed(
                                 &name,
                                 format!("unknown tool '{name}'"),
@@ -312,9 +377,21 @@ impl PendingTool {
                     }) => result
                 };
                 match outcome {
-                    Ok(Ok(result)) => {
+                    Ok(Ok((tool_output, duration))) => {
+                        let result = tool_output.output_text().to_string();
+                        let summary = tool_output
+                            .result_properties()
+                            .into_iter()
+                            .map(|(key, value)| (key.to_string(), value))
+                            .collect::<Vec<_>>();
                         let _ = agent_tx
-                            .send(AgentEvent::ToolDone { id, name, result })
+                            .send(AgentEvent::ToolDone {
+                                id,
+                                name,
+                                result,
+                                summary,
+                                duration,
+                            })
                             .await;
                     }
                     Ok(Err(error)) => {
@@ -397,6 +474,12 @@ impl AgentLoop {
         let _ = self.cmd_tx.send(cmd).await;
     }
 
+    /// Clone of the command channel sender, for consumers (e.g. the TUI
+    /// driver and the SIGINT relay) that send commands without a `&self`.
+    pub fn command_sender(&self) -> mpsc::Sender<AgentCommand> {
+        self.cmd_tx.clone()
+    }
+
     pub fn run(&mut self) -> tokio::task::JoinHandle<anyhow::Result<Context>> {
         let provider = self.provider.clone();
         let registry = self.registry.clone();
@@ -428,6 +511,7 @@ impl AgentLoop {
                             AgentEvent::StreamDone { partial } => {
                                 context.push_assistant(partial, AssistantStatus::Complete);
                                 if inject_pending_steers(&mut pending_steers, &mut context) {
+                                    let _ = ui_tx.send(UiUpdate::SteerApplied).await;
                                     mode = AgentMode::Streaming;
                                     current_cancel = Some(start_request(
                                         &context,
@@ -481,11 +565,12 @@ impl AgentLoop {
                                         .send(UiUpdate::ToolPending {
                                             name: first.call.name.clone(),
                                             id: first.call.id,
+                                            arguments: first.call.arguments.clone(),
                                         })
                                         .await;
                                 }
                             }
-                            AgentEvent::ToolDone { id, name, result } => {
+                            AgentEvent::ToolDone { id, name, result, summary, duration } => {
                                 current_tool_cancel = None;
                                 context.push_tool_result(id, name.clone(), result.clone());
                                 let _ = ui_tx
@@ -493,6 +578,8 @@ impl AgentLoop {
                                         id,
                                         name,
                                         result,
+                                        summary,
+                                        duration,
                                     })
                                     .await;
                                 advance_tool_queue(
@@ -561,6 +648,7 @@ impl AgentLoop {
                                     // stream. Queued from ToolPending too; injection
                                     // is deferred (Phase 4 adds descope_pending_tools).
                                     pending_steers.push_back(text);
+                                    let _ = ui_tx.send(UiUpdate::SteerQueued).await;
                                 }
                             }
                             AgentCommand::ApproveTool { id } => {
@@ -590,7 +678,7 @@ impl AgentLoop {
                                         .await;
                                 }
                             }
-                            AgentCommand::DenyTool { id } => {
+                            AgentCommand::DenyTool { id, reason } => {
                                 // Only valid in `ToolPending`; ignored otherwise.
                                 let is_front = mode == AgentMode::ToolPending
                                     && pending_tools
@@ -602,10 +690,22 @@ impl AgentLoop {
                                     let name = denied.call.name;
                                     let call_id = denied.call.id;
                                     tracing::debug!(tool = %name, "tool denied");
-                                    let error = format!(
-                                        "tool '{name}' was denied (no auto-approve configured)"
-                                    );
-                                    context.push_tool_error(call_id, name, error.clone());
+                                    let mut error = format!("tool '{name}' was denied");
+                                    if !reason.is_empty() {
+                                        error.push_str(&format!(": {reason}"));
+                                    }
+                                    context.push_tool_error(call_id, name.clone(), error.clone());
+                                    // When the user supplied a reason, also push a
+                                    // `user` role message so the model reads the
+                                    // correction through the authoritative instruction
+                                    // channel rather than just the tool-error envelope.
+                                    if !reason.is_empty() {
+                                        context.push_implicit_user(format!(
+                                            "I denied the '{name}' tool call \
+                                             ( tool_call_id={call_id} ). \
+                                             Here is my reason for the denial:\n\n{reason}"
+                                        ));
+                                    }
                                     let _ = ui_tx
                                         .send(UiUpdate::ToolError { id: call_id, error })
                                         .await;
@@ -623,7 +723,7 @@ impl AgentLoop {
                                     .await;
                                 }
                             }
-                            AgentCommand::Stop => {
+                            AgentCommand::Stop { reason } => {
                                 // Interrupt: hard-abort the current round.
                                 pending_steers.clear();
                                 if let Some(cancel_token) = current_cancel.take() {
@@ -633,6 +733,27 @@ impl AgentLoop {
                                     tool_cancel.cancel();
                                 }
                                 if mode == AgentMode::ToolPending {
+                                    // Record a denial result for every pending
+                                    // tool so the model history stays consistent
+                                    // (every tool call must have a result).
+                                    // Only the front tool has a visible bubble;
+                                    // the rest are queued without one yet.
+                                    let mut first = true;
+                                    for pending in pending_tools.iter() {
+                                        let name = pending.call.name.clone();
+                                        let id = pending.call.id;
+                                        let mut error = format!("tool '{name}' was denied");
+                                        if !reason.is_empty() {
+                                            error.push_str(&format!(": {reason}"));
+                                        }
+                                        context.push_tool_error(id, name, error.clone());
+                                        if first {
+                                            let _ = ui_tx
+                                                .send(UiUpdate::ToolError { id, error })
+                                                .await;
+                                            first = false;
+                                        }
+                                    }
                                     pending_tools.clear();
                                     mode = AgentMode::Idle;
                                 }
@@ -666,6 +787,7 @@ async fn advance_tool_queue(
             .send(UiUpdate::ToolPending {
                 name: next.call.name.clone(),
                 id: next.call.id,
+                arguments: next.call.arguments.clone(),
             })
             .await;
         return;
@@ -847,6 +969,7 @@ mod tests {
         };
         let user = Message::User {
             content: "user".into(),
+            kind: UserMessageKind::Explicit,
         };
         let assistant = Message::Assistant {
             content: "assistant".into(),
@@ -910,6 +1033,7 @@ mod tests {
             context.messages()[2],
             Message::User {
                 content: "first user turn".to_string(),
+                kind: UserMessageKind::Explicit,
             }
         );
         assert_eq!(
@@ -924,6 +1048,7 @@ mod tests {
             context.messages()[4],
             Message::User {
                 content: "second user turn".to_string(),
+                kind: UserMessageKind::Explicit,
             }
         );
     }
@@ -1004,7 +1129,8 @@ mod tests {
         assert_eq!(
             read_back[2],
             Message::User {
-                content: "hello".into()
+                content: "hello".into(),
+                kind: UserMessageKind::Explicit,
             }
         );
     }
@@ -1015,15 +1141,20 @@ mod tests {
             AgentCommand::Prompt("hello".into()),
             AgentCommand::Prompt(text) if text == "hello"
         ));
-        assert!(matches!(AgentCommand::Stop, AgentCommand::Stop));
+        assert!(matches!(
+            AgentCommand::Stop {
+                reason: String::new()
+            },
+            AgentCommand::Stop { .. }
+        ));
         let id = Uuid::new_v4();
         assert!(matches!(
             AgentCommand::ApproveTool { id },
             AgentCommand::ApproveTool { id: got } if got == id
         ));
         assert!(matches!(
-            AgentCommand::DenyTool { id },
-            AgentCommand::DenyTool { id: got } if got == id
+            AgentCommand::DenyTool { id, reason: "r".into() },
+            AgentCommand::DenyTool { id: got, .. } if got == id
         ));
 
         assert!(matches!(

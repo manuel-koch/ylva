@@ -38,7 +38,9 @@ Tool status lines render as `[tool] <title> …` (e.g. `[tool] Read docs/feature
 
 ## TUI Runtime
 
-**WIP:** not yet implemented.
+Interactive terminal UI launched automatically when stdout is a terminal
+(see [Phase 4: TUI skeleton](#phase-4-tui-skeleton)). When stdout is not a
+terminal (piped or redirected), Ylva falls back to the headless runner.
 
 ## Model Provider
 
@@ -66,3 +68,85 @@ Every `role:"tool"` message carries its `content` as JSON struct
   Offset and limit are 0-based!
 - **write**: Write `content` to file at given `path`.  
 - **glob**: Search for paths using a glob `pattern`, including wildcards like `*`, `?`, `**`, `[...]`.
+
+## Phase 4: TUI skeleton
+
+The TUI is a **rendering layer** on top of the headless `AgentLoop`; the agent
+architecture is unchanged. It is selected automatically in `main.rs` via
+`std::io::stdout().is_terminal()`.
+
+- **Layout:** a scrollable chat-history area, a variable-height input box
+  (capped at 1/3 of the terminal height), a `─` separator line, and a 2-row
+  footer (mode/hint row and key-hints row). No sidebar.
+- **Input always active:** the input box is never disabled. `Enter` sends
+  unconditionally — while the model is streaming the message is queued as a
+  pending steer, and `Ctrl+C`/`Esc` interrupt the current round.
+- **Steer bubble lifecycle:** a user message appears immediately on `Enter`. It
+  is rendered `Queued` (yellow) while pending, then becomes `Steered` (light
+  green) when `SteerApplied` arrives — visually distinct from a normal `Sent`
+  message to identify mid-stream corrections.
+- **Cancelled steers:** interrupting marks all pending bubbles `Cancelled`
+  (grey) with a dimmed "Not sent." line. The text is retained in input history
+  so it can be recovered with `↑`.
+- **Tool approval sub-mode:** when a tool awaits approval the footer switches
+  to `[ ✓ Approve (Enter) ]  [ ✗ Deny (Esc) ]` (mouse-clickable). `Enter`
+  sends `ApproveTool`, `Esc` sends `DenyTool` immediately; `Ctrl+C` still uses
+  the double-press confirm. The input field is available to type a reason for
+  denial (a dimmed `"Enter reason for denial here…"` placeholder appears when
+  the field is empty). The user's draft is snapshotted when approval sub-mode
+  starts and restored automatically after the tool is approved or denied.
+- **Double-press `Ctrl+C`/`Esc`:** a key-agnostic confirm with a 2-second
+  window (`CONFIRM_TIMEOUT`). While streaming/tool-pending the first press
+  shows `"Press again to cancel"` and the second stops the round; while idle
+  `Ctrl+C` double-press quits and `Esc` just clears the input. A natural
+  transition to `Idle` clears confirm state. OS SIGINT stops immediately (no
+  double-press).
+- **Help popup (`F1`):** toggles a centered popup with the full keybinding
+  table and `BuildInfo` values.
+- **Smart auto-scroll:** the chat follows the newest output by default; the
+  mouse wheel and `PageUp`/`PageDown`/`End` scroll the history directly (no
+  focus needed, so the wheel works anywhere over the TUI). Scrolling up
+  disables auto-scroll; scrolling back down to the bottom (or pressing `End`)
+  re-enables it. The scroll offset is clamped to the content height, so
+  scrolling past either end never silently drifts.
+- **Wordmark:** while the conversation is empty (no messages submitted yet), a
+  horizontally centered ASCII-art "Ylva" wordmark is displayed with the version
+  and git commit shown below it in DarkGray. Once the first message is sent,
+  the wordmark disappears and the conversation fills the chat area.
+- **Input history:** `↑` on the first line loads the previous sent message
+  (draft is saved); `↓` restores it; any edit while browsing copies the entry
+  to a fresh draft.
+- **Line navigation:** `Fn+Left`/`Fn+Right` move the input cursor to the
+  start/end of the current line, wrapping to the previous/next line.
+- **Starts empty:** the TUI launches with an empty input box and no auto-sent
+  turn — the hardcoded demo prompt is headless-only. An explicit `--prompt` or
+  piped stdin still auto-sends on startup.
+- **Sending state:** after `Enter` (or an auto-sent initial prompt) the footer
+  shows `"Sending…"` until the first stream event arrives, instead of `"Idle"`.
+- **Input as a message:** the input box renders like a sent user message — a
+  colored left border (Cyan), no full frame and no `"Input"` title. Long text
+  **word-wraps** inside the box (no horizontal scrollbar), and the box grows
+  with its content up to the 1/3 height cap.
+- **Mouse editing:** a left-click in the input box places the cursor at the
+  clicked character (word-wrapping honored); a left-drag selects text. `read`/
+  `glob` tool status lines and approval buttons remain mouse-clickable.
+- **Shift+Enter / Alt+Enter:** insert a newline via the kitty keyboard protocol
+  (`DISAMBIGUATE_ESCAPE_CODES`), so terminals that support it (ZED, iTerm2,
+  kitty, WezTerm) report the modifier and the newline is not mistaken for send.
+- **Message dedenting:** submitted messages are automatically dedented —
+  common leading whitespace is stripped (via `textwrap::dedent`) and leading
+  and trailing blank-only lines are removed. This makes pasting indented code
+  snippets or quoted text send cleanly.
+- **Multiline paste:** the TUI supports pasting multiline text via the
+  terminal's bracketed-paste protocol (enabled automatically by crossterm).
+  Pasted text is dedented before insertion.
+- **Tool bubble collapse/expand:** clicking a tool bubble's title line or its
+  left-border bar toggles whether the bubble's arguments and result are shown
+  (expanded, `▼`) or hidden (collapsed, `▶`). Collapsed bubbles display only
+  the title line, useful for decluttering long conversations.
+- **Tool duration:** when a tool finishes, its execution time is shown in the
+  bubble title.
+- **Toast notifications:** transient messages appear in the bottom-right corner
+  (e.g., `"Copied to clipboard"`) and auto-dismiss after ~1.5 seconds.
+- **Scrollbar:** the chat scrollbar's thumb reaches the very bottom of the
+  track at the end of the list (and the top at the start).

@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::io::IsTerminal;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ylva::llm::{serialize_messages, MockProvider, OpenAiProvider, Provider};
+use ylva::llm::{MockProvider, OpenAiProvider, Provider};
 use ylva::logging::{init_logging, LogConfig, LogFormat};
-use ylva::{default_registry, AgentCommand, AgentLoop, Tool, UiUpdate};
+use ylva::{default_registry, headless_runner, tui_runner};
 
 /// Fallback demo prompt used when neither `--prompt` nor piped stdin supplies
 /// the initial user turn.
@@ -50,128 +51,54 @@ fn main() {
 
     let provider: Arc<dyn Provider> = select_provider();
     let registry = Arc::new(default_registry());
-    let (mut agent, mut ui_rx) = AgentLoop::new(provider, Arc::clone(&registry));
-
-    let prompt = initial_prompt(args);
     let runtime = tokio::runtime::Runtime::new().expect("failed to start Tokio runtime");
-    runtime.block_on(async {
-        // Echo the user's turn before sending the request, so it appears even
-        // while the provider is still connecting / retrying (the "Assistant:"
-        // prefix is printed when the stream actually starts).
-        println!("---[ User ]---\n{prompt}");
-        agent
-            .send_command(AgentCommand::Prompt(prompt.clone()))
-            .await;
-        let handle = agent.run();
 
-        let mut response_finished = false;
-        while !response_finished {
-            match ui_rx.recv().await {
-                Some(UiUpdate::StreamStarted) => {
-                    println!("\n---[ Assistant ]---");
-                }
-                Some(UiUpdate::AppendText(text)) => print!("{text}"),
-                Some(UiUpdate::ToolPending { name, id }) => {
-                    // CLI-only host, no interactive approval. read/glob are
-                    // auto-approved via the normal protocol; a write request is
-                    // denied and fed back to the model as a ToolError.
-                    let title = registry
-                        .get(&name)
-                        .map(|tool| tool.title().to_string())
-                        .unwrap_or_else(|| name.clone());
-                    let needs_approval = registry
-                        .get(&name)
-                        .is_some_and(|tool| tool.needs_approval());
-                    if needs_approval {
-                        println!("[tool] {title} denied (no --auto-approve-write in Phase 3)");
-                        agent.send_command(AgentCommand::DenyTool { id }).await;
-                    } else {
-                        println!("[tool] {title} auto-approved");
-                        agent.send_command(AgentCommand::ApproveTool { id }).await;
-                    }
-                }
-                Some(UiUpdate::ToolStart {
-                    name, arguments, ..
-                }) => {
-                    let invocation = registry
-                        .get(&name)
-                        .map(|tool| render_tool_invocation(tool.as_ref(), &arguments))
-                        .unwrap_or_else(|| name.clone());
-                    println!("[tool] {invocation}");
-                }
-                Some(UiUpdate::ToolDone {
-                    name, result: _, ..
-                }) => {
-                    // for now, don't output any tool result
-                    let title = registry
-                        .get(&name)
-                        .map(|tool| tool.title().to_string())
-                        .unwrap_or_else(|| name.clone());
-                    println!("[tool] {title} done");
-                }
-                Some(UiUpdate::ToolError { error, .. }) => {
-                    println!("[tool] error: {error}");
-                }
-                Some(UiUpdate::ToolKilled { .. }) => {
-                    println!("[tool] killed");
-                }
-                Some(UiUpdate::StreamDone) => {
-                    println!();
-                    response_finished = true;
-                }
-                Some(UiUpdate::StreamCancelled) => {
-                    println!("---[ Interrupted ]---");
-                    response_finished = true;
-                }
-                Some(UiUpdate::Error(error)) => {
-                    println!("---[ Error ]---\n{error}");
-                    response_finished = true;
-                }
-                None => response_finished = true,
-            }
+    if std::io::stdout().is_terminal() {
+        // The TUI starts with an empty input box. An explicit `--prompt` (or
+        // piped stdin) still auto-sends, but the hardcoded demo prompt is only
+        // for the headless path — it must not pre-populate the interactive UI.
+        let explicit_prompt = explicit_prompt(args);
+        let exit_code = runtime.block_on(tui_runner::run_tui_on_stdout(
+            provider,
+            registry,
+            explicit_prompt,
+        ));
+        if let Err(error) = exit_code {
+            eprintln!("error: {error}");
+            std::process::exit(2);
         }
-
-        // Dropping the AgentLoop closes cmd_tx, which makes the outer loop
-        // return the final committed history from `handle`.
-        drop(agent);
-
-        let final_context = handle
-            .await
-            .expect("agent loop task panicked")
-            .expect("agent loop returned an error");
-        println!(
-            "\n---[ Conversation history of {} messages ]---",
-            final_context.messages().len()
-        );
-        // Emit the committed history as JSONL (one JSON object per message) in
-        // the same wire shape the provider sees, rather than Rust's Debug
-        // rendering. A blank line separates the header from the JSONL payload.
-        if let Some(array) = serialize_messages(final_context.messages()).as_array() {
-            for message in array {
-                println!(
-                    "{}",
-                    serde_json::to_string(message).expect("message serializes to JSON")
-                );
-            }
+    } else {
+        let prompt = initial_prompt(args);
+        let result = runtime.block_on(headless_runner::run_headless(provider, registry, prompt));
+        if let Err(error) = result {
+            eprintln!("error: {error}");
+            std::process::exit(2);
         }
-    });
+    }
 }
 
-/// The initial user turn sent to the agent, resolved by precedence:
-/// `--prompt <text>`, else piped stdin read to EOF, else the hardcoded demo
-/// prompt. stdin is only consumed when it is **not** a terminal (something is
-/// piped in); no interactive prompt-read is attempted in the CLI-only phase.
-/// The resolved prompt is trimmed (leading/trailing whitespace removed) before
-/// it is echoed and sent.
-fn initial_prompt(args: Vec<String>) -> String {
-    let prompt = if let Some(text) = prompt_from_arg(&args) {
-        text
-    } else if let Some(text) = prompt_from_stdin() {
-        text
+/// The explicitly supplied initial user turn, if any: `--prompt <text>`, else
+/// piped stdin read to EOF. Returns `None` when neither was given (or stdin is
+/// a terminal / whitespace-only). Used by the TUI, which starts with an empty
+/// input box unless the user supplied a turn.
+fn explicit_prompt(args: Vec<String>) -> Option<String> {
+    let prompt = prompt_from_arg(&args).or_else(prompt_from_stdin)?;
+    let trimmed = prompt.trim().to_string();
+    if trimmed.is_empty() {
+        None
     } else {
-        DEFAULT_DEMO_PROMPT.to_string()
-    };
-    prompt.trim().to_string()
+        Some(trimmed)
+    }
+}
+
+/// The initial user turn sent to the agent in headless mode, resolved by
+/// precedence: `--prompt <text>`, else piped stdin read to EOF, else the
+/// hardcoded demo prompt. stdin is only consumed when it is **not** a terminal
+/// (something is piped in); no interactive prompt-read is attempted in the
+/// CLI-only phase. The resolved prompt is trimmed (leading/trailing whitespace
+/// removed) before it is echoed and sent.
+fn initial_prompt(args: Vec<String>) -> String {
+    explicit_prompt(args).unwrap_or_else(|| DEFAULT_DEMO_PROMPT.to_string())
 }
 
 /// Extract the value of the first `--prompt <text>` argument, if any.
@@ -261,7 +188,7 @@ fn logging_from_args(args: &[String]) -> Result<LogConfig, String> {
 /// Read all of stdin when it is not a terminal. Returns `None` when stdin is a
 /// terminal (no piped input to consume) or contains only whitespace.
 fn prompt_from_stdin() -> Option<String> {
-    use std::io::{IsTerminal, Read};
+    use std::io::Read;
     if std::io::stdin().is_terminal() {
         return None;
     }
@@ -335,66 +262,9 @@ fn select_provider() -> Arc<dyn Provider> {
     ))
 }
 
-/// Length beyond which a string value is treated as "long" and elided when
-/// rendering a tool invocation.
-const STRING_ELIDE_LIMIT: usize = 40;
-
-/// Render a tool invocation for the CLI status line, e.g.
-/// `Read docs/features.md [limit=32]`.
-///
-/// This is **host-side presentation policy** (CLI-only in Phase 3): the App
-/// decides how a tool is shown, using the tool's [`title`](Tool::title) as the
-/// label, the tool's own `argument_order` to pick the primary (inline)
-/// argument, and its `non_default_arguments` for the bracketed rest. Host
-/// details (brackets, eliding long values) stay here.
-fn render_tool_invocation(tool: &dyn Tool, arguments: &serde_json::Value) -> String {
-    let mut line = tool.title().to_string();
-    let mut non_default = tool.non_default_arguments(arguments);
-    non_default.sort_by(|(key_a, _), (key_b, _)| {
-        (tool.argument_order(key_a), key_a).cmp(&(tool.argument_order(key_b), key_b))
-    });
-    let mut rest: Vec<String> = Vec::new();
-    for (index, (key, value)) in non_default.into_iter().enumerate() {
-        if index == 0 {
-            // A short-string primary is shown inline; a long one is dropped to
-            // keep the status line short (its content stays in the JSONL
-            // history).
-            if let Some(text) = value.as_str() {
-                if text.len() <= STRING_ELIDE_LIMIT {
-                    line.push(' ');
-                    line.push_str(text);
-                }
-            }
-            continue;
-        }
-        rest.push(format!("{key}={}", render_arg_value(value)));
-    }
-    if !rest.is_empty() {
-        line.push_str(&format!(" [{}]", rest.join(", ")));
-    }
-    line
-}
-
-/// Render a single argument value: short strings, numbers, and booleans as-is;
-/// long strings elided to a length placeholder.
-fn render_arg_value(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::String(text) if text.len() > STRING_ELIDE_LIMIT => {
-            format!("<{}-char string elided>", text.chars().count())
-        }
-        serde_json::Value::String(text) => text.clone(),
-        serde_json::Value::Null => "null".to_string(),
-        other => serde_json::to_string(other).unwrap_or_else(|_| "?".to_string()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn read_tool() -> Arc<dyn Tool> {
-        Arc::new(ylva::agent::tools::fs::ReadTool::default())
-    }
 
     #[test]
     fn logging_from_args_accepts_mixed_case_values() {
@@ -440,65 +310,33 @@ mod tests {
     }
 
     #[test]
-    fn render_keeps_primary_inline_and_non_default_args_in_brackets() {
-        let rendered = render_tool_invocation(
-            read_tool().as_ref(),
-            &serde_json::json!({
-                "path": "some/document.md",
-                "mode": "lines",
-                "offset": 88,
-                "limit": 10,
-            }),
-        );
+    fn prompt_from_arg_reads_value_after_flag() {
         assert_eq!(
-            rendered,
-            "Read some/document.md [mode=lines, offset=88, limit=10]"
+            prompt_from_arg(&["--prompt".to_string(), "hello".to_string()]),
+            Some("hello".to_string())
+        );
+        assert_eq!(prompt_from_arg(&["--log-file".to_string()]), None);
+    }
+
+    #[test]
+    fn initial_prompt_prefers_arg_over_default() {
+        assert_eq!(
+            initial_prompt(vec!["--prompt".to_string(), "  hi  ".to_string()]),
+            "hi"
         );
     }
 
     #[test]
-    fn render_suppresses_default_valued_args() {
-        // mode=bytes and offset=0 are defaults and must be suppressed.
-        let rendered = render_tool_invocation(
-            read_tool().as_ref(),
-            &serde_json::json!({
-                "path": "some/document.md",
-                "mode": "bytes",
-                "offset": 0,
-                "limit": 32,
-            }),
-        );
-        assert_eq!(rendered, "Read some/document.md [limit=32]");
+    fn explicit_prompt_is_none_without_user_turn() {
+        assert_eq!(explicit_prompt(Vec::new()), None);
+        assert_eq!(explicit_prompt(vec!["--log-file".to_string()]), None);
     }
 
     #[test]
-    fn render_shows_glob_pattern_inline_via_title() {
-        let tool: Arc<dyn Tool> = Arc::new(ylva::agent::tools::fs::GlobTool::default());
-        let rendered = render_tool_invocation(
-            tool.as_ref(),
-            &serde_json::json!({ "pattern": "src/**/*.rs" }),
-        );
-        assert_eq!(rendered, "Glob src/**/*.rs");
-    }
-
-    #[test]
-    fn render_elides_long_string_values() {
-        let tool: Arc<dyn Tool> = Arc::new(ylva::agent::tools::fs::WriteTool::default());
-        let rendered = render_tool_invocation(
-            tool.as_ref(),
-            &serde_json::json!({
-                "path": "/tmp/out.txt",
-                "content": "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt",
-            }),
-        );
-        assert!(rendered.starts_with("Write /tmp/out.txt ["));
-        assert!(
-            rendered.contains("char string elided>]"),
-            "long content should be elided: {rendered}"
-        );
-        assert!(
-            !rendered.contains("Lorem ipsum"),
-            "content must not appear: {rendered}"
+    fn explicit_prompt_returns_trimmed_arg() {
+        assert_eq!(
+            explicit_prompt(vec!["--prompt".to_string(), "  hi  ".to_string()]),
+            Some("hi".to_string())
         );
     }
 }

@@ -198,7 +198,7 @@ pub fn serialize_messages(messages: &[Message]) -> serde_json::Value {
                 "role": "system",
                 "content": content,
             }),
-            Message::User { content } => serde_json::json!({
+            Message::User { content, .. } => serde_json::json!({
                 "role": "user",
                 "content": content,
             }),
@@ -265,6 +265,7 @@ pub fn serialize_messages(messages: &[Message]) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::UserMessageKind;
 
     async fn assert_received_text(rx: &mut mpsc::Receiver<StreamEvent>, expected: &str) {
         assert!(
@@ -386,6 +387,7 @@ mod tests {
             },
             Message::User {
                 content: "usr".into(),
+                kind: UserMessageKind::Explicit,
             },
             Message::Assistant {
                 content: "ast".into(),

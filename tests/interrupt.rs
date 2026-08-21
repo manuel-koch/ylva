@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use ylva::{
     AgentCommand, AgentLoop, AssistantStatus, Message, MockProvider, ToolRegistry, UiUpdate,
-    DEFAULT_SYSTEM_PROMPT, TOOL_PROTOCOL_SYSTEM_PROMPT,
+    UserMessageKind, DEFAULT_SYSTEM_PROMPT, TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
 
 mod common;
@@ -58,7 +58,11 @@ async fn stop_aborts_stream_flushes_partial_and_clears_pending_steers() {
     agent
         .send_command(AgentCommand::Prompt("dropped steer".into()))
         .await;
-    agent.send_command(AgentCommand::Stop).await;
+    agent
+        .send_command(AgentCommand::Stop {
+            reason: "aborted by user".into(),
+        })
+        .await;
 
     let cancelled = collect_until(&mut ui_rx, |update| {
         matches!(update, UiUpdate::StreamCancelled)
@@ -87,6 +91,7 @@ async fn stop_aborts_stream_flushes_partial_and_clears_pending_steers() {
             },
             Message::User {
                 content: "first".to_string(),
+                kind: UserMessageKind::Explicit,
             },
             Message::Assistant {
                 content: emitted.to_string(),
@@ -110,7 +115,11 @@ async fn stop_of_two_tokened_stream_commits_only_first_token() {
 
     let _ = collect_until(&mut ui_rx, is_append_text).await;
 
-    agent.send_command(AgentCommand::Stop).await;
+    agent
+        .send_command(AgentCommand::Stop {
+            reason: "aborted by user".into(),
+        })
+        .await;
 
     let _ = collect_until(&mut ui_rx, |update| {
         matches!(update, UiUpdate::StreamCancelled)
@@ -134,6 +143,7 @@ async fn stop_of_two_tokened_stream_commits_only_first_token() {
             },
             Message::User {
                 content: "go".to_string(),
+                kind: UserMessageKind::Explicit,
             },
             Message::Assistant {
                 content: "only-".to_string(),

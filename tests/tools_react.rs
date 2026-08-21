@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 
 use ylva::{
     default_registry, AgentCommand, AgentLoop, DeltaChunk, Message, MockEvent, MockProvider, Tool,
-    ToolError, ToolRegistry, UiUpdate, MAX_ITERATIONS,
+    ToolError, ToolOutput, ToolRegistry, UiUpdate, MAX_ITERATIONS,
 };
 
 /// Build a `MockEvent::Delta` carrying a complete tool call for `index`.
@@ -80,10 +80,13 @@ where
     let mut collected = Vec::new();
     loop {
         if let Ok(update) = ui_rx.try_recv() {
-            if let UiUpdate::ToolPending { id, name } = &update {
+            if let UiUpdate::ToolPending { id, name, .. } = &update {
                 let needs_approval = registry.get(name).is_some_and(|tool| tool.needs_approval());
                 let command = if needs_approval {
-                    AgentCommand::DenyTool { id: *id }
+                    AgentCommand::DenyTool {
+                        id: *id,
+                        reason: "denied in test".into(),
+                    }
                 } else {
                     AgentCommand::ApproveTool { id: *id }
                 };
@@ -366,19 +369,52 @@ async fn stop_while_awaiting_approval_clears_pending_tools() {
     );
 
     // Hard interrupt before approving either: pending tools are dropped.
-    agent.send_command(AgentCommand::Stop).await;
-    assert_quiescent(&mut ui_rx, interval).await;
+    agent
+        .send_command(AgentCommand::Stop {
+            reason: "aborted by user".into(),
+        })
+        .await;
+
+    // The agent emits ToolError for the approval-pending tool so the TUI
+    // can clear its approval footer and mark the bubble as aborted.
+    let after_stop = collect_until_advancing(&mut ui_rx, interval, is_tool_error).await;
+    assert!(
+        after_stop
+            .iter()
+            .any(|u| matches!(u, UiUpdate::ToolError { .. })),
+        "expected ToolError after stop while awaiting approval"
+    );
 
     drop(agent);
     let context = handle.await.expect("loop ok").expect("context");
+    // Neither tool ran, so no ToolResult in history.
     assert!(!context
         .messages()
         .iter()
         .any(|m| matches!(m, Message::ToolResult { .. })));
+    // Both pending tools must have a ToolError result so the model history
+    // stays consistent (every tool call must have a corresponding result).
+    let tool_error_count = context
+        .messages()
+        .iter()
+        .filter(|m| matches!(m, Message::ToolError { .. }))
+        .count();
+    assert_eq!(tool_error_count, 2, "expected one error per pending tool");
 }
 
 #[derive(JsonSchema, Deserialize)]
 struct SleepArgs {}
+
+/// Minimal [`ToolOutput`] wrapper for a plain string, used in test tools that
+/// do not need to expose domain properties.
+#[derive(Debug)]
+struct SimpleStringOutput(String);
+
+impl ToolOutput for SimpleStringOutput {
+    fn output_text(&self) -> &str {
+        &self.0
+    }
+}
 
 /// A tool that never finishes, used to exercise kill-on-Stop.
 struct SleepTool;
@@ -405,10 +441,14 @@ impl Tool for SleepTool {
             .map(|(key, value)| (key.to_string(), value.clone()))
             .collect()
     }
-    fn run<'a>(&'a self, _arguments: Value) -> BoxFuture<'a, Result<String, ToolError>> {
+    fn run<'a>(
+        &'a self,
+        _arguments: Value,
+    ) -> BoxFuture<'a, Result<Box<dyn ToolOutput>, ToolError>> {
         Box::pin(async move {
             tokio::time::sleep(Duration::from_secs(600)).await;
-            Ok("done".to_string())
+            let output: Box<dyn ToolOutput> = Box::new(SimpleStringOutput("done".to_string()));
+            Ok(output)
         })
     }
 }
@@ -440,7 +480,11 @@ async fn stop_mid_tool_kills_tool_and_returns_to_idle() {
     assert!(matches!(started.last(), Some(UiUpdate::ToolStart { name, .. }) if name == "sleep"));
 
     // Hard interrupt mid-tool: cancelled task reports ToolKilled, loop is idle.
-    agent.send_command(AgentCommand::Stop).await;
+    agent
+        .send_command(AgentCommand::Stop {
+            reason: "aborted by user".into(),
+        })
+        .await;
     let killed = collect_until_advancing(&mut ui_rx, interval, |u| {
         matches!(u, UiUpdate::ToolKilled { .. })
     })
@@ -507,4 +551,8 @@ fn is_stream_started(update: &UiUpdate) -> bool {
 
 fn is_tool_pending(update: &UiUpdate) -> bool {
     matches!(update, UiUpdate::ToolPending { .. })
+}
+
+fn is_tool_error(update: &UiUpdate) -> bool {
+    matches!(update, UiUpdate::ToolError { .. })
 }

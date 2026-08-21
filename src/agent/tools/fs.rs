@@ -33,7 +33,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tracing::Instrument;
 
-use super::{Tool, ToolError, DEFAULT_TIMEOUT_SECS};
+use super::{Tool, ToolError, ToolOutput, DEFAULT_TIMEOUT_SECS};
 
 /// The unit that `ReadFileArgs::offset`/`limit` count, chosen by the model.
 ///
@@ -78,6 +78,87 @@ pub struct WriteFileArgs {
 #[derive(Debug, Clone, JsonSchema, Deserialize)]
 pub struct GlobArgs {
     pub pattern: String,
+}
+
+/// Output of a successful `read` tool invocation.
+#[derive(Debug)]
+pub struct ReadOutput {
+    /// File content returned to the LLM.
+    pub content: String,
+}
+
+impl ToolOutput for ReadOutput {
+    fn output_text(&self) -> &str {
+        &self.content
+    }
+
+    fn result_properties(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("read_bytes", format!("{}", self.content.len())),
+            ("read_lines", format!("{}", self.content.lines().count())),
+        ]
+    }
+}
+
+/// Output of a successful `write` tool invocation.
+#[derive(Debug)]
+pub struct WriteOutput {
+    /// Path that was written.
+    pub path: String,
+    /// Number of bytes written to the file.
+    pub bytes_written: usize,
+    /// Pre-formatted LLM-facing confirmation text.
+    text: String,
+}
+
+impl WriteOutput {
+    fn new(path: impl Into<String>, bytes_written: usize) -> Self {
+        let path = path.into();
+        WriteOutput {
+            text: format!("wrote {bytes_written} bytes to '{path}'"),
+            path,
+            bytes_written,
+        }
+    }
+}
+
+impl ToolOutput for WriteOutput {
+    fn output_text(&self) -> &str {
+        &self.text
+    }
+
+    fn result_properties(&self) -> Vec<(&'static str, String)> {
+        vec![("bytes_written", format!("{}", self.bytes_written))]
+    }
+}
+
+/// Output of a successful `glob` tool invocation.
+#[derive(Debug)]
+pub struct GlobOutput {
+    /// Matched paths, sorted.
+    pub matched_paths: Vec<String>,
+    /// Newline-joined paths — the text returned to the LLM.
+    text: String,
+}
+
+impl GlobOutput {
+    fn new(matched_paths: Vec<String>) -> Self {
+        let text = matched_paths.join("\n");
+        GlobOutput {
+            matched_paths,
+            text,
+        }
+    }
+}
+
+impl ToolOutput for GlobOutput {
+    fn output_text(&self) -> &str {
+        &self.text
+    }
+
+    fn result_properties(&self) -> Vec<(&'static str, String)> {
+        vec![("matches", self.matched_paths.len().to_string())]
+    }
 }
 
 /// The `read` tool: return the contents of a file, optionally trimmed by
@@ -141,14 +222,19 @@ impl Tool for ReadTool {
         }
     }
 
-    fn run<'a>(&'a self, arguments: Value) -> BoxFuture<'a, Result<String, ToolError>> {
+    fn run<'a>(
+        &'a self,
+        arguments: Value,
+    ) -> BoxFuture<'a, Result<Box<dyn ToolOutput>, ToolError>> {
         let span = super::span_for_invocation(self, &arguments);
         Box::pin(
             async move {
                 let args = serde_json::from_value::<ReadFileArgs>(arguments).map_err(|error| {
                     ToolError::failed("read", format!("invalid arguments: {error}"))
                 })?;
-                read_file(args).await
+                read_file(args)
+                    .await
+                    .map(|o| -> Box<dyn ToolOutput> { Box::new(o) })
             }
             .instrument(span),
         )
@@ -217,14 +303,19 @@ impl Tool for WriteTool {
         }
     }
 
-    fn run<'a>(&'a self, arguments: Value) -> BoxFuture<'a, Result<String, ToolError>> {
+    fn run<'a>(
+        &'a self,
+        arguments: Value,
+    ) -> BoxFuture<'a, Result<Box<dyn ToolOutput>, ToolError>> {
         let span = super::span_for_invocation(self, &arguments);
         Box::pin(
             async move {
                 let args = serde_json::from_value::<WriteFileArgs>(arguments).map_err(|error| {
                     ToolError::failed("write", format!("invalid arguments: {error}"))
                 })?;
-                write_file(args).await
+                write_file(args)
+                    .await
+                    .map(|o| -> Box<dyn ToolOutput> { Box::new(o) })
             }
             .instrument(span),
         )
@@ -282,21 +373,26 @@ impl Tool for GlobTool {
         }
     }
 
-    fn run<'a>(&'a self, arguments: Value) -> BoxFuture<'a, Result<String, ToolError>> {
+    fn run<'a>(
+        &'a self,
+        arguments: Value,
+    ) -> BoxFuture<'a, Result<Box<dyn ToolOutput>, ToolError>> {
         let span = super::span_for_invocation(self, &arguments);
         Box::pin(
             async move {
                 let args = serde_json::from_value::<GlobArgs>(arguments).map_err(|error| {
                     ToolError::failed("glob", format!("invalid arguments: {error}"))
                 })?;
-                glob_files(&args.pattern).await
+                glob_files(&args.pattern)
+                    .await
+                    .map(|o| -> Box<dyn ToolOutput> { Box::new(o) })
             }
             .instrument(span),
         )
     }
 }
 
-async fn read_file(args: ReadFileArgs) -> Result<String, ToolError> {
+async fn read_file(args: ReadFileArgs) -> Result<ReadOutput, ToolError> {
     tracing::debug!("reading file");
     // TODO: should we really read the whole file into memory
     //       and get the chunks afterwards ?
@@ -318,7 +414,7 @@ async fn read_file(args: ReadFileArgs) -> Result<String, ToolError> {
                 lines = content.lines().count(),
                 "read file"
             );
-            Ok(content)
+            Ok(ReadOutput { content })
         }
         ReadMode::Lines => {
             let text = String::from_utf8_lossy(&bytes).to_string();
@@ -338,7 +434,7 @@ async fn read_file(args: ReadFileArgs) -> Result<String, ToolError> {
                 lines = content.lines().count(),
                 "read file"
             );
-            Ok(content)
+            Ok(ReadOutput { content })
         }
         ReadMode::Chars => {
             let text = String::from_utf8_lossy(&bytes).to_string();
@@ -348,7 +444,7 @@ async fn read_file(args: ReadFileArgs) -> Result<String, ToolError> {
                 .limit
                 .map(|limit| (start + limit).min(chars.len()))
                 .unwrap_or(chars.len());
-            let content = if start < end {
+            let content: String = if start < end {
                 chars[start..end].iter().collect()
             } else {
                 String::new()
@@ -358,12 +454,12 @@ async fn read_file(args: ReadFileArgs) -> Result<String, ToolError> {
                 lines = content.lines().count(),
                 "read file"
             );
-            Ok(content)
+            Ok(ReadOutput { content })
         }
     }
 }
 
-async fn write_file(args: WriteFileArgs) -> Result<String, ToolError> {
+async fn write_file(args: WriteFileArgs) -> Result<WriteOutput, ToolError> {
     tracing::debug!("writing file");
     if let Some(parent) = Path::new(&args.path).parent() {
         if !parent.as_os_str().is_empty() {
@@ -380,6 +476,7 @@ async fn write_file(args: WriteFileArgs) -> Result<String, ToolError> {
             })?;
         }
     }
+    let bytes_written = args.content.len();
     tokio::fs::write(&args.path, &args.content)
         .await
         .map_err(|error| {
@@ -387,14 +484,10 @@ async fn write_file(args: WriteFileArgs) -> Result<String, ToolError> {
             ToolError::failed("write", format!("failed to write '{}': {error}", args.path))
         })?;
     tracing::debug!("wrote file");
-    Ok(format!(
-        "wrote {} bytes to '{}'",
-        args.content.len(),
-        args.path
-    ))
+    Ok(WriteOutput::new(args.path, bytes_written))
 }
 
-async fn glob_files(pattern: &str) -> Result<String, ToolError> {
+async fn glob_files(pattern: &str) -> Result<GlobOutput, ToolError> {
     tracing::debug!(pattern = %pattern, "glob searching");
     let paths = glob::glob(pattern)
         .map_err(|error| {
@@ -406,7 +499,7 @@ async fn glob_files(pattern: &str) -> Result<String, ToolError> {
     let mut sorted = paths;
     sorted.sort();
     tracing::debug!(matches = sorted.len(), "glob searched");
-    Ok(sorted.join("\n"))
+    Ok(GlobOutput::new(sorted))
 }
 
 #[cfg(test)]
@@ -476,7 +569,7 @@ mod tests {
         })
         .await
         .expect("read ok");
-        assert_eq!(result, "hello world");
+        assert_eq!(result.output_text(), "hello world");
     }
 
     #[tokio::test]
@@ -505,7 +598,7 @@ mod tests {
         })
         .await
         .expect("read ok");
-        assert_eq!(result, "2345");
+        assert_eq!(result.output_text(), "2345");
     }
 
     #[tokio::test]
@@ -523,7 +616,7 @@ mod tests {
         })
         .await
         .expect("read ok");
-        assert_eq!(result, "two\nthree");
+        assert_eq!(result.output_text(), "two\nthree");
     }
 
     #[tokio::test]
@@ -540,7 +633,7 @@ mod tests {
         })
         .await
         .expect("read ok");
-        assert_eq!(result, "éll");
+        assert_eq!(result.output_text(), "éll");
     }
 
     #[tokio::test]
@@ -553,7 +646,7 @@ mod tests {
         })
         .await
         .expect("write ok");
-        assert!(result.contains("wrote 3 bytes"));
+        assert!(result.output_text().contains("wrote 3 bytes"));
         let content = tokio::fs::read_to_string(&path).await.expect("read back");
         assert_eq!(content, "abc");
     }
@@ -575,10 +668,10 @@ mod tests {
         let matches = glob_files(&format!("{}/*.txt", dir.path().display()))
             .await
             .expect("glob ok");
-        let lines: Vec<&str> = matches.lines().collect();
-        assert!(lines.iter().any(|l| l.ends_with("a.txt")));
-        assert!(lines.iter().any(|l| l.ends_with("b.txt")));
-        assert!(!lines.iter().any(|l| l.ends_with("c.txt")));
+        let lines: Vec<&str> = matches.output_text().lines().collect();
+        assert!(lines.iter().any(|l: &&str| l.ends_with("a.txt")));
+        assert!(lines.iter().any(|l: &&str| l.ends_with("b.txt")));
+        assert!(!lines.iter().any(|l: &&str| l.ends_with("c.txt")));
     }
 
     #[tokio::test]

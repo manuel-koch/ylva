@@ -2391,32 +2391,33 @@ top of a proven agent loop.
 **Decision:** The TUI is added only after the agent loop is proven headless. The TUI is a rendering
 layer, not a core architectural change.
 
-- [ ] **Goal:** A responsive terminal interface where the input box is **never** disabled.
+- [x] **Goal:** A responsive terminal interface where the input box is **never** disabled.
 
-- [ ] Set up `ratatui` + `crossterm` event loop via `spawn_blocking` + `select!`
+- [x] Set up `ratatui` + `crossterm` event loop via `spawn_blocking` + `select!`
 
-- [ ] Two UI areas: chat history (scrollable) and input box. Sidebar is deferred to Phase 6.
+- [x] Two UI areas: chat history (scrollable) and input box. Sidebar is deferred to Phase 6.
 
-- [ ] Integrate `ratatui-textarea` (renamed from `tui-textarea`) for bottom input with history
+- [x] Integrate `ratatui-textarea` (renamed from `tui-textarea`) for bottom input with history
       navigation (`↑`/`↓` on boundary lines loads previous/next sent message; draft is saved).
 
-- [ ] Echo user input back into the chat view; user messages rendered as a block with a
+- [x] Echo user input back into the chat view; user messages rendered as a block with a
       colored left border and soft background — no text prefix. Border color encodes
-      `UserMessageState`: Blue = Sent, Yellow = Queued (pending steer), DarkGray = Cancelled.
+      `UserMessageState`: Green = Sent, Yellow = Queued (pending steer), LightGreen = Steered
+      (applied steer), DarkGray = Cancelled.
       Colors are named constants, ready to be extracted into a `Theme` struct.
 
-- [ ] 2-row footer: mode indicator + steer count (row 1); key hints (row 2).
+- [x] 2-row footer: mode indicator + steer count (row 1); key hints (row 2).
 
-- [ ] Install `ctrlc` handler that sends `AgentCommand::Stop` via channel immediately — no
+- [x] Install `ctrlc` handler that sends `AgentCommand::Stop` via channel immediately — no
       double-press required for OS-level SIGINT.
 
-- [ ] **Re-use the same `AgentLoop` struct** from Phase 3. The TUI is just another consumer
+- [x] **Re-use the same `AgentLoop` struct** from Phase 3. The TUI is just another consumer
       of `UiUpdate`.
 
-- [ ] **Steering in TUI:** `Enter` sends unconditionally, even while streaming — queued as a
+- [x] **Steering in TUI:** `Enter` sends unconditionally, even while streaming — queued as a
       pending steer when busy and shown with a `Queued` (yellow) border style.
 
-- [ ] **Interrupt — double-press confirm with 2-second window:**
+- [x] **Interrupt — double-press confirm with 2-second window:**
       `Ctrl+C` and `Esc` use a key-agnostic double-press: the first press of either key sets
       confirm state; the second press of either key within `CONFIRM_TIMEOUT` (2 s) triggers the
       action. A natural transition to `Idle` (via `StreamDone`, `StreamCancelled`, or `Error`)
@@ -2427,21 +2428,21 @@ layer, not a core architectural change.
       quit TUI. `Esc` while idle → clear input field only (no confirm, no quit).
       - Help popup open → `Esc` closes popup immediately; confirm state is unchanged.
 
-- [ ] **Pending-steer rendering:** `Queued` bubbles convert to `Sent` (blue) when `SteerApplied`
+- [x] **Pending-steer rendering:** `Queued` bubbles convert to `Sent` (blue) when `SteerApplied`
       arrives. Interrupting marks all `Queued` bubbles as `Cancelled` (grey) with a dimmed
       `"Not sent."` annotation; cancelled texts are retained in `input_history` so the user
       can recover them via `↑`.
 
-- [ ] **Tool approval sub-mode:** when `UiUpdate::ToolPending` arrives, the footer switches to
+- [x] **Tool approval sub-mode:** when `UiUpdate::ToolPending` arrives, the footer switches to
       `[ ✓ Approve (Enter) ]  [ ✗ Deny (Esc) ]` with mouse-clickable buttons. In this sub-mode
       `Enter` sends `ApproveTool`, `Esc` sends `DenyTool` immediately (no double-press). `Ctrl+C`
       still follows the double-press confirm → `AgentCommand::Stop`. Clicking outside the buttons
       is a no-op.
 
-- [ ] **F1 Help popup:** opens/closes a centered popup (60 % × 70 %) showing the full keybinding
+- [x] **F1 Help popup:** opens/closes a centered popup (60 % × 70 %) showing the full keybinding
       table and `BuildInfo` values (version, commit, build timestamp, profile).
 
-- [ ] **Mode dispatch:** `std::io::stdout().is_terminal()` in `main.rs` selects between
+- [x] **Mode dispatch:** `std::io::stdout().is_terminal()` in `main.rs` selects between
       `tui_runner::run_tui_on_stdout` and `headless_runner::run_headless`. No `App` trait yet
       (deferred to Phase 5).
 
@@ -2449,6 +2450,66 @@ layer, not a core architectural change.
 The input widget must never be "disabled."
 
 **Key crates:** `ratatui 0.30`, `crossterm 0.29`, `ratatui-textarea 0.9`, `textwrap`, `ctrlc`
+
+#### Phase 4 outcome
+
+Decisions recorded during implementation:
+
+- **Double-press confirm is key-agnostic.** A single `confirm_state: Option<Instant>` in the TUI
+  driver (not in `TuiState`) tracks the first-press timestamp; the current `agent_mode` decides
+  the action when the second press fires within `CONFIRM_TIMEOUT` (2 s). No `ConfirmKind` enum.
+- **OS SIGINT → immediate `Stop`.** The `ctrlc` handler runs on a dedicated OS thread and forwards
+  to tokio as `AppAction::SigInt` into the *action* channel (so the relay holds no `cmd_tx` clone
+  and cannot keep the agent loop alive after a quit). A `spawn_blocking` watcher polls
+  `recv_timeout` and exits as soon as the action receiver closes, so it never leaks a thread that
+  hangs runtime shutdown. `block_on` is never called inside the handler. No double-press for
+  OS-level SIGINT.
+- **Natural transition to Idle clears confirm state.** `StreamDone`/`StreamCancelled`/`Error`
+  (observed via `UiUpdate`) reset the driver's confirm state as soon as the agent returns to
+  `Idle`.
+- **Tool approval sub-mode.** `Enter` = `ApproveTool`, `Esc` = `DenyTool` (immediate); the footer
+  renders mouse-clickable buttons whose rects are captured from the frame for hit-testing;
+  clicking outside is a no-op. `Ctrl+C` still follows the double-press confirm → `Stop`.
+- **User message visual design.** User messages render as blocks with a left-only border and a
+  soft background shade (`USER_MESSAGE_BG_COLOR`), with **no text prefix**. Border color encodes
+  `UserMessageState` (Green = Sent, Yellow = Queued, LightGreen = Steered, DarkGray = Cancelled);
+  colours are named constants ready to be extracted into a `Theme` struct.
+- **Cancelled steers.** Marked `Cancelled` in `ChatEntry` (ephemeral view state, never persisted)
+  and retained in `input_history` for recovery via `↑`.
+- **`SteerQueued`/`SteerApplied` are pure mode signals** — no payload; the TUI driver creates the
+  bubbles itself.
+- **Terminal restoration is RAII.** `run_tui_on_stdout` restores the terminal (raw mode +
+  alternate screen) via a guard on every exit path, including panics.
+- **Mouse capture is enabled.** `EnableMouseCapture`/`DisableMouseCapture` are part of the
+  enter/leave sequences; without them the wheel and clickable approval buttons would never receive
+  events.
+- **Kitty keyboard protocol for modified keys.** `run_tui_on_stdout` pushes
+  `KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES` (and pops it in the terminal guard) so
+  supporting terminals (ZED, iTerm2, kitty, WezTerm) report `Shift+Enter`/`Alt+Enter` as
+  distinguishable CSI-u sequences; `Shift+Enter`/`Alt+Enter` then insert a newline instead of
+  being mistaken for a bare `Enter`. Unsupported terminals ignore the flag.
+- **Mouse click/drag in the input box.** A left-click places the cursor at the clicked character
+  (word-wrapping accounted for); a left-drag selects text. The input box's on-screen rect is
+  written to `TuiState` each frame for hit-testing.
+- **Input box is a word-wrapped message.** The input renders as a left-border bubble (Cyan), no
+  full frame and no title, and long text word-wraps inside the box (no horizontal scrollbar). Its
+  height grows with the wrapped content, capped at 1/3 of the terminal.
+- **`Sending…` state.** A `TuiState::submitted` flag is set when a prompt is sent from idle and
+  cleared on `StreamStarted`, so the footer shows `"Sending…"` (not `"Idle"`) while waiting for
+  the first stream event.
+- **TUI starts empty.** The hardcoded demo prompt is headless-only; the TUI launches with an
+  empty input box unless an explicit `--prompt` or piped stdin was given.
+- **Scrollbar thumb reaches the track end.** The chat scrollbar uses `content_length =
+  max_offset + 1` (not the raw line count), because ratatui's thumb proportion only reaches the
+  very bottom/top when `content_length` is the number of scrollable positions.
+- **Scroll offset is clamped and direction-correct.** `scroll_offset` is a row offset from the
+  top: `PageUp`/wheel-up decrease it (toward earlier content), `PageDown`/wheel-down increase it,
+  and `ui::draw` clamps it to the rendered content height so over-scrolling cannot silently drift.
+  Scrolling back to the bottom re-enables auto-scroll.
+- **Wordmark.** The chat list always opens with a centered ASCII-art "Ylva" wordmark so the
+  initial frame is not empty while the first response streams.
+- **`run_tui` returns the final `TuiState`** so integration tests (`tests/tui_state.rs`) can
+  assert on the resulting view state; the production entry point discards it.
 
 ### Phase 5: Interface Seams
 

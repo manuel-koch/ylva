@@ -58,13 +58,29 @@ pub const BUILD_INFO: BuildInfo = BuildInfo {
 impl BuildInfo {
     /// Canonical multi-line representation: a one-line header followed by one
     /// field per line in the stable order `version` / `commit` / `built` /
-    /// `profile`. Field labels and alignment are stable for scripts to parse.
+    /// `profile` / `features`. Field labels and alignment are stable for
+    /// scripts to parse.
     pub fn render(&self) -> String {
+        let features = enabled_features();
+        let features_line = if features.is_empty() {
+            String::from("Features: (none)")
+        } else {
+            format!("Features: {}", features.join(", "))
+        };
         format!(
-            "Ylva - Agent-Harness\nVersion: v{}\nCommit:  {}\nBuilt:   {}\nProfile: {}",
-            self.version, self.git_commit, self.build_timestamp_utc, self.profile
+            "Ylva - Agent-Harness\nVersion: v{}\nCommit:  {}\nBuilt:   {}\nProfile: {}\n{}",
+            self.version, self.git_commit, self.build_timestamp_utc, self.profile, features_line
         )
     }
+}
+
+/// Returns the names of non-default Cargo features enabled in this build.
+pub fn enabled_features() -> Vec<&'static str> {
+    #[allow(unused_mut)]
+    let mut features: Vec<&'static str> = Vec::new();
+    #[cfg(feature = "artificial-tool-delay")]
+    features.push("artificial-tool-delay");
+    features
 }
 
 #[cfg(test)]
@@ -83,15 +99,12 @@ mod tests {
     #[test]
     fn render_emits_stable_field_order_and_labels() {
         let rendered = fixture().render();
-        assert_eq!(
-            rendered,
-            "Ylva - Agent-Harness\nVersion: v9.9.9\nCommit:  01234567\nBuilt:   2026-08-13T16:45:00Z\nProfile: debug"
-        );
         assert!(rendered.starts_with("Ylva - Agent-Harness\n"));
         assert!(rendered.contains("\nVersion: v"));
         assert!(rendered.contains("\nCommit:  "));
         assert!(rendered.contains("\nBuilt:   "));
         assert!(rendered.contains("\nProfile: "));
+        assert!(rendered.contains("\nFeatures: "));
     }
 
     #[test]
