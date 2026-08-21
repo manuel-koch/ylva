@@ -212,7 +212,7 @@ fn handle_action(
     }
 
     match action {
-        AppAction::CtrlC => handle_ctrl_c(state, confirm_state, cmd_tx),
+        AppAction::CtrlC => handle_ctrl_c(state, textarea, confirm_state, cmd_tx),
         AppAction::Escape => handle_escape(state, textarea, confirm_state, cmd_tx),
         AppAction::ShowHelp => {
             state.show_help = !state.show_help;
@@ -264,6 +264,7 @@ fn handle_paste(text: String, state: &mut TuiState, textarea: &mut TextArea<'_>)
 
 fn handle_ctrl_c(
     state: &mut TuiState,
+    textarea: &mut TextArea<'_>,
     confirm_state: &mut Option<Instant>,
     cmd_tx: &mpsc::Sender<AgentCommand>,
 ) -> ActionOutcome {
@@ -277,7 +278,17 @@ fn handle_ctrl_c(
         }
         return ActionOutcome::Continue;
     }
-    // Busy/streaming: double-press → Stop.
+    // Busy with a non-empty draft: clear the input first, same as Esc.
+    // The confirm-to-stop flow only triggers once the field is empty.
+    if state.agent_mode != AgentMode::Idle && textarea.lines() != [""] {
+        state.history_index = None;
+        state.draft = String::new();
+        *textarea = TextArea::default();
+        configure_textarea(textarea);
+        *confirm_state = None;
+        return ActionOutcome::Continue;
+    }
+    // Busy/streaming with empty input: double-press → Stop.
     if state.agent_mode != AgentMode::Idle {
         return confirm_or_stop(confirm_state, cmd_tx);
     }
@@ -317,12 +328,27 @@ fn handle_escape(
     }
     if state.agent_mode == AgentMode::Idle {
         // Idle: clear input only (no confirm, no quit).
+        // Reset history browsing so the next ↑ starts from the most-recent entry.
+        state.history_index = None;
+        state.draft = String::new();
         *textarea = TextArea::default();
         configure_textarea(textarea);
         *confirm_state = None;
         return ActionOutcome::Continue;
     }
-    // Busy: same key-agnostic double-press → Stop as Ctrl+C.
+    // Busy with a non-empty draft: Esc clears the input field (and exits any
+    // active history browsing) instead of starting the confirm-to-stop flow.
+    // The confirm-to-stop flow is only triggered when the field is already empty.
+    let input_is_empty = textarea.lines() == [""];
+    if !input_is_empty {
+        state.history_index = None;
+        state.draft = String::new();
+        *textarea = TextArea::default();
+        configure_textarea(textarea);
+        *confirm_state = None;
+        return ActionOutcome::Continue;
+    }
+    // Busy with empty input: same key-agnostic double-press → Stop as Ctrl+C.
     confirm_or_stop(confirm_state, cmd_tx)
 }
 
@@ -996,6 +1022,87 @@ mod tests {
     }
 
     #[test]
+    fn idle_escape_resets_history_index() {
+        let (mut state, _textarea, cmd_tx, _cmd_rx) = setup();
+        state.push_user_bubble("first".to_string(), UserMessageState::Sent);
+        state.push_user_bubble("second".to_string(), UserMessageState::Sent);
+        // Navigate into history so history_index is set.
+        let mut textarea = TextArea::from(vec!["draft".to_string()]);
+        state.navigate_history(HistoryDirection::Up, "draft");
+        assert!(state.history_index.is_some());
+        // Pressing Esc should reset the history index.
+        handle_action(
+            AppAction::Escape,
+            &mut state,
+            &mut textarea,
+            &mut None,
+            &mut MouseDrag::default(),
+            &mut None,
+            &None,
+            &cmd_tx,
+        );
+        assert_eq!(state.history_index, None);
+        assert_eq!(state.draft, "");
+    }
+
+    #[test]
+    fn busy_escape_with_draft_clears_input_without_stopping() {
+        let (mut state, _textarea, cmd_tx, mut cmd_rx) = setup();
+        state.push_user_bubble("first".to_string(), UserMessageState::Sent);
+        state.apply_update(&UiUpdate::StreamStarted);
+        let mut textarea = TextArea::from(vec!["my draft".to_string()]);
+        // Esc should clear the draft — not start confirm-to-stop.
+        let outcome = handle_action(
+            AppAction::Escape,
+            &mut state,
+            &mut textarea,
+            &mut None,
+            &mut MouseDrag::default(),
+            &mut None,
+            &None,
+            &cmd_tx,
+        );
+        assert_eq!(outcome, ActionOutcome::Continue);
+        assert_eq!(state.history_index, None);
+        assert_eq!(textarea.lines(), &[""]);
+        assert!(cmd_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn busy_escape_with_empty_input_triggers_confirm_to_stop() {
+        let (mut state, mut textarea, cmd_tx, mut cmd_rx) = setup();
+        state.apply_update(&UiUpdate::StreamStarted);
+        let mut confirm = None;
+        // First Esc: confirm hint shown, no Stop yet.
+        let first = handle_action(
+            AppAction::Escape,
+            &mut state,
+            &mut textarea,
+            &mut confirm,
+            &mut MouseDrag::default(),
+            &mut None,
+            &None,
+            &cmd_tx,
+        );
+        assert_eq!(first, ActionOutcome::Continue);
+        assert!(confirm.is_some());
+        assert!(cmd_rx.try_recv().is_err());
+        // Second Esc: Stop is sent.
+        let second = handle_action(
+            AppAction::Escape,
+            &mut state,
+            &mut textarea,
+            &mut confirm,
+            &mut MouseDrag::default(),
+            &mut None,
+            &None,
+            &cmd_tx,
+        );
+        assert_eq!(second, ActionOutcome::Continue);
+        assert!(matches!(cmd_rx.try_recv(), Ok(AgentCommand::Stop { .. })));
+    }
+
+    #[test]
     fn busy_double_press_ctrl_c_sends_stop() {
         let (mut state, mut textarea, cmd_tx, mut cmd_rx) = setup();
         state.apply_update(&UiUpdate::StreamStarted);
@@ -1031,6 +1138,26 @@ mod tests {
                 reason: "aborted by user".into()
             })
         );
+    }
+
+    #[test]
+    fn busy_ctrl_c_with_draft_clears_input_without_stopping() {
+        let (mut state, _textarea, cmd_tx, mut cmd_rx) = setup();
+        state.apply_update(&UiUpdate::StreamStarted);
+        let mut textarea = TextArea::from(vec!["my draft".to_string()]);
+        let outcome = handle_action(
+            AppAction::CtrlC,
+            &mut state,
+            &mut textarea,
+            &mut None,
+            &mut MouseDrag::default(),
+            &mut None,
+            &None,
+            &cmd_tx,
+        );
+        assert_eq!(outcome, ActionOutcome::Continue);
+        assert_eq!(textarea.lines(), &[""]);
+        assert!(cmd_rx.try_recv().is_err());
     }
 
     #[test]

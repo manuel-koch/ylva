@@ -1124,7 +1124,7 @@ Update the following docs **in the same commit** as the code changes:
       Thus a former multiline prompt ends up as a single long (wrapped) string
       in the input field.
 
-- [ ] When retrieving former messages from conversation the position of
+- [x] When retrieving former messages from conversation the position of
       last-picked-historic-message is maintained/saved.
       Can this index get messed up when queued user messages are removed ( e.g. by ctrl-c while pending ) ?
       I noticed that while jumping back/forth and pressing esc the next jump back/forth picks up were I "left" the history at the last press of esc.
@@ -1136,6 +1136,13 @@ Update the following docs **in the same commit** as the code changes:
       shouldn't it?
       Should we "reset" the current index in conversation-history after an "esc"
       press ( to clear current input message ) or whenever a new user message was submitted ?
+      (The index cannot be corrupted by queued-message removal because `input_history`
+      is a separate `Vec` that is only ever appended to; cancelling queued entries
+      only touches `chat_entries`. `push_user_bubble` already resets `history_index`
+      to `None` on every submission. The remaining gap — Esc did not reset the index
+      — is now fixed: `handle_escape` in `tui_runner.rs` clears both `history_index`
+      and `draft` before resetting the textarea, so the next ↑ always starts from
+      the most-recent entry. Covered by `idle_escape_resets_history_index`.)
 
 - [ ] Help popup should use 1 char padding and the popup should have a title "Help"
       at upper-left position of popup ( 2 char indent, not directly at the edge )

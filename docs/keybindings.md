@@ -10,8 +10,9 @@ Reference for Ylva's TUI keybindings.
 | `shift-enter` / `alt-enter` | Input focused | Insert newline |
 | `home` / `fn-left` | Input focused | Move to start of line; if already at column 0, move to end of previous line |
 | `end` / `fn-right` | Input focused | Move to end of line; if already at line end, move to start of next line |
-| `ctrl-c` or `esc` (×1) | Streaming / ToolPending | Show `"Press again to cancel"` hint |
-| `ctrl-c` or `esc` (×2 ≤ 2 s) | Streaming / ToolPending | Interrupt conversation |
+| `ctrl-c` or `esc` (×1) | Streaming / ToolPending, input empty | Show `"Press again to cancel"` hint |
+| `ctrl-c` or `esc` (×2 ≤ 2 s) | Streaming / ToolPending, input empty | Interrupt conversation |
+| `ctrl-c` or `esc` | Streaming / ToolPending, input non-empty | Clear input field (no interrupt) |
 | `ctrl-c` (×1) | Idle | Show `"Press again to quit"` hint |
 | `ctrl-c` (×2 ≤ 2 s) | Idle | Quit TUI |
 | `esc` | Idle | Clear input field (no quit) |

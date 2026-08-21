@@ -186,7 +186,19 @@ pub fn draw(
             hint,
         )
     } else {
-        draw_normal_footer(frame, footer_row_1, footer_row_2, state, hint);
+        let keybinding_hint = if state.agent_mode != AgentMode::Idle && !input_is_empty {
+            " enter: send  ctrl-c/esc: clear draft  F1: help"
+        } else {
+            " enter: send  ctrl-c/esc: cancel/quit  F1: help"
+        };
+        draw_normal_footer(
+            frame,
+            footer_row_1,
+            footer_row_2,
+            state,
+            keybinding_hint,
+            hint,
+        );
         None
     };
 
@@ -843,6 +855,7 @@ fn draw_normal_footer(
     row_1: Rect,
     row_2: Rect,
     state: &TuiState,
+    keybinding_hint: &str,
     hint: Option<&str>,
 ) {
     let mode_word = match state.agent_mode {
@@ -870,7 +883,7 @@ fn draw_normal_footer(
     );
     frame.render_widget(
         Paragraph::new(Line::styled(
-            " enter: send  ctrl-c/esc: cancel/quit  F1: help",
+            keybinding_hint.to_string(),
             Style::default().fg(Color::DarkGray),
         )),
         row_2,
@@ -1014,8 +1027,9 @@ fn draw_help_popup(frame: &mut Frame) {
     let keybindings = "\
 enter                       Send message; queue steer if busy
 shift-enter / alt-enter     Insert newline
-ctrl-c / esc (x1)           Show \"Press again to cancel\" hint (while streaming)
-ctrl-c / esc (x2, <=2s)     Interrupt generation
+ctrl-c / esc (x1)           Show \"Press again to cancel\" hint (busy, empty input)
+ctrl-c / esc (x2, <=2s)     Interrupt generation (busy, empty input)
+ctrl-c / esc                Clear input field (busy, non-empty input)
 ctrl-c (x1)                 Show \"Press again to quit\" hint (idle)
 ctrl-c (x2, <=2s)           Quit TUI
 esc                         Clear input (idle)
