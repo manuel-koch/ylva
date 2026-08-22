@@ -14,6 +14,7 @@
 
 pub mod agent;
 pub mod app;
+pub mod app_state;
 pub mod build_info;
 pub mod events;
 pub mod headless_runner;

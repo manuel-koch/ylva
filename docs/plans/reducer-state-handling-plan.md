@@ -98,40 +98,40 @@ the Driver) form the complete event surface of the Presenter.
 
 ### Step 1 — Define `TuiMode`, `Focus`, `InputEvent`, `DomainEvent`, `Effect`, and `AppLayout` in `src/app_state.rs`
 
-- [ ] Create `src/app_state.rs` with:
-  - [ ] `TuiMode` enum (Idle, Pending, Streaming, Aborting, DoublePressAbort).
-  - [ ] `Focus` enum:
-    - [ ] `MainInput` — normal typing, history navigation.
-    - [ ] `HelpPopup` — modal; captures all keyboard and mouse input.
-    - [ ] `ToolApproval { tool_id: Uuid, tool_name: String }` — non-modal; captures
+- [x] Create `src/app_state.rs` with:
+  - [x] `TuiMode` enum (Idle, Pending, Streaming, Aborting, DoublePressAbort).
+  - [x] `Focus` enum:
+    - [x] `MainInput` — normal typing, history navigation.
+    - [x] `HelpPopup` — modal; captures all keyboard and mouse input.
+    - [x] `ToolApproval { tool_id: Uuid, tool_name: String }` — non-modal; captures
       keyboard only. Tool arguments are **not** stored here; they live solely in
       the corresponding `ToolBubble` chat entry.
-    - [ ] `is_modal(&self) -> bool` method (true only for `HelpPopup`).
-  - [ ] `InputEvent` enum: `ShowHelp`, `SigInt`, `CtrlC`, `Escape`,
+    - [x] `is_modal(&self) -> bool` method (true only for `HelpPopup`).
+  - [x] `InputEvent` enum: `ShowHelp`, `SigInt`, `CtrlC`, `Escape`,
     `KeyInput(crossterm::event::KeyEvent)`, `Paste(String)`. This decouples the
     Presenter from `AppAction` and raw crossterm types.
-  - [ ] `DomainEvent` enum: variants covering all `UiUpdate` cases that the Presenter
+  - [x] `DomainEvent` enum: variants covering all `UiUpdate` cases that the Presenter
     needs to react to (e.g. `StreamStarted`, `StreamChunk`, `StreamDone`,
     `StreamCancelled`, `ToolPending { id, name }`, `ToolStart`, `ToolDone`,
     `ToolKilled`, `ToolDenied`, `Error`, `ConfirmExpired`). The Driver converts
     `UiUpdate → DomainEvent`; the Presenter never imports from `agent.rs`.
-  - [ ] `Effect` enum: `SubmitPrompt { steer: bool }`, `ClearTextarea`,
+  - [x] `Effect` enum: `SubmitPrompt { steer: bool }`, `ClearTextarea`,
     `SaveTextareaAndClear`, `RestoreTextarea`, `TextareaKey(KeyEvent)`,
     `Paste(String)`, `ApproveTool { id: Uuid }`, `DenyTool { id: Uuid }`,
     `StopAgent`, `Quit`.
-  - [ ] `ChatArea`, `InputArea`, `HelpPopup` layout structs each holding a `Rect`
+  - [x] `ChatArea`, `InputArea`, `HelpPopup` layout structs each holding a `Rect`
     with `contains(col, row) -> bool`, `page_scroll_rows() -> u16`, and (for
     `HelpPopup`) `hit(col, row) -> bool` methods.
-  - [ ] `AppLayout` struct aggregating those structs.
-  - [ ] `AppState` struct containing `mode: TuiMode`, `focus: Focus`,
+  - [x] `AppLayout` struct aggregating those structs.
+  - [x] `AppState` struct containing `mode: TuiMode`, `focus: Focus`,
     `layout: AppLayout`, plus all current fields of `TuiState` that are pure
     view-model data. Fields that belong to the Driver (`mouse_drag`,
     `button_areas`) are **not** included.
-- [ ] Verify: no `use ratatui::backend`, no channel types, no `UiUpdate` imports.
-- [ ] Write unit tests (inside `src/app_state.rs` `#[cfg(test)]`):
-  - [ ] `Focus::is_modal()` returns true only for `HelpPopup`.
-  - [ ] `ChatArea::contains` / `InputArea::contains` geometry correctness.
-  - [ ] `TuiMode` variant construction and equality.
+- [x] Verify: no `use ratatui::backend`, no channel types, no `UiUpdate` imports.
+- [x] Write unit tests (inside `src/app_state.rs` `#[cfg(test)]`):
+  - [x] `Focus::is_modal()` returns true only for `HelpPopup`.
+  - [x] `ChatArea::contains` / `InputArea::contains` geometry correctness.
+  - [x] `TuiMode` variant construction and equality.
 
 ### Step 2 — Convert `src/app.rs` to a shim re-exporting from `src/app_state.rs`
 
