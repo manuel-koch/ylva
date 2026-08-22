@@ -146,51 +146,51 @@ the Driver) form the complete event surface of the Presenter.
 
 ### Step 3 — Implement `src/presenter.rs` with `update()` and routing functions
 
-- [ ] Create `src/presenter.rs` with:
-  - [ ] `pub fn update(state: &mut AppState, event: TuiEvent) -> Vec<Effect>`
+- [x] Create `src/presenter.rs` with:
+  - [x] `pub fn update(state: &mut AppState, event: TuiEvent) -> Vec<Effect>`
     where `TuiEvent` is an enum wrapping `InputEvent`, `MouseEvent`, and
     `DomainEvent`.
-  - [ ] `fn route_keyboard(state, InputEvent) -> Vec<Effect>`
-  - [ ] `fn route_mouse(state, crossterm::event::MouseEvent) -> Vec<Effect>`
-  - [ ] `fn route_domain(state, DomainEvent) -> Vec<Effect>`
-  - [ ] Per-focus keyboard handlers: `keyboard_main`, `keyboard_help`,
+  - [x] `fn route_keyboard(state, InputEvent) -> Vec<Effect>`
+  - [x] `fn route_mouse(state, crossterm::event::MouseEvent) -> Vec<Effect>`
+  - [x] `fn route_domain(state, DomainEvent) -> Vec<Effect>`
+  - [x] Per-focus keyboard handlers: `keyboard_main`, `keyboard_help`,
     `keyboard_approval`.
-  - [ ] Per-mode domain handlers: `domain_idle`, `domain_pending`,
+  - [x] Per-mode domain handlers: `domain_idle`, `domain_pending`,
     `domain_streaming`, `domain_aborting`, `domain_double_press`.
-  - [ ] Mouse handlers: `mouse_chat`, `mouse_input_area`.
-  - [ ] Ensure `UiUpdate::ToolStart | ToolKilled | StreamCancelled` map to
+  - [x] Mouse handlers: `mouse_chat`, `mouse_input_area`.
+  - [x] Ensure `UiUpdate::ToolStart | ToolKilled | StreamCancelled` map to
     `DomainEvent` variants that reset `state.focus` back to `Focus::MainInput`;
     document this mapping explicitly to prevent focus desync from agent state.
-- [ ] Port all logic from `tui_runner.rs` (`handle_action`, `handle_ctrl_c`,
+- [x] Port all logic from `tui_runner.rs` (`handle_action`, `handle_ctrl_c`,
   `handle_escape`, `handle_key_input`, `handle_mouse_input`, `handle_paste`,
   `confirm_or_stop`). The `confirm_state: Option<Instant>` becomes
   `TuiMode::DoublePressAbort { pressed_at: Instant, return_to: Box<TuiMode> }`.
   The `DomainEvent::ConfirmExpired` variant clears this mode back to `return_to`.
-- [ ] The Driver fires `DomainEvent::ConfirmExpired` via the existing
+- [x] The Driver fires `DomainEvent::ConfirmExpired` via the existing
   `tokio::time::sleep` arm in `select!`, converting it to a `TuiEvent::Domain`
   before calling `update()`. The Presenter's `DoublePressAbort` handler handles
   the expiry — no timing logic inside the Presenter.
-- [ ] Verify: no `use ratatui`, no `use ratatui_textarea`, no channel sends.
-- [ ] Write unit tests (inside `src/presenter.rs` `#[cfg(test)]`):
-  - [ ] `ctrl_c_while_idle_first_press_sets_double_press_abort_mode`
-  - [ ] `ctrl_c_while_idle_second_press_returns_quit_effect`
-  - [ ] `ctrl_c_while_busy_first_press_records_confirm`
-  - [ ] `ctrl_c_while_busy_second_press_returns_stop_agent_effect`
-  - [ ] `ctrl_c_while_tool_approval_denies_tool`
-  - [ ] `escape_while_help_open_closes_help`
-  - [ ] `escape_while_tool_approval_denies_tool`
-  - [ ] `escape_while_busy_empty_input_triggers_confirm`
-  - [ ] `show_help_toggles_focus_to_help_popup`
-  - [ ] `sigint_sends_stop_agent_effect_immediately`
-  - [ ] `enter_with_text_returns_submit_prompt_effect`
-  - [ ] `enter_while_approval_empty_returns_approve_tool_effect`
-  - [ ] `enter_while_approval_with_text_returns_deny_tool_effect`
-  - [ ] `keyboard_in_help_mode_scrolls_help`
-  - [ ] `mouse_scroll_up_in_chat_area_decrements_scroll_offset`
-  - [ ] `mouse_click_outside_help_popup_closes_modal`
-  - [ ] `domain_stream_done_transitions_mode_to_idle`
-  - [ ] `domain_tool_pending_while_aborting_returns_deny_effect`
-  - [ ] `confirm_expired_event_clears_double_press_abort_mode`
+- [x] Verify: no `use ratatui`, no `use ratatui_textarea`, no channel sends.
+- [x] Write unit tests (inside `src/presenter.rs` `#[cfg(test)]`):
+  - [x] `ctrl_c_while_idle_first_press_sets_double_press_abort_mode`
+  - [x] `ctrl_c_while_idle_second_press_returns_quit_effect`
+  - [x] `ctrl_c_while_busy_first_press_records_confirm`
+  - [x] `ctrl_c_while_busy_second_press_returns_stop_agent_effect`
+  - [x] `ctrl_c_while_tool_approval_denies_tool`
+  - [x] `escape_while_help_open_closes_help`
+  - [x] `escape_while_tool_approval_denies_tool`
+  - [x] `escape_while_busy_empty_input_triggers_confirm`
+  - [x] `show_help_toggles_focus_to_help_popup`
+  - [x] `sigint_sends_stop_agent_effect_immediately`
+  - [x] `enter_with_text_returns_submit_prompt_effect`
+  - [x] `enter_while_approval_empty_returns_approve_tool_effect`
+  - [x] `enter_while_approval_with_text_returns_deny_tool_effect`
+  - [x] `keyboard_in_help_mode_scrolls_help`
+  - [x] `mouse_scroll_up_in_chat_area_decrements_scroll_offset`
+  - [x] `mouse_click_outside_help_popup_closes_modal`
+  - [x] `domain_stream_done_transitions_mode_to_idle`
+  - [x] `domain_tool_pending_while_aborting_returns_deny_effect`
+  - [x] `confirm_expired_event_clears_double_press_abort_mode`
 
 ### Step 4 — Rewrite `src/tui_runner.rs` as the Driver
 

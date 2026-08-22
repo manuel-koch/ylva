@@ -20,6 +20,7 @@ pub mod events;
 pub mod headless_runner;
 pub mod llm;
 pub mod logging;
+pub mod presenter;
 pub mod tui_runner;
 pub mod ui;
 

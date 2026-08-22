@@ -298,7 +298,7 @@ fn handle_action(
 }
 
 fn handle_paste(text: String, state: &mut TuiState, textarea: &mut TextArea<'_>) -> ActionOutcome {
-    state.exit_browsing(&textarea.lines().join("\n"));
+    state.exit_input_history_browsing(&textarea.lines().join("\n"));
     let dedented_text = dedent(&text);
     let paste_lines: Vec<&str> = dedented_text.split('\n').collect();
     for (index, line) in paste_lines.iter().enumerate() {
@@ -457,7 +457,7 @@ fn load_history_into_textarea(
     textarea: &mut TextArea<'_>,
 ) -> bool {
     let current = textarea.lines().join("\n");
-    if let Some(loaded) = state.navigate_history(direction, &current) {
+    if let Some(loaded) = state.navigate_input_message_history(direction, &current) {
         let lines: Vec<String> = loaded.split('\n').map(str::to_owned).collect();
         *textarea = TextArea::from(lines);
         configure_textarea(textarea);
@@ -528,7 +528,7 @@ fn handle_key_input(
             if event.modifiers.contains(KeyModifiers::SHIFT)
                 || event.modifiers.contains(KeyModifiers::ALT) =>
         {
-            state.exit_browsing(&textarea.lines().join("\n"));
+            state.exit_input_history_browsing(&textarea.lines().join("\n"));
             textarea.input(event);
             ActionOutcome::Continue
         }
@@ -630,7 +630,7 @@ fn handle_key_input(
         _ => {
             // Any edit keypress while browsing copies the entry to a fresh
             // draft and exits browsing mode.
-            state.exit_browsing(&textarea.lines().join("\n"));
+            state.exit_input_history_browsing(&textarea.lines().join("\n"));
             textarea.input(event);
             ActionOutcome::Continue
         }
@@ -818,7 +818,7 @@ fn handle_mouse_input(
             if in_input {
                 if let Some((row, col)) = cursor_for_click(textarea, area, mouse.column, mouse.row)
                 {
-                    state.exit_browsing(&textarea.lines().join("\n"));
+                    state.exit_input_history_browsing(&textarea.lines().join("\n"));
                     textarea
                         .move_cursor(ratatui_textarea::CursorMove::Jump(row as u16, col as u16));
                     textarea.cancel_selection();
@@ -1208,7 +1208,7 @@ mod tests {
         state.push_user_bubble("second".to_string(), UserMessageState::Sent);
         // Navigate into history so history_index is set.
         let mut textarea = TextArea::from(vec!["draft".to_string()]);
-        state.navigate_history(HistoryDirection::Up, "draft");
+        state.navigate_input_message_history(HistoryDirection::Up, "draft");
         assert!(state.history_index.is_some());
         // Pressing Esc should reset the history index.
         handle_action(

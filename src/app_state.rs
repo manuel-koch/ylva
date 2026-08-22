@@ -152,7 +152,7 @@ pub enum ChatEntry {
     },
 }
 
-/// Direction for [`TuiState::navigate_history`].
+/// Direction for [`AppState::navigate_input_message_history`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistoryDirection {
     Up,
@@ -269,7 +269,7 @@ impl TuiState {
     /// the `AssistantMessage` is appended first, and then the steers are
     /// re-appended so the logical order is always:
     /// `… → AssistantMessage → QueuedSteer → …`
-    fn commit_partial(&mut self, interrupted: bool) {
+    fn flush_partial_assistant_message(&mut self, interrupted: bool) {
         if !self.partial_assistant_text.is_empty() {
             let queued_steers: Vec<ChatEntry> = self
                 .chat_entries
@@ -304,7 +304,7 @@ impl TuiState {
         }
     }
 
-    fn mark_queued_as(&mut self, state: UserMessageState) {
+    fn transition_queued_messages_to(&mut self, state: UserMessageState) {
         for entry in self.chat_entries.iter_mut() {
             if let ChatEntry::UserMessage {
                 state: entry_state, ..
@@ -351,7 +351,7 @@ impl TuiState {
                 // (e.g. prose that preceded tool calls) so it is preserved as
                 // a permanent AssistantMessage bubble before the new stream
                 // clears the partial buffer.
-                self.commit_partial(false);
+                self.flush_partial_assistant_message(false);
                 // While aborting, keep the Aborting mode so the TUI can
                 // detect the eventual Idle transition and quit.
                 if self.agent_mode != AgentMode::Aborting {
@@ -366,14 +366,14 @@ impl TuiState {
                 }
             }
             UiUpdate::StreamDone => {
-                self.commit_partial(false);
+                self.flush_partial_assistant_message(false);
                 self.agent_mode = AgentMode::Idle;
                 self.scroll_locked = true;
                 self.scroll_offset = 0;
             }
             UiUpdate::StreamCancelled => {
-                self.commit_partial(true);
-                self.mark_queued_as(UserMessageState::Cancelled);
+                self.flush_partial_assistant_message(true);
+                self.transition_queued_messages_to(UserMessageState::Cancelled);
                 self.steer_indicator = false;
                 self.pending_approval = None;
                 self.agent_mode = AgentMode::Idle;
@@ -384,7 +384,7 @@ impl TuiState {
                 self.steer_indicator = true;
             }
             UiUpdate::SteerApplied => {
-                self.mark_queued_as(UserMessageState::Steered);
+                self.transition_queued_messages_to(UserMessageState::Steered);
                 self.steer_indicator = false;
             }
             UiUpdate::ToolPending {
@@ -401,7 +401,7 @@ impl TuiState {
                 // Commit any text that arrived in the same stream as the tool
                 // calls (prose before/alongside the call) so it is preserved
                 // as a permanent AssistantMessage bubble.
-                self.commit_partial(false);
+                self.flush_partial_assistant_message(false);
                 self.chat_entries.push(ChatEntry::ToolBubble {
                     id: *id,
                     name: name.clone(),
@@ -649,7 +649,7 @@ impl TuiState {
     /// - `Up` at oldest entry: no change.
     /// - `Down` at newest entry: restore the saved draft (exit browsing).
     /// - `Down` at live draft: no change.
-    pub fn navigate_history(
+    pub fn navigate_input_message_history(
         &mut self,
         direction: HistoryDirection,
         current_text: &str,
@@ -690,7 +690,7 @@ impl TuiState {
 
     /// Exit history browsing (if active), copying the browsed entry into the
     /// live draft, before an edit keypress is processed.
-    pub fn exit_browsing(&mut self, current_text: &str) {
+    pub fn exit_input_history_browsing(&mut self, current_text: &str) {
         if self.history_index.is_some() {
             self.draft = current_text.to_string();
             self.history_index = None;
@@ -951,61 +951,70 @@ mod tui_state_tests {
     }
 
     #[test]
-    fn navigate_history_up_down_and_draft_restore() {
+    fn navigate_input_message_history_up_down_and_draft_restore() {
         let mut state = TuiState::new();
         state.push_user_bubble("old".to_string(), UserMessageState::Sent);
         state.push_user_bubble("new".to_string(), UserMessageState::Sent);
 
         let text = state
-            .navigate_history(HistoryDirection::Up, "live draft")
+            .navigate_input_message_history(HistoryDirection::Up, "live draft")
             .expect("moves to newest");
         assert_eq!(text, "new");
         assert_eq!(state.history_index, Some(1));
 
         let text = state
-            .navigate_history(HistoryDirection::Up, "new")
+            .navigate_input_message_history(HistoryDirection::Up, "new")
             .expect("moves to oldest");
         assert_eq!(text, "old");
         assert_eq!(state.history_index, Some(0));
 
-        assert_eq!(state.navigate_history(HistoryDirection::Up, "old"), None);
+        assert_eq!(
+            state.navigate_input_message_history(HistoryDirection::Up, "old"),
+            None
+        );
         assert_eq!(state.history_index, Some(0));
 
         let text = state
-            .navigate_history(HistoryDirection::Down, "old")
+            .navigate_input_message_history(HistoryDirection::Down, "old")
             .expect("moves forward");
         assert_eq!(text, "new");
         assert_eq!(state.history_index, Some(1));
 
         let text = state
-            .navigate_history(HistoryDirection::Down, "new")
+            .navigate_input_message_history(HistoryDirection::Down, "new")
             .expect("restores draft");
         assert_eq!(text, "live draft");
         assert_eq!(state.history_index, None);
     }
 
     #[test]
-    fn navigate_history_down_from_live_draft_is_noop() {
+    fn navigate_input_message_history_down_from_live_draft_is_noop() {
         let mut state = TuiState::new();
         state.push_user_bubble("only".to_string(), UserMessageState::Sent);
-        assert_eq!(state.navigate_history(HistoryDirection::Down, ""), None);
+        assert_eq!(
+            state.navigate_input_message_history(HistoryDirection::Down, ""),
+            None
+        );
     }
 
     #[test]
-    fn navigate_history_up_on_empty_history_is_noop() {
+    fn navigate_input_message_history_up_on_empty_history_is_noop() {
         let mut state = TuiState::new();
-        assert_eq!(state.navigate_history(HistoryDirection::Up, ""), None);
+        assert_eq!(
+            state.navigate_input_message_history(HistoryDirection::Up, ""),
+            None
+        );
     }
 
     #[test]
-    fn exit_browsing_saves_current_text_as_draft() {
+    fn exit_input_history_browsing_saves_current_text_as_draft() {
         let mut state = TuiState::new();
         state.push_user_bubble("history".to_string(), UserMessageState::Sent);
         state
-            .navigate_history(HistoryDirection::Up, "")
+            .navigate_input_message_history(HistoryDirection::Up, "")
             .expect("enters browsing");
         assert!(state.history_index.is_some());
-        state.exit_browsing("history");
+        state.exit_input_history_browsing("history");
         assert_eq!(state.history_index, None);
         assert_eq!(state.draft, "history");
     }
@@ -1332,6 +1341,18 @@ pub enum Effect {
     StopAgent,
     /// Quit the TUI event loop.
     Quit,
+    /// Load a history entry into the textarea (driver replaces textarea content).
+    LoadHistory { direction: HistoryDirection },
+    /// Exit history browsing mode (driver restores live draft).
+    ExitBrowsing,
+    /// Place the textarea cursor at the given terminal cell coordinates.
+    PlaceCursorAtMousePos { column: u16, row: u16 },
+    /// Start a textarea text selection at the current cursor position.
+    StartInputSelection,
+    /// Extend the textarea text selection to the given terminal cell.
+    ExtendInputSelection { column: u16, row: u16 },
+    /// Finalize and copy the current textarea text selection.
+    FinalizeInputSelection,
 }
 
 // ─── AppLayout ────────────────────────────────────────────────────────────────
@@ -1414,8 +1435,9 @@ pub struct AppLayout {
 
 /// The authoritative TUI view-model owned by the Driver.
 ///
-/// Fields that belong exclusively to the Driver (`mouse_drag`, `button_areas`)
-/// are **not** included here.
+/// Fields that require `TextArea` to interpret (e.g. `mouse_drag`, used by
+/// `cursor_for_click`) or that exist purely to pass rendering artifacts between
+/// draw calls (e.g. `button_areas`) are kept in the Driver and excluded here.
 pub struct AppState {
     pub mode: TuiMode,
     pub focus: Focus,
@@ -1479,6 +1501,10 @@ pub struct AppState {
     // ── history navigation helper ────────────────────────────────────────────
     /// Exposes history navigation for use by the presenter.
     pub _history_direction: Option<HistoryDirection>,
+
+    // ── chat drag selection ──────────────────────────────────────────────────
+    /// `true` while the left mouse button is held down in the chat area.
+    pub chat_drag_active: bool,
 }
 
 impl AppState {
@@ -1517,6 +1543,8 @@ impl AppState {
             bubble_title_rows: Vec::new(),
 
             _history_direction: None,
+
+            chat_drag_active: false,
         }
     }
 
@@ -1526,6 +1554,225 @@ impl AppState {
             .as_ref()
             .map(|(_, start)| start.elapsed() < TOAST_DURATION)
             .unwrap_or(false)
+    }
+
+    /// Commit the in-flight partial assistant text into a full `AssistantMessage`
+    /// entry and clear the partial buffer. Queued steers are moved after the new entry.
+    pub fn flush_partial_assistant_message(&mut self, interrupted: bool) {
+        if !self.partial_assistant_text.is_empty() {
+            let queued_steers: Vec<ChatEntry> = self
+                .chat_entries
+                .iter()
+                .filter(|entry| {
+                    matches!(
+                        entry,
+                        ChatEntry::UserMessage {
+                            state: UserMessageState::Queued,
+                            ..
+                        }
+                    )
+                })
+                .cloned()
+                .collect();
+            self.chat_entries.retain(|entry| {
+                !matches!(
+                    entry,
+                    ChatEntry::UserMessage {
+                        state: UserMessageState::Queued,
+                        ..
+                    }
+                )
+            });
+            self.chat_entries.push(ChatEntry::AssistantMessage {
+                text: std::mem::take(&mut self.partial_assistant_text),
+                interrupted,
+            });
+            self.chat_entries.extend(queued_steers);
+        } else {
+            self.partial_assistant_text.clear();
+        }
+    }
+
+    /// Mark all `UserMessage { state: Queued }` entries with the given state.
+    pub fn transition_queued_messages_to(&mut self, state: UserMessageState) {
+        for entry in self.chat_entries.iter_mut() {
+            if let ChatEntry::UserMessage {
+                state: entry_state, ..
+            } = entry
+            {
+                if *entry_state == UserMessageState::Queued {
+                    *entry_state = state;
+                }
+            }
+        }
+    }
+
+    /// Find the most-recent `ToolBubble` with `id == target_id`.
+    pub fn find_tool_bubble_mut(&mut self, target_id: Uuid) -> Option<&mut ChatEntry> {
+        self.chat_entries
+            .iter_mut()
+            .rev()
+            .find(|entry| matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == target_id))
+    }
+
+    /// Append a user message bubble and record the text in input history.
+    pub fn push_user_bubble(&mut self, text: String, state: UserMessageState) {
+        self.chat_entries.push(ChatEntry::UserMessage {
+            text: text.clone(),
+            state,
+        });
+        self.input_history.push(text);
+        self.history_index = None;
+    }
+
+    /// Scroll chat up (toward earlier content); disables auto-scroll.
+    pub fn scroll_up(&mut self, lines: usize) {
+        self.scroll_locked = false;
+        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+    }
+
+    /// Scroll chat down (toward later content); disables auto-scroll.
+    pub fn scroll_down(&mut self, lines: usize) {
+        self.scroll_locked = false;
+        self.scroll_offset = self.scroll_offset.saturating_add(lines);
+    }
+
+    /// Re-enable auto-scroll (jump to bottom).
+    pub fn scroll_to_bottom(&mut self) {
+        self.scroll_locked = true;
+        self.scroll_offset = 0;
+    }
+
+    /// Scroll the help popup up.
+    pub fn help_scroll_up(&mut self, lines: usize) {
+        self.help_scroll_offset = self.help_scroll_offset.saturating_sub(lines);
+    }
+
+    /// Scroll the help popup down.
+    pub fn help_scroll_down(&mut self, lines: usize) {
+        self.help_scroll_offset = self.help_scroll_offset.saturating_add(lines);
+    }
+
+    /// Scroll the help popup left.
+    pub fn help_scroll_left(&mut self, columns: usize) {
+        self.help_scroll_x = self.help_scroll_x.saturating_sub(columns);
+    }
+
+    /// Scroll the help popup right.
+    pub fn help_scroll_right(&mut self, columns: usize) {
+        self.help_scroll_x = self.help_scroll_x.saturating_add(columns);
+    }
+
+    /// Toggle the collapsed/expanded state of the tool bubble with the given id.
+    pub fn toggle_tool_bubble_collapsed(&mut self, target_id: Uuid) {
+        for entry in &mut self.chat_entries {
+            if let ChatEntry::ToolBubble { id, collapsed, .. } = entry {
+                if *id == target_id {
+                    *collapsed = !*collapsed;
+                    self.scroll_locked = false;
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Extract the text covered by the current `chat_selection`.
+    pub fn extract_chat_selection_text(&self) -> Option<String> {
+        let sel = self.chat_selection.as_ref()?;
+        if sel.is_empty() {
+            return None;
+        }
+        let (start_line, start_col, end_line, end_col) = sel.normalized();
+        let lines = &self.chat_rendered_lines;
+        let start_line = start_line.min(lines.len().saturating_sub(1));
+        let end_line = end_line.min(lines.len().saturating_sub(1));
+        if start_line > end_line || lines.is_empty() {
+            return None;
+        }
+        if start_line == end_line {
+            let line = &lines[start_line];
+            Some(char_range(line, start_col, end_col))
+        } else {
+            let mut result = String::new();
+            for (absolute_index, line) in lines
+                .iter()
+                .enumerate()
+                .skip(start_line)
+                .take(end_line - start_line + 1)
+            {
+                let fragment = if absolute_index == start_line {
+                    char_range(line, start_col, line.chars().count())
+                } else if absolute_index == end_line {
+                    char_range(line, 0, end_col)
+                } else {
+                    line.clone()
+                };
+                if !result.is_empty() {
+                    result.push('\n');
+                }
+                result.push_str(&fragment);
+            }
+            Some(result)
+        }
+    }
+
+    /// Show a transient toast notification.
+    pub fn set_toast(&mut self, message: impl Into<String>) {
+        self.toast = Some((message.into(), Instant::now() + TOAST_DURATION));
+    }
+
+    /// Remove an expired toast.
+    pub fn clear_expired_toast(&mut self) {
+        if let Some((_, expires_at)) = &self.toast {
+            if Instant::now() >= *expires_at {
+                self.toast = None;
+            }
+        }
+    }
+
+    /// Navigate input history. Returns the text to load, or `None` if boundary reached.
+    pub fn navigate_input_message_history(
+        &mut self,
+        direction: HistoryDirection,
+        current_text: &str,
+    ) -> Option<String> {
+        match direction {
+            HistoryDirection::Up => {
+                if self.input_history.is_empty() {
+                    return None;
+                }
+                match self.history_index {
+                    None => {
+                        self.draft = current_text.to_string();
+                        self.history_index = Some(self.input_history.len() - 1);
+                    }
+                    Some(0) => return None,
+                    Some(index) => {
+                        self.history_index = Some(index - 1);
+                    }
+                }
+                Some(self.input_history[self.history_index.expect("just set")].clone())
+            }
+            HistoryDirection::Down => match self.history_index {
+                None => None,
+                Some(index) if index < self.input_history.len() - 1 => {
+                    self.history_index = Some(index + 1);
+                    Some(self.input_history[index + 1].clone())
+                }
+                Some(_) => {
+                    self.history_index = None;
+                    Some(std::mem::take(&mut self.draft))
+                }
+            },
+        }
+    }
+
+    /// Exit history browsing (if active) before an edit keypress.
+    pub fn exit_input_history_browsing(&mut self, current_text: &str) {
+        if self.history_index.is_some() {
+            self.draft = current_text.to_string();
+            self.history_index = None;
+        }
     }
 }
 
