@@ -135,14 +135,14 @@ the Driver) form the complete event surface of the Presenter.
 
 ### Step 2 — Convert `src/app.rs` to a shim re-exporting from `src/app_state.rs`
 
-- [ ] Replace the body of `src/app.rs` with a thin re-export shim:
+- [x] Replace the body of `src/app.rs` with a thin re-export shim:
 
   ```rust
   // src/app.rs — transitional shim; remove after full migration
   pub use crate::app_state::*;
   ```
 
-- [ ] Verify `make test` passes.
+- [x] Verify `make test` passes.
 
 ### Step 3 — Implement `src/presenter.rs` with `update()` and routing functions
 
