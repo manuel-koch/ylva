@@ -27,10 +27,13 @@
 
 use std::time::{Duration, Instant};
 
+use std::sync::Arc;
+
 use crossterm::event::KeyEvent;
 use ratatui::layout::Rect;
 use uuid::Uuid;
 
+use crate::agent::tools::ToolRegistry;
 use crate::agent::{AgentMode, UiUpdate};
 
 // ─── Duration constant ───────────────────────────────────────────────────────
@@ -164,6 +167,10 @@ pub enum HistoryDirection {
 /// The TUI's live rendering state. Populated exclusively by
 /// [`TuiState::apply_update`] (from `UiUpdate`) and the driver helpers below.
 pub struct TuiState {
+    /// Registry of known tools, used to look up schema-derived argument display
+    /// order for tool bubbles. An empty registry is used when no tools are
+    /// registered (e.g. in tests), which preserves the LLM-supplied key order.
+    pub registry: Arc<ToolRegistry>,
     pub agent_mode: AgentMode,
     pub chat_entries: Vec<ChatEntry>,
     pub partial_assistant_text: String,
@@ -233,6 +240,7 @@ pub struct TuiState {
 impl TuiState {
     pub fn new() -> Self {
         TuiState {
+            registry: Arc::new(ToolRegistry::new()),
             agent_mode: AgentMode::Idle,
             chat_entries: Vec::new(),
             partial_assistant_text: String::new(),
@@ -1351,6 +1359,8 @@ pub enum Effect {
     StartInputSelection,
     /// Extend the textarea text selection to the given terminal cell.
     ExtendInputSelection { column: u16, row: u16 },
+    /// Copy the given text to the OS clipboard.
+    CopyToClipboard(String),
     /// Finalize and copy the current textarea text selection.
     FinalizeInputSelection,
 }
@@ -1429,6 +1439,14 @@ pub struct AppLayout {
     pub chat_area: ChatArea,
     pub input_area: InputAreaLayout,
     pub help_popup: HelpPopupLayout,
+    /// Rect of the Approve button rendered in the tool-approval footer.
+    /// Written by the Driver after each `ui::draw` call; zero-sized when
+    /// no approval footer is visible.
+    pub approve_button: Rect,
+    /// Rect of the Deny button rendered in the tool-approval footer.
+    /// Written by the Driver after each `ui::draw` call; zero-sized when
+    /// no approval footer is visible.
+    pub deny_button: Rect,
 }
 
 // ─── AppState ────────────────────────────────────────────────────────────────
@@ -1505,6 +1523,13 @@ pub struct AppState {
     // ── chat drag selection ──────────────────────────────────────────────────
     /// `true` while the left mouse button is held down in the chat area.
     pub chat_drag_active: bool,
+
+    // ── abort-exit flag ──────────────────────────────────────────────────────
+    /// `true` when `TuiMode::Aborting` was entered via Ctrl+C double-press,
+    /// meaning the Driver should break the event loop once mode returns to
+    /// Idle. `false` when Aborting was entered via Esc (soft cancel) — the
+    /// TUI stays open so the user can continue chatting.
+    pub aborting_exit: bool,
 }
 
 impl AppState {
@@ -1545,6 +1570,7 @@ impl AppState {
             _history_direction: None,
 
             chat_drag_active: false,
+            aborting_exit: false,
         }
     }
 
@@ -1772,6 +1798,75 @@ impl AppState {
         if self.history_index.is_some() {
             self.draft = current_text.to_string();
             self.history_index = None;
+        }
+    }
+
+    // ── View-layer helpers ────────────────────────────────────────────────────
+
+    /// Convert the current [`TuiMode`] (and [`Focus`]) to the legacy
+    /// [`AgentMode`] used by `ui.rs` for footer and spinner rendering.
+    pub fn agent_mode(&self) -> AgentMode {
+        match &self.mode {
+            TuiMode::Idle => AgentMode::Idle,
+            TuiMode::Pending => AgentMode::Pending,
+            TuiMode::Streaming => {
+                if matches!(self.focus, Focus::ToolApproval { .. }) {
+                    AgentMode::ToolPending
+                } else {
+                    AgentMode::Streaming
+                }
+            }
+            TuiMode::Aborting => AgentMode::Aborting,
+            TuiMode::DoublePressAbort { return_to, .. } => match return_to.as_ref() {
+                TuiMode::Idle | TuiMode::DoublePressAbort { .. } => AgentMode::Idle,
+                TuiMode::Pending => AgentMode::Pending,
+                TuiMode::Streaming => AgentMode::Streaming,
+                TuiMode::Aborting => AgentMode::Aborting,
+            },
+        }
+    }
+
+    /// Returns `true` when the help popup is currently displayed.
+    pub fn show_help(&self) -> bool {
+        matches!(self.focus, Focus::HelpPopup)
+    }
+
+    /// Returns `true` when a tool is awaiting user approval.
+    pub fn is_approval_pending(&self) -> bool {
+        matches!(self.focus, Focus::ToolApproval { .. })
+    }
+
+    /// Returns the name of the tool awaiting approval, or `None` when not in
+    /// approval sub-mode.
+    pub fn approval_tool_name(&self) -> Option<&str> {
+        if let Focus::ToolApproval { tool_name, .. } = &self.focus {
+            Some(tool_name.as_str())
+        } else {
+            None
+        }
+    }
+
+    /// Update the tool bubble for `id` to the Error state. If `id` was the
+    /// tool awaiting approval, clear the approval focus and reset mode to Idle.
+    pub fn apply_tool_error(&mut self, id: Uuid, error: String) {
+        if let Some(entry) = self.find_tool_bubble_mut(id) {
+            if let ChatEntry::ToolBubble {
+                state: bubble_state,
+                ..
+            } = entry
+            {
+                *bubble_state = ToolBubbleState::Error {
+                    error: error.clone(),
+                };
+            }
+        } else {
+            self.chat_entries.push(ChatEntry::ErrorLine {
+                message: error.clone(),
+            });
+        }
+        if matches!(self.focus, Focus::ToolApproval { tool_id, .. } if tool_id == id) {
+            self.focus = Focus::MainInput;
+            self.mode = TuiMode::Idle;
         }
     }
 }

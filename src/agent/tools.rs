@@ -214,6 +214,18 @@ impl ToolRegistry {
         self.tools.keys().cloned().collect()
     }
 
+    /// Returns the display-order rank for `key` in the named tool's schema.
+    ///
+    /// Delegates to [`Tool::argument_order`] for the registered tool. Returns
+    /// `usize::MAX` when the tool name is not registered, so unknown tools
+    /// preserve their LLM-supplied key order (stable sort).
+    pub fn argument_order(&self, tool_name: &str, key: &str) -> usize {
+        self.tools
+            .get(tool_name)
+            .map(|tool| tool.argument_order(key))
+            .unwrap_or(usize::MAX)
+    }
+
     /// The OpenAI wire schemas for every registered tool (the `tools` array).
     pub fn schemas(&self) -> Vec<ToolSchema> {
         self.tools

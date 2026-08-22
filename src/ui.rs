@@ -24,6 +24,7 @@ use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 use ratatui::Frame;
 use ratatui_textarea::TextArea;
 
+use crate::agent::tools::ToolRegistry;
 use crate::agent::AgentMode;
 use crate::app::{ChatEntry, ToolBubbleState, TuiState, UserMessageState};
 use crate::build_info::BUILD_INFO;
@@ -368,6 +369,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
                         state: bubble_state,
                         collapsed: *collapsed,
                         spinner_frame: state.spinner_frame,
+                        registry: &state.registry,
                     },
                     &mut bubble_title_rows_out,
                     wrap_width,
@@ -426,6 +428,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
                 state: bubble_state,
                 collapsed: *collapsed,
                 spinner_frame: state.spinner_frame,
+                registry: &state.registry,
             },
             &mut bubble_title_rows_out,
             wrap_width,
@@ -938,6 +941,7 @@ struct ToolBubbleArgs<'a> {
     state: &'a ToolBubbleState,
     collapsed: bool,
     spinner_frame: u8,
+    registry: &'a ToolRegistry,
 }
 
 fn append_tool_bubble_lines(
@@ -953,6 +957,7 @@ fn append_tool_bubble_lines(
         state,
         collapsed,
         spinner_frame,
+        registry,
     } = bubble;
     let bar = Span::styled(
         "▌",
@@ -968,7 +973,17 @@ fn append_tool_bubble_lines(
         Span::styled(" ".repeat(pad), Style::default().bg(TOOL_BUBBLE_BG_COLOR))
     };
 
-    let expand_indicator = if collapsed { "▶" } else { "▼" };
+    let has_expandable_body =
+        matches!(state, ToolBubbleState::Done { result, .. } if !result.is_empty());
+    let expand_indicator = if has_expandable_body {
+        if collapsed {
+            "▶"
+        } else {
+            "▼"
+        }
+    } else {
+        " "
+    };
 
     // Capitalise the tool name for display.
     let display_title: String = {
@@ -979,29 +994,43 @@ fn append_tool_bubble_lines(
         }
     };
 
-    // Format non-null argument values as `key=value` pairs for the title.
+    // Format arguments for the title:
+    // - primary arg (schema rank 0): value only, rendered in bold.
+    // - remaining args: `key=value` pairs, rendered dim.
     let maybe_args = match state {
         ToolBubbleState::Pending { arguments }
         | ToolBubbleState::Running { arguments }
         | ToolBubbleState::Done { arguments, .. } => Some(arguments),
         _ => None,
     };
-    let props_text: String = if let Some(arguments) = maybe_args {
+    let (primary_text, props_text): (Option<String>, String) = if let Some(arguments) = maybe_args {
         arguments
             .as_object()
             .map(|map| {
-                map.iter()
-                    .filter(|(_, v)| !v.is_null())
-                    .map(|(k, v)| {
-                        let val = v.as_str().unwrap_or_default();
-                        format!("{k}={val}")
-                    })
+                let mut entries: Vec<(&String, &serde_json::Value)> =
+                    map.iter().filter(|(_, v)| !v.is_null()).collect();
+                entries.sort_by_key(|(k, _)| registry.argument_order(name, k));
+
+                let scalar_value = |v: &serde_json::Value| -> Option<String> {
+                    match v {
+                        serde_json::Value::String(s) => Some(s.clone()),
+                        serde_json::Value::Number(n) => Some(n.to_string()),
+                        serde_json::Value::Bool(b) => Some(b.to_string()),
+                        _ => None,
+                    }
+                };
+
+                let mut iter = entries.into_iter();
+                let primary = iter.next().and_then(|(_, v)| scalar_value(v));
+                let rest = iter
+                    .filter_map(|(k, v)| scalar_value(v).map(|s| format!("{k}={s}")))
                     .collect::<Vec<_>>()
-                    .join(" ")
+                    .join(" ");
+                (primary, rest)
             })
             .unwrap_or_default()
     } else {
-        String::new()
+        (None, String::new())
     };
 
     // Result summary appended to the title for Done state.
@@ -1059,12 +1088,32 @@ fn append_tool_bubble_lines(
         ),
     ];
     let mut title_len = title_prefix.chars().count();
+    let has_args = primary_text.as_ref().is_some_and(|s| !s.is_empty()) || !props_text.is_empty();
+    let tool_ran = matches!(state, ToolBubbleState::Done { .. });
+    if let Some(primary) = primary_text {
+        if !primary.is_empty() {
+            let segment = format!(" {primary}");
+            title_len += segment.chars().count();
+            title_spans.push(Span::styled(
+                segment,
+                Style::default()
+                    .fg(Color::White)
+                    .bg(TOOL_BUBBLE_BG_COLOR)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+    }
     if !props_text.is_empty() {
         let segment = format!(" {props_text}");
         title_len += segment.chars().count();
         title_spans.push(Span::styled(segment, dim_white));
     }
     if !summary_text.is_empty() {
+        if has_args && tool_ran {
+            let arrow = " →";
+            title_len += arrow.chars().count();
+            title_spans.push(Span::styled(arrow, dim_white));
+        }
         let segment = format!(" {summary_text}");
         title_len += segment.chars().count();
         title_spans.push(Span::styled(segment, dim_white));
@@ -1148,7 +1197,25 @@ fn draw_normal_footer(
     let row_1_text = if let Some(hint) = hint {
         hint.to_string()
     } else if state.steer_indicator {
-        format!(" {spinner_prefix}{mode_word}  ⋮ 1 steer queued")
+        let queued_count = state
+            .chat_entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry,
+                    ChatEntry::UserMessage {
+                        state: UserMessageState::Queued,
+                        ..
+                    }
+                )
+            })
+            .count();
+        let steer_label = if queued_count == 1 {
+            "1 steer queued".to_string()
+        } else {
+            format!("{queued_count} steers queued")
+        };
+        format!(" {spinner_prefix}{mode_word}  ⋮ {steer_label}")
     } else {
         format!(" {spinner_prefix}{mode_word}")
     };

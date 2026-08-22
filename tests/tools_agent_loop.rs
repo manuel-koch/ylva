@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 
 use ylva::{
     default_registry, AgentCommand, AgentLoop, DeltaChunk, Message, MockEvent, MockProvider, Tool,
-    ToolError, ToolOutput, ToolRegistry, UiUpdate, MAX_ITERATIONS,
+    ToolError, ToolOutput, ToolRegistry, UiUpdate, MAX_TOOL_USE_ITERATIONS,
 };
 
 /// Build a `MockEvent::Delta` carrying a complete tool call for `index`.
@@ -535,7 +535,7 @@ async fn iteration_guard_stops_after_max_reprompts() {
         .iter()
         .filter(|u| matches!(u, UiUpdate::StreamStarted))
         .count();
-    assert_eq!(starts, MAX_ITERATIONS);
+    assert_eq!(starts, MAX_TOOL_USE_ITERATIONS);
 
     drop(agent);
     let context = handle.await.expect("loop ok").expect("context");

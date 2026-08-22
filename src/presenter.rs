@@ -192,8 +192,9 @@ fn handle_ctrl_c_generic(state: &mut AppState, textarea_is_empty: bool) -> Vec<E
                 state.mode = TuiMode::Idle;
                 vec![Effect::Quit]
             } else {
-                // Busy double-press → stop agent.
+                // Busy double-press → stop agent and exit TUI on done.
                 state.mode = TuiMode::Aborting;
+                state.aborting_exit = true;
                 vec![Effect::StopAgent]
             }
         }
@@ -231,12 +232,16 @@ fn handle_escape_main(state: &mut AppState, textarea: &TextareaContext) -> Vec<E
         return vec![Effect::ClearTextarea];
     }
 
-    // Busy with empty input: double-press → stop.
+    // Busy with empty input: double-press → stop, but stay in the TUI.
+    // Unlike Ctrl+C, Esc does not set aborting_exit; the TUI remains open
+    // when StreamCancelled transitions mode to Idle.
     let current_mode = std::mem::replace(&mut state.mode, TuiMode::Idle);
     match current_mode {
         TuiMode::DoublePressAbort { return_to, .. } => {
+            // Enter Aborting for visual feedback ("Aborting…" in footer +
+            // spinner) but leave aborting_exit = false so the Driver stays open.
             state.mode = TuiMode::Aborting;
-            let _ = return_to; // consumed
+            let _ = return_to;
             vec![Effect::StopAgent]
         }
         mode => {
@@ -352,7 +357,7 @@ fn route_mouse(
                 // direct textarea.scroll calls. We use a raw mouse effect pass-through.
                 // Since we can't embed mouse events in Effect, we emit nothing
                 // and rely on the driver's fallback scroll handler for input.
-                // (Input area scroll is a driver concern; see tui_runner.rs.)
+                // (Input area scroll is a driver concern; see tui_driver.rs.)
             } else {
                 if scroll_up {
                     state.scroll_up(1);
@@ -372,6 +377,28 @@ fn route_mouse(
                     state.help_scroll_x = 0;
                 }
                 return vec![];
+            }
+
+            // Approve / Deny button clicks while in tool-approval focus.
+            if let Focus::ToolApproval { tool_id, .. } = state.focus {
+                let approve = state.layout.approve_button;
+                let deny = state.layout.deny_button;
+                let in_approve = column >= approve.x
+                    && column < approve.x + approve.width
+                    && row >= approve.y
+                    && row < approve.y + approve.height;
+                let in_deny = column >= deny.x
+                    && column < deny.x + deny.width
+                    && row >= deny.y
+                    && row < deny.y + deny.height;
+                if in_approve {
+                    state.focus = Focus::MainInput;
+                    return vec![Effect::ApproveTool { id: tool_id }, Effect::RestoreTextarea];
+                }
+                if in_deny {
+                    state.focus = Focus::MainInput;
+                    return vec![Effect::DenyTool { id: tool_id }, Effect::RestoreTextarea];
+                }
             }
 
             let in_chat = state.layout.chat_area.contains(column, row);
@@ -418,8 +445,7 @@ fn route_mouse(
                 let selected_text = state.extract_chat_selection_text();
                 if let Some(text) = selected_text {
                     if !text.is_empty() {
-                        // Driver will copy to clipboard.
-                        return vec![];
+                        return vec![Effect::CopyToClipboard(text)];
                     }
                 }
                 // Plain click — toggle bubble if clicked on title row.
@@ -755,12 +781,14 @@ fn domain_aborting(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
                 state.focus = Focus::MainInput;
             }
             state.mode = TuiMode::Idle;
+            state.aborting_exit = false;
             state.scroll_locked = true;
             state.scroll_offset = 0;
             vec![]
         }
         DomainEvent::AgentIdle => {
             state.mode = TuiMode::Idle;
+            state.aborting_exit = false;
             state.focus = Focus::MainInput;
             vec![]
         }
@@ -818,7 +846,7 @@ fn domain_aborting(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
 fn domain_double_press(
     state: &mut AppState,
     event: DomainEvent,
-    _pressed_at: Instant,
+    pressed_at: Instant,
     return_to: Box<TuiMode>,
 ) -> Vec<Effect> {
     match event {
@@ -828,9 +856,21 @@ fn domain_double_press(
             vec![]
         }
         other_event => {
-            // Delegate to the underlying mode's handler.
+            // Temporarily restore the underlying mode so domain handlers can
+            // process the event. If the handler didn't change the mode (i.e.
+            // it was a side-effect-only update like StreamChunk or ToolDone),
+            // reinstate DoublePressAbort so the confirm window remains active.
+            // If the handler did change mode (e.g. StreamDone → Idle), the
+            // new mode stays.
             state.mode = *return_to.clone();
-            route_domain(state, other_event)
+            let effects = route_domain(state, other_event);
+            if state.mode == *return_to {
+                state.mode = TuiMode::DoublePressAbort {
+                    pressed_at,
+                    return_to,
+                };
+            }
+            effects
         }
     }
 }
@@ -1134,13 +1174,22 @@ mod tests {
             matches!(state.mode, TuiMode::DoublePressAbort { .. }),
             "expected DoublePressAbort after first Escape"
         );
-        // Second press → stop.
+        // Second press → stop agent but stay in TUI (mode should be Aborting
+        // for visual feedback, but aborting_exit must stay false).
         let effects = update(
             &mut state,
             TuiEvent::Input(InputEvent::Escape),
             &empty_textarea(),
         );
         assert!(effects.contains(&Effect::StopAgent));
+        assert!(
+            matches!(state.mode, TuiMode::Aborting),
+            "Esc second press must set Aborting for visual feedback"
+        );
+        assert!(
+            !state.aborting_exit,
+            "Esc second press must not set aborting_exit — TUI must stay open"
+        );
     }
 
     // ── ShowHelp ──────────────────────────────────────────────────────────────
@@ -1273,6 +1322,35 @@ mod tests {
         assert_eq!(state.focus, Focus::MainInput);
     }
 
+    #[test]
+    fn chat_drag_mouse_up_emits_copy_to_clipboard_effect() {
+        // The Presenter must emit CopyToClipboard so the Driver can handle the
+        // I/O without the test touching the OS clipboard.
+        let mut state = AppState::new();
+        state.chat_drag_active = true;
+        state.chat_rendered_lines = vec!["hello world".to_string()];
+        state.chat_selection = Some(ChatSelection {
+            anchor_line: 0,
+            anchor_col: 0,
+            cursor_line: 0,
+            cursor_col: 5,
+        });
+        let mouse = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: 5,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        };
+        let effects = update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::CopyToClipboard(t) if t == "hello")),
+            "expected CopyToClipboard(\"hello\"), got {effects:?}"
+        );
+        assert!(!state.chat_drag_active, "drag should be cleared");
+    }
+
     // ── Domain events ─────────────────────────────────────────────────────────
 
     #[test]
@@ -1325,5 +1403,30 @@ mod tests {
             &empty_textarea(),
         );
         assert_eq!(state.mode, TuiMode::Streaming);
+    }
+
+    #[test]
+    fn stream_chunk_during_double_press_abort_preserves_confirm_window() {
+        // A StreamChunk must not destroy the DoublePressAbort mode — the user
+        // must still be able to land the second Esc while the model streams.
+        let mut state = AppState::new();
+        let pressed_at = Instant::now();
+        state.mode = TuiMode::DoublePressAbort {
+            pressed_at,
+            return_to: Box::new(TuiMode::Streaming),
+        };
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::StreamChunk("hello".to_string())),
+            &empty_textarea(),
+        );
+        assert!(
+            matches!(state.mode, TuiMode::DoublePressAbort { .. }),
+            "DoublePressAbort must survive a StreamChunk"
+        );
+        assert_eq!(
+            state.partial_assistant_text, "hello",
+            "chunk must still be appended"
+        );
     }
 }

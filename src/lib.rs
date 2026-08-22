@@ -21,7 +21,7 @@ pub mod headless_runner;
 pub mod llm;
 pub mod logging;
 pub mod presenter;
-pub mod tui_runner;
+pub mod tui_driver;
 pub mod ui;
 
 #[cfg(test)]
@@ -33,7 +33,8 @@ pub use agent::tools::{default_registry, Tool, ToolError, ToolOutput, ToolRegist
 pub use agent::{
     AgentCommand, AgentEvent, AgentLoop, AgentMode, AssembledToolCall, AssistantStatus, Context,
     DeltaChunk, Message, PendingTool, StreamEvent, ToolCallRequest, UiUpdate, UserMessageKind,
-    DEFAULT_SYSTEM_PROMPT, DEFAULT_TOOL_TIMEOUT_SECS, MAX_ITERATIONS, TOOL_PROTOCOL_SYSTEM_PROMPT,
+    DEFAULT_SYSTEM_PROMPT, DEFAULT_TOOL_TIMEOUT_SECS, MAX_TOOL_USE_ITERATIONS,
+    TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
 pub use app::{ChatEntry, ChatSelection, ToolBubbleState, TuiState, UserMessageState};
 pub use build_info::{BuildInfo, BUILD_INFO};

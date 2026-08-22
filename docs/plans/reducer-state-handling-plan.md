@@ -194,34 +194,50 @@ the Driver) form the complete event surface of the Presenter.
 
 ### Step 4 — Rewrite `src/tui_runner.rs` as the Driver
 
-- [ ] Add conversions:
-  - [ ] `fn app_action_to_tui_event(action: AppAction) -> Option<TuiEvent>` —
+- [x] Add conversions:
+  - [x] `fn app_action_to_tui_event(action: AppAction) -> Option<TuiEvent>` —
     maps `AppAction` to `TuiEvent::Input(InputEvent)` or `TuiEvent::Mouse(MouseEvent)`.
-  - [ ] `fn ui_update_to_domain_event(update: &UiUpdate) -> DomainEvent` —
+  - [x] `fn ui_update_to_domain_event(update: &UiUpdate) -> DomainEvent` —
     converts each `UiUpdate` variant to the corresponding `DomainEvent`.
-- [ ] Add `async fn execute_effects(state, textarea, cmd_tx, effects) -> ActionOutcome`:
-  - [ ] `SubmitPrompt { steer }` → `cmd_tx.send(AgentCommand::Prompt)`.
-  - [ ] `ClearTextarea` → replace textarea with a fresh configured default.
-  - [ ] `SaveTextareaAndClear` → snapshot textarea into
+- [x] Add `async fn execute_effects(state, textarea, cmd_tx, effects) -> ActionOutcome`:
+  - [x] `SubmitPrompt { steer }` → `cmd_tx.send(AgentCommand::Prompt)`.
+  - [x] `ClearTextarea` → replace textarea with a fresh configured default.
+  - [x] `SaveTextareaAndClear` → snapshot textarea into
     `state.pending_approval_input_snapshot`, clear textarea.
-  - [ ] `RestoreTextarea` → restore snapshot.
-  - [ ] `TextareaKey(event)` → `textarea.input(event)`.
-  - [ ] `Paste(text)` → existing dedent + feed-chars logic.
-  - [ ] `ApproveTool { id }` → `cmd_tx.send(AgentCommand::ApproveTool { id })`.
-  - [ ] `DenyTool { id }` → `cmd_tx.send(AgentCommand::DenyTool { id, reason })`.
-  - [ ] `StopAgent` → `cmd_tx.send(AgentCommand::Stop)`.
-  - [ ] `Quit` → return `ActionOutcome::Quit`.
+  - [x] `RestoreTextarea` → restore snapshot.
+  - [x] `TextareaKey(event)` → `textarea.input(event)`.
+  - [x] `Paste(text)` → existing dedent + feed-chars logic.
+  - [x] `ApproveTool { id }` → `cmd_tx.send(AgentCommand::ApproveTool { id })`.
+  - [x] `DenyTool { id }` → `cmd_tx.send(AgentCommand::DenyTool { id, reason })`.
+  - [x] `StopAgent` → `cmd_tx.send(AgentCommand::Stop)`.
+  - [x] `Quit` → return `ActionOutcome::Quit`.
 - [ ] Remove `pending_approval: Option<(Uuid, String, Value)>` from `AppState`;
   the tool ID and name are now held in `Focus::ToolApproval { tool_id, tool_name }`,
   and tool arguments remain solely in the corresponding `ToolBubble` chat entry.
-- [ ] Replace `handle_action` with: convert `AppAction` → `TuiEvent`, call `update()`, call `execute_effects()`.
-- [ ] The confirm-timeout `select!` arm fires `update(&mut state, TuiEvent::Domain(DomainEvent::ConfirmExpired))`.
-- [ ] Remove `confirm_state` from driver-local variables (now `TuiMode::DoublePressAbort`).
-- [ ] Keep `mouse_pos` and `mouse_drag` as driver-local state.
-- [ ] Verify Focus transitions for `UiUpdate::ToolPending` / `ToolStart` / `ToolKilled` /
+  _Deferred: `pending_approval` is still needed by `ui::draw` (via a
+  `TuiState` projection) until Step 5 migrates the view layer to `AppState`._
+- [x] Replace `handle_action` with: convert `AppAction` → `TuiEvent`, call `update()`, call `execute_effects()`.
+- [x] The confirm-timeout `select!` arm fires `update(&mut state, TuiEvent::Domain(DomainEvent::ConfirmExpired))`.
+- [x] Remove `confirm_state` from driver-local variables (now `TuiMode::DoublePressAbort`).
+- [x] Keep `mouse_pos` and `mouse_drag` as driver-local state.
+- [x] Verify Focus transitions for `UiUpdate::ToolPending` / `ToolStart` / `ToolKilled` /
   `StreamCancelled` are handled via `DomainEvent` variants in the Presenter; the
   Driver does not manipulate `state.focus` directly.
-- [ ] Verify `make test` and `make lint` pass.
+- [x] Verify `make test` and `make lint` pass.
+
+**Implementation notes (Step 4):**
+
+- `ui::draw` still takes `&mut TuiState` (not `AppState`) because integration
+  tests call it directly with `TuiState`. The Driver projects `AppState →
+  TuiState` via `app_state_for_draw()` each frame, then syncs view-geometry
+  fields back via `sync_from_draw()`. This intermediate layer is removed in
+  Step 5 when `render.rs` is extracted and wired to `AppState` directly.
+- `UiUpdate::ToolError` has no `DomainEvent` counterpart; it is handled
+  directly by `AppState::apply_tool_error()` (added in this step).
+- Helper methods `agent_mode()`, `show_help()`, `is_approval_pending()`,
+  `approval_tool_name()`, and `apply_tool_error()` were added to `AppState`.
+- `run_tui` returns the legacy `TuiState` (converted from `AppState` at exit)
+  so integration-test assertions on `state.agent_mode` continue to compile.
 
 ### Step 5 — Extract `src/render.rs` from `src/ui.rs`
 

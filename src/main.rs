@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use ylva::llm::{MockProvider, OpenAiProvider, Provider};
 use ylva::logging::{init_logging, LogConfig, LogFormat};
-use ylva::{default_registry, headless_runner, tui_runner};
+use ylva::{default_registry, headless_runner, tui_driver};
 
 /// Fallback demo prompt used when neither `--prompt` nor piped stdin supplies
 /// the initial user turn.
@@ -58,7 +58,7 @@ fn main() {
         // piped stdin) still auto-sends, but the hardcoded demo prompt is only
         // for the headless path — it must not pre-populate the interactive UI.
         let explicit_prompt = explicit_prompt(args);
-        let exit_code = runtime.block_on(tui_runner::run_tui_on_stdout(
+        let exit_code = runtime.block_on(tui_driver::run_tui_on_stdout(
             provider,
             registry,
             explicit_prompt,

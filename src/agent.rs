@@ -28,10 +28,10 @@ pub mod tools;
 
 use tools::{TimedOutput, ToolError, ToolOutput, ToolRegistry};
 
-/// Maximum number of LLM requests the ReAct loop starts within a single user
+/// Maximum number of LLM requests the tool-use loop starts within a single user
 /// turn before the guard stops re-prompting. Per-engine configurability is a
 /// later (Phase 5) concern; this module-level default is the Phase 3 SSOT.
-pub const MAX_ITERATIONS: usize = 15;
+pub const MAX_TOOL_USE_ITERATIONS: usize = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentMode {
@@ -561,6 +561,7 @@ impl AgentLoop {
                                 }
                                 mode = AgentMode::ToolPending;
                                 if let Some(first) = pending_tools.front() {
+                                    log_tool_approval_request(&first.call, &registry);
                                     let _ = ui_tx
                                         .send(UiUpdate::ToolPending {
                                             name: first.call.name.clone(),
@@ -589,6 +590,7 @@ impl AgentLoop {
                                     &mut current_cancel,
                                     &mut iterations,
                                     provider.clone(),
+                                    &registry,
                                     registry.schemas(),
                                     ui_tx.clone(),
                                     agent_tx.clone(),
@@ -606,6 +608,7 @@ impl AgentLoop {
                                     &mut current_cancel,
                                     &mut iterations,
                                     provider.clone(),
+                                    &registry,
                                     registry.schemas(),
                                     ui_tx.clone(),
                                     agent_tx.clone(),
@@ -663,7 +666,7 @@ impl AgentLoop {
                                     let name = pending.call.name.clone();
                                     let call_id = pending.call.id;
                                     let arguments = pending.call.arguments.clone();
-                                    tracing::debug!(tool = %name, "tool approved");
+                                    tracing::info!(tool = %name, tool_call_id = %call_id, "tool approved");
                                     current_tool_cancel = Some(PendingTool::execute(
                                         pending,
                                         registry.clone(),
@@ -689,7 +692,7 @@ impl AgentLoop {
                                         pending_tools.pop_front().expect("checked front");
                                     let name = denied.call.name;
                                     let call_id = denied.call.id;
-                                    tracing::debug!(tool = %name, "tool denied");
+                                    tracing::info!(tool = %name, tool_call_id = %call_id, "tool denied");
                                     let mut error = format!("tool '{name}' was denied");
                                     if !reason.is_empty() {
                                         error.push_str(&format!(": {reason}"));
@@ -716,6 +719,7 @@ impl AgentLoop {
                                         &mut current_cancel,
                                         &mut iterations,
                                         provider.clone(),
+                                        &registry,
                                         registry.schemas(),
                                         ui_tx.clone(),
                                         agent_tx.clone(),
@@ -766,6 +770,24 @@ impl AgentLoop {
     }
 }
 
+/// Log the "tool approval requested" event for the given pending call using the
+/// tool's own non-default redacted arguments so sensitive values are never
+/// written to the log.
+fn log_tool_approval_request(call: &AssembledToolCall, registry: &ToolRegistry) {
+    if let Some(tool) = registry.get(&call.name) {
+        let safe_args: serde_json::Map<String, serde_json::Value> = tool
+            .non_default_redacted_arguments(&call.arguments)
+            .into_iter()
+            .collect();
+        tracing::info!(
+            tool = %call.name,
+            tool_call_id = %call.id,
+            args = %serde_json::to_string(&safe_args).unwrap_or_else(|_| "{}".to_string()),
+            "tool approval requested"
+        );
+    }
+}
+
 /// Advance the pending-tool queue after one call completes (executed, errored,
 /// or denied). If a call remains, stay in `ToolPending` and surface the next
 /// approval request; otherwise re-prompt the model — the internal deferred
@@ -778,11 +800,13 @@ async fn advance_tool_queue(
     current_cancel: &mut Option<CancellationToken>,
     iterations: &mut usize,
     provider: Arc<dyn Provider>,
+    registry: &ToolRegistry,
     tools: Vec<ToolSchema>,
     ui_tx: mpsc::Sender<UiUpdate>,
     agent_tx: mpsc::Sender<AgentEvent>,
 ) {
     if let Some(next) = pending_tools.front() {
+        log_tool_approval_request(&next.call, registry);
         let _ = ui_tx
             .send(UiUpdate::ToolPending {
                 name: next.call.name.clone(),
@@ -794,10 +818,12 @@ async fn advance_tool_queue(
     }
     *iterations += 1;
     tracing::debug!(iterations = *iterations, "advancing tool queue");
-    if *iterations > MAX_ITERATIONS {
-        tracing::warn!(iterations = *iterations, "max ReAct iterations exceeded");
+    if *iterations > MAX_TOOL_USE_ITERATIONS {
+        tracing::warn!(iterations = *iterations, "max tool-use iterations exceeded");
         let _ = ui_tx
-            .send(UiUpdate::Error("max ReAct iterations exceeded".to_string()))
+            .send(UiUpdate::Error(
+                "max tool-use iterations exceeded".to_string(),
+            ))
             .await;
         *mode = AgentMode::Idle;
         return;

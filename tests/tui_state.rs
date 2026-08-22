@@ -22,7 +22,8 @@ use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 use tokio::sync::mpsc;
 
-use ylva::{tui_runner, AppAction, ChatEntry, MockProvider, ToolRegistry, UserMessageState};
+use ylva::tui_driver::NoopClipboard;
+use ylva::{tui_driver, AppAction, ChatEntry, MockProvider, ToolRegistry, UserMessageState};
 
 /// Type `text` into the (driver-owned) textarea and press Enter.
 async fn type_and_enter(tx: &mpsc::Sender<AppAction>, text: &str) {
@@ -61,9 +62,16 @@ async fn typed_enter_creates_sent_user_bubble_and_assistant() {
     let run_handle = tokio::spawn({
         let mut terminal = terminal;
         async move {
-            tui_runner::run_tui(&mut terminal, Arc::new(provider), registry, None, action_rx)
-                .await
-                .expect("run_tui completed")
+            tui_driver::run_tui(
+                &mut terminal,
+                Arc::new(provider),
+                registry,
+                None,
+                action_rx,
+                &mut NoopClipboard,
+            )
+            .await
+            .expect("run_tui completed")
         }
     });
 
@@ -106,9 +114,16 @@ async fn double_press_ctrl_c_mid_stream_cancels_pending_steer() {
     let run_handle = tokio::spawn({
         let mut terminal = terminal;
         async move {
-            tui_runner::run_tui(&mut terminal, Arc::new(provider), registry, None, action_rx)
-                .await
-                .expect("run_tui completed")
+            tui_driver::run_tui(
+                &mut terminal,
+                Arc::new(provider),
+                registry,
+                None,
+                action_rx,
+                &mut NoopClipboard,
+            )
+            .await
+            .expect("run_tui completed")
         }
     });
 
@@ -156,9 +171,16 @@ async fn key_agnostic_ctrl_c_then_escape_stops_stream() {
     let run_handle = tokio::spawn({
         let mut terminal = terminal;
         async move {
-            tui_runner::run_tui(&mut terminal, Arc::new(provider), registry, None, action_rx)
-                .await
-                .expect("run_tui completed")
+            tui_driver::run_tui(
+                &mut terminal,
+                Arc::new(provider),
+                registry,
+                None,
+                action_rx,
+                &mut NoopClipboard,
+            )
+            .await
+            .expect("run_tui completed")
         }
     });
 
@@ -203,9 +225,16 @@ async fn steer_cycle_leaves_no_queued_entries() {
     let run_handle = tokio::spawn({
         let mut terminal = terminal;
         async move {
-            tui_runner::run_tui(&mut terminal, Arc::new(provider), registry, None, action_rx)
-                .await
-                .expect("run_tui completed")
+            tui_driver::run_tui(
+                &mut terminal,
+                Arc::new(provider),
+                registry,
+                None,
+                action_rx,
+                &mut NoopClipboard,
+            )
+            .await
+            .expect("run_tui completed")
         }
     });
 
@@ -243,12 +272,13 @@ async fn initial_prompt_produces_sent_bubble() {
     let run_handle = tokio::spawn({
         let mut terminal = terminal;
         async move {
-            tui_runner::run_tui(
+            tui_driver::run_tui(
                 &mut terminal,
                 Arc::new(provider),
                 registry,
                 Some("init".to_string()),
                 action_rx,
+                &mut NoopClipboard,
             )
             .await
             .expect("run_tui completed")
@@ -282,9 +312,16 @@ async fn drag_in_chat_area_selects_text() {
     let run_handle = tokio::spawn({
         let mut terminal = terminal;
         async move {
-            tui_runner::run_tui(&mut terminal, Arc::new(provider), registry, None, action_rx)
-                .await
-                .expect("run_tui completed")
+            tui_driver::run_tui(
+                &mut terminal,
+                Arc::new(provider),
+                registry,
+                None,
+                action_rx,
+                &mut NoopClipboard,
+            )
+            .await
+            .expect("run_tui completed")
         }
     });
 
@@ -577,12 +614,13 @@ async fn message_sent_while_submitted_is_queued_not_sent() {
     let run_handle = tokio::spawn({
         let mut terminal = terminal;
         async move {
-            ylva::tui_runner::run_tui(
+            ylva::tui_driver::run_tui(
                 &mut terminal,
                 std::sync::Arc::new(provider),
                 registry,
                 None,
                 action_rx,
+                &mut NoopClipboard,
             )
             .await
             .expect("run_tui")
@@ -705,4 +743,49 @@ fn pending_tool_bubble_renders_after_completed_entries() {
         has_pending,
         "chat_entries should still contain a Pending tool bubble"
     );
+}
+
+#[tokio::test]
+async fn escape_twice_while_streaming_stops_stream_but_keeps_tui_open() {
+    // Esc+Esc must stop the agent but NOT exit the TUI (unlike Ctrl+C+Ctrl+C).
+    let provider = MockProvider::new(
+        vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        Duration::from_millis(40),
+    );
+    let backend = TestBackend::new(80, 24);
+    let terminal = Terminal::new(backend).expect("test terminal");
+    let (action_tx, action_rx) = mpsc::channel(64);
+    let registry = Arc::new(ToolRegistry::new());
+
+    let run_handle = tokio::spawn({
+        let mut terminal = terminal;
+        async move {
+            tui_driver::run_tui(
+                &mut terminal,
+                Arc::new(provider),
+                registry,
+                None,
+                action_rx,
+                &mut NoopClipboard,
+            )
+            .await
+            .expect("run_tui completed")
+        }
+    });
+
+    type_and_enter(&action_tx, "hello").await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    send(&action_tx, AppAction::Escape).await; // first press: enter confirm
+    send(&action_tx, AppAction::Escape).await; // second press: send Stop, stay in TUI
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    // TUI must still be running after Esc+Esc.
+    assert!(
+        !run_handle.is_finished(),
+        "TUI must remain open after Esc+Esc"
+    );
+    drop(action_tx);
+
+    let state = run_handle.await.expect("task joined");
+    assert_eq!(state.agent_mode, ylva::AgentMode::Idle);
 }
