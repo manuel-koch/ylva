@@ -93,9 +93,8 @@ fn highlighted_lines_cached(content: &str, file_extension: Option<&str>) -> High
     })
 }
 
-use crate::agent::tools::ToolRegistry;
 use crate::agent::AgentMode;
-use crate::app::{ChatEntry, ToolBubbleState, TuiState, UserMessageState};
+use crate::app::{ChatEntry, ToolCallState, TuiState, UserMessageState};
 use crate::build_info::BUILD_INFO;
 
 // User message border colors — extract into Theme struct in a later phase.
@@ -146,7 +145,7 @@ const LOGO: [&str; 7] = [
     "  ╚██╔╝  ██║     ╚██╗ ██╔╝██╔══██║",
     "   ██║   ███████╗ ╚████╔╝ ██║  ██║",
     "   ╚═╝   ╚══════╝  ╚═══╝  ╚═╝  ╚═╝",
-    "    Taming the pack of agents!    ",
+    "  Taming the wild pack of agents! ",
 ];
 
 /// Clickable approval button rects returned by `draw` when in approval sub-mode.
@@ -379,7 +378,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
     // Pending tool bubbles (awaiting approval) are deferred to the very end
     // of the conversation so they stay close to the approve/deny footer
     // regardless of how many earlier entries exist.
-    let mut deferred_pending_tool_bubbles: Vec<(uuid::Uuid, String, ToolBubbleState, bool)> =
+    let mut deferred_pending_tool_bubbles: Vec<(uuid::Uuid, String, ToolCallState, bool)> =
         Vec::new();
     // Rebuilt every frame; assigned to state after the loop (avoids a borrow
     // conflict between iterating state.chat_entries and mutating state).
@@ -421,7 +420,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
             } => {
                 // Pending tool bubbles are deferred so they render at the bottom,
                 // close to the approve/deny footer buttons.
-                if matches!(bubble_state, ToolBubbleState::Pending { .. }) {
+                if matches!(bubble_state, ToolCallState::Pending { .. }) {
                     deferred_pending_tool_bubbles.push((
                         *id,
                         name.clone(),
@@ -438,7 +437,6 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
                         state: bubble_state,
                         collapsed: *collapsed,
                         spinner_frame: state.spinner_frame,
-                        registry: &state.registry,
                     },
                     &mut bubble_title_rows_out,
                     wrap_width,
@@ -497,7 +495,6 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
                 state: bubble_state,
                 collapsed: *collapsed,
                 spinner_frame: state.spinner_frame,
-                registry: &state.registry,
             },
             &mut bubble_title_rows_out,
             wrap_width,
@@ -1007,10 +1004,9 @@ fn append_user_lines(
 struct ToolBubbleArgs<'a> {
     id: uuid::Uuid,
     name: &'a str,
-    state: &'a ToolBubbleState,
+    state: &'a ToolCallState,
     collapsed: bool,
     spinner_frame: u8,
-    registry: &'a ToolRegistry,
 }
 
 fn append_tool_bubble_lines(
@@ -1026,7 +1022,6 @@ fn append_tool_bubble_lines(
         state,
         collapsed,
         spinner_frame,
-        registry,
     } = bubble;
     let bar = Span::styled(
         "▌",
@@ -1046,56 +1041,55 @@ fn append_tool_bubble_lines(
     // - primary arg (schema rank 0): value only, rendered in bold.
     // - remaining args: `key=value` pairs, rendered dim.
     // - body arguments (declared by the tool) are omitted from the title.
-    let maybe_args = match state {
-        ToolBubbleState::Pending { arguments }
-        | ToolBubbleState::Running { arguments }
-        | ToolBubbleState::Done { arguments, .. }
-        | ToolBubbleState::Denied { arguments, .. } => Some(arguments),
-        _ => None,
+    let title_arguments = match state {
+        ToolCallState::Pending {
+            title_arguments, ..
+        }
+        | ToolCallState::Running {
+            title_arguments, ..
+        }
+        | ToolCallState::Done {
+            title_arguments, ..
+        }
+        | ToolCallState::Denied {
+            title_arguments, ..
+        } => title_arguments.as_slice(),
+        _ => &[],
     };
-    let (primary_text, props_text): (Option<String>, String) = if let Some(arguments) = maybe_args {
-        arguments
-            .as_object()
-            .map(|map| {
-                let mut entries: Vec<(&String, &serde_json::Value)> = map
-                    .iter()
-                    .filter(|(k, v)| !v.is_null() && !registry.is_body_argument(name, k))
-                    .collect();
-                entries.sort_by_key(|(k, _)| registry.argument_order(name, k));
-                let scalar_value = |v: &serde_json::Value| -> Option<String> {
-                    match v {
-                        serde_json::Value::String(s) => Some(s.clone()),
-                        serde_json::Value::Number(n) => Some(n.to_string()),
-                        serde_json::Value::Bool(b) => Some(b.to_string()),
-                        _ => None,
-                    }
-                };
-                let mut iter = entries.into_iter();
-                let primary = iter.next().and_then(|(_, v)| scalar_value(v));
-                let rest = iter
-                    .filter_map(|(k, v)| scalar_value(v).map(|s| format!("{k}={s}")))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                (primary, rest)
-            })
-            .unwrap_or_default()
-    } else {
-        (None, String::new())
+    let scalar_value = |v: &serde_json::Value| -> Option<String> {
+        match v {
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            serde_json::Value::Bool(b) => Some(b.to_string()),
+            _ => None,
+        }
     };
+    let mut iter = title_arguments.iter();
+    let primary_text: Option<String> = iter.next().and_then(|(_, v)| scalar_value(v));
+    let props_text: String = iter
+        .filter_map(|(k, v)| scalar_value(v).map(|s| format!("{k}={s}")))
+        .collect::<Vec<_>>()
+        .join(" ");
 
     // Compute body sections for the collapsible bubble body.
-    let body_sections: Vec<crate::agent::tools::BodySection> = match state {
-        ToolBubbleState::Pending { arguments }
-        | ToolBubbleState::Running { arguments }
-        | ToolBubbleState::Denied { arguments, .. } => {
-            registry.body_sections(name, arguments, None)
+    let content_sections: Vec<crate::agent::tools::ContentSection> = match state {
+        ToolCallState::Pending {
+            content_sections, ..
         }
-        ToolBubbleState::Done { body_sections, .. } => body_sections.clone(),
+        | ToolCallState::Running {
+            content_sections, ..
+        }
+        | ToolCallState::Denied {
+            content_sections, ..
+        } => content_sections.clone(),
+        ToolCallState::Done {
+            content_sections, ..
+        } => content_sections.clone(),
         _ => vec![],
     };
 
-    let has_expandable_body = !body_sections.is_empty()
-        || matches!(state, ToolBubbleState::Done { result, .. } if !result.is_empty());
+    let has_expandable_body = !content_sections.is_empty()
+        || matches!(state, ToolCallState::Done { result, .. } if !result.is_empty());
     let expand_indicator = if has_expandable_body {
         if collapsed {
             "▶"
@@ -1116,7 +1110,7 @@ fn append_tool_bubble_lines(
     };
 
     // Result summary appended to the title for Done state.
-    let summary_text: String = if let ToolBubbleState::Done {
+    let summary_text: String = if let ToolCallState::Done {
         summary, duration, ..
     } = state
     {
@@ -1151,7 +1145,7 @@ fn append_tool_bubble_lines(
 
     let mut title_spans: Vec<Span> = vec![
         bar.clone(),
-        if matches!(state, ToolBubbleState::Running { .. }) {
+        if matches!(state, ToolCallState::Running { .. }) {
             let spinner_char = SPINNER_FRAMES[spinner_frame as usize % SPINNER_FRAMES.len()];
             Span::styled(
                 format!("{spinner_char} "),
@@ -1171,7 +1165,7 @@ fn append_tool_bubble_lines(
     ];
     let mut title_len = title_prefix.chars().count();
     let has_args = primary_text.as_ref().is_some_and(|s| !s.is_empty()) || !props_text.is_empty();
-    let tool_ran = matches!(state, ToolBubbleState::Done { .. });
+    let tool_ran = matches!(state, ToolCallState::Done { .. });
     if let Some(primary) = primary_text {
         if !primary.is_empty() {
             let segment = format!(" {primary}");
@@ -1205,7 +1199,7 @@ fn append_tool_bubble_lines(
 
     // Error/Denied second title line (shown even when collapsed).
     let maybe_error = match state {
-        ToolBubbleState::Error { error } | ToolBubbleState::Denied { error, .. } => Some(error),
+        ToolCallState::Error { error } | ToolCallState::Denied { error, .. } => Some(error),
         _ => None,
     };
     if let Some(error) = maybe_error {
@@ -1227,9 +1221,9 @@ fn append_tool_bubble_lines(
 
     // Body (body sections + fallback result text) — hidden when collapsed.
     if !collapsed {
-        if !body_sections.is_empty() {
-            let show_labels = body_sections.len() > 1;
-            for section in &body_sections {
+        if !content_sections.is_empty() {
+            let show_labels = content_sections.len() > 1;
+            for section in &content_sections {
                 // Label header (only when multiple sections).
                 if show_labels {
                     if let Some(label) = &section.label {
@@ -1315,7 +1309,7 @@ fn append_tool_bubble_lines(
                     lines.push(Line::from(spans).patch_style(row_bg));
                 }
             }
-        } else if let ToolBubbleState::Done { result, .. } = state {
+        } else if let ToolCallState::Done { result, .. } = state {
             // Fallback: no body sections — render plain result text.
             for wrapped_line in textwrap::wrap(result, wrap_width) {
                 let line_str = wrapped_line.into_owned();

@@ -40,7 +40,7 @@ Tool status lines render as `[tool] <title> …` (e.g. `[tool] Read docs/feature
 
 Interactive terminal UI launched automatically when stdout is a terminal
 (see [Phase 4: TUI skeleton](#phase-4-tui-skeleton)). When stdout is not a
-terminal (piped or redirected), Ylva falls back to the headless runner.
+terminal (piped or redirected), Ylva falls back to the CLI driver.
 
 ## Model Provider
 

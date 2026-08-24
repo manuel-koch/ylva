@@ -179,7 +179,7 @@ fn build_dump_path_from_template(template: &str) -> Option<PathBuf> {
     };
 
     let stem = template_path
-        .file_name()
+        .file_stem()
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
         .unwrap_or("ylva_req");
@@ -372,6 +372,21 @@ mod tests {
     fn response_body_detail_returns_empty_for_blank_body() {
         assert_eq!(snippet_from_body(b"   "), "");
         assert_eq!(snippet_from_body(b""), "");
+    }
+
+    #[test]
+    fn build_dump_path_strips_extension_from_template() {
+        let path = build_dump_path_from_template("/tmp/dumps/ylva.json").expect("path");
+        let file_name = path.file_name().and_then(|n| n.to_str()).expect("name");
+        assert!(
+            file_name.starts_with("ylva_"),
+            "expected stem prefix 'ylva_', got {file_name}"
+        );
+        assert!(
+            !file_name.contains(".json_"),
+            "extension must not appear mid-name: {file_name}"
+        );
+        assert!(file_name.ends_with(".json"), "expected .json suffix");
     }
 
     #[test]

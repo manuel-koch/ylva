@@ -22,7 +22,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use futures::future::BoxFuture;
 use schemars::schema::RootSchema;
 use serde_json::Value;
 
@@ -55,12 +54,12 @@ impl ToolError {
 ///
 /// Every tool returns its own concrete type that implements this trait.
 /// The trait exposes two concerns that belong at different layers:
-/// - [`text`](ToolResult::text): the LLM-facing text;
-/// - [`properties`](ToolResult::properties): domain facts the
+/// - [`text`](ToolCallResult::text): the LLM-facing text;
+/// - [`properties`](ToolCallResult::properties): domain facts the
 ///   result carries (e.g. bytes read, paths matched).  Consumers above the
 ///   tool layer — the agent, the TUI — decide how to use these facts; the
 ///   tool itself does not know.
-pub trait ToolResult: Send + Sync + std::fmt::Debug {
+pub trait ToolCallResult: Send + Sync + std::fmt::Debug {
     /// The text returned to the LLM as the tool's result message.
     fn text(&self) -> &str;
 
@@ -72,68 +71,90 @@ pub trait ToolResult: Send + Sync + std::fmt::Debug {
         Vec::new()
     }
 
-    /// Body sections to display in the tool bubble when the tool is Done.
-    /// Computed once at execution time; the renderer reads from state.
-    fn body_sections(&self) -> Vec<BodySection> {
+    /// Rich content sections produced by this result (e.g. file text, command
+    /// output). Computed once at execution time.
+    fn content_sections(&self) -> Vec<ContentSection> {
         vec![]
     }
 }
 
-/// Wraps any [`ToolResult`] and appends a `duration_ms` property capturing
-/// how long the tool's `run()` call took.  Applied by the agent at the single
-/// call site so every tool gets duration tracking automatically.
-#[derive(Debug)]
-pub struct TimedToolResult {
-    inner: Box<dyn ToolResult>,
-    pub duration: std::time::Duration,
-}
-
-impl TimedToolResult {
-    pub fn new(inner: Box<dyn ToolResult>, duration: std::time::Duration) -> Self {
-        TimedToolResult { inner, duration }
-    }
-}
-
-impl ToolResult for TimedToolResult {
-    fn text(&self) -> &str {
-        self.inner.text()
-    }
-
-    fn properties(&self) -> Vec<(&'static str, String)> {
-        self.inner.properties()
-    }
-
-    fn body_sections(&self) -> Vec<BodySection> {
-        self.inner.body_sections()
-    }
-}
-
-/// A named, schema-described, async tool the model may call (blueprint §4D).
+/// A named content block produced by a tool call.
 ///
-/// The trait exposes tool **data**, behavior, and the argument display
-/// A named content block rendered in the collapsible bubble body.
-///
-/// Returned by [`Tool::body_sections`] so a tool can expose rich content
-/// (file text, code, output) with syntax highlighting and line numbers.
+/// Returned by [`ToolCall::pending_content_sections`] and
+/// [`ToolCallResult::content_sections`] to expose structured content (file
+/// text, command output, code) with optional syntax and line-number metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BodySection {
-    /// Header label shown above the content block.
-    /// The renderer suppresses this when there is only one section.
+pub struct ContentSection {
+    /// Optional label for this block. Absent when the call produces only one
+    /// section and a label would add no information.
     pub label: Option<String>,
-    /// The text content to display.
+    /// The text content of this block.
     pub content: String,
-    /// Lowercase file extension for syntect syntax highlighting
+    /// Lowercase file-extension hint for syntax highlighting
     /// (e.g. `"rs"`, `"py"`, `"json"`). `None` = plain text.
     pub file_extension: Option<String>,
-    /// 0-based index of the first line in `content` within its source file,
-    /// used to produce an accurate line-number gutter.
-    /// `None` = no line-number gutter.
+    /// 0-based index of the first line of `content` within its source file.
+    /// `None` = offset unknown; no line-number annotation.
     pub line_number_offset: Option<usize>,
 }
 
-/// metadata a host needs (which arguments are defaulted, and their display
-/// order). Actual rendering (brackets, eliding long values) stays the host's
-/// decision.
+/// An invocation object for a specific tool call. Carries the call ID,
+/// arguments, and execution logic for a single invocation.
+pub trait ToolCall: Send + Sync {
+    fn id(&self) -> uuid::Uuid;
+    fn name(&self) -> &str;
+    fn arguments(&self) -> &serde_json::Value;
+    fn timeout_secs(&self) -> u64;
+
+    /// Returns `true` when `key` names an argument whose value belongs in a
+    /// content section rather than an inline invocation summary.
+    fn is_body_argument(&self, _key: &str) -> bool {
+        false
+    }
+
+    /// Content sections produced before execution completes (e.g. argument
+    /// preview). Defaults to empty.
+    fn pending_content_sections(&self) -> Vec<ContentSection> {
+        vec![]
+    }
+
+    /// Schema-defined display rank for `key`. Lower ranks appear earlier in
+    /// invocation summaries; the lowest-ranked argument is the primary one.
+    /// Defaults to `usize::MAX` (sort last — preserves LLM-supplied key order).
+    fn argument_order(&self, _key: &str) -> usize {
+        usize::MAX
+    }
+
+    /// Non-content-section, non-null arguments sorted by schema-defined rank.
+    fn title_arguments(&self) -> Vec<(String, serde_json::Value)> {
+        let mut args: Vec<(String, serde_json::Value)> = self
+            .arguments()
+            .as_object()
+            .into_iter()
+            .flat_map(|map| map.iter())
+            .filter(|(k, v)| !v.is_null() && !self.is_body_argument(k))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        args.sort_by_key(|(k, _)| self.argument_order(k));
+        args
+    }
+
+    /// The non-default arguments for this call, with sensitive values redacted.
+    fn non_default_redacted_arguments(&self) -> Vec<(String, serde_json::Value)>;
+
+    /// Execute the tool, consuming the call object, and return the result.
+    fn run(
+        self: Box<Self>,
+    ) -> futures::future::BoxFuture<'static, Result<Box<dyn ToolCallResult>, ToolError>>;
+}
+
+/// A named, schema-described tool the model may call (blueprint §4D).
+///
+/// The trait exposes tool **data** and argument metadata. Actual execution is
+/// encapsulated in the [`ToolCall`] object created by [`Tool::create_call`].
+/// Argument display metadata a host needs (which arguments are defaulted, and
+/// their display order) stays here. Actual rendering (brackets, eliding long
+/// values) stays the host's decision.
 pub trait Tool: Send + Sync {
     /// The tool's canonical identifier, used by the model and as the registry
     /// key (e.g. `read`, `web_search`).
@@ -168,23 +189,6 @@ pub trait Tool: Send + Sync {
     /// `offset: 0`/`null`, `limit: null`).
     fn is_default_argument(&self, _key: &str, _value: &Value) -> bool {
         false
-    }
-
-    /// Returns `true` when `key` names an argument whose value is too large or
-    /// sensitive to display inline in the bubble title. Such arguments are
-    /// suppressed from the title line; the tool is responsible for surfacing
-    /// the value through [`body_sections`](Self::body_sections) if needed.
-    fn is_body_argument(&self, _key: &str) -> bool {
-        false
-    }
-
-    /// Content blocks to display in the collapsible bubble body.
-    ///
-    /// Called with `result: None` when the bubble is Pending / Running / Denied
-    /// (only inputs are known). Called with `result: Some(text)` when Done.
-    /// Returning `vec![]` falls back to plain result text rendering.
-    fn body_sections(&self, _arguments: &Value, _result: Option<&str>) -> Vec<BodySection> {
-        vec![]
     }
 
     /// Display-order rank for an argument key: lower ranks are listed earlier
@@ -227,11 +231,9 @@ pub trait Tool: Send + Sync {
     /// Default execution timeout (seconds) for this tool.
     fn timeout_secs(&self) -> u64;
 
-    /// Execute the tool with parsed `arguments`, returning a [`ToolResult`]
-    /// that carries the LLM-facing text and any domain properties the result
-    /// naturally has.
-    fn run<'a>(&'a self, arguments: Value)
-        -> BoxFuture<'a, Result<Box<dyn ToolResult>, ToolError>>;
+    /// Create a [`ToolCall`] invocation object for a specific call, binding
+    /// the call ID and arguments to the tool's execution logic.
+    fn create_call(&self, id: uuid::Uuid, arguments: serde_json::Value) -> Box<dyn ToolCall>;
 }
 
 /// Central store of every tool the agent may invoke.
@@ -261,38 +263,17 @@ impl ToolRegistry {
         self.tools.keys().cloned().collect()
     }
 
-    /// Returns the display-order rank for `key` in the named tool's schema.
-    ///
-    /// Delegates to [`Tool::argument_order`] for the registered tool. Returns
-    /// `usize::MAX` when the tool name is not registered, so unknown tools
-    /// preserve their LLM-supplied key order (stable sort).
-    pub fn argument_order(&self, tool_name: &str, key: &str) -> usize {
-        self.tools
-            .get(tool_name)
-            .map(|tool| tool.argument_order(key))
-            .unwrap_or(usize::MAX)
-    }
-
-    /// Returns `true` when `key` names a body argument for the given tool.
-    /// Body arguments are suppressed from the bubble title.
-    pub fn is_body_argument(&self, tool_name: &str, key: &str) -> bool {
-        self.tools
-            .get(tool_name)
-            .is_some_and(|tool| tool.is_body_argument(key))
-    }
-
-    /// Body sections for a tool bubble, as declared by the registered tool.
-    /// Returns `vec![]` when the tool is not registered.
-    pub fn body_sections(
+    /// Create a [`ToolCall`] for the named tool, or `None` if the tool is not
+    /// registered.
+    pub fn create_call(
         &self,
-        tool_name: &str,
-        arguments: &Value,
-        result: Option<&str>,
-    ) -> Vec<BodySection> {
+        name: &str,
+        id: uuid::Uuid,
+        arguments: serde_json::Value,
+    ) -> Option<Box<dyn ToolCall>> {
         self.tools
-            .get(tool_name)
-            .map(|tool| tool.body_sections(arguments, result))
-            .unwrap_or_default()
+            .get(name)
+            .map(|tool| tool.create_call(id, arguments))
     }
 
     /// The OpenAI wire schemas for every registered tool (the `tools` array).
@@ -312,18 +293,6 @@ fn to_tool_schema(tool: &dyn Tool) -> ToolSchema {
         description: tool.description().to_string(),
         parameters,
     }
-}
-
-/// The span opened for a tool invocation, recording the tool's redacted
-/// non-default arguments (serialized compactly). The value is a single JSON
-/// string so any tool's arguments fit a fixed span field.
-pub(crate) fn span_for_invocation(tool: &dyn Tool, arguments: &Value) -> tracing::Span {
-    let recorded: serde_json::Map<String, Value> = tool
-        .non_default_redacted_arguments(arguments)
-        .into_iter()
-        .collect();
-    let serialized = serde_json::to_string(&recorded).unwrap_or_else(|_| "{}".to_string());
-    tracing::info_span!("tool_args", args = %serialized)
 }
 
 /// Convenience: build the Phase 3 registry with the three file-system tools.
@@ -351,9 +320,47 @@ mod tests {
     #[derive(Debug)]
     struct SimpleOutput(String);
 
-    impl ToolResult for SimpleOutput {
+    impl ToolCallResult for SimpleOutput {
         fn text(&self) -> &str {
             &self.0
+        }
+    }
+
+    struct TestToolCall {
+        id: uuid::Uuid,
+        arguments: serde_json::Value,
+        timeout_secs: u64,
+    }
+
+    impl ToolCall for TestToolCall {
+        fn id(&self) -> uuid::Uuid {
+            self.id
+        }
+        fn name(&self) -> &str {
+            "test"
+        }
+        fn arguments(&self) -> &serde_json::Value {
+            &self.arguments
+        }
+        fn timeout_secs(&self) -> u64 {
+            self.timeout_secs
+        }
+        fn non_default_redacted_arguments(&self) -> Vec<(String, serde_json::Value)> {
+            self.arguments
+                .as_object()
+                .into_iter()
+                .flat_map(|map| map.iter())
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        }
+        fn run(
+            self: Box<Self>,
+        ) -> futures::future::BoxFuture<'static, Result<Box<dyn ToolCallResult>, ToolError>>
+        {
+            Box::pin(async move {
+                let output: Box<dyn ToolCallResult> = Box::new(SimpleOutput("ok".to_string()));
+                Ok(output)
+            })
         }
     }
 
@@ -382,13 +389,11 @@ mod tests {
                 .map(|(key, value)| (key.to_string(), value.clone()))
                 .collect()
         }
-        fn run<'a>(
-            &'a self,
-            _arguments: Value,
-        ) -> BoxFuture<'a, Result<Box<dyn ToolResult>, ToolError>> {
-            Box::pin(async move {
-                let output: Box<dyn ToolResult> = Box::new(SimpleOutput("ok".to_string()));
-                Ok(output)
+        fn create_call(&self, id: uuid::Uuid, arguments: serde_json::Value) -> Box<dyn ToolCall> {
+            Box::new(TestToolCall {
+                id,
+                arguments,
+                timeout_secs: self.timeout_secs(),
             })
         }
     }

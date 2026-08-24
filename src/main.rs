@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use ylva::llm::{MockProvider, OpenAiProvider, Provider};
 use ylva::logging::{init_logging, LogConfig, LogFormat};
-use ylva::{default_registry, headless_runner, tui_driver};
+use ylva::{cli_driver, default_registry, tui_driver};
 
 /// Fallback demo prompt used when neither `--prompt` nor piped stdin supplies
 /// the initial user turn.
@@ -53,7 +53,7 @@ fn main() {
     let registry = Arc::new(default_registry());
     let runtime = tokio::runtime::Runtime::new().expect("failed to start Tokio runtime");
 
-    if std::io::stdout().is_terminal() {
+    if std::io::stdout().is_terminal() && !args.contains(&"--no-tui".to_string()) {
         // The TUI starts with an empty input box. An explicit `--prompt` (or
         // piped stdin) still auto-sends, but the hardcoded demo prompt is only
         // for the headless path — it must not pre-populate the interactive UI.
@@ -69,7 +69,7 @@ fn main() {
         }
     } else {
         let prompt = initial_prompt(args);
-        let result = runtime.block_on(headless_runner::run_headless(provider, registry, prompt));
+        let result = runtime.block_on(cli_driver::run_cli(provider, registry, prompt));
         if let Err(error) = result {
             eprintln!("error: {error}");
             std::process::exit(2);

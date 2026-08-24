@@ -297,7 +297,7 @@ the Driver) form the complete event surface of the Presenter.
 ## Implementation Hints
 
 - Current module layout (all in `src/`):
-  - `app.rs` — `TuiState`, `ChatEntry`, `ToolBubbleState`, `UserMessageState`,
+  - `app.rs` — `TuiState`, `ChatEntry`, `ToolCallState`, `UserMessageState`,
     `ChatSelection`, `InputArea`
   - `tui_runner.rs` — `run_tui`, `handle_action`, all key/mouse/paste handlers,
     `confirm_state` driver-local, `ActionOutcome`

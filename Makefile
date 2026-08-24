@@ -12,7 +12,7 @@ COVERAGE_THRESHOLD := 80
 
 .PHONY: lint format \
 	build-debug build-debug-and-run \
-	build-release build-release-and-run \
+	build-release build-release-and-run build-debug-and-run-with-logs \
 	test test-coverage test-coverage-missing \
 	install tag-version \
 	outdated-dependencies upgrade-dependencies
@@ -58,14 +58,14 @@ test:
 
 # Run all tests and print a per-file coverage summary.
 # Fails if total line coverage of testable files drops below $(COVERAGE_THRESHOLD).
-# ui.rs and main.rs are excluded: they require a live terminal (ratatui/crossterm)
+# ui.rs, render.rs and main.rs are excluded: they require a live terminal (ratatui/crossterm)
 # and cannot be unit-tested without a full terminal emulator harness.
 # Requires: cargo install cargo-llvm-cov
 #           rustup component add llvm-tools-preview
 test-coverage:
 	cargo llvm-cov \
-		--ignore-filename-regex "(ui|main)\.rs" \
-		--fail-under-lines $(COVERAGE_THRESHOLD)
+	    --ignore-filename-regex "(ui|render|main)\.rs" \
+	    --fail-under-lines $(COVERAGE_THRESHOLD)
 
 # Same as test-coverage but also prints uncovered line numbers per file.
 # Useful for finding exactly which lines to target with new tests.
@@ -73,9 +73,9 @@ test-coverage:
 # line-level hint and the build to fail below $(COVERAGE_THRESHOLD)%.
 test-coverage-missing:
 	cargo llvm-cov \
-		--ignore-filename-regex "(ui|main)\.rs" \
-		--fail-under-lines $(COVERAGE_THRESHOLD) \
-		--show-missing-lines
+	    --ignore-filename-regex "(ui|render|main)\.rs" \
+	    --fail-under-lines $(COVERAGE_THRESHOLD) \
+	    --show-missing-lines
 
 # Show available dependency upgrades (within semver bounds)
 outdated-dependencies:

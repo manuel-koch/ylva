@@ -20,24 +20,87 @@ use std::sync::Arc;
 
 use crate::agent::{AgentCommand, AgentLoop, UiUpdate};
 use crate::llm::{serialize_messages, Provider};
-use crate::{Tool, ToolRegistry};
+use crate::ToolRegistry;
+
+#[cfg(test)]
+use crate::Tool;
+
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+    }
+}
+
+fn render_invocation_from_title_arguments(
+    title: &str,
+    title_arguments: &[(String, serde_json::Value)],
+) -> String {
+    let mut line = title.to_string();
+    let mut iter = title_arguments.iter();
+    if let Some((_, value)) = iter.next() {
+        let primary = match value {
+            serde_json::Value::String(s) if s.len() <= STRING_ELIDE_LIMIT => {
+                Some(s.as_str().to_string())
+            }
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            serde_json::Value::Bool(b) => Some(b.to_string()),
+            _ => None,
+        };
+        if let Some(primary) = primary {
+            line.push(' ');
+            line.push_str(&primary);
+        }
+    }
+    let rest: Vec<String> = iter
+        .map(|(k, v)| format!("{k}={}", render_arg_value(v)))
+        .collect();
+    if !rest.is_empty() {
+        line.push_str(&format!(" [{}]", rest.join(", ")));
+    }
+    line
+}
+
+fn render_content_sections(
+    out: &mut dyn Write,
+    sections: &[crate::agent::tools::ContentSection],
+) -> anyhow::Result<()> {
+    for section in sections {
+        if let Some(label) = &section.label {
+            writeln!(out, "  --- {label} ---")?;
+        }
+        let line_count = section.content.lines().count();
+        let last_line_num = section.line_number_offset.unwrap_or(0) + line_count;
+        let digits = last_line_num.to_string().len();
+        for (i, line) in section.content.lines().enumerate() {
+            if let Some(offset) = section.line_number_offset {
+                write!(out, "  {:>digits$}: ", offset + i + 1)?;
+            } else {
+                write!(out, "  ")?;
+            }
+            writeln!(out, "{line}")?;
+        }
+    }
+    Ok(())
+}
 
 /// Length beyond which a string value is treated as "long" and elided when
 /// rendering a tool invocation.
 const STRING_ELIDE_LIMIT: usize = 40;
 
 /// Run the agent loop headless, printing to stdout.
-pub async fn run_headless(
+pub async fn run_cli(
     provider: Arc<dyn Provider>,
     registry: Arc<ToolRegistry>,
     initial_prompt: String,
 ) -> anyhow::Result<()> {
-    run_headless_to(provider, registry, initial_prompt, &mut std::io::stdout()).await
+    run_cli_to(provider, registry, initial_prompt, &mut std::io::stdout()).await
 }
 
-/// [`run_headless`] with an explicit output writer (used by tests to capture
+/// [`run_cli`] with an explicit output writer (used by tests to capture
 /// the emitted lines without redirecting process stdout).
-pub async fn run_headless_to(
+pub async fn run_cli_to(
     provider: Arc<dyn Provider>,
     registry: Arc<ToolRegistry>,
     initial_prompt: String,
@@ -55,6 +118,8 @@ pub async fn run_headless_to(
         .await;
     let handle = agent.run();
 
+    let mut denied_tool_ids: std::collections::HashSet<uuid::Uuid> =
+        std::collections::HashSet::new();
     let mut response_finished = false;
     while !response_finished {
         match ui_rx.recv().await {
@@ -65,51 +130,69 @@ pub async fn run_headless_to(
                 write!(out, "{text}")?;
                 out.flush()?;
             }
-            Some(UiUpdate::ToolPending { name, id, .. }) => {
-                // CLI-only host, no interactive approval. read/glob are
-                // auto-approved via the normal protocol; a write request is
-                // denied and fed back to the model as a ToolError.
+            Some(UiUpdate::ToolPending {
+                name,
+                id,
+                title_arguments,
+                content_sections,
+                ..
+            }) => {
                 let title = registry
                     .get(&name)
                     .map(|tool| tool.title().to_string())
-                    .unwrap_or_else(|| name.clone());
+                    .unwrap_or_else(|| capitalize_first(&name));
+                let invocation = render_invocation_from_title_arguments(&title, &title_arguments);
                 let needs_approval = registry
                     .get(&name)
                     .is_some_and(|tool| tool.needs_approval());
                 if needs_approval {
-                    writeln!(
-                        out,
-                        "[tool] {title} denied (no --auto-approve-write in Phase 3)"
-                    )?;
+                    let reason = "no --auto-approve-write configured";
+                    writeln!(out, "[tool] {invocation} → denied: {reason}")?;
+                    render_content_sections(out, &content_sections)?;
+                    denied_tool_ids.insert(id);
                     agent
                         .send_command(AgentCommand::DenyTool {
                             id,
-                            reason: "no --auto-approve-write configured".into(),
+                            reason: reason.into(),
                         })
                         .await;
                 } else {
-                    writeln!(out, "[tool] {title} auto-approved")?;
+                    writeln!(out, "[tool] {invocation}")?;
+                    render_content_sections(out, &content_sections)?;
                     agent.send_command(AgentCommand::ApproveTool { id }).await;
                 }
             }
             Some(UiUpdate::ToolStart {
-                name, arguments, ..
+                content_sections, ..
             }) => {
-                let invocation = registry
-                    .get(&name)
-                    .map(|tool| render_tool_invocation(tool.as_ref(), &arguments))
-                    .unwrap_or_else(|| name.clone());
-                writeln!(out, "[tool] {invocation}")?;
+                render_content_sections(out, &content_sections)?;
             }
-            Some(UiUpdate::ToolDone { name, .. }) => {
+            Some(UiUpdate::ToolDone {
+                name,
+                summary,
+                duration,
+                content_sections,
+                ..
+            }) => {
                 let title = registry
                     .get(&name)
                     .map(|tool| tool.title().to_string())
-                    .unwrap_or_else(|| name.clone());
-                writeln!(out, "[tool] {title} done")?;
+                    .unwrap_or_else(|| capitalize_first(&name));
+                let duration_s = duration.as_secs_f64();
+                let summary_str = if summary.is_empty() {
+                    String::new()
+                } else {
+                    let parts: Vec<String> =
+                        summary.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                    format!(" {}", parts.join(" "))
+                };
+                writeln!(out, "[tool] {title} done ({duration_s:.3}s){summary_str}")?;
+                render_content_sections(out, &content_sections)?;
             }
-            Some(UiUpdate::ToolError { error, .. }) => {
-                writeln!(out, "[tool] error: {error}")?;
+            Some(UiUpdate::ToolError { id, error }) => {
+                if !denied_tool_ids.remove(&id) {
+                    writeln!(out, "[tool] error: {error}")?;
+                }
             }
             Some(UiUpdate::ToolKilled { .. }) => {
                 writeln!(out, "[tool] killed")?;
@@ -167,6 +250,7 @@ pub async fn run_headless_to(
 /// label, the tool's own `argument_order` to pick the primary (inline)
 /// argument, and its `non_default_arguments` for the bracketed rest. Host
 /// details (brackets, eliding long values) stay here.
+#[cfg(test)]
 fn render_tool_invocation(tool: &dyn Tool, arguments: &serde_json::Value) -> String {
     let mut line = tool.title().to_string();
     let mut non_default = tool.non_default_arguments(arguments);

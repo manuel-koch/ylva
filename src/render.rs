@@ -21,14 +21,11 @@
 //! snapshot consumed by [`crate::ui::draw`], and syncs the view-geometry
 //! fields written back by `ui::draw` into `AppState` after each frame.
 
-use std::sync::Arc;
-
 use ratatui::Frame;
 use ratatui_textarea::TextArea;
 
 use crate::app_state::{AppState, Focus, TuiState};
 use crate::ui::{self, ButtonAreas};
-use crate::ToolRegistry;
 
 /// Draw one TUI frame.
 ///
@@ -40,12 +37,11 @@ use crate::ToolRegistry;
 pub fn render(
     frame: &mut Frame,
     state: &mut AppState,
-    registry: &Arc<ToolRegistry>,
     textarea: &mut TextArea<'_>,
     hint: Option<&str>,
     mouse_pos: Option<(u16, u16)>,
 ) {
-    let mut render_state = project_for_draw(state, registry);
+    let mut render_state = project_for_draw(state);
     let button_areas = ui::draw(frame, &mut render_state, textarea, hint, mouse_pos);
     sync_from_draw(state, render_state, button_areas);
 }
@@ -55,7 +51,7 @@ pub fn render(
 ///
 /// The projection is a shallow clone of all view-model fields. Driver-owned
 /// types (`TextArea`, channel handles) are not part of this snapshot.
-fn project_for_draw(state: &AppState, registry: &Arc<ToolRegistry>) -> TuiState {
+fn project_for_draw(state: &AppState) -> TuiState {
     let pending_approval = if let Focus::ToolApproval {
         tool_id,
         ref tool_name,
@@ -90,7 +86,6 @@ fn project_for_draw(state: &AppState, registry: &Arc<ToolRegistry>) -> TuiState 
         help_scroll_x: state.help_scroll_x,
         input_scroll_top: state.input_scroll_top,
         bubble_title_rows: state.bubble_title_rows.clone(),
-        registry: Arc::clone(registry),
     }
 }
 

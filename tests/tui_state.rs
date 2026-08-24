@@ -679,7 +679,7 @@ fn pending_tool_bubble_renders_after_completed_entries() {
     // even when there are earlier completed entries above it.
     use ratatui_textarea::TextArea;
     use ylva::ui;
-    use ylva::{ToolBubbleState, UiUpdate};
+    use ylva::{ToolCallState, UiUpdate};
 
     let backend = TestBackend::new(60, 30);
     let mut terminal = Terminal::new(backend).expect("terminal");
@@ -698,6 +698,9 @@ fn pending_tool_bubble_renders_after_completed_entries() {
         id: tool_id,
         name: "glob".to_string(),
         arguments: serde_json::json!({"pattern": "**/*.rs"}),
+        content_sections: vec![],
+
+        title_arguments: vec![],
     });
 
     terminal
@@ -734,7 +737,7 @@ fn pending_tool_bubble_renders_after_completed_entries() {
         matches!(
             entry,
             ChatEntry::ToolBubble {
-                state: ToolBubbleState::Pending { .. },
+                state: ToolCallState::Pending { .. },
                 ..
             }
         )

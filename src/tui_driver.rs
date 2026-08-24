@@ -134,20 +134,28 @@ fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
             id,
             name,
             arguments,
+            content_sections,
+            title_arguments,
         } => Some(DomainEvent::ToolPending {
             id: *id,
             name: name.clone(),
             arguments: arguments.clone(),
+            content_sections: content_sections.clone(),
+            title_arguments: title_arguments.clone(),
         }),
         UiUpdate::ToolStart {
             id,
             name,
             arguments,
+            content_sections,
+            title_arguments,
             ..
         } => Some(DomainEvent::ToolStart {
             id: *id,
             name: name.clone(),
             arguments: arguments.clone(),
+            content_sections: content_sections.clone(),
+            title_arguments: title_arguments.clone(),
         }),
         UiUpdate::ToolDone {
             id,
@@ -155,14 +163,14 @@ fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
             result,
             summary,
             duration,
-            body_sections,
+            content_sections,
         } => Some(DomainEvent::ToolDone {
             id: *id,
             name: name.clone(),
             result: result.clone(),
             summary: summary.clone(),
             duration: *duration,
-            body_sections: body_sections.clone(),
+            content_sections: content_sections.clone(),
         }),
         UiUpdate::ToolKilled { id } => Some(DomainEvent::ToolKilled { id: *id }),
         UiUpdate::Error(message) => Some(DomainEvent::Error(message.clone())),
@@ -359,7 +367,6 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
         help_scroll_x: app.help_scroll_x,
         input_scroll_top: app.input_scroll_top,
         bubble_title_rows: app.bubble_title_rows,
-        registry: Arc::new(ToolRegistry::new()),
     }
 }
 
@@ -405,14 +412,7 @@ where
     loop {
         let hint = confirm_hint(&state);
         terminal.draw(|frame| {
-            render::render(
-                frame,
-                &mut state,
-                &registry,
-                &mut textarea,
-                hint.as_deref(),
-                mouse_pos,
-            );
+            render::render(frame, &mut state, &mut textarea, hint.as_deref(), mouse_pos);
         })?;
 
         let textarea_ctx = TextareaContext {
@@ -934,6 +934,9 @@ mod tests {
                 id: tool_id,
                 name: "read".to_string(),
                 arguments: serde_json::json!({}),
+                content_sections: vec![],
+
+                title_arguments: vec![],
             }),
             &textarea_ctx_from(&textarea),
         );
@@ -979,6 +982,9 @@ mod tests {
                 id: tool_id,
                 name: "read".to_string(),
                 arguments: serde_json::json!({}),
+                content_sections: vec![],
+
+                title_arguments: vec![],
             }),
             &textarea_ctx_from(&textarea),
         );
@@ -1025,6 +1031,9 @@ mod tests {
                 id: tool_id,
                 name: "read".to_string(),
                 arguments: serde_json::json!({}),
+                content_sections: vec![],
+
+                title_arguments: vec![],
             }),
             &textarea_ctx_from(&textarea),
         );
@@ -1071,6 +1080,9 @@ mod tests {
                 id: uuid::Uuid::new_v4(),
                 name: "read".to_string(),
                 arguments: serde_json::json!({}),
+                content_sections: vec![],
+
+                title_arguments: vec![],
             }),
             &textarea_ctx_from(&textarea),
         );

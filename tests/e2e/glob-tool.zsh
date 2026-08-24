@@ -10,7 +10,8 @@ test -d "${LOG_DIR}" || mkdir -p "${LOG_DIR}"
 echo "**" > "${LOG_DIR}/.gitignore"
 
 function ylva() {
-  ${YLVA} --log-file $(git rev-parse --show-toplevel)/logs/${LOG_PREFIX}_$(date +%Y%m%d%H%M%S).log \
+  ${YLVA} --no-tui \
+          --log-file $(git rev-parse --show-toplevel)/logs/${LOG_PREFIX}_$(date +%Y%m%d%H%M%S).log \
           --log-level DEBUG --log-format ${LOG_FORMAT}
 }
 
@@ -24,4 +25,10 @@ echo "----------------------------------------------------------"
 ylva << '__EOT__'
 Search for markdown files in the docs directory (recursive).
 Report one found path per line!
+__EOT__
+
+echo "----------------------------------------------------------"
+ylva << '__EOT__'
+Search for files in the project root (non-recursive).
+Count the number of found files!
 __EOT__

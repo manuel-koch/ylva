@@ -27,13 +27,10 @@
 
 use std::time::{Duration, Instant};
 
-use std::sync::Arc;
-
 use crossterm::event::KeyEvent;
 use ratatui::layout::Rect;
 use uuid::Uuid;
 
-use crate::agent::tools::ToolRegistry;
 use crate::agent::{AgentMode, UiUpdate};
 
 // ─── Duration constant ───────────────────────────────────────────────────────
@@ -110,18 +107,27 @@ pub enum UserMessageState {
 
 /// State of a tool call bubble in the TUI chat history.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ToolBubbleState {
+pub enum ToolCallState {
     /// Awaiting user approval; arguments are shown so the user knows what the tool will do.
-    Pending { arguments: serde_json::Value },
+    Pending {
+        arguments: serde_json::Value,
+        content_sections: Vec<crate::agent::tools::ContentSection>,
+        title_arguments: Vec<(String, serde_json::Value)>,
+    },
     /// Approved and running.
-    Running { arguments: serde_json::Value },
+    Running {
+        arguments: serde_json::Value,
+        content_sections: Vec<crate::agent::tools::ContentSection>,
+        title_arguments: Vec<(String, serde_json::Value)>,
+    },
     /// Completed successfully.
     Done {
         arguments: serde_json::Value,
         result: String,
-        body_sections: Vec<crate::agent::tools::BodySection>,
+        content_sections: Vec<crate::agent::tools::ContentSection>,
         summary: Vec<(String, String)>,
         duration: std::time::Duration,
+        title_arguments: Vec<(String, serde_json::Value)>,
     },
     /// Tool returned an error.
     Error { error: String },
@@ -131,6 +137,8 @@ pub enum ToolBubbleState {
     Denied {
         arguments: serde_json::Value,
         error: String,
+        content_sections: Vec<crate::agent::tools::ContentSection>,
+        title_arguments: Vec<(String, serde_json::Value)>,
     },
 }
 
@@ -149,7 +157,7 @@ pub enum ChatEntry {
     ToolBubble {
         id: uuid::Uuid,
         name: String,
-        state: ToolBubbleState,
+        state: ToolCallState,
         /// Whether the bubble body (arguments, result) is hidden; only the title
         /// line is rendered when `true`. Toggled by clicking the title line.
         collapsed: bool,
@@ -171,10 +179,6 @@ pub enum HistoryDirection {
 /// The TUI's live rendering state. Populated exclusively by
 /// [`TuiState::apply_update`] (from `UiUpdate`) and the driver helpers below.
 pub struct TuiState {
-    /// Registry of known tools, used to look up schema-derived argument display
-    /// order for tool bubbles. An empty registry is used when no tools are
-    /// registered (e.g. in tests), which preserves the LLM-supplied key order.
-    pub registry: Arc<ToolRegistry>,
     pub agent_mode: AgentMode,
     pub chat_entries: Vec<ChatEntry>,
     pub partial_assistant_text: String,
@@ -244,7 +248,6 @@ pub struct TuiState {
 impl TuiState {
     pub fn new() -> Self {
         TuiState {
-            registry: Arc::new(ToolRegistry::new()),
             agent_mode: AgentMode::Idle,
             chat_entries: Vec::new(),
             partial_assistant_text: String::new(),
@@ -403,6 +406,8 @@ impl TuiState {
                 name,
                 id,
                 arguments,
+                content_sections,
+                title_arguments,
             } => {
                 // While aborting, skip approval sub-mode entirely: the agent
                 // will process the pending Stop command and deny this tool on
@@ -417,8 +422,10 @@ impl TuiState {
                 self.chat_entries.push(ChatEntry::ToolBubble {
                     id: *id,
                     name: name.clone(),
-                    state: ToolBubbleState::Pending {
+                    state: ToolCallState::Pending {
                         arguments: arguments.clone(),
+                        content_sections: content_sections.clone(),
+                        title_arguments: title_arguments.clone(),
                     },
                     collapsed: true,
                 });
@@ -428,20 +435,26 @@ impl TuiState {
                 name,
                 id,
                 arguments,
+                content_sections,
+                title_arguments,
                 ..
             } => {
                 if let Some(entry) = self.find_tool_bubble_mut(*id) {
                     if let ChatEntry::ToolBubble { state, .. } = entry {
-                        *state = ToolBubbleState::Running {
+                        *state = ToolCallState::Running {
                             arguments: arguments.clone(),
+                            content_sections: content_sections.clone(),
+                            title_arguments: title_arguments.clone(),
                         };
                     }
                 } else {
                     self.chat_entries.push(ChatEntry::ToolBubble {
                         id: *id,
                         name: name.clone(),
-                        state: ToolBubbleState::Running {
+                        state: ToolCallState::Running {
                             arguments: arguments.clone(),
+                            content_sections: content_sections.clone(),
+                            title_arguments: title_arguments.clone(),
                         },
                         collapsed: true,
                     });
@@ -454,42 +467,52 @@ impl TuiState {
                 result,
                 summary,
                 duration,
-                body_sections,
+                content_sections,
             } => {
-                let previous_arguments = self
+                let (previous_arguments, previous_title_arguments) = self
                     .find_tool_bubble_mut(*id)
                     .and_then(|entry| {
                         if let ChatEntry::ToolBubble { state, .. } = entry {
                             match state {
-                                ToolBubbleState::Running { arguments }
-                                | ToolBubbleState::Pending { arguments } => Some(arguments.clone()),
+                                ToolCallState::Running {
+                                    arguments,
+                                    title_arguments,
+                                    ..
+                                }
+                                | ToolCallState::Pending {
+                                    arguments,
+                                    title_arguments,
+                                    ..
+                                } => Some((arguments.clone(), title_arguments.clone())),
                                 _ => None,
                             }
                         } else {
                             None
                         }
                     })
-                    .unwrap_or(serde_json::Value::Null);
+                    .unwrap_or((serde_json::Value::Null, vec![]));
                 if let Some(entry) = self.find_tool_bubble_mut(*id) {
                     if let ChatEntry::ToolBubble { state, .. } = entry {
-                        *state = ToolBubbleState::Done {
+                        *state = ToolCallState::Done {
                             arguments: previous_arguments,
                             result: result.clone(),
-                            body_sections: body_sections.clone(),
+                            content_sections: content_sections.clone(),
                             summary: summary.clone(),
                             duration: *duration,
+                            title_arguments: previous_title_arguments,
                         };
                     }
                 } else {
                     self.chat_entries.push(ChatEntry::ToolBubble {
                         id: *id,
                         name: name.clone(),
-                        state: ToolBubbleState::Done {
+                        state: ToolCallState::Done {
                             arguments: serde_json::Value::Null,
                             result: result.clone(),
-                            body_sections: body_sections.clone(),
+                            content_sections: content_sections.clone(),
                             summary: summary.clone(),
                             duration: *duration,
+                            title_arguments: vec![],
                         },
                         collapsed: true,
                     });
@@ -498,7 +521,7 @@ impl TuiState {
             UiUpdate::ToolError { id, error } => {
                 if let Some(entry) = self.find_tool_bubble_mut(*id) {
                     if let ChatEntry::ToolBubble { state, .. } = entry {
-                        *state = ToolBubbleState::Error {
+                        *state = ToolCallState::Error {
                             error: error.clone(),
                         };
                     }
@@ -522,13 +545,13 @@ impl TuiState {
             UiUpdate::ToolKilled { id } => {
                 if let Some(entry) = self.find_tool_bubble_mut(*id) {
                     if let ChatEntry::ToolBubble { state, .. } = entry {
-                        *state = ToolBubbleState::Killed;
+                        *state = ToolCallState::Killed;
                     }
                 } else {
                     self.chat_entries.push(ChatEntry::ToolBubble {
                         id: *id,
                         name: String::new(),
-                        state: ToolBubbleState::Killed,
+                        state: ToolCallState::Killed,
                         collapsed: true,
                     });
                 }
@@ -731,6 +754,9 @@ mod tui_state_tests {
             name: "read".to_string(),
             id: Uuid::new_v4(),
             arguments: serde_json::json!({}),
+            content_sections: vec![],
+
+            title_arguments: vec![],
         }
     }
 
@@ -857,6 +883,9 @@ mod tui_state_tests {
             name: "write".to_string(),
             id,
             arguments: args.clone(),
+            content_sections: vec![],
+
+            title_arguments: vec![],
         });
         assert_eq!(
             state.pending_approval,
@@ -866,7 +895,7 @@ mod tui_state_tests {
             state.chat_entries.last(),
             Some(ChatEntry::ToolBubble {
                 name,
-                state: ToolBubbleState::Pending { .. },
+                state: ToolCallState::Pending { .. },
                 ..
             }) if name == "write"
         ));
@@ -874,12 +903,15 @@ mod tui_state_tests {
             name: "write".to_string(),
             id,
             arguments: serde_json::json!({}),
+            content_sections: vec![],
+
+            title_arguments: vec![],
         });
         assert_eq!(state.pending_approval, None);
         assert!(matches!(
             state.chat_entries.last(),
             Some(ChatEntry::ToolBubble {
-                state: ToolBubbleState::Running { .. },
+                state: ToolCallState::Running { .. },
                 ..
             })
         ));
@@ -893,11 +925,17 @@ mod tui_state_tests {
             name: "read".to_string(),
             id,
             arguments: serde_json::json!({}),
+            content_sections: vec![],
+
+            title_arguments: vec![],
         });
         state.apply_update(&UiUpdate::ToolStart {
             id,
             name: "read".to_string(),
             arguments: serde_json::json!({}),
+            content_sections: vec![],
+
+            title_arguments: vec![],
         });
         state.apply_update(&UiUpdate::ToolError {
             id,
@@ -906,7 +944,7 @@ mod tui_state_tests {
         assert!(matches!(
             state.chat_entries.last(),
             Some(ChatEntry::ToolBubble {
-                state: ToolBubbleState::Error { error },
+                state: ToolCallState::Error { error },
                 ..
             }) if error == "boom"
         ));
@@ -1139,16 +1177,22 @@ mod tui_state_tests {
             name: "read".to_string(),
             id,
             arguments: pending_args,
+            content_sections: vec![],
+
+            title_arguments: vec![],
         });
         state.apply_update(&UiUpdate::ToolStart {
             name: "read".to_string(),
             id,
             arguments: start_args.clone(),
+            content_sections: vec![],
+
+            title_arguments: vec![],
         });
         assert!(matches!(
             state.chat_entries.last(),
             Some(ChatEntry::ToolBubble {
-                state: ToolBubbleState::Running { arguments },
+                state: ToolCallState::Running { arguments, .. },
                 ..
             }) if *arguments == start_args
         ));
@@ -1163,11 +1207,17 @@ mod tui_state_tests {
             name: "read".to_string(),
             id,
             arguments: arguments.clone(),
+            content_sections: vec![],
+
+            title_arguments: vec![],
         });
         state.apply_update(&UiUpdate::ToolStart {
             name: "read".to_string(),
             id,
             arguments: arguments.clone(),
+            content_sections: vec![],
+
+            title_arguments: vec![],
         });
         state.apply_update(&UiUpdate::ToolDone {
             id,
@@ -1175,23 +1225,23 @@ mod tui_state_tests {
             result: "file contents".to_string(),
             summary: Vec::new(),
             duration: std::time::Duration::from_millis(0),
-            body_sections: vec![],
+            content_sections: vec![],
         });
         assert!(matches!(
             state.chat_entries.last(),
             Some(ChatEntry::ToolBubble {
-                state: ToolBubbleState::Done { result, .. },
+                state: ToolCallState::Done { result, .. },
                 ..
             }) if result == "file contents"
         ));
     }
 
     #[test]
-    fn tool_done_body_sections_stored_in_state() {
-        use crate::agent::tools::BodySection;
+    fn tool_done_content_sections_stored_in_state() {
+        use crate::agent::tools::ContentSection;
         let mut state = TuiState::new();
         let id = Uuid::new_v4();
-        let sections = vec![BodySection {
+        let sections = vec![ContentSection {
             label: None,
             content: "line one\nline two\n".to_string(),
             file_extension: Some("rs".to_string()),
@@ -1201,6 +1251,9 @@ mod tui_state_tests {
             name: "read".to_string(),
             id,
             arguments: serde_json::json!({"path": "foo.rs"}),
+            content_sections: vec![],
+
+            title_arguments: vec![],
         });
         state.apply_update(&UiUpdate::ToolDone {
             id,
@@ -1208,15 +1261,18 @@ mod tui_state_tests {
             result: "line one\nline two\n".to_string(),
             summary: Vec::new(),
             duration: std::time::Duration::from_millis(0),
-            body_sections: sections.clone(),
+            content_sections: sections.clone(),
         });
         let stored = state.chat_entries.iter().find_map(|e| {
             if let ChatEntry::ToolBubble {
-                state: ToolBubbleState::Done { body_sections, .. },
+                state:
+                    ToolCallState::Done {
+                        content_sections, ..
+                    },
                 ..
             } = e
             {
-                Some(body_sections.clone())
+                Some(content_sections.clone())
             } else {
                 None
             }
@@ -1224,7 +1280,7 @@ mod tui_state_tests {
         assert_eq!(
             stored,
             Some(sections),
-            "body_sections must survive apply_update"
+            "content_sections must survive apply_update"
         );
     }
 
@@ -1236,17 +1292,23 @@ mod tui_state_tests {
             name: "exec".to_string(),
             id,
             arguments: serde_json::json!({}),
+            content_sections: vec![],
+
+            title_arguments: vec![],
         });
         state.apply_update(&UiUpdate::ToolStart {
             name: "exec".to_string(),
             id,
             arguments: serde_json::json!({}),
+            content_sections: vec![],
+
+            title_arguments: vec![],
         });
         state.apply_update(&UiUpdate::ToolKilled { id });
         assert!(matches!(
             state.chat_entries.last(),
             Some(ChatEntry::ToolBubble {
-                state: ToolBubbleState::Killed,
+                state: ToolCallState::Killed,
                 ..
             })
         ));
@@ -1347,12 +1409,16 @@ pub enum DomainEvent {
         id: Uuid,
         name: String,
         arguments: serde_json::Value,
+        content_sections: Vec<crate::agent::tools::ContentSection>,
+        title_arguments: Vec<(String, serde_json::Value)>,
     },
     /// A tool call started executing (approved).
     ToolStart {
         id: Uuid,
         name: String,
         arguments: serde_json::Value,
+        content_sections: Vec<crate::agent::tools::ContentSection>,
+        title_arguments: Vec<(String, serde_json::Value)>,
     },
     /// A tool call completed successfully.
     ToolDone {
@@ -1361,7 +1427,7 @@ pub enum DomainEvent {
         result: String,
         summary: Vec<(String, String)>,
         duration: std::time::Duration,
-        body_sections: Vec<crate::agent::tools::BodySection>,
+        content_sections: Vec<crate::agent::tools::ContentSection>,
     },
     /// A tool call was killed (e.g. via Stop).
     ToolKilled { id: Uuid },
@@ -1914,10 +1980,10 @@ impl AppState {
                 // Skip bubbles already transitioned to Denied by the Driver
                 // (via apply_tool_denied). The ToolError that the agent sends
                 // after processing a DenyTool command is redundant for those.
-                if matches!(bubble_state, ToolBubbleState::Denied { .. }) {
+                if matches!(bubble_state, ToolCallState::Denied { .. }) {
                     return;
                 }
-                *bubble_state = ToolBubbleState::Error {
+                *bubble_state = ToolCallState::Error {
                     error: error.clone(),
                 };
             }
@@ -1942,15 +2008,29 @@ impl AppState {
             ..
         }) = self.find_tool_bubble_mut(id)
         {
-            let preserved_arguments = match bubble_state {
-                ToolBubbleState::Pending { arguments } | ToolBubbleState::Running { arguments } => {
-                    std::mem::replace(arguments, serde_json::Value::Null)
-                }
-                _ => serde_json::Value::Null,
-            };
-            *bubble_state = ToolBubbleState::Denied {
+            let (preserved_arguments, preserved_content_sections, preserved_title_arguments) =
+                match bubble_state {
+                    ToolCallState::Pending {
+                        arguments,
+                        content_sections,
+                        title_arguments,
+                    }
+                    | ToolCallState::Running {
+                        arguments,
+                        content_sections,
+                        title_arguments,
+                    } => (
+                        std::mem::replace(arguments, serde_json::Value::Null),
+                        std::mem::take(content_sections),
+                        std::mem::take(title_arguments),
+                    ),
+                    _ => (serde_json::Value::Null, vec![], vec![]),
+                };
+            *bubble_state = ToolCallState::Denied {
                 arguments: preserved_arguments,
                 error: "Denied by user".to_string(),
+                content_sections: preserved_content_sections,
+                title_arguments: preserved_title_arguments,
             };
         }
     }
@@ -2076,8 +2156,11 @@ mod tests {
         state.chat_entries.push(ChatEntry::ToolBubble {
             id,
             name: "shell".to_string(),
-            state: ToolBubbleState::Pending {
+            state: ToolCallState::Pending {
                 arguments: args.clone(),
+                content_sections: vec![],
+
+                title_arguments: vec![],
             },
             collapsed: false,
         });
@@ -2086,7 +2169,7 @@ mod tests {
             matches!(
                 state.chat_entries.last(),
                 Some(ChatEntry::ToolBubble {
-                    state: ToolBubbleState::Denied { arguments, error },
+                    state: ToolCallState::Denied { arguments, error, .. },
                     ..
                 }) if *arguments == args && error == "Denied by user"
             ),
@@ -2102,9 +2185,12 @@ mod tests {
         state.chat_entries.push(ChatEntry::ToolBubble {
             id,
             name: "shell".to_string(),
-            state: ToolBubbleState::Denied {
+            state: ToolCallState::Denied {
                 arguments: args.clone(),
                 error: "Denied by user".to_string(),
+                content_sections: vec![],
+
+                title_arguments: vec![],
             },
             collapsed: false,
         });
@@ -2113,7 +2199,7 @@ mod tests {
             matches!(
                 state.chat_entries.last(),
                 Some(ChatEntry::ToolBubble {
-                    state: ToolBubbleState::Denied { arguments, .. },
+                    state: ToolCallState::Denied { arguments, .. },
                     ..
                 }) if *arguments == args
             ),
@@ -2128,8 +2214,11 @@ mod tests {
         state.chat_entries.push(ChatEntry::ToolBubble {
             id,
             name: "shell".to_string(),
-            state: ToolBubbleState::Running {
+            state: ToolCallState::Running {
                 arguments: serde_json::json!({"cmd": "ls"}),
+                content_sections: vec![],
+
+                title_arguments: vec![],
             },
             collapsed: false,
         });
@@ -2138,7 +2227,7 @@ mod tests {
             matches!(
                 state.chat_entries.last(),
                 Some(ChatEntry::ToolBubble {
-                    state: ToolBubbleState::Error { error },
+                    state: ToolCallState::Error { error },
                     ..
                 }) if error == "execution failed"
             ),

@@ -28,7 +28,7 @@ use uuid::Uuid;
 
 use crate::app_state::{
     AppState, ChatEntry, ChatSelection, DomainEvent, Effect, Focus, HistoryDirection, InputEvent,
-    ToolBubbleState, TuiMode, UserMessageState,
+    ToolCallState, TuiMode, UserMessageState,
 };
 
 // ─── Public surface ───────────────────────────────────────────────────────────
@@ -193,6 +193,7 @@ fn handle_ctrl_c_generic(state: &mut AppState, textarea_is_empty: bool) -> Vec<E
                 vec![Effect::Quit]
             } else {
                 // Busy double-press → stop agent and exit TUI on done.
+                tracing::info!("double Ctrl-C: entering Aborting, stop requested");
                 state.mode = TuiMode::Aborting;
                 state.aborting_exit = true;
                 vec![Effect::StopAgent]
@@ -504,13 +505,17 @@ fn domain_idle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             id,
             name,
             arguments,
+            content_sections,
+            title_arguments,
         } => {
             state.flush_partial_assistant_message(false);
             state.chat_entries.push(ChatEntry::ToolBubble {
                 id,
                 name: name.clone(),
-                state: ToolBubbleState::Pending {
+                state: ToolCallState::Pending {
                     arguments: arguments.clone(),
+                    content_sections: content_sections.clone(),
+                    title_arguments: title_arguments.clone(),
                 },
                 collapsed: true,
             });
@@ -543,8 +548,17 @@ fn domain_idle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             id,
             name,
             arguments,
+            content_sections,
+            title_arguments,
         } => {
-            update_tool_bubble_to_running(state, id, name, arguments);
+            update_tool_bubble_to_running(
+                state,
+                id,
+                name,
+                arguments,
+                content_sections,
+                title_arguments,
+            );
             vec![]
         }
         DomainEvent::ToolDone {
@@ -553,9 +567,17 @@ fn domain_idle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             result,
             summary,
             duration,
-            body_sections,
+            content_sections,
         } => {
-            update_tool_bubble_to_done(state, id, name, result, body_sections, summary, duration);
+            update_tool_bubble_to_done(
+                state,
+                id,
+                name,
+                result,
+                content_sections,
+                summary,
+                duration,
+            );
             vec![]
         }
         DomainEvent::ToolKilled { id } => {
@@ -607,13 +629,17 @@ fn domain_pending(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             id,
             name,
             arguments,
+            content_sections,
+            title_arguments,
         } => {
             state.flush_partial_assistant_message(false);
             state.chat_entries.push(ChatEntry::ToolBubble {
                 id,
                 name: name.clone(),
-                state: ToolBubbleState::Pending {
+                state: ToolCallState::Pending {
                     arguments: arguments.clone(),
+                    content_sections: content_sections.clone(),
+                    title_arguments: title_arguments.clone(),
                 },
                 collapsed: true,
             });
@@ -641,8 +667,17 @@ fn domain_pending(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             id,
             name,
             arguments,
+            content_sections,
+            title_arguments,
         } => {
-            update_tool_bubble_to_running(state, id, name, arguments);
+            update_tool_bubble_to_running(
+                state,
+                id,
+                name,
+                arguments,
+                content_sections,
+                title_arguments,
+            );
             vec![]
         }
         DomainEvent::ToolDone {
@@ -651,9 +686,17 @@ fn domain_pending(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             result,
             summary,
             duration,
-            body_sections,
+            content_sections,
         } => {
-            update_tool_bubble_to_done(state, id, name, result, body_sections, summary, duration);
+            update_tool_bubble_to_done(
+                state,
+                id,
+                name,
+                result,
+                content_sections,
+                summary,
+                duration,
+            );
             vec![]
         }
         DomainEvent::ToolKilled { id } => {
@@ -704,13 +747,17 @@ fn domain_streaming(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             id,
             name,
             arguments,
+            content_sections,
+            title_arguments,
         } => {
             state.flush_partial_assistant_message(false);
             state.chat_entries.push(ChatEntry::ToolBubble {
                 id,
                 name: name.clone(),
-                state: ToolBubbleState::Pending {
+                state: ToolCallState::Pending {
                     arguments: arguments.clone(),
+                    content_sections: content_sections.clone(),
+                    title_arguments: title_arguments.clone(),
                 },
                 collapsed: true,
             });
@@ -724,8 +771,17 @@ fn domain_streaming(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             id,
             name,
             arguments,
+            content_sections,
+            title_arguments,
         } => {
-            update_tool_bubble_to_running(state, id, name, arguments);
+            update_tool_bubble_to_running(
+                state,
+                id,
+                name,
+                arguments,
+                content_sections,
+                title_arguments,
+            );
             vec![]
         }
         DomainEvent::ToolDone {
@@ -734,9 +790,17 @@ fn domain_streaming(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             result,
             summary,
             duration,
-            body_sections,
+            content_sections,
         } => {
-            update_tool_bubble_to_done(state, id, name, result, body_sections, summary, duration);
+            update_tool_bubble_to_done(
+                state,
+                id,
+                name,
+                result,
+                content_sections,
+                summary,
+                duration,
+            );
             vec![]
         }
         DomainEvent::ToolKilled { id } => {
@@ -775,8 +839,13 @@ fn domain_streaming(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
 }
 
 fn domain_aborting(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
+    tracing::debug!(event = ?std::mem::discriminant(&event), "domain_aborting: received event");
     match event {
         DomainEvent::StreamCancelled => {
+            tracing::info!(
+                aborting_exit = state.aborting_exit,
+                "aborting: stream cancelled → idle"
+            );
             state.flush_partial_assistant_message(true);
             state.transition_queued_messages_to(UserMessageState::Cancelled);
             state.steer_indicator = false;
@@ -809,8 +878,17 @@ fn domain_aborting(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             id,
             name,
             arguments,
+            content_sections,
+            title_arguments,
         } => {
-            update_tool_bubble_to_running(state, id, name, arguments);
+            update_tool_bubble_to_running(
+                state,
+                id,
+                name,
+                arguments,
+                content_sections,
+                title_arguments,
+            );
             vec![]
         }
         DomainEvent::ToolDone {
@@ -819,14 +897,29 @@ fn domain_aborting(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             result,
             summary,
             duration,
-            body_sections,
+            content_sections,
         } => {
-            update_tool_bubble_to_done(state, id, name, result, body_sections, summary, duration);
+            update_tool_bubble_to_done(
+                state,
+                id,
+                name,
+                result,
+                content_sections,
+                summary,
+                duration,
+            );
             vec![]
         }
         DomainEvent::ToolKilled { id } => {
+            tracing::info!(%id, aborting_exit = state.aborting_exit, "aborting: tool killed → idle");
             update_tool_bubble_to_killed(state, id);
-            vec![]
+            state.mode = TuiMode::Idle;
+            state.focus = Focus::MainInput;
+            if std::mem::replace(&mut state.aborting_exit, false) {
+                vec![Effect::Quit]
+            } else {
+                vec![]
+            }
         }
         DomainEvent::ToolDenied { id } => {
             update_tool_bubble_to_denied(state, id);
@@ -892,6 +985,8 @@ fn update_tool_bubble_to_running(
     id: Uuid,
     name: String,
     arguments: serde_json::Value,
+    content_sections: Vec<crate::agent::tools::ContentSection>,
+    title_arguments: Vec<(String, serde_json::Value)>,
 ) {
     if let Some(entry) = state.find_tool_bubble_mut(id) {
         if let ChatEntry::ToolBubble {
@@ -899,15 +994,21 @@ fn update_tool_bubble_to_running(
             ..
         } = entry
         {
-            *bubble_state = ToolBubbleState::Running {
+            *bubble_state = ToolCallState::Running {
                 arguments: arguments.clone(),
+                content_sections: content_sections.clone(),
+                title_arguments: title_arguments.clone(),
             };
         }
     } else {
         state.chat_entries.push(ChatEntry::ToolBubble {
             id,
             name,
-            state: ToolBubbleState::Running { arguments },
+            state: ToolCallState::Running {
+                arguments,
+                content_sections,
+                title_arguments,
+            },
             collapsed: true,
         });
     }
@@ -922,11 +1023,11 @@ fn update_tool_bubble_to_done(
     id: Uuid,
     name: String,
     result: String,
-    body_sections: Vec<crate::agent::tools::BodySection>,
+    content_sections: Vec<crate::agent::tools::ContentSection>,
     summary: Vec<(String, String)>,
     duration: std::time::Duration,
 ) {
-    let previous_arguments = state
+    let (previous_arguments, previous_title_arguments) = state
         .find_tool_bubble_mut(id)
         .and_then(|entry| {
             if let ChatEntry::ToolBubble {
@@ -935,39 +1036,49 @@ fn update_tool_bubble_to_done(
             } = entry
             {
                 match bubble_state {
-                    ToolBubbleState::Running { arguments }
-                    | ToolBubbleState::Pending { arguments } => Some(arguments.clone()),
+                    ToolCallState::Running {
+                        arguments,
+                        title_arguments,
+                        ..
+                    }
+                    | ToolCallState::Pending {
+                        arguments,
+                        title_arguments,
+                        ..
+                    } => Some((arguments.clone(), title_arguments.clone())),
                     _ => None,
                 }
             } else {
                 None
             }
         })
-        .unwrap_or(serde_json::Value::Null);
+        .unwrap_or((serde_json::Value::Null, vec![]));
     if let Some(entry) = state.find_tool_bubble_mut(id) {
         if let ChatEntry::ToolBubble {
             state: bubble_state,
             ..
         } = entry
         {
-            *bubble_state = ToolBubbleState::Done {
+            *bubble_state = ToolCallState::Done {
                 arguments: previous_arguments,
                 result,
-                body_sections,
+                content_sections,
                 summary,
                 duration,
+                title_arguments: previous_title_arguments,
             };
         }
     } else {
         state.chat_entries.push(ChatEntry::ToolBubble {
             id,
             name,
-            state: ToolBubbleState::Done {
+            state: ToolCallState::Done {
                 arguments: serde_json::Value::Null,
                 result,
-                body_sections,
+                content_sections,
                 summary,
                 duration,
+                title_arguments: vec![],
             },
             collapsed: true,
         });
@@ -981,13 +1092,13 @@ fn update_tool_bubble_to_killed(state: &mut AppState, id: Uuid) {
             ..
         } = entry
         {
-            *bubble_state = ToolBubbleState::Killed;
+            *bubble_state = ToolCallState::Killed;
         }
     } else {
         state.chat_entries.push(ChatEntry::ToolBubble {
             id,
             name: String::new(),
-            state: ToolBubbleState::Killed,
+            state: ToolCallState::Killed,
             collapsed: true,
         });
     }
@@ -1002,15 +1113,29 @@ fn update_tool_bubble_to_denied(state: &mut AppState, id: Uuid) {
         ..
     }) = state.find_tool_bubble_mut(id)
     {
-        let preserved_arguments = match bubble_state {
-            ToolBubbleState::Pending { arguments } | ToolBubbleState::Running { arguments } => {
-                arguments.clone()
-            }
-            _ => serde_json::Value::Null,
-        };
-        *bubble_state = ToolBubbleState::Denied {
+        let (preserved_arguments, preserved_content_sections, preserved_title_arguments) =
+            match bubble_state {
+                ToolCallState::Pending {
+                    arguments,
+                    content_sections,
+                    title_arguments,
+                }
+                | ToolCallState::Running {
+                    arguments,
+                    content_sections,
+                    title_arguments,
+                } => (
+                    arguments.clone(),
+                    content_sections.clone(),
+                    title_arguments.clone(),
+                ),
+                _ => (serde_json::Value::Null, vec![], vec![]),
+            };
+        *bubble_state = ToolCallState::Denied {
             arguments: preserved_arguments,
             error: "Denied by user".to_string(),
+            content_sections: preserved_content_sections,
+            title_arguments: preserved_title_arguments,
         };
     }
 }
@@ -1042,7 +1167,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::app_state::{AppState, ChatEntry, Focus, InputEvent, ToolBubbleState, TuiMode};
+    use crate::app_state::{AppState, ChatEntry, Focus, InputEvent, ToolCallState, TuiMode};
 
     fn empty_textarea() -> TextareaContext {
         TextareaContext {
@@ -1164,6 +1289,37 @@ mod tests {
             effects.contains(&Effect::Quit),
             "StreamCancelled after double Ctrl-C while streaming must emit Quit"
         );
+    }
+
+    #[test]
+    fn double_ctrl_c_while_tool_running_quits_after_tool_killed() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::Streaming;
+        // First Ctrl-C.
+        update(
+            &mut state,
+            TuiEvent::Input(InputEvent::CtrlC),
+            &empty_textarea(),
+        );
+        // Second Ctrl-C: stop agent, set aborting_exit.
+        let effects = update(
+            &mut state,
+            TuiEvent::Input(InputEvent::CtrlC),
+            &empty_textarea(),
+        );
+        assert!(effects.contains(&Effect::StopAgent));
+        assert!(state.aborting_exit);
+        // ToolKilled arrives (no StreamCancelled because no HTTP stream was active).
+        let effects = update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolKilled { id: Uuid::new_v4() }),
+            &empty_textarea(),
+        );
+        assert!(
+            effects.contains(&Effect::Quit),
+            "ToolKilled after double Ctrl-C while tool running must emit Quit"
+        );
+        assert_eq!(state.mode, TuiMode::Idle, "mode must return to Idle");
     }
 
     #[test]
@@ -1430,6 +1586,9 @@ mod tests {
                 id: tool_id,
                 name: "test_tool".to_string(),
                 arguments: serde_json::json!({}),
+                content_sections: vec![],
+
+                title_arguments: vec![],
             }),
             &empty_textarea(),
         );
@@ -1496,6 +1655,9 @@ mod tests {
                 id: tool_id,
                 name: "write_file".to_string(),
                 arguments: args.clone(),
+                content_sections: vec![],
+
+                title_arguments: vec![],
             }),
             &empty_textarea(),
         );
@@ -1506,7 +1668,7 @@ mod tests {
         );
         let denied_bubble = state.chat_entries.iter().find_map(|entry| {
             if let ChatEntry::ToolBubble {
-                state: ToolBubbleState::Denied { arguments, .. },
+                state: ToolCallState::Denied { arguments, .. },
                 ..
             } = entry
             {

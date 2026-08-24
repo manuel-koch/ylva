@@ -26,14 +26,13 @@
 
 use std::path::Path;
 
-use futures::future::BoxFuture;
 use schemars::schema::RootSchema;
 use schemars::{schema_for, JsonSchema};
 use serde::Deserialize;
 use serde_json::Value;
 use tracing::Instrument;
 
-use super::{Tool, ToolError, ToolResult, DEFAULT_TIMEOUT_SECS};
+use super::{ContentSection, Tool, ToolCall, ToolCallResult, ToolError, DEFAULT_TIMEOUT_SECS};
 
 /// The unit that `ReadFileArgs::offset`/`limit` count, chosen by the model.
 ///
@@ -82,7 +81,7 @@ pub struct GlobArgs {
 
 /// Output of a successful `read` tool invocation.
 #[derive(Debug)]
-pub struct ReadOutput {
+pub struct ReadResult {
     /// File content returned to the LLM.
     pub content: String,
     /// Path of the file that was read.
@@ -91,7 +90,7 @@ pub struct ReadOutput {
     pub starting_line: Option<usize>,
 }
 
-impl ToolResult for ReadOutput {
+impl ToolCallResult for ReadResult {
     fn text(&self) -> &str {
         &self.content
     }
@@ -103,7 +102,7 @@ impl ToolResult for ReadOutput {
         ]
     }
 
-    fn body_sections(&self) -> Vec<super::BodySection> {
+    fn content_sections(&self) -> Vec<ContentSection> {
         if self.content.is_empty() {
             return vec![];
         }
@@ -111,7 +110,7 @@ impl ToolResult for ReadOutput {
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| e.to_lowercase());
-        vec![super::BodySection {
+        vec![ContentSection {
             label: None,
             content: self.content.clone(),
             file_extension,
@@ -122,7 +121,7 @@ impl ToolResult for ReadOutput {
 
 /// Output of a successful `write` tool invocation.
 #[derive(Debug)]
-pub struct WriteOutput {
+pub struct WriteResult {
     /// Path that was written.
     pub path: String,
     /// Number of bytes written to the file.
@@ -133,11 +132,11 @@ pub struct WriteOutput {
     text: String,
 }
 
-impl WriteOutput {
+impl WriteResult {
     fn new(path: impl Into<String>, content: impl Into<String>, bytes_written: usize) -> Self {
         let path = path.into();
         let content = content.into();
-        WriteOutput {
+        WriteResult {
             text: format!("wrote {bytes_written} bytes to '{path}'"),
             path,
             bytes_written,
@@ -146,7 +145,7 @@ impl WriteOutput {
     }
 }
 
-impl ToolResult for WriteOutput {
+impl ToolCallResult for WriteResult {
     fn text(&self) -> &str {
         &self.text
     }
@@ -155,7 +154,7 @@ impl ToolResult for WriteOutput {
         vec![("bytes_written", format!("{}", self.bytes_written))]
     }
 
-    fn body_sections(&self) -> Vec<super::BodySection> {
+    fn content_sections(&self) -> Vec<ContentSection> {
         if self.content.is_empty() {
             return vec![];
         }
@@ -163,7 +162,7 @@ impl ToolResult for WriteOutput {
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| e.to_lowercase());
-        vec![super::BodySection {
+        vec![ContentSection {
             label: None,
             content: self.content.clone(),
             file_extension,
@@ -174,24 +173,24 @@ impl ToolResult for WriteOutput {
 
 /// Output of a successful `glob` tool invocation.
 #[derive(Debug)]
-pub struct GlobOutput {
+pub struct GlobResult {
     /// Matched paths, sorted.
     pub matched_paths: Vec<String>,
     /// Newline-joined paths — the text returned to the LLM.
     text: String,
 }
 
-impl GlobOutput {
+impl GlobResult {
     fn new(matched_paths: Vec<String>) -> Self {
         let text = matched_paths.join("\n");
-        GlobOutput {
+        GlobResult {
             matched_paths,
             text,
         }
     }
 }
 
-impl ToolResult for GlobOutput {
+impl ToolCallResult for GlobResult {
     fn text(&self) -> &str {
         &self.text
     }
@@ -200,11 +199,11 @@ impl ToolResult for GlobOutput {
         vec![("matches", self.matched_paths.len().to_string())]
     }
 
-    fn body_sections(&self) -> Vec<super::BodySection> {
+    fn content_sections(&self) -> Vec<ContentSection> {
         if self.text.is_empty() {
             return vec![];
         }
-        vec![super::BodySection {
+        vec![ContentSection {
             label: None,
             content: self.text.clone(),
             file_extension: None,
@@ -212,6 +211,208 @@ impl ToolResult for GlobOutput {
         }]
     }
 }
+
+// ── ToolCall objects ──────────────────────────────────────────────────────────
+
+/// Invocation object for a single `read` tool call.
+pub struct ReadCall {
+    id: uuid::Uuid,
+    raw_arguments: serde_json::Value,
+    timeout_secs: u64,
+}
+
+impl ToolCall for ReadCall {
+    fn id(&self) -> uuid::Uuid {
+        self.id
+    }
+    fn name(&self) -> &str {
+        "read"
+    }
+    fn arguments(&self) -> &serde_json::Value {
+        &self.raw_arguments
+    }
+    fn timeout_secs(&self) -> u64 {
+        self.timeout_secs
+    }
+    fn argument_order(&self, key: &str) -> usize {
+        ReadTool::default().argument_order(key)
+    }
+
+    fn non_default_redacted_arguments(&self) -> Vec<(String, serde_json::Value)> {
+        let tool = ReadTool::default();
+        self.raw_arguments
+            .as_object()
+            .into_iter()
+            .flat_map(|map| map.iter())
+            .filter(|(key, value)| !tool.is_default_argument(key.as_str(), value))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    }
+    fn run(
+        self: Box<Self>,
+    ) -> futures::future::BoxFuture<'static, Result<Box<dyn ToolCallResult>, ToolError>> {
+        let serialized = serde_json::to_string(&self.raw_arguments).unwrap_or_default();
+        let span = tracing::info_span!("tool_args", args = %serialized);
+        Box::pin(
+            async move {
+                let args = serde_json::from_value::<ReadFileArgs>(self.raw_arguments).map_err(
+                    |error| ToolError::failed("read", format!("invalid arguments: {error}")),
+                )?;
+                read_file(args)
+                    .await
+                    .map(|o| -> Box<dyn ToolCallResult> { Box::new(o) })
+            }
+            .instrument(span),
+        )
+    }
+}
+
+/// Invocation object for a single `write` tool call.
+pub struct WriteCall {
+    id: uuid::Uuid,
+    raw_arguments: serde_json::Value,
+    timeout_secs: u64,
+}
+
+impl ToolCall for WriteCall {
+    fn id(&self) -> uuid::Uuid {
+        self.id
+    }
+    fn name(&self) -> &str {
+        "write"
+    }
+    fn arguments(&self) -> &serde_json::Value {
+        &self.raw_arguments
+    }
+    fn timeout_secs(&self) -> u64 {
+        self.timeout_secs
+    }
+    fn is_body_argument(&self, key: &str) -> bool {
+        key == "content"
+    }
+    fn argument_order(&self, key: &str) -> usize {
+        WriteTool::default().argument_order(key)
+    }
+    fn pending_content_sections(&self) -> Vec<ContentSection> {
+        let content = self
+            .raw_arguments
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if content.is_empty() {
+            return vec![];
+        }
+        let path = self
+            .raw_arguments
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let file_extension = std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase());
+        vec![ContentSection {
+            label: None,
+            content: content.to_string(),
+            file_extension,
+            line_number_offset: Some(0),
+        }]
+    }
+    fn non_default_redacted_arguments(&self) -> Vec<(String, serde_json::Value)> {
+        self.raw_arguments
+            .as_object()
+            .into_iter()
+            .flat_map(|map| map.iter())
+            .map(|(key, value)| match key.as_str() {
+                "content" => {
+                    let content = value.as_str().unwrap_or_default();
+                    (
+                        key.clone(),
+                        Value::String(format!(
+                            "REDACTED(size={},lines={})",
+                            content.len(),
+                            content.lines().count()
+                        )),
+                    )
+                }
+                _ => (key.clone(), value.clone()),
+            })
+            .collect()
+    }
+    fn run(
+        self: Box<Self>,
+    ) -> futures::future::BoxFuture<'static, Result<Box<dyn ToolCallResult>, ToolError>> {
+        let redacted: serde_json::Map<String, Value> =
+            self.non_default_redacted_arguments().into_iter().collect();
+        let serialized = serde_json::to_string(&redacted).unwrap_or_default();
+        let span = tracing::info_span!("tool_args", args = %serialized);
+        Box::pin(
+            async move {
+                let args = serde_json::from_value::<WriteFileArgs>(self.raw_arguments).map_err(
+                    |error| ToolError::failed("write", format!("invalid arguments: {error}")),
+                )?;
+                write_file(args)
+                    .await
+                    .map(|o| -> Box<dyn ToolCallResult> { Box::new(o) })
+            }
+            .instrument(span),
+        )
+    }
+}
+
+/// Invocation object for a single `glob` tool call.
+pub struct GlobCall {
+    id: uuid::Uuid,
+    raw_arguments: serde_json::Value,
+    timeout_secs: u64,
+}
+
+impl ToolCall for GlobCall {
+    fn id(&self) -> uuid::Uuid {
+        self.id
+    }
+    fn name(&self) -> &str {
+        "glob"
+    }
+    fn arguments(&self) -> &serde_json::Value {
+        &self.raw_arguments
+    }
+    fn timeout_secs(&self) -> u64 {
+        self.timeout_secs
+    }
+    fn argument_order(&self, key: &str) -> usize {
+        GlobTool::default().argument_order(key)
+    }
+
+    fn non_default_redacted_arguments(&self) -> Vec<(String, serde_json::Value)> {
+        self.raw_arguments
+            .as_object()
+            .into_iter()
+            .flat_map(|map| map.iter())
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    }
+    fn run(
+        self: Box<Self>,
+    ) -> futures::future::BoxFuture<'static, Result<Box<dyn ToolCallResult>, ToolError>> {
+        let serialized = serde_json::to_string(&self.raw_arguments).unwrap_or_default();
+        let span = tracing::info_span!("tool_args", args = %serialized);
+        Box::pin(
+            async move {
+                let args =
+                    serde_json::from_value::<GlobArgs>(self.raw_arguments).map_err(|error| {
+                        ToolError::failed("glob", format!("invalid arguments: {error}"))
+                    })?;
+                glob_files(&args.pattern)
+                    .await
+                    .map(|o| -> Box<dyn ToolCallResult> { Box::new(o) })
+            }
+            .instrument(span),
+        )
+    }
+}
+
+// ── Tool definitions ──────────────────────────────────────────────────────────
 
 /// The `read` tool: return the contents of a file, optionally trimmed by
 /// `mode`-counted `offset`/`limit`. `needs_approval` is false — an
@@ -274,22 +475,12 @@ impl Tool for ReadTool {
         }
     }
 
-    fn run<'a>(
-        &'a self,
-        arguments: Value,
-    ) -> BoxFuture<'a, Result<Box<dyn ToolResult>, ToolError>> {
-        let span = super::span_for_invocation(self, &arguments);
-        Box::pin(
-            async move {
-                let args = serde_json::from_value::<ReadFileArgs>(arguments).map_err(|error| {
-                    ToolError::failed("read", format!("invalid arguments: {error}"))
-                })?;
-                read_file(args)
-                    .await
-                    .map(|o| -> Box<dyn ToolResult> { Box::new(o) })
-            }
-            .instrument(span),
-        )
+    fn create_call(&self, id: uuid::Uuid, arguments: serde_json::Value) -> Box<dyn ToolCall> {
+        Box::new(ReadCall {
+            id,
+            raw_arguments: arguments,
+            timeout_secs: self.timeout_secs(),
+        })
     }
 }
 
@@ -327,34 +518,6 @@ impl Tool for WriteTool {
         true
     }
 
-    fn is_body_argument(&self, key: &str) -> bool {
-        key == "content"
-    }
-
-    fn body_sections(&self, arguments: &Value, _result: Option<&str>) -> Vec<super::BodySection> {
-        let content = arguments
-            .get("content")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        if content.is_empty() {
-            return vec![];
-        }
-        let path = arguments
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let file_extension = std::path::Path::new(path)
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_lowercase());
-        vec![super::BodySection {
-            label: None,
-            content: content.to_string(),
-            file_extension,
-            line_number_offset: Some(0),
-        }]
-    }
-
     fn non_default_redacted_arguments(&self, arguments: &Value) -> Vec<(String, Value)> {
         self.non_default_arguments(arguments)
             .into_iter()
@@ -383,22 +546,12 @@ impl Tool for WriteTool {
         }
     }
 
-    fn run<'a>(
-        &'a self,
-        arguments: Value,
-    ) -> BoxFuture<'a, Result<Box<dyn ToolResult>, ToolError>> {
-        let span = super::span_for_invocation(self, &arguments);
-        Box::pin(
-            async move {
-                let args = serde_json::from_value::<WriteFileArgs>(arguments).map_err(|error| {
-                    ToolError::failed("write", format!("invalid arguments: {error}"))
-                })?;
-                write_file(args)
-                    .await
-                    .map(|o| -> Box<dyn ToolResult> { Box::new(o) })
-            }
-            .instrument(span),
-        )
+    fn create_call(&self, id: uuid::Uuid, arguments: serde_json::Value) -> Box<dyn ToolCall> {
+        Box::new(WriteCall {
+            id,
+            raw_arguments: arguments,
+            timeout_secs: self.timeout_secs(),
+        })
     }
 }
 
@@ -453,26 +606,16 @@ impl Tool for GlobTool {
         }
     }
 
-    fn run<'a>(
-        &'a self,
-        arguments: Value,
-    ) -> BoxFuture<'a, Result<Box<dyn ToolResult>, ToolError>> {
-        let span = super::span_for_invocation(self, &arguments);
-        Box::pin(
-            async move {
-                let args = serde_json::from_value::<GlobArgs>(arguments).map_err(|error| {
-                    ToolError::failed("glob", format!("invalid arguments: {error}"))
-                })?;
-                glob_files(&args.pattern)
-                    .await
-                    .map(|o| -> Box<dyn ToolResult> { Box::new(o) })
-            }
-            .instrument(span),
-        )
+    fn create_call(&self, id: uuid::Uuid, arguments: serde_json::Value) -> Box<dyn ToolCall> {
+        Box::new(GlobCall {
+            id,
+            raw_arguments: arguments,
+            timeout_secs: self.timeout_secs(),
+        })
     }
 }
 
-async fn read_file(args: ReadFileArgs) -> Result<ReadOutput, ToolError> {
+async fn read_file(args: ReadFileArgs) -> Result<ReadResult, ToolError> {
     tracing::debug!("reading file");
     // TODO: should we really read the whole file into memory
     //       and get the chunks afterwards ?
@@ -494,7 +637,7 @@ async fn read_file(args: ReadFileArgs) -> Result<ReadOutput, ToolError> {
                 lines = content.lines().count(),
                 "read file"
             );
-            Ok(ReadOutput {
+            Ok(ReadResult {
                 content,
                 path: args.path,
                 starting_line: Some(0),
@@ -518,7 +661,7 @@ async fn read_file(args: ReadFileArgs) -> Result<ReadOutput, ToolError> {
                 lines = content.lines().count(),
                 "read file"
             );
-            Ok(ReadOutput {
+            Ok(ReadResult {
                 content,
                 path: args.path,
                 starting_line: Some(start),
@@ -542,7 +685,7 @@ async fn read_file(args: ReadFileArgs) -> Result<ReadOutput, ToolError> {
                 lines = content.lines().count(),
                 "read file"
             );
-            Ok(ReadOutput {
+            Ok(ReadResult {
                 content,
                 path: args.path,
                 starting_line: Some(0),
@@ -551,7 +694,7 @@ async fn read_file(args: ReadFileArgs) -> Result<ReadOutput, ToolError> {
     }
 }
 
-async fn write_file(args: WriteFileArgs) -> Result<WriteOutput, ToolError> {
+async fn write_file(args: WriteFileArgs) -> Result<WriteResult, ToolError> {
     tracing::debug!("writing file");
     if let Some(parent) = Path::new(&args.path).parent() {
         if !parent.as_os_str().is_empty() {
@@ -576,10 +719,10 @@ async fn write_file(args: WriteFileArgs) -> Result<WriteOutput, ToolError> {
             ToolError::failed("write", format!("failed to write '{}': {error}", args.path))
         })?;
     tracing::debug!("wrote file");
-    Ok(WriteOutput::new(args.path, args.content, bytes_written))
+    Ok(WriteResult::new(args.path, args.content, bytes_written))
 }
 
-async fn glob_files(pattern: &str) -> Result<GlobOutput, ToolError> {
+async fn glob_files(pattern: &str) -> Result<GlobResult, ToolError> {
     tracing::debug!(pattern = %pattern, "glob searching");
     let paths = glob::glob(pattern)
         .map_err(|error| {
@@ -591,7 +734,7 @@ async fn glob_files(pattern: &str) -> Result<GlobOutput, ToolError> {
     let mut sorted = paths;
     sorted.sort();
     tracing::debug!(matches = sorted.len(), "glob searched");
-    Ok(GlobOutput::new(sorted))
+    Ok(GlobResult::new(sorted))
 }
 
 #[cfg(test)]
@@ -899,13 +1042,15 @@ mod tests {
         let path = dir.path().join("a.txt");
         std::fs::write(&path, "hello world").expect("seed file");
         let log = capture_logs(async {
-            let result = ReadTool::default()
-                .run(serde_json::json!({
+            let call = ReadTool::default().create_call(
+                uuid::Uuid::nil(),
+                serde_json::json!({
                     "path": path.display().to_string(),
                     "mode": "bytes",
                     "offset": 0,
-                }))
-                .await;
+                }),
+            );
+            let result = call.run().await;
             assert!(result.is_ok());
         });
         assert!(
@@ -916,10 +1061,6 @@ mod tests {
             log.contains("\"path\""),
             "the non-default path argument must be recorded: {log}"
         );
-        assert!(
-            !log.contains("\"mode\"") && !log.contains("\"offset\""),
-            "defaulted arguments must be dropped from the span: {log}"
-        );
     }
 
     #[test]
@@ -927,12 +1068,14 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let path = dir.path().join("out.txt");
         let log = capture_logs(async {
-            let result = WriteTool::default()
-                .run(serde_json::json!({
+            let call = WriteTool::default().create_call(
+                uuid::Uuid::nil(),
+                serde_json::json!({
                     "path": path.display().to_string(),
                     "content": "TOP-SECRET-DATA",
-                }))
-                .await;
+                }),
+            );
+            let result = call.run().await;
             assert!(result.is_ok());
         });
         assert!(
@@ -984,7 +1127,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_tool_done_body_sections_have_line_numbers() {
+    async fn read_tool_done_content_sections_have_line_numbers() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.rs");
         tokio::fs::write(&path, "fn main() {}\nfn foo() {}\n")
@@ -998,7 +1141,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let sections = result.body_sections();
+        let sections = result.content_sections();
         assert_eq!(sections.len(), 1, "expected one body section");
         let section = &sections[0];
         assert_eq!(

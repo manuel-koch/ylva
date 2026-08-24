@@ -15,7 +15,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::future::BoxFuture;
 use schemars::schema::RootSchema;
 use schemars::{schema_for, JsonSchema};
 use serde::Deserialize;
@@ -25,7 +24,7 @@ use tokio::sync::mpsc;
 
 use ylva::{
     default_registry, AgentCommand, AgentLoop, DeltaChunk, Message, MockEvent, MockProvider, Tool,
-    ToolError, ToolRegistry, ToolResult, UiUpdate, MAX_TOOL_USE_ITERATIONS,
+    ToolCall, ToolCallResult, ToolError, ToolRegistry, UiUpdate, MAX_TOOL_USE_ITERATIONS,
 };
 
 /// Build a `MockEvent::Delta` carrying a complete tool call for `index`.
@@ -405,14 +404,46 @@ async fn stop_while_awaiting_approval_clears_pending_tools() {
 #[derive(JsonSchema, Deserialize)]
 struct SleepArgs {}
 
-/// Minimal [`ToolResult`] wrapper for a plain string, used in test tools that
+/// Minimal [`ToolCallResult`] wrapper for a plain string, used in test tools that
 /// do not need to expose domain properties.
 #[derive(Debug)]
 struct SimpleStringOutput(String);
 
-impl ToolResult for SimpleStringOutput {
+impl ToolCallResult for SimpleStringOutput {
     fn text(&self) -> &str {
         &self.0
+    }
+}
+
+struct SleepToolCall {
+    id: uuid::Uuid,
+    arguments: serde_json::Value,
+}
+
+impl ToolCall for SleepToolCall {
+    fn id(&self) -> uuid::Uuid {
+        self.id
+    }
+    fn name(&self) -> &str {
+        "sleep"
+    }
+    fn arguments(&self) -> &serde_json::Value {
+        &self.arguments
+    }
+    fn timeout_secs(&self) -> u64 {
+        600
+    }
+    fn non_default_redacted_arguments(&self) -> Vec<(String, serde_json::Value)> {
+        vec![]
+    }
+    fn run(
+        self: Box<Self>,
+    ) -> futures::future::BoxFuture<'static, Result<Box<dyn ToolCallResult>, ToolError>> {
+        Box::pin(async move {
+            tokio::time::sleep(Duration::from_secs(600)).await;
+            let output: Box<dyn ToolCallResult> = Box::new(SimpleStringOutput("done".to_string()));
+            Ok(output)
+        })
     }
 }
 
@@ -441,15 +472,8 @@ impl Tool for SleepTool {
             .map(|(key, value)| (key.to_string(), value.clone()))
             .collect()
     }
-    fn run<'a>(
-        &'a self,
-        _arguments: Value,
-    ) -> BoxFuture<'a, Result<Box<dyn ToolResult>, ToolError>> {
-        Box::pin(async move {
-            tokio::time::sleep(Duration::from_secs(600)).await;
-            let output: Box<dyn ToolResult> = Box::new(SimpleStringOutput("done".to_string()));
-            Ok(output)
-        })
+    fn create_call(&self, id: uuid::Uuid, arguments: serde_json::Value) -> Box<dyn ToolCall> {
+        Box::new(SleepToolCall { id, arguments })
     }
 }
 
