@@ -26,12 +26,12 @@ use crate::llm::{Provider, ToolEnvelope, ToolSchema};
 
 pub mod tools;
 
-use tools::{TimedOutput, ToolError, ToolOutput, ToolRegistry};
+use tools::{ToolCall, ToolRegistry};
 
-/// Maximum number of LLM requests the ReAct loop starts within a single user
+/// Maximum number of LLM requests the tool-use loop starts within a single user
 /// turn before the guard stops re-prompting. Per-engine configurability is a
 /// later (Phase 5) concern; this module-level default is the Phase 3 SSOT.
-pub const MAX_ITERATIONS: usize = 15;
+pub const MAX_TOOL_USE_ITERATIONS: usize = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentMode {
@@ -73,6 +73,7 @@ pub enum AgentEvent {
         result: String,
         summary: Vec<(String, String)>,
         duration: std::time::Duration,
+        content_sections: Vec<crate::agent::tools::ContentSection>,
     },
     ToolError {
         id: Uuid,
@@ -96,11 +97,15 @@ pub enum UiUpdate {
         name: String,
         id: Uuid,
         arguments: Value,
+        content_sections: Vec<crate::agent::tools::ContentSection>,
+        title_arguments: Vec<(String, serde_json::Value)>,
     },
     ToolPending {
         name: String,
         id: Uuid,
         arguments: serde_json::Value,
+        content_sections: Vec<crate::agent::tools::ContentSection>,
+        title_arguments: Vec<(String, serde_json::Value)>,
     },
     ToolDone {
         id: Uuid,
@@ -108,6 +113,7 @@ pub enum UiUpdate {
         result: String,
         summary: Vec<(String, String)>,
         duration: std::time::Duration,
+        content_sections: Vec<crate::agent::tools::ContentSection>,
     },
     ToolError {
         id: Uuid,
@@ -308,10 +314,18 @@ pub struct AssembledToolCall {
 ///
 /// Once approved, [`PendingTool::execute`] runs the tool in its own task and
 /// reports completion through `agent_tx` so the loop never blocks on a tool.
-#[derive(Debug)]
 pub struct PendingTool {
-    pub call: AssembledToolCall,
-    pub timeout_secs: Option<u64>,
+    pub call: Box<dyn ToolCall>,
+}
+
+impl std::fmt::Debug for PendingTool {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PendingTool")
+            .field("name", &self.call.name())
+            .field("id", &self.call.id())
+            .finish()
+    }
 }
 
 /// Default execution timeout for file-system tools (blueprint §4D: 5s).
@@ -322,16 +336,12 @@ impl PendingTool {
     /// default) and a per-tool `CancellationToken`. Completion is reported via
     /// `agent_tx` (`ToolDone`/`ToolError`/`ToolKilled`); returns the token the
     /// outer loop stores as the running tool's cancel.
-    pub fn execute(
-        self,
-        registry: Arc<ToolRegistry>,
-        agent_tx: mpsc::Sender<AgentEvent>,
-    ) -> CancellationToken {
+    pub fn execute(self, agent_tx: mpsc::Sender<AgentEvent>) -> CancellationToken {
         let cancel = CancellationToken::new();
         let run_cancel = cancel.clone();
-        let name = self.call.name.clone();
-        let id = self.call.id;
-        let timeout_secs = self.timeout_secs.unwrap_or(DEFAULT_TOOL_TIMEOUT_SECS);
+        let id = self.call.id();
+        let name = self.call.name().to_string();
+        let timeout_secs = self.call.timeout_secs();
         let span = tracing::info_span!("tool_execute", tool = %name, tool_call_id = %id);
         tokio::spawn(
             async move {
@@ -347,43 +357,33 @@ impl PendingTool {
                         return;
                     }
                     result = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
-                        match registry.get(&name) {
-                            Some(tool) => {
-                                let start = std::time::Instant::now();
-                                // TODO: remove artificial delay
-                                #[cfg(feature = "artificial-tool-delay")]
-                                {
-                                    let delay_secs = 3
-                                        + (std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .unwrap_or_default()
-                                            .subsec_nanos()
-                                            % 3) as u64;
-                                    tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
-                                }
-                                // END TODO
-                                tool.run(self.call.arguments).await.map(|output| {
-                                    let elapsed = start.elapsed();
-                                    let timed = Box::new(TimedOutput::new(output, elapsed))
-                                        as Box<dyn ToolOutput>;
-                                    (timed, elapsed)
-                                })
-                            }
-                            None => Err(ToolError::failed(
-                                &name,
-                                format!("unknown tool '{name}'"),
-                            )),
+                        let start = std::time::Instant::now();
+                        // TODO: remove artificial delay
+                        #[cfg(feature = "artificial-tool-delay")]
+                        {
+                            let delay_secs = 2
+                                + (std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .subsec_nanos()
+                                    % 3) as u64;
+                            tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
                         }
-                    }) => result
+                        // END TODO
+                        let result = self.call.run().await;
+                        let elapsed = start.elapsed();
+                        (result, elapsed)
+                    }) => result,
                 };
                 match outcome {
-                    Ok(Ok((tool_output, duration))) => {
-                        let result = tool_output.output_text().to_string();
+                    Ok((Ok(tool_output), duration)) => {
+                        let result = tool_output.text().to_string();
                         let summary = tool_output
-                            .result_properties()
+                            .properties()
                             .into_iter()
                             .map(|(key, value)| (key.to_string(), value))
                             .collect::<Vec<_>>();
+                        let content_sections = tool_output.content_sections();
                         let _ = agent_tx
                             .send(AgentEvent::ToolDone {
                                 id,
@@ -391,10 +391,11 @@ impl PendingTool {
                                 result,
                                 summary,
                                 duration,
+                                content_sections,
                             })
                             .await;
                     }
-                    Ok(Err(error)) => {
+                    Ok((Err(error), _)) => {
                         let _ = agent_tx
                             .send(AgentEvent::ToolError {
                                 id,
@@ -553,24 +554,43 @@ impl AgentLoop {
                                     AssistantStatus::Complete,
                                     requests,
                                 );
-                                for call in calls {
-                                    let timeout_secs =
-                                        registry.get(&call.name).map(|tool| tool.timeout_secs());
-                                    pending_tools
-                                        .push_back(PendingTool { call, timeout_secs });
+                                for assembled in calls {
+                                    match registry.create_call(
+                                        &assembled.name,
+                                        assembled.id,
+                                        assembled.arguments.clone(),
+                                    ) {
+                                        Some(call) => {
+                                            pending_tools.push_back(PendingTool { call });
+                                        }
+                                        None => {
+                                            let error =
+                                                format!("unknown tool '{}'", assembled.name);
+                                            let _ = agent_tx
+                                                .send(AgentEvent::ToolError {
+                                                    id: assembled.id,
+                                                    name: assembled.name.clone(),
+                                                    error,
+                                                })
+                                                .await;
+                                        }
+                                    }
                                 }
                                 mode = AgentMode::ToolPending;
                                 if let Some(first) = pending_tools.front() {
+                                    log_tool_approval_request(first.call.as_ref());
                                     let _ = ui_tx
                                         .send(UiUpdate::ToolPending {
-                                            name: first.call.name.clone(),
-                                            id: first.call.id,
-                                            arguments: first.call.arguments.clone(),
+                                            name: first.call.name().to_string(),
+                                            id: first.call.id(),
+                                            arguments: first.call.arguments().clone(),
+                                            content_sections: first.call.pending_content_sections(),
+                                            title_arguments: first.call.title_arguments(),
                                         })
                                         .await;
                                 }
                             }
-                            AgentEvent::ToolDone { id, name, result, summary, duration } => {
+                            AgentEvent::ToolDone { id, name, result, summary, duration, content_sections } => {
                                 current_tool_cancel = None;
                                 context.push_tool_result(id, name.clone(), result.clone());
                                 let _ = ui_tx
@@ -580,6 +600,7 @@ impl AgentLoop {
                                         result,
                                         summary,
                                         duration,
+                                        content_sections,
                                     })
                                     .await;
                                 advance_tool_queue(
@@ -589,7 +610,7 @@ impl AgentLoop {
                                     &mut current_cancel,
                                     &mut iterations,
                                     provider.clone(),
-                                    registry.schemas(),
+                                    Arc::clone(&registry),
                                     ui_tx.clone(),
                                     agent_tx.clone(),
                                 )
@@ -606,13 +627,14 @@ impl AgentLoop {
                                     &mut current_cancel,
                                     &mut iterations,
                                     provider.clone(),
-                                    registry.schemas(),
+                                    Arc::clone(&registry),
                                     ui_tx.clone(),
                                     agent_tx.clone(),
                                 )
                                 .await;
                             }
                             AgentEvent::ToolKilled { id, name: _ } => {
+                                tracing::info!(%id, "tool killed; agent returning to idle");
                                 current_tool_cancel = None;
                                 pending_tools.clear();
                                 let _ = ui_tx.send(UiUpdate::ToolKilled { id }).await;
@@ -656,24 +678,27 @@ impl AgentLoop {
                                 let is_front = mode == AgentMode::ToolPending
                                     && pending_tools
                                         .front()
-                                        .is_some_and(|pending| pending.call.id == id);
+                                        .is_some_and(|pending| pending.call.id() == id);
                                 if is_front {
                                     let pending =
                                         pending_tools.pop_front().expect("checked front");
-                                    let name = pending.call.name.clone();
-                                    let call_id = pending.call.id;
-                                    let arguments = pending.call.arguments.clone();
-                                    tracing::debug!(tool = %name, "tool approved");
+                                    let name = pending.call.name().to_string();
+                                    let call_id = pending.call.id();
+                                    let arguments = pending.call.arguments().clone();
+                                    let content_sections = pending.call.pending_content_sections();
+                                    let title_arguments = pending.call.title_arguments();
+                                    tracing::info!(tool = %name, tool_call_id = %call_id, "tool approved");
                                     current_tool_cancel = Some(PendingTool::execute(
                                         pending,
-                                        registry.clone(),
                                         agent_tx.clone(),
                                     ));
                                     let _ = ui_tx
                                         .send(UiUpdate::ToolStart {
-                                            name,
+                                            name: name.clone(),
                                             id: call_id,
-                                            arguments,
+                                            arguments: arguments.clone(),
+                                            content_sections,
+                                            title_arguments,
                                         })
                                         .await;
                                 }
@@ -683,13 +708,13 @@ impl AgentLoop {
                                 let is_front = mode == AgentMode::ToolPending
                                     && pending_tools
                                         .front()
-                                        .is_some_and(|pending| pending.call.id == id);
+                                        .is_some_and(|pending| pending.call.id() == id);
                                 if is_front {
                                     let denied =
                                         pending_tools.pop_front().expect("checked front");
-                                    let name = denied.call.name;
-                                    let call_id = denied.call.id;
-                                    tracing::debug!(tool = %name, "tool denied");
+                                    let name = denied.call.name().to_string();
+                                    let call_id = denied.call.id();
+                                    tracing::info!(tool = %name, tool_call_id = %call_id, "tool denied");
                                     let mut error = format!("tool '{name}' was denied");
                                     if !reason.is_empty() {
                                         error.push_str(&format!(": {reason}"));
@@ -716,7 +741,7 @@ impl AgentLoop {
                                         &mut current_cancel,
                                         &mut iterations,
                                         provider.clone(),
-                                        registry.schemas(),
+                                        Arc::clone(&registry),
                                         ui_tx.clone(),
                                         agent_tx.clone(),
                                     )
@@ -724,6 +749,13 @@ impl AgentLoop {
                                 }
                             }
                             AgentCommand::Stop { reason } => {
+                                tracing::info!(
+                                    %reason,
+                                    has_stream = current_cancel.is_some(),
+                                    has_tool = current_tool_cancel.is_some(),
+                                    ?mode,
+                                    "stop command received"
+                                );
                                 // Interrupt: hard-abort the current round.
                                 pending_steers.clear();
                                 if let Some(cancel_token) = current_cancel.take() {
@@ -740,8 +772,8 @@ impl AgentLoop {
                                     // the rest are queued without one yet.
                                     let mut first = true;
                                     for pending in pending_tools.iter() {
-                                        let name = pending.call.name.clone();
-                                        let id = pending.call.id;
+                                        let name = pending.call.name().to_string();
+                                        let id = pending.call.id();
                                         let mut error = format!("tool '{name}' was denied");
                                         if !reason.is_empty() {
                                             error.push_str(&format!(": {reason}"));
@@ -766,6 +798,20 @@ impl AgentLoop {
     }
 }
 
+/// Log the "tool approval requested" event for the given pending call using the
+/// tool's own non-default redacted arguments so sensitive values are never
+/// written to the log.
+fn log_tool_approval_request(call: &dyn ToolCall) {
+    let safe_args: serde_json::Map<String, serde_json::Value> =
+        call.non_default_redacted_arguments().into_iter().collect();
+    tracing::info!(
+        tool = %call.name(),
+        tool_call_id = %call.id(),
+        args = %serde_json::to_string(&safe_args).unwrap_or_else(|_| "{}".to_string()),
+        "tool approval requested"
+    );
+}
+
 /// Advance the pending-tool queue after one call completes (executed, errored,
 /// or denied). If a call remains, stay in `ToolPending` and surface the next
 /// approval request; otherwise re-prompt the model — the internal deferred
@@ -778,32 +824,43 @@ async fn advance_tool_queue(
     current_cancel: &mut Option<CancellationToken>,
     iterations: &mut usize,
     provider: Arc<dyn Provider>,
-    tools: Vec<ToolSchema>,
+    registry: Arc<ToolRegistry>,
     ui_tx: mpsc::Sender<UiUpdate>,
     agent_tx: mpsc::Sender<AgentEvent>,
 ) {
     if let Some(next) = pending_tools.front() {
+        log_tool_approval_request(next.call.as_ref());
         let _ = ui_tx
             .send(UiUpdate::ToolPending {
-                name: next.call.name.clone(),
-                id: next.call.id,
-                arguments: next.call.arguments.clone(),
+                name: next.call.name().to_string(),
+                id: next.call.id(),
+                arguments: next.call.arguments().clone(),
+                content_sections: next.call.pending_content_sections(),
+                title_arguments: next.call.title_arguments(),
             })
             .await;
         return;
     }
     *iterations += 1;
     tracing::debug!(iterations = *iterations, "advancing tool queue");
-    if *iterations > MAX_ITERATIONS {
-        tracing::warn!(iterations = *iterations, "max ReAct iterations exceeded");
+    if *iterations > MAX_TOOL_USE_ITERATIONS {
+        tracing::warn!(iterations = *iterations, "max tool-use iterations exceeded");
         let _ = ui_tx
-            .send(UiUpdate::Error("max ReAct iterations exceeded".to_string()))
+            .send(UiUpdate::Error(
+                "max tool-use iterations exceeded".to_string(),
+            ))
             .await;
         *mode = AgentMode::Idle;
         return;
     }
     *mode = AgentMode::Streaming;
-    *current_cancel = Some(start_request(context, provider, tools, ui_tx, agent_tx));
+    *current_cancel = Some(start_request(
+        context,
+        provider,
+        registry.schemas(),
+        ui_tx,
+        agent_tx,
+    ));
 }
 
 /// Spawns the inner streaming task for one request, built from an immutable
@@ -1272,18 +1329,20 @@ mod tests {
         let log = capture_logs(async {
             let id = Uuid::new_v4();
             let (agent_tx, mut agent_rx) = mpsc::channel(8);
+            let registry = tools::default_registry();
             let pending = PendingTool {
-                call: AssembledToolCall {
-                    id,
-                    name: "write".into(),
-                    arguments: serde_json::json!({
-                        "path": write_path.display().to_string(),
-                        "content": "abc",
-                    }),
-                },
-                timeout_secs: None,
+                call: registry
+                    .create_call(
+                        "write",
+                        id,
+                        serde_json::json!({
+                            "path": write_path.display().to_string(),
+                            "content": "abc",
+                        }),
+                    )
+                    .expect("write tool registered"),
             };
-            let _cancel = pending.execute(Arc::new(tools::default_registry()), agent_tx);
+            let _cancel = pending.execute(agent_tx);
             tokio::time::timeout(Duration::from_secs(2), async {
                 while let Some(event) = agent_rx.recv().await {
                     if matches!(event, AgentEvent::ToolDone { .. }) {

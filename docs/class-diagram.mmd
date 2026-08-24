@@ -100,9 +100,46 @@ classDiagram
         }
     }
 
+    %% ---- TUI internal modules ----
+    namespace TUI {
+        class AppState {
+            <<model>>
+            +mode: TuiMode
+            +focus: Focus
+            +layout: AppLayout
+        }
+        class Presenter {
+            <<presenter>>
+            +update(state, event) Vec~Effect~
+            +route_keyboard(state, event) Vec~Effect~
+            +route_mouse(state, event) Vec~Effect~
+            +route_domain(state, event) Vec~Effect~
+        }
+        class RenderView {
+            <<view>>
+            +render(frame, state)
+        }
+        class TuiDriver {
+            <<driver>>
+            +run_tui(cmd_tx, ui_rx) AppState
+            +execute_effects(state, textarea, cmd_tx, effects)
+        }
+        class CliDriver {
+            <<driver>>
+            +run_headless(cmd_tx, ui_rx)
+        }
+    }
+
     %% ---- Relationships ----
     TuiApp ..|> App
     ConsoleApp ..|> App
+    TuiApp ..> TuiDriver : runs
+    TuiDriver ..> AppState : owns
+    TuiDriver ..> Presenter : calls update()
+    TuiDriver ..> RenderView : calls render()
+    Presenter ..> AppState : mutates
+    RenderView ..> AppState : reads / writes layout
+    ConsoleApp ..> CliDriver : runs
     AgentFactory ..> AgentLoop : creates
     AgentFactory ..> Role : reads
     ChildAgentManager *-- AgentFactory

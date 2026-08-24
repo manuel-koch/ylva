@@ -125,3 +125,17 @@ Since integration tests run in their own crate, they cannot use this module —
 shared integration-test helpers go in `tests/common` (see above). Never copy
 `SharedLog`/`capture_logs` (or any other helper) into a per-module test block;
 SSOT applies here as well.
+
+## `cfg(test)` does not reach library code from integration tests
+
+The Rust compiler sets `cfg(test)` only for the crate being compiled as a test
+harness. For integration tests (`tests/*.rs`) the `ylva` library is compiled as
+a normal dependency — **`cfg(test)` is NOT set** for library source files when
+the caller is an integration test.
+
+Practical consequence: `#[cfg(not(test))]` guards inside `src/` do **not**
+prevent execution when called from `tests/*.rs`. Any side-effect that must be
+suppressed in tests (OS clipboard writes, network calls, file I/O, …) must be
+abstracted via a trait or closure that is injected by the caller, so integration
+tests can pass a no-op implementation and unit tests can continue using
+`#[cfg(test)]` guards for their own call sites.

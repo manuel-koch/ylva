@@ -24,7 +24,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use ylva::{
-    default_registry, headless_runner::run_headless_to, DeltaChunk, Message, MockEvent, Provider,
+    cli_driver::run_cli_to, default_registry, DeltaChunk, Message, MockEvent, Provider,
     StreamEvent, ToolRegistry, ToolSchema,
 };
 
@@ -100,7 +100,7 @@ fn write_scratch(dir: &TempDir, name: &str, content: &str) -> String {
 }
 
 #[tokio::test]
-async fn run_headless_streams_user_and_assistant_and_history() {
+async fn run_cli_streams_user_and_assistant_and_history() {
     let provider = Arc::new(MockProviderWithScript {
         phase_one: vec![
             MockEvent::Text("hello ".into()),
@@ -112,7 +112,7 @@ async fn run_headless_streams_user_and_assistant_and_history() {
     });
     let registry = Arc::new(ToolRegistry::new());
     let mut output = Vec::new();
-    run_headless_to(provider, registry, "greet me".to_string(), &mut output)
+    run_cli_to(provider, registry, "greet me".to_string(), &mut output)
         .await
         .expect("headless run succeeds");
     let output = String::from_utf8(output).expect("utf8 output");
@@ -130,7 +130,7 @@ async fn run_headless_streams_user_and_assistant_and_history() {
 }
 
 #[tokio::test]
-async fn run_headless_auto_approves_read_and_runs_it() {
+async fn run_cli_auto_approves_read_and_runs_it() {
     let dir = TempDir::new().expect("tempdir");
     let path = write_scratch(&dir, "doc.md", "file body");
     let provider = Arc::new(MockProviderWithScript {
@@ -141,19 +141,18 @@ async fn run_headless_auto_approves_read_and_runs_it() {
     });
     let registry = Arc::new(default_registry());
     let mut output = Vec::new();
-    run_headless_to(provider, registry, "read the file".to_string(), &mut output)
+    run_cli_to(provider, registry, "read the file".to_string(), &mut output)
         .await
         .expect("headless run succeeds");
     let output = String::from_utf8(output).expect("utf8 output");
 
-    // read needs no approval → auto-approved and executed.
-    assert!(output.contains("auto-approved"), "output: {output}");
+    // read needs no approval → approved and executed.
     assert!(output.contains("[tool] Read"), "output: {output}");
     assert!(output.contains("done"), "output: {output}");
 }
 
 #[tokio::test]
-async fn run_headless_denies_write_and_fed_back_as_error() {
+async fn run_cli_denies_write_and_fed_back_as_error() {
     let provider = Arc::new(MockProviderWithScript {
         phase_one: vec![tool_call(
             "write",
@@ -165,11 +164,11 @@ async fn run_headless_denies_write_and_fed_back_as_error() {
     });
     let registry = Arc::new(default_registry());
     let mut output = Vec::new();
-    run_headless_to(provider, registry, "write a file".to_string(), &mut output)
+    run_cli_to(provider, registry, "write a file".to_string(), &mut output)
         .await
         .expect("headless run succeeds");
     let output = String::from_utf8(output).expect("utf8 output");
 
     assert!(output.contains("denied"), "output: {output}");
-    assert!(output.contains("error:"), "output: {output}");
+    // error line is suppressed when the denial was already shown at ToolPending
 }

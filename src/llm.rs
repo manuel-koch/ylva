@@ -82,7 +82,7 @@ pub trait Provider: Send + Sync {
 /// One item of a deterministic [`MockProvider`] script.
 ///
 /// The script is the single deterministic path both text-streaming and
-/// ReAct-with-tools tests share: a sequence of text tokens and raw
+/// Tool-use-loop tests share: a sequence of text tokens and raw
 /// [`DeltaChunk`] tool-call fragments, emitted at a fixed interval. `chat()`
 /// always terminates the script with `StreamEvent::Done`.
 #[derive(Debug, Clone)]
@@ -114,7 +114,7 @@ impl MockProvider {
     }
 
     /// A fully scripted provider (text + tool-call deltas) for deterministic
-    /// ReAct tests. `chat()` emits `script` at `interval`, then `Done`.
+    /// tool-use loop tests. `chat()` emits `script` at `interval`, then `Done`.
     pub fn with_script(script: Vec<MockEvent>, interval: Duration) -> Self {
         MockProvider { script, interval }
     }

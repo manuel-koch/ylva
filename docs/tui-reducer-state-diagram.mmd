@@ -1,0 +1,111 @@
+---
+title: Ylva TUI — TuiMode × Focus State Diagram
+config:
+  layout: elk
+  elk:
+    mergeEdges: false
+    nodePlacementStrategy: LINEAR_SEGMENTS
+---
+
+stateDiagram-v2
+    direction LR
+    %% ─── TuiMode states ────────────────────────────────────────────────────
+    %%
+    %% Each TuiMode state is shown as a composite state that contains the
+    %% orthogonal Focus sub-states valid inside it. The Focus transitions
+    %% that are valid in all TuiMode states are drawn inside a shared
+    %% parallel region labeled "[Focus]".
+    %%
+    %% Events that trigger mode-level transitions are shown on the arrows.
+    %% Focus-only transitions (ShowHelp / Escape / ToolPending / ToolStart /
+    %% ToolKilled / ToolDenied) are annotated on the inner arrows.
+
+    [*] --> Idle
+
+    %% ── Idle ────────────────────────────────────────────────────────────────
+    state Idle {
+        [*] --> MainInput_Idle
+        MainInput_Idle --> HelpPopup_Idle   : ShowHelp / F1
+        HelpPopup_Idle  --> MainInput_Idle  : Escape / ShowHelp / F1
+
+        MainInput_Idle : MainInput
+        HelpPopup_Idle : HelpPopup
+    }
+
+    %% ── Pending ─────────────────────────────────────────────────────────────
+    state Pending {
+        [*] --> MainInput_Pending
+        MainInput_Pending --> HelpPopup_Pending  : ShowHelp / F1
+        HelpPopup_Pending  --> MainInput_Pending : Escape / ShowHelp / F1
+
+        MainInput_Pending : MainInput
+        HelpPopup_Pending : HelpPopup
+    }
+
+    %% ── Streaming ───────────────────────────────────────────────────────────
+    state Streaming {
+        [*] --> MainInput_Streaming
+        MainInput_Streaming --> HelpPopup_Streaming    : ShowHelp / F1
+        HelpPopup_Streaming  --> MainInput_Streaming   : Escape / ShowHelp / F1
+        MainInput_Streaming  --> ToolApproval_Streaming : ToolPending
+        ToolApproval_Streaming --> MainInput_Streaming : ToolStart / ToolKilled
+        ToolApproval_Streaming --> MainInput_Streaming : Escape / CtrlC / ToolDenied
+
+        MainInput_Streaming    : MainInput
+        HelpPopup_Streaming    : HelpPopup
+        ToolApproval_Streaming : ToolApproval
+    }
+
+    %% ── Aborting ────────────────────────────────────────────────────────────
+    state Aborting {
+        [*] --> MainInput_Aborting
+        MainInput_Aborting --> HelpPopup_Aborting  : ShowHelp / F1
+        HelpPopup_Aborting  --> MainInput_Aborting : Escape / ShowHelp / F1
+
+        MainInput_Aborting : MainInput
+        HelpPopup_Aborting : HelpPopup
+    }
+
+    %% ── DoublePressAbort ────────────────────────────────────────────────────
+    %%
+    %% A transient overlay: Focus is frozen at whatever it was before
+    %% the first Ctrl+C.  The second Ctrl+C confirms; expiry reverts
+    %% to return_to mode.
+    state DoublePressAbort {
+        [*] --> AwaitingConfirm
+        AwaitingConfirm : Awaiting second Ctrl+C\n(confirm window open)
+    }
+
+    %% ─── TuiMode transitions ────────────────────────────────────────────────
+
+    %% Idle → Pending
+    Idle      --> Pending          : Enter (non-empty input) → SubmitPrompt
+
+    %% Pending → Streaming / Idle
+    Pending   --> Streaming        : StreamStarted
+    Pending   --> Idle             : Error / AgentIdle
+
+    %% Streaming → Idle / Aborting
+    Streaming --> Idle             : StreamDone / StreamCancelled / AgentIdle / Error
+    Streaming --> Aborting         : CtrlC (non-empty input, busy)\nor SigInt
+
+    %% Aborting → Idle
+    Aborting  --> Idle             : StreamCancelled / AgentIdle
+
+    %% DoublePressAbort enter / exit
+    Idle      --> DoublePressAbort : CtrlC (first press, idle)
+    DoublePressAbort --> Idle      : ConfirmExpired (return_to = Idle)
+    DoublePressAbort --> [*]       : CtrlC (second press, return_to = Idle) → Quit
+
+    Pending   --> DoublePressAbort : CtrlC (first press, pending)
+    DoublePressAbort --> Aborting  : CtrlC (second press, return_to = busy) → StopAgent
+    DoublePressAbort --> Pending   : ConfirmExpired (return_to = Pending)
+
+    Streaming --> DoublePressAbort : CtrlC (first press, streaming,\nempty input)
+    DoublePressAbort --> Streaming : ConfirmExpired (return_to = Streaming)
+
+    %% SigInt is unconditional: no confirm window
+    Idle      --> Idle             : SigInt → StopAgent (no-op when idle)
+    Pending   --> Aborting         : SigInt → StopAgent
+    Streaming --> Aborting         : SigInt → StopAgent
+    Aborting  --> Aborting         : SigInt → StopAgent (idempotent)

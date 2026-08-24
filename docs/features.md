@@ -24,6 +24,9 @@ agent, the assistant response is streamed to stdout as it arrives, and the
 final committed conversation history is printed as JSONL on exit — one JSON
 object per message, in the same wire shape the provider sees.
 
+Implemented in `src/cli_driver.rs`; selected automatically by `main.rs` when
+stdout is not a terminal or forced via cli flag `--no-tui`.
+
 Initial user turn resolution: `--prompt <text>`, else piped stdin read to EOF
 (only when stdin is not a terminal) — e.g. `echo '…' | ylva`.
 
@@ -40,7 +43,7 @@ Tool status lines render as `[tool] <title> …` (e.g. `[tool] Read docs/feature
 
 Interactive terminal UI launched automatically when stdout is a terminal
 (see [Phase 4: TUI skeleton](#phase-4-tui-skeleton)). When stdout is not a
-terminal (piped or redirected), Ylva falls back to the headless runner.
+terminal (piped or redirected), Ylva falls back to the CLI driver.
 
 ## Model Provider
 
@@ -74,6 +77,39 @@ Every `role:"tool"` message carries its `content` as JSON struct
 The TUI is a **rendering layer** on top of the headless `AgentLoop`; the agent
 architecture is unchanged. It is selected automatically in `main.rs` via
 `std::io::stdout().is_terminal()`.
+
+### TUI module layout
+
+The TUI follows a **reducer/MVP** split across source modules:
+
+#### Model
+
+`src/app_state.rs` — pure view-model with no I/O. Defines `AppState`,
+`TuiMode`, `Focus`, `AppLayout`, `Effect`, `InputEvent`, and `DomainEvent`.
+
+#### Presenter
+
+`src/presenter.rs` — pure `update(state, event) → Vec<Effect>` reducer. No
+ratatui imports, no channel sends; fully unit-testable without a live terminal.
+
+#### View
+
+`src/render.rs` + `src/ui.rs` — `render(frame, state)` entry point. Writes
+computed geometry back to `state.layout`; delegates widget rendering to helpers
+in `ui.rs`.
+
+#### Driver
+
+`src/tui_driver.rs` and `src/cli_driver.rs` — async event loops, one per
+runtime mode, selected by `main.rs` based on whether stdout is a terminal.
+
+`tui_driver.rs` owns `TextArea` and channel handles, converts
+`AppAction → InputEvent` and `UiUpdate → DomainEvent`, calls `update()`, then
+executes the returned `Vec<Effect>` via `execute_effects()`.
+
+`cli_driver.rs` consumes `UiUpdate` events from the agent, streams the
+assistant response to stdout, and prints the final conversation as JSONL on
+exit.
 
 - **Layout:** a scrollable chat-history area, a variable-height input box
   (capped at 1/3 of the terminal height), a `─` separator line, and a 2-row

@@ -23,9 +23,78 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 use ratatui::Frame;
 use ratatui_textarea::TextArea;
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+use syntect::easy::HighlightLines;
+use syntect::highlighting::{Style as SyntectStyle, Theme, ThemeSet};
+use syntect::parsing::SyntaxSet;
+
+/// Lazily initialised default syntax set — loaded once, reused every frame.
+static SYNTAX_SET: std::sync::OnceLock<SyntaxSet> = std::sync::OnceLock::new();
+/// Lazily initialised default theme set — loaded once, reused every frame.
+static THEME_SET: std::sync::OnceLock<ThemeSet> = std::sync::OnceLock::new();
+
+fn syntax_set() -> &'static SyntaxSet {
+    SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines)
+}
+
+fn highlight_theme() -> &'static Theme {
+    let theme_set = THEME_SET.get_or_init(ThemeSet::load_defaults);
+    &theme_set.themes["base16-ocean.dark"]
+}
+
+/// Pre-computed highlighted lines keyed by a hash of `(content, file_extension)`.
+/// No invalidation needed — the hash is the identity.
+type HighlightedLines = Vec<Vec<(SyntectStyle, String)>>;
+type HighlightCacheMap = HashMap<u64, HighlightedLines>;
+
+thread_local! {
+    static HIGHLIGHT_CACHE: RefCell<HighlightCacheMap> = RefCell::new(HashMap::new());
+}
+
+fn highlight_cache_key(content: &str, file_extension: Option<&str>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    content.hash(&mut hasher);
+    file_extension.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Returns highlighted lines for `content`, using a content-addressed cache so
+/// syntect is not re-run on every render frame.
+fn highlighted_lines_cached(content: &str, file_extension: Option<&str>) -> HighlightedLines {
+    let key = highlight_cache_key(content, file_extension);
+    HIGHLIGHT_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(lines) = cache.get(&key) {
+            return lines.clone();
+        }
+        let ss = syntax_set();
+        let theme = highlight_theme();
+        let syntax = file_extension
+            .and_then(|ext| ss.find_syntax_by_extension(ext))
+            .or_else(|| ss.find_syntax_by_first_line(content))
+            .unwrap_or_else(|| ss.find_syntax_plain_text());
+        let mut highlighter = HighlightLines::new(syntax, theme);
+        let lines: HighlightedLines = content
+            .lines()
+            .map(|line| {
+                highlighter
+                    .highlight_line(line, ss)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(style, token)| (style, token.to_string()))
+                    .collect()
+            })
+            .collect();
+        cache.insert(key, lines.clone());
+        lines
+    })
+}
 
 use crate::agent::AgentMode;
-use crate::app::{ChatEntry, ToolBubbleState, TuiState, UserMessageState};
+use crate::app_state::{ChatEntry, ToolCallState, TuiState, UserMessageState};
 use crate::build_info::BUILD_INFO;
 
 // User message border colors — extract into Theme struct in a later phase.
@@ -76,7 +145,7 @@ const LOGO: [&str; 7] = [
     "  ╚██╔╝  ██║     ╚██╗ ██╔╝██╔══██║",
     "   ██║   ███████╗ ╚████╔╝ ██║  ██║",
     "   ╚═╝   ╚══════╝  ╚═══╝  ╚═╝  ╚═╝",
-    "    Taming the pack of agents!    ",
+    "  Taming the wild pack of agents! ",
 ];
 
 /// Clickable approval button rects returned by `draw` when in approval sub-mode.
@@ -309,7 +378,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
     // Pending tool bubbles (awaiting approval) are deferred to the very end
     // of the conversation so they stay close to the approve/deny footer
     // regardless of how many earlier entries exist.
-    let mut deferred_pending_tool_bubbles: Vec<(uuid::Uuid, String, ToolBubbleState, bool)> =
+    let mut deferred_pending_tool_bubbles: Vec<(uuid::Uuid, String, ToolCallState, bool)> =
         Vec::new();
     // Rebuilt every frame; assigned to state after the loop (avoids a borrow
     // conflict between iterating state.chat_entries and mutating state).
@@ -351,7 +420,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
             } => {
                 // Pending tool bubbles are deferred so they render at the bottom,
                 // close to the approve/deny footer buttons.
-                if matches!(bubble_state, ToolBubbleState::Pending { .. }) {
+                if matches!(bubble_state, ToolCallState::Pending { .. }) {
                     deferred_pending_tool_bubbles.push((
                         *id,
                         name.clone(),
@@ -935,7 +1004,7 @@ fn append_user_lines(
 struct ToolBubbleArgs<'a> {
     id: uuid::Uuid,
     name: &'a str,
-    state: &'a ToolBubbleState,
+    state: &'a ToolCallState,
     collapsed: bool,
     spinner_frame: u8,
 }
@@ -968,7 +1037,68 @@ fn append_tool_bubble_lines(
         Span::styled(" ".repeat(pad), Style::default().bg(TOOL_BUBBLE_BG_COLOR))
     };
 
-    let expand_indicator = if collapsed { "▶" } else { "▼" };
+    // Format arguments for the title:
+    // - primary arg (schema rank 0): value only, rendered in bold.
+    // - remaining args: `key=value` pairs, rendered dim.
+    // - body arguments (declared by the tool) are omitted from the title.
+    let title_arguments = match state {
+        ToolCallState::Pending {
+            title_arguments, ..
+        }
+        | ToolCallState::Running {
+            title_arguments, ..
+        }
+        | ToolCallState::Done {
+            title_arguments, ..
+        }
+        | ToolCallState::Denied {
+            title_arguments, ..
+        } => title_arguments.as_slice(),
+        _ => &[],
+    };
+    let scalar_value = |v: &serde_json::Value| -> Option<String> {
+        match v {
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            serde_json::Value::Bool(b) => Some(b.to_string()),
+            _ => None,
+        }
+    };
+    let mut iter = title_arguments.iter();
+    let primary_text: Option<String> = iter.next().and_then(|(_, v)| scalar_value(v));
+    let props_text: String = iter
+        .filter_map(|(k, v)| scalar_value(v).map(|s| format!("{k}={s}")))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    // Compute body sections for the collapsible bubble body.
+    let content_sections: Vec<crate::agent::tools::ContentSection> = match state {
+        ToolCallState::Pending {
+            content_sections, ..
+        }
+        | ToolCallState::Running {
+            content_sections, ..
+        }
+        | ToolCallState::Denied {
+            content_sections, ..
+        } => content_sections.clone(),
+        ToolCallState::Done {
+            content_sections, ..
+        } => content_sections.clone(),
+        _ => vec![],
+    };
+
+    let has_expandable_body = !content_sections.is_empty()
+        || matches!(state, ToolCallState::Done { result, .. } if !result.is_empty());
+    let expand_indicator = if has_expandable_body {
+        if collapsed {
+            "▶"
+        } else {
+            "▼"
+        }
+    } else {
+        " "
+    };
 
     // Capitalise the tool name for display.
     let display_title: String = {
@@ -979,33 +1109,8 @@ fn append_tool_bubble_lines(
         }
     };
 
-    // Format non-null argument values as `key=value` pairs for the title.
-    let maybe_args = match state {
-        ToolBubbleState::Pending { arguments }
-        | ToolBubbleState::Running { arguments }
-        | ToolBubbleState::Done { arguments, .. } => Some(arguments),
-        _ => None,
-    };
-    let props_text: String = if let Some(arguments) = maybe_args {
-        arguments
-            .as_object()
-            .map(|map| {
-                map.iter()
-                    .filter(|(_, v)| !v.is_null())
-                    .map(|(k, v)| {
-                        let val = v.as_str().unwrap_or_default();
-                        format!("{k}={val}")
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            })
-            .unwrap_or_default()
-    } else {
-        String::new()
-    };
-
     // Result summary appended to the title for Done state.
-    let summary_text: String = if let ToolBubbleState::Done {
+    let summary_text: String = if let ToolCallState::Done {
         summary, duration, ..
     } = state
     {
@@ -1040,7 +1145,7 @@ fn append_tool_bubble_lines(
 
     let mut title_spans: Vec<Span> = vec![
         bar.clone(),
-        if matches!(state, ToolBubbleState::Running { .. }) {
+        if matches!(state, ToolCallState::Running { .. }) {
             let spinner_char = SPINNER_FRAMES[spinner_frame as usize % SPINNER_FRAMES.len()];
             Span::styled(
                 format!("{spinner_char} "),
@@ -1059,12 +1164,32 @@ fn append_tool_bubble_lines(
         ),
     ];
     let mut title_len = title_prefix.chars().count();
+    let has_args = primary_text.as_ref().is_some_and(|s| !s.is_empty()) || !props_text.is_empty();
+    let tool_ran = matches!(state, ToolCallState::Done { .. });
+    if let Some(primary) = primary_text {
+        if !primary.is_empty() {
+            let segment = format!(" {primary}");
+            title_len += segment.chars().count();
+            title_spans.push(Span::styled(
+                segment,
+                Style::default()
+                    .fg(Color::White)
+                    .bg(TOOL_BUBBLE_BG_COLOR)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+    }
     if !props_text.is_empty() {
         let segment = format!(" {props_text}");
         title_len += segment.chars().count();
         title_spans.push(Span::styled(segment, dim_white));
     }
     if !summary_text.is_empty() {
+        if has_args && tool_ran {
+            let arrow = " →";
+            title_len += arrow.chars().count();
+            title_spans.push(Span::styled(arrow, dim_white));
+        }
         let segment = format!(" {summary_text}");
         title_len += segment.chars().count();
         title_spans.push(Span::styled(segment, dim_white));
@@ -1074,7 +1199,7 @@ fn append_tool_bubble_lines(
 
     // Error/Denied second title line (shown even when collapsed).
     let maybe_error = match state {
-        ToolBubbleState::Error { error } | ToolBubbleState::Denied { error } => Some(error),
+        ToolCallState::Error { error } | ToolCallState::Denied { error, .. } => Some(error),
         _ => None,
     };
     if let Some(error) = maybe_error {
@@ -1094,9 +1219,98 @@ fn append_tool_bubble_lines(
         );
     }
 
-    // Body (result text) — hidden when collapsed.
+    // Body (body sections + fallback result text) — hidden when collapsed.
     if !collapsed {
-        if let ToolBubbleState::Done { result, .. } = state {
+        if !content_sections.is_empty() {
+            let show_labels = content_sections.len() > 1;
+            for section in &content_sections {
+                // Label header (only when multiple sections).
+                if show_labels {
+                    if let Some(label) = &section.label {
+                        let label_str = format!("  {label}:");
+                        let label_len = label_str.chars().count();
+                        lines.push(
+                            Line::from(vec![
+                                bar.clone(),
+                                margin.clone(),
+                                Span::styled(
+                                    label_str,
+                                    Style::default()
+                                        .fg(Color::White)
+                                        .bg(TOOL_BUBBLE_BG_COLOR)
+                                        .add_modifier(Modifier::DIM),
+                                ),
+                                trailing_pad(label_len),
+                            ])
+                            .patch_style(row_bg),
+                        );
+                    }
+                }
+
+                // Determine line-number gutter width.
+                let line_count = section.content.lines().count();
+                let offset = section.line_number_offset.unwrap_or(0);
+                let last_line_num = offset + line_count;
+                let digits = last_line_num.to_string().len();
+
+                // Fetch highlighted lines from cache (content-addressed, computed once).
+                let all_highlighted =
+                    highlighted_lines_cached(&section.content, section.file_extension.as_deref());
+
+                for (line_index, highlighted) in all_highlighted.into_iter().enumerate() {
+                    let line_num = offset + line_index + 1; // 1-based display
+
+                    let mut spans: Vec<Span<'static>> = vec![bar.clone(), margin.clone()];
+
+                    // Gutter or plain indent.
+                    if section.line_number_offset.is_some() {
+                        let gutter_str = format!("  {line_num:>digits$}: ");
+                        spans.push(Span::styled(
+                            gutter_str,
+                            Style::default()
+                                .fg(Color::DarkGray)
+                                .bg(TOOL_BUBBLE_BG_COLOR),
+                        ));
+                    } else {
+                        spans.push(Span::styled(
+                            "  ",
+                            Style::default().bg(TOOL_BUBBLE_BG_COLOR),
+                        ));
+                    }
+
+                    // Convert cached syntect tokens to ratatui spans.
+                    let mut content_spans: Vec<Span<'static>> = highlighted
+                        .iter()
+                        .map(|(style, token)| {
+                            let fg = Color::Rgb(
+                                style.foreground.r,
+                                style.foreground.g,
+                                style.foreground.b,
+                            );
+                            Span::styled(
+                                token.clone(),
+                                Style::default().fg(fg).bg(TOOL_BUBBLE_BG_COLOR),
+                            )
+                        })
+                        .collect();
+
+                    let content_text_len: usize = content_spans
+                        .iter()
+                        .map(|s| s.content.chars().count())
+                        .sum();
+                    let gutter_prefix_len = if section.line_number_offset.is_some() {
+                        2 + digits + 2 // "  " + digits + ": "
+                    } else {
+                        2 // "  " indent
+                    };
+
+                    spans.append(&mut content_spans);
+                    spans.push(trailing_pad(gutter_prefix_len + content_text_len));
+                    lines.push(Line::from(spans).patch_style(row_bg));
+                }
+            }
+        } else if let ToolCallState::Done { result, .. } = state {
+            // Fallback: no body sections — render plain result text.
             for wrapped_line in textwrap::wrap(result, wrap_width) {
                 let line_str = wrapped_line.into_owned();
                 let line_len = line_str.chars().count();
@@ -1148,7 +1362,25 @@ fn draw_normal_footer(
     let row_1_text = if let Some(hint) = hint {
         hint.to_string()
     } else if state.steer_indicator {
-        format!(" {spinner_prefix}{mode_word}  ⋮ 1 steer queued")
+        let queued_count = state
+            .chat_entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry,
+                    ChatEntry::UserMessage {
+                        state: UserMessageState::Queued,
+                        ..
+                    }
+                )
+            })
+            .count();
+        let steer_label = if queued_count == 1 {
+            "1 steer queued".to_string()
+        } else {
+            format!("{queued_count} steers queued")
+        };
+        format!(" {spinner_prefix}{mode_word}  ⋮ {steer_label}")
     } else {
         format!(" {spinner_prefix}{mode_word}")
     };
