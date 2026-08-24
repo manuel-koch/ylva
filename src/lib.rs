@@ -38,6 +38,11 @@ pub use agent::{
     TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
 pub use app::{ChatEntry, ChatSelection, ToolCallState, TuiState, UserMessageState};
+pub use app_state::{
+    AppLayout, AppState, ChatArea, DomainEvent, Effect, Focus, HelpPopupLayout, InputAreaLayout,
+    InputEvent, TuiMode,
+};
+pub use presenter::{TextareaContext, TuiEvent};
 pub use build_info::{BuildInfo, BUILD_INFO};
 pub use cli_driver::{run_cli, run_cli_to};
 pub use events::AppAction;

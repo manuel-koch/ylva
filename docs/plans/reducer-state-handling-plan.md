@@ -250,11 +250,11 @@ the Driver) form the complete event surface of the Presenter.
 
 ### Step 6 — Wire new modules in `src/lib.rs` and `src/main.rs`
 
-- [ ] Add `pub mod app_state;`, `pub mod presenter;`, `pub mod render;` to `src/lib.rs`.
-- [ ] Re-export from `src/lib.rs`: `AppState`, `TuiMode`, `Focus`, `Effect`,
+- [x] Add `pub mod app_state;`, `pub mod presenter;`, `pub mod render;` to `src/lib.rs`.
+- [x] Re-export from `src/lib.rs`: `AppState`, `TuiMode`, `Focus`, `Effect`,
   `InputEvent`, `DomainEvent`, `AppLayout` and any sub-types integration tests need.
-- [ ] Keep the existing `pub mod app;` shim in place until Step 8.
-- [ ] Update `src/main.rs` and `src/tui_runner.rs` imports to use `app_state` and `presenter`.
+- [x] Keep the existing `pub mod app;` shim in place until Step 8.
+- [x] Update `src/main.rs` and `src/tui_runner.rs` imports to use `app_state` and `presenter`.
 
 ### Step 7 — Migrate integration tests
 
