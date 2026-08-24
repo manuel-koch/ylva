@@ -258,10 +258,10 @@ the Driver) form the complete event surface of the Presenter.
 
 ### Step 7 — Migrate integration tests
 
-- [ ] Update `tests/tui_state.rs` imports to use the new type names (`AppState`,
+- [x] Update `tests/tui_state.rs` imports to use the new type names (`AppState`,
   `TuiMode`, `Focus`) where needed. Keep test intent, structure, and assertion
   logic unchanged.
-- [ ] Verify all tests under `tests/` compile and pass with `make test`.
+- [x] Verify all tests under `tests/` compile and pass with `make test`.
 
 ### Step 8 — Remove legacy `src/app.rs` and clean up
 
