@@ -241,10 +241,10 @@ the Driver) form the complete event surface of the Presenter.
 
 ### Step 5 — Extract `src/render.rs` from `src/ui.rs`
 
-- [ ] Create `src/render.rs` with `pub fn render(frame: &mut Frame, state: &mut AppState)`:
-  - [ ] Calls layout functions to obtain `Rect`s and writes them back to `state.layout.*`.
-  - [ ] Delegates to existing widget/draw functions kept in `src/ui.rs`.
-- [ ] Add `render.rs` to the coverage exclusion list in `Makefile` (same
+- [x] Create `src/render.rs` with `pub fn render(frame: &mut Frame, state: &mut AppState)`:
+  - [x] Calls layout functions to obtain `Rect`s and writes them back to `state.layout.*`.
+  - [x] Delegates to existing widget/draw functions kept in `src/ui.rs`.
+- [x] Add `render.rs` to the coverage exclusion list in `Makefile` (same
   exclusion as `ui.rs` and `main.rs`) before running coverage checks, or
   coverage will fail.
 

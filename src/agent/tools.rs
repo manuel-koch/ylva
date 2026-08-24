@@ -55,52 +55,82 @@ impl ToolError {
 ///
 /// Every tool returns its own concrete type that implements this trait.
 /// The trait exposes two concerns that belong at different layers:
-/// - [`output_text`](ToolOutput::output_text): the LLM-facing text;
-/// - [`result_properties`](ToolOutput::result_properties): domain facts the
+/// - [`text`](ToolResult::text): the LLM-facing text;
+/// - [`properties`](ToolResult::properties): domain facts the
 ///   result carries (e.g. bytes read, paths matched).  Consumers above the
 ///   tool layer — the agent, the TUI — decide how to use these facts; the
 ///   tool itself does not know.
-pub trait ToolOutput: Send + Sync + std::fmt::Debug {
+pub trait ToolResult: Send + Sync + std::fmt::Debug {
     /// The text returned to the LLM as the tool's result message.
-    fn output_text(&self) -> &str;
+    fn text(&self) -> &str;
 
     /// Key/value domain properties of the result (e.g. `("bytes_written",
     /// "42")`).  Returned as an ordered vec so callers can present them in a
     /// stable, meaningful sequence.  Defaults to an empty vec for tools whose
-    /// output is fully captured by [`output_text`](Self::output_text).
-    fn result_properties(&self) -> Vec<(&'static str, String)> {
+    /// output is fully captured by [`text`](Self::text).
+    fn properties(&self) -> Vec<(&'static str, String)> {
         Vec::new()
+    }
+
+    /// Body sections to display in the tool bubble when the tool is Done.
+    /// Computed once at execution time; the renderer reads from state.
+    fn body_sections(&self) -> Vec<BodySection> {
+        vec![]
     }
 }
 
-/// Wraps any [`ToolOutput`] and appends a `duration_ms` property capturing
+/// Wraps any [`ToolResult`] and appends a `duration_ms` property capturing
 /// how long the tool's `run()` call took.  Applied by the agent at the single
 /// call site so every tool gets duration tracking automatically.
 #[derive(Debug)]
-pub struct TimedOutput {
-    inner: Box<dyn ToolOutput>,
+pub struct TimedToolResult {
+    inner: Box<dyn ToolResult>,
     pub duration: std::time::Duration,
 }
 
-impl TimedOutput {
-    pub fn new(inner: Box<dyn ToolOutput>, duration: std::time::Duration) -> Self {
-        TimedOutput { inner, duration }
+impl TimedToolResult {
+    pub fn new(inner: Box<dyn ToolResult>, duration: std::time::Duration) -> Self {
+        TimedToolResult { inner, duration }
     }
 }
 
-impl ToolOutput for TimedOutput {
-    fn output_text(&self) -> &str {
-        self.inner.output_text()
+impl ToolResult for TimedToolResult {
+    fn text(&self) -> &str {
+        self.inner.text()
     }
 
-    fn result_properties(&self) -> Vec<(&'static str, String)> {
-        self.inner.result_properties()
+    fn properties(&self) -> Vec<(&'static str, String)> {
+        self.inner.properties()
+    }
+
+    fn body_sections(&self) -> Vec<BodySection> {
+        self.inner.body_sections()
     }
 }
 
 /// A named, schema-described, async tool the model may call (blueprint §4D).
 ///
 /// The trait exposes tool **data**, behavior, and the argument display
+/// A named content block rendered in the collapsible bubble body.
+///
+/// Returned by [`Tool::body_sections`] so a tool can expose rich content
+/// (file text, code, output) with syntax highlighting and line numbers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BodySection {
+    /// Header label shown above the content block.
+    /// The renderer suppresses this when there is only one section.
+    pub label: Option<String>,
+    /// The text content to display.
+    pub content: String,
+    /// Lowercase file extension for syntect syntax highlighting
+    /// (e.g. `"rs"`, `"py"`, `"json"`). `None` = plain text.
+    pub file_extension: Option<String>,
+    /// 0-based index of the first line in `content` within its source file,
+    /// used to produce an accurate line-number gutter.
+    /// `None` = no line-number gutter.
+    pub line_number_offset: Option<usize>,
+}
+
 /// metadata a host needs (which arguments are defaulted, and their display
 /// order). Actual rendering (brackets, eliding long values) stays the host's
 /// decision.
@@ -138,6 +168,23 @@ pub trait Tool: Send + Sync {
     /// `offset: 0`/`null`, `limit: null`).
     fn is_default_argument(&self, _key: &str, _value: &Value) -> bool {
         false
+    }
+
+    /// Returns `true` when `key` names an argument whose value is too large or
+    /// sensitive to display inline in the bubble title. Such arguments are
+    /// suppressed from the title line; the tool is responsible for surfacing
+    /// the value through [`body_sections`](Self::body_sections) if needed.
+    fn is_body_argument(&self, _key: &str) -> bool {
+        false
+    }
+
+    /// Content blocks to display in the collapsible bubble body.
+    ///
+    /// Called with `result: None` when the bubble is Pending / Running / Denied
+    /// (only inputs are known). Called with `result: Some(text)` when Done.
+    /// Returning `vec![]` falls back to plain result text rendering.
+    fn body_sections(&self, _arguments: &Value, _result: Option<&str>) -> Vec<BodySection> {
+        vec![]
     }
 
     /// Display-order rank for an argument key: lower ranks are listed earlier
@@ -180,11 +227,11 @@ pub trait Tool: Send + Sync {
     /// Default execution timeout (seconds) for this tool.
     fn timeout_secs(&self) -> u64;
 
-    /// Execute the tool with parsed `arguments`, returning a [`ToolOutput`]
+    /// Execute the tool with parsed `arguments`, returning a [`ToolResult`]
     /// that carries the LLM-facing text and any domain properties the result
     /// naturally has.
     fn run<'a>(&'a self, arguments: Value)
-        -> BoxFuture<'a, Result<Box<dyn ToolOutput>, ToolError>>;
+        -> BoxFuture<'a, Result<Box<dyn ToolResult>, ToolError>>;
 }
 
 /// Central store of every tool the agent may invoke.
@@ -224,6 +271,28 @@ impl ToolRegistry {
             .get(tool_name)
             .map(|tool| tool.argument_order(key))
             .unwrap_or(usize::MAX)
+    }
+
+    /// Returns `true` when `key` names a body argument for the given tool.
+    /// Body arguments are suppressed from the bubble title.
+    pub fn is_body_argument(&self, tool_name: &str, key: &str) -> bool {
+        self.tools
+            .get(tool_name)
+            .is_some_and(|tool| tool.is_body_argument(key))
+    }
+
+    /// Body sections for a tool bubble, as declared by the registered tool.
+    /// Returns `vec![]` when the tool is not registered.
+    pub fn body_sections(
+        &self,
+        tool_name: &str,
+        arguments: &Value,
+        result: Option<&str>,
+    ) -> Vec<BodySection> {
+        self.tools
+            .get(tool_name)
+            .map(|tool| tool.body_sections(arguments, result))
+            .unwrap_or_default()
     }
 
     /// The OpenAI wire schemas for every registered tool (the `tools` array).
@@ -282,8 +351,8 @@ mod tests {
     #[derive(Debug)]
     struct SimpleOutput(String);
 
-    impl ToolOutput for SimpleOutput {
-        fn output_text(&self) -> &str {
+    impl ToolResult for SimpleOutput {
+        fn text(&self) -> &str {
             &self.0
         }
     }
@@ -316,9 +385,9 @@ mod tests {
         fn run<'a>(
             &'a self,
             _arguments: Value,
-        ) -> BoxFuture<'a, Result<Box<dyn ToolOutput>, ToolError>> {
+        ) -> BoxFuture<'a, Result<Box<dyn ToolResult>, ToolError>> {
             Box::pin(async move {
-                let output: Box<dyn ToolOutput> = Box::new(SimpleOutput("ok".to_string()));
+                let output: Box<dyn ToolResult> = Box::new(SimpleOutput("ok".to_string()));
                 Ok(output)
             })
         }

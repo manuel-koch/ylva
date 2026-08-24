@@ -553,8 +553,9 @@ fn domain_idle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             result,
             summary,
             duration,
+            body_sections,
         } => {
-            update_tool_bubble_to_done(state, id, name, result, summary, duration);
+            update_tool_bubble_to_done(state, id, name, result, body_sections, summary, duration);
             vec![]
         }
         DomainEvent::ToolKilled { id } => {
@@ -650,8 +651,9 @@ fn domain_pending(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             result,
             summary,
             duration,
+            body_sections,
         } => {
-            update_tool_bubble_to_done(state, id, name, result, summary, duration);
+            update_tool_bubble_to_done(state, id, name, result, body_sections, summary, duration);
             vec![]
         }
         DomainEvent::ToolKilled { id } => {
@@ -732,8 +734,9 @@ fn domain_streaming(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             result,
             summary,
             duration,
+            body_sections,
         } => {
-            update_tool_bubble_to_done(state, id, name, result, summary, duration);
+            update_tool_bubble_to_done(state, id, name, result, body_sections, summary, duration);
             vec![]
         }
         DomainEvent::ToolKilled { id } => {
@@ -781,16 +784,22 @@ fn domain_aborting(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
                 state.focus = Focus::MainInput;
             }
             state.mode = TuiMode::Idle;
-            state.aborting_exit = false;
             state.scroll_locked = true;
             state.scroll_offset = 0;
-            vec![]
+            if std::mem::replace(&mut state.aborting_exit, false) {
+                vec![Effect::Quit]
+            } else {
+                vec![]
+            }
         }
         DomainEvent::AgentIdle => {
             state.mode = TuiMode::Idle;
-            state.aborting_exit = false;
             state.focus = Focus::MainInput;
-            vec![]
+            if std::mem::replace(&mut state.aborting_exit, false) {
+                vec![Effect::Quit]
+            } else {
+                vec![]
+            }
         }
         DomainEvent::ToolPending { id, .. } => {
             // While aborting, deny immediately without entering approval sub-mode.
@@ -810,8 +819,9 @@ fn domain_aborting(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             result,
             summary,
             duration,
+            body_sections,
         } => {
-            update_tool_bubble_to_done(state, id, name, result, summary, duration);
+            update_tool_bubble_to_done(state, id, name, result, body_sections, summary, duration);
             vec![]
         }
         DomainEvent::ToolKilled { id } => {
@@ -912,6 +922,7 @@ fn update_tool_bubble_to_done(
     id: Uuid,
     name: String,
     result: String,
+    body_sections: Vec<crate::agent::tools::BodySection>,
     summary: Vec<(String, String)>,
     duration: std::time::Duration,
 ) {
@@ -942,6 +953,7 @@ fn update_tool_bubble_to_done(
             *bubble_state = ToolBubbleState::Done {
                 arguments: previous_arguments,
                 result,
+                body_sections,
                 summary,
                 duration,
             };
@@ -953,6 +965,7 @@ fn update_tool_bubble_to_done(
             state: ToolBubbleState::Done {
                 arguments: serde_json::Value::Null,
                 result,
+                body_sections,
                 summary,
                 duration,
             },
@@ -989,8 +1002,15 @@ fn update_tool_bubble_to_denied(state: &mut AppState, id: Uuid) {
         ..
     }) = state.find_tool_bubble_mut(id)
     {
+        let preserved_arguments = match bubble_state {
+            ToolBubbleState::Pending { arguments } | ToolBubbleState::Running { arguments } => {
+                arguments.clone()
+            }
+            _ => serde_json::Value::Null,
+        };
         *bubble_state = ToolBubbleState::Denied {
-            error: "denied by user".to_string(),
+            arguments: preserved_arguments,
+            error: "Denied by user".to_string(),
         };
     }
 }
@@ -1022,7 +1042,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::app_state::{AppState, Focus, InputEvent, TuiMode};
+    use crate::app_state::{AppState, ChatEntry, Focus, InputEvent, ToolBubbleState, TuiMode};
 
     fn empty_textarea() -> TextareaContext {
         TextareaContext {
@@ -1110,6 +1130,40 @@ mod tests {
         );
         assert!(effects.contains(&Effect::StopAgent));
         assert_eq!(state.mode, TuiMode::Aborting);
+        assert!(
+            state.aborting_exit,
+            "aborting_exit must be set after double-press Ctrl-C while busy"
+        );
+    }
+
+    #[test]
+    fn double_ctrl_c_while_streaming_quits_after_stream_cancelled() {
+        let mut state = AppState::new();
+        // First Ctrl-C: enters DoublePressAbort.
+        state.mode = TuiMode::Streaming;
+        update(
+            &mut state,
+            TuiEvent::Input(InputEvent::CtrlC),
+            &empty_textarea(),
+        );
+        // Second Ctrl-C: sends StopAgent and sets aborting_exit.
+        let effects = update(
+            &mut state,
+            TuiEvent::Input(InputEvent::CtrlC),
+            &empty_textarea(),
+        );
+        assert!(effects.contains(&Effect::StopAgent));
+        assert!(state.aborting_exit);
+        // StreamCancelled arrives: must emit Quit.
+        let effects = update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::StreamCancelled),
+            &empty_textarea(),
+        );
+        assert!(
+            effects.contains(&Effect::Quit),
+            "StreamCancelled after double Ctrl-C while streaming must emit Quit"
+        );
     }
 
     #[test]
@@ -1427,6 +1481,43 @@ mod tests {
         assert_eq!(
             state.partial_assistant_text, "hello",
             "chunk must still be appended"
+        );
+    }
+
+    #[test]
+    fn denied_tool_bubble_retains_arguments() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::Idle;
+        let tool_id = Uuid::new_v4();
+        let args = serde_json::json!({"path": "/tmp/foo", "content": "bar"});
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolPending {
+                id: tool_id,
+                name: "write_file".to_string(),
+                arguments: args.clone(),
+            }),
+            &empty_textarea(),
+        );
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolDenied { id: tool_id }),
+            &empty_textarea(),
+        );
+        let denied_bubble = state.chat_entries.iter().find_map(|entry| {
+            if let ChatEntry::ToolBubble {
+                state: ToolBubbleState::Denied { arguments, .. },
+                ..
+            } = entry
+            {
+                return Some(arguments.clone());
+            }
+            None
+        });
+        assert_eq!(
+            denied_bubble.expect("denied bubble should exist"),
+            args,
+            "Denied bubble must retain the arguments from the Pending state"
         );
     }
 }

@@ -119,6 +119,7 @@ pub enum ToolBubbleState {
     Done {
         arguments: serde_json::Value,
         result: String,
+        body_sections: Vec<crate::agent::tools::BodySection>,
         summary: Vec<(String, String)>,
         duration: std::time::Duration,
     },
@@ -127,7 +128,10 @@ pub enum ToolBubbleState {
     /// Tool was killed (stream interrupted while tool was running).
     Killed,
     /// Tool was denied by the user; error message is the denial reason.
-    Denied { error: String },
+    Denied {
+        arguments: serde_json::Value,
+        error: String,
+    },
 }
 
 /// One entry in the scrollable chat history area.
@@ -450,6 +454,7 @@ impl TuiState {
                 result,
                 summary,
                 duration,
+                body_sections,
             } => {
                 let previous_arguments = self
                     .find_tool_bubble_mut(*id)
@@ -470,6 +475,7 @@ impl TuiState {
                         *state = ToolBubbleState::Done {
                             arguments: previous_arguments,
                             result: result.clone(),
+                            body_sections: body_sections.clone(),
                             summary: summary.clone(),
                             duration: *duration,
                         };
@@ -481,6 +487,7 @@ impl TuiState {
                         state: ToolBubbleState::Done {
                             arguments: serde_json::Value::Null,
                             result: result.clone(),
+                            body_sections: body_sections.clone(),
                             summary: summary.clone(),
                             duration: *duration,
                         },
@@ -887,6 +894,11 @@ mod tui_state_tests {
             id,
             arguments: serde_json::json!({}),
         });
+        state.apply_update(&UiUpdate::ToolStart {
+            id,
+            name: "read".to_string(),
+            arguments: serde_json::json!({}),
+        });
         state.apply_update(&UiUpdate::ToolError {
             id,
             error: "boom".to_string(),
@@ -1163,6 +1175,7 @@ mod tui_state_tests {
             result: "file contents".to_string(),
             summary: Vec::new(),
             duration: std::time::Duration::from_millis(0),
+            body_sections: vec![],
         });
         assert!(matches!(
             state.chat_entries.last(),
@@ -1171,6 +1184,48 @@ mod tui_state_tests {
                 ..
             }) if result == "file contents"
         ));
+    }
+
+    #[test]
+    fn tool_done_body_sections_stored_in_state() {
+        use crate::agent::tools::BodySection;
+        let mut state = TuiState::new();
+        let id = Uuid::new_v4();
+        let sections = vec![BodySection {
+            label: None,
+            content: "line one\nline two\n".to_string(),
+            file_extension: Some("rs".to_string()),
+            line_number_offset: Some(0),
+        }];
+        state.apply_update(&UiUpdate::ToolStart {
+            name: "read".to_string(),
+            id,
+            arguments: serde_json::json!({"path": "foo.rs"}),
+        });
+        state.apply_update(&UiUpdate::ToolDone {
+            id,
+            name: "read".to_string(),
+            result: "line one\nline two\n".to_string(),
+            summary: Vec::new(),
+            duration: std::time::Duration::from_millis(0),
+            body_sections: sections.clone(),
+        });
+        let stored = state.chat_entries.iter().find_map(|e| {
+            if let ChatEntry::ToolBubble {
+                state: ToolBubbleState::Done { body_sections, .. },
+                ..
+            } = e
+            {
+                Some(body_sections.clone())
+            } else {
+                None
+            }
+        });
+        assert_eq!(
+            stored,
+            Some(sections),
+            "body_sections must survive apply_update"
+        );
     }
 
     #[test]
@@ -1306,6 +1361,7 @@ pub enum DomainEvent {
         result: String,
         summary: Vec<(String, String)>,
         duration: std::time::Duration,
+        body_sections: Vec<crate::agent::tools::BodySection>,
     },
     /// A tool call was killed (e.g. via Stop).
     ToolKilled { id: Uuid },
@@ -1855,6 +1911,12 @@ impl AppState {
                 ..
             } = entry
             {
+                // Skip bubbles already transitioned to Denied by the Driver
+                // (via apply_tool_denied). The ToolError that the agent sends
+                // after processing a DenyTool command is redundant for those.
+                if matches!(bubble_state, ToolBubbleState::Denied { .. }) {
+                    return;
+                }
                 *bubble_state = ToolBubbleState::Error {
                     error: error.clone(),
                 };
@@ -1867,6 +1929,29 @@ impl AppState {
         if matches!(self.focus, Focus::ToolApproval { tool_id, .. } if tool_id == id) {
             self.focus = Focus::MainInput;
             self.mode = TuiMode::Idle;
+        }
+    }
+
+    /// Mark a `Pending` tool bubble as `Denied`, preserving its arguments.
+    ///
+    /// Called by the Driver immediately when `Effect::DenyTool` is executed,
+    /// before the agent sends the corresponding `ToolError` response.
+    pub fn apply_tool_denied(&mut self, id: Uuid) {
+        if let Some(ChatEntry::ToolBubble {
+            state: bubble_state,
+            ..
+        }) = self.find_tool_bubble_mut(id)
+        {
+            let preserved_arguments = match bubble_state {
+                ToolBubbleState::Pending { arguments } | ToolBubbleState::Running { arguments } => {
+                    std::mem::replace(arguments, serde_json::Value::Null)
+                }
+                _ => serde_json::Value::Null,
+            };
+            *bubble_state = ToolBubbleState::Denied {
+                arguments: preserved_arguments,
+                error: "Denied by user".to_string(),
+            };
         }
     }
 }
@@ -1981,5 +2066,83 @@ mod tests {
         } else {
             panic!("expected DoublePressAbort");
         }
+    }
+
+    #[test]
+    fn apply_tool_denied_preserves_arguments() {
+        let mut state = AppState::new();
+        let id = Uuid::new_v4();
+        let args = serde_json::json!({"cmd": "rm -rf /"});
+        state.chat_entries.push(ChatEntry::ToolBubble {
+            id,
+            name: "shell".to_string(),
+            state: ToolBubbleState::Pending {
+                arguments: args.clone(),
+            },
+            collapsed: false,
+        });
+        state.apply_tool_denied(id);
+        assert!(
+            matches!(
+                state.chat_entries.last(),
+                Some(ChatEntry::ToolBubble {
+                    state: ToolBubbleState::Denied { arguments, error },
+                    ..
+                }) if *arguments == args && error == "Denied by user"
+            ),
+            "apply_tool_denied must produce Denied with the original Pending arguments"
+        );
+    }
+
+    #[test]
+    fn apply_tool_error_skips_already_denied_bubble() {
+        let mut state = AppState::new();
+        let id = Uuid::new_v4();
+        let args = serde_json::json!({"cmd": "ls"});
+        state.chat_entries.push(ChatEntry::ToolBubble {
+            id,
+            name: "shell".to_string(),
+            state: ToolBubbleState::Denied {
+                arguments: args.clone(),
+                error: "Denied by user".to_string(),
+            },
+            collapsed: false,
+        });
+        state.apply_tool_error(id, "tool 'shell' was denied: Denied by user".to_string());
+        assert!(
+            matches!(
+                state.chat_entries.last(),
+                Some(ChatEntry::ToolBubble {
+                    state: ToolBubbleState::Denied { arguments, .. },
+                    ..
+                }) if *arguments == args
+            ),
+            "apply_tool_error must not overwrite a Denied bubble"
+        );
+    }
+
+    #[test]
+    fn apply_tool_error_on_running_bubble_produces_error() {
+        let mut state = AppState::new();
+        let id = Uuid::new_v4();
+        state.chat_entries.push(ChatEntry::ToolBubble {
+            id,
+            name: "shell".to_string(),
+            state: ToolBubbleState::Running {
+                arguments: serde_json::json!({"cmd": "ls"}),
+            },
+            collapsed: false,
+        });
+        state.apply_tool_error(id, "execution failed".to_string());
+        assert!(
+            matches!(
+                state.chat_entries.last(),
+                Some(ChatEntry::ToolBubble {
+                    state: ToolBubbleState::Error { error },
+                    ..
+                }) if error == "execution failed"
+            ),
+            "Running + ToolError must produce Error"
+        );
     }
 }

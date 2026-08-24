@@ -33,7 +33,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tracing::Instrument;
 
-use super::{Tool, ToolError, ToolOutput, DEFAULT_TIMEOUT_SECS};
+use super::{Tool, ToolError, ToolResult, DEFAULT_TIMEOUT_SECS};
 
 /// The unit that `ReadFileArgs::offset`/`limit` count, chosen by the model.
 ///
@@ -85,18 +85,38 @@ pub struct GlobArgs {
 pub struct ReadOutput {
     /// File content returned to the LLM.
     pub content: String,
+    /// Path of the file that was read.
+    pub path: String,
+    /// 0-based index of the first line in `content` within the source file.
+    pub starting_line: Option<usize>,
 }
 
-impl ToolOutput for ReadOutput {
-    fn output_text(&self) -> &str {
+impl ToolResult for ReadOutput {
+    fn text(&self) -> &str {
         &self.content
     }
 
-    fn result_properties(&self) -> Vec<(&'static str, String)> {
+    fn properties(&self) -> Vec<(&'static str, String)> {
         vec![
             ("read_bytes", format!("{}", self.content.len())),
             ("read_lines", format!("{}", self.content.lines().count())),
         ]
+    }
+
+    fn body_sections(&self) -> Vec<super::BodySection> {
+        if self.content.is_empty() {
+            return vec![];
+        }
+        let file_extension = std::path::Path::new(&self.path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase());
+        vec![super::BodySection {
+            label: None,
+            content: self.content.clone(),
+            file_extension,
+            line_number_offset: self.starting_line,
+        }]
     }
 }
 
@@ -107,28 +127,48 @@ pub struct WriteOutput {
     pub path: String,
     /// Number of bytes written to the file.
     pub bytes_written: usize,
+    /// Content that was written to the file.
+    pub content: String,
     /// Pre-formatted LLM-facing confirmation text.
     text: String,
 }
 
 impl WriteOutput {
-    fn new(path: impl Into<String>, bytes_written: usize) -> Self {
+    fn new(path: impl Into<String>, content: impl Into<String>, bytes_written: usize) -> Self {
         let path = path.into();
+        let content = content.into();
         WriteOutput {
             text: format!("wrote {bytes_written} bytes to '{path}'"),
             path,
             bytes_written,
+            content,
         }
     }
 }
 
-impl ToolOutput for WriteOutput {
-    fn output_text(&self) -> &str {
+impl ToolResult for WriteOutput {
+    fn text(&self) -> &str {
         &self.text
     }
 
-    fn result_properties(&self) -> Vec<(&'static str, String)> {
+    fn properties(&self) -> Vec<(&'static str, String)> {
         vec![("bytes_written", format!("{}", self.bytes_written))]
+    }
+
+    fn body_sections(&self) -> Vec<super::BodySection> {
+        if self.content.is_empty() {
+            return vec![];
+        }
+        let file_extension = std::path::Path::new(&self.path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase());
+        vec![super::BodySection {
+            label: None,
+            content: self.content.clone(),
+            file_extension,
+            line_number_offset: Some(0),
+        }]
     }
 }
 
@@ -151,13 +191,25 @@ impl GlobOutput {
     }
 }
 
-impl ToolOutput for GlobOutput {
-    fn output_text(&self) -> &str {
+impl ToolResult for GlobOutput {
+    fn text(&self) -> &str {
         &self.text
     }
 
-    fn result_properties(&self) -> Vec<(&'static str, String)> {
+    fn properties(&self) -> Vec<(&'static str, String)> {
         vec![("matches", self.matched_paths.len().to_string())]
+    }
+
+    fn body_sections(&self) -> Vec<super::BodySection> {
+        if self.text.is_empty() {
+            return vec![];
+        }
+        vec![super::BodySection {
+            label: None,
+            content: self.text.clone(),
+            file_extension: None,
+            line_number_offset: Some(0),
+        }]
     }
 }
 
@@ -225,7 +277,7 @@ impl Tool for ReadTool {
     fn run<'a>(
         &'a self,
         arguments: Value,
-    ) -> BoxFuture<'a, Result<Box<dyn ToolOutput>, ToolError>> {
+    ) -> BoxFuture<'a, Result<Box<dyn ToolResult>, ToolError>> {
         let span = super::span_for_invocation(self, &arguments);
         Box::pin(
             async move {
@@ -234,7 +286,7 @@ impl Tool for ReadTool {
                 })?;
                 read_file(args)
                     .await
-                    .map(|o| -> Box<dyn ToolOutput> { Box::new(o) })
+                    .map(|o| -> Box<dyn ToolResult> { Box::new(o) })
             }
             .instrument(span),
         )
@@ -275,6 +327,34 @@ impl Tool for WriteTool {
         true
     }
 
+    fn is_body_argument(&self, key: &str) -> bool {
+        key == "content"
+    }
+
+    fn body_sections(&self, arguments: &Value, _result: Option<&str>) -> Vec<super::BodySection> {
+        let content = arguments
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if content.is_empty() {
+            return vec![];
+        }
+        let path = arguments
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let file_extension = std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase());
+        vec![super::BodySection {
+            label: None,
+            content: content.to_string(),
+            file_extension,
+            line_number_offset: Some(0),
+        }]
+    }
+
     fn non_default_redacted_arguments(&self, arguments: &Value) -> Vec<(String, Value)> {
         self.non_default_arguments(arguments)
             .into_iter()
@@ -306,7 +386,7 @@ impl Tool for WriteTool {
     fn run<'a>(
         &'a self,
         arguments: Value,
-    ) -> BoxFuture<'a, Result<Box<dyn ToolOutput>, ToolError>> {
+    ) -> BoxFuture<'a, Result<Box<dyn ToolResult>, ToolError>> {
         let span = super::span_for_invocation(self, &arguments);
         Box::pin(
             async move {
@@ -315,7 +395,7 @@ impl Tool for WriteTool {
                 })?;
                 write_file(args)
                     .await
-                    .map(|o| -> Box<dyn ToolOutput> { Box::new(o) })
+                    .map(|o| -> Box<dyn ToolResult> { Box::new(o) })
             }
             .instrument(span),
         )
@@ -376,7 +456,7 @@ impl Tool for GlobTool {
     fn run<'a>(
         &'a self,
         arguments: Value,
-    ) -> BoxFuture<'a, Result<Box<dyn ToolOutput>, ToolError>> {
+    ) -> BoxFuture<'a, Result<Box<dyn ToolResult>, ToolError>> {
         let span = super::span_for_invocation(self, &arguments);
         Box::pin(
             async move {
@@ -385,7 +465,7 @@ impl Tool for GlobTool {
                 })?;
                 glob_files(&args.pattern)
                     .await
-                    .map(|o| -> Box<dyn ToolOutput> { Box::new(o) })
+                    .map(|o| -> Box<dyn ToolResult> { Box::new(o) })
             }
             .instrument(span),
         )
@@ -414,7 +494,11 @@ async fn read_file(args: ReadFileArgs) -> Result<ReadOutput, ToolError> {
                 lines = content.lines().count(),
                 "read file"
             );
-            Ok(ReadOutput { content })
+            Ok(ReadOutput {
+                content,
+                path: args.path,
+                starting_line: Some(0),
+            })
         }
         ReadMode::Lines => {
             let text = String::from_utf8_lossy(&bytes).to_string();
@@ -434,7 +518,11 @@ async fn read_file(args: ReadFileArgs) -> Result<ReadOutput, ToolError> {
                 lines = content.lines().count(),
                 "read file"
             );
-            Ok(ReadOutput { content })
+            Ok(ReadOutput {
+                content,
+                path: args.path,
+                starting_line: Some(start),
+            })
         }
         ReadMode::Chars => {
             let text = String::from_utf8_lossy(&bytes).to_string();
@@ -454,7 +542,11 @@ async fn read_file(args: ReadFileArgs) -> Result<ReadOutput, ToolError> {
                 lines = content.lines().count(),
                 "read file"
             );
-            Ok(ReadOutput { content })
+            Ok(ReadOutput {
+                content,
+                path: args.path,
+                starting_line: Some(0),
+            })
         }
     }
 }
@@ -484,7 +576,7 @@ async fn write_file(args: WriteFileArgs) -> Result<WriteOutput, ToolError> {
             ToolError::failed("write", format!("failed to write '{}': {error}", args.path))
         })?;
     tracing::debug!("wrote file");
-    Ok(WriteOutput::new(args.path, bytes_written))
+    Ok(WriteOutput::new(args.path, args.content, bytes_written))
 }
 
 async fn glob_files(pattern: &str) -> Result<GlobOutput, ToolError> {
@@ -569,7 +661,7 @@ mod tests {
         })
         .await
         .expect("read ok");
-        assert_eq!(result.output_text(), "hello world");
+        assert_eq!(result.text(), "hello world");
     }
 
     #[tokio::test]
@@ -598,7 +690,7 @@ mod tests {
         })
         .await
         .expect("read ok");
-        assert_eq!(result.output_text(), "2345");
+        assert_eq!(result.text(), "2345");
     }
 
     #[tokio::test]
@@ -616,7 +708,7 @@ mod tests {
         })
         .await
         .expect("read ok");
-        assert_eq!(result.output_text(), "two\nthree");
+        assert_eq!(result.text(), "two\nthree");
     }
 
     #[tokio::test]
@@ -633,7 +725,7 @@ mod tests {
         })
         .await
         .expect("read ok");
-        assert_eq!(result.output_text(), "éll");
+        assert_eq!(result.text(), "éll");
     }
 
     #[tokio::test]
@@ -646,7 +738,7 @@ mod tests {
         })
         .await
         .expect("write ok");
-        assert!(result.output_text().contains("wrote 3 bytes"));
+        assert!(result.text().contains("wrote 3 bytes"));
         let content = tokio::fs::read_to_string(&path).await.expect("read back");
         assert_eq!(content, "abc");
     }
@@ -668,7 +760,7 @@ mod tests {
         let matches = glob_files(&format!("{}/*.txt", dir.path().display()))
             .await
             .expect("glob ok");
-        let lines: Vec<&str> = matches.output_text().lines().collect();
+        let lines: Vec<&str> = matches.text().lines().collect();
         assert!(lines.iter().any(|l: &&str| l.ends_with("a.txt")));
         assert!(lines.iter().any(|l: &&str| l.ends_with("b.txt")));
         assert!(!lines.iter().any(|l: &&str| l.ends_with("c.txt")));
@@ -889,5 +981,31 @@ mod tests {
             by_key.get("content"),
             Some(&Value::String("REDACTED(size=15,lines=1)".into()))
         );
+    }
+
+    #[tokio::test]
+    async fn read_tool_done_body_sections_have_line_numbers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.rs");
+        tokio::fs::write(&path, "fn main() {}\nfn foo() {}\n")
+            .await
+            .unwrap();
+        let result = read_file(ReadFileArgs {
+            path: path.to_str().unwrap().to_string(),
+            mode: ReadMode::Bytes,
+            offset: None,
+            limit: None,
+        })
+        .await
+        .unwrap();
+        let sections = result.body_sections();
+        assert_eq!(sections.len(), 1, "expected one body section");
+        let section = &sections[0];
+        assert_eq!(
+            section.line_number_offset,
+            Some(0),
+            "bytes mode must carry line_number_offset Some(0)"
+        );
+        assert_eq!(section.file_extension.as_deref(), Some("rs"));
     }
 }

@@ -47,7 +47,7 @@ use crate::app_state::{
 use crate::events::{spawn_crossterm_bridge, AppAction};
 use crate::llm::Provider;
 use crate::presenter::{self, TextareaContext, TuiEvent};
-use crate::ui::{self, ButtonAreas};
+use crate::render;
 use crate::ToolRegistry;
 
 /// Abstracts writing text to the OS clipboard so the Driver can be tested
@@ -155,12 +155,14 @@ fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
             result,
             summary,
             duration,
+            body_sections,
         } => Some(DomainEvent::ToolDone {
             id: *id,
             name: name.clone(),
             result: result.clone(),
             summary: summary.clone(),
             duration: *duration,
+            body_sections: body_sections.clone(),
         }),
         UiUpdate::ToolKilled { id } => Some(DomainEvent::ToolKilled { id: *id }),
         UiUpdate::Error(message) => Some(DomainEvent::Error(message.clone())),
@@ -232,9 +234,10 @@ async fn execute_effects(
                 let _ = cmd_tx.try_send(AgentCommand::ApproveTool { id });
             }
             Effect::DenyTool { id } => {
+                state.apply_tool_denied(id);
                 let _ = cmd_tx.try_send(AgentCommand::DenyTool {
                     id,
-                    reason: "denied by user".into(),
+                    reason: "Denied by user".into(),
                 });
             }
             Effect::StopAgent => {
@@ -360,73 +363,6 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
     }
 }
 
-/// Build a `TuiState` snapshot for one `ui::draw` call.
-///
-/// `ui::draw` takes `&mut TuiState` because it writes back view-geometry
-/// fields (rendered line lists, scroll limits, etc.) that the event loop
-/// needs for mouse hit-testing.  The Driver maintains `AppState` as the
-/// authority; this function projects it to a `TuiState` each frame.
-fn app_state_for_draw(state: &AppState, registry: &Arc<ToolRegistry>) -> TuiState {
-    let pending_approval = if let Focus::ToolApproval {
-        tool_id,
-        ref tool_name,
-    } = state.focus
-    {
-        Some((tool_id, tool_name.clone(), serde_json::Value::Null))
-    } else {
-        None
-    };
-    TuiState {
-        agent_mode: state.agent_mode(),
-        chat_entries: state.chat_entries.clone(),
-        partial_assistant_text: state.partial_assistant_text.clone(),
-        show_help: state.show_help(),
-        steer_indicator: state.steer_indicator,
-        scroll_offset: state.scroll_offset,
-        scroll_locked: state.scroll_locked,
-        chat_area_height: state.chat_area_height,
-        pending_approval,
-        pending_approval_input_snapshot: state.pending_approval_input_snapshot.clone(),
-        input_history: state.input_history.clone(),
-        history_index: state.history_index,
-        draft: state.draft.clone(),
-        input_area: state.layout.input_area.rect,
-        chat_area: state.layout.chat_area.rect,
-        chat_rendered_lines: state.chat_rendered_lines.clone(),
-        chat_selection: state.chat_selection,
-        chat_drag_active: state.chat_drag_active,
-        toast: state.toast.clone(),
-        spinner_frame: state.spinner_frame,
-        help_scroll_offset: state.help_scroll_offset,
-        help_scroll_x: state.help_scroll_x,
-        input_scroll_top: state.input_scroll_top,
-        bubble_title_rows: state.bubble_title_rows.clone(),
-        registry: Arc::clone(registry),
-    }
-}
-
-/// Sync the view-geometry fields that `ui::draw` writes back into `AppState`
-/// after each frame.
-fn sync_from_draw(state: &mut AppState, rendered: TuiState, button_areas: Option<ButtonAreas>) {
-    state.layout.input_area.rect = rendered.input_area;
-    state.layout.chat_area.rect = rendered.chat_area;
-    if let Some(buttons) = button_areas {
-        state.layout.approve_button = buttons.approve;
-        state.layout.deny_button = buttons.deny;
-    } else {
-        state.layout.approve_button = ratatui::layout::Rect::default();
-        state.layout.deny_button = ratatui::layout::Rect::default();
-    }
-    state.input_scroll_top = rendered.input_scroll_top;
-    state.scroll_offset = rendered.scroll_offset;
-    state.scroll_locked = rendered.scroll_locked;
-    state.bubble_title_rows = rendered.bubble_title_rows;
-    state.chat_rendered_lines = rendered.chat_rendered_lines;
-    state.help_scroll_offset = rendered.help_scroll_offset;
-    state.help_scroll_x = rendered.help_scroll_x;
-    state.toast = rendered.toast;
-}
-
 /// Run the TUI event loop against an existing terminal.
 ///
 /// Uses `AppState` internally (the reducer model) and returns a `TuiState`
@@ -468,20 +404,16 @@ where
 
     loop {
         let hint = confirm_hint(&state);
-        // `ui::draw` takes `&mut TuiState`; project AppState to TuiState for
-        // each frame and sync the view-geometry fields it writes back.
-        let mut render_state = app_state_for_draw(&state, &registry);
-        let mut button_areas: Option<ButtonAreas> = None;
         terminal.draw(|frame| {
-            button_areas = ui::draw(
+            render::render(
                 frame,
-                &mut render_state,
+                &mut state,
+                &registry,
                 &mut textarea,
                 hint.as_deref(),
                 mouse_pos,
             );
         })?;
-        sync_from_draw(&mut state, render_state, button_areas);
 
         let textarea_ctx = TextareaContext {
             is_empty: textarea.lines() == [""],
@@ -556,28 +488,36 @@ where
 
             update = ui_rx.recv() => {
                 let Some(update) = update else { break };
-                let old_mode_was_aborting = matches!(state.mode, TuiMode::Aborting);
 
-                process_one_update(
+                if process_one_update(
                     &mut state, &mut textarea, &cmd_tx, &textarea_ctx, &update, &mut mouse_drag,
                     clipboard,
                 )
-                .await;
+                .await
+                    == ActionOutcome::Quit
+                {
+                    break;
+                }
 
+                let mut drain_quit = false;
                 for _ in 0..CHANNEL_CAPACITY {
                     match ui_rx.try_recv() {
                         Ok(next) => {
-                            process_one_update(
+                            if process_one_update(
                                 &mut state, &mut textarea, &cmd_tx, &textarea_ctx,
                                 &next, &mut mouse_drag, clipboard,
                             )
-                            .await;
+                            .await
+                                == ActionOutcome::Quit
+                            {
+                                drain_quit = true;
+                                break;
+                            }
                         }
                         Err(_) => break,
                     }
                 }
-
-                if old_mode_was_aborting && matches!(state.mode, TuiMode::Idle) && state.aborting_exit {
+                if drain_quit {
                     break;
                 }
             }
@@ -1024,7 +964,7 @@ mod tests {
             cmd_rx.try_recv(),
             Ok(AgentCommand::DenyTool {
                 id: tool_id,
-                reason: "denied by user".into(),
+                reason: "Denied by user".into(),
             })
         );
     }
@@ -1115,7 +1055,7 @@ mod tests {
             cmd_rx.try_recv(),
             Ok(AgentCommand::DenyTool {
                 id: tool_id,
-                reason: "denied by user".into()
+                reason: "Denied by user".into()
             })
         );
     }

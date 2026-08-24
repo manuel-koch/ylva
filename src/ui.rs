@@ -23,6 +23,75 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 use ratatui::Frame;
 use ratatui_textarea::TextArea;
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+use syntect::easy::HighlightLines;
+use syntect::highlighting::{Style as SyntectStyle, Theme, ThemeSet};
+use syntect::parsing::SyntaxSet;
+
+/// Lazily initialised default syntax set — loaded once, reused every frame.
+static SYNTAX_SET: std::sync::OnceLock<SyntaxSet> = std::sync::OnceLock::new();
+/// Lazily initialised default theme set — loaded once, reused every frame.
+static THEME_SET: std::sync::OnceLock<ThemeSet> = std::sync::OnceLock::new();
+
+fn syntax_set() -> &'static SyntaxSet {
+    SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines)
+}
+
+fn highlight_theme() -> &'static Theme {
+    let theme_set = THEME_SET.get_or_init(ThemeSet::load_defaults);
+    &theme_set.themes["base16-ocean.dark"]
+}
+
+/// Pre-computed highlighted lines keyed by a hash of `(content, file_extension)`.
+/// No invalidation needed — the hash is the identity.
+type HighlightedLines = Vec<Vec<(SyntectStyle, String)>>;
+type HighlightCacheMap = HashMap<u64, HighlightedLines>;
+
+thread_local! {
+    static HIGHLIGHT_CACHE: RefCell<HighlightCacheMap> = RefCell::new(HashMap::new());
+}
+
+fn highlight_cache_key(content: &str, file_extension: Option<&str>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    content.hash(&mut hasher);
+    file_extension.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Returns highlighted lines for `content`, using a content-addressed cache so
+/// syntect is not re-run on every render frame.
+fn highlighted_lines_cached(content: &str, file_extension: Option<&str>) -> HighlightedLines {
+    let key = highlight_cache_key(content, file_extension);
+    HIGHLIGHT_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(lines) = cache.get(&key) {
+            return lines.clone();
+        }
+        let ss = syntax_set();
+        let theme = highlight_theme();
+        let syntax = file_extension
+            .and_then(|ext| ss.find_syntax_by_extension(ext))
+            .or_else(|| ss.find_syntax_by_first_line(content))
+            .unwrap_or_else(|| ss.find_syntax_plain_text());
+        let mut highlighter = HighlightLines::new(syntax, theme);
+        let lines: HighlightedLines = content
+            .lines()
+            .map(|line| {
+                highlighter
+                    .highlight_line(line, ss)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(style, token)| (style, token.to_string()))
+                    .collect()
+            })
+            .collect();
+        cache.insert(key, lines.clone());
+        lines
+    })
+}
 
 use crate::agent::tools::ToolRegistry;
 use crate::agent::AgentMode;
@@ -973,8 +1042,60 @@ fn append_tool_bubble_lines(
         Span::styled(" ".repeat(pad), Style::default().bg(TOOL_BUBBLE_BG_COLOR))
     };
 
-    let has_expandable_body =
-        matches!(state, ToolBubbleState::Done { result, .. } if !result.is_empty());
+    // Format arguments for the title:
+    // - primary arg (schema rank 0): value only, rendered in bold.
+    // - remaining args: `key=value` pairs, rendered dim.
+    // - body arguments (declared by the tool) are omitted from the title.
+    let maybe_args = match state {
+        ToolBubbleState::Pending { arguments }
+        | ToolBubbleState::Running { arguments }
+        | ToolBubbleState::Done { arguments, .. }
+        | ToolBubbleState::Denied { arguments, .. } => Some(arguments),
+        _ => None,
+    };
+    let (primary_text, props_text): (Option<String>, String) = if let Some(arguments) = maybe_args {
+        arguments
+            .as_object()
+            .map(|map| {
+                let mut entries: Vec<(&String, &serde_json::Value)> = map
+                    .iter()
+                    .filter(|(k, v)| !v.is_null() && !registry.is_body_argument(name, k))
+                    .collect();
+                entries.sort_by_key(|(k, _)| registry.argument_order(name, k));
+                let scalar_value = |v: &serde_json::Value| -> Option<String> {
+                    match v {
+                        serde_json::Value::String(s) => Some(s.clone()),
+                        serde_json::Value::Number(n) => Some(n.to_string()),
+                        serde_json::Value::Bool(b) => Some(b.to_string()),
+                        _ => None,
+                    }
+                };
+                let mut iter = entries.into_iter();
+                let primary = iter.next().and_then(|(_, v)| scalar_value(v));
+                let rest = iter
+                    .filter_map(|(k, v)| scalar_value(v).map(|s| format!("{k}={s}")))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                (primary, rest)
+            })
+            .unwrap_or_default()
+    } else {
+        (None, String::new())
+    };
+
+    // Compute body sections for the collapsible bubble body.
+    let body_sections: Vec<crate::agent::tools::BodySection> = match state {
+        ToolBubbleState::Pending { arguments }
+        | ToolBubbleState::Running { arguments }
+        | ToolBubbleState::Denied { arguments, .. } => {
+            registry.body_sections(name, arguments, None)
+        }
+        ToolBubbleState::Done { body_sections, .. } => body_sections.clone(),
+        _ => vec![],
+    };
+
+    let has_expandable_body = !body_sections.is_empty()
+        || matches!(state, ToolBubbleState::Done { result, .. } if !result.is_empty());
     let expand_indicator = if has_expandable_body {
         if collapsed {
             "▶"
@@ -992,45 +1113,6 @@ fn append_tool_bubble_lines(
             None => String::new(),
             Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
         }
-    };
-
-    // Format arguments for the title:
-    // - primary arg (schema rank 0): value only, rendered in bold.
-    // - remaining args: `key=value` pairs, rendered dim.
-    let maybe_args = match state {
-        ToolBubbleState::Pending { arguments }
-        | ToolBubbleState::Running { arguments }
-        | ToolBubbleState::Done { arguments, .. } => Some(arguments),
-        _ => None,
-    };
-    let (primary_text, props_text): (Option<String>, String) = if let Some(arguments) = maybe_args {
-        arguments
-            .as_object()
-            .map(|map| {
-                let mut entries: Vec<(&String, &serde_json::Value)> =
-                    map.iter().filter(|(_, v)| !v.is_null()).collect();
-                entries.sort_by_key(|(k, _)| registry.argument_order(name, k));
-
-                let scalar_value = |v: &serde_json::Value| -> Option<String> {
-                    match v {
-                        serde_json::Value::String(s) => Some(s.clone()),
-                        serde_json::Value::Number(n) => Some(n.to_string()),
-                        serde_json::Value::Bool(b) => Some(b.to_string()),
-                        _ => None,
-                    }
-                };
-
-                let mut iter = entries.into_iter();
-                let primary = iter.next().and_then(|(_, v)| scalar_value(v));
-                let rest = iter
-                    .filter_map(|(k, v)| scalar_value(v).map(|s| format!("{k}={s}")))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                (primary, rest)
-            })
-            .unwrap_or_default()
-    } else {
-        (None, String::new())
     };
 
     // Result summary appended to the title for Done state.
@@ -1123,7 +1205,7 @@ fn append_tool_bubble_lines(
 
     // Error/Denied second title line (shown even when collapsed).
     let maybe_error = match state {
-        ToolBubbleState::Error { error } | ToolBubbleState::Denied { error } => Some(error),
+        ToolBubbleState::Error { error } | ToolBubbleState::Denied { error, .. } => Some(error),
         _ => None,
     };
     if let Some(error) = maybe_error {
@@ -1143,9 +1225,98 @@ fn append_tool_bubble_lines(
         );
     }
 
-    // Body (result text) — hidden when collapsed.
+    // Body (body sections + fallback result text) — hidden when collapsed.
     if !collapsed {
-        if let ToolBubbleState::Done { result, .. } = state {
+        if !body_sections.is_empty() {
+            let show_labels = body_sections.len() > 1;
+            for section in &body_sections {
+                // Label header (only when multiple sections).
+                if show_labels {
+                    if let Some(label) = &section.label {
+                        let label_str = format!("  {label}:");
+                        let label_len = label_str.chars().count();
+                        lines.push(
+                            Line::from(vec![
+                                bar.clone(),
+                                margin.clone(),
+                                Span::styled(
+                                    label_str,
+                                    Style::default()
+                                        .fg(Color::White)
+                                        .bg(TOOL_BUBBLE_BG_COLOR)
+                                        .add_modifier(Modifier::DIM),
+                                ),
+                                trailing_pad(label_len),
+                            ])
+                            .patch_style(row_bg),
+                        );
+                    }
+                }
+
+                // Determine line-number gutter width.
+                let line_count = section.content.lines().count();
+                let offset = section.line_number_offset.unwrap_or(0);
+                let last_line_num = offset + line_count;
+                let digits = last_line_num.to_string().len();
+
+                // Fetch highlighted lines from cache (content-addressed, computed once).
+                let all_highlighted =
+                    highlighted_lines_cached(&section.content, section.file_extension.as_deref());
+
+                for (line_index, highlighted) in all_highlighted.into_iter().enumerate() {
+                    let line_num = offset + line_index + 1; // 1-based display
+
+                    let mut spans: Vec<Span<'static>> = vec![bar.clone(), margin.clone()];
+
+                    // Gutter or plain indent.
+                    if section.line_number_offset.is_some() {
+                        let gutter_str = format!("  {line_num:>digits$}: ");
+                        spans.push(Span::styled(
+                            gutter_str,
+                            Style::default()
+                                .fg(Color::DarkGray)
+                                .bg(TOOL_BUBBLE_BG_COLOR),
+                        ));
+                    } else {
+                        spans.push(Span::styled(
+                            "  ",
+                            Style::default().bg(TOOL_BUBBLE_BG_COLOR),
+                        ));
+                    }
+
+                    // Convert cached syntect tokens to ratatui spans.
+                    let mut content_spans: Vec<Span<'static>> = highlighted
+                        .iter()
+                        .map(|(style, token)| {
+                            let fg = Color::Rgb(
+                                style.foreground.r,
+                                style.foreground.g,
+                                style.foreground.b,
+                            );
+                            Span::styled(
+                                token.clone(),
+                                Style::default().fg(fg).bg(TOOL_BUBBLE_BG_COLOR),
+                            )
+                        })
+                        .collect();
+
+                    let content_text_len: usize = content_spans
+                        .iter()
+                        .map(|s| s.content.chars().count())
+                        .sum();
+                    let gutter_prefix_len = if section.line_number_offset.is_some() {
+                        2 + digits + 2 // "  " + digits + ": "
+                    } else {
+                        2 // "  " indent
+                    };
+
+                    spans.append(&mut content_spans);
+                    spans.push(trailing_pad(gutter_prefix_len + content_text_len));
+                    lines.push(Line::from(spans).patch_style(row_bg));
+                }
+            }
+        } else if let ToolBubbleState::Done { result, .. } = state {
+            // Fallback: no body sections — render plain result text.
             for wrapped_line in textwrap::wrap(result, wrap_width) {
                 let line_str = wrapped_line.into_owned();
                 let line_len = line_str.chars().count();

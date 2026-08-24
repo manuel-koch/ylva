@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 
 use ylva::{
     default_registry, AgentCommand, AgentLoop, DeltaChunk, Message, MockEvent, MockProvider, Tool,
-    ToolError, ToolOutput, ToolRegistry, UiUpdate, MAX_TOOL_USE_ITERATIONS,
+    ToolError, ToolRegistry, ToolResult, UiUpdate, MAX_TOOL_USE_ITERATIONS,
 };
 
 /// Build a `MockEvent::Delta` carrying a complete tool call for `index`.
@@ -405,13 +405,13 @@ async fn stop_while_awaiting_approval_clears_pending_tools() {
 #[derive(JsonSchema, Deserialize)]
 struct SleepArgs {}
 
-/// Minimal [`ToolOutput`] wrapper for a plain string, used in test tools that
+/// Minimal [`ToolResult`] wrapper for a plain string, used in test tools that
 /// do not need to expose domain properties.
 #[derive(Debug)]
 struct SimpleStringOutput(String);
 
-impl ToolOutput for SimpleStringOutput {
-    fn output_text(&self) -> &str {
+impl ToolResult for SimpleStringOutput {
+    fn text(&self) -> &str {
         &self.0
     }
 }
@@ -444,10 +444,10 @@ impl Tool for SleepTool {
     fn run<'a>(
         &'a self,
         _arguments: Value,
-    ) -> BoxFuture<'a, Result<Box<dyn ToolOutput>, ToolError>> {
+    ) -> BoxFuture<'a, Result<Box<dyn ToolResult>, ToolError>> {
         Box::pin(async move {
             tokio::time::sleep(Duration::from_secs(600)).await;
-            let output: Box<dyn ToolOutput> = Box::new(SimpleStringOutput("done".to_string()));
+            let output: Box<dyn ToolResult> = Box::new(SimpleStringOutput("done".to_string()));
             Ok(output)
         })
     }

@@ -26,7 +26,7 @@ use crate::llm::{Provider, ToolEnvelope, ToolSchema};
 
 pub mod tools;
 
-use tools::{TimedOutput, ToolError, ToolOutput, ToolRegistry};
+use tools::{TimedToolResult, ToolError, ToolRegistry, ToolResult};
 
 /// Maximum number of LLM requests the tool-use loop starts within a single user
 /// turn before the guard stops re-prompting. Per-engine configurability is a
@@ -73,6 +73,7 @@ pub enum AgentEvent {
         result: String,
         summary: Vec<(String, String)>,
         duration: std::time::Duration,
+        body_sections: Vec<crate::agent::tools::BodySection>,
     },
     ToolError {
         id: Uuid,
@@ -108,6 +109,7 @@ pub enum UiUpdate {
         result: String,
         summary: Vec<(String, String)>,
         duration: std::time::Duration,
+        body_sections: Vec<crate::agent::tools::BodySection>,
     },
     ToolError {
         id: Uuid,
@@ -353,7 +355,7 @@ impl PendingTool {
                                 // TODO: remove artificial delay
                                 #[cfg(feature = "artificial-tool-delay")]
                                 {
-                                    let delay_secs = 3
+                                    let delay_secs = 2
                                         + (std::time::SystemTime::now()
                                             .duration_since(std::time::UNIX_EPOCH)
                                             .unwrap_or_default()
@@ -364,8 +366,8 @@ impl PendingTool {
                                 // END TODO
                                 tool.run(self.call.arguments).await.map(|output| {
                                     let elapsed = start.elapsed();
-                                    let timed = Box::new(TimedOutput::new(output, elapsed))
-                                        as Box<dyn ToolOutput>;
+                                    let timed = Box::new(TimedToolResult::new(output, elapsed))
+                                        as Box<dyn ToolResult>;
                                     (timed, elapsed)
                                 })
                             }
@@ -378,12 +380,13 @@ impl PendingTool {
                 };
                 match outcome {
                     Ok(Ok((tool_output, duration))) => {
-                        let result = tool_output.output_text().to_string();
+                        let result = tool_output.text().to_string();
                         let summary = tool_output
-                            .result_properties()
+                            .properties()
                             .into_iter()
                             .map(|(key, value)| (key.to_string(), value))
                             .collect::<Vec<_>>();
+                        let body_sections = tool_output.body_sections();
                         let _ = agent_tx
                             .send(AgentEvent::ToolDone {
                                 id,
@@ -391,6 +394,7 @@ impl PendingTool {
                                 result,
                                 summary,
                                 duration,
+                                body_sections,
                             })
                             .await;
                     }
@@ -571,7 +575,7 @@ impl AgentLoop {
                                         .await;
                                 }
                             }
-                            AgentEvent::ToolDone { id, name, result, summary, duration } => {
+                            AgentEvent::ToolDone { id, name, result, summary, duration, body_sections } => {
                                 current_tool_cancel = None;
                                 context.push_tool_result(id, name.clone(), result.clone());
                                 let _ = ui_tx
@@ -581,6 +585,7 @@ impl AgentLoop {
                                         result,
                                         summary,
                                         duration,
+                                        body_sections,
                                     })
                                     .await;
                                 advance_tool_queue(

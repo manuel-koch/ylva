@@ -21,6 +21,7 @@ pub mod headless_runner;
 pub mod llm;
 pub mod logging;
 pub mod presenter;
+pub mod render;
 pub mod tui_driver;
 pub mod ui;
 
@@ -29,7 +30,7 @@ mod test_support;
 
 pub use logging::{init_logging, LogConfig, LogFormat, LogGuards};
 
-pub use agent::tools::{default_registry, Tool, ToolError, ToolOutput, ToolRegistry};
+pub use agent::tools::{default_registry, Tool, ToolError, ToolRegistry, ToolResult};
 pub use agent::{
     AgentCommand, AgentEvent, AgentLoop, AgentMode, AssembledToolCall, AssistantStatus, Context,
     DeltaChunk, Message, PendingTool, StreamEvent, ToolCallRequest, UiUpdate, UserMessageKind,
