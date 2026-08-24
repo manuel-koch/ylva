@@ -272,12 +272,12 @@ the Driver) form the complete event surface of the Presenter.
 
 ### Step 9 — Produce the TuiMode × Focus state diagram
 
-- [ ] Create `docs/tui-reducer-state-diagram.mmd` as a Mermaid state diagram showing:
-  - [ ] All `TuiMode` variants as states.
-  - [ ] All `Focus` variants as orthogonal states (or a separate parallel diagram).
-  - [ ] Events that trigger transitions between them (e.g. `CtrlC`, `StreamDone`,
+- [x] Create `docs/tui-reducer-state-diagram.mmd` as a Mermaid state diagram showing:
+  - [x] All `TuiMode` variants as states.
+  - [x] All `Focus` variants as orthogonal states (or a separate parallel diagram).
+  - [x] Events that trigger transitions between them (e.g. `CtrlC`, `StreamDone`,
     `ToolPending`, `ConfirmExpired`, `ShowHelp`, `Escape`).
-- [ ] Render it to `docs/tui-reducer-state-diagram.mmd.svg`.
+- [x] Render it to `docs/tui-reducer-state-diagram.mmd.svg`.
 
 ### Step 10 — Update documentation
 
