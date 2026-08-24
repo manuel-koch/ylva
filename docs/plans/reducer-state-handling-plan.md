@@ -265,10 +265,10 @@ the Driver) form the complete event surface of the Presenter.
 
 ### Step 8 — Remove legacy `src/app.rs` and clean up
 
-- [ ] Delete `src/app.rs` (the shim introduced in Step 2).
-- [ ] Remove dead re-exports from `src/lib.rs`.
-- [ ] Run `make lint` and fix all warnings/clippy findings.
-- [ ] Run `make test-coverage` and confirm ≥80% threshold is met.
+- [x] Delete `src/app.rs` (the shim introduced in Step 2).
+- [x] Remove dead re-exports from `src/lib.rs`.
+- [x] Run `make lint` and fix all warnings/clippy findings.
+- [x] Run `make test-coverage` and confirm ≥80% threshold is met.
 
 ### Step 9 — Produce the TuiMode × Focus state diagram
 

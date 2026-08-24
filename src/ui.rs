@@ -94,7 +94,7 @@ fn highlighted_lines_cached(content: &str, file_extension: Option<&str>) -> High
 }
 
 use crate::agent::AgentMode;
-use crate::app::{ChatEntry, ToolCallState, TuiState, UserMessageState};
+use crate::app_state::{ChatEntry, ToolCallState, TuiState, UserMessageState};
 use crate::build_info::BUILD_INFO;
 
 // User message border colors — extract into Theme struct in a later phase.

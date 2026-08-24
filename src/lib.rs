@@ -13,7 +13,6 @@
 // limitations under the License.
 
 pub mod agent;
-pub mod app;
 pub mod app_state;
 pub mod build_info;
 pub mod cli_driver;
@@ -37,13 +36,13 @@ pub use agent::{
     DEFAULT_SYSTEM_PROMPT, DEFAULT_TOOL_TIMEOUT_SECS, MAX_TOOL_USE_ITERATIONS,
     TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
-pub use app::{ChatEntry, ChatSelection, ToolCallState, TuiState, UserMessageState};
 pub use app_state::{
-    AppLayout, AppState, ChatArea, DomainEvent, Effect, Focus, HelpPopupLayout, InputAreaLayout,
-    InputEvent, TuiMode,
+    AppLayout, AppState, ChatArea, ChatEntry, ChatSelection, DomainEvent, Effect, Focus,
+    HelpPopupLayout, InputAreaLayout, InputEvent, ToolCallState, TuiMode, TuiState,
+    UserMessageState,
 };
-pub use presenter::{TextareaContext, TuiEvent};
 pub use build_info::{BuildInfo, BUILD_INFO};
 pub use cli_driver::{run_cli, run_cli_to};
 pub use events::AppAction;
 pub use llm::{MockEvent, MockProvider, OpenAiProvider, Provider, ToolSchema};
+pub use presenter::{TextareaContext, TuiEvent};
