@@ -2443,7 +2443,7 @@ layer, not a core architectural change.
       table and `BuildInfo` values (version, commit, build timestamp, profile).
 
 - [x] **Mode dispatch:** `std::io::stdout().is_terminal()` in `main.rs` selects between
-      `tui_runner::run_tui_on_stdout` and `headless_runner::run_headless`. No `App` trait yet
+      `tui_driver::run_tui_on_stdout` and `headless_runner::run_headless`. No `App` trait yet
       (deferred to Phase 5).
 
 **CRITICAL:** Ensure `Enter`, `Ctrl+C`, and `Esc` are handled **regardless** of streaming state.
@@ -2510,6 +2510,38 @@ Decisions recorded during implementation:
   initial frame is not empty while the first response streams.
 - **`run_tui` returns the final `TuiState`** so integration tests (`tests/tui_state.rs`) can
   assert on the resulting view state; the production entry point discards it.
+
+### Phase 4 Reducer Refactor (TUI state handling)
+
+**Decision:** Replace the imperative, mixed-concern `handle_action` in `tui_runner.rs` with a
+pure reducer pattern (`update(state, event) → Vec<Effect>`) and a clean MVP module split.
+See [reducer-state-handling-plan.md](./plans/reducer-state-handling-plan.md).
+
+- [x] **`src/app_state.rs` (Model):** pure view-model; defines `AppState`, `TuiMode`, `Focus`,
+      `AppLayout`, `Effect`, `InputEvent`, `DomainEvent`. No ratatui backend, no channel types.
+- [x] **`src/presenter.rs` (Presenter):** `update()` + routing helpers (`route_keyboard`,
+      `route_mouse`, `route_domain`); no I/O. All state-machine logic lives here; fully unit-tested
+      without a live terminal.
+- [x] **`src/render.rs` (View):** `render(frame, &mut AppState)` entry point extracted from
+      `src/ui.rs`; writes geometry back to `state.layout.*`; excluded from coverage.
+- [x] **`src/tui_driver.rs` (Driver, renamed from `tui_runner.rs`):** thin async event loop;
+      owns `TextArea` and channel handles; converts `AppAction → TuiEvent` and
+      `UiUpdate → DomainEvent`; executes `Vec<Effect>` via `execute_effects()`.
+- [x] **`TuiMode`** replaces the legacy `agent_mode: AgentMode` field for TUI control flow;
+      `Focus` replaces `show_help: bool` and the `pending_approval` sub-mode flag.
+- [x] **`TuiMode::DoublePressAbort`** folds the driver-local `confirm_state: Option<Instant>` into
+      typed state; `DomainEvent::ConfirmExpired` drives the expiry transition.
+- [x] **State diagram:** `docs/tui-reducer-state-diagram.mmd` (rendered SVG alongside) documents
+      all `TuiMode × Focus` transitions.
+
+#### Phase 4 Reducer Refactor outcome
+
+- **MVP boundary is compiler-enforced.** `presenter.rs` has no `use ratatui` / channel imports;
+  clippy catches violations.
+- **Unit tests without a terminal.** Each handler in `presenter.rs` is tested by setting
+  `state.mode`/`state.focus` and asserting `Vec<Effect>` — no channel, no crossterm needed.
+- **Integration tests unchanged.** `tests/tui_state.rs` exercises the full Driver + Presenter +
+  View composition; type imports updated to new names (`AppState`, `TuiMode`, `Focus`).
 
 ### Phase 5: Interface Seams
 

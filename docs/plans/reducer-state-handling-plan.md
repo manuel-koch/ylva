@@ -281,17 +281,17 @@ the Driver) form the complete event surface of the Presenter.
 
 ### Step 10 — Update documentation
 
-- [ ] `docs/features.md` — update the TUI Runtime section to describe the
+- [x] `docs/features.md` — update the TUI Runtime section to describe the
   reducer/MVP module layout (Model `app_state.rs`, Presenter `presenter.rs`,
   View `render.rs` + `ui.rs`, Driver `tui_runner.rs`).
-- [ ] `docs/keybindings.md` — verify all keybinding descriptions remain accurate;
+- [x] `docs/keybindings.md` — verify all keybinding descriptions remain accurate;
   update any that change due to the refactor.
-- [ ] `docs/class-diagram.mmd` — update module diagram to show `app_state.rs`,
+- [x] `docs/class-diagram.mmd` — update module diagram to show `app_state.rs`,
   `presenter.rs`, `render.rs`, and the Driver (`tui_runner.rs`) as separate
   nodes with directional dependencies.
-- [ ] `docs/blueprint.md` — add or update a phase entry recording this refactor
+- [x] `docs/blueprint.md` — add or update a phase entry recording this refactor
   (state-handling consolidation) as completed, after Phase 4.
-- [ ] `docs/development-workflow.md` — update any module-layout references to
+- [x] `docs/development-workflow.md` — update any module-layout references to
   reflect the new file names.
 
 ## Implementation Hints
