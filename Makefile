@@ -12,6 +12,7 @@ endif
 COVERAGE_THRESHOLD := 80
 
 .PHONY: lint format \
+	create-logs-dir \
 	build-debug build-debug-and-run \
 	build-release build-release-and-run build-debug-and-run-with-logs \
 	test test-coverage test-coverage-missing \
@@ -31,6 +32,14 @@ lint:
 format:
 	cargo fmt
 
+logs:
+	mkdir logs
+
+logs/.gitignore: logs
+	echo "**" > logs/.gitignore
+
+create-logs-dir: logs/.gitignore
+
 # Build debug binary (output: target/debug/ylva)
 build-debug:
 	cargo build
@@ -40,10 +49,10 @@ build-debug-and-run:
 	cargo run
 
 # Build debug binary and launch it with loggin enabled
-build-debug-and-run-with-logs:
-	YLVA_REQUEST_DUMP_PATH=. cargo run --features artificial-tool-delay -- \
-	    --log-file ylva_$(shell date +%s).log \
-		--log-level trace
+build-debug-and-run-with-logs: create-logs-dir
+	YLVA_REQUEST_DUMP_PATH=logs/ylva.json cargo run --features artificial-tool-delay -- \
+	    --log-file logs/ylva_$(shell date +%s).log \
+	    --log-level trace
 
 # Build optimized release binary (output: ${CARGO_TARGET_DIR}/release/ylva)
 build-release:
