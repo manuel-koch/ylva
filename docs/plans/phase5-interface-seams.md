@@ -329,7 +329,7 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 
 ### Step 8 — Implement `TuiApp` and `ConsoleApp`
 
-- [ ] Done
+- [x] Done
 
 - In `src/tui_driver.rs`:
   - Add `pub struct TuiApp` implementing `App`:
@@ -447,7 +447,6 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 - Run `make test-coverage` — must remain ≥80%.
 - Run `cargo clippy -- -D warnings` — zero warnings.
 - Run `rumdl docs/` — zero findings.
-- Commit all source and doc changes in a single commit.
 
 ## Implementation Hints
 

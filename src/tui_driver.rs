@@ -39,12 +39,15 @@ use ratatui_textarea::{Scrolling, TextArea};
 use tokio::select;
 use tokio::sync::mpsc;
 
-use crate::agent::{AgentCommand, AgentLoop, UiUpdate};
+use crate::agent::{AgentCommand, AgentLoop, Role, UiUpdate};
+use crate::agent_factory::AgentFactory;
+use crate::app::App;
 use crate::app_state::{
     AppState, DomainEvent, Effect, Focus, HistoryDirection, InputEvent, TuiMode, TuiState,
     UserMessageState,
 };
-use crate::engine::{EngineConfig, EngineImpl, DEFAULT_CONTEXT_LENGTH};
+use crate::config::{AgentConfig, ProfileConfig};
+use crate::engine::{Engine, EngineConfig, EngineImpl, DEFAULT_CONTEXT_LENGTH};
 use crate::events::{spawn_crossterm_bridge, AppAction};
 use crate::llm::Provider;
 use crate::presenter::{self, TextareaContext, TuiEvent};
@@ -664,34 +667,81 @@ async fn confirm_timeout(state: &AppState) {
     }
 }
 
-/// Production entry point: builds a real `CrosstermBackend` terminal, enables
-/// raw mode + alternate screen, installs the SIGINT handler, and guarantees
-/// the terminal is restored on every exit path.
+/// Top-level TUI application entry point.
+///
+/// Builds a real `CrosstermBackend` terminal, enables raw mode + alternate
+/// screen, installs the SIGINT handler, constructs an [`AgentLoop`] via
+/// `AgentFactory`, and guarantees the terminal is restored on every exit path.
+pub struct TuiApp {
+    factory: Arc<AgentFactory>,
+    profile: ProfileConfig,
+    agent_type: String,
+    explicit_prompt: Option<String>,
+}
+
+impl TuiApp {
+    pub fn new(
+        factory: Arc<AgentFactory>,
+        profile: ProfileConfig,
+        agent_type: String,
+        explicit_prompt: Option<String>,
+    ) -> Self {
+        TuiApp {
+            factory,
+            profile,
+            agent_type,
+            explicit_prompt,
+        }
+    }
+}
+
+impl App for TuiApp {
+    async fn run(self) -> anyhow::Result<u8> {
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            Hide,
+            EnableMouseCapture,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
+            EnableBracketedPaste,
+        )?;
+        let _guard = TerminalGuard;
+
+        let backend = CrosstermBackend::new(stdout);
+        let mut terminal = Terminal::new(backend)?;
+
+        let (action_tx, action_rx) = mpsc::channel::<AppAction>(CHANNEL_CAPACITY);
+        spawn_crossterm_bridge(action_tx.clone());
+        install_sigint_relay(action_tx)?;
+
+        let (agent, ui_rx) = self
+            .factory
+            .create(&self.profile, &self.agent_type, Role::Root)?;
+
+        run_tui(
+            &mut terminal,
+            agent,
+            ui_rx,
+            self.explicit_prompt,
+            action_rx,
+            &mut ArboardClipboard,
+        )
+        .await
+        .map(|_| 0u8)
+    }
+}
+
+/// Compatibility shim for `main.rs` until Phase 5 Step 9 migrates the binary
+/// to construct `TuiApp` directly.
+///
+/// TODO Phase 5 Step 9: remove this function.
 pub async fn run_tui_on_stdout(
     provider: Arc<dyn Provider>,
     registry: Arc<ToolRegistry>,
     initial_prompt: Option<String>,
 ) -> anyhow::Result<()> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(
-        stdout,
-        EnterAlternateScreen,
-        Hide,
-        EnableMouseCapture,
-        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
-        EnableBracketedPaste,
-    )?;
-    let _guard = TerminalGuard;
-
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
-    let (action_tx, action_rx) = mpsc::channel::<AppAction>(CHANNEL_CAPACITY);
-    spawn_crossterm_bridge(action_tx.clone());
-    install_sigint_relay(action_tx)?;
-
-    // TODO Phase 5 Step 9: replace with AgentFactory
     let engine_config = EngineConfig {
         provider: provider.name().to_string(),
         model: String::new(),
@@ -700,19 +750,30 @@ pub async fn run_tui_on_stdout(
         api_base_url: None,
         api_key: None,
     };
-    let engine = std::sync::Arc::new(EngineImpl::new(provider, engine_config));
-    let (agent, ui_rx) = AgentLoop::new(engine, Arc::clone(&registry));
-
-    run_tui(
-        &mut terminal,
-        agent,
-        ui_rx,
-        initial_prompt,
-        action_rx,
-        &mut ArboardClipboard,
-    )
-    .await
-    .map(|_| ())
+    let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(provider, engine_config));
+    let factory = Arc::new(AgentFactory::new(std::collections::HashMap::from([(
+        "default".to_string(),
+        engine,
+    )])));
+    let profile = ProfileConfig {
+        default_engine: "default".to_string(),
+        compact_engine: None,
+        agents: std::collections::HashMap::from([(
+            "default".to_string(),
+            AgentConfig {
+                engine: None,
+                allowed_tools: None,
+                timeout_secs: None,
+                persona: None,
+                can_spawn: true,
+            },
+        )]),
+    };
+    let _ = registry; // registry is created internally by AgentFactory; parameter kept for API compat
+    TuiApp::new(factory, profile, "default".to_string(), initial_prompt)
+        .run()
+        .await
+        .map(|_| ())
 }
 
 /// RAII guard restoring the terminal to its pre-TUI state.

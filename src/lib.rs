@@ -48,9 +48,10 @@ pub use app_state::{
     UserMessageState,
 };
 pub use build_info::{BuildInfo, BUILD_INFO};
-pub use cli_driver::{run_cli, run_cli_to};
+pub use cli_driver::{run_cli, run_cli_to, ConsoleApp};
 pub use config::{AgentConfig, ProfileConfig};
 pub use engine::{Engine, EngineConfig, EngineImpl, DEFAULT_CONTEXT_LENGTH};
 pub use events::AppAction;
 pub use llm::{MockEvent, MockProvider, ModelInfo, OpenAiProvider, Provider, ToolSchema};
 pub use presenter::{TextareaContext, TuiEvent};
+pub use tui_driver::TuiApp;

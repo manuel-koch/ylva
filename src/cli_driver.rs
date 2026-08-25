@@ -20,7 +20,11 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use crate::agent::{AgentCommand, AgentLoop, UiUpdate};
+use crate::agent::tools::default_registry;
+use crate::agent::{AgentCommand, AgentLoop, Role, UiUpdate};
+use crate::agent_factory::AgentFactory;
+use crate::app::App;
+use crate::config::ProfileConfig;
 use crate::engine::{EngineConfig, EngineImpl, DEFAULT_CONTEXT_LENGTH};
 use crate::llm::{serialize_messages, Provider};
 use crate::ToolRegistry;
@@ -92,6 +96,48 @@ fn render_content_sections(
 /// rendering a tool invocation.
 const STRING_ELIDE_LIMIT: usize = 40;
 
+/// Top-level headless (non-terminal) application entry point.
+///
+/// Constructs an [`AgentLoop`] via [`AgentFactory`] and delegates to
+/// [`run_cli_to`] with the configured writer.
+pub struct ConsoleApp {
+    factory: Arc<AgentFactory>,
+    profile: ProfileConfig,
+    agent_type: String,
+    prompt: String,
+    writer: Box<dyn Write + Send>,
+}
+
+impl ConsoleApp {
+    pub fn new(
+        factory: Arc<AgentFactory>,
+        profile: ProfileConfig,
+        agent_type: String,
+        prompt: String,
+        writer: Box<dyn Write + Send>,
+    ) -> Self {
+        ConsoleApp {
+            factory,
+            profile,
+            agent_type,
+            prompt,
+            writer,
+        }
+    }
+}
+
+impl App for ConsoleApp {
+    async fn run(mut self) -> anyhow::Result<u8> {
+        let registry = Arc::new(default_registry());
+        let (agent, ui_rx) = self
+            .factory
+            .create(&self.profile, &self.agent_type, Role::Root)?;
+        run_cli_to(agent, ui_rx, registry, self.prompt, &mut *self.writer)
+            .await
+            .map(|_| 0u8)
+    }
+}
+
 /// Run the agent loop headless, printing to stdout.
 pub async fn run_cli(
     provider: Arc<dyn Provider>,
@@ -127,7 +173,7 @@ pub async fn run_cli_to(
     mut ui_rx: mpsc::Receiver<UiUpdate>,
     registry: Arc<ToolRegistry>,
     initial_prompt: String,
-    out: &mut dyn Write,
+    out: &mut (dyn Write + Send),
 ) -> anyhow::Result<()> {
     let mut agent = agent;
 
