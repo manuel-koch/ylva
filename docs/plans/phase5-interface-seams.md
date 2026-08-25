@@ -268,7 +268,7 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 
 ### Step 6 — Introduce `AgentFactory`
 
-- [ ] Done
+- [x] Done
 
 - Create `src/agent_factory.rs`.
 - Define:
