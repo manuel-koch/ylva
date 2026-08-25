@@ -33,8 +33,8 @@ pub use logging::{init_logging, LogConfig, LogFormat, LogGuards};
 pub use agent::tools::{default_registry, Tool, ToolCall, ToolCallResult, ToolError, ToolRegistry};
 pub use agent::{
     AgentCommand, AgentEvent, AgentLoop, AgentMode, AssembledToolCall, AssistantStatus, Context,
-    DeltaChunk, Message, PendingTool, StreamEvent, ToolCallRequest, UiUpdate, UserMessageKind,
-    DEFAULT_SYSTEM_PROMPT, DEFAULT_TOOL_TIMEOUT_SECS, MAX_TOOL_USE_ITERATIONS,
+    DeltaChunk, Message, PendingTool, Role, StreamEvent, ToolCallRequest, UiUpdate,
+    UserMessageKind, DEFAULT_SYSTEM_PROMPT, DEFAULT_TOOL_TIMEOUT_SECS, MAX_TOOL_USE_ITERATIONS,
     TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
 pub use app_state::{

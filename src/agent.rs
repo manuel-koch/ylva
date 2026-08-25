@@ -437,6 +437,19 @@ impl PendingTool {
 /// `ToolPending` and waits for an approve/deny command — the loop holds no
 /// approval policy, the driver decides (blueprint §4E, §4B).
 ///
+/// Indicates whether an `AgentLoop` is acting as the root (top-level) agent
+/// or as a child agent spawned by a root agent.
+///
+/// `Child` is a placeholder in Phase 5; `AgentFactory::create` returns `Err`
+/// when asked to create a `Child` agent. Full implementation comes in Phase 6.
+pub enum Role {
+    /// The top-level agent for a session.
+    Root,
+    /// A child agent spawned by a root agent. Not yet constructable via
+    /// `AgentFactory::create`; will be implemented in Phase 6.
+    Child,
+}
+
 /// The outer loop task is the sole writer of `Context` (`single-writer`
 /// rule): no `Arc<Mutex<Context>>` anywhere. `run()` takes the loop's channel
 /// receivers out of `self`; the caller keeps `self` (and thus `cmd_tx`) alive

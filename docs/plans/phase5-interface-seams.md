@@ -222,7 +222,7 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 
 ### Step 4 — Introduce `Role` enum
 
-- [ ] Done
+- [x] Done
 
 - In `src/agent.rs`, define:
 
