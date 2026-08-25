@@ -791,128 +791,138 @@ mod tests {
             "offset schema must state its 0-based convention, got: {offset_description}"
         );
     }
-    #[tokio::test]
-    async fn read_returns_whole_file_content() {
-        let dir = TempDir::new().expect("tempdir");
-        let path = dir.path().join("a.txt");
-        tokio::fs::write(&path, "hello world").await.expect("write");
-        let result = read_file(ReadFileArgs {
-            path: path.display().to_string(),
-            mode: ReadMode::Bytes,
-            offset: None,
-            limit: None,
-        })
-        .await
-        .expect("read ok");
-        assert_eq!(result.text(), "hello world");
-    }
-
-    #[tokio::test]
-    async fn read_missing_file_is_error() {
-        let dir = TempDir::new().expect("tempdir");
-        let result = read_file(ReadFileArgs {
-            path: dir.path().join("nope.txt").display().to_string(),
-            mode: ReadMode::Bytes,
-            offset: None,
-            limit: None,
-        })
-        .await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn read_bytes_honors_offset_and_limit() {
-        let dir = TempDir::new().expect("tempdir");
-        let path = dir.path().join("a.txt");
-        tokio::fs::write(&path, "0123456789").await.expect("write");
-        let result = read_file(ReadFileArgs {
-            path: path.display().to_string(),
-            mode: ReadMode::Bytes,
-            offset: Some(2),
-            limit: Some(4),
-        })
-        .await
-        .expect("read ok");
-        assert_eq!(result.text(), "2345");
-    }
-
-    #[tokio::test]
-    async fn read_lines_honors_offset_and_limit() {
-        let dir = TempDir::new().expect("tempdir");
-        let path = dir.path().join("a.txt");
-        tokio::fs::write(&path, "one\ntwo\nthree\nfour")
+    #[test]
+    fn read_returns_whole_file_content() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            let path = dir.path().join("a.txt");
+            std::fs::write(&path, "hello world").expect("write");
+            let result = read_file(ReadFileArgs {
+                path: path.display().to_string(),
+                mode: ReadMode::Bytes,
+                offset: None,
+                limit: None,
+            })
             .await
-            .expect("write");
-        let result = read_file(ReadFileArgs {
-            path: path.display().to_string(),
-            mode: ReadMode::Lines,
-            offset: Some(1),
-            limit: Some(2),
-        })
-        .await
-        .expect("read ok");
-        assert_eq!(result.text(), "two\nthree");
+            .expect("read ok");
+            assert_eq!(result.text(), "hello world");
+        });
     }
 
-    #[tokio::test]
-    async fn read_chars_counts_utf8_code_points() {
-        let dir = TempDir::new().expect("tempdir");
-        let path = dir.path().join("a.txt");
-        // `é` is 2 bytes but 1 UTF-8 code point.
-        tokio::fs::write(&path, "héllo").await.expect("write");
-        let result = read_file(ReadFileArgs {
-            path: path.display().to_string(),
-            mode: ReadMode::Chars,
-            offset: Some(1),
-            limit: Some(3),
-        })
-        .await
-        .expect("read ok");
-        assert_eq!(result.text(), "éll");
+    #[test]
+    fn read_missing_file_is_error() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            let result = read_file(ReadFileArgs {
+                path: dir.path().join("nope.txt").display().to_string(),
+                mode: ReadMode::Bytes,
+                offset: None,
+                limit: None,
+            })
+            .await;
+            assert!(result.is_err());
+        });
     }
 
-    #[tokio::test]
-    async fn write_creates_file_and_returns_byte_count() {
-        let dir = TempDir::new().expect("tempdir");
-        let path = dir.path().join("sub").join("out.txt");
-        let result = write_file(WriteFileArgs {
-            path: path.display().to_string(),
-            content: "abc".to_string(),
-        })
-        .await
-        .expect("write ok");
-        assert!(result.text().contains("wrote 3 bytes"));
-        let content = tokio::fs::read_to_string(&path).await.expect("read back");
-        assert_eq!(content, "abc");
+    #[test]
+    fn read_bytes_honors_offset_and_limit() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            let path = dir.path().join("a.txt");
+            std::fs::write(&path, "0123456789").expect("write");
+            let result = read_file(ReadFileArgs {
+                path: path.display().to_string(),
+                mode: ReadMode::Bytes,
+                offset: Some(2),
+                limit: Some(4),
+            })
+            .await
+            .expect("read ok");
+            assert_eq!(result.text(), "2345");
+        });
     }
 
-    #[tokio::test]
-    async fn glob_matches_pattern_in_scratch_dir() {
-        let dir = TempDir::new().expect("tempdir");
-        let sub = dir.path().join("sub");
-        tokio::fs::create_dir_all(&sub).await.expect("mkdir");
-        for name in ["a.txt", "b.txt"] {
-            tokio::fs::write(dir.path().join(name), name)
+    #[test]
+    fn read_lines_honors_offset_and_limit() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            let path = dir.path().join("a.txt");
+            std::fs::write(&path, "one\ntwo\nthree\nfour").expect("write");
+            let result = read_file(ReadFileArgs {
+                path: path.display().to_string(),
+                mode: ReadMode::Lines,
+                offset: Some(1),
+                limit: Some(2),
+            })
+            .await
+            .expect("read ok");
+            assert_eq!(result.text(), "two\nthree");
+        });
+    }
+
+    #[test]
+    fn read_chars_counts_utf8_code_points() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            let path = dir.path().join("a.txt");
+            // `é` is 2 bytes but 1 UTF-8 code point.
+            std::fs::write(&path, "héllo").expect("write");
+            let result = read_file(ReadFileArgs {
+                path: path.display().to_string(),
+                mode: ReadMode::Chars,
+                offset: Some(1),
+                limit: Some(3),
+            })
+            .await
+            .expect("read ok");
+            assert_eq!(result.text(), "éll");
+        });
+    }
+
+    #[test]
+    fn write_creates_file_and_returns_byte_count() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            let path = dir.path().join("sub").join("out.txt");
+            let result = write_file(WriteFileArgs {
+                path: path.display().to_string(),
+                content: "abc".to_string(),
+            })
+            .await
+            .expect("write ok");
+            assert!(result.text().contains("wrote 3 bytes"));
+            let content = std::fs::read_to_string(&path).expect("read back");
+            assert_eq!(content, "abc");
+        });
+    }
+
+    #[test]
+    fn glob_matches_pattern_in_scratch_dir() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            let sub = dir.path().join("sub");
+            std::fs::create_dir_all(&sub).expect("mkdir");
+            for name in ["a.txt", "b.txt"] {
+                std::fs::write(dir.path().join(name), name).expect("write");
+            }
+            std::fs::write(sub.join("c.txt"), "c").expect("write");
+
+            let matches = glob_files(&format!("{}/*.txt", dir.path().display()))
                 .await
-                .expect("write");
-        }
-        tokio::fs::write(sub.join("c.txt"), "c")
-            .await
-            .expect("write");
-
-        let matches = glob_files(&format!("{}/*.txt", dir.path().display()))
-            .await
-            .expect("glob ok");
-        let lines: Vec<&str> = matches.text().lines().collect();
-        assert!(lines.iter().any(|l: &&str| l.ends_with("a.txt")));
-        assert!(lines.iter().any(|l: &&str| l.ends_with("b.txt")));
-        assert!(!lines.iter().any(|l: &&str| l.ends_with("c.txt")));
+                .expect("glob ok");
+            let lines: Vec<&str> = matches.text().lines().collect();
+            assert!(lines.iter().any(|l: &&str| l.ends_with("a.txt")));
+            assert!(lines.iter().any(|l: &&str| l.ends_with("b.txt")));
+            assert!(!lines.iter().any(|l: &&str| l.ends_with("c.txt")));
+        });
     }
 
-    #[tokio::test]
-    async fn glob_invalid_pattern_is_error() {
-        let result = glob_files("[").await;
-        assert!(result.is_err());
+    #[test]
+    fn glob_invalid_pattern_is_error() {
+        crate::test_support::run_locked(async {
+            let result = glob_files("[").await;
+            assert!(result.is_err());
+        });
     }
 
     #[test]
@@ -1126,29 +1136,29 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn read_tool_done_content_sections_have_line_numbers() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.rs");
-        tokio::fs::write(&path, "fn main() {}\nfn foo() {}\n")
+    #[test]
+    fn read_tool_done_content_sections_have_line_numbers() {
+        crate::test_support::run_locked(async {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("test.rs");
+            std::fs::write(&path, "fn main() {}\nfn foo() {}\n").unwrap();
+            let result = read_file(ReadFileArgs {
+                path: path.to_str().unwrap().to_string(),
+                mode: ReadMode::Bytes,
+                offset: None,
+                limit: None,
+            })
             .await
             .unwrap();
-        let result = read_file(ReadFileArgs {
-            path: path.to_str().unwrap().to_string(),
-            mode: ReadMode::Bytes,
-            offset: None,
-            limit: None,
-        })
-        .await
-        .unwrap();
-        let sections = result.content_sections();
-        assert_eq!(sections.len(), 1, "expected one body section");
-        let section = &sections[0];
-        assert_eq!(
-            section.line_number_offset,
-            Some(0),
-            "bytes mode must carry line_number_offset Some(0)"
-        );
-        assert_eq!(section.file_extension.as_deref(), Some("rs"));
+            let sections = result.content_sections();
+            assert_eq!(sections.len(), 1, "expected one body section");
+            let section = &sections[0];
+            assert_eq!(
+                section.line_number_offset,
+                Some(0),
+                "bytes mode must carry line_number_offset Some(0)"
+            );
+            assert_eq!(section.file_extension.as_deref(), Some("rs"));
+        });
     }
 }

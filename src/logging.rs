@@ -280,6 +280,11 @@ mod tests {
 
     #[test]
     fn init_logging_with_text_creates_file_and_returns_guard() {
+        // Holds SUBSCRIBER_LOCK: try_init() calls set_global_default which
+        // triggers rebuild_interest_cache, racing with capture_logs tests.
+        let _lock = crate::test_support::SUBSCRIBER_LOCK
+            .lock()
+            .expect("subscriber mutex poisoned");
         let dir = tempfile::TempDir::new().expect("tempdir");
         let path = dir.path().join("ylva.log");
         let guard = init_logging(LogConfig {
@@ -294,6 +299,17 @@ mod tests {
 
     #[test]
     fn init_logging_writes_plain_text_without_ansi_escape_sequences() {
+        // Holds SUBSCRIBER_LOCK: `with_default` calls `Dispatch::new` which
+        // registers the dispatcher in the global `LOCKED_DISPATCHERS` list.
+        // Concurrent `with_default` callers from other test threads can then
+        // join that list and trigger `rebuild_callsite_interest` with
+        // `Interest::and()` across all live dispatchers. An INFO-only
+        // dispatcher ANDs to `Interest::never()` for DEBUG callsites, silently
+        // dropping events that `capture_logs` tests rely on. Holding the lock
+        // prevents concurrent registration and keeps callsite interests stable.
+        let _lock = crate::test_support::SUBSCRIBER_LOCK
+            .lock()
+            .expect("subscriber mutex poisoned");
         let dir = tempfile::TempDir::new().expect("tempdir");
         let path = dir.path().join("ylva.log");
         let file = open_truncate(&path).expect("open log file");
@@ -316,6 +332,11 @@ mod tests {
 
     #[test]
     fn text_format_condenses_source_to_basename_and_line() {
+        // Holds SUBSCRIBER_LOCK: see
+        // init_logging_writes_plain_text_without_ansi_escape_sequences.
+        let _lock = crate::test_support::SUBSCRIBER_LOCK
+            .lock()
+            .expect("subscriber mutex poisoned");
         let dir = tempfile::TempDir::new().expect("tempdir");
         let path = dir.path().join("ylva.log");
         let file = open_truncate(&path).expect("open log file");
@@ -341,6 +362,10 @@ mod tests {
 
     #[test]
     fn init_logging_with_json_creates_file_and_returns_guard() {
+        // Holds SUBSCRIBER_LOCK: see init_logging_with_text_creates_file_and_returns_guard.
+        let _lock = crate::test_support::SUBSCRIBER_LOCK
+            .lock()
+            .expect("subscriber mutex poisoned");
         let dir = tempfile::TempDir::new().expect("tempdir");
         let path = dir.path().join("ylva.jsonl");
         let guard = init_logging(LogConfig {
@@ -355,6 +380,11 @@ mod tests {
 
     #[test]
     fn json_format_emits_spans_chain_but_not_single_span_field() {
+        // Holds SUBSCRIBER_LOCK: see
+        // init_logging_writes_plain_text_without_ansi_escape_sequences.
+        let _lock = crate::test_support::SUBSCRIBER_LOCK
+            .lock()
+            .expect("subscriber mutex poisoned");
         let dir = tempfile::TempDir::new().expect("tempdir");
         let path = dir.path().join("ylva.jsonl");
         let file = open_truncate(&path).expect("open log file");
@@ -384,6 +414,11 @@ mod tests {
 
     #[test]
     fn text_format_renders_current_span_name_and_fields() {
+        // Holds SUBSCRIBER_LOCK: see
+        // init_logging_writes_plain_text_without_ansi_escape_sequences.
+        let _lock = crate::test_support::SUBSCRIBER_LOCK
+            .lock()
+            .expect("subscriber mutex poisoned");
         let dir = tempfile::TempDir::new().expect("tempdir");
         let path = dir.path().join("ylva.log");
         let file = open_truncate(&path).expect("open log file");
@@ -416,6 +451,11 @@ mod tests {
     /// rendering the stub `[[log]]`.
     #[test]
     fn text_format_normalizes_bridged_log_events_to_real_source() {
+        // Holds SUBSCRIBER_LOCK: see
+        // init_logging_writes_plain_text_without_ansi_escape_sequences.
+        let _lock = crate::test_support::SUBSCRIBER_LOCK
+            .lock()
+            .expect("subscriber mutex poisoned");
         let dir = tempfile::TempDir::new().expect("tempdir");
         let path = dir.path().join("ylva.log");
         let file = open_truncate(&path).expect("open log file");
@@ -475,6 +515,10 @@ mod tests {
 
     #[test]
     fn init_logging_relative_filename_uses_current_directory() {
+        // Holds SUBSCRIBER_LOCK: see init_logging_with_text_creates_file_and_returns_guard.
+        let _lock = crate::test_support::SUBSCRIBER_LOCK
+            .lock()
+            .expect("subscriber mutex poisoned");
         let dir = tempfile::TempDir::new().expect("tempdir");
         let previous = std::env::current_dir().expect("current dir");
         std::env::set_current_dir(dir.path()).expect("set cwd");
