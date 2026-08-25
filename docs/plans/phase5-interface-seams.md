@@ -239,7 +239,7 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 
 ### Step 5 — Introduce `ProfileConfig` and `AgentConfig`
 
-- [ ] Done
+- [x] Done
 
 - Create `src/config.rs`.
 - Define:
