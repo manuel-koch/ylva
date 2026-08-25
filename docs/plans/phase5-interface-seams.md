@@ -76,6 +76,7 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 - In `src/llm.rs`, add:
 
   ```rust
+  #[derive(Clone, Debug)]
   pub struct ModelInfo {
       pub id: String,
       pub name: Option<String>,
@@ -113,6 +114,14 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 - Define:
 
   ```rust
+  /// Configuration for an Engine.
+  ///
+  /// **Note:** `model`, `temperature`, `context_length`, `api_base_url`, and `api_key`
+  /// are advisory in Phase 5 — `EngineImpl::chat()` delegates directly to the wrapped
+  /// `Provider`, which already bakes these settings in at construction time. Phase 7
+  /// wires these fields into provider construction from TOML config, making `EngineConfig`
+  /// the true SSOT for sampling parameters.
+  #[derive(Clone, Debug)]
   pub struct EngineConfig {
       pub provider: String,
       pub model: String,
@@ -153,8 +162,16 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
   - `config()` returns `&self.config`.
 - Add `pub mod engine;` to `src/lib.rs` and re-export `Engine`, `EngineConfig`,
   `EngineImpl`.
+- Also define `pub const DEFAULT_CONTEXT_LENGTH: usize = 128_000;` in `src/engine.rs`
+  and re-export it; use it in `main.rs` (Step 9) and in all tests that build a
+  test `EngineConfig`.
 - Write unit tests: confirm `EngineImpl::config()` returns the injected config;
   confirm `EngineImpl::chat()` delegates to `MockProvider`.
+- In `tests/common`, add a `pub fn test_engine_config() -> EngineConfig` helper that
+  returns a default `EngineConfig` (e.g. `provider: "mock"`, `model: "test-model"`,
+  `temperature: None`, `context_length: DEFAULT_CONTEXT_LENGTH`, `api_base_url: None`,
+  `api_key: None`). Use this helper in all tests that need an `EngineConfig` to avoid
+  repetitive inline struct literals.
 
 ### Step 3 — Migrate `AgentLoop` from `Arc<dyn Provider>` to `Arc<dyn Engine>`
 
@@ -169,6 +186,8 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
   - Replace `provider: Arc<dyn Provider>, registry: Arc<ToolRegistry>` parameters
     with `agent: AgentLoop, ui_rx: mpsc::Receiver<UiUpdate>` — `run_tui` no longer
     constructs the `AgentLoop`; it receives a pre-built one.
+  - Mark `run_tui<B>` as `#[doc(hidden)] pub` — it is the integration-test seam and
+    must remain reachable from `tests/`, but should not appear in public API docs.
   - Remove the `AgentLoop::new(…)` call at the top of `run_tui`.
   - Update `tests/tui_state.rs`: replace `Arc::new(provider), registry` arguments
     with `AgentLoop::new(Arc::new(EngineImpl::new(provider, config)), registry)`.
@@ -177,8 +196,10 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
     `agent: AgentLoop, ui_rx: mpsc::Receiver<UiUpdate>`. **Keep** `registry: Arc<ToolRegistry>`
     — it is still used inside the function body for tool-title lookup and approval checks.
   - New signature:
-    `run_cli_to(agent: AgentLoop, ui_rx: mpsc::Receiver<UiUpdate>,`
+    `#[doc(hidden)] pub fn run_cli_to(agent: AgentLoop, ui_rx: mpsc::Receiver<UiUpdate>,`
     `registry: Arc<ToolRegistry>, initial_prompt: String, out: &mut dyn Write)`
+    Mark `run_cli_to` as `#[doc(hidden)] pub` — it is the integration-test seam and
+    must remain reachable from `tests/`, but should not appear in public API docs.
   - Remove the `AgentLoop::new(…)` call at the top of `run_cli_to`.
   - Update `run_cli` (public signature unchanged: still accepts `Arc<dyn Provider>` and
     `Arc<ToolRegistry>`): build `AgentLoop::new(engine, registry.clone())` in its body
@@ -200,7 +221,8 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
   ```rust
   pub enum Role {
       Root,
-      Child, // fields added in Phase 6
+      /// Not yet constructable via `AgentFactory::create`; will be implemented in Phase 6.
+      Child,
   }
   ```
 
@@ -218,11 +240,13 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
       pub allowed_tools: Option<Vec<String>>,
       pub timeout_secs: Option<u64>,
       pub persona: Option<String>,
+      /// Phase 6: checked by `AgentFactory::create` to allow spawning child agents.
       pub can_spawn: bool,
   }
 
   pub struct ProfileConfig {
       pub default_engine: String,
+      /// Phase 7: when `None`, falls back to `default_engine` for compact/summarisation tasks.
       pub compact_engine: Option<String>,
       pub agents: HashMap<String, AgentConfig>,
   }
@@ -265,8 +289,13 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
   Do not use `todo!()` — it panics and aborts the test process.
 - Add `pub mod agent_factory;` to `src/lib.rs` and re-export `AgentFactory`.
 - Write unit tests:
-  - `create` returns `Ok(…)` for `Role::Root` with a known engine name.
+  - `create` returns `Ok(…)` for `Role::Root` with a known engine name; unwrap the
+    result and assert the returned `mpsc::Receiver<UiUpdate>` channel is open (not
+    closed/dropped) as a smoke test that the `AgentLoop` is non-trivially constructed.
   - `create` returns `Err(…)` for an unknown engine name.
+  - `create` returns `Err(…)` for `Role::Child` (any engine name).
+  - Use `test_engine_config()` from `tests/common` (see Step 2 note) for all test
+    `EngineConfig` construction.
 
 ### Step 7 — Introduce `App` trait in `src/app.rs`
 
@@ -319,7 +348,7 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
     `provider.name()` provides it. `EngineConfig.provider` is set from `provider.name()`.
   - Construct an `EngineConfig` inline from the env-var-derived values, setting
     `provider` from `provider.name().to_string()`, `model` from the relevant env var,
-    `temperature: None` (model default), and `context_length: 128_000`.
+    `temperature: None` (model default), and `context_length: DEFAULT_CONTEXT_LENGTH`.
   - Wrap the provider in `EngineImpl::new(provider, engine_config)`.
   - Construct `ProfileConfig` inline:
 
@@ -402,14 +431,15 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 
 - **`run_tui<B>`** (`src/tui_driver.rs:377`) is the integration-test seam for the TUI —
   after Step 3 it accepts `(agent: AgentLoop, ui_rx: mpsc::Receiver<UiUpdate>)` instead
-  of `provider` + `registry`. It stays `pub`. `run_tui_on_stdout` is removed; its logic
-  moves into `TuiApp::run()`.
+  of `provider` + `registry`. Mark it `#[doc(hidden)] pub` — accessible from `tests/` but
+  hidden from API docs. `run_tui_on_stdout` is removed; its logic moves into `TuiApp::run()`.
 - **`run_cli_to`** (`src/cli_driver.rs:103`) is the integration-test seam for the CLI —
   after Step 3 its signature is:
-  `(agent: AgentLoop, ui_rx: Receiver<UiUpdate>, registry: Arc<ToolRegistry>,`
+  `#[doc(hidden)] pub fn run_cli_to(agent: AgentLoop, ui_rx: Receiver<UiUpdate>, registry: Arc<ToolRegistry>,`
   `initial_prompt: String, out: &mut dyn Write)`.
   `registry` is kept because the function body looks up tool titles and approval flags.
-  It stays `pub`. Tests updated in Step 3 to pre-build `AgentLoop` and pass `registry` separately.
+  Mark it `#[doc(hidden)] pub` — accessible from `tests/` but hidden from API docs.
+  Tests updated in Step 3 to pre-build `AgentLoop` and pass `registry` separately.
 - **`EngineConfig.provider` string values**: populated from `provider.name()` in `main.rs`
   (`"ollama"`, `"openrouter"`, or `"mock"`). These strings are the future SSOT for
   `OpenAiProvider::list_models` endpoint dispatch.
@@ -432,7 +462,8 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
   (not `impl Future`); `MockProvider` is the test double — match its `chat()` impl
   pattern for `list_models`.
 - **`OpenAiProvider`** lives in `src/llm/openai_provider.rs`. Its `list_models` implementation
-  is deferred; add a `todo!()` stub to satisfy the trait bound in Phase 5.
+  is deferred; add `Box::pin(async { anyhow::bail!("list_models not yet implemented") })` to
+  satisfy the trait bound in Phase 5. Do **not** use `todo!()` — it panics and aborts tests.
 - **`tui_driver.rs`**: search for `AgentLoop::new` to find construction sites that must
   move to `AgentFactory::create` in Step 8.
 - **`cli_driver.rs`**: `run_cli` and `run_cli_to` (`src/cli_driver.rs:93`, `:103`)
@@ -440,7 +471,7 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 - **`main.rs`**: after Phase 5, `select_provider()` still produces `Arc<dyn Provider>`.
   `EngineConfig.provider` is populated from `provider.name()`. The engine is built via
   `EngineImpl::new(provider, engine_config)` with `temperature: None` and
-  `context_length: 128_000`. `Arc<AgentFactory>` is created once before the `if/else`
+  `context_length: DEFAULT_CONTEXT_LENGTH`. `Arc<AgentFactory>` is created once before the `if/else`
   dispatch. `ProfileConfig` is constructed inline with `default_engine = "default"` and
   `can_spawn = true` for the default agent type.
 - **`EngineImpl::new`**: `pub fn new(provider: Arc<dyn Provider>, config: EngineConfig) -> Self`.
