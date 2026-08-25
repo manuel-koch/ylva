@@ -12,17 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod common;
+
 use std::sync::Arc;
 
 use ylva::{
-    AgentCommand, AgentLoop, Message, MockProvider, ToolRegistry, UiUpdate, DEFAULT_SYSTEM_PROMPT,
-    TOOL_PROTOCOL_SYSTEM_PROMPT,
+    AgentCommand, AgentLoop, EngineImpl, Message, MockProvider, ToolRegistry, UiUpdate,
+    DEFAULT_SYSTEM_PROMPT, TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
 
 #[tokio::test]
 async fn empty_prompt_is_a_noop_and_final_context_stays_seeded() {
     let provider = MockProvider::new(Vec::new(), std::time::Duration::from_millis(10));
-    let (mut agent, mut ui_rx) = AgentLoop::new(Arc::new(provider), Arc::new(ToolRegistry::new()));
+    let (mut agent, mut ui_rx) = AgentLoop::new(
+        Arc::new(EngineImpl::new(
+            Arc::new(provider),
+            common::test_engine_config(),
+        )),
+        Arc::new(ToolRegistry::new()),
+    );
 
     agent
         .send_command(AgentCommand::Prompt(String::new()))

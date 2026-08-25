@@ -179,7 +179,7 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 
 ### Step 3 — Migrate `AgentLoop` from `Arc<dyn Provider>` to `Arc<dyn Engine>`
 
-- [ ] Done
+- [x] Done
 
 - In `src/agent.rs`:
   - Replace `provider: Arc<dyn Provider>` field with `engine: Arc<dyn Engine>`.

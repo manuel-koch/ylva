@@ -24,8 +24,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use ylva::{
-    cli_driver::run_cli_to, default_registry, DeltaChunk, Message, MockEvent, Provider,
-    StreamEvent, ToolRegistry, ToolSchema,
+    cli_driver::run_cli_to, default_registry, AgentLoop, DeltaChunk, EngineImpl, Message,
+    MockEvent, Provider, StreamEvent, ToolRegistry, ToolSchema,
 };
 
 /// A provider that emits `phase_one` on the first `chat()` call and
@@ -120,7 +120,9 @@ async fn run_cli_streams_user_and_assistant_and_history() {
     });
     let registry = Arc::new(ToolRegistry::new());
     let mut output = Vec::new();
-    run_cli_to(provider, registry, "greet me".to_string(), &mut output)
+    let engine = Arc::new(EngineImpl::new(provider, common::test_engine_config()));
+    let (agent, ui_rx) = AgentLoop::new(engine, Arc::clone(&registry));
+    run_cli_to(agent, ui_rx, registry, "greet me".to_string(), &mut output)
         .await
         .expect("headless run succeeds");
     let output = String::from_utf8(output).expect("utf8 output");
@@ -149,9 +151,17 @@ async fn run_cli_auto_approves_read_and_runs_it() {
     });
     let registry = Arc::new(default_registry());
     let mut output = Vec::new();
-    run_cli_to(provider, registry, "read the file".to_string(), &mut output)
-        .await
-        .expect("headless run succeeds");
+    let engine = Arc::new(EngineImpl::new(provider, common::test_engine_config()));
+    let (agent, ui_rx) = AgentLoop::new(engine, Arc::clone(&registry));
+    run_cli_to(
+        agent,
+        ui_rx,
+        registry,
+        "read the file".to_string(),
+        &mut output,
+    )
+    .await
+    .expect("headless run succeeds");
     let output = String::from_utf8(output).expect("utf8 output");
 
     // read needs no approval → approved and executed.
@@ -172,9 +182,17 @@ async fn run_cli_denies_write_and_fed_back_as_error() {
     });
     let registry = Arc::new(default_registry());
     let mut output = Vec::new();
-    run_cli_to(provider, registry, "write a file".to_string(), &mut output)
-        .await
-        .expect("headless run succeeds");
+    let engine = Arc::new(EngineImpl::new(provider, common::test_engine_config()));
+    let (agent, ui_rx) = AgentLoop::new(engine, Arc::clone(&registry));
+    run_cli_to(
+        agent,
+        ui_rx,
+        registry,
+        "write a file".to_string(),
+        &mut output,
+    )
+    .await
+    .expect("headless run succeeds");
     let output = String::from_utf8(output).expect("utf8 output");
 
     assert!(output.contains("denied"), "output: {output}");

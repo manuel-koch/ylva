@@ -44,6 +44,7 @@ use crate::app_state::{
     AppState, DomainEvent, Effect, Focus, HistoryDirection, InputEvent, TuiMode, TuiState,
     UserMessageState,
 };
+use crate::engine::{EngineConfig, EngineImpl, DEFAULT_CONTEXT_LENGTH};
 use crate::events::{spawn_crossterm_bridge, AppAction};
 use crate::llm::Provider;
 use crate::presenter::{self, TextareaContext, TuiEvent};
@@ -374,10 +375,11 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
 ///
 /// Uses `AppState` internally (the reducer model) and returns a `TuiState`
 /// for backward compatibility with integration tests.
+#[doc(hidden)]
 pub async fn run_tui<B>(
     terminal: &mut Terminal<B>,
-    provider: Arc<dyn Provider>,
-    registry: Arc<ToolRegistry>,
+    agent: AgentLoop,
+    ui_rx: mpsc::Receiver<UiUpdate>,
     initial_prompt: Option<String>,
     mut action_rx: mpsc::Receiver<AppAction>,
     clipboard: &mut dyn ClipboardSink,
@@ -386,7 +388,8 @@ where
     B: Backend,
     B::Error: std::error::Error + Send + Sync + 'static,
 {
-    let (mut agent, mut ui_rx) = AgentLoop::new(provider, Arc::clone(&registry));
+    let mut agent = agent;
+    let mut ui_rx = ui_rx;
     let mut state = AppState::new();
     let mut textarea = TextArea::default();
     configure_textarea(&mut textarea);
@@ -688,10 +691,22 @@ pub async fn run_tui_on_stdout(
     spawn_crossterm_bridge(action_tx.clone());
     install_sigint_relay(action_tx)?;
 
+    // TODO Phase 5 Step 9: replace with AgentFactory
+    let engine_config = EngineConfig {
+        provider: provider.name().to_string(),
+        model: String::new(),
+        temperature: None,
+        context_length: DEFAULT_CONTEXT_LENGTH,
+        api_base_url: None,
+        api_key: None,
+    };
+    let engine = std::sync::Arc::new(EngineImpl::new(provider, engine_config));
+    let (agent, ui_rx) = AgentLoop::new(engine, Arc::clone(&registry));
+
     run_tui(
         &mut terminal,
-        provider,
-        registry,
+        agent,
+        ui_rx,
         initial_prompt,
         action_rx,
         &mut ArboardClipboard,

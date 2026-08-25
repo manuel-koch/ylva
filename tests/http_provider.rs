@@ -20,8 +20,9 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 use ylva::{
-    AgentCommand, AgentLoop, AssistantStatus, Message, OpenAiProvider, Provider, StreamEvent,
-    ToolRegistry, UiUpdate, UserMessageKind, DEFAULT_SYSTEM_PROMPT, TOOL_PROTOCOL_SYSTEM_PROMPT,
+    AgentCommand, AgentLoop, AssistantStatus, EngineImpl, Message, OpenAiProvider, Provider,
+    StreamEvent, ToolRegistry, UiUpdate, UserMessageKind, DEFAULT_SYSTEM_PROMPT,
+    TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
 
 use common::collect_until;
@@ -251,7 +252,10 @@ async fn agent_loop_round_trip_commits_streamed_text() {
     let server = MockLlmServer::start(config).await.expect("bind failed");
     let provider = provider_for(&server);
 
-    let (mut agent, mut ui_rx) = AgentLoop::new(provider, Arc::new(ToolRegistry::new()));
+    let (mut agent, mut ui_rx) = AgentLoop::new(
+        Arc::new(EngineImpl::new(provider, common::test_engine_config())),
+        Arc::new(ToolRegistry::new()),
+    );
     agent
         .send_command(AgentCommand::Prompt("question".into()))
         .await;

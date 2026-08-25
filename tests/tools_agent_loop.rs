@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod common;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,8 +25,9 @@ use tempfile::TempDir;
 use tokio::sync::mpsc;
 
 use ylva::{
-    default_registry, AgentCommand, AgentLoop, DeltaChunk, Message, MockEvent, MockProvider, Tool,
-    ToolCall, ToolCallResult, ToolError, ToolRegistry, UiUpdate, MAX_TOOL_USE_ITERATIONS,
+    default_registry, AgentCommand, AgentLoop, DeltaChunk, EngineImpl, Message, MockEvent,
+    MockProvider, Tool, ToolCall, ToolCallResult, ToolError, ToolRegistry, UiUpdate,
+    MAX_TOOL_USE_ITERATIONS,
 };
 
 /// Build a `MockEvent::Delta` carrying a complete tool call for `index`.
@@ -131,7 +134,13 @@ async fn tool_call_pauses_for_approval_then_reprompts_after_result() {
         vec![call("read", 0, serde_json::json!({ "path": file }))],
         interval,
     );
-    let (mut agent, mut ui_rx) = AgentLoop::new(Arc::new(provider), Arc::clone(&registry));
+    let (mut agent, mut ui_rx) = AgentLoop::new(
+        Arc::new(EngineImpl::new(
+            Arc::new(provider),
+            common::test_engine_config(),
+        )),
+        Arc::clone(&registry),
+    );
 
     agent
         .send_command(AgentCommand::Prompt("read it".into()))
@@ -183,7 +192,13 @@ async fn two_tool_calls_drain_serially_with_single_reprompt() {
         ],
         interval,
     );
-    let (mut agent, mut ui_rx) = AgentLoop::new(Arc::new(provider), Arc::clone(&registry));
+    let (mut agent, mut ui_rx) = AgentLoop::new(
+        Arc::new(EngineImpl::new(
+            Arc::new(provider),
+            common::test_engine_config(),
+        )),
+        Arc::clone(&registry),
+    );
 
     agent
         .send_command(AgentCommand::Prompt("read both".into()))
@@ -246,7 +261,13 @@ async fn failing_tool_emits_tool_error_and_still_reprompts() {
         )],
         interval,
     );
-    let (mut agent, mut ui_rx) = AgentLoop::new(Arc::new(provider), Arc::clone(&registry));
+    let (mut agent, mut ui_rx) = AgentLoop::new(
+        Arc::new(EngineImpl::new(
+            Arc::new(provider),
+            common::test_engine_config(),
+        )),
+        Arc::clone(&registry),
+    );
 
     agent
         .send_command(AgentCommand::Prompt("read missing".into()))
@@ -299,7 +320,13 @@ async fn denied_write_is_fed_back_and_triggers_a_new_request() {
         ],
         interval,
     );
-    let (mut agent, mut ui_rx) = AgentLoop::new(Arc::new(provider), Arc::clone(&registry));
+    let (mut agent, mut ui_rx) = AgentLoop::new(
+        Arc::new(EngineImpl::new(
+            Arc::new(provider),
+            common::test_engine_config(),
+        )),
+        Arc::clone(&registry),
+    );
 
     agent
         .send_command(AgentCommand::Prompt("do it".into()))
@@ -351,7 +378,13 @@ async fn stop_while_awaiting_approval_clears_pending_tools() {
         ],
         interval,
     );
-    let (mut agent, mut ui_rx) = AgentLoop::new(Arc::new(provider), Arc::clone(&registry));
+    let (mut agent, mut ui_rx) = AgentLoop::new(
+        Arc::new(EngineImpl::new(
+            Arc::new(provider),
+            common::test_engine_config(),
+        )),
+        Arc::clone(&registry),
+    );
 
     agent.send_command(AgentCommand::Prompt("go".into())).await;
     let handle = agent.run();
@@ -485,7 +518,13 @@ async fn stop_mid_tool_kills_tool_and_returns_to_idle() {
     let interval = Duration::from_millis(5);
     let provider =
         MockProvider::with_script(vec![call("sleep", 0, serde_json::json!({}))], interval);
-    let (mut agent, mut ui_rx) = AgentLoop::new(Arc::new(provider), Arc::clone(&registry));
+    let (mut agent, mut ui_rx) = AgentLoop::new(
+        Arc::new(EngineImpl::new(
+            Arc::new(provider),
+            common::test_engine_config(),
+        )),
+        Arc::clone(&registry),
+    );
 
     agent.send_command(AgentCommand::Prompt("nap".into())).await;
     let handle = agent.run();
@@ -538,7 +577,13 @@ async fn iteration_guard_stops_after_max_reprompts() {
         )],
         interval,
     );
-    let (mut agent, mut ui_rx) = AgentLoop::new(Arc::new(provider), Arc::clone(&registry));
+    let (mut agent, mut ui_rx) = AgentLoop::new(
+        Arc::new(EngineImpl::new(
+            Arc::new(provider),
+            common::test_engine_config(),
+        )),
+        Arc::clone(&registry),
+    );
 
     agent
         .send_command(AgentCommand::Prompt("loop".into()))

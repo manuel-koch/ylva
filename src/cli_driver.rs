@@ -18,7 +18,10 @@
 use std::io::Write;
 use std::sync::Arc;
 
+use tokio::sync::mpsc;
+
 use crate::agent::{AgentCommand, AgentLoop, UiUpdate};
+use crate::engine::{EngineConfig, EngineImpl, DEFAULT_CONTEXT_LENGTH};
 use crate::llm::{serialize_messages, Provider};
 use crate::ToolRegistry;
 
@@ -95,18 +98,38 @@ pub async fn run_cli(
     registry: Arc<ToolRegistry>,
     initial_prompt: String,
 ) -> anyhow::Result<()> {
-    run_cli_to(provider, registry, initial_prompt, &mut std::io::stdout()).await
+    // TODO Phase 5 Step 9: replace with AgentFactory
+    let engine_config = EngineConfig {
+        provider: provider.name().to_string(),
+        model: String::new(),
+        temperature: None,
+        context_length: DEFAULT_CONTEXT_LENGTH,
+        api_base_url: None,
+        api_key: None,
+    };
+    let engine = Arc::new(EngineImpl::new(provider, engine_config));
+    let (agent, ui_rx) = AgentLoop::new(engine, Arc::clone(&registry));
+    run_cli_to(
+        agent,
+        ui_rx,
+        registry,
+        initial_prompt,
+        &mut std::io::stdout(),
+    )
+    .await
 }
 
 /// [`run_cli`] with an explicit output writer (used by tests to capture
 /// the emitted lines without redirecting process stdout).
+#[doc(hidden)]
 pub async fn run_cli_to(
-    provider: Arc<dyn Provider>,
+    agent: AgentLoop,
+    mut ui_rx: mpsc::Receiver<UiUpdate>,
     registry: Arc<ToolRegistry>,
     initial_prompt: String,
     out: &mut dyn Write,
 ) -> anyhow::Result<()> {
-    let (mut agent, mut ui_rx) = AgentLoop::new(provider, Arc::clone(&registry));
+    let mut agent = agent;
 
     // Echo the user's turn before sending the request, so it appears even
     // while the provider is still connecting / retrying (the "Assistant:"
