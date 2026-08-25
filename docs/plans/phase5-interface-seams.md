@@ -358,7 +358,7 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 
 ### Step 9 — Refactor `main.rs` to dispatch via `App`
 
-- [ ] Done
+- [x] Done
 
 - In `src/main.rs`:
   - Remove all `// TODO Phase 5 Step 9` temporary wrappers introduced in Step 3.

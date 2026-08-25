@@ -12,13 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::sync::Arc;
 use std::time::Duration;
 
 use ylva::llm::{MockProvider, OpenAiProvider, Provider};
 use ylva::logging::{init_logging, LogConfig, LogFormat};
-use ylva::{cli_driver, default_registry, tui_driver};
+use ylva::{
+    AgentConfig, AgentFactory, App, ConsoleApp, Engine, EngineConfig, EngineImpl, ProfileConfig,
+    TuiApp, DEFAULT_CONTEXT_LENGTH,
+};
 
 /// Fallback demo prompt used when neither `--prompt` nor piped stdin supplies
 /// the initial user turn.
@@ -50,27 +54,72 @@ fn main() {
     };
 
     let provider: Arc<dyn Provider> = select_provider();
-    let registry = Arc::new(default_registry());
     let runtime = tokio::runtime::Runtime::new().expect("failed to start Tokio runtime");
 
-    if std::io::stdout().is_terminal() && !args.contains(&"--no-tui".to_string()) {
-        // The TUI starts with an empty input box. An explicit `--prompt` (or
-        // piped stdin) still auto-sends, but the hardcoded demo prompt is only
-        // for the headless path — it must not pre-populate the interactive UI.
-        let explicit_prompt = explicit_prompt(args);
-        let exit_code = runtime.block_on(tui_driver::run_tui_on_stdout(
-            provider,
-            registry,
-            explicit_prompt,
-        ));
-        if let Err(error) = exit_code {
-            eprintln!("error: {error}");
-            std::process::exit(2);
+    let engine_config = EngineConfig {
+        provider: provider.name().to_string(),
+        model: model_from_env(),
+        temperature: None,
+        context_length: DEFAULT_CONTEXT_LENGTH,
+        api_base_url: None,
+        api_key: None,
+    };
+    let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(provider, engine_config));
+
+    let profile = ProfileConfig {
+        default_engine: "default".to_string(),
+        compact_engine: None,
+        agents: HashMap::from([(
+            "default".to_string(),
+            AgentConfig {
+                engine: None,
+                allowed_tools: None,
+                timeout_secs: None,
+                persona: None,
+                can_spawn: true,
+            },
+        )]),
+    };
+
+    let factory = Arc::new(AgentFactory::new(HashMap::from([(
+        "default".to_string(),
+        engine as Arc<dyn Engine>,
+    )])));
+
+    let result = runtime.block_on(async {
+        if std::io::stdout().is_terminal() && !args.contains(&"--no-tui".to_string()) {
+            // The TUI starts with an empty input box. An explicit `--prompt` (or
+            // piped stdin) still auto-sends, but the hardcoded demo prompt is only
+            // for the headless path — it must not pre-populate the interactive UI.
+            let explicit_prompt = explicit_prompt(args);
+            TuiApp::new(
+                Arc::clone(&factory),
+                profile,
+                "default".to_string(),
+                explicit_prompt,
+            )
+            .run()
+            .await
+        } else {
+            let prompt = initial_prompt(args);
+            ConsoleApp::new(
+                Arc::clone(&factory),
+                profile,
+                "default".to_string(),
+                prompt,
+                Box::new(std::io::stdout()),
+            )
+            .run()
+            .await
         }
-    } else {
-        let prompt = initial_prompt(args);
-        let result = runtime.block_on(cli_driver::run_cli(provider, registry, prompt));
-        if let Err(error) = result {
+    });
+    match result {
+        Ok(exit_code) => {
+            if exit_code != 0 {
+                std::process::exit(exit_code as i32);
+            }
+        }
+        Err(error) => {
             eprintln!("error: {error}");
             std::process::exit(2);
         }
@@ -204,6 +253,32 @@ fn prompt_from_stdin() -> Option<String> {
 const DEFAULT_OLLAMA_MODEL: &str = "gemma4:e4b-mlx";
 /// Default OpenRouter model when `OPENROUTER_MODEL` is unset.
 const DEFAULT_OPENROUTER_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
+
+/// Return the model name that matches the active provider's env vars.
+///
+/// Mirrors the precedence of [`select_provider`]: Ollama first, then
+/// OpenRouter, then an empty string for the `MockProvider` fallback.
+///
+/// TODO: this duplicates provider-specific knowledge that should live on the
+/// provider itself (see `docs/ideas/resolving-provider.md`). Once a
+/// `ProviderRegistry` exists, replace both `select_provider` and
+/// `model_from_env` with a single `ProviderRegistry::resolve_provider` call
+/// that returns a fully-configured provider (including model).
+fn model_from_env() -> String {
+    if let Ok(base_url) = std::env::var("OLLAMA_BASE_URL") {
+        if !base_url.is_empty() {
+            return std::env::var("OLLAMA_MODEL")
+                .unwrap_or_else(|_| DEFAULT_OLLAMA_MODEL.to_string());
+        }
+    }
+    if let Ok(base_url) = std::env::var("OPENROUTER_BASE_URL") {
+        if !base_url.is_empty() {
+            return std::env::var("OPENROUTER_MODEL")
+                .unwrap_or_else(|_| DEFAULT_OPENROUTER_MODEL.to_string());
+        }
+    }
+    String::new()
+}
 
 /// Select the Phase 2 demo provider from environment variables with
 /// **Ollama-first** precedence. Falls back to the `MockProvider` when no
