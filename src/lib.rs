@@ -16,6 +16,7 @@ pub mod agent;
 pub mod app_state;
 pub mod build_info;
 pub mod cli_driver;
+pub mod engine;
 pub mod events;
 pub mod llm;
 pub mod logging;
@@ -43,6 +44,7 @@ pub use app_state::{
 };
 pub use build_info::{BuildInfo, BUILD_INFO};
 pub use cli_driver::{run_cli, run_cli_to};
+pub use engine::{Engine, EngineConfig, EngineImpl, DEFAULT_CONTEXT_LENGTH};
 pub use events::AppAction;
 pub use llm::{MockEvent, MockProvider, ModelInfo, OpenAiProvider, Provider, ToolSchema};
 pub use presenter::{TextareaContext, TuiEvent};

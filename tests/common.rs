@@ -23,7 +23,7 @@
 pub mod mock_llm_server;
 
 use tokio::sync::mpsc;
-use ylva::UiUpdate;
+use ylva::{EngineConfig, UiUpdate, DEFAULT_CONTEXT_LENGTH};
 
 /// Whether `value` matches `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$`
 /// (the trailing `Z` is literal — a `+00:00` style must fail).
@@ -67,5 +67,19 @@ where
         if collected.len() > 500 {
             panic!("collect_until budget exceeded");
         }
+    }
+}
+
+/// Returns a default [`EngineConfig`] suitable for use in tests.
+///
+/// Use this helper instead of inline struct literals to keep test code DRY.
+pub fn test_engine_config() -> EngineConfig {
+    EngineConfig {
+        provider: "mock".to_string(),
+        model: "test-model".to_string(),
+        temperature: None,
+        context_length: DEFAULT_CONTEXT_LENGTH,
+        api_base_url: None,
+        api_key: None,
     }
 }

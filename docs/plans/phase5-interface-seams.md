@@ -112,7 +112,7 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 
 ### Step 2 — Introduce `EngineConfig`, `Engine` trait, and `EngineImpl`
 
-- [ ] Done
+- [x] Done
 
 - Create `src/engine.rs`.
 - Define:
