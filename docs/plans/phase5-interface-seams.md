@@ -73,6 +73,8 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 
 ### Step 1 — Introduce `ModelInfo` and extend `Provider` trait
 
+- [x] Done
+
 - In `src/llm.rs`, add:
 
   ```rust
@@ -109,6 +111,8 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
   - `MockProvider::list_models()` returns an empty `Vec`.
 
 ### Step 2 — Introduce `EngineConfig`, `Engine` trait, and `EngineImpl`
+
+- [ ] Done
 
 - Create `src/engine.rs`.
 - Define:
@@ -175,6 +179,8 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 
 ### Step 3 — Migrate `AgentLoop` from `Arc<dyn Provider>` to `Arc<dyn Engine>`
 
+- [ ] Done
+
 - In `src/agent.rs`:
   - Replace `provider: Arc<dyn Provider>` field with `engine: Arc<dyn Engine>`.
   - Update `AgentLoop::new(engine: Arc<dyn Engine>, registry: Arc<ToolRegistry>)`
@@ -216,6 +222,8 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 
 ### Step 4 — Introduce `Role` enum
 
+- [ ] Done
+
 - In `src/agent.rs`, define:
 
   ```rust
@@ -230,6 +238,8 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 - No behaviour change in Phase 5; `Role::Child` is a unit variant.
 
 ### Step 5 — Introduce `ProfileConfig` and `AgentConfig`
+
+- [ ] Done
 
 - Create `src/config.rs`.
 - Define:
@@ -257,6 +267,8 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 - Write a simple unit test: construct a `ProfileConfig` and verify field access.
 
 ### Step 6 — Introduce `AgentFactory`
+
+- [ ] Done
 
 - Create `src/agent_factory.rs`.
 - Define:
@@ -299,6 +311,8 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 
 ### Step 7 — Introduce `App` trait in `src/app.rs`
 
+- [ ] Done
+
 - Create `src/app.rs` with:
 
   ```rust
@@ -314,6 +328,8 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 - Add `pub mod app;` to `src/lib.rs` and re-export `App`.
 
 ### Step 8 — Implement `TuiApp` and `ConsoleApp`
+
+- [ ] Done
 
 - In `src/tui_driver.rs`:
   - Add `pub struct TuiApp` implementing `App`:
@@ -341,6 +357,8 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 - Export `TuiApp` and `ConsoleApp` from `src/lib.rs`.
 
 ### Step 9 — Refactor `main.rs` to dispatch via `App`
+
+- [ ] Done
 
 - In `src/main.rs`:
   - Remove all `// TODO Phase 5 Step 9` temporary wrappers introduced in Step 3.
@@ -410,6 +428,8 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 
 ### Step 10 — Documentation updates
 
+- [ ] Done
+
 - Update `docs/features.md`: document `Engine`/`AgentFactory`/`App` seams as
   implemented features.
 - Update `docs/configuration.md`: document `EngineConfig` and `ProfileConfig`
@@ -420,6 +440,8 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
   fix any findings from `rumdl docs/`.
 
 ### Step 11 — Final verification
+
+- [ ] Done
 
 - Run `make test` — all tests must pass.
 - Run `make test-coverage` — must remain ≥80%.

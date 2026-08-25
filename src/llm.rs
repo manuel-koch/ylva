@@ -55,6 +55,14 @@ impl ToolSchema {
     }
 }
 
+/// Metadata describing a single model available from a provider.
+#[derive(Clone, Debug)]
+pub struct ModelInfo {
+    pub id: String,
+    pub name: Option<String>,
+    pub context_length: Option<usize>,
+}
+
 /// Runtime abstraction over a chat-completions-style streaming provider.
 ///
 /// Native async trait (Rust 1.75+): no `async-trait` crate. The Provider
@@ -77,6 +85,16 @@ pub trait Provider: Send + Sync {
         tools: Vec<ToolSchema>,
         cancel: CancellationToken,
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>>;
+
+    /// Return the short name identifying this provider (e.g. `"ollama"`, `"openrouter"`, `"mock"`).
+    fn name(&self) -> &str;
+
+    /// Return the list of models available from this provider.
+    ///
+    /// The real HTTP implementation is deferred to the phase that introduces
+    /// the `/models` slash command. Providers that have not yet implemented
+    /// this method return an error.
+    fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>>;
 }
 
 /// One item of a deterministic [`MockProvider`] script.
@@ -121,6 +139,14 @@ impl MockProvider {
 }
 
 impl Provider for MockProvider {
+    fn name(&self) -> &str {
+        "mock"
+    }
+
+    fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
+        Box::pin(async { Ok(vec![]) })
+    }
+
     fn chat<'a>(
         &'a self,
         _messages: Vec<Message>,
@@ -272,6 +298,19 @@ mod tests {
             matches!(rx.recv().await, Some(StreamEvent::Text(text)) if text == expected),
             "expected Text({expected:?})"
         );
+    }
+
+    #[test]
+    fn mock_provider_name_returns_mock() {
+        let provider = MockProvider::new(vec![], Duration::from_millis(10));
+        assert_eq!(provider.name(), "mock");
+    }
+
+    #[tokio::test]
+    async fn mock_provider_list_models_returns_empty_vec() {
+        let provider = MockProvider::new(vec![], Duration::from_millis(10));
+        let models = provider.list_models().await.unwrap();
+        assert!(models.is_empty());
     }
 
     #[tokio::test(start_paused = true)]

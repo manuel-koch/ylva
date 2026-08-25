@@ -44,5 +44,5 @@ pub use app_state::{
 pub use build_info::{BuildInfo, BUILD_INFO};
 pub use cli_driver::{run_cli, run_cli_to};
 pub use events::AppAction;
-pub use llm::{MockEvent, MockProvider, OpenAiProvider, Provider, ToolSchema};
+pub use llm::{MockEvent, MockProvider, ModelInfo, OpenAiProvider, Provider, ToolSchema};
 pub use presenter::{TextareaContext, TuiEvent};

@@ -82,6 +82,14 @@ impl Provider for MockProviderWithScript {
             Ok(rx)
         })
     }
+
+    fn name(&self) -> &str {
+        "mock"
+    }
+
+    fn list_models(&self) -> futures::future::BoxFuture<'_, anyhow::Result<Vec<ylva::ModelInfo>>> {
+        Box::pin(async { Ok(vec![]) })
+    }
 }
 
 fn tool_call(name: &str, args: serde_json::Value) -> MockEvent {

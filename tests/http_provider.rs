@@ -33,6 +33,7 @@ use common::mock_llm_server::{content_frame, tool_call_frame, MockLlmConfig, Moc
 /// rust-analyzer's inference across the `dyn Provider` boundary is unreliable.
 fn provider_for(server: &MockLlmServer) -> Arc<dyn Provider> {
     Arc::new(OpenAiProvider::new(
+        "test".to_string(),
         server.base_url(),
         "mock-model".into(),
         None,
@@ -43,7 +44,12 @@ fn provider_for(server: &MockLlmServer) -> Arc<dyn Provider> {
 /// the tests that call `.chat()` directly, so the IDE can infer the stream type
 /// without crossing the `dyn Provider` trait-object boundary.
 fn openai_provider_for(server: &MockLlmServer) -> OpenAiProvider {
-    OpenAiProvider::new(server.base_url(), "mock-model".into(), None)
+    OpenAiProvider::new(
+        "test".to_string(),
+        server.base_url(),
+        "mock-model".into(),
+        None,
+    )
 }
 
 /// Consume a provider receiver until `Done`, returning the streamed text chunks

@@ -227,7 +227,12 @@ fn select_provider() -> Arc<dyn Provider> {
                 api_key = if api_key.is_some() { "set" } else { "unset" },
                 "provider selected"
             );
-            return Arc::new(OpenAiProvider::new(base_url, model, api_key));
+            return Arc::new(OpenAiProvider::new(
+                "ollama".to_string(),
+                base_url,
+                model,
+                api_key,
+            ));
         }
     }
     if let Ok(base_url) = std::env::var("OPENROUTER_BASE_URL") {
@@ -242,7 +247,12 @@ fn select_provider() -> Arc<dyn Provider> {
                 api_key = if api_key.is_some() { "set" } else { "unset" },
                 "provider selected"
             );
-            return Arc::new(OpenAiProvider::new(base_url, model, api_key));
+            return Arc::new(OpenAiProvider::new(
+                "openrouter".to_string(),
+                base_url,
+                model,
+                api_key,
+            ));
         }
     }
     tracing::debug!(
