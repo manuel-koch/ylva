@@ -311,7 +311,7 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 
 ### Step 7 — Introduce `App` trait in `src/app.rs`
 
-- [ ] Done
+- [x] Done
 
 - Create `src/app.rs` with:
 

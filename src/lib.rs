@@ -14,6 +14,7 @@
 
 pub mod agent;
 pub mod agent_factory;
+pub mod app;
 pub mod app_state;
 pub mod build_info;
 pub mod cli_driver;
@@ -40,6 +41,7 @@ pub use agent::{
     TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
 pub use agent_factory::AgentFactory;
+pub use app::App;
 pub use app_state::{
     AppLayout, AppState, ChatArea, ChatEntry, ChatSelection, DomainEvent, Effect, Focus,
     HelpPopupLayout, InputAreaLayout, InputEvent, ToolCallState, TuiMode, TuiState,
