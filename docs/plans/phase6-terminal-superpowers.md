@@ -25,7 +25,8 @@ After Phase 5 the agent has named engines, `AgentFactory`, `Engine`/`EngineImpl`
    `only_dirs` flags; structured `ToolCallResult` metadata for truncation signalling
 7. Human-in-the-loop: approval modal for `bash` (Strict); diff view + approval for
    `write`/`edit` (Ask); `clarify` interactive banner (Interactive)
-8. `spawn_subagent` tool + `ChildAgentManager` (one child at a time, no nesting)
+8. `spawn_subagent` tool + `ChildAgentManager` (unbounded FIFO queue; one child active at
+   a time; no nesting)
 9. `finish` tool (child-only; unstructured fallback if never called)
 10. Child-agent persistence records (`child_start` / `child_result` JSONL) in parent session
 11. Drill-in TUI conversation model: child agent replaces main view with breadcrumb header
@@ -41,13 +42,21 @@ mechanics, making Ylva capable of editing code autonomously while remaining huma
 
 **Acceptance criteria / definition of done:**
 
-- `bash` executes shell commands; orphaned grandchildren are killed on timeout/cancel via
-  `tokio::process::Command::process_group(0)` + `killpg`.
+- `bash` executes shell commands; stdout and stderr are merged in true arrival order
+  (concurrent async reads); orphaned grandchildren are killed on timeout/cancel via
+  `tokio::process::Command::process_group(0)` + `killpg`; output capped at 100 KB
+  (first chunk kept); `tool_output_truncated` and `tool_output_truncated_at_bytes`
+  metadata fields present when capped.
 - `search` finds files and text using pure-Rust `ignore` + `regex`; no `rg` binary required.
-- `edit` applies search-and-replace and line-range patches; shows a unified diff before
-  approval; writes to disk only after approval is granted.
+  Results in grep style (`<file>:<line>: <content>`); binary files (null byte in first 8 KB)
+  skipped silently; output capped at 100 KB with `tool_output_truncated` metadata.
+- `edit` applies search-and-replace (`SearchReplace` replaces first occurrence; `ToolError`
+  if not found) and line-range patches (1-based, documented in schema; `ToolError` if
+  `start_line > end_line` or file does not exist); shows a unified diff before approval;
+  writes to disk only after approval is granted.
 - `glob` supports `git_ignore`, `only_count`, `limit`, `only_files`, `only_dirs` flags;
-  returns truncation metadata when `limit` is active.
+  returns `tool_output_truncated` / `tool_output_total_matches` metadata when `limit` is
+  active; `ToolError` if both `only_files` and `only_dirs` are set.
 - `clarify` shows a question banner (+ numbered choices if provided) in TUI mode; the model
   may supply up to 5 pre-populated choices; the user can pick one or type freely; `clarify`
   is absent from the `tools` array in headless mode.
@@ -57,19 +66,30 @@ mechanics, making Ylva capable of editing code autonomously while remaining huma
   returned by every `Tool::needs_approval(&self, args: &Value)` call; agent loop acts
   accordingly. The sandbox is embedded in each tool via `SandboxContext`.
 - Approval modal and diff view appear for `bash`, `write`, `edit` before execution.
-- `spawn_subagent` spawns exactly one child at a time; a concurrent call is queued and
-  executed automatically after the current child finishes.
-- `finish` terminates the child's ReAct loop; unstructured fallback activates on timeout or
-  max iterations.
+- `spawn_subagent` runs one child at a time; additional calls are queued in an unbounded
+  FIFO and executed automatically after the current child finishes. Returns
+  `{ "status": "spawned", "run_id": "..." }` when the child starts immediately, or
+  `{ "status": "queued", "run_id": "..." }` when it is queued behind an active child.
+- `spawn_subagent` requires human approval by default (`UserApprovalRequired`);
+  `--auto-approve-spawn` bypasses this. Children inherit the parent's `--auto-approve-spawn`
+  and `--auto-approve-write` flags. No blanket `--auto-approve-all` flag exists.
+- `finish` terminates the child's ReAct loop (uses same max-iterations limit as parent);
+  unstructured fallback activates on timeout or max iterations.
 - `child_start` / `child_result` JSONL records are appended to the parent session file.
+  Cancelled children (parent stopped, or queue drained) write a `child_result` record
+  with `status: "cancelled"`.
 - Viewing a child's conversation: full-screen drill-in with non-scrolling breadcrumb header
   and "← Back (Ctrl+B)" button; parent continues processing messages and tools while a
   child is active.
-- Parent chat shows a clickable spawn-bubble; clicking it navigates to the child conversation.
+- Parent chat shows a clickable spawn-bubble (mouse); clicking it navigates to the child
+  conversation. A keyboard-driven `/agents` command is deferred to a future phase.
+- While in child view and the child is not paused for input, the input box is disabled with
+  a muted `"Waiting for child agent…"` hint; input is not buffered.
 - TUI auto-switches to child view when the child needs user input; auto-returns to the
   previous view only if the switch was automatic (manual navigation stays).
 - Child interactive pauses take precedence over parent interactive pauses.
 - `--allow-child-agents` enables child spawning in headless mode (disabled by default).
+- `--auto-approve-spawn` bypasses approval for `spawn_subagent`; children inherit it.
 - All existing tests pass; new modules meet ≥80% line-coverage threshold.
 - `docs/features.md`, `docs/configuration.md`, and `docs/keybindings.md` are updated
   (`Ctrl+B` back-to-parent keybinding added in Phase 6.8).
@@ -81,8 +101,8 @@ mechanics, making Ylva capable of editing code autonomously while remaining huma
 - `main.rs` stays thin (event loop, key handling only).
 - `AgentFactory::create(profile, agent_type, role)` is the single construction path.
 - `Role::Child` never receives `spawn_subagent` in its `ToolRegistry` (structural enforcement).
-- One child at a time; second spawn while one is active is queued (one slot); executed
-  automatically when the current child's `finish_rx` fires.
+- One active child at a time; additional `spawn_subagent` calls are queued in an unbounded
+  FIFO; each queued child starts automatically when the previous child's `finish_rx` fires.
 - No nesting: delegation depth limit of one (Phase 6; future phases may relax this).
 - `clarify` multiple-choice is capped at 5 options; enforced in JSON schema via
   `maxItems: 5` and validated at call-parse time in `create_call`.
@@ -93,7 +113,10 @@ mechanics, making Ylva capable of editing code autonomously while remaining huma
   is available on tokio ≥ 1.35 (current lockfile resolves ≥ 1.53).
 - `AgentCommand::AnswerClarify(String)` is a new dedicated variant; existing `ApproveTool`
   match arms are not changed.
-- Safety inheritance: child agents inherit parent `--auto-approve-*` flags.
+- Safety inheritance: child agents inherit parent `--auto-approve-write` and
+  `--auto-approve-spawn` flags. No blanket `--auto-approve-all` flag.
+- `spawn_subagent` always requires human approval (`UserApprovalRequired`) unless
+  `--auto-approve-spawn` is set.
 - Persistence format: JSONL append-only, no SQLite (blueprint §4H).
 - `Section` enum (`Section::Content(ContentSection)` / `Section::Diff(DiffSection)`) replaces
   bare `Vec<ContentSection>` on `pending_content_sections()` and `content_sections()`; both
@@ -143,7 +166,9 @@ No user-visible behavior. Must be fully green before any tool work begins.
    impl Sandbox { pub fn new() -> Self { /* workspace_root = std::env::current_dir() */ } }
 
    /// Per-tool context. Built once at construction; re-reads Sandbox on each check.
-   /// Evaluation: canonicalize path → walk rules in order → last match wins.
+   /// Evaluation: normalize path (workspace_root.join(path), collapse ".." without
+   /// hitting filesystem) → walk rules in order → last match wins.
+   /// Path does not need to exist on disk; normalization alone determines workspace membership.
    /// Implicit zeroth verdict: UserApprovalRequired (nothing matched = ask human).
    pub struct SandboxContext {
        sandbox: Arc<RwLock<Sandbox>>,
@@ -231,17 +256,25 @@ No user-visible behavior. Must be fully green before any tool work begins.
     - Spawn via `tokio::process::Command::new("bash").arg("-c").arg(&command)`
       with `.process_group(0)`.
     - Capture pgid immediately after spawn via `.id()`.
+    - Read stdout and stderr concurrently via two async tasks, merging lines in arrival
+      order (true interleaved output). Buffer up to 100 KB total; once the cap is hit,
+      stop buffering and discard remaining output.
     - Wrap in `tokio::time::timeout(Duration::from_secs(DEFAULT_BASH_TIMEOUT_SECS), ...)`.
     - On timeout or `CancellationToken` fire: kill the process group via
       `nix::sys::signal::killpg(Pid::from_raw(pgid as i32), Signal::SIGKILL)`.
-    - Return combined stdout + stderr on success; `ToolError` on non-zero exit or timeout.
-    - `needs_approval(&self, _args)` returns `UserApprovalRequired` unconditionally.
+    - Return buffered output on success; include `tool_output_truncated: true` and
+      `tool_output_truncated_at_bytes: <n>` in result metadata when the cap was hit.
+      Return `ToolError` on non-zero exit or timeout.
+    - `needs_approval(&self, _args)` returns `UserApprovalRequired` unconditionally
+      (or `AutoApproved` when `--auto-approve-bash` is set — **not** in Phase 6).
     - Define `DEFAULT_BASH_TIMEOUT_SECS: u64 = 30` alongside `DEFAULT_TOOL_TIMEOUT_SECS`.
+    - Define `BASH_OUTPUT_LIMIT_BYTES: usize = 100 * 1024`.
 
 11. Register `BashTool` in `default_registry()`.
 
 12. Write unit tests: happy path (`echo`), timeout kills child process group, cancellation
-    token kills child process group.
+    token kills child process group, output truncated at 100 KB cap (`tool_output_truncated`
+    metadata present), non-zero exit returns `ToolError`.
 
 13. Update `docs/features.md`: add `bash` entry (approval level, timeout, process-group kill).
 
@@ -270,9 +303,15 @@ No user-visible behavior. Must be fully green before any tool work begins.
     `SearchTool` embeds `sandbox_context: SandboxContext`. In `SearchCall::run`:
     - Build `regex::Regex` (respecting `case_sensitive`).
     - Use `ignore::WalkBuilder` rooted at `path` (or cwd) with `.git_ignore(true)`.
+    - Skip files that appear binary: if the first 8 KB of a file contains a null byte,
+      omit it from results silently (same heuristic as `git grep` and `rg`).
     - For each file: read UTF-8 lossy, collect matches with line numbers and
       `context_lines` before/after.
-    - Return results as `Section::Content(ContentSection)` entries (one per matching file).
+    - Format results in grep style: `<filepath>:<line_number>: <line_content>`.
+      Context lines are prefixed with `<filepath>-<line_number>- <content>`.
+      One `ContentSection` per matching file, label set to the file path.
+    - Cap total output at 100 KB (first chunk kept); set `tool_output_truncated: true`
+      and `tool_output_truncated_at_bytes: <n>` in result metadata when capped.
 
     `needs_approval(&self, args)`:
     - If `args.path` is `Some(p)`: return `sandbox_context.check_path(p)`.
@@ -281,7 +320,8 @@ No user-visible behavior. Must be fully green before any tool work begins.
 16. Register `SearchTool` in `default_registry()`.
 
 17. Write unit tests: match found, no match, invalid regex, case-insensitive, context lines,
-    explicit out-of-workspace path returns `AutoDenied`.
+    explicit out-of-workspace path returns `AutoDenied`, binary file skipped (null byte),
+    output truncated at 100 KB cap (`tool_output_truncated` metadata present).
 
 18. Update `docs/features.md`: add `search` entry.
 
@@ -305,12 +345,17 @@ No user-visible behavior. Must be fully green before any tool work begins.
 
 21. Update `GlobTool::run`:
     - When `git_ignore` is `true` (default), use `ignore::WalkBuilder`; else use `glob` crate.
+    - Return `ToolError` immediately if both `only_files` and `only_dirs` are `true`
+      (contradictory combination).
     - Apply `only_files` / `only_dirs` filters.
-    - Apply `limit`; set `truncated: true` + `total_matches` in metadata when capped.
-    - When `only_count`: return count in metadata; content is empty string.
+    - Apply `limit`; set `tool_output_truncated: true` and `tool_output_total_matches: <n>`
+      in metadata when capped.
+    - When `only_count`: return count via `tool_output_total_matches` in metadata;
+      content is empty string.
 
 22. Add `fn metadata(&self) -> Option<serde_json::Value> { None }` default method to
-    `ToolCallResult` trait. Override in `GlobResult` to return truncation/count metadata.
+    `ToolCallResult` trait. Override in `GlobResult` to return truncation/count metadata
+    using the `tool_output_*` prefix (`tool_output_truncated`, `tool_output_total_matches`).
     Serialize metadata into the tool-role message alongside content.
 
 23. Update `GlobTool::needs_approval(&self, args)` to call
@@ -318,7 +363,8 @@ No user-visible behavior. Must be fully green before any tool work begins.
     traversal); return `UserApprovalRequired` if the root falls outside the workspace.
     Do not check individual result paths — listing paths is not content access.
 
-24. Write unit tests for all new flags, truncation metadata, and approval check.
+24. Write unit tests for all new flags, truncation metadata (`tool_output_*` keys),
+    `ToolError` on contradictory `only_files + only_dirs`, and approval check.
 
 25. Update `docs/features.md`: update `glob` entry with new flags.
 
@@ -345,14 +391,19 @@ No user-visible behavior. Must be fully green before any tool work begins.
     #[serde(untagged)]
     enum EditMode {
         SearchReplace { old_string: String, new_string: String },
+        /// Line numbers are 1-based (documented in JSON schema description).
+        /// Returns ToolError if start_line > end_line.
         LineRange { start_line: usize, end_line: usize, new_string: String },
     }
     ```
 
     `EditCall` is constructed with the parsed args. At construction time (before approval):
+    - Return `ToolError` immediately if the file does not exist (use `write` to create new files).
     - Read the current file content.
-    - Apply the patch in memory (`ToolError` if `old_string` not found or line range
-      out of bounds).
+    - `SearchReplace`: replace the **first** occurrence of `old_string`; return `ToolError`
+      if not found.
+    - `LineRange`: validate `start_line <= end_line` (1-based) and range is within file
+      bounds; return `ToolError` otherwise.
     - Compute unified diff via `similar::TextDiff`.
     - Store both `patched_content: String` and `diff: String` as fields on `EditCall`.
 
@@ -365,8 +416,10 @@ No user-visible behavior. Must be fully green before any tool work begins.
 
 28. Register `EditTool` in `default_registry()`.
 
-29. Write unit tests: `SearchReplace` happy path and diff output, not-found error,
-    `LineRange` happy path and diff output, out-of-bounds error,
+29. Write unit tests: `SearchReplace` happy path (first occurrence replaced) and diff output,
+    not-found error, multiple-occurrence replaces only first,
+    `LineRange` happy path and diff output, out-of-bounds error, `start_line > end_line` error,
+    non-existent file returns `ToolError`,
     `pending_content_sections()` returns `Section::Diff`.
 
 30. Update `docs/features.md`: add `edit` entry (two modes, diff preview, approval flow).
@@ -397,7 +450,9 @@ No user-visible behavior. Must be fully green before any tool work begins.
     `ClarifyTool::needs_approval` returns `UserApprovalRequired` (Interactive flow).
     `create_call` validates `choices.len() <= 5`; returns `ToolError` if exceeded.
     `ClarifyTool` is **not** registered in `default_registry()`; injected into the registry
-    by `TuiApp` at startup only.
+    by `TuiApp` at startup only. If a `clarify` call arrives in headless mode despite this
+    (e.g. session replay), return `ToolError` with message
+    `"clarify is not available in headless mode"`.
 
 33. Add `AgentCommand::AnswerClarify(String)` to `src/agent.rs`. Agent loop handles
     `clarify` calls specially:
@@ -464,16 +519,16 @@ processing messages and tools while a child is active.
         run_id: Option<Uuid>,
         finish_tx: mpsc::Sender<FinishResult>,  // sender end; AgentLoop holds receiver
         child_cancel: Option<CancellationToken>,
-        pending_spawn: Option<SpawnRequest>,    // queued if a child is already running
+        queue: VecDeque<SpawnRequest>,           // unbounded FIFO; drained one-by-one
     }
     impl ChildAgentManager {
         /// AgentLoop creates the mpsc channel; passes Sender here, keeps Receiver.
         pub fn new(finish_tx: mpsc::Sender<FinishResult>) -> Self { ... }
-        /// If a child is already running, the request is queued (one slot only;
-        /// returns Ok with queued run_id).
-        /// The queued spawn executes automatically when the current child's finish_rx fires.
-        pub fn spawn(...) -> Result<Uuid, ChildAgentError> { ... }
-        pub fn cancel(&mut self) { /* fire child_cancel */ }
+        /// If a child is already running, enqueues the request (unbounded FIFO).
+        /// Returns `SpawnStatus::Started(run_id)` or `SpawnStatus::Queued(run_id)`.
+        pub fn spawn(...) -> SpawnStatus { ... }
+        /// Cancel the running child and drain the queue. Called when parent stops.
+        pub fn cancel_all(&mut self) { /* fire child_cancel; clear queue */ }
         pub fn is_running(&self) -> bool { ... }
     }
     ```
@@ -482,11 +537,12 @@ processing messages and tools while a child is active.
     to `ChildAgentManager::new` and keeps `Receiver` in its own `select!` loop.
 
 45. Create `src/agent/tools/spawn_subagent.rs`. `SpawnSubagentArgs { task, briefing,
-    agent_type }`. `needs_approval` returns `UserApprovalRequired`. After approval, the
-    agent loop calls `child_agent_manager.spawn(...)`, which returns a `run_id` immediately
-    (child may start now or be queued). The tool returns `{ "status": "spawned",
-    "run_id": "<uuid>" }` to the LLM immediately — the child's `finish` result arrives
-    later as an async observation (see step 47).
+    agent_type }`. `needs_approval` returns `UserApprovalRequired` (or `AutoApproved`
+    when `--auto-approve-spawn` is set). After approval, the agent loop calls
+    `child_agent_manager.spawn(...)`. The tool returns `{ "status": "spawned", "run_id": "<uuid>" }`
+    when the child starts immediately, or `{ "status": "queued", "run_id": "<uuid>" }` when
+    it is enqueued behind an active child. The child's `finish` result arrives later as a
+    tool result message tied to this `spawn_subagent` call id (see step 47).
 
 46. Create `src/agent/tools/finish.rs`. `FinishArgs { status, result, error, sources }`.
     `FinishTool::run` sends `FinishResult` via `finish_tx` and returns a success envelope.
@@ -497,22 +553,31 @@ processing messages and tools while a child is active.
     - Hold `child_agent_manager: Option<ChildAgentManager>` (present when
       `role = Root && agent_type.can_spawn`).
     - Add `finish_rx` arm to `tokio::select!`. On `FinishResult` received: inject the
-      result as an async observation into the parent conversation context, then re-prompt
-      the parent LLM. If a pending spawn is queued in `ChildAgentManager`, start it now.
+      result as a **tool result message** (role: `tool`, tool_call_id: the original
+      `spawn_subagent` call id) into the parent conversation context. Enqueue it for
+      the normal ReAct loop to pick up on its next iteration — no forced re-prompt.
+      If the next request is queued in `ChildAgentManager`, start it now.
+    - On `AgentCommand::Stop`: call `child_agent_manager.cancel_all()` (fires child
+      `CancellationToken`, drains queue); write a `child_result` JSONL record with
+      `status: "cancelled"` for the running child (if any). Persistence errors are
+      logged and non-fatal.
     - Add `subagent_ui_rx` arm for live child tokens → `UiUpdate`.
     - On `ToolCall("spawn_subagent")`: pause, emit `UiUpdate::ToolPending`, await
-      approval, call `child_agent_manager.spawn(...)`, return `{ "status": "spawned",
-      "run_id": "<uuid>" }` immediately to the LLM. The parent loop continues normally.
+      approval, call `child_agent_manager.spawn(...)`, return
+      `{ "status": "spawned"/"queued", "run_id": "<uuid>" }` immediately to the LLM.
+      The parent loop continues normally.
     - Unstructured fallback: if child's `JoinHandle` completes without `finish` being called
-      (timeout or max iterations), extract last `Message::Assistant` text, wrap as
-      `FinishResult { status: "unstructured", ... }` and inject as an async observation.
+      (timeout or max iterations — same cap as parent), extract last `Message::Assistant`
+      text, wrap as `FinishResult { status: "unstructured", ... }` and inject as a tool
+      result message tied to the original `spawn_subagent` call id.
     - `Role::Child`: `spawn_subagent` structurally absent from registry.
     - Parent processes user messages and runs its own tools concurrently with the child;
       no suspension of the parent ReAct loop while a child is active.
 
-48. Write unit tests: `spawn` queues second spawn when one is already running (does not
-    error); queued spawn starts automatically after first child's `finish_rx` fires;
-    cancellation fires child token; `finish_rx` receives result when child calls `finish`;
+48. Write unit tests: `spawn` returns `Queued` when a child is already running; multiple
+    queued spawns are drained in FIFO order after each child finishes; `cancel_all` fires
+    child token and empties the queue; `finish_rx` receives result when child calls `finish`;
+    cancelled child writes `child_result` with `status: "cancelled"`;
     unstructured fallback when `finish` never called.
 
 49. Update `docs/features.md`: add child-agent delegation section.
@@ -571,9 +636,12 @@ chat; auto-switch only on child interactive pauses.
       `🔍 <agent_type>: "<task>" [← Back (Ctrl+B)]`.
     - When `active_view == Root`: render `root_messages`. Spawn-bubble has a distinct
       border (magenta); mouse-click on it sets `active_view = Child` (manual navigation,
-      `auto_switched_to_child = false`).
-    - Input box is always active; while `active_view == Child`, `Enter` routes to the
-      child's approval/clarify flow, not the parent's prompt queue.
+      `auto_switched_to_child = false`). A `/agents` slash-command for keyboard-driven
+      child navigation is deferred to a future phase.
+    - Input box behaviour while `active_view == Child`:
+      - Child paused for approval/clarify: input active; `Enter` routes to the child flow.
+      - Child running (not paused): input disabled; show muted hint
+        `"Waiting for child agent…"`. User input is not buffered.
 
 55. Add `Ctrl+B` keybinding for "back to parent" in `presenter.rs`. Document in
     `docs/keybindings.md`.
@@ -635,19 +703,24 @@ chat; auto-switch only on child interactive pauses.
 **Goal:** Enable child spawning in headless mode; finalise all documentation.
 
 64. Add `--allow-child-agents` boolean CLI flag in `src/main.rs` (via `clap`, default
-    `false`). Pass through to `ConsoleApp` / `cli_driver`. When `false`, `ChildAgentManager`
+    `false`). Add `--auto-approve-spawn` boolean flag (default `false`). Pass both through
+    to `ConsoleApp` / `cli_driver`. When `--allow-child-agents` is `false`, `ChildAgentManager`
     is `None` in `AgentLoop`; `spawn_subagent` is absent from the active tool registry.
+    When `--auto-approve-spawn` is `true`, `spawn_subagent::needs_approval` returns
+    `AutoApproved`; children inherit this flag alongside `--auto-approve-write`.
 
 65. When `--allow-child-agents` is active in headless mode, emit to stderr:
     - `Spawned child agent '<type>' for task '<task>'\n` on spawn.
+    - `Queued child agent '<type>' for task '<task>'\n` when enqueued.
     - `Child agent '<type>' completed: <status>\n` on finish.
-    - Safety inheritance: child agents inherit parent `--auto-approve-*` flags.
+    - Safety inheritance: child agents inherit parent `--auto-approve-write` and
+      `--auto-approve-spawn` flags.
 
 66. Update `docs/features.md`: finalise all WIP notes from sub-phases; add
     `--allow-child-agents` documentation; verify every Phase 6 feature is described.
 
-67. Update `docs/configuration.md`: `--allow-child-agents` flag; `can_spawn` agent-type
-    key; `Sandbox` Phase 6 defaults (TOML config Phase 7).
+67. Update `docs/configuration.md`: `--allow-child-agents` flag; `--auto-approve-spawn`
+    flag; `can_spawn` agent-type key; `Sandbox` Phase 6 defaults (TOML config Phase 7).
 
 68. Run `rumdl fmt docs/features.md docs/keybindings.md docs/configuration.md
     docs/plans/phase6-terminal-superpowers.md` and fix any findings.
@@ -711,12 +784,18 @@ a `clarify` call or `ClarifyPending` for a non-clarify call.
 - **`glob` `git_ignore` default:** `true` (matching `search`'s default behaviour).
   `GlobTool::needs_approval` checks only the input root path before traversal; it does
   not inspect individual result paths (listing paths is not content access).
-- **Concurrent parent + child model:** `spawn_subagent` returns `{ "status": "spawned",
-  "run_id": "..." }` immediately; the parent ReAct loop continues. When the child calls
-  `finish`, `AgentLoop` injects the result as an async observation and re-prompts the
-  parent LLM. A second `spawn` while a child is running is queued in
-  `ChildAgentManager::pending_spawn`; it starts automatically when `finish_rx` fires.
-  Parent approval takes lower precedence than child approval (child shown first).
+  Returns `ToolError` immediately if both `only_files` and `only_dirs` are `true`.
+  Metadata keys use the `tool_output_*` prefix: `tool_output_truncated`,
+  `tool_output_total_matches`. All tools with output caps use the same prefix
+  (`tool_output_truncated`, `tool_output_truncated_at_bytes`).
+- **Concurrent parent + child model:** `spawn_subagent` returns
+  `{ "status": "spawned"/"queued", "run_id": "..." }` immediately; the parent ReAct loop
+  continues. When the child calls `finish`, `AgentLoop` injects the result as a **tool
+  result message** (role: `tool`, tool_call_id: original `spawn_subagent` call id) and
+  enqueues it for the normal ReAct loop — no forced re-prompt. Additional `spawn` calls
+  while a child is running are enqueued in an unbounded FIFO (`VecDeque`) inside
+  `ChildAgentManager`; each starts automatically when the previous child's `finish_rx`
+  fires. Parent approval takes lower precedence than child approval (child shown first).
 - **`ChildAgentManager` channel ownership:** `AgentLoop` creates the `mpsc` channel
   at startup; passes `Sender<FinishResult>` to `ChildAgentManager::new`; keeps
   `Receiver<FinishResult>` in its own `select!` loop. This design is forward-compatible
@@ -731,9 +810,11 @@ a `clarify` call or `ClarifyPending` for a non-clarify call.
   only if the switch was automatic (manual click on spawn-bubble = no auto-return).
 - **`AgentCommand::AnswerClarify(String)`:** new variant; `ApproveTool` match arms unchanged.
 - **Coverage gate:** `make test-coverage` fails below 80% — run after each sub-phase.
-- **ADR directory:** `docs/architecture-design-records/` is currently empty. Record a new
-  ADR for decisions that deviate from the blueprint: `clarify` multiple-choice; drill-in
-  model (vs. sidebar panel); pure-Rust `search`; `Section` enum; `SandboxContext` design.
+- **ADR directory:** `docs/architecture-design-records/` is currently empty. Record two
+  new ADRs in Phase 6.10: one for pure-Rust `search` (no external binary dependency),
+  one for `SandboxContext` design (last-match-wins, normalization without filesystem hit,
+  Phase 6 hardcoded defaults). UX decisions (drill-in model, `Section` enum, `clarify`
+  choices) do not warrant ADRs.
 - **Blueprint references:** §4D (tools, process-group), §4E (safety/approval), §4G
   (child lifecycle), §4H (JSONL persistence), §6 (checklist at lines 2594–2631).
 - **Ideas files:** `docs/ideas/glob-tool-filtering.md` (Phase 6.3) and
