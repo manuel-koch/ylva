@@ -1,5 +1,5 @@
 REPO_ROOT := $(realpath $(dir $(abspath $(firstword $(MAKEFILE_LIST)))))
-QUIET     :=
+VERBOSE   := false
 
 ifeq ($(CARGO_TARGET_DIR),)
 export CARGO_TARGET_DIR := $(REPO_ROOT)/target
@@ -22,10 +22,10 @@ COVERAGE_THRESHOLD := 80
 # Run cargo check/clippy and report all warnings
 lint:
 	cargo check \
-	    $(if $(filter true,$(QUIET)),--quiet,) \
+	    $(if $(filter true,$(strip $(VERBOSE))),,--quiet) \
 	    --all-targets --all-features
 	cargo clippy \
-	    $(if $(filter true,$(QUIET)),--quiet,) \
+ 	    $(if $(filter true,$(strip $(VERBOSE))),,--quiet) \
 	    --all-targets --all-features
 
 # Run cargo fmt to enforce consistent formatting
@@ -68,7 +68,7 @@ install:
 
 # Run all unit and integration tests
 test:
-	cargo test $(if $(filter true,$(QUIET)),--quiet,)
+	cargo test $(if $(filter true,$(strip $(VERBOSE))),,--quiet)
 
 # Run all tests and print a per-file coverage summary.
 # Fails if total line coverage of testable files drops below $(COVERAGE_THRESHOLD).
@@ -78,7 +78,7 @@ test:
 #           rustup component add llvm-tools-preview
 test-coverage:
 	cargo llvm-cov \
-	    $(if $(filter true,$(QUIET)),--quiet,) \
+	    $(if $(filter true,$(strip $(VERBOSE))),,--quiet) \
 	    --ignore-filename-regex "(ui|render|main)\.rs" \
 	    --fail-under-lines $(COVERAGE_THRESHOLD)
 
@@ -88,7 +88,7 @@ test-coverage:
 # line-level hint and the build to fail below $(COVERAGE_THRESHOLD)%.
 test-coverage-missing:
 	cargo llvm-cov \
-	    $(if $(filter true,$(QUIET)),--quiet,) \
+	    $(if $(filter true,$(strip $(VERBOSE))),,--quiet) \
 	    --ignore-filename-regex "(ui|render|main)\.rs" \
 	    --fail-under-lines $(COVERAGE_THRESHOLD) \
 	    --show-missing-lines
