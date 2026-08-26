@@ -32,7 +32,7 @@ use std::sync::Arc;
 /// has no worker thread, so every event is written before the emitting call
 /// returns and the captured text is deterministic.
 
-# [derive(Clone, Default)]
+#[derive(Clone, Default)]
 
 pub(crate) struct SharedLog {
     buffer: Arc<std::sync::Mutex<String>>,

@@ -74,7 +74,6 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 ### Step 1 — Introduce `ModelInfo` and extend `Provider` trait
 
 - [x] Done
-
 - In `src/llm.rs`, add:
 
   ```rust
@@ -113,7 +112,6 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 ### Step 2 — Introduce `EngineConfig`, `Engine` trait, and `EngineImpl`
 
 - [x] Done
-
 - Create `src/engine.rs`.
 - Define:
 
@@ -180,7 +178,6 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 ### Step 3 — Migrate `AgentLoop` from `Arc<dyn Provider>` to `Arc<dyn Engine>`
 
 - [x] Done
-
 - In `src/agent.rs`:
   - Replace `provider: Arc<dyn Provider>` field with `engine: Arc<dyn Engine>`.
   - Update `AgentLoop::new(engine: Arc<dyn Engine>, registry: Arc<ToolRegistry>)`
@@ -223,7 +220,6 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 ### Step 4 — Introduce `Role` enum
 
 - [x] Done
-
 - In `src/agent.rs`, define:
 
   ```rust
@@ -240,7 +236,6 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 ### Step 5 — Introduce `ProfileConfig` and `AgentConfig`
 
 - [x] Done
-
 - Create `src/config.rs`.
 - Define:
 
@@ -269,7 +264,6 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 ### Step 6 — Introduce `AgentFactory`
 
 - [x] Done
-
 - Create `src/agent_factory.rs`.
 - Define:
 
@@ -330,7 +324,6 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 ### Step 8 — Implement `TuiApp` and `ConsoleApp`
 
 - [x] Done
-
 - In `src/tui_driver.rs`:
   - Add `pub struct TuiApp` implementing `App`:
     - Fields: `factory: Arc<AgentFactory>`, `profile: ProfileConfig`,
@@ -428,8 +421,7 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 
 ### Step 10 — Documentation updates
 
-- [ ] Done
-
+- [x] Done
 - Update `docs/features.md`: document `Engine`/`AgentFactory`/`App` seams as
   implemented features.
 - Update `docs/configuration.md`: document `EngineConfig` and `ProfileConfig`
@@ -442,7 +434,6 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 ### Step 11 — Final verification
 
 - [ ] Done
-
 - Run `make test` — all tests must pass.
 - Run `make test-coverage` — must remain ≥80%.
 - Run `cargo clippy -- -D warnings` — zero warnings.

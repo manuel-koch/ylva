@@ -2545,31 +2545,31 @@ See [reducer-state-handling-plan.md](./plans/reducer-state-handling-plan.md).
 
 ### Phase 5: Interface Seams
 
-- [ ] **Goal:** Introduce the runtime interface layer (§4A, [class-diagram.mmd](./class-diagram.mmd))
+- [x] **Goal:** Introduce the runtime interface layer (§4A, [class-diagram.mmd](./class-diagram.mmd))
       so Phase 6 child agents build against `AgentFactory` and `Engine` from the start,
       not against the Phase 1 `Provider`-direct seam.
 
-- [ ] **`Engine` trait + `EngineImpl`:** thin wrapper holding `Arc<dyn Provider>` +
+- [x] **`Engine` trait + `EngineImpl`:** thin wrapper holding `Arc<dyn Provider>` +
       `EngineConfig`; exposes `chat()` and `config()`. `AgentLoop` migrates from
       `Arc<dyn Provider>` to `Arc<dyn Engine>`.
 
-- [ ] **`AgentFactory` struct:** owns the resolved `HashMap<String, Arc<dyn Engine>>`
+- [x] **`AgentFactory` struct:** owns the resolved `HashMap<String, Arc<dyn Engine>>`
       built from `EngineConfig` definitions + profile resolution. Exposes
       `create(profile, agent_type, role) -> AgentLoop` (single method; §4G).
 
-- [ ] **`App` trait:** `async fn run(self) -> anyhow::Result<u8>`. `TuiApp` and
+- [x] **`App` trait:** `async fn run(self) -> anyhow::Result<u8>`. `TuiApp` and
       `ConsoleApp` implement it (§6). `main.rs` dispatches on CLI mode.
 
-- [ ] **`Provider::list_models()`:** add to the `Provider` trait; `OpenAiProvider`
+- [x] **`Provider::list_models()`:** add to the `Provider` trait; `OpenAiProvider`
       queries `/models` (OpenRouter) or `/api/tags` (Ollama). Returns `Vec<ModelInfo>`
       for a future `/models` slash command.
 
-- [ ] **Config refactor:** rename `provider_type` → `provider` in `EngineConfig`;
+- [x] **Config refactor:** rename `provider_type` → `provider` in `EngineConfig`;
       add profile-level `default_engine` (required) and `compact_engine` (optional,
       resolves to `default_engine`); document quoted-key engine names
       (`[engines."ollama/local"]`) as opt-in.
 
-- [ ] **Child-agent construction** (§4G) uses `AgentFactory::create(profile, agent_type, Role::Child { ... })` from
+- [x] **Child-agent construction** (§4G) uses `AgentFactory::create(profile, agent_type, Role::Child { ... })` from
       the start — no `AgentLoop::new()` direct calls for child agents.
 
 **Key crates:** none new (uses existing `tokio`, `reqwest`, `serde`).
