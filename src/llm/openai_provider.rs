@@ -38,6 +38,7 @@ use crate::llm::{serialize_messages, Provider, ToolSchema};
 /// occurs and mid-stream errors surface as `StreamEvent::Error`.
 #[derive(Debug)]
 pub struct OpenAiProvider {
+    name: String,
     base_url: String,
     model: String,
     api_key: Option<String>,
@@ -47,10 +48,12 @@ pub struct OpenAiProvider {
 impl OpenAiProvider {
     /// Create a provider for an OpenAI-compatible backend.
     ///
+    /// `name` is the short identifier for this provider instance (e.g. `"ollama"`, `"openrouter"`).
     /// `base_url` must include the backend origin and version prefix.
     /// `api_key` is `None` for backends that need no auth (local Ollama).
-    pub fn new(base_url: String, model: String, api_key: Option<String>) -> Self {
+    pub fn new(name: String, base_url: String, model: String, api_key: Option<String>) -> Self {
         OpenAiProvider {
+            name,
             base_url,
             model,
             api_key,
@@ -67,6 +70,14 @@ impl OpenAiProvider {
 }
 
 impl Provider for OpenAiProvider {
+    fn name(&self) -> &str {
+        self.name.as_str()
+    }
+
+    fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<crate::llm::ModelInfo>>> {
+        Box::pin(async { anyhow::bail!("list_models not yet implemented") })
+    }
+
     fn chat<'a>(
         &'a self,
         messages: Vec<Message>,

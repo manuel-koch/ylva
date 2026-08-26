@@ -35,8 +35,6 @@ Please explain more.
 How many markdown files are in `docs` folder ?
 ```
 
-
-
 ```text
 Why is the sky blue?
 And why appear oceans green ?

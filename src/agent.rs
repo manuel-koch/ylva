@@ -22,7 +22,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use uuid::Uuid;
 
-use crate::llm::{Provider, ToolEnvelope, ToolSchema};
+use crate::engine::Engine;
+use crate::llm::{ToolEnvelope, ToolSchema};
 
 pub mod tools;
 
@@ -436,13 +437,26 @@ impl PendingTool {
 /// `ToolPending` and waits for an approve/deny command — the loop holds no
 /// approval policy, the driver decides (blueprint §4E, §4B).
 ///
+/// Indicates whether an `AgentLoop` is acting as the root (top-level) agent
+/// or as a child agent spawned by a root agent.
+///
+/// `Child` is a placeholder in Phase 5; `AgentFactory::create` returns `Err`
+/// when asked to create a `Child` agent. Full implementation comes in Phase 6.
+pub enum Role {
+    /// The top-level agent for a session.
+    Root,
+    /// A child agent spawned by a root agent. Not yet constructable via
+    /// `AgentFactory::create`; will be implemented in Phase 6.
+    Child,
+}
+
 /// The outer loop task is the sole writer of `Context` (`single-writer`
 /// rule): no `Arc<Mutex<Context>>` anywhere. `run()` takes the loop's channel
 /// receivers out of `self`; the caller keeps `self` (and thus `cmd_tx`) alive
 /// and shuts the loop down by **dropping the `AgentLoop`**, after which the
 /// task returns the final committed `Context` from `handle.await`.
 pub struct AgentLoop {
-    provider: Arc<dyn Provider>,
+    engine: Arc<dyn Engine>,
     registry: Arc<ToolRegistry>,
     cmd_tx: mpsc::Sender<AgentCommand>,
     cmd_rx: Option<mpsc::Receiver<AgentCommand>>,
@@ -453,14 +467,14 @@ pub struct AgentLoop {
 
 impl AgentLoop {
     pub fn new(
-        provider: Arc<dyn Provider>,
+        engine: Arc<dyn Engine>,
         registry: Arc<ToolRegistry>,
     ) -> (Self, mpsc::Receiver<UiUpdate>) {
         let (cmd_tx, cmd_rx) = mpsc::channel::<AgentCommand>(10);
         let (ui_tx, ui_rx) = mpsc::channel::<UiUpdate>(100);
         let (agent_tx, agent_rx) = mpsc::channel::<AgentEvent>(10);
         let agent = AgentLoop {
-            provider,
+            engine,
             registry,
             cmd_tx,
             cmd_rx: Some(cmd_rx),
@@ -482,7 +496,7 @@ impl AgentLoop {
     }
 
     pub fn run(&mut self) -> tokio::task::JoinHandle<anyhow::Result<Context>> {
-        let provider = self.provider.clone();
+        let engine = self.engine.clone();
         let registry = self.registry.clone();
         let ui_tx = self.ui_tx.clone();
         let agent_tx = self.agent_tx.clone();
@@ -516,7 +530,7 @@ impl AgentLoop {
                                     mode = AgentMode::Streaming;
                                     current_cancel = Some(start_request(
                                         &context,
-                                        provider.clone(),
+                                        engine.clone(),
                                         registry.schemas(),
                                         ui_tx.clone(),
                                         agent_tx.clone(),
@@ -609,7 +623,7 @@ impl AgentLoop {
                                     &mut mode,
                                     &mut current_cancel,
                                     &mut iterations,
-                                    provider.clone(),
+                                    engine.clone(),
                                     Arc::clone(&registry),
                                     ui_tx.clone(),
                                     agent_tx.clone(),
@@ -626,7 +640,7 @@ impl AgentLoop {
                                     &mut mode,
                                     &mut current_cancel,
                                     &mut iterations,
-                                    provider.clone(),
+                                    engine.clone(),
                                     Arc::clone(&registry),
                                     ui_tx.clone(),
                                     agent_tx.clone(),
@@ -660,7 +674,7 @@ impl AgentLoop {
                                     mode = AgentMode::Streaming;
                                     current_cancel = Some(start_request(
                                         &context,
-                                        provider.clone(),
+                                        engine.clone(),
                                         registry.schemas(),
                                         ui_tx.clone(),
                                         agent_tx.clone(),
@@ -740,7 +754,7 @@ impl AgentLoop {
                                         &mut mode,
                                         &mut current_cancel,
                                         &mut iterations,
-                                        provider.clone(),
+                                        engine.clone(),
                                         Arc::clone(&registry),
                                         ui_tx.clone(),
                                         agent_tx.clone(),
@@ -823,7 +837,7 @@ async fn advance_tool_queue(
     mode: &mut AgentMode,
     current_cancel: &mut Option<CancellationToken>,
     iterations: &mut usize,
-    provider: Arc<dyn Provider>,
+    engine: Arc<dyn Engine>,
     registry: Arc<ToolRegistry>,
     ui_tx: mpsc::Sender<UiUpdate>,
     agent_tx: mpsc::Sender<AgentEvent>,
@@ -856,7 +870,7 @@ async fn advance_tool_queue(
     *mode = AgentMode::Streaming;
     *current_cancel = Some(start_request(
         context,
-        provider,
+        engine,
         registry.schemas(),
         ui_tx,
         agent_tx,
@@ -873,7 +887,7 @@ async fn advance_tool_queue(
 /// `Context`, and this task never writes it.
 fn start_request(
     context: &Context,
-    provider: Arc<dyn Provider>,
+    engine: Arc<dyn Engine>,
     tools: Vec<ToolSchema>,
     ui_tx: mpsc::Sender<UiUpdate>,
     agent_tx: mpsc::Sender<AgentEvent>,
@@ -882,11 +896,11 @@ fn start_request(
     let messages = context.messages().to_vec();
     let inner_cancel = cancel.clone();
     tokio::spawn(async move {
-        let mut stream = match provider.chat(messages, tools, inner_cancel).await {
+        let mut stream = match engine.chat(messages, tools, inner_cancel).await {
             Ok(stream) => stream,
             Err(error) => {
                 let message = format!("{error}");
-                tracing::error!(message = %message, "provider chat failed");
+                tracing::error!(message = %message, "engine chat failed");
                 let _ = ui_tx.send(UiUpdate::Error(message.clone())).await;
                 let _ = agent_tx.send(AgentEvent::StreamError(message)).await;
                 return;

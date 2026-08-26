@@ -186,3 +186,28 @@ exit.
   (e.g., `"Copied to clipboard"`) and auto-dismiss after ~1.5 seconds.
 - **Scrollbar:** the chat scrollbar's thumb reaches the very bottom of the
   track at the end of the list (and the top at the start).
+
+## Phase 5: Named engines and profiles
+
+### Named engine configuration
+
+Backends are now described by named engine entries, each specifying the provider,
+model, sampling parameters, and connection details. Multiple engines can be defined
+and referenced by name — for example a fast local Ollama engine for everyday chat and
+a more capable OpenRouter model for heavier tasks.
+
+See [configuration](./configuration.md) for all available fields.
+
+### Runtime profiles
+
+A profile groups a default engine with optional per-agent overrides. This is the
+groundwork for Phase 6 child agents, which will let different agent types run against
+different engines automatically.
+
+**WIP:** Profile and engine definitions are constructed in code today; TOML file loading
+is introduced in Phase 7.
+
+### `/models` command (coming soon)
+
+The groundwork for a `/models` slash command is in place. When implemented it will
+list the models available from the active provider directly inside the conversation.

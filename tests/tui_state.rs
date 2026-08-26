@@ -23,7 +23,10 @@ use ratatui::Terminal;
 use tokio::sync::mpsc;
 
 use ylva::tui_driver::NoopClipboard;
-use ylva::{tui_driver, AppAction, ChatEntry, MockProvider, ToolRegistry, UserMessageState};
+use ylva::{
+    tui_driver, AgentLoop, AppAction, ChatEntry, EngineImpl, MockProvider, ToolRegistry,
+    UserMessageState,
+};
 
 /// Type `text` into the (driver-owned) textarea and press Enter.
 async fn type_and_enter(tx: &mpsc::Sender<AppAction>, text: &str) {
@@ -62,10 +65,15 @@ async fn typed_enter_creates_sent_user_bubble_and_assistant() {
     let run_handle = tokio::spawn({
         let mut terminal = terminal;
         async move {
+            let engine = Arc::new(EngineImpl::new(
+                Arc::new(provider),
+                common::test_engine_config(),
+            ));
+            let (agent, ui_rx) = AgentLoop::new(engine, registry);
             tui_driver::run_tui(
                 &mut terminal,
-                Arc::new(provider),
-                registry,
+                agent,
+                ui_rx,
                 None,
                 action_rx,
                 &mut NoopClipboard,
@@ -114,10 +122,15 @@ async fn double_press_ctrl_c_mid_stream_cancels_pending_steer() {
     let run_handle = tokio::spawn({
         let mut terminal = terminal;
         async move {
+            let engine = Arc::new(EngineImpl::new(
+                Arc::new(provider),
+                common::test_engine_config(),
+            ));
+            let (agent, ui_rx) = AgentLoop::new(engine, registry);
             tui_driver::run_tui(
                 &mut terminal,
-                Arc::new(provider),
-                registry,
+                agent,
+                ui_rx,
                 None,
                 action_rx,
                 &mut NoopClipboard,
@@ -171,10 +184,15 @@ async fn key_agnostic_ctrl_c_then_escape_stops_stream() {
     let run_handle = tokio::spawn({
         let mut terminal = terminal;
         async move {
+            let engine = Arc::new(EngineImpl::new(
+                Arc::new(provider),
+                common::test_engine_config(),
+            ));
+            let (agent, ui_rx) = AgentLoop::new(engine, registry);
             tui_driver::run_tui(
                 &mut terminal,
-                Arc::new(provider),
-                registry,
+                agent,
+                ui_rx,
                 None,
                 action_rx,
                 &mut NoopClipboard,
@@ -225,10 +243,15 @@ async fn steer_cycle_leaves_no_queued_entries() {
     let run_handle = tokio::spawn({
         let mut terminal = terminal;
         async move {
+            let engine = Arc::new(EngineImpl::new(
+                Arc::new(provider),
+                common::test_engine_config(),
+            ));
+            let (agent, ui_rx) = AgentLoop::new(engine, registry);
             tui_driver::run_tui(
                 &mut terminal,
-                Arc::new(provider),
-                registry,
+                agent,
+                ui_rx,
                 None,
                 action_rx,
                 &mut NoopClipboard,
@@ -272,10 +295,15 @@ async fn initial_prompt_produces_sent_bubble() {
     let run_handle = tokio::spawn({
         let mut terminal = terminal;
         async move {
+            let engine = Arc::new(EngineImpl::new(
+                Arc::new(provider),
+                common::test_engine_config(),
+            ));
+            let (agent, ui_rx) = AgentLoop::new(engine, registry);
             tui_driver::run_tui(
                 &mut terminal,
-                Arc::new(provider),
-                registry,
+                agent,
+                ui_rx,
                 Some("init".to_string()),
                 action_rx,
                 &mut NoopClipboard,
@@ -312,10 +340,15 @@ async fn drag_in_chat_area_selects_text() {
     let run_handle = tokio::spawn({
         let mut terminal = terminal;
         async move {
+            let engine = Arc::new(EngineImpl::new(
+                Arc::new(provider),
+                common::test_engine_config(),
+            ));
+            let (agent, ui_rx) = AgentLoop::new(engine, registry);
             tui_driver::run_tui(
                 &mut terminal,
-                Arc::new(provider),
-                registry,
+                agent,
+                ui_rx,
                 None,
                 action_rx,
                 &mut NoopClipboard,
@@ -614,10 +647,15 @@ async fn message_sent_while_submitted_is_queued_not_sent() {
     let run_handle = tokio::spawn({
         let mut terminal = terminal;
         async move {
+            let engine = std::sync::Arc::new(ylva::EngineImpl::new(
+                std::sync::Arc::new(provider),
+                common::test_engine_config(),
+            ));
+            let (agent, ui_rx) = ylva::AgentLoop::new(engine, registry);
             ylva::tui_driver::run_tui(
                 &mut terminal,
-                std::sync::Arc::new(provider),
-                registry,
+                agent,
+                ui_rx,
                 None,
                 action_rx,
                 &mut NoopClipboard,
@@ -763,10 +801,15 @@ async fn escape_twice_while_streaming_stops_stream_but_keeps_tui_open() {
     let run_handle = tokio::spawn({
         let mut terminal = terminal;
         async move {
+            let engine = Arc::new(EngineImpl::new(
+                Arc::new(provider),
+                common::test_engine_config(),
+            ));
+            let (agent, ui_rx) = AgentLoop::new(engine, registry);
             tui_driver::run_tui(
                 &mut terminal,
-                Arc::new(provider),
-                registry,
+                agent,
+                ui_rx,
                 None,
                 action_rx,
                 &mut NoopClipboard,

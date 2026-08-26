@@ -12,16 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod common;
+
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
-use ylva::{AgentCommand, AgentLoop, Message, MockProvider, ToolRegistry, UiUpdate};
+use ylva::{AgentCommand, AgentLoop, EngineImpl, Message, MockProvider, ToolRegistry, UiUpdate};
 
 #[tokio::test(start_paused = true)]
 async fn multiple_steers_during_stream_complete_without_deadlock() {
     let provider = MockProvider::new(vec!["a-".into(), "b".into()], Duration::from_millis(10));
-    let (mut agent, mut ui_rx) = AgentLoop::new(Arc::new(provider), Arc::new(ToolRegistry::new()));
+    let (mut agent, mut ui_rx) = AgentLoop::new(
+        Arc::new(EngineImpl::new(
+            Arc::new(provider),
+            common::test_engine_config(),
+        )),
+        Arc::new(ToolRegistry::new()),
+    );
 
     agent
         .send_command(AgentCommand::Prompt("first".into()))

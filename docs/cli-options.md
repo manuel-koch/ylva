@@ -28,7 +28,7 @@ The initial user turn (`--prompt`) is resolved by precedence:
 
 ## Environment variables
 
-**WIP while we still work on blueprint phases**
+### WIP: still working on blueprint phases
 
 The provider is selected from environment variables with **Ollama-first**
 precedence; when no backend is configured the `MockProvider` (deterministic

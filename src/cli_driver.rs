@@ -18,7 +18,14 @@
 use std::io::Write;
 use std::sync::Arc;
 
-use crate::agent::{AgentCommand, AgentLoop, UiUpdate};
+use tokio::sync::mpsc;
+
+use crate::agent::tools::default_registry;
+use crate::agent::{AgentCommand, AgentLoop, Role, UiUpdate};
+use crate::agent_factory::AgentFactory;
+use crate::app::App;
+use crate::config::ProfileConfig;
+use crate::engine::{EngineConfig, EngineImpl, DEFAULT_CONTEXT_LENGTH};
 use crate::llm::{serialize_messages, Provider};
 use crate::ToolRegistry;
 
@@ -89,24 +96,86 @@ fn render_content_sections(
 /// rendering a tool invocation.
 const STRING_ELIDE_LIMIT: usize = 40;
 
+/// Top-level headless (non-terminal) application entry point.
+///
+/// Constructs an [`AgentLoop`] via [`AgentFactory`] and delegates to
+/// [`run_cli_to`] with the configured writer.
+pub struct ConsoleApp {
+    factory: Arc<AgentFactory>,
+    profile: ProfileConfig,
+    agent_type: String,
+    prompt: String,
+    writer: Box<dyn Write + Send>,
+}
+
+impl ConsoleApp {
+    pub fn new(
+        factory: Arc<AgentFactory>,
+        profile: ProfileConfig,
+        agent_type: String,
+        prompt: String,
+        writer: Box<dyn Write + Send>,
+    ) -> Self {
+        ConsoleApp {
+            factory,
+            profile,
+            agent_type,
+            prompt,
+            writer,
+        }
+    }
+}
+
+impl App for ConsoleApp {
+    async fn run(mut self) -> anyhow::Result<u8> {
+        let registry = Arc::new(default_registry());
+        let (agent, ui_rx) = self
+            .factory
+            .create(&self.profile, &self.agent_type, Role::Root)?;
+        run_cli_to(agent, ui_rx, registry, self.prompt, &mut *self.writer)
+            .await
+            .map(|_| 0u8)
+    }
+}
+
 /// Run the agent loop headless, printing to stdout.
 pub async fn run_cli(
     provider: Arc<dyn Provider>,
     registry: Arc<ToolRegistry>,
     initial_prompt: String,
 ) -> anyhow::Result<()> {
-    run_cli_to(provider, registry, initial_prompt, &mut std::io::stdout()).await
+    // TODO Phase 5 Step 9: replace with AgentFactory
+    let engine_config = EngineConfig {
+        provider: provider.name().to_string(),
+        model: String::new(),
+        temperature: None,
+        context_length: DEFAULT_CONTEXT_LENGTH,
+        api_base_url: None,
+        api_key: None,
+    };
+    let engine = Arc::new(EngineImpl::new(provider, engine_config));
+    let (agent, ui_rx) = AgentLoop::new(engine, Arc::clone(&registry));
+    run_cli_to(
+        agent,
+        ui_rx,
+        registry,
+        initial_prompt,
+        &mut std::io::stdout(),
+    )
+    .await
 }
 
 /// [`run_cli`] with an explicit output writer (used by tests to capture
 /// the emitted lines without redirecting process stdout).
+#[doc(hidden)]
 pub async fn run_cli_to(
-    provider: Arc<dyn Provider>,
+    agent: AgentLoop,
+    mut ui_rx: mpsc::Receiver<UiUpdate>,
     registry: Arc<ToolRegistry>,
     initial_prompt: String,
-    out: &mut dyn Write,
+    out: &mut (dyn Write + Send),
 ) -> anyhow::Result<()> {
-    let (mut agent, mut ui_rx) = AgentLoop::new(provider, Arc::clone(&registry));
+    let mut agent = agent;
 
     // Echo the user's turn before sending the request, so it appears even
     // while the provider is still connecting / retrying (the "Assistant:"
