@@ -7,10 +7,10 @@ make format lint test-coverage build-debug-and-run-with-logs
 ```
 
 ```text
-Fix first open task in section "Bugs / Follow-Up Changes" of
-docs/plans/phase4-tui-skeleton.md
+Implement open tasks in section "Phase 6.0" of
+docs/plans/phase6-terminal-superpowers.md
+
 Don't stage or commit anything in git!
-Don't fix markdown linter issues.
 Check linter/tests/coverage for issues!
 ```
 
@@ -56,4 +56,8 @@ Please read file `docs/development-workflow.md` and
 count the words in its content.
 
 Create a four line poem about a little lamp and save it to `logs/poem.md`.
+
+Summarize current conversation and save it to `../logs/summary.md`.
+
+Create a 50 word sentence ( without newline ) and save it too `../logs/long-line.md`.
 ```

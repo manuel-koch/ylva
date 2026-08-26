@@ -111,20 +111,20 @@ pub enum ToolCallState {
     /// Awaiting user approval; arguments are shown so the user knows what the tool will do.
     Pending {
         arguments: serde_json::Value,
-        content_sections: Vec<crate::agent::tools::ContentSection>,
+        content_sections: Vec<crate::agent::tools::Section>,
         title_arguments: Vec<(String, serde_json::Value)>,
     },
     /// Approved and running.
     Running {
         arguments: serde_json::Value,
-        content_sections: Vec<crate::agent::tools::ContentSection>,
+        content_sections: Vec<crate::agent::tools::Section>,
         title_arguments: Vec<(String, serde_json::Value)>,
     },
     /// Completed successfully.
     Done {
         arguments: serde_json::Value,
         result: String,
-        content_sections: Vec<crate::agent::tools::ContentSection>,
+        content_sections: Vec<crate::agent::tools::Section>,
         summary: Vec<(String, String)>,
         duration: std::time::Duration,
         title_arguments: Vec<(String, serde_json::Value)>,
@@ -137,7 +137,7 @@ pub enum ToolCallState {
     Denied {
         arguments: serde_json::Value,
         error: String,
-        content_sections: Vec<crate::agent::tools::ContentSection>,
+        content_sections: Vec<crate::agent::tools::Section>,
         title_arguments: Vec<(String, serde_json::Value)>,
     },
 }
@@ -541,6 +541,25 @@ impl TuiState {
                     self.pending_approval = None;
                     self.agent_mode = AgentMode::Idle;
                 }
+            }
+            UiUpdate::ToolAutoDenied {
+                id,
+                name,
+                title_arguments,
+                content_sections,
+                reason,
+            } => {
+                self.chat_entries.push(ChatEntry::ToolBubble {
+                    id: *id,
+                    name: name.clone(),
+                    state: ToolCallState::Denied {
+                        arguments: serde_json::Value::Null,
+                        error: reason.clone(),
+                        content_sections: content_sections.clone(),
+                        title_arguments: title_arguments.clone(),
+                    },
+                    collapsed: false,
+                });
             }
             UiUpdate::ToolKilled { id } => {
                 if let Some(entry) = self.find_tool_bubble_mut(*id) {
@@ -1238,15 +1257,15 @@ mod tui_state_tests {
 
     #[test]
     fn tool_done_content_sections_stored_in_state() {
-        use crate::agent::tools::ContentSection;
+        use crate::agent::tools::{ContentSection, Section};
         let mut state = TuiState::new();
         let id = Uuid::new_v4();
-        let sections = vec![ContentSection {
+        let sections = vec![Section::Content(ContentSection {
             label: None,
             content: "line one\nline two\n".to_string(),
             file_extension: Some("rs".to_string()),
             line_number_offset: Some(0),
-        }];
+        })];
         state.apply_update(&UiUpdate::ToolStart {
             name: "read".to_string(),
             id,
@@ -1409,7 +1428,7 @@ pub enum DomainEvent {
         id: Uuid,
         name: String,
         arguments: serde_json::Value,
-        content_sections: Vec<crate::agent::tools::ContentSection>,
+        content_sections: Vec<crate::agent::tools::Section>,
         title_arguments: Vec<(String, serde_json::Value)>,
     },
     /// A tool call started executing (approved).
@@ -1417,7 +1436,7 @@ pub enum DomainEvent {
         id: Uuid,
         name: String,
         arguments: serde_json::Value,
-        content_sections: Vec<crate::agent::tools::ContentSection>,
+        content_sections: Vec<crate::agent::tools::Section>,
         title_arguments: Vec<(String, serde_json::Value)>,
     },
     /// A tool call completed successfully.
@@ -1427,7 +1446,7 @@ pub enum DomainEvent {
         result: String,
         summary: Vec<(String, String)>,
         duration: std::time::Duration,
-        content_sections: Vec<crate::agent::tools::ContentSection>,
+        content_sections: Vec<crate::agent::tools::Section>,
     },
     /// A tool call was killed (e.g. via Stop).
     ToolKilled { id: Uuid },
@@ -1996,6 +2015,29 @@ impl AppState {
             self.focus = Focus::MainInput;
             self.mode = TuiMode::Idle;
         }
+    }
+
+    /// Create a `Denied` bubble for a tool that was auto-denied by the sandbox
+    /// before it ever started. No prior `ToolStart` was sent for this id.
+    pub fn apply_tool_auto_denied(
+        &mut self,
+        id: Uuid,
+        name: String,
+        title_arguments: Vec<(String, serde_json::Value)>,
+        content_sections: Vec<crate::agent::tools::Section>,
+        reason: String,
+    ) {
+        self.chat_entries.push(ChatEntry::ToolBubble {
+            id,
+            name,
+            state: ToolCallState::Denied {
+                arguments: serde_json::Value::Null,
+                error: reason,
+                content_sections,
+                title_arguments,
+            },
+            collapsed: false,
+        });
     }
 
     /// Mark a `Pending` tool bubble as `Denied`, preserving its arguments.

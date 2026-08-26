@@ -1,6 +1,6 @@
 [package]
 name = "ylva"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["Manuel Koch"]
@@ -23,6 +23,9 @@ eventsource-stream = "0.2"
 serde = { version = "1", features = ["derive"] }
 schemars = { version = "0.8", features = ["preserve_order"] }
 glob = "0.3"
+ignore = "0.4"
+regex = "1"
+similar = { version = "2", features = ["text"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
@@ -42,3 +45,6 @@ time = { version = "0.3", features = ["formatting", "macros"] }
 log = "0.4"
 tempfile = "3"
 tokio = { version = "1", features = ["test-util"] }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["signal", "process"] }

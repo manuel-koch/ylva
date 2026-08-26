@@ -25,6 +25,7 @@ pub mod llm;
 pub mod logging;
 pub mod presenter;
 pub mod render;
+pub mod sandbox;
 pub mod tui_driver;
 pub mod ui;
 
@@ -54,4 +55,5 @@ pub use engine::{Engine, EngineConfig, EngineImpl, DEFAULT_CONTEXT_LENGTH};
 pub use events::AppAction;
 pub use llm::{MockEvent, MockProvider, ModelInfo, OpenAiProvider, Provider, ToolSchema};
 pub use presenter::{TextareaContext, TuiEvent};
+pub use sandbox::{ApprovalCheck, Sandbox, SandboxContext};
 pub use tui_driver::TuiApp;

@@ -985,7 +985,7 @@ fn update_tool_bubble_to_running(
     id: Uuid,
     name: String,
     arguments: serde_json::Value,
-    content_sections: Vec<crate::agent::tools::ContentSection>,
+    content_sections: Vec<crate::agent::tools::Section>,
     title_arguments: Vec<(String, serde_json::Value)>,
 ) {
     if let Some(entry) = state.find_tool_bubble_mut(id) {
@@ -1023,7 +1023,7 @@ fn update_tool_bubble_to_done(
     id: Uuid,
     name: String,
     result: String,
-    content_sections: Vec<crate::agent::tools::ContentSection>,
+    content_sections: Vec<crate::agent::tools::Section>,
     summary: Vec<(String, String)>,
     duration: std::time::Duration,
 ) {

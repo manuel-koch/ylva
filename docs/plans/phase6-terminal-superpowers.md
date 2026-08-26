@@ -138,14 +138,14 @@ Run `make test-coverage` at the end of every sub-phase to confirm ≥80% line co
 **Goal:** All compile-time and runtime foundations every subsequent sub-phase depends on.
 No user-visible behavior. Must be fully green before any tool work begins.
 
-- [ ] 1. Add to `[dependencies]` in `Cargo.toml`:
+- [x] 1. Add to `[dependencies]` in `Cargo.toml`:
   - `nix = { version = "0.29", features = ["signal", "process"] }` under
     `[target.'cfg(unix)'.dependencies]`
   - `ignore = "0.4"`
   - `regex = "1"`
   - `similar = { version = "2", features = ["text"] }`
 
-- [ ] 2. Create `src/sandbox.rs`. Define `ApprovalCheck`, `SandboxRule`, `Sandbox`, and
+- [x] 2. Create `src/sandbox.rs`. Define `ApprovalCheck`, `SandboxRule`, `Sandbox`, and
   `SandboxContext` (last-match-wins evaluation; see
   `docs/ideas/read-tool-auto-approve.md` for the full model):
 
@@ -169,7 +169,7 @@ No user-visible behavior. Must be fully green before any tool work begins.
    /// Evaluation: normalize path (workspace_root.join(path), collapse ".." without
    /// hitting filesystem) → walk rules in order → last match wins.
    /// Path does not need to exist on disk; normalization alone determines workspace membership.
-   /// Implicit zeroth verdict: UserApprovalRequired (nothing matched = ask human).
+   /// Returns None when no rule fires (sandbox abstains); the tool applies its own default.
    pub struct SandboxContext {
        sandbox: Arc<RwLock<Sandbox>>,
        rules: Vec<SandboxRule>,  // named rules prepended; glob list appended
@@ -177,11 +177,11 @@ No user-visible behavior. Must be fully green before any tool work begins.
    impl SandboxContext {
        /// Phase 6 defaults: dot_path = deny, outside_workspace = deny.
        pub fn new(sandbox: Arc<RwLock<Sandbox>>) -> Self { ... }
-       pub fn check_path(&self, path: &Path) -> ApprovalCheck { ... }
+       pub fn check_path(&self, path: &Path) -> Option<ApprovalCheck> { ... }
    }
    ```
 
-- [ ] 3. Introduce `Section` enum in `src/agent/tools.rs` alongside `ContentSection`:
+- [x] 3. Introduce `Section` enum in `src/agent/tools.rs` alongside `ContentSection`:
 
    ```rust
    pub struct DiffSection {
@@ -204,20 +204,27 @@ No user-visible behavior. Must be fully green before any tool work begins.
   rendering paths in `tui_driver.rs` / `ui.rs`, and all test assertions on these methods
   must be updated in the same commit to avoid compilation failures mid-refactor.
 
-- [ ] 4. Update `default_registry()` in `src/agent/tools.rs` to accept
+- [x] 4. Update `default_registry()` in `src/agent/tools.rs` to accept
   `sandbox: Arc<RwLock<Sandbox>>`. Each tool is constructed with
   `SandboxContext::new(Arc::clone(&sandbox))`.
 
   **Call-site atomicity:** every call site (`src/agent.rs`, `src/agent_factory.rs`, and
   tests) must be updated in the same commit as steps 4–6 to keep the codebase compilable.
 
-- [ ] 5. Update the `Tool` trait: replace `fn needs_approval(&self) -> bool` with
-  `fn needs_approval(&self, args: &Value) -> ApprovalCheck`. Default: return
-  `UserApprovalRequired`. Update every existing implementor (`ReadTool`, `WriteTool`,
-  `GlobTool` in `src/agent/tools/fs.rs`; `TestTool` in the unit-test module). Each
-  concrete tool struct gains `sandbox_context: SandboxContext`.
+- [x] 5. Update the `Tool` trait: replace `fn needs_approval(&self) -> bool` with
+  `fn needs_approval(&self, args: &Value) -> ApprovalCheck`. Update every existing
+  implementor (`ReadTool`, `WriteTool`, `GlobTool` in `src/agent/tools/fs.rs`; `TestTool`
+  in the unit-test module). Each concrete tool struct gains `sandbox_context: SandboxContext`.
 
-- [ ] 6. Wire `ApprovalCheck` into the agent loop (`src/agent.rs`) and `src/cli_driver.rs`:
+  Each tool calls `sandbox_context.check_path()` which returns `Option<ApprovalCheck>`:
+  - `None` → sandbox abstains; tool applies its own default (`AutoApproved` for reads,
+    `UserApprovalRequired` for writes).
+  - `Some(verdict)` → explicit sandbox opinion; tool honours it unconditionally.
+
+  This keeps `UserApprovalRequired` as a first-class rule verdict (e.g. `user:*.secret`
+  globs) rather than conflating it with "no rule fired".
+
+- [x] 6. Wire `ApprovalCheck` into the agent loop (`src/agent.rs`) and `src/cli_driver.rs`:
   - `AutoApproved` → execute immediately, no pause.
   - `AutoDenied { reason }` → send `ToolError` with the reason; no pause.
   - `UserApprovalRequired` → existing pause/`ToolPending` path (unchanged).
@@ -229,21 +236,21 @@ No user-visible behavior. Must be fully green before any tool work begins.
     Update every `default_registry()` call site (in `src/agent.rs`, `src/agent_factory.rs`,
     and tests) atomically in the same commit as steps 4–6.
 
-- [ ] 7. Update render path for `pending_content_sections()`: in `tui_driver.rs` / `ui.rs`,
+- [x] 7. Update render path for `pending_content_sections()`: in `tui_driver.rs` / `ui.rs`,
   when a tool is pending approval and `call.pending_content_sections()` returns
   `Section::Diff(...)` entries, render them with `+` lines in green and `−` lines in red
   in a scrollable overlay above the approval footer. `Section::Content(...)` entries render
   as before (line numbers + syntax highlighting). Collapse to a one-line summary if
   terminal height is below 20 rows.
 
-- [ ] 8. Write unit tests:
+- [x] 8. Write unit tests:
   - `SandboxContext::check_path`: outside-workspace denied; dot-path denied; later
     `allow` glob overrides earlier deny (last-match wins); no-match → `UserApprovalRequired`.
   - `WriteTool::needs_approval`: always returns `UserApprovalRequired` regardless of path.
   - `Section` round-trips: existing tool calls still produce `Section::Content` sections.
   - Agent loop: `AutoApproved` skips pause; `AutoDenied` emits `ToolError`.
 
-- [ ] 9. Run `make test` + `make test-coverage`. Fix regressions before continuing.
+- [x] 9. Run `make test` + `make test-coverage`. Fix regressions before continuing.
 
 ---
 

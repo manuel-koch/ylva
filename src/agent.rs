@@ -74,7 +74,7 @@ pub enum AgentEvent {
         result: String,
         summary: Vec<(String, String)>,
         duration: std::time::Duration,
-        content_sections: Vec<crate::agent::tools::ContentSection>,
+        content_sections: Vec<crate::agent::tools::Section>,
     },
     ToolError {
         id: Uuid,
@@ -98,14 +98,14 @@ pub enum UiUpdate {
         name: String,
         id: Uuid,
         arguments: Value,
-        content_sections: Vec<crate::agent::tools::ContentSection>,
+        content_sections: Vec<crate::agent::tools::Section>,
         title_arguments: Vec<(String, serde_json::Value)>,
     },
     ToolPending {
         name: String,
         id: Uuid,
         arguments: serde_json::Value,
-        content_sections: Vec<crate::agent::tools::ContentSection>,
+        content_sections: Vec<crate::agent::tools::Section>,
         title_arguments: Vec<(String, serde_json::Value)>,
     },
     ToolDone {
@@ -114,11 +114,20 @@ pub enum UiUpdate {
         result: String,
         summary: Vec<(String, String)>,
         duration: std::time::Duration,
-        content_sections: Vec<crate::agent::tools::ContentSection>,
+        content_sections: Vec<crate::agent::tools::Section>,
     },
     ToolError {
         id: Uuid,
         error: String,
+    },
+    /// A tool call was denied automatically by the sandbox before it started.
+    /// Creates a `Denied` bubble directly — no `ToolStart` is ever sent.
+    ToolAutoDenied {
+        id: Uuid,
+        name: String,
+        title_arguments: Vec<(String, serde_json::Value)>,
+        content_sections: Vec<crate::agent::tools::Section>,
+        reason: String,
     },
     ToolKilled {
         id: Uuid,
@@ -591,18 +600,20 @@ impl AgentLoop {
                                     }
                                 }
                                 mode = AgentMode::ToolPending;
-                                if let Some(first) = pending_tools.front() {
-                                    log_tool_approval_request(first.call.as_ref());
-                                    let _ = ui_tx
-                                        .send(UiUpdate::ToolPending {
-                                            name: first.call.name().to_string(),
-                                            id: first.call.id(),
-                                            arguments: first.call.arguments().clone(),
-                                            content_sections: first.call.pending_content_sections(),
-                                            title_arguments: first.call.title_arguments(),
-                                        })
-                                        .await;
-                                }
+                                advance_tool_queue(
+                                    &mut pending_tools,
+                                    &mut context,
+                                    &mut mode,
+                                    &mut current_cancel,
+                                    &mut current_tool_cancel,
+                                    &mut iterations,
+                                    false,
+                                    engine.clone(),
+                                    Arc::clone(&registry),
+                                    ui_tx.clone(),
+                                    agent_tx.clone(),
+                                )
+                                .await;
                             }
                             AgentEvent::ToolDone { id, name, result, summary, duration, content_sections } => {
                                 current_tool_cancel = None;
@@ -622,7 +633,9 @@ impl AgentLoop {
                                     &mut context,
                                     &mut mode,
                                     &mut current_cancel,
+                                    &mut current_tool_cancel,
                                     &mut iterations,
+                                    true,
                                     engine.clone(),
                                     Arc::clone(&registry),
                                     ui_tx.clone(),
@@ -639,7 +652,9 @@ impl AgentLoop {
                                     &mut context,
                                     &mut mode,
                                     &mut current_cancel,
+                                    &mut current_tool_cancel,
                                     &mut iterations,
+                                    true,
                                     engine.clone(),
                                     Arc::clone(&registry),
                                     ui_tx.clone(),
@@ -753,7 +768,9 @@ impl AgentLoop {
                                         &mut context,
                                         &mut mode,
                                         &mut current_cancel,
+                                        &mut current_tool_cancel,
                                         &mut iterations,
+                                        true,
                                         engine.clone(),
                                         Arc::clone(&registry),
                                         ui_tx.clone(),
@@ -826,55 +843,130 @@ fn log_tool_approval_request(call: &dyn ToolCall) {
     );
 }
 
-/// Advance the pending-tool queue after one call completes (executed, errored,
-/// or denied). If a call remains, stay in `ToolPending` and surface the next
-/// approval request; otherwise re-prompt the model — the internal deferred
-/// re-prompt (blueprint §7 Phase 3 Q26) — unless the iteration guard trips.
+/// Advance the pending-tool queue. Processes auto-approved and auto-denied
+/// tools immediately in a loop; stops at the first `UserApprovalRequired`
+/// tool (sends `ToolPending`) or re-prompts the model when the queue is
+/// empty.
+///
+/// `increment_iterations` is `false` when called immediately after a new
+/// `ToolCall` batch arrives (the iteration counter was already set) and
+/// `true` after a tool finishes executing (each completed tool round counts).
 #[allow(clippy::too_many_arguments)]
 async fn advance_tool_queue(
     pending_tools: &mut VecDeque<PendingTool>,
     context: &mut Context,
     mode: &mut AgentMode,
     current_cancel: &mut Option<CancellationToken>,
+    current_tool_cancel: &mut Option<CancellationToken>,
     iterations: &mut usize,
+    increment_iterations: bool,
     engine: Arc<dyn Engine>,
     registry: Arc<ToolRegistry>,
     ui_tx: mpsc::Sender<UiUpdate>,
     agent_tx: mpsc::Sender<AgentEvent>,
 ) {
-    if let Some(next) = pending_tools.front() {
-        log_tool_approval_request(next.call.as_ref());
-        let _ = ui_tx
-            .send(UiUpdate::ToolPending {
-                name: next.call.name().to_string(),
-                id: next.call.id(),
-                arguments: next.call.arguments().clone(),
-                content_sections: next.call.pending_content_sections(),
-                title_arguments: next.call.title_arguments(),
-            })
-            .await;
-        return;
+    loop {
+        match pending_tools.front() {
+            None => {
+                // Queue empty: optionally increment and re-prompt.
+                if increment_iterations {
+                    *iterations += 1;
+                    tracing::debug!(iterations = *iterations, "advancing tool queue");
+                    if *iterations > MAX_TOOL_USE_ITERATIONS {
+                        tracing::warn!(
+                            iterations = *iterations,
+                            "max tool-use iterations exceeded"
+                        );
+                        let _ = ui_tx
+                            .send(UiUpdate::Error(
+                                "max tool-use iterations exceeded".to_string(),
+                            ))
+                            .await;
+                        *mode = AgentMode::Idle;
+                        return;
+                    }
+                }
+                *mode = AgentMode::Streaming;
+                *current_cancel = Some(start_request(
+                    context,
+                    engine,
+                    registry.schemas(),
+                    ui_tx,
+                    agent_tx,
+                ));
+                return;
+            }
+            Some(front) => {
+                let approval = {
+                    let _span = tracing::debug_span!(
+                        "needs_approval",
+                        tool = %front.call.name(),
+                        tool_call_id = %front.call.id(),
+                    )
+                    .entered();
+                    registry
+                        .get(front.call.name())
+                        .map(|tool| tool.needs_approval(front.call.arguments()))
+                        .unwrap_or(crate::sandbox::ApprovalCheck::UserApprovalRequired)
+                };
+                match approval {
+                    crate::sandbox::ApprovalCheck::AutoApproved => {
+                        let pending = pending_tools.pop_front().expect("checked front");
+                        let name = pending.call.name().to_string();
+                        let call_id = pending.call.id();
+                        let arguments = pending.call.arguments().clone();
+                        let content_sections = pending.call.pending_content_sections();
+                        let title_arguments = pending.call.title_arguments();
+                        tracing::info!(tool = %name, tool_call_id = %call_id, "tool auto-approved");
+                        *current_tool_cancel =
+                            Some(PendingTool::execute(pending, agent_tx.clone()));
+                        let _ = ui_tx
+                            .send(UiUpdate::ToolStart {
+                                name,
+                                id: call_id,
+                                arguments,
+                                content_sections,
+                                title_arguments,
+                            })
+                            .await;
+                        return; // wait for ToolDone/ToolError
+                    }
+                    crate::sandbox::ApprovalCheck::AutoDenied { reason } => {
+                        let pending = pending_tools.pop_front().expect("checked front");
+                        let name = pending.call.name().to_string();
+                        let call_id = pending.call.id();
+                        let title_arguments = pending.call.title_arguments();
+                        let content_sections = pending.call.pending_content_sections();
+                        tracing::info!(tool = %name, tool_call_id = %call_id, %reason, "tool auto-denied");
+                        context.push_tool_error(call_id, name.clone(), reason.clone());
+                        let _ = ui_tx
+                            .send(UiUpdate::ToolAutoDenied {
+                                id: call_id,
+                                name,
+                                title_arguments,
+                                content_sections,
+                                reason,
+                            })
+                            .await;
+                        // Continue loop to handle next tool in queue.
+                    }
+                    crate::sandbox::ApprovalCheck::UserApprovalRequired => {
+                        log_tool_approval_request(front.call.as_ref());
+                        let _ = ui_tx
+                            .send(UiUpdate::ToolPending {
+                                name: front.call.name().to_string(),
+                                id: front.call.id(),
+                                arguments: front.call.arguments().clone(),
+                                content_sections: front.call.pending_content_sections(),
+                                title_arguments: front.call.title_arguments(),
+                            })
+                            .await;
+                        return;
+                    }
+                }
+            }
+        }
     }
-    *iterations += 1;
-    tracing::debug!(iterations = *iterations, "advancing tool queue");
-    if *iterations > MAX_TOOL_USE_ITERATIONS {
-        tracing::warn!(iterations = *iterations, "max tool-use iterations exceeded");
-        let _ = ui_tx
-            .send(UiUpdate::Error(
-                "max tool-use iterations exceeded".to_string(),
-            ))
-            .await;
-        *mode = AgentMode::Idle;
-        return;
-    }
-    *mode = AgentMode::Streaming;
-    *current_cancel = Some(start_request(
-        context,
-        engine,
-        registry.schemas(),
-        ui_tx,
-        agent_tx,
-    ));
 }
 
 /// Spawns the inner streaming task for one request, built from an immutable
@@ -1343,7 +1435,9 @@ mod tests {
         let log = capture_logs(async {
             let id = Uuid::new_v4();
             let (agent_tx, mut agent_rx) = mpsc::channel(8);
-            let registry = tools::default_registry();
+            let registry = tools::default_registry(std::sync::Arc::new(std::sync::RwLock::new(
+                crate::sandbox::Sandbox::new(),
+            )));
             let pending = PendingTool {
                 call: registry
                     .create_call(

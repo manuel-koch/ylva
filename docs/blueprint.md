@@ -1318,14 +1318,42 @@ A terminal agent that can run `rm -rf` or `curl | sh` must ask for approval.
 | `bash`, `git push`        | `Strict` (modal confirmation)                                           |
 | `clarify`                 | `Interactive` (rendered as question banner; user answers via input box) |
 
-**Interim vs. path-based approval (Q5):** the `Auto` level for `read`/`glob` is an
-**interim/fake** marker for Phase 3 — the loop protocol is uniform (every tool
-pauses at `ToolPending` and receives `ApproveTool`/`DenyTool`/`Stop`; the driver
-just auto-approves `read`/`glob`). This is **not** the final policy: once the
-Phase 6 sandbox defines a workspace root, approval becomes **path-dependent** —
-an out-of-workspace `read`/`glob` will require approval, so those tools can
-report `needs_approval() == true` per-path. Phase 3 marks them `false` only as a
-read-only convenience, never a permanent exemption.
+**Path-based approval via sandbox:** `read` and `glob` are auto-approved by
+default, but approval is **path-dependent** — each tool queries
+`SandboxContext::check_path`, which returns `None` (sandbox abstains; tool
+applies its own default) or `Some(verdict)` (explicit rule; tool honours it
+unconditionally). All rule evaluation runs against the **canonical** (symlink-
+resolved) path so symlinks cannot hide their real location, name, or extension.
+For non-existent paths (e.g. a write target), lexical normalization is the
+fallback.
+
+**Tool approval rules (planned TOML config):** each tool's path-based policy is
+configurable via a `[tool.<name>]` block. Named rules act as early defaults;
+glob rules (last-match-wins) can override them:
+
+```toml
+[tool.read]
+path_outside_workspace = deny   # default: deny
+dot_path               = deny   # default: deny
+# cross_filesystem not set — sandbox abstains; configure to deny|user when needed
+globs = [
+    "allow:**/.*",              # re-allow dot-files inside workspace
+    "user:/**/.env",            # escalate .env files to user approval
+]
+
+[tool.write]
+path_outside_workspace = deny   # default: deny
+dot_path               = deny   # default: deny
+# cross_filesystem not set — sandbox abstains; configure to deny|user when needed
+```
+
+Named rules:
+- `path_outside_workspace` — canonicalized path is not under the workspace root
+- `dot_path` — any component of the workspace-relative path starts with `.`
+- `cross_filesystem` — canonicalized path is on a different filesystem (device)
+  than the workspace root; catches writes into mounted shares or volumes.
+  **Not configured by default** (sandbox abstains). Set to `deny` or `user`
+  to restrict cross-device access.
 
 **Flow:**
 

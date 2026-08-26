@@ -27,6 +27,7 @@ use crate::app::App;
 use crate::config::ProfileConfig;
 use crate::engine::{EngineConfig, EngineImpl, DEFAULT_CONTEXT_LENGTH};
 use crate::llm::{serialize_messages, Provider};
+use crate::sandbox::{ApprovalCheck, Sandbox};
 use crate::ToolRegistry;
 
 #[cfg(test)]
@@ -71,22 +72,34 @@ fn render_invocation_from_title_arguments(
 
 fn render_content_sections(
     out: &mut dyn Write,
-    sections: &[crate::agent::tools::ContentSection],
+    sections: &[crate::agent::tools::Section],
 ) -> anyhow::Result<()> {
     for section in sections {
-        if let Some(label) = &section.label {
-            writeln!(out, "  --- {label} ---")?;
-        }
-        let line_count = section.content.lines().count();
-        let last_line_num = section.line_number_offset.unwrap_or(0) + line_count;
-        let digits = last_line_num.to_string().len();
-        for (i, line) in section.content.lines().enumerate() {
-            if let Some(offset) = section.line_number_offset {
-                write!(out, "  {:>digits$}: ", offset + i + 1)?;
-            } else {
-                write!(out, "  ")?;
+        match section {
+            crate::agent::tools::Section::Content(content_section) => {
+                if let Some(label) = &content_section.label {
+                    writeln!(out, "  --- {label} ---")?;
+                }
+                let line_count = content_section.content.lines().count();
+                let last_line_num = content_section.line_number_offset.unwrap_or(0) + line_count;
+                let digits = last_line_num.to_string().len();
+                for (i, line) in content_section.content.lines().enumerate() {
+                    if let Some(offset) = content_section.line_number_offset {
+                        write!(out, "  {:>digits$}: ", offset + i + 1)?;
+                    } else {
+                        write!(out, "  ")?;
+                    }
+                    writeln!(out, "{line}")?;
+                }
             }
-            writeln!(out, "{line}")?;
+            crate::agent::tools::Section::Diff(diff_section) => {
+                if let Some(label) = &diff_section.label {
+                    writeln!(out, "  --- {label} ---")?;
+                }
+                for line in diff_section.content.lines() {
+                    writeln!(out, "  {line}")?;
+                }
+            }
         }
     }
     Ok(())
@@ -128,7 +141,8 @@ impl ConsoleApp {
 
 impl App for ConsoleApp {
     async fn run(mut self) -> anyhow::Result<u8> {
-        let registry = Arc::new(default_registry());
+        let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new()));
+        let registry = Arc::new(default_registry(sandbox));
         let (agent, ui_rx) = self
             .factory
             .create(&self.profile, &self.agent_type, Role::Root)?;
@@ -204,6 +218,7 @@ pub async fn run_cli_to(
                 id,
                 title_arguments,
                 content_sections,
+                arguments,
                 ..
             }) => {
                 let title = registry
@@ -211,24 +226,36 @@ pub async fn run_cli_to(
                     .map(|tool| tool.title().to_string())
                     .unwrap_or_else(|| capitalize_first(&name));
                 let invocation = render_invocation_from_title_arguments(&title, &title_arguments);
-                let needs_approval = registry
+                let approval_check = registry
                     .get(&name)
-                    .is_some_and(|tool| tool.needs_approval());
-                if needs_approval {
-                    let reason = "no --auto-approve-write configured";
-                    writeln!(out, "[tool] {invocation} → denied: {reason}")?;
-                    render_content_sections(out, &content_sections)?;
-                    denied_tool_ids.insert(id);
-                    agent
-                        .send_command(AgentCommand::DenyTool {
-                            id,
-                            reason: reason.into(),
-                        })
-                        .await;
-                } else {
-                    writeln!(out, "[tool] {invocation}")?;
-                    render_content_sections(out, &content_sections)?;
-                    agent.send_command(AgentCommand::ApproveTool { id }).await;
+                    .map(|tool| tool.needs_approval(&arguments))
+                    .unwrap_or(ApprovalCheck::UserApprovalRequired);
+                match approval_check {
+                    ApprovalCheck::AutoApproved => {
+                        writeln!(out, "[tool] {invocation}")?;
+                        render_content_sections(out, &content_sections)?;
+                        agent.send_command(AgentCommand::ApproveTool { id }).await;
+                    }
+                    ApprovalCheck::AutoDenied { reason } => {
+                        writeln!(out, "[tool] {invocation} → auto-denied: {reason}")?;
+                        render_content_sections(out, &content_sections)?;
+                        denied_tool_ids.insert(id);
+                        agent
+                            .send_command(AgentCommand::DenyTool { id, reason })
+                            .await;
+                    }
+                    ApprovalCheck::UserApprovalRequired => {
+                        let reason = "no --auto-approve-write configured";
+                        writeln!(out, "[tool] {invocation} → denied: {reason}")?;
+                        render_content_sections(out, &content_sections)?;
+                        denied_tool_ids.insert(id);
+                        agent
+                            .send_command(AgentCommand::DenyTool {
+                                id,
+                                reason: reason.into(),
+                            })
+                            .await;
+                    }
                 }
             }
             Some(UiUpdate::ToolStart {
@@ -262,6 +289,9 @@ pub async fn run_cli_to(
                 if !denied_tool_ids.remove(&id) {
                     writeln!(out, "[tool] error: {error}")?;
                 }
+            }
+            Some(UiUpdate::ToolAutoDenied { name, reason, .. }) => {
+                writeln!(out, "[tool] auto-denied '{name}': {reason}")?;
             }
             Some(UiUpdate::ToolKilled { .. }) => {
                 writeln!(out, "[tool] killed")?;

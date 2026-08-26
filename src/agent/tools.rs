@@ -26,6 +26,7 @@ use schemars::schema::RootSchema;
 use serde_json::Value;
 
 use crate::llm::ToolSchema;
+use crate::sandbox::ApprovalCheck;
 
 pub mod fs;
 
@@ -73,7 +74,7 @@ pub trait ToolCallResult: Send + Sync + std::fmt::Debug {
 
     /// Rich content sections produced by this result (e.g. file text, command
     /// output). Computed once at execution time.
-    fn content_sections(&self) -> Vec<ContentSection> {
+    fn content_sections(&self) -> Vec<Section> {
         vec![]
     }
 }
@@ -98,6 +99,27 @@ pub struct ContentSection {
     pub line_number_offset: Option<usize>,
 }
 
+/// A diff block produced by a tool call (e.g. `edit`).
+///
+/// Lines are unified-diff text from the `similar` crate; `+` lines are
+/// additions, `−` lines are removals. Renderers that support colour should
+/// paint additions green and removals red.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffSection {
+    /// Optional label (e.g. the file path being patched).
+    pub label: Option<String>,
+    /// Unified diff text.
+    pub content: String,
+}
+
+/// A content block produced by a tool call — either a rich file / text
+/// section or a unified diff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Section {
+    Content(ContentSection),
+    Diff(DiffSection),
+}
+
 /// An invocation object for a specific tool call. Carries the call ID,
 /// arguments, and execution logic for a single invocation.
 pub trait ToolCall: Send + Sync {
@@ -114,7 +136,7 @@ pub trait ToolCall: Send + Sync {
 
     /// Content sections produced before execution completes (e.g. argument
     /// preview). Defaults to empty.
-    fn pending_content_sections(&self) -> Vec<ContentSection> {
+    fn pending_content_sections(&self) -> Vec<Section> {
         vec![]
     }
 
@@ -173,14 +195,15 @@ pub trait Tool: Send + Sync {
     /// The `schemars`-derived parameter schema for the tool's arguments.
     fn schema(&self) -> RootSchema;
 
-    /// Whether this tool requires explicit approval. The loop treats it only
-    /// as a driver hint; approval policy lives at the driver/tool boundary.
+    /// Whether this tool call requires explicit human approval.
     ///
-    /// Defaults to `true` (**safe-by-default**): any tool requires approval
-    /// unless it explicitly opts out. Read-only tools override to `false` —
-    /// an interim/fake marker pending Phase 6 path-based approval (Q4/Q5).
-    fn needs_approval(&self) -> bool {
-        true
+    /// `AutoApproved` → execute immediately without pausing.
+    /// `AutoDenied { reason }` → reject immediately, surface reason to the model.
+    /// `UserApprovalRequired` → pause for human.
+    ///
+    /// Defaults to `UserApprovalRequired` (safe-by-default).
+    fn needs_approval(&self, _args: &Value) -> ApprovalCheck {
+        ApprovalCheck::UserApprovalRequired
     }
 
     /// Whether an argument value equals the tool's semantic default, so a host
@@ -296,11 +319,20 @@ fn to_tool_schema(tool: &dyn Tool) -> ToolSchema {
 }
 
 /// Convenience: build the Phase 3 registry with the three file-system tools.
-pub fn default_registry() -> ToolRegistry {
+pub fn default_registry(
+    sandbox: std::sync::Arc<std::sync::RwLock<crate::sandbox::Sandbox>>,
+) -> ToolRegistry {
+    use crate::sandbox::SandboxContext;
     let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(fs::ReadTool::default()));
-    registry.register(Arc::new(fs::WriteTool::default()));
-    registry.register(Arc::new(fs::GlobTool::default()));
+    registry.register(Arc::new(fs::ReadTool::new(SandboxContext::new(
+        Arc::clone(&sandbox),
+    ))));
+    registry.register(Arc::new(fs::WriteTool::new(SandboxContext::new(
+        Arc::clone(&sandbox),
+    ))));
+    registry.register(Arc::new(fs::GlobTool::new(SandboxContext::new(
+        Arc::clone(&sandbox),
+    ))));
     registry
 }
 
@@ -377,8 +409,8 @@ mod tests {
         fn schema(&self) -> RootSchema {
             schema_for!(TestArgs)
         }
-        fn needs_approval(&self) -> bool {
-            false
+        fn needs_approval(&self, _args: &Value) -> ApprovalCheck {
+            ApprovalCheck::AutoApproved
         }
         fn timeout_secs(&self) -> u64 {
             5
@@ -423,10 +455,73 @@ mod tests {
 
     #[test]
     fn default_registry_registers_all_three_tools() {
-        let registry = default_registry();
+        let sandbox = std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new()));
+        let registry = default_registry(sandbox);
         assert_eq!(registry.names().len(), 3);
         assert!(registry.get("read").is_some());
         assert!(registry.get("write").is_some());
         assert!(registry.get("glob").is_some());
+    }
+
+    #[test]
+    fn write_tool_always_needs_user_approval() {
+        let write_tool = fs::WriteTool::default();
+        let args = serde_json::json!({ "path": "src/main.rs", "content": "hello" });
+        assert!(matches!(
+            write_tool.needs_approval(&args),
+            ApprovalCheck::UserApprovalRequired
+        ));
+    }
+
+    #[test]
+    fn section_content_roundtrip() {
+        let section = Section::Content(ContentSection {
+            label: None,
+            content: "hello".to_string(),
+            file_extension: Some("rs".to_string()),
+            line_number_offset: Some(0),
+        });
+        assert!(matches!(section, Section::Content(_)));
+    }
+
+    #[test]
+    fn section_diff_variant() {
+        let section = Section::Diff(DiffSection {
+            label: Some("file.rs".to_string()),
+            content: "+hello\n-world".to_string(),
+        });
+        assert!(matches!(section, Section::Diff(_)));
+    }
+
+    #[test]
+    fn tool_call_result_default_properties_is_empty() {
+        let output = SimpleOutput("test".to_string());
+        assert!(output.properties().is_empty());
+        assert!(output.content_sections().is_empty());
+    }
+
+    #[test]
+    fn tool_call_default_pending_sections_and_argument_order() {
+        let call = TestToolCall {
+            id: uuid::Uuid::new_v4(),
+            arguments: serde_json::json!({ "field": "val" }),
+            timeout_secs: 1,
+        };
+        assert!(call.pending_content_sections().is_empty());
+        assert_eq!(call.argument_order("any_key"), usize::MAX);
+    }
+
+    // `TestTool` does not override `title` or `is_default_argument`, so these
+    // tests exercise the default trait method bodies.
+    #[test]
+    fn tool_default_title_equals_name() {
+        let tool = TestTool;
+        assert_eq!(tool.title(), tool.name());
+    }
+
+    #[test]
+    fn tool_default_is_default_argument_returns_false() {
+        let tool = TestTool;
+        assert!(!tool.is_default_argument("field", &serde_json::json!("value")));
     }
 }

@@ -1,8 +1,11 @@
 #!/bin/zsh
 YLVA=${CARGO_TARGET_DIR:-./target}/debug/ylva
-LOG_DIR=$(git rev-parse --show-toplevel)/logs
+ROOT_DIR=$(git rev-parse --show-toplevel)
+LOG_DIR=${ROOT_DIR}/logs
 LOG_PREFIX=$(basename $0 .zsh)
 LOG_FORMAT=text
+
+cd ${ROOT_DIR}
 
 make build-debug
 
@@ -31,4 +34,9 @@ echo "----------------------------------------------------------"
 ylva << '__EOT__'
 Read the first 32 bytes of tests/e2e/read-tool.zsh.
 Report only the plain read data snippet as-is.
+__EOT__
+
+echo "----------------------------------------------------------"
+ylva << '__EOT__'
+What content does `.rumdl.toml` have ?
 __EOT__

@@ -1,8 +1,11 @@
 #!/bin/zsh
 YLVA=${CARGO_TARGET_DIR:-./target}/debug/ylva
-LOG_DIR=$(git rev-parse --show-toplevel)/logs
+ROOT_DIR=$(git rev-parse --show-toplevel)
+LOG_DIR=${ROOT_DIR}/logs
 LOG_PREFIX=$(basename $0 .zsh)
-LOG_FORMAT=json
+LOG_FORMAT=text
+
+cd ${ROOT_DIR}
 
 make build-debug
 

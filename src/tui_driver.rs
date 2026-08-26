@@ -178,9 +178,9 @@ fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
         }),
         UiUpdate::ToolKilled { id } => Some(DomainEvent::ToolKilled { id: *id }),
         UiUpdate::Error(message) => Some(DomainEvent::Error(message.clone())),
-        // ToolError is handled directly by the Driver via AppState::apply_tool_error;
-        // no corresponding DomainEvent exists in the Presenter's surface.
-        UiUpdate::ToolError { .. } => None,
+        // ToolError and ToolAutoDenied are handled directly by the Driver via
+        // AppState; no corresponding DomainEvent exists in the Presenter's surface.
+        UiUpdate::ToolError { .. } | UiUpdate::ToolAutoDenied { .. } => None,
     }
 }
 
@@ -328,6 +328,23 @@ async fn process_one_update(
 ) -> ActionOutcome {
     if let UiUpdate::ToolError { id, error } = update {
         state.apply_tool_error(*id, error.clone());
+        return ActionOutcome::Continue;
+    }
+    if let UiUpdate::ToolAutoDenied {
+        id,
+        name,
+        title_arguments,
+        content_sections,
+        reason,
+    } = update
+    {
+        state.apply_tool_auto_denied(
+            *id,
+            name.clone(),
+            title_arguments.clone(),
+            content_sections.clone(),
+            reason.clone(),
+        );
         return ActionOutcome::Continue;
     }
     if let Some(domain_event) = ui_update_to_domain_event(update) {

@@ -46,8 +46,56 @@ fn highlight_theme() -> &'static Theme {
 
 /// Pre-computed highlighted lines keyed by a hash of `(content, file_extension)`.
 /// No invalidation needed — the hash is the identity.
-type HighlightedLines = Vec<Vec<(SyntectStyle, String)>>;
+type HighlightedLine = Vec<(SyntectStyle, String)>;
+type HighlightedLines = Vec<HighlightedLine>;
 type HighlightCacheMap = HashMap<u64, HighlightedLines>;
+
+/// Splits a single highlighted line's token-spans into multiple visual rows,
+/// each at most `available_width` characters wide.  Splitting occurs at
+/// character boundaries within tokens (code content), not at word boundaries.
+fn wrap_highlighted_line(spans: HighlightedLine, available_width: usize) -> Vec<HighlightedLine> {
+    if available_width == 0 {
+        return vec![spans];
+    }
+    let mut rows: Vec<HighlightedLine> = Vec::new();
+    let mut current_row: HighlightedLine = Vec::new();
+    let mut current_width: usize = 0;
+
+    for (style, token) in spans {
+        let mut remaining: &str = &token;
+        while !remaining.is_empty() {
+            let available = available_width.saturating_sub(current_width);
+            let token_chars = remaining.chars().count();
+            if token_chars <= available {
+                current_row.push((style, remaining.to_string()));
+                current_width += token_chars;
+                remaining = "";
+            } else {
+                // Split: take only `available` chars into the current row.
+                let split_byte = remaining
+                    .char_indices()
+                    .nth(available)
+                    .map(|(byte_idx, _)| byte_idx)
+                    .unwrap_or(remaining.len());
+                let (head, tail) = remaining.split_at(split_byte);
+                if !head.is_empty() {
+                    current_row.push((style, head.to_string()));
+                }
+                rows.push(std::mem::take(&mut current_row));
+                current_width = 0;
+                remaining = tail;
+            }
+        }
+    }
+
+    if !current_row.is_empty() {
+        rows.push(current_row);
+    }
+    if rows.is_empty() {
+        rows.push(Vec::new());
+    }
+    rows
+}
 
 thread_local! {
     static HIGHLIGHT_CACHE: RefCell<HighlightCacheMap> = RefCell::new(HashMap::new());
@@ -405,11 +453,11 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
             ChatEntry::UserMessage { text, state } => {
                 // User bubbles carry a 1-char left border bar plus a 2-char
                 // margin, so wrap to a narrower width to keep lines on-screen.
-                let user_width = bubble_row_width.saturating_sub(3).max(1);
+                let user_width = bubble_row_width.saturating_sub(4).max(1);
                 append_user_lines(&mut lines, text, *state, user_width, bubble_row_width);
             }
             ChatEntry::AssistantMessage { text, interrupted } => {
-                let msg_width = bubble_row_width.saturating_sub(3).max(1);
+                let msg_width = bubble_row_width.saturating_sub(4).max(1);
                 append_assistant_lines(&mut lines, text, *interrupted, msg_width, bubble_row_width);
             }
             ChatEntry::ToolBubble {
@@ -439,7 +487,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
                         spinner_frame: state.spinner_frame,
                     },
                     &mut bubble_title_rows_out,
-                    wrap_width,
+                    bubble_row_width.saturating_sub(4).max(1),
                     bubble_row_width,
                 );
             }
@@ -457,7 +505,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
     }
 
     if state.agent_mode == AgentMode::Streaming && !state.partial_assistant_text.is_empty() {
-        let stream_width = bubble_row_width.saturating_sub(3).max(1);
+        let stream_width = bubble_row_width.saturating_sub(4).max(1);
         append_streaming_lines(
             &mut lines,
             &state.partial_assistant_text.clone(),
@@ -473,7 +521,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
     // Flush deferred queued steer messages after the stream bubble so they
     // appear visually after the current in-progress response.
     for queued_text in &deferred_queued_messages {
-        let user_width = bubble_row_width.saturating_sub(3).max(1);
+        let user_width = bubble_row_width.saturating_sub(4).max(1);
         append_user_lines(
             &mut lines,
             queued_text,
@@ -497,7 +545,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
                 spinner_frame: state.spinner_frame,
             },
             &mut bubble_title_rows_out,
-            wrap_width,
+            bubble_row_width.saturating_sub(4).max(1),
             bubble_row_width,
         );
         lines.push(Line::default());
@@ -799,9 +847,9 @@ fn append_assistant_lines(
     let row_bg = Style::default().bg(ASSISTANT_STREAM_BG_COLOR);
     let trailing_pad = |text_len: usize| -> Span<'static> {
         let used = 3 + text_len;
-        let pad = row_width.saturating_sub(used);
+        let pad = row_width.saturating_sub(used + 1);
         Span::styled(
-            " ".repeat(pad),
+            " ".repeat(pad + 1),
             Style::default().bg(ASSISTANT_STREAM_BG_COLOR),
         )
     };
@@ -862,9 +910,9 @@ fn append_streaming_lines(lines: &mut Vec<Line>, text: &str, width: usize, row_w
     let row_bg = Style::default().bg(ASSISTANT_STREAM_BG_COLOR);
     let trailing_pad = |text_len: usize| -> Span<'static> {
         let used = 3 + text_len;
-        let pad = row_width.saturating_sub(used);
+        let pad = row_width.saturating_sub(used + 1);
         Span::styled(
-            " ".repeat(pad),
+            " ".repeat(pad + 1),
             Style::default().bg(ASSISTANT_STREAM_BG_COLOR),
         )
     };
@@ -952,8 +1000,11 @@ fn append_user_lines(
     // the right edge of the content area. bar(1) + margin(2) = 3 prefix cols.
     let trailing_pad = |text_len: usize| -> Span<'static> {
         let used = 3 + text_len;
-        let pad = row_width.saturating_sub(used);
-        Span::styled(" ".repeat(pad), Style::default().bg(USER_MESSAGE_BG_COLOR))
+        let pad = row_width.saturating_sub(used + 1);
+        Span::styled(
+            " ".repeat(pad + 1),
+            Style::default().bg(USER_MESSAGE_BG_COLOR),
+        )
     };
 
     // 1-char top padding keeps the bubble from crowding the entry above.
@@ -1033,8 +1084,11 @@ fn append_tool_bubble_lines(
     let row_bg = Style::default().bg(TOOL_BUBBLE_BG_COLOR);
     let trailing_pad = |text_len: usize| -> Span<'static> {
         let used = 3 + text_len;
-        let pad = row_width.saturating_sub(used);
-        Span::styled(" ".repeat(pad), Style::default().bg(TOOL_BUBBLE_BG_COLOR))
+        let pad = row_width.saturating_sub(used + 1);
+        Span::styled(
+            " ".repeat(pad + 1),
+            Style::default().bg(TOOL_BUBBLE_BG_COLOR),
+        )
     };
 
     // Format arguments for the title:
@@ -1072,7 +1126,7 @@ fn append_tool_bubble_lines(
         .join(" ");
 
     // Compute body sections for the collapsible bubble body.
-    let content_sections: Vec<crate::agent::tools::ContentSection> = match state {
+    let content_sections: Vec<crate::agent::tools::Section> = match state {
         ToolCallState::Pending {
             content_sections, ..
         }
@@ -1203,20 +1257,24 @@ fn append_tool_bubble_lines(
         _ => None,
     };
     if let Some(error) = maybe_error {
-        let error_label = format!("  {error}");
-        let error_len = error_label.chars().count();
-        lines.push(
-            Line::from(vec![
-                bar.clone(),
-                margin.clone(),
-                Span::styled(
-                    error_label,
-                    Style::default().fg(Color::Red).bg(TOOL_BUBBLE_BG_COLOR),
-                ),
-                trailing_pad(error_len),
-            ])
-            .patch_style(row_bg),
-        );
+        // "  " prefix (2 chars) inside the bar+margin prefix → wrap text tighter.
+        let error_wrap_width = wrap_width.saturating_sub(2).max(1);
+        for wrapped in textwrap::wrap(error, error_wrap_width) {
+            let error_label = format!("  {wrapped}");
+            let error_len = error_label.chars().count();
+            lines.push(
+                Line::from(vec![
+                    bar.clone(),
+                    margin.clone(),
+                    Span::styled(
+                        error_label,
+                        Style::default().fg(Color::Red).bg(TOOL_BUBBLE_BG_COLOR),
+                    ),
+                    trailing_pad(error_len),
+                ])
+                .patch_style(row_bg),
+            );
+        }
     }
 
     // Body (body sections + fallback result text) — hidden when collapsed.
@@ -1224,89 +1282,171 @@ fn append_tool_bubble_lines(
         if !content_sections.is_empty() {
             let show_labels = content_sections.len() > 1;
             for section in &content_sections {
-                // Label header (only when multiple sections).
-                if show_labels {
-                    if let Some(label) = &section.label {
-                        let label_str = format!("  {label}:");
-                        let label_len = label_str.chars().count();
-                        lines.push(
-                            Line::from(vec![
-                                bar.clone(),
-                                margin.clone(),
-                                Span::styled(
-                                    label_str,
-                                    Style::default()
-                                        .fg(Color::White)
-                                        .bg(TOOL_BUBBLE_BG_COLOR)
-                                        .add_modifier(Modifier::DIM),
-                                ),
-                                trailing_pad(label_len),
-                            ])
-                            .patch_style(row_bg),
+                match section {
+                    crate::agent::tools::Section::Content(content_section) => {
+                        // Label header (only when multiple sections).
+                        if show_labels {
+                            if let Some(label) = &content_section.label {
+                                let label_str = format!("  {label}:");
+                                let label_len = label_str.chars().count();
+                                lines.push(
+                                    Line::from(vec![
+                                        bar.clone(),
+                                        margin.clone(),
+                                        Span::styled(
+                                            label_str,
+                                            Style::default()
+                                                .fg(Color::White)
+                                                .bg(TOOL_BUBBLE_BG_COLOR)
+                                                .add_modifier(Modifier::DIM),
+                                        ),
+                                        trailing_pad(label_len),
+                                    ])
+                                    .patch_style(row_bg),
+                                );
+                            }
+                        }
+
+                        // Determine line-number gutter width.
+                        let line_count = content_section.content.lines().count();
+                        let offset = content_section.line_number_offset.unwrap_or(0);
+                        let last_line_num = offset + line_count;
+                        let digits = last_line_num.to_string().len();
+
+                        // Fetch highlighted lines from cache (content-addressed, computed once).
+                        let all_highlighted = highlighted_lines_cached(
+                            &content_section.content,
+                            content_section.file_extension.as_deref(),
                         );
+
+                        for (line_index, highlighted) in all_highlighted.into_iter().enumerate() {
+                            let line_num = offset + line_index + 1; // 1-based display
+
+                            let gutter_prefix_len = if content_section.line_number_offset.is_some()
+                            {
+                                2 + digits + 2 // "  " + digits + ": "
+                            } else {
+                                2 // "  " indent
+                            };
+
+                            // Available width for actual code content after the gutter.
+                            let content_width = wrap_width.saturating_sub(gutter_prefix_len).max(1);
+
+                            // Wrap this syntect line into visual rows that fit within content_width.
+                            let visual_rows = wrap_highlighted_line(highlighted, content_width);
+
+                            for (row_index, row_spans) in visual_rows.into_iter().enumerate() {
+                                let mut spans: Vec<Span<'static>> =
+                                    vec![bar.clone(), margin.clone()];
+
+                                // Gutter only on the first visual row; continuation rows get indent.
+                                if row_index == 0 {
+                                    if content_section.line_number_offset.is_some() {
+                                        let gutter_str = format!("  {line_num:>digits$}: ");
+                                        spans.push(Span::styled(
+                                            gutter_str,
+                                            Style::default()
+                                                .fg(Color::DarkGray)
+                                                .bg(TOOL_BUBBLE_BG_COLOR),
+                                        ));
+                                    } else {
+                                        spans.push(Span::styled(
+                                            "  ",
+                                            Style::default().bg(TOOL_BUBBLE_BG_COLOR),
+                                        ));
+                                    }
+                                } else {
+                                    // Continuation row: blank gutter placeholder.
+                                    let indent = " ".repeat(gutter_prefix_len);
+                                    spans.push(Span::styled(
+                                        indent,
+                                        Style::default().bg(TOOL_BUBBLE_BG_COLOR),
+                                    ));
+                                }
+
+                                // Convert syntect tokens to ratatui spans.
+                                let content_text_len: usize =
+                                    row_spans.iter().map(|(_, t)| t.chars().count()).sum();
+                                for (style, token) in row_spans {
+                                    let fg = Color::Rgb(
+                                        style.foreground.r,
+                                        style.foreground.g,
+                                        style.foreground.b,
+                                    );
+                                    spans.push(Span::styled(
+                                        token,
+                                        Style::default().fg(fg).bg(TOOL_BUBBLE_BG_COLOR),
+                                    ));
+                                }
+
+                                spans.push(trailing_pad(gutter_prefix_len + content_text_len));
+                                lines.push(Line::from(spans).patch_style(row_bg));
+                            }
+                        }
                     }
-                }
+                    crate::agent::tools::Section::Diff(diff_section) => {
+                        // Label header (only when multiple sections).
+                        if show_labels {
+                            if let Some(label) = &diff_section.label {
+                                let label_str = format!("  {label}:");
+                                let label_len = label_str.chars().count();
+                                lines.push(
+                                    Line::from(vec![
+                                        bar.clone(),
+                                        margin.clone(),
+                                        Span::styled(
+                                            label_str,
+                                            Style::default()
+                                                .fg(Color::White)
+                                                .bg(TOOL_BUBBLE_BG_COLOR)
+                                                .add_modifier(Modifier::DIM),
+                                        ),
+                                        trailing_pad(label_len),
+                                    ])
+                                    .patch_style(row_bg),
+                                );
+                            }
+                        }
 
-                // Determine line-number gutter width.
-                let line_count = section.content.lines().count();
-                let offset = section.line_number_offset.unwrap_or(0);
-                let last_line_num = offset + line_count;
-                let digits = last_line_num.to_string().len();
-
-                // Fetch highlighted lines from cache (content-addressed, computed once).
-                let all_highlighted =
-                    highlighted_lines_cached(&section.content, section.file_extension.as_deref());
-
-                for (line_index, highlighted) in all_highlighted.into_iter().enumerate() {
-                    let line_num = offset + line_index + 1; // 1-based display
-
-                    let mut spans: Vec<Span<'static>> = vec![bar.clone(), margin.clone()];
-
-                    // Gutter or plain indent.
-                    if section.line_number_offset.is_some() {
-                        let gutter_str = format!("  {line_num:>digits$}: ");
-                        spans.push(Span::styled(
-                            gutter_str,
-                            Style::default()
-                                .fg(Color::DarkGray)
-                                .bg(TOOL_BUBBLE_BG_COLOR),
-                        ));
-                    } else {
-                        spans.push(Span::styled(
-                            "  ",
-                            Style::default().bg(TOOL_BUBBLE_BG_COLOR),
-                        ));
+                        // Render unified diff: + lines green, - lines red.
+                        for diff_line in diff_section.content.lines() {
+                            let (line_color, prefix) = if diff_line.starts_with('+') {
+                                (Color::Green, "+")
+                            } else if diff_line.starts_with('-') {
+                                (Color::Red, "-")
+                            } else {
+                                (Color::DarkGray, " ")
+                            };
+                            let rest = diff_line.get(1..).unwrap_or("");
+                            // Diff line prefix is "  {prefix} " — 4 chars wide.
+                            let diff_prefix_len = 4;
+                            let diff_content_width =
+                                wrap_width.saturating_sub(diff_prefix_len).max(1);
+                            let wrapped_rest = textwrap::wrap(rest, diff_content_width);
+                            for (wrap_index, wrapped_chunk) in wrapped_rest.iter().enumerate() {
+                                let text_str = if wrap_index == 0 {
+                                    format!("  {prefix} {wrapped_chunk}")
+                                } else {
+                                    format!("    {wrapped_chunk}") // continuation indent, no prefix
+                                };
+                                let text_len = text_str.chars().count();
+                                lines.push(
+                                    Line::from(vec![
+                                        bar.clone(),
+                                        margin.clone(),
+                                        Span::styled(
+                                            text_str,
+                                            Style::default()
+                                                .fg(line_color)
+                                                .bg(TOOL_BUBBLE_BG_COLOR),
+                                        ),
+                                        trailing_pad(text_len),
+                                    ])
+                                    .patch_style(row_bg),
+                                );
+                            }
+                        }
                     }
-
-                    // Convert cached syntect tokens to ratatui spans.
-                    let mut content_spans: Vec<Span<'static>> = highlighted
-                        .iter()
-                        .map(|(style, token)| {
-                            let fg = Color::Rgb(
-                                style.foreground.r,
-                                style.foreground.g,
-                                style.foreground.b,
-                            );
-                            Span::styled(
-                                token.clone(),
-                                Style::default().fg(fg).bg(TOOL_BUBBLE_BG_COLOR),
-                            )
-                        })
-                        .collect();
-
-                    let content_text_len: usize = content_spans
-                        .iter()
-                        .map(|s| s.content.chars().count())
-                        .sum();
-                    let gutter_prefix_len = if section.line_number_offset.is_some() {
-                        2 + digits + 2 // "  " + digits + ": "
-                    } else {
-                        2 // "  " indent
-                    };
-
-                    spans.append(&mut content_spans);
-                    spans.push(trailing_pad(gutter_prefix_len + content_text_len));
-                    lines.push(Line::from(spans).patch_style(row_bg));
                 }
             }
         } else if let ToolCallState::Done { result, .. } = state {

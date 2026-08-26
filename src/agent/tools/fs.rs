@@ -32,7 +32,27 @@ use serde::Deserialize;
 use serde_json::Value;
 use tracing::Instrument;
 
-use super::{ContentSection, Tool, ToolCall, ToolCallResult, ToolError, DEFAULT_TIMEOUT_SECS};
+use super::{
+    ContentSection, Section, Tool, ToolCall, ToolCallResult, ToolError, DEFAULT_TIMEOUT_SECS,
+};
+use crate::sandbox::{ApprovalCheck, SandboxContext};
+
+/// Return `Ok(value_str)` when `args[key]` is a non-empty string, or
+/// `Err(AutoDenied)` with an explanatory reason.
+///
+/// Used inside `needs_approval` implementations to reject malformed tool
+/// calls before any sandbox or user-approval logic runs.
+fn require_string_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, ApprovalCheck> {
+    match args.get(key).and_then(|v| v.as_str()) {
+        Some(value) if !value.is_empty() => Ok(value),
+        Some(_) => Err(ApprovalCheck::AutoDenied {
+            reason: format!("Required argument '{key}' must not be empty"),
+        }),
+        None => Err(ApprovalCheck::AutoDenied {
+            reason: format!("Required argument '{key}' is missing or not a string"),
+        }),
+    }
+}
 
 /// The unit that `ReadFileArgs::offset`/`limit` count, chosen by the model.
 ///
@@ -102,7 +122,7 @@ impl ToolCallResult for ReadResult {
         ]
     }
 
-    fn content_sections(&self) -> Vec<ContentSection> {
+    fn content_sections(&self) -> Vec<Section> {
         if self.content.is_empty() {
             return vec![];
         }
@@ -110,12 +130,12 @@ impl ToolCallResult for ReadResult {
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| e.to_lowercase());
-        vec![ContentSection {
+        vec![Section::Content(ContentSection {
             label: None,
             content: self.content.clone(),
             file_extension,
             line_number_offset: self.starting_line,
-        }]
+        })]
     }
 }
 
@@ -154,7 +174,7 @@ impl ToolCallResult for WriteResult {
         vec![("bytes_written", format!("{}", self.bytes_written))]
     }
 
-    fn content_sections(&self) -> Vec<ContentSection> {
+    fn content_sections(&self) -> Vec<Section> {
         if self.content.is_empty() {
             return vec![];
         }
@@ -162,12 +182,12 @@ impl ToolCallResult for WriteResult {
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| e.to_lowercase());
-        vec![ContentSection {
+        vec![Section::Content(ContentSection {
             label: None,
             content: self.content.clone(),
             file_extension,
             line_number_offset: Some(0),
-        }]
+        })]
     }
 }
 
@@ -199,16 +219,16 @@ impl ToolCallResult for GlobResult {
         vec![("matches", self.matched_paths.len().to_string())]
     }
 
-    fn content_sections(&self) -> Vec<ContentSection> {
+    fn content_sections(&self) -> Vec<Section> {
         if self.text.is_empty() {
             return vec![];
         }
-        vec![ContentSection {
+        vec![Section::Content(ContentSection {
             label: None,
             content: self.text.clone(),
             file_extension: None,
             line_number_offset: Some(0),
-        }]
+        })]
     }
 }
 
@@ -293,7 +313,7 @@ impl ToolCall for WriteCall {
     fn argument_order(&self, key: &str) -> usize {
         WriteTool::default().argument_order(key)
     }
-    fn pending_content_sections(&self) -> Vec<ContentSection> {
+    fn pending_content_sections(&self) -> Vec<Section> {
         let content = self
             .raw_arguments
             .get("content")
@@ -311,12 +331,12 @@ impl ToolCall for WriteCall {
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| e.to_lowercase());
-        vec![ContentSection {
+        vec![Section::Content(ContentSection {
             label: None,
             content: content.to_string(),
             file_extension,
             line_number_offset: Some(0),
-        }]
+        })]
     }
     fn non_default_redacted_arguments(&self) -> Vec<(String, serde_json::Value)> {
         self.raw_arguments
@@ -415,17 +435,35 @@ impl ToolCall for GlobCall {
 // ── Tool definitions ──────────────────────────────────────────────────────────
 
 /// The `read` tool: return the contents of a file, optionally trimmed by
-/// `mode`-counted `offset`/`limit`. `needs_approval` is false — an
-/// **interim/fake** read-only marker (Q5): the real Phase 6 policy is
-/// path-based, and an out-of-workspace read may then require approval.
-#[derive(Debug, Default)]
+/// `mode`-counted `offset`/`limit`.
+#[derive(Debug)]
 pub struct ReadTool {
     timeout_secs: u64,
+    sandbox_context: SandboxContext,
 }
 
 impl ReadTool {
-    pub fn with_timeout(timeout_secs: u64) -> Self {
-        ReadTool { timeout_secs }
+    pub fn new(sandbox_context: SandboxContext) -> Self {
+        ReadTool {
+            timeout_secs: 0,
+            sandbox_context,
+        }
+    }
+
+    pub fn with_timeout(timeout_secs: u64, sandbox_context: SandboxContext) -> Self {
+        ReadTool {
+            timeout_secs,
+            sandbox_context,
+        }
+    }
+}
+
+impl Default for ReadTool {
+    fn default() -> Self {
+        use crate::sandbox::Sandbox;
+        ReadTool::new(SandboxContext::new(std::sync::Arc::new(
+            std::sync::RwLock::new(Sandbox::new()),
+        )))
     }
 }
 
@@ -446,8 +484,31 @@ impl Tool for ReadTool {
         schema_for!(ReadFileArgs)
     }
 
-    fn needs_approval(&self) -> bool {
-        false
+    fn needs_approval(&self, args: &Value) -> ApprovalCheck {
+        let path_str = match require_string_arg(args, "path") {
+            Ok(value) => value,
+            Err(denied) => return denied,
+        };
+        // When the sandbox has no opinion, reads are auto-approved.
+        // Explicit sandbox verdicts (deny or user-approval) are honoured as-is.
+        let sandbox_verdict = self
+            .sandbox_context
+            .check_path(std::path::Path::new(path_str));
+        let approval = match sandbox_verdict {
+            None => ApprovalCheck::AutoApproved,
+            Some(verdict) => verdict,
+        };
+        tracing::debug!(
+            tool = "read",
+            path = path_str,
+            sandbox = match &approval {
+                ApprovalCheck::AutoApproved => "abstain→auto-approved",
+                ApprovalCheck::AutoDenied { .. } => "auto-denied",
+                ApprovalCheck::UserApprovalRequired => "user-approval-required",
+            },
+            "tool approval decision"
+        );
+        approval
     }
 
     fn is_default_argument(&self, key: &str, value: &Value) -> bool {
@@ -484,16 +545,35 @@ impl Tool for ReadTool {
     }
 }
 
-/// The `write` tool: create or overwrite a file. `needs_approval` is true, so
-/// a CLI-only host with no auto-approve denies it.
-#[derive(Debug, Default)]
+/// The `write` tool: create or overwrite a file.
+#[derive(Debug)]
 pub struct WriteTool {
     timeout_secs: u64,
+    sandbox_context: SandboxContext,
 }
 
 impl WriteTool {
-    pub fn with_timeout(timeout_secs: u64) -> Self {
-        WriteTool { timeout_secs }
+    pub fn new(sandbox_context: SandboxContext) -> Self {
+        WriteTool {
+            timeout_secs: 0,
+            sandbox_context,
+        }
+    }
+
+    pub fn with_timeout(timeout_secs: u64, sandbox_context: SandboxContext) -> Self {
+        WriteTool {
+            timeout_secs,
+            sandbox_context,
+        }
+    }
+}
+
+impl Default for WriteTool {
+    fn default() -> Self {
+        use crate::sandbox::Sandbox;
+        WriteTool::new(SandboxContext::new(std::sync::Arc::new(
+            std::sync::RwLock::new(Sandbox::new()),
+        )))
     }
 }
 
@@ -514,8 +594,34 @@ impl Tool for WriteTool {
         schema_for!(WriteFileArgs)
     }
 
-    fn needs_approval(&self) -> bool {
-        true
+    fn needs_approval(&self, args: &Value) -> ApprovalCheck {
+        let path_str = match require_string_arg(args, "path") {
+            Ok(value) => value,
+            Err(denied) => return denied,
+        };
+        if let Err(denied) = require_string_arg(args, "content") {
+            return denied;
+        }
+        // When the sandbox has no opinion, writes require explicit user approval.
+        // Explicit sandbox verdicts (deny or allow) are honoured as-is.
+        let sandbox_verdict = self
+            .sandbox_context
+            .check_path(std::path::Path::new(path_str));
+        let approval = match sandbox_verdict {
+            None => ApprovalCheck::UserApprovalRequired,
+            Some(verdict) => verdict,
+        };
+        tracing::debug!(
+            tool = "write",
+            path = path_str,
+            decision = match &approval {
+                ApprovalCheck::AutoApproved => "auto-approved",
+                ApprovalCheck::AutoDenied { .. } => "auto-denied",
+                ApprovalCheck::UserApprovalRequired => "sandbox-abstain→user-approval-required",
+            },
+            "tool approval decision"
+        );
+        approval
     }
 
     fn non_default_redacted_arguments(&self, arguments: &Value) -> Vec<(String, Value)> {
@@ -555,18 +661,37 @@ impl Tool for WriteTool {
     }
 }
 
-/// The `glob` tool: enumerate pathnames matching a pattern. `needs_approval`
-/// is false — an **interim/fake** read-only marker (Q5): the real Phase 6
-/// policy is path-based, and an out-of-workspace glob may then require
-/// approval.
-#[derive(Debug, Default)]
+/// The `glob` tool: enumerate pathnames matching a pattern.
+#[derive(Debug)]
 pub struct GlobTool {
     timeout_secs: u64,
+    /// Sandbox context carried for when glob approval gains path-scoped rules.
+    #[allow(dead_code)]
+    sandbox_context: SandboxContext,
 }
 
 impl GlobTool {
-    pub fn with_timeout(timeout_secs: u64) -> Self {
-        GlobTool { timeout_secs }
+    pub fn new(sandbox_context: SandboxContext) -> Self {
+        GlobTool {
+            timeout_secs: 0,
+            sandbox_context,
+        }
+    }
+
+    pub fn with_timeout(timeout_secs: u64, sandbox_context: SandboxContext) -> Self {
+        GlobTool {
+            timeout_secs,
+            sandbox_context,
+        }
+    }
+}
+
+impl Default for GlobTool {
+    fn default() -> Self {
+        use crate::sandbox::Sandbox;
+        GlobTool::new(SandboxContext::new(std::sync::Arc::new(
+            std::sync::RwLock::new(Sandbox::new()),
+        )))
     }
 }
 
@@ -587,8 +712,11 @@ impl Tool for GlobTool {
         schema_for!(GlobArgs)
     }
 
-    fn needs_approval(&self) -> bool {
-        false
+    fn needs_approval(&self, args: &Value) -> ApprovalCheck {
+        if let Err(denied) = require_string_arg(args, "pattern") {
+            return denied;
+        }
+        ApprovalCheck::AutoApproved
     }
 
     fn non_default_redacted_arguments(&self, arguments: &Value) -> Vec<(String, Value)> {
@@ -744,16 +872,99 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn read_tool_needs_no_approval_and_has_default_timeout() {
+    fn read_tool_auto_approves_workspace_path_and_has_default_timeout() {
         let tool = ReadTool::default();
-        assert!(!tool.needs_approval());
+        let args = serde_json::json!({ "path": "src/main.rs" });
+        // Phase 6.0: reads inside the workspace are auto-approved by the sandbox;
+        // the cwd is the project root in tests, so "src/main.rs" is in-workspace.
+        assert!(matches!(
+            tool.needs_approval(&args),
+            crate::sandbox::ApprovalCheck::AutoApproved
+        ));
         assert_eq!(tool.timeout_secs(), DEFAULT_TIMEOUT_SECS);
     }
 
     #[test]
     fn write_tool_requires_approval() {
         let tool = WriteTool::default();
-        assert!(tool.needs_approval());
+        let args = serde_json::json!({ "path": "src/main.rs", "content": "hello" });
+        assert!(matches!(
+            tool.needs_approval(&args),
+            crate::sandbox::ApprovalCheck::UserApprovalRequired
+        ));
+    }
+
+    #[test]
+    fn write_tool_outside_workspace_is_auto_denied() {
+        let tool = WriteTool::default();
+        // /tmp is outside the project workspace root (cwd), so the sandbox denies it.
+        let args = serde_json::json!({ "path": "/tmp/evil.sh", "content": "rm -rf /" });
+        assert!(matches!(
+            tool.needs_approval(&args),
+            crate::sandbox::ApprovalCheck::AutoDenied { .. }
+        ));
+    }
+
+    #[test]
+    fn read_tool_missing_path_is_auto_denied() {
+        let tool = ReadTool::default();
+        assert!(matches!(
+            tool.needs_approval(&serde_json::json!({})),
+            crate::sandbox::ApprovalCheck::AutoDenied { .. }
+        ));
+        assert!(matches!(
+            tool.needs_approval(&serde_json::json!({ "path": "" })),
+            crate::sandbox::ApprovalCheck::AutoDenied { .. }
+        ));
+        assert!(matches!(
+            tool.needs_approval(&serde_json::json!({ "path": 42 })),
+            crate::sandbox::ApprovalCheck::AutoDenied { .. }
+        ));
+    }
+
+    #[test]
+    fn write_tool_missing_required_args_are_auto_denied() {
+        let tool = WriteTool::default();
+        // Missing path.
+        assert!(matches!(
+            tool.needs_approval(&serde_json::json!({ "content": "hello" })),
+            crate::sandbox::ApprovalCheck::AutoDenied { .. }
+        ));
+        // Missing content.
+        assert!(matches!(
+            tool.needs_approval(&serde_json::json!({ "path": "out.txt" })),
+            crate::sandbox::ApprovalCheck::AutoDenied { .. }
+        ));
+        // Both missing.
+        assert!(matches!(
+            tool.needs_approval(&serde_json::json!({})),
+            crate::sandbox::ApprovalCheck::AutoDenied { .. }
+        ));
+    }
+
+    #[test]
+    fn write_tool_empty_content_is_auto_denied() {
+        // An empty string for `content` is treated as a malformed call, consistent
+        // with how an empty `path` is handled.
+        let tool = WriteTool::default();
+        let args = serde_json::json!({ "path": "src/empty.rs", "content": "" });
+        assert!(matches!(
+            tool.needs_approval(&args),
+            crate::sandbox::ApprovalCheck::AutoDenied { .. }
+        ));
+    }
+
+    #[test]
+    fn glob_tool_missing_pattern_is_auto_denied() {
+        let tool = GlobTool::default();
+        assert!(matches!(
+            tool.needs_approval(&serde_json::json!({})),
+            crate::sandbox::ApprovalCheck::AutoDenied { .. }
+        ));
+        assert!(matches!(
+            tool.needs_approval(&serde_json::json!({ "pattern": "" })),
+            crate::sandbox::ApprovalCheck::AutoDenied { .. }
+        ));
     }
 
     #[test]
@@ -1153,12 +1364,114 @@ mod tests {
             let sections = result.content_sections();
             assert_eq!(sections.len(), 1, "expected one body section");
             let section = &sections[0];
+            let content_section = match section {
+                super::Section::Content(cs) => cs,
+                other => panic!("expected Section::Content, got {other:?}"),
+            };
             assert_eq!(
-                section.line_number_offset,
+                content_section.line_number_offset,
                 Some(0),
                 "bytes mode must carry line_number_offset Some(0)"
             );
-            assert_eq!(section.file_extension.as_deref(), Some("rs"));
+            assert_eq!(content_section.file_extension.as_deref(), Some("rs"));
         });
+    }
+
+    #[test]
+    fn read_result_empty_content_has_no_sections() {
+        let result = ReadResult {
+            content: String::new(),
+            path: "empty.txt".to_string(),
+            starting_line: None,
+        };
+        assert!(result.content_sections().is_empty());
+    }
+
+    #[test]
+    fn write_result_empty_content_has_no_sections() {
+        let result = WriteResult::new("empty.txt", "", 0);
+        assert!(result.content_sections().is_empty());
+    }
+
+    #[test]
+    fn glob_result_content_sections_empty_and_nonempty() {
+        let empty_result = GlobResult::new(vec![]);
+        assert!(empty_result.content_sections().is_empty());
+
+        let result = GlobResult::new(vec!["src/main.rs".to_string()]);
+        let sections = result.content_sections();
+        assert_eq!(sections.len(), 1);
+        assert!(matches!(sections[0], super::Section::Content(_)));
+    }
+
+    #[test]
+    fn read_call_tool_call_methods() {
+        let id = uuid::Uuid::new_v4();
+        let args = serde_json::json!({ "path": "src/main.rs" });
+        let call = ReadTool::default().create_call(id, args.clone());
+        assert_eq!(call.id(), id);
+        assert_eq!(call.name(), "read");
+        assert_eq!(call.arguments(), &args);
+        assert_eq!(call.timeout_secs(), DEFAULT_TIMEOUT_SECS);
+        assert_eq!(call.argument_order("path"), 0);
+        let redacted = call.non_default_redacted_arguments();
+        assert!(redacted.iter().any(|(key, _)| key == "path"));
+    }
+
+    #[test]
+    fn write_call_tool_call_methods() {
+        let id = uuid::Uuid::new_v4();
+        let args = serde_json::json!({ "path": "out.txt", "content": "hello" });
+        let call = WriteTool::default().create_call(id, args.clone());
+        assert_eq!(call.id(), id);
+        assert_eq!(call.name(), "write");
+        assert_eq!(call.arguments(), &args);
+        assert_eq!(call.argument_order("path"), 0);
+        assert!(call.is_body_argument("content"));
+        assert!(!call.is_body_argument("path"));
+        let redacted = call.non_default_redacted_arguments();
+        let content_entry = redacted.iter().find(|(key, _)| key == "content");
+        assert!(
+            content_entry.map(|(_, v)| v.as_str().unwrap_or("").starts_with("REDACTED"))
+                == Some(true)
+        );
+        let sections = call.pending_content_sections();
+        assert_eq!(sections.len(), 1);
+    }
+
+    #[test]
+    fn write_call_pending_content_sections_empty_for_empty_content() {
+        let args = serde_json::json!({ "path": "out.txt", "content": "" });
+        let call = WriteTool::default().create_call(uuid::Uuid::new_v4(), args);
+        assert!(call.pending_content_sections().is_empty());
+    }
+
+    #[test]
+    fn glob_call_tool_call_methods() {
+        let id = uuid::Uuid::new_v4();
+        let args = serde_json::json!({ "pattern": "**/*.rs" });
+        let call = GlobTool::default().create_call(id, args.clone());
+        assert_eq!(call.id(), id);
+        assert_eq!(call.name(), "glob");
+        assert_eq!(call.arguments(), &args);
+        assert_eq!(call.timeout_secs(), DEFAULT_TIMEOUT_SECS);
+        assert_eq!(call.argument_order("pattern"), 0);
+        let redacted = call.non_default_redacted_arguments();
+        assert!(redacted.iter().any(|(key, _)| key == "pattern"));
+    }
+
+    #[test]
+    fn tools_with_timeout_constructor() {
+        let make_ctx = || {
+            SandboxContext::new(std::sync::Arc::new(std::sync::RwLock::new(
+                crate::sandbox::Sandbox::new(),
+            )))
+        };
+        let read_tool = ReadTool::with_timeout(10, make_ctx());
+        assert_eq!(read_tool.timeout_secs(), 10);
+        let write_tool = WriteTool::with_timeout(20, make_ctx());
+        assert_eq!(write_tool.timeout_secs(), 20);
+        let glob_tool = GlobTool::with_timeout(30, make_ctx());
+        assert_eq!(glob_tool.timeout_secs(), 30);
     }
 }

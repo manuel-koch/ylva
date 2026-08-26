@@ -21,6 +21,7 @@ use crate::agent::tools::default_registry;
 use crate::agent::{AgentLoop, Role, UiUpdate};
 use crate::config::ProfileConfig;
 use crate::engine::Engine;
+use crate::sandbox::Sandbox;
 
 /// Constructs [`AgentLoop`] instances from a named set of [`Engine`]s and a
 /// [`ProfileConfig`].
@@ -66,7 +67,8 @@ impl AgentFactory {
             .get(engine_name)
             .ok_or_else(|| anyhow::anyhow!("unknown engine: {engine_name}"))?;
 
-        let registry = Arc::new(default_registry());
+        let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new()));
+        let registry = Arc::new(default_registry(sandbox));
         let (agent_loop, ui_rx) = AgentLoop::new(Arc::clone(engine), registry);
         Ok((agent_loop, ui_rx))
     }

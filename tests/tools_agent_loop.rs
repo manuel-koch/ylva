@@ -25,9 +25,9 @@ use tempfile::TempDir;
 use tokio::sync::mpsc;
 
 use ylva::{
-    default_registry, AgentCommand, AgentLoop, DeltaChunk, EngineImpl, Message, MockEvent,
-    MockProvider, Tool, ToolCall, ToolCallResult, ToolError, ToolRegistry, UiUpdate,
-    MAX_TOOL_USE_ITERATIONS,
+    default_registry, AgentCommand, AgentLoop, ApprovalCheck, DeltaChunk, EngineImpl, Message,
+    MockEvent, MockProvider, Sandbox, Tool, ToolCall, ToolCallResult, ToolError, ToolRegistry,
+    UiUpdate, MAX_TOOL_USE_ITERATIONS,
 };
 
 /// Build a `MockEvent::Delta` carrying a complete tool call for `index`.
@@ -82,15 +82,24 @@ where
     let mut collected = Vec::new();
     loop {
         if let Ok(update) = ui_rx.try_recv() {
-            if let UiUpdate::ToolPending { id, name, .. } = &update {
-                let needs_approval = registry.get(name).is_some_and(|tool| tool.needs_approval());
-                let command = if needs_approval {
+            if let UiUpdate::ToolPending {
+                id,
+                name,
+                arguments,
+                ..
+            } = &update
+            {
+                let approval_check = registry
+                    .get(name)
+                    .map(|tool| tool.needs_approval(arguments))
+                    .unwrap_or(ApprovalCheck::UserApprovalRequired);
+                let command = if matches!(approval_check, ApprovalCheck::AutoApproved) {
+                    AgentCommand::ApproveTool { id: *id }
+                } else {
                     AgentCommand::DenyTool {
                         id: *id,
                         reason: "denied in test".into(),
                     }
-                } else {
-                    AgentCommand::ApproveTool { id: *id }
                 };
                 agent.send_command(command).await;
             }
@@ -124,14 +133,28 @@ fn scratch_file(dir: &TempDir, name: &str, content: &str) -> String {
     path.display().to_string()
 }
 
+fn make_sandbox() -> std::sync::Arc<std::sync::RwLock<Sandbox>> {
+    std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new()))
+}
+
 #[tokio::test(start_paused = true)]
 async fn tool_call_pauses_for_approval_then_reprompts_after_result() {
+    // Phase 6.0: reads are auto-approved for in-workspace files and auto-denied for
+    // files outside the workspace. Writes always require explicit user approval
+    // (UserApprovalRequired). This test uses `write` to exercise the ToolPending flow.
     let dir = TempDir::new().expect("tempdir");
-    let file = scratch_file(&dir, "a.txt", "hello tool");
-    let registry = Arc::new(default_registry());
+    let output_path = dir.path().join("out.txt").to_string_lossy().to_string();
+    let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox {
+        workspace_root: dir.path().to_path_buf(),
+    }));
+    let registry = Arc::new(default_registry(sandbox));
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(
-        vec![call("read", 0, serde_json::json!({ "path": file }))],
+        vec![call(
+            "write",
+            0,
+            serde_json::json!({ "path": output_path, "content": "hello tool" }),
+        )],
         interval,
     );
     let (mut agent, mut ui_rx) = AgentLoop::new(
@@ -143,15 +166,15 @@ async fn tool_call_pauses_for_approval_then_reprompts_after_result() {
     );
 
     agent
-        .send_command(AgentCommand::Prompt("read it".into()))
+        .send_command(AgentCommand::Prompt("write it".into()))
         .await;
     let handle = agent.run();
     let _ = collect_until_advancing(&mut ui_rx, interval, is_stream_started).await;
 
-    // The deltas + Done assemble into a tool call; the loop pauses at
-    // ToolPending and must NOT re-prompt without approval.
+    // The write tool requires user approval (UserApprovalRequired); the loop pauses
+    // at ToolPending and must NOT re-prompt without approval.
     let pending = collect_until_advancing(&mut ui_rx, interval, is_tool_pending).await;
-    assert!(matches!(pending.last(), Some(UiUpdate::ToolPending { name, .. }) if name == "read"));
+    assert!(matches!(pending.last(), Some(UiUpdate::ToolPending { name, .. }) if name == "write"));
     assert_quiescent(&mut ui_rx, interval).await;
 
     // Approve, then a fresh re-prompt stream follows a ToolStart + ToolDone.
@@ -163,18 +186,18 @@ async fn tool_call_pauses_for_approval_then_reprompts_after_result() {
     let after = collect_until_advancing(&mut ui_rx, interval, is_stream_started).await;
     assert!(matches!(
         after.first(),
-        Some(UiUpdate::ToolStart { name, .. }) if name == "read"
+        Some(UiUpdate::ToolStart { name, .. }) if name == "write"
     ));
     assert!(matches!(
         after.iter().find(|u| matches!(u, UiUpdate::ToolDone { .. })),
-        Some(UiUpdate::ToolDone { result, .. }) if result.contains("hello tool")
+        Some(UiUpdate::ToolDone { result, .. }) if result.contains("wrote")
     ));
 
     drop(agent);
     let context = handle.await.expect("loop ok").expect("context");
     assert!(matches!(
         context.messages().iter().find(|m| matches!(m, Message::ToolResult { .. })),
-        Some(Message::ToolResult { name, result, .. }) if name == "read" && result.contains("hello tool")
+        Some(Message::ToolResult { name, result, .. }) if name == "write" && result.contains("wrote")
     ));
 }
 
@@ -183,7 +206,12 @@ async fn two_tool_calls_drain_serially_with_single_reprompt() {
     let dir = TempDir::new().expect("tempdir");
     let a = scratch_file(&dir, "a.txt", "AAAA");
     let b = scratch_file(&dir, "b.txt", "BBBB");
-    let registry = Arc::new(default_registry());
+    // Phase 6.0: reads inside the workspace are auto-approved. Use the tmpdir as
+    // the workspace root so both scratch files are within the sandbox.
+    let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox {
+        workspace_root: dir.path().to_path_buf(),
+    }));
+    let registry = Arc::new(default_registry(sandbox));
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(
         vec![
@@ -251,13 +279,13 @@ async fn two_tool_calls_drain_serially_with_single_reprompt() {
 
 #[tokio::test(start_paused = true)]
 async fn failing_tool_emits_tool_error_and_still_reprompts() {
-    let registry = Arc::new(default_registry());
+    let registry = Arc::new(default_registry(make_sandbox()));
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(
         vec![call(
             "read",
             0,
-            serde_json::json!({ "path": "/nonexistent/never.txt" }),
+            serde_json::json!({ "path": "nonexistent_file_that_does_not_exist.txt" }),
         )],
         interval,
     );
@@ -307,7 +335,7 @@ async fn failing_tool_emits_tool_error_and_still_reprompts() {
 async fn denied_write_is_fed_back_and_triggers_a_new_request() {
     let dir = TempDir::new().expect("tempdir");
     let file = scratch_file(&dir, "a.txt", "content");
-    let registry = Arc::new(default_registry());
+    let registry = Arc::new(default_registry(make_sandbox()));
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(
         vec![
@@ -367,14 +395,20 @@ async fn denied_write_is_fed_back_and_triggers_a_new_request() {
 #[tokio::test(start_paused = true)]
 async fn stop_while_awaiting_approval_clears_pending_tools() {
     let dir = TempDir::new().expect("tempdir");
-    let a = scratch_file(&dir, "a.txt", "A");
-    let b = scratch_file(&dir, "b.txt", "B");
-    let registry = Arc::new(default_registry());
+    let a = dir.path().join("a.txt").to_string_lossy().to_string();
+    let b = dir.path().join("b.txt").to_string_lossy().to_string();
+    // Phase 6.0: writes always require user approval (UserApprovalRequired), so
+    // both calls will produce ToolPending.  Use tmpdir as workspace root so
+    // the sandbox does not auto-deny the paths.
+    let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox {
+        workspace_root: dir.path().to_path_buf(),
+    }));
+    let registry = Arc::new(default_registry(sandbox));
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(
         vec![
-            call("read", 0, serde_json::json!({ "path": a })),
-            call("read", 1, serde_json::json!({ "path": b })),
+            call("write", 0, serde_json::json!({ "path": a, "content": "A" })),
+            call("write", 1, serde_json::json!({ "path": b, "content": "B" })),
         ],
         interval,
     );
@@ -493,8 +527,8 @@ impl Tool for SleepTool {
     fn schema(&self) -> RootSchema {
         schema_for!(SleepArgs)
     }
-    fn needs_approval(&self) -> bool {
-        false
+    fn needs_approval(&self, _args: &serde_json::Value) -> ApprovalCheck {
+        ApprovalCheck::AutoApproved
     }
     fn timeout_secs(&self) -> u64 {
         600
@@ -512,7 +546,7 @@ impl Tool for SleepTool {
 
 #[tokio::test(start_paused = true)]
 async fn stop_mid_tool_kills_tool_and_returns_to_idle() {
-    let mut registry = default_registry();
+    let mut registry = default_registry(make_sandbox());
     registry.register(Arc::new(SleepTool));
     let registry = Arc::new(registry);
     let interval = Duration::from_millis(5);
@@ -529,13 +563,8 @@ async fn stop_mid_tool_kills_tool_and_returns_to_idle() {
     agent.send_command(AgentCommand::Prompt("nap".into())).await;
     let handle = agent.run();
     let _ = collect_until_advancing(&mut ui_rx, interval, is_stream_started).await;
-    let pending = collect_until_advancing(&mut ui_rx, interval, is_tool_pending).await;
-    let id = match pending.last().unwrap() {
-        UiUpdate::ToolPending { id, .. } => *id,
-        _ => unreachable!(),
-    };
-
-    agent.send_command(AgentCommand::ApproveTool { id }).await;
+    // Phase 6.0: SleepTool is AutoApproved — the loop starts it directly without
+    // ToolPending. Collect until ToolStart arrives.
     let started = collect_until_advancing(&mut ui_rx, interval, |u| {
         matches!(u, UiUpdate::ToolStart { .. })
     })
@@ -567,7 +596,7 @@ async fn stop_mid_tool_kills_tool_and_returns_to_idle() {
 
 #[tokio::test(start_paused = true)]
 async fn iteration_guard_stops_after_max_reprompts() {
-    let registry = Arc::new(default_registry());
+    let registry = Arc::new(default_registry(make_sandbox()));
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(
         vec![call(
