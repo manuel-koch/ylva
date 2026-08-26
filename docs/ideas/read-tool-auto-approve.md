@@ -38,3 +38,14 @@ globs = [
     "allow:/tmp/**"
 ]
 ```
+
+## Open Questions
+
+- How to integrate tool config into agent config ?
+  Currently agent config only seems to include a flat `allowed_tools` list.
+  There is no way to re-configure or override specific config per tool for
+  just this agent.
+  - we could introduce custom tools with a new name ( keeping the title ),
+    that derive from a known tool and configure it.
+    E.g. `read-for-research-agent` ( only allows reading markdown files within project ),
+    could be used by the `research-agent` config to include a specialized `read` tool.

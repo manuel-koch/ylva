@@ -433,7 +433,7 @@ Phase 5 introduces all the missing types so Phase 6 has stable seams to build ag
 
 ### Step 11 — Final verification
 
-- [ ] Done
+- [x] Done
 - Run `make test` — all tests must pass.
 - Run `make test-coverage` — must remain ≥80%.
 - Run `cargo clippy -- -D warnings` — zero warnings.

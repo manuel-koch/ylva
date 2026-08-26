@@ -19,7 +19,8 @@ Create a minimal `ratatui` + `tokio` application that simulates an LLM stream.
   `try_recv()` (bounded per-frame cap) rather than one at a time, so it sustains ~60 FPS at high
   injection rates.
 - Draw at ~60 FPS. Log frame times to verify no dropped frames, no input latency, and no consumer starvation.
-  "No channel backpressure" is measured as **steady-state queue depth ≤ 1 frame's worth (~20 tokens) at 1000+ msg/s**,
+  "No channel backpressure" is measured as **steady-state queue depth ≤ 1 frame's worth
+  (~20 tokens) at 1000+ msg/s**,
   i.e. the consumer never falls behind — not as the producer never waiting on a full channel.
   A bounded channel (`send().await` throttles the generator under overload) keeps memory flat regardless.
 - Test rapid steering: send a mid-stream `AgentCommand::Prompt` — verify the stream is **not**
@@ -31,7 +32,8 @@ Create a minimal `ratatui` + `tokio` application that simulates an LLM stream.
 
 - Frame time consistently ≤ 17 ms.
 - Keyboard input (Enter, Ctrl+C, typing) responds instantly regardless of stream volume.
-- Steady-state channel queue depth ≤ ~20 tokens at 1000+ msg/s (no consumer starvation / no effective backpressure).
+- Steady-state channel queue depth ≤ ~20 tokens at 1000+ msg/s
+  (no consumer starvation / no effective backpressure).
 - No memory growth (flat peak buffered memory) after 10 minutes of continuous token injection.
 
 #### Spike 1 Outcome
@@ -268,8 +270,10 @@ works even if crossterm's event queue is momentarily stuck.
 
 **Key principles:**
 
-1. **The TUI thread never blocks on I/O.** All LLM and tool I/O runs in a `tokio` task and communicates back via channels.
-2. **The input box is never disabled.** The user can type and hit Enter at any moment — even while tokens are streaming.
+1. **The TUI thread never blocks on I/O.** All LLM and tool I/O runs in a `tokio` task
+   and communicates back via channels.
+2. **The input box is never disabled.** The user can type and hit Enter at any moment
+   — even while tokens are streaming.
 3. **Interruption is cooperative.** `Ctrl+C` / `Esc` fires the `CancellationToken` to abort the HTTP
    stream and any running tool, preserve whatever partial response was received, and return to idle.
 4. **Steering never aborts.** A new user message sent while the agent is busy is queued and injected
@@ -360,7 +364,8 @@ src/
 
 ## 4. Core Implementation Patterns
 
-**Unified provider decision:** Ollama exposes an OpenAI-compatible API at `/v1/chat/completions` (since v0.1.24).
+**Unified provider decision:** Ollama exposes an OpenAI-compatible API at
+`/v1/chat/completions` (since v0.1.24).
 Therefore, we do **not** need separate provider crates. A **single** raw `reqwest` + `eventsource-stream`
 implementation targets the OpenAI chat-completions spec and works for both OpenRouter and Ollama via
 configuration (`base_url`, `api_key`, `model`). This eliminates:
@@ -369,7 +374,8 @@ configuration (`base_url`, `api_key`, `model`). This eliminates:
 - Hidden cancellation semantics inside convenience wrappers (`async-openai`, `ollama-rs`).
 - The risk that one crate's stream adapter leaks connections when dropped.
 
-All streaming logic — SSE parsing, `CancellationToken` polling, `ToolCallAccumulator` — lives in one place.
+All streaming logic — SSE parsing, `CancellationToken` polling, `ToolCallAccumulator`
+— lives in one place.
 
 ### A. Unified Provider & Engine Traits (with Abort)
 
@@ -393,7 +399,8 @@ The runtime exposes **two** layers (see [class-diagram.mmd](./class-diagram.mmd)
 > that Ylva currently ships an OpenAI-compatible provider must not leak the OpenAI path structure into
 > the trait or into `base_url`'s meaning. The concrete `OpenAiProvider` receives a `base_url` that
 > includes the backend origin and version prefix (OpenRouter `https://openrouter.ai/api/v1`, Ollama
-> `http://localhost:11434/v1`) and internally appends `/chat/completions`. This leaves room for future provider-side queries (e.g. model listing) under the
+> `http://localhost:11434/v1`) and internally appends `/chat/completions`. This leaves
+> room for future provider-side queries (e.g. model listing) under the
 > same `base_url`.
 
 ```rust
@@ -928,7 +935,10 @@ loop {
         // 3. Crossterm events (spawn_blocking bridged to async)
         Some(evt) = event_rx.recv() => {
             match evt {
-                Event::Key(KeyEvent { code: KeyCode::Char('c'), modifiers: KeyModifiers::CONTROL }) => {
+                Event::Key(KeyEvent {
+                    code: KeyCode::Char('c'),
+                    modifiers: KeyModifiers::CONTROL,
+                }) => {
                     cmd_tx.send(AgentCommand::Stop).await.ok();
                 }
                 Event::Key(KeyEvent { code: KeyCode::Enter, .. }) => {
@@ -1032,7 +1042,10 @@ impl Context {
     fn push_user(&mut self, text: String) {
         self.messages.push(Message::User { content: text });
     }
-    fn push_assistant(&mut self, content: String, status: AssistantStatus, tool_calls: Vec<ToolCallRequest>) {
+    fn push_assistant(
+        &mut self, content: String, status: AssistantStatus,
+        tool_calls: Vec<ToolCallRequest>,
+    ) {
         self.messages.push(Message::Assistant { content, status, tool_calls });
     }
     fn messages(&self) -> &[Message] {
@@ -1050,7 +1063,8 @@ impl Context {
   Phase 1; a future config phase sources this from a customizable **SOUL.md**,
   see §4G).
 - `push_user(text)` → `Message::User { content: text }`
-- `push_assistant(content, status, tool_calls)` → `Message::Assistant { content, status, tool_calls }`
+- `push_assistant(content, status, tool_calls)` →
+  `Message::Assistant { content, status, tool_calls }`
 
 **Phase 7 (future):** Replace `Vec<Message>` with `Vec<TieredMessage>`, add
 `push_system`, `push_initial_context`, `push_compacted`, `maybe_compact`,
@@ -1278,7 +1292,8 @@ handler fires the tool's `CancellationToken`, killing the process. The task then
 **Process-group termination:** For shell/spawning tools (`bash`, and any tool that runs subprocesses
 such as `curl | sh` or a script with backgrounded `&` jobs), `tokio::process::Command::kill()` alone
 only kills the direct child, leaving orphaned grandchildren. Use `Command::process_group(0)` so the
-child runs in its own process group, and on timeout/cancel kill the **process group** (kill the group id,
+child runs in its own process group, and on timeout/cancel kill the **process group**
+(kill the group id,
 e.g. via `nix::sys::signal::killpg`) to tear down the whole tree. Plain file tools need no
 process-group treatment.
 
@@ -2204,7 +2219,8 @@ of a line to avoid triggering inside pasted code.
 the first user message, truncated and single-line (see §4H decision 8) — so
 headless runs are easy to find later via `rg '"type":"meta"' ~/.ylva/chats/`.
 
-**Persistence:** Always persists to a JSONL session file (§4H); there is no `--no-persist` flag. Every run leaves a trace
+**Persistence:** Always persists to a JSONL session file (§4H); there is no `--no-persist` flag.
+Every run leaves a trace
 for later review.
 
 **Buffering strategy:** Buffer everything and emit at the end. For `--format text`, the user sees
@@ -2515,7 +2531,7 @@ Decisions recorded during implementation:
 
 **Decision:** Replace the imperative, mixed-concern `handle_action` in `tui_runner.rs` with a
 pure reducer pattern (`update(state, event) → Vec<Effect>`) and a clean MVP module split.
-See [reducer-state-handling-plan.md](./plans/reducer-state-handling-plan.md).
+See reducer-state-handling-plan.md.
 
 - [x] **`src/app_state.rs` (Model):** pure view-model; defines `AppState`, `TuiMode`, `Focus`,
       `AppLayout`, `Effect`, `InputEvent`, `DomainEvent`. No ratatui backend, no channel types.
@@ -2569,7 +2585,8 @@ See [reducer-state-handling-plan.md](./plans/reducer-state-handling-plan.md).
       resolves to `default_engine`); document quoted-key engine names
       (`[engines."ollama/local"]`) as opt-in.
 
-- [x] **Child-agent construction** (§4G) uses `AgentFactory::create(profile, agent_type, Role::Child { ... })` from
+- [x] **Child-agent construction** (§4G) uses
+      `AgentFactory::create(profile, agent_type, Role::Child { ... })` from
       the start — no `AgentLoop::new()` direct calls for child agents.
 
 **Key crates:** none new (uses existing `tokio`, `reqwest`, `serde`).
@@ -2634,9 +2651,13 @@ See [reducer-state-handling-plan.md](./plans/reducer-state-handling-plan.md).
 
 - [ ] Token counting with cached counts per `TieredMessage` (re-count on insertion, not every request)
 
-- [ ] Context window compaction: when total > `context_length × 0.9`, compact to ≤ `context_length × compact_target_ratio` (default 0.5, per `EngineConfig`); minimal intervention, drops/summarizes oldest `Recent`/`Compacted` messages (`maybe_compact`)
+- [ ] Context window compaction: when total > `context_length × 0.9`, compact to
+  ≤ `context_length × compact_target_ratio` (default 0.5, per `EngineConfig`);
+  minimal intervention, drops/summarizes oldest `Recent`/`Compacted` messages
+  (`maybe_compact`)
 
-- [ ] Phase 7 extension: replace "drop" with on-the-fly summarization via a cheap local model (engine = `compact_engine`, §4G)
+- [ ] Phase 7 extension: replace "drop" with on-the-fly summarization via a cheap local model
+  (engine = `compact_engine`, §4G)
 
 - [ ] `/commands` in input box (e.g., `/model`, `/tools`, `/clear`, `/save`)
 
@@ -2783,9 +2804,11 @@ Study these for patterns:
 
 - [ ] **Can interrupt model generation at any time with** `Ctrl+C`
 
-- [ ] **Can type and send new messages while the model is still streaming** (queued and injected at the next natural point)
+- [ ] **Can type and send new messages while the model is still streaming**
+  (queued and injected at the next natural point)
 
-- [ ] Interrupted partial messages are preserved in conversation history; queued steers are shown as pending until injected
+- [ ] Interrupted partial messages are preserved in conversation history;
+  queued steers are shown as pending until injected
 
 - [ ] Reads and proposes file edits with diff preview
 
