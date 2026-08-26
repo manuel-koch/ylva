@@ -138,16 +138,16 @@ Run `make test-coverage` at the end of every sub-phase to confirm ≥80% line co
 **Goal:** All compile-time and runtime foundations every subsequent sub-phase depends on.
 No user-visible behavior. Must be fully green before any tool work begins.
 
-1. Add to `[dependencies]` in `Cargo.toml`:
-   - `nix = { version = "0.29", features = ["signal", "process"] }` under
-     `[target.'cfg(unix)'.dependencies]`
-   - `ignore = "0.4"`
-   - `regex = "1"`
-   - `similar = { version = "2", features = ["text"] }`
+- [ ] 1. Add to `[dependencies]` in `Cargo.toml`:
+  - `nix = { version = "0.29", features = ["signal", "process"] }` under
+    `[target.'cfg(unix)'.dependencies]`
+  - `ignore = "0.4"`
+  - `regex = "1"`
+  - `similar = { version = "2", features = ["text"] }`
 
-2. Create `src/sandbox.rs`. Define `ApprovalCheck`, `SandboxRule`, `Sandbox`, and
-   `SandboxContext` (last-match-wins evaluation; see
-   `docs/ideas/read-tool-auto-approve.md` for the full model):
+- [ ] 2. Create `src/sandbox.rs`. Define `ApprovalCheck`, `SandboxRule`, `Sandbox`, and
+  `SandboxContext` (last-match-wins evaluation; see
+  `docs/ideas/read-tool-auto-approve.md` for the full model):
 
    ```rust
    pub enum ApprovalCheck {
@@ -181,7 +181,7 @@ No user-visible behavior. Must be fully green before any tool work begins.
    }
    ```
 
-3. Introduce `Section` enum in `src/agent/tools.rs` alongside `ContentSection`:
+- [ ] 3. Introduce `Section` enum in `src/agent/tools.rs` alongside `ContentSection`:
 
    ```rust
    pub struct DiffSection {
@@ -195,48 +195,55 @@ No user-visible behavior. Must be fully green before any tool work begins.
    }
    ```
 
-   Change `ToolCall::pending_content_sections()` and `ToolCallResult::content_sections()`
-   to return `Vec<Section>` instead of `Vec<ContentSection>`. Add default implementations
-   returning `vec![]`. Update every existing implementor to wrap `ContentSection` in
-   `Section::Content(...)` — mechanical, no logic change.
+  Change `ToolCall::pending_content_sections()` and `ToolCallResult::content_sections()`
+  to return `Vec<Section>` instead of `Vec<ContentSection>`. Add default implementations
+  returning `vec![]`. Update every existing implementor to wrap `ContentSection` in
+  `Section::Content(...)` — mechanical, no logic change.
 
-4. Update `default_registry()` in `src/agent/tools.rs` to accept
-   `sandbox: Arc<RwLock<Sandbox>>`. Each tool is constructed with
-   `SandboxContext::new(Arc::clone(&sandbox))`.
+  **Breaking-change note:** this is a coordinated change — all existing tools, all
+  rendering paths in `tui_driver.rs` / `ui.rs`, and all test assertions on these methods
+  must be updated in the same commit to avoid compilation failures mid-refactor.
 
-5. Update the `Tool` trait: replace `fn needs_approval(&self) -> bool` with
-   `fn needs_approval(&self, args: &Value) -> ApprovalCheck`. Default: return
-   `UserApprovalRequired`. Update every existing implementor (`ReadTool`, `WriteTool`,
-   `GlobTool` in `src/agent/tools/fs.rs`; `TestTool` in the unit-test module). Each
-   concrete tool struct gains `sandbox_context: SandboxContext`.
+- [ ] 4. Update `default_registry()` in `src/agent/tools.rs` to accept
+  `sandbox: Arc<RwLock<Sandbox>>`. Each tool is constructed with
+  `SandboxContext::new(Arc::clone(&sandbox))`.
 
-6. Wire `ApprovalCheck` into the agent loop (`src/agent.rs`) and `src/cli_driver.rs`:
-   - `AutoApproved` → execute immediately, no pause.
-   - `AutoDenied { reason }` → send `ToolError` with the reason; no pause.
-   - `UserApprovalRequired` → existing pause/`ToolPending` path (unchanged).
+  **Call-site atomicity:** every call site (`src/agent.rs`, `src/agent_factory.rs`, and
+  tests) must be updated in the same commit as steps 4–6 to keep the codebase compilable.
 
-   Construct `Arc::new(RwLock::new(Sandbox::new()))` once in `AgentLoop::new` and
-   pass to `default_registry(sandbox)`. Add `session_id: Uuid` field to `AgentLoop`,
-   generated via `Uuid::new_v4()` in `new()`.
+- [ ] 5. Update the `Tool` trait: replace `fn needs_approval(&self) -> bool` with
+  `fn needs_approval(&self, args: &Value) -> ApprovalCheck`. Default: return
+  `UserApprovalRequired`. Update every existing implementor (`ReadTool`, `WriteTool`,
+  `GlobTool` in `src/agent/tools/fs.rs`; `TestTool` in the unit-test module). Each
+  concrete tool struct gains `sandbox_context: SandboxContext`.
 
-   Update every `default_registry()` call site (in `src/agent.rs`, `src/agent_factory.rs`,
-   and tests) atomically in the same commit as steps 4–6.
+- [ ] 6. Wire `ApprovalCheck` into the agent loop (`src/agent.rs`) and `src/cli_driver.rs`:
+  - `AutoApproved` → execute immediately, no pause.
+  - `AutoDenied { reason }` → send `ToolError` with the reason; no pause.
+  - `UserApprovalRequired` → existing pause/`ToolPending` path (unchanged).
 
-7. Update render path for `pending_content_sections()`: in `tui_driver.rs` / `ui.rs`,
-   when a tool is pending approval and `call.pending_content_sections()` returns
-   `Section::Diff(...)` entries, render them with `+` lines in green and `−` lines in red
-   in a scrollable overlay above the approval footer. `Section::Content(...)` entries render
-   as before (line numbers + syntax highlighting). Collapse to a one-line summary if
-   terminal height is below 20 rows.
+    Construct `Arc::new(RwLock::new(Sandbox::new()))` once in `AgentLoop::new` and
+    pass to `default_registry(sandbox)`. Add `session_id: Uuid` field to `AgentLoop`,
+    generated via `Uuid::new_v4()` in `new()`.
 
-8. Write unit tests:
-   - `SandboxContext::check_path`: outside-workspace denied; dot-path denied; later
-     `allow` glob overrides earlier deny (last-match wins); no-match → `UserApprovalRequired`.
-   - `WriteTool::needs_approval`: always returns `UserApprovalRequired` regardless of path.
-   - `Section` round-trips: existing tool calls still produce `Section::Content` sections.
-   - Agent loop: `AutoApproved` skips pause; `AutoDenied` emits `ToolError`.
+    Update every `default_registry()` call site (in `src/agent.rs`, `src/agent_factory.rs`,
+    and tests) atomically in the same commit as steps 4–6.
 
-9. Run `make test` + `make test-coverage`. Fix regressions before continuing.
+- [ ] 7. Update render path for `pending_content_sections()`: in `tui_driver.rs` / `ui.rs`,
+  when a tool is pending approval and `call.pending_content_sections()` returns
+  `Section::Diff(...)` entries, render them with `+` lines in green and `−` lines in red
+  in a scrollable overlay above the approval footer. `Section::Content(...)` entries render
+  as before (line numbers + syntax highlighting). Collapse to a one-line summary if
+  terminal height is below 20 rows.
+
+- [ ] 8. Write unit tests:
+  - `SandboxContext::check_path`: outside-workspace denied; dot-path denied; later
+    `allow` glob overrides earlier deny (last-match wins); no-match → `UserApprovalRequired`.
+  - `WriteTool::needs_approval`: always returns `UserApprovalRequired` regardless of path.
+  - `Section` round-trips: existing tool calls still produce `Section::Content` sections.
+  - Agent loop: `AutoApproved` skips pause; `AutoDenied` emits `ToolError`.
+
+- [ ] 9. Run `make test` + `make test-coverage`. Fix regressions before continuing.
 
 ---
 
@@ -244,41 +251,41 @@ No user-visible behavior. Must be fully green before any tool work begins.
 
 **Goal:** Shell command execution with process-group kill and 30-second timeout.
 
-10. Create `src/agent/tools/bash.rs`. Define:
+- [ ] 10. Create `src/agent/tools/bash.rs`. Define:
 
     ```rust
     #[derive(JsonSchema, Deserialize)]
     struct BashArgs { command: String }
     ```
 
-    Implement `BashTool` + `BashCall`. `BashTool` embeds `sandbox_context: SandboxContext`.
-    In `BashCall::run`:
-    - Spawn via `tokio::process::Command::new("bash").arg("-c").arg(&command)`
-      with `.process_group(0)`.
-    - Capture pgid immediately after spawn via `.id()`.
-    - Read stdout and stderr concurrently via two async tasks, merging lines in arrival
-      order (true interleaved output). Buffer up to 100 KB total; once the cap is hit,
-      stop buffering and discard remaining output.
-    - Wrap in `tokio::time::timeout(Duration::from_secs(DEFAULT_BASH_TIMEOUT_SECS), ...)`.
-    - On timeout or `CancellationToken` fire: kill the process group via
-      `nix::sys::signal::killpg(Pid::from_raw(pgid as i32), Signal::SIGKILL)`.
-    - Return buffered output on success; include `tool_output_truncated: true` and
-      `tool_output_truncated_at_bytes: <n>` in result metadata when the cap was hit.
-      Return `ToolError` on non-zero exit or timeout.
-    - `needs_approval(&self, _args)` returns `UserApprovalRequired` unconditionally
-      (or `AutoApproved` when `--auto-approve-bash` is set — **not** in Phase 6).
-    - Define `DEFAULT_BASH_TIMEOUT_SECS: u64 = 30` alongside `DEFAULT_TOOL_TIMEOUT_SECS`.
-    - Define `BASH_OUTPUT_LIMIT_BYTES: usize = 100 * 1024`.
+  Implement `BashTool` + `BashCall`. `BashTool` embeds `sandbox_context: SandboxContext`.
+  In `BashCall::run`:
+  - Spawn via `tokio::process::Command::new("bash").arg("-c").arg(&command)`
+    with `.process_group(0)`.
+  - Capture pgid immediately after spawn via `.id()`.
+  - Read stdout and stderr concurrently via two async tasks, merging lines in arrival
+    order (true interleaved output). Buffer up to 100 KB total; once the cap is hit,
+    stop buffering and discard remaining output.
+  - Wrap in `tokio::time::timeout(Duration::from_secs(DEFAULT_BASH_TIMEOUT_SECS), ...)`.
+  - On timeout or `CancellationToken` fire: kill the process group via
+    `nix::sys::signal::killpg(Pid::from_raw(pgid as i32), Signal::SIGKILL)`.
+  - Return buffered output on success; include `tool_output_truncated: true` and
+    `tool_output_truncated_at_bytes: <n>` in result metadata when the cap was hit.
+    Return `ToolError` on non-zero exit or timeout.
+  - `needs_approval(&self, _args)` returns `UserApprovalRequired` unconditionally
+    (or `AutoApproved` when `--auto-approve-bash` is set — **not** in Phase 6).
+  - Define `DEFAULT_BASH_TIMEOUT_SECS: u64 = 30` alongside `DEFAULT_TOOL_TIMEOUT_SECS`.
+  - Define `BASH_OUTPUT_LIMIT_BYTES: usize = 100 * 1024`.
 
-11. Register `BashTool` in `default_registry()`.
+- [ ] 11. Register `BashTool` in `default_registry()`.
 
-12. Write unit tests: happy path (`echo`), timeout kills child process group, cancellation
-    token kills child process group, output truncated at 100 KB cap (`tool_output_truncated`
-    metadata present), non-zero exit returns `ToolError`.
+- [ ] 12. Write unit tests: happy path (`echo`), timeout kills child process group, cancellation
+  token kills child process group, output truncated at 100 KB cap (`tool_output_truncated`
+  metadata present), non-zero exit returns `ToolError`.
 
-13. Update `docs/features.md`: add `bash` entry (approval level, timeout, process-group kill).
+- [ ] 13. Update `docs/features.md`: add `bash` entry (approval level, timeout, process-group kill).
 
-14. Run `make test` + `make test-coverage`.
+- [ ] 14. Run `make test` + `make test-coverage`.
 
 ---
 
@@ -286,7 +293,7 @@ No user-visible behavior. Must be fully green before any tool work begins.
 
 **Goal:** Text search using `ignore` + `regex`; no external binary.
 
-15. Create `src/agent/tools/search.rs`. Define:
+- [ ] 15. Create `src/agent/tools/search.rs`. Define:
 
     ```rust
     #[derive(JsonSchema, Deserialize)]
@@ -300,32 +307,32 @@ No user-visible behavior. Must be fully green before any tool work begins.
     }
     ```
 
-    `SearchTool` embeds `sandbox_context: SandboxContext`. In `SearchCall::run`:
-    - Build `regex::Regex` (respecting `case_sensitive`).
-    - Use `ignore::WalkBuilder` rooted at `path` (or cwd) with `.git_ignore(true)`.
-    - Skip files that appear binary: if the first 8 KB of a file contains a null byte,
-      omit it from results silently (same heuristic as `git grep` and `rg`).
-    - For each file: read UTF-8 lossy, collect matches with line numbers and
-      `context_lines` before/after.
-    - Format results in grep style: `<filepath>:<line_number>: <line_content>`.
-      Context lines are prefixed with `<filepath>-<line_number>- <content>`.
-      One `ContentSection` per matching file, label set to the file path.
-    - Cap total output at 100 KB (first chunk kept); set `tool_output_truncated: true`
-      and `tool_output_truncated_at_bytes: <n>` in result metadata when capped.
+  `SearchTool` embeds `sandbox_context: SandboxContext`. In `SearchCall::run`:
+  - Build `regex::Regex` (respecting `case_sensitive`).
+  - Use `ignore::WalkBuilder` rooted at `path` (or cwd) with `.git_ignore(true)`.
+  - Skip files that appear binary: if the first 8 KB of a file contains a null byte,
+    omit it from results silently (same heuristic as `git grep` and `rg`).
+  - For each file: read UTF-8 lossy, collect matches with line numbers and
+    `context_lines` before/after.
+  - Format results in grep style: `<filepath>:<line_number>: <line_content>`.
+    Context lines are prefixed with `<filepath>-<line_number>- <content>`.
+    One `ContentSection` per matching file, label set to the file path.
+  - Cap total output at 100 KB (first chunk kept); set `tool_output_truncated: true`
+    and `tool_output_truncated_at_bytes: <n>` in result metadata when capped.
 
     `needs_approval(&self, args)`:
-    - If `args.path` is `Some(p)`: return `sandbox_context.check_path(p)`.
-    - If `args.path` is `None` (defaults to cwd, inside workspace): return `AutoApproved`.
+  - If `args.path` is `Some(p)`: return `sandbox_context.check_path(p)`.
+  - If `args.path` is `None` (defaults to cwd, inside workspace): return `AutoApproved`.
 
-16. Register `SearchTool` in `default_registry()`.
+- [ ] 16. Register `SearchTool` in `default_registry()`.
 
-17. Write unit tests: match found, no match, invalid regex, case-insensitive, context lines,
-    explicit out-of-workspace path returns `AutoDenied`, binary file skipped (null byte),
-    output truncated at 100 KB cap (`tool_output_truncated` metadata present).
+- [ ] 17. Write unit tests: match found, no match, invalid regex, case-insensitive, context lines,
+  explicit out-of-workspace path returns `AutoDenied`, binary file skipped (null byte),
+  output truncated at 100 KB cap (`tool_output_truncated` metadata present).
 
-18. Update `docs/features.md`: add `search` entry.
+- [ ] 18. Update `docs/features.md`: add `search` entry.
 
-19. Run `make test` + `make test-coverage`.
+- [ ] 19. Run `make test` + `make test-coverage`.
 
 ---
 
@@ -333,7 +340,7 @@ No user-visible behavior. Must be fully green before any tool work begins.
 
 **Goal:** Filtering flags and structured result metadata per `docs/ideas/glob-tool-filtering.md`.
 
-20. Extend `GlobArgs` in `src/agent/tools/fs.rs`:
+- [ ] 20. Extend `GlobArgs` in `src/agent/tools/fs.rs`:
 
     ```rust
     #[serde(default = "default_true")] git_ignore: bool,  // default: true
@@ -343,32 +350,32 @@ No user-visible behavior. Must be fully green before any tool work begins.
     #[serde(default)] limit: Option<usize>,
     ```
 
-21. Update `GlobTool::run`:
-    - When `git_ignore` is `true` (default), use `ignore::WalkBuilder`; else use `glob` crate.
-    - Return `ToolError` immediately if both `only_files` and `only_dirs` are `true`
-      (contradictory combination).
-    - Apply `only_files` / `only_dirs` filters.
-    - Apply `limit`; set `tool_output_truncated: true` and `tool_output_total_matches: <n>`
-      in metadata when capped.
-    - When `only_count`: return count via `tool_output_total_matches` in metadata;
-      content is empty string.
+- [ ] 21. Update `GlobTool::run`:
+  - When `git_ignore` is `true` (default), use `ignore::WalkBuilder`; else use `glob` crate.
+  - Return `ToolError` immediately if both `only_files` and `only_dirs` are `true`
+    (contradictory combination).
+  - Apply `only_files` / `only_dirs` filters.
+  - Apply `limit`; set `tool_output_truncated: true` and `tool_output_total_matches: <n>`
+    in metadata when capped.
+  - When `only_count`: return count via `tool_output_total_matches` in metadata;
+    content is empty string.
 
-22. Add `fn metadata(&self) -> Option<serde_json::Value> { None }` default method to
-    `ToolCallResult` trait. Override in `GlobResult` to return truncation/count metadata
-    using the `tool_output_*` prefix (`tool_output_truncated`, `tool_output_total_matches`).
-    Serialize metadata into the tool-role message alongside content.
+- [ ] 22. Add `fn metadata(&self) -> Option<serde_json::Value> { None }` default method to
+  `ToolCallResult` trait. Override in `GlobResult` to return truncation/count metadata
+  using the `tool_output_*` prefix (`tool_output_truncated`, `tool_output_total_matches`).
+  Serialize metadata into the tool-role message alongside content.
 
-23. Update `GlobTool::needs_approval(&self, args)` to call
-    `sandbox_context.check_path(resolved_root)` on the input path root only (before
-    traversal); return `UserApprovalRequired` if the root falls outside the workspace.
-    Do not check individual result paths — listing paths is not content access.
+- [ ] 23. Update `GlobTool::needs_approval(&self, args)` to call
+  `sandbox_context.check_path(resolved_root)` on the input path root only (before
+  traversal); return `UserApprovalRequired` if the root falls outside the workspace.
+  Do not check individual result paths — listing paths is not content access.
 
-24. Write unit tests for all new flags, truncation metadata (`tool_output_*` keys),
-    `ToolError` on contradictory `only_files + only_dirs`, and approval check.
+- [ ] 24. Write unit tests for all new flags, truncation metadata (`tool_output_*` keys),
+  `ToolError` on contradictory `only_files + only_dirs`, and approval check.
 
-25. Update `docs/features.md`: update `glob` entry with new flags.
+- [ ] 25. Update `docs/features.md`: update `glob` entry with new flags.
 
-26. Run `make test` + `make test-coverage`.
+- [ ] 26. Run `make test` + `make test-coverage`.
 
 ---
 
@@ -377,7 +384,7 @@ No user-visible behavior. Must be fully green before any tool work begins.
 **Goal:** Line-based or search-and-replace file patching; diff preview via
 `pending_content_sections()`; write only after approval.
 
-27. Create `src/agent/tools/edit.rs`. Define:
+- [ ] 27. Create `src/agent/tools/edit.rs`. Define:
 
     ```rust
     #[derive(JsonSchema, Deserialize)]
@@ -397,15 +404,15 @@ No user-visible behavior. Must be fully green before any tool work begins.
     }
     ```
 
-    `EditCall` is constructed with the parsed args. At construction time (before approval):
-    - Return `ToolError` immediately if the file does not exist (use `write` to create new files).
-    - Read the current file content.
-    - `SearchReplace`: replace the **first** occurrence of `old_string`; return `ToolError`
-      if not found.
-    - `LineRange`: validate `start_line <= end_line` (1-based) and range is within file
-      bounds; return `ToolError` otherwise.
-    - Compute unified diff via `similar::TextDiff`.
-    - Store both `patched_content: String` and `diff: String` as fields on `EditCall`.
+  `EditCall` is constructed with the parsed args. At construction time (before approval):
+  - Return `ToolError` immediately if the file does not exist (use `write` to create new files).
+  - Read the current file content.
+  - `SearchReplace`: replace the **first** occurrence of `old_string`; return `ToolError`
+    if not found.
+  - `LineRange`: validate `start_line <= end_line` (1-based) and range is within file
+    bounds; return `ToolError` otherwise.
+  - Compute unified diff via `similar::TextDiff`.
+  - Store both `patched_content: String` and `diff: String` as fields on `EditCall`.
 
     `EditCall::pending_content_sections()` returns `vec![Section::Diff(DiffSection {
     label: Some(path.clone()), content: self.diff.clone() })]`.
@@ -414,18 +421,18 @@ No user-visible behavior. Must be fully green before any tool work begins.
 
     `EditTool::needs_approval(&self, args)` calls `sandbox_context.check_path(path)`.
 
-28. Register `EditTool` in `default_registry()`.
+- [ ] 28. Register `EditTool` in `default_registry()`.
 
-29. Write unit tests: `SearchReplace` happy path (first occurrence replaced) and diff output,
-    not-found error, multiple-occurrence replaces only first,
-    `LineRange` happy path and diff output, out-of-bounds error, `start_line > end_line` error,
-    non-existent file returns `ToolError`,
-    `pending_content_sections()` returns `Section::Diff`.
+- [ ] 29. Write unit tests: `SearchReplace` happy path (first occurrence replaced) and diff output,
+  not-found error, multiple-occurrence replaces only first,
+  `LineRange` happy path and diff output, out-of-bounds error, `start_line > end_line` error,
+  non-existent file returns `ToolError`,
+  `pending_content_sections()` returns `Section::Diff`.
 
-30. Update `docs/features.md`: add `edit` entry (two modes, diff preview, approval flow).
-    Remove the `write` WIP note — `write` is fully implemented and approval-gated.
+- [ ] 30. Update `docs/features.md`: add `edit` entry (two modes, diff preview, approval flow).
+  Remove the `write` WIP note — `write` is fully implemented and approval-gated.
 
-31. Run `make test` + `make test-coverage`.
+- [ ] 31. Run `make test` + `make test-coverage`.
 
 ---
 
@@ -433,7 +440,7 @@ No user-visible behavior. Must be fully green before any tool work begins.
 
 **Goal:** Interactive model-to-user question; optional multiple-choice (≤5); excluded in headless.
 
-32. Create `src/agent/tools/clarify.rs`. Define:
+- [ ] 32. Create `src/agent/tools/clarify.rs`. Define:
 
     ```rust
     #[derive(JsonSchema, Deserialize)]
@@ -447,33 +454,39 @@ No user-visible behavior. Must be fully green before any tool work begins.
     }
     ```
 
-    `ClarifyTool::needs_approval` returns `UserApprovalRequired` (Interactive flow).
-    `create_call` validates `choices.len() <= 5`; returns `ToolError` if exceeded.
-    `ClarifyTool` is **not** registered in `default_registry()`; injected into the registry
-    by `TuiApp` at startup only. If a `clarify` call arrives in headless mode despite this
-    (e.g. session replay), return `ToolError` with message
-    `"clarify is not available in headless mode"`.
+  `ClarifyTool::needs_approval` returns `UserApprovalRequired` (Interactive flow).
+  `create_call` validates `choices.len() <= 5`; returns `ToolError` if exceeded.
+  `ClarifyTool` is **not** registered in `default_registry()`; injected into the registry
+  by `TuiApp` at startup only. If a `clarify` call arrives in headless mode despite this
+  (e.g. session replay), return `ToolError` with message
+  `"clarify is not available in headless mode"`.
 
-33. Add `AgentCommand::AnswerClarify(String)` to `src/agent.rs`. Agent loop handles
-    `clarify` calls specially:
-    - Pause loop; emit `UiUpdate::ClarifyPending { question, choices }`.
-    - Await `AgentCommand::AnswerClarify(answer)` or `AgentCommand::Stop`.
-    - Inject the answer as the tool result; resume.
+- [ ] 33. Add `AgentCommand::AnswerClarify(String)` to `src/agent.rs`. Agent loop handles
+  `clarify` calls specially:
+  - Pause loop; emit `UiUpdate::ClarifyPending { question, choices }`.
+  - Await `AgentCommand::AnswerClarify(answer)` or `AgentCommand::Stop`.
+  - Inject the answer as the tool result; resume.
 
-34. Add `TuiMode::ClarifyPending { question: String, choices: Option<Vec<String>> }` to
-    `src/app_state.rs`. Add `DomainEvent::ClarifyPending` and handle in `presenter.rs`.
+- [ ] 34. Add `TuiMode::ClarifyPending { question: String, choices: Option<Vec<String>> }` to
+  `src/app_state.rs`. Add `DomainEvent::ClarifyPending` and handle in `presenter.rs`.
 
-35. In `tui_driver.rs` / `render.rs`: when `TuiMode::ClarifyPending`, render a yellow
-    banner with the question text. If `choices` is `Some`, render numbered items `1.`–`5.`.
-    Pressing `1`–`5` populates the input field with the chosen text. `Enter` sends
-    `AgentCommand::AnswerClarify(input)`.
+- [ ] 35. In `tui_driver.rs` / `render.rs`: when `TuiMode::ClarifyPending`, render a yellow
+  banner with the question text. If `choices` is `Some`, render numbered items `1.`–`5.`.
+  Pressing `1`–`5` populates the input field with the chosen text. `Enter` sends
+  `AgentCommand::AnswerClarify(input)`.
 
-36. Write unit tests: choice-count validation (≤5 ok, 6 → error); presenter tests for the
-    `ClarifyPending` state transition.
+- [ ] 36. Write unit tests: choice-count validation (≤5 ok, 6 → error); presenter tests for the
+  `ClarifyPending` state transition.
 
-37. Update `docs/features.md`: add `clarify` entry (banner, choices, headless exclusion).
+- [ ] 36a. Verify that the agent loop branches on tool name before emitting the pending `UiUpdate`:
+      `ClarifyTool` must emit `UiUpdate::ClarifyPending` and route through
+      `AgentCommand::AnswerClarify`; all other tools must emit `UiUpdate::ToolPending` and
+      route through `ApproveTool`/`DenyTool`. No path may send `ToolPending` for a `clarify`
+      call or `ClarifyPending` for a non-clarify call. Add regression tests for both branches.
 
-38. Run `make test` + `make test-coverage`.
+- [ ] 37. Update `docs/features.md`: add `clarify` entry (banner, choices, headless exclusion).
+
+- [ ] 38. Run `make test` + `make test-coverage`.
 
 ---
 
@@ -482,22 +495,22 @@ No user-visible behavior. Must be fully green before any tool work begins.
 **Goal:** Render `Section::Diff` sections from `pending_content_sections()` during tool
 approval. The `ApprovalCheck` loop wiring was already done in Phase 6.0 step 6.
 
-39. In `render.rs` / `ui.rs`: during `TuiMode::ToolApproval`, call
-    `pending_call.pending_content_sections()` and render each section:
-    - `Section::Diff(d)`: scrollable diff overlay above the footer — `+` lines green,
-      `−` lines red, context lines default style. Collapses to a one-line summary if
-      terminal height is below 20 rows.
-    - `Section::Content(c)`: render as a read-only code block (existing path).
+- [ ] 39. In `render.rs` / `ui.rs`: during `TuiMode::ToolApproval`, call
+  `pending_call.pending_content_sections()` and render each section:
+  - `Section::Diff(d)`: scrollable diff overlay above the footer — `+` lines green,
+    `−` lines red, context lines default style. Collapses to a one-line summary if
+    terminal height is below 20 rows.
+  - `Section::Content(c)`: render as a read-only code block (existing path).
     Both types scroll with `PageUp`/`PageDown`.
 
-40. Expose `pending_content_sections()` on the `PendingTool` state in `AppState` so
-    `render.rs` can call it without holding a full `Box<dyn ToolCall>` beyond the driver.
-    Add `sections: Vec<Section>` to `AppState::pending_tool_sections`, populated in
-    `tui_driver.rs` when `UiUpdate::ToolPending` arrives.
+- [ ] 40. Expose `pending_content_sections()` on the `PendingTool` state in `AppState` so
+  `render.rs` can call it without holding a full `Box<dyn ToolCall>` beyond the driver.
+  Add `sections: Vec<Section>` to `AppState::pending_tool_sections`, populated in
+  `tui_driver.rs` when `UiUpdate::ToolPending` arrives.
 
-41. Update `docs/features.md`: document diff overlay and section rendering.
+- [ ] 41. Update `docs/features.md`: document diff overlay and section rendering.
 
-42. Run `make test` + `make test-coverage`.
+- [ ] 42. Run `make test` + `make test-coverage`.
 
 ---
 
@@ -506,12 +519,14 @@ approval. The `ApprovalCheck` loop wiring was already done in Phase 6.0 step 6.
 **Goal:** One-level agent delegation; child runs concurrently with parent; parent continues
 processing messages and tools while a child is active.
 
-43. Implement `Role::Child` construction in `AgentFactory::create`
-    (`src/agent_factory.rs`). Remove `create_returns_err_for_child_role` test; replace
-    with a positive assertion. Wire `briefing`, `parent_cancel`, `subagent_ui_tx`, and
-    the `finish_tx: mpsc::Sender<FinishResult>` from `Role::Child` fields.
+- [ ] 43. Implement `Role::Child` construction in `AgentFactory::create`
+  (`src/agent_factory.rs`). Remove `create_returns_err_for_child_role` test (line 147 in
+  `src/agent_factory.rs`, left failing since Phase 5); replace with a positive assertion.
+  This must be done before any other child-agent steps (6.7–6.9) can compile. Wire
+  `briefing`, `parent_cancel`, `subagent_ui_tx`, and the
+  `finish_tx: mpsc::Sender<FinishResult>` from `Role::Child` fields.
 
-44. Create `src/child_agent_manager.rs`:
+- [ ] 44. Create `src/child_agent_manager.rs`:
 
     ```rust
     pub struct ChildAgentManager {
@@ -533,57 +548,57 @@ processing messages and tools while a child is active.
     }
     ```
 
-    `AgentLoop` creates `mpsc::channel::<FinishResult>()` at startup; passes `Sender`
-    to `ChildAgentManager::new` and keeps `Receiver` in its own `select!` loop.
+  `AgentLoop` creates `mpsc::channel::<FinishResult>()` at startup; passes `Sender`
+  to `ChildAgentManager::new` and keeps `Receiver` in its own `select!` loop.
 
-45. Create `src/agent/tools/spawn_subagent.rs`. `SpawnSubagentArgs { task, briefing,
-    agent_type }`. `needs_approval` returns `UserApprovalRequired` (or `AutoApproved`
-    when `--auto-approve-spawn` is set). After approval, the agent loop calls
-    `child_agent_manager.spawn(...)`. The tool returns `{ "status": "spawned", "run_id": "<uuid>" }`
-    when the child starts immediately, or `{ "status": "queued", "run_id": "<uuid>" }` when
-    it is enqueued behind an active child. The child's `finish` result arrives later as a
-    tool result message tied to this `spawn_subagent` call id (see step 47).
+- [ ] 45. Create `src/agent/tools/spawn_subagent.rs`. `SpawnSubagentArgs { task, briefing,
+  agent_type }`. `needs_approval` returns `UserApprovalRequired` (or `AutoApproved`
+  when `--auto-approve-spawn` is set). After approval, the agent loop calls
+  `child_agent_manager.spawn(...)`. The tool returns `{ "status": "spawned", "run_id": "<uuid>" }`
+  when the child starts immediately, or `{ "status": "queued", "run_id": "<uuid>" }` when
+  it is enqueued behind an active child. The child's `finish` result arrives later as a
+  tool result message tied to this `spawn_subagent` call id (see step 47).
 
-46. Create `src/agent/tools/finish.rs`. `FinishArgs { status, result, error, sources }`.
-    `FinishTool::run` sends `FinishResult` via `finish_tx` and returns a success envelope.
-    Child loop exits unconditionally on `ChildFinish` (exempt from iteration cap). Injected
-    only into `Role::Child` registries.
+- [ ] 46. Create `src/agent/tools/finish.rs`. `FinishArgs { status, result, error, sources }`.
+  `FinishTool::run` sends `FinishResult` via `finish_tx` and returns a success envelope.
+  Child loop exits unconditionally on `ChildFinish` (exempt from iteration cap). Injected
+  only into `Role::Child` registries.
 
-47. Update `AgentLoop` (`src/agent.rs`):
-    - Hold `child_agent_manager: Option<ChildAgentManager>` (present when
-      `role = Root && agent_type.can_spawn`).
-    - Add `finish_rx` arm to `tokio::select!`. On `FinishResult` received: inject the
-      result as a **tool result message** (role: `tool`, tool_call_id: the original
-      `spawn_subagent` call id) into the parent conversation context. Enqueue it for
-      the normal ReAct loop to pick up on its next iteration — no forced re-prompt.
-      If the next request is queued in `ChildAgentManager`, start it now.
-    - On `AgentCommand::Stop`: call `child_agent_manager.cancel_all()` (fires child
-      `CancellationToken`, drains queue); write a `child_result` JSONL record with
-      `status: "cancelled"` for the running child (if any). Persistence errors are
-      logged and non-fatal.
-    - Add `subagent_ui_rx` arm for live child tokens → `UiUpdate`.
-    - On `ToolCall("spawn_subagent")`: pause, emit `UiUpdate::ToolPending`, await
-      approval, call `child_agent_manager.spawn(...)`, return
-      `{ "status": "spawned"/"queued", "run_id": "<uuid>" }` immediately to the LLM.
-      The parent loop continues normally.
-    - Unstructured fallback: if child's `JoinHandle` completes without `finish` being called
-      (timeout or max iterations — same cap as parent), extract last `Message::Assistant`
-      text, wrap as `FinishResult { status: "unstructured", ... }` and inject as a tool
-      result message tied to the original `spawn_subagent` call id.
-    - `Role::Child`: `spawn_subagent` structurally absent from registry.
-    - Parent processes user messages and runs its own tools concurrently with the child;
-      no suspension of the parent ReAct loop while a child is active.
+- [ ] 47. Update `AgentLoop` (`src/agent.rs`):
+  - Hold `child_agent_manager: Option<ChildAgentManager>` (present when
+    `role = Root && agent_type.can_spawn`).
+  - Add `finish_rx` arm to `tokio::select!`. On `FinishResult` received: inject the
+    result as a **tool result message** (role: `tool`, tool_call_id: the original
+    `spawn_subagent` call id) into the parent conversation context. Enqueue it for
+    the normal ReAct loop to pick up on its next iteration — no forced re-prompt.
+    If the next request is queued in `ChildAgentManager`, start it now.
+  - On `AgentCommand::Stop`: call `child_agent_manager.cancel_all()` (fires child
+    `CancellationToken`, drains queue); write a `child_result` JSONL record with
+    `status: "cancelled"` for the running child (if any). Persistence errors are
+    logged and non-fatal.
+  - Add `subagent_ui_rx` arm for live child tokens → `UiUpdate`.
+  - On `ToolCall("spawn_subagent")`: pause, emit `UiUpdate::ToolPending`, await
+    approval, call `child_agent_manager.spawn(...)`, return
+    `{ "status": "spawned"/"queued", "run_id": "<uuid>" }` immediately to the LLM.
+    The parent loop continues normally.
+  - Unstructured fallback: if child's `JoinHandle` completes without `finish` being called
+    (timeout or max iterations — same cap as parent), extract last `Message::Assistant`
+    text, wrap as `FinishResult { status: "unstructured", ... }` and inject as a tool
+    result message tied to the original `spawn_subagent` call id.
+  - `Role::Child`: `spawn_subagent` structurally absent from registry.
+  - Parent processes user messages and runs its own tools concurrently with the child;
+    no suspension of the parent ReAct loop while a child is active.
 
-48. Write unit tests: `spawn` returns `Queued` when a child is already running; multiple
-    queued spawns are drained in FIFO order after each child finishes; `cancel_all` fires
-    child token and empties the queue; `finish_rx` receives result when child calls `finish`;
-    cancelled child writes `child_result` with `status: "cancelled"`;
-    unstructured fallback when `finish` never called.
+- [ ] 48. Write unit tests: `spawn` returns `Queued` when a child is already running; multiple
+  queued spawns are drained in FIFO order after each child finishes; `cancel_all` fires
+  child token and empties the queue; `finish_rx` receives result when child calls `finish`;
+  cancelled child writes `child_result` with `status: "cancelled"`;
+  unstructured fallback when `finish` never called.
 
-49. Update `docs/features.md`: add child-agent delegation section.
-    Update `docs/configuration.md` with `can_spawn` key.
+- [ ] 49. Update `docs/features.md`: add child-agent delegation section.
+  Update `docs/configuration.md` with `can_spawn` key.
 
-50. Run `make test` + `make test-coverage`.
+- [ ] 50. Run `make test` + `make test-coverage`.
 
 ---
 
@@ -592,13 +607,13 @@ processing messages and tools while a child is active.
 **Goal:** Child conversation as a first-class full-screen view; spawn-bubble in parent
 chat; auto-switch only on child interactive pauses.
 
-51. Add `session_id` is already in `AgentLoop` after Phase 6.0 step 6. Add
-    `UiUpdate` variants emitted from `ChildAgentManager` via `subagent_ui_tx`:
-    `ChildAgentStarted { run_id, agent_type, task }`,
-    `ChildAgentToken(String)`,
-    `ChildAgentDone { status, result }` in `src/agent.rs`.
+- [ ] 51. Add `session_id` is already in `AgentLoop` after Phase 6.0 step 6. Add
+  `UiUpdate` variants emitted from `ChildAgentManager` via `subagent_ui_tx`:
+  `ChildAgentStarted { run_id, agent_type, task }`,
+  `ChildAgentToken(String)`,
+  `ChildAgentDone { status, result }` in `src/agent.rs`.
 
-52. Define `ConversationView` in `src/app_state.rs`:
+- [ ] 52. Define `ConversationView` in `src/app_state.rs`:
 
     ```rust
     pub enum ConversationView {
@@ -607,52 +622,52 @@ chat; auto-switch only on child interactive pauses.
     }
     ```
 
-    Add to `AppState`:
-    - `active_view: ConversationView` (default `Root`)
-    - `child_messages: Vec<Message>`
-    - `auto_switched_to_child: bool`
+  Add to `AppState`:
+  - `active_view: ConversationView` (default `Root`)
+  - `child_messages: Vec<Message>`
+  - `auto_switched_to_child: bool`
 
-53. Update `presenter.rs`:
-    - On `ChildAgentStarted`: create a spawn-bubble entry in `root_messages` (distinct
-      style: magenta, shows task + "running…"); initialize `child_messages = vec![]`.
-      **Do not change `active_view`** — user stays in parent view until they click or
-      until an interactive pause fires.
-    - On `ChildAgentToken`: append token to `child_messages`.
-    - On `ChildAgentDone`: update spawn-bubble status to done/error.
-      If `active_view == Child` and `auto_switched_to_child`, switch back to `Root` and
-      clear `auto_switched_to_child`.
-    - On `ClarifyPending` or `ToolPending` from child when `active_view == Root`:
-      set `auto_switched_to_child = true`, switch to `Child` view.
-      If `active_view` is already `Child`: set `auto_switched_to_child = false` (user
-      navigated manually; no auto-return).
-    - When child interactive pause resolves: auto-return to `Root` only if
-      `auto_switched_to_child` is `true`.
-    - Child interactive pauses take precedence over any simultaneous parent pending tool:
-      auto-switch to child; resume parent pending state after child resolves.
+- [ ] 53. Update `presenter.rs`:
+  - On `ChildAgentStarted`: create a spawn-bubble entry in `root_messages` (distinct
+    style: magenta, shows task + "running…"); initialize `child_messages = vec![]`.
+    **Do not change `active_view`** — user stays in parent view until they click or
+    until an interactive pause fires.
+  - On `ChildAgentToken`: append token to `child_messages`.
+  - On `ChildAgentDone`: update spawn-bubble status to done/error.
+    If `active_view == Child` and `auto_switched_to_child`, switch back to `Root` and
+    clear `auto_switched_to_child`.
+  - On `ClarifyPending` or `ToolPending` from child when `active_view == Root`:
+    set `auto_switched_to_child = true`, switch to `Child` view.
+    If `active_view` is already `Child`: set `auto_switched_to_child = false` (user
+    navigated manually; no auto-return).
+  - When child interactive pause resolves: auto-return to `Root` only if
+    `auto_switched_to_child` is `true`.
+  - Child interactive pauses take precedence over any simultaneous parent pending tool:
+    auto-switch to child; resume parent pending state after child resolves.
 
-54. Update `render.rs`:
-    - When `active_view == Child`: render `child_messages` in the main chat area.
-      Add a **non-scrolling 1-row header**:
-      `🔍 <agent_type>: "<task>" [← Back (Ctrl+B)]`.
-    - When `active_view == Root`: render `root_messages`. Spawn-bubble has a distinct
-      border (magenta); mouse-click on it sets `active_view = Child` (manual navigation,
-      `auto_switched_to_child = false`). A `/agents` slash-command for keyboard-driven
-      child navigation is deferred to a future phase.
-    - Input box behaviour while `active_view == Child`:
-      - Child paused for approval/clarify: input active; `Enter` routes to the child flow.
-      - Child running (not paused): input disabled; show muted hint
-        `"Waiting for child agent…"`. User input is not buffered.
+- [ ] 54. Update `render.rs`:
+  - When `active_view == Child`: render `child_messages` in the main chat area.
+    Add a **non-scrolling 1-row header**:
+    `🔍 <agent_type>: "<task>" [← Back (Ctrl+B)]`.
+  - When `active_view == Root`: render `root_messages`. Spawn-bubble has a distinct
+    border (magenta); mouse-click on it sets `active_view = Child` (manual navigation,
+    `auto_switched_to_child = false`). A `/agents` slash-command for keyboard-driven
+    child navigation is deferred to a future phase.
+  - Input box behaviour while `active_view == Child`:
+    - Child paused for approval/clarify: input active; `Enter` routes to the child flow.
+    - Child running (not paused): input disabled; show muted hint
+      `"Waiting for child agent…"`. User input is not buffered.
 
-55. Add `Ctrl+B` keybinding for "back to parent" in `presenter.rs`. Document in
-    `docs/keybindings.md`.
+- [ ] 55. Add `Ctrl+B` keybinding for "back to parent" in `presenter.rs`. Document in
+  `docs/keybindings.md`.
 
-56. Write presenter unit tests: spawn does not auto-switch view; interactive child pause
-    auto-switches; manual navigation prevents auto-return; back-to-parent keybinding works.
+- [ ] 56. Write presenter unit tests: spawn does not auto-switch view; interactive child pause
+  auto-switches; manual navigation prevents auto-return; back-to-parent keybinding works.
 
-57. Update `docs/features.md`: document drill-in model, spawn-bubble, back navigation,
-    auto-switch rules. Update `docs/keybindings.md`.
+- [ ] 57. Update `docs/features.md`: document drill-in model, spawn-bubble, back navigation,
+  auto-switch rules. Update `docs/keybindings.md`.
 
-58. Run `make test` + `make test-coverage`.
+- [ ] 58. Run `make test` + `make test-coverage`.
 
 ---
 
@@ -660,8 +675,8 @@ chat; auto-switch only on child interactive pauses.
 
 **Goal:** Durable `child_start` / `child_result` records in the parent session file.
 
-59. Create `src/store.rs` (Phase 6 minimal subset; full JSONL session store is Phase 7).
-    Define:
+- [ ] 59. Create `src/store.rs` (Phase 6 minimal subset; full JSONL session store is Phase 7).
+  Define:
 
     ```rust
     pub struct Store {
@@ -676,25 +691,25 @@ chat; auto-switch only on child interactive pauses.
     }
     ```
 
-    Both methods: acquire the `Mutex`; open or reuse a `BufWriter<File>` for
-    `~/.ylva/sessions/<session_id>.jsonl` (create dirs if absent); append one JSONL line;
-    flush. Follow blueprint §4H shapes:
+  Both methods: acquire the `Mutex`; open or reuse a `BufWriter<File>` for
+  `~/.ylva/sessions/<session_id>.jsonl` (create dirs if absent); append one JSONL line;
+  flush. Follow blueprint §4H shapes:
 
     ```json
     {"type":"child_start","v":1,"id":"<run-uuid>","parent_session":"<uuid>","agent_type":"...","task":"...","created_at":"..."}
     {"type":"child_result","v":1,"id":"<run-uuid>","parent_session":"<uuid>","status":"...","result":"...","sources":[...],"completed_at":"..."}
     ```
 
-60. Pass a `Arc<Store>` into `AgentLoop`. Call `append_child_start` from
-    `ChildAgentManager::spawn` and `append_child_result` from the `finish_rx` handler.
-    Persistence errors are logged (non-fatal); they must not crash the agent.
+- [ ] 60. Pass a `Arc<Store>` into `AgentLoop`. Call `append_child_start` from
+  `ChildAgentManager::spawn` and `append_child_result` from the `finish_rx` handler.
+  Persistence errors are logged (non-fatal); they must not crash the agent.
 
-61. Write unit tests using `tempfile::tempdir()`: correct JSON shapes; two sequential calls
-    produce two valid JSONL lines; single-writer correctness confirmed by re-parsing lines.
+- [ ] 61. Write unit tests using `tempfile::tempdir()`: correct JSON shapes; two sequential calls
+  produce two valid JSONL lines; single-writer correctness confirmed by re-parsing lines.
 
-62. Update `docs/features.md`: document persistence records.
+- [ ] 62. Update `docs/features.md`: document persistence records.
 
-63. Run `make test` + `make test-coverage`.
+- [ ] 63. Run `make test` + `make test-coverage`.
 
 ---
 
@@ -702,55 +717,30 @@ chat; auto-switch only on child interactive pauses.
 
 **Goal:** Enable child spawning in headless mode; finalise all documentation.
 
-64. Add `--allow-child-agents` boolean CLI flag in `src/main.rs` (via `clap`, default
-    `false`). Add `--auto-approve-spawn` boolean flag (default `false`). Pass both through
-    to `ConsoleApp` / `cli_driver`. When `--allow-child-agents` is `false`, `ChildAgentManager`
-    is `None` in `AgentLoop`; `spawn_subagent` is absent from the active tool registry.
-    When `--auto-approve-spawn` is `true`, `spawn_subagent::needs_approval` returns
-    `AutoApproved`; children inherit this flag alongside `--auto-approve-write`.
+- [ ] 64. Add `--allow-child-agents` boolean CLI flag in `src/main.rs` (via `clap`, default
+  `false`). Add `--auto-approve-spawn` boolean flag (default `false`). Pass both through
+  to `ConsoleApp` / `cli_driver`. When `--allow-child-agents` is `false`, `ChildAgentManager`
+  is `None` in `AgentLoop`; `spawn_subagent` is absent from the active tool registry.
+  When `--auto-approve-spawn` is `true`, `spawn_subagent::needs_approval` returns
+  `AutoApproved`; children inherit this flag alongside `--auto-approve-write`.
 
-65. When `--allow-child-agents` is active in headless mode, emit to stderr:
-    - `Spawned child agent '<type>' for task '<task>'\n` on spawn.
-    - `Queued child agent '<type>' for task '<task>'\n` when enqueued.
-    - `Child agent '<type>' completed: <status>\n` on finish.
-    - Safety inheritance: child agents inherit parent `--auto-approve-write` and
-      `--auto-approve-spawn` flags.
+- [ ] 65. When `--allow-child-agents` is active in headless mode, emit to stderr:
+  - `Spawned child agent '<type>' for task '<task>'\n` on spawn.
+  - `Queued child agent '<type>' for task '<task>'\n` when enqueued.
+  - `Child agent '<type>' completed: <status>\n` on finish.
+  - Safety inheritance: child agents inherit parent `--auto-approve-write` and
+    `--auto-approve-spawn` flags.
 
-66. Update `docs/features.md`: finalise all WIP notes from sub-phases; add
-    `--allow-child-agents` documentation; verify every Phase 6 feature is described.
+- [ ] 66. Update `docs/features.md`: finalise all WIP notes from sub-phases; add
+  `--allow-child-agents` documentation; verify every Phase 6 feature is described.
 
-67. Update `docs/configuration.md`: `--allow-child-agents` flag; `--auto-approve-spawn`
-    flag; `can_spawn` agent-type key; `Sandbox` Phase 6 defaults (TOML config Phase 7).
+- [ ] 67. Update `docs/configuration.md`: `--allow-child-agents` flag; `--auto-approve-spawn`
+  flag; `can_spawn` agent-type key; `Sandbox` Phase 6 defaults (TOML config Phase 7).
 
-68. Run `rumdl fmt docs/features.md docs/keybindings.md docs/configuration.md
-    docs/plans/phase6-terminal-superpowers.md` and fix any findings.
+- [ ] 68. Run `rumdl fmt docs/features.md docs/keybindings.md docs/configuration.md
+  docs/plans/phase6-terminal-superpowers.md` and fix any findings.
 
-69. Run `make test` + `make test-coverage` — full suite must pass, all new modules ≥80%.
-
-## Consistency Issues
-
-**[high] `Role::Child` construction currently returns `Err`.**
-The existing test `create_returns_err_for_child_role` in `src/agent_factory.rs` line 147
-asserts that `AgentFactory::create` with `Role::Child` returns an error (Phase 5 left
-it unimplemented). Phase 6.7 step 43 removes that test and replaces it with a positive
-assertion. This must be resolved before any child-agent steps (6.7–6.9) compile.
-
-**[low] `default_registry()` signature change.**
-Phase 6.0 step 4 changes the signature to `default_registry(sandbox: Arc<RwLock<Sandbox>>)`.
-Every call site (`src/agent.rs`, `src/agent_factory.rs`, tests) must be updated atomically in
-the same commit to avoid compilation failures mid-refactor.
-
-**[low] `Section` enum is a breaking change to two trait methods.**
-Phase 6.0 step 3 changes `pending_content_sections()` and `content_sections()` return types
-from `Vec<ContentSection>` to `Vec<Section>`. All existing tools, all rendering paths in
-`tui_driver.rs` / `ui.rs`, and all test assertions on these methods must be updated in the
-same commit. Mechanical wrapping `Section::Content(...)` — but easy to miss in tests.
-
-**[low] `clarify` flow must not conflate with tool-approval flow.**
-`ClarifyTool` uses `TuiMode::ClarifyPending` + `AgentCommand::AnswerClarify`; standard
-tools use `TuiMode::ToolApproval` + `ApproveTool`/`DenyTool`. The agent loop must branch
-on tool name before emitting the pending UiUpdate. Ensure no path sends `ToolPending` for
-a `clarify` call or `ClarifyPending` for a non-clarify call.
+- [ ] 69. Run `make test` + `make test-coverage` — full suite must pass, all new modules ≥80%.
 
 ## Implementation Hints
 
