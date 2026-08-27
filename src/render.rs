@@ -78,6 +78,7 @@ fn project_for_draw(state: &AppState) -> TuiState {
         input_area: state.layout.input_area.rect,
         chat_area: state.layout.chat_area.rect,
         chat_rendered_lines: state.chat_rendered_lines.clone(),
+        chat_rendered_line_chrome_widths: state.chat_rendered_line_chrome_widths.clone(),
         chat_selection: state.chat_selection,
         chat_drag_active: state.chat_drag_active,
         toast: state.toast.clone(),
@@ -106,6 +107,7 @@ fn sync_from_draw(state: &mut AppState, rendered: TuiState, button_areas: Option
     state.scroll_locked = rendered.scroll_locked;
     state.bubble_title_rows = rendered.bubble_title_rows;
     state.chat_rendered_lines = rendered.chat_rendered_lines;
+    state.chat_rendered_line_chrome_widths = rendered.chat_rendered_line_chrome_widths;
     state.help_scroll_offset = rendered.help_scroll_offset;
     state.help_scroll_x = rendered.help_scroll_x;
     state.toast = rendered.toast;

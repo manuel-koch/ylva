@@ -130,7 +130,12 @@ pub enum ToolCallState {
         title_arguments: Vec<(String, serde_json::Value)>,
     },
     /// Tool returned an error.
-    Error { error: String },
+    Error {
+        error: String,
+        title_arguments: Vec<(String, serde_json::Value)>,
+        duration: std::time::Duration,
+        content_sections: Vec<crate::agent::tools::Section>,
+    },
     /// Tool was killed (stream interrupted while tool was running).
     Killed,
     /// Tool was denied by the user; error message is the denial reason.
@@ -214,6 +219,11 @@ pub struct TuiState {
     /// call. Indexed by absolute line number (before scroll offset). Used for
     /// extracting selected text on mouse-up.
     pub chat_rendered_lines: Vec<String>,
+    /// Number of leading chrome characters (`▌  `) stripped from the
+    /// corresponding `chat_rendered_lines` entry. Zero for non-bubble lines.
+    /// Used by `extract_chat_selection_text` to map terminal columns (which
+    /// include the chrome) back to content columns.
+    pub chat_rendered_line_chrome_widths: Vec<usize>,
     /// Active or committed chat selection. `None` = no selection.
     pub chat_selection: Option<ChatSelection>,
     /// True while the left mouse button is held down in the chat area (drag
@@ -264,6 +274,7 @@ impl TuiState {
             input_area: ratatui::layout::Rect::default(),
             chat_area: ratatui::layout::Rect::default(),
             chat_rendered_lines: Vec::new(),
+            chat_rendered_line_chrome_widths: Vec::new(),
             chat_selection: None,
             chat_drag_active: false,
             toast: None,
@@ -518,11 +529,37 @@ impl TuiState {
                     });
                 }
             }
-            UiUpdate::ToolError { id, error } => {
+            UiUpdate::ToolError {
+                id,
+                error,
+                duration,
+                content_sections,
+            } => {
                 if let Some(entry) = self.find_tool_bubble_mut(*id) {
                     if let ChatEntry::ToolBubble { state, .. } = entry {
+                        let preserved_title_arguments = match &*state {
+                            ToolCallState::Pending {
+                                title_arguments, ..
+                            }
+                            | ToolCallState::Running {
+                                title_arguments, ..
+                            }
+                            | ToolCallState::Done {
+                                title_arguments, ..
+                            }
+                            | ToolCallState::Denied {
+                                title_arguments, ..
+                            }
+                            | ToolCallState::Error {
+                                title_arguments, ..
+                            } => title_arguments.clone(),
+                            _ => vec![],
+                        };
                         *state = ToolCallState::Error {
                             error: error.clone(),
+                            title_arguments: preserved_title_arguments,
+                            duration: *duration,
+                            content_sections: content_sections.clone(),
                         };
                     }
                 } else {
@@ -655,9 +692,22 @@ impl TuiState {
         if start_line > end_line || lines.is_empty() {
             return None;
         }
+        // Subtract per-line chrome width so the border and indent are not
+        // included in the copied text.
+        let chrome = |index: usize| -> usize {
+            self.chat_rendered_line_chrome_widths
+                .get(index)
+                .copied()
+                .unwrap_or(0)
+        };
         if start_line == end_line {
             let line = &lines[start_line];
-            Some(char_range(line, start_col, end_col))
+            let c = chrome(start_line);
+            Some(char_range(
+                line,
+                start_col.saturating_sub(c),
+                end_col.saturating_sub(c),
+            ))
         } else {
             let mut result = String::new();
             for (absolute_index, line) in lines
@@ -666,10 +716,11 @@ impl TuiState {
                 .skip(start_line)
                 .take(end_line - start_line + 1)
             {
+                let c = chrome(absolute_index);
                 let fragment = if absolute_index == start_line {
-                    char_range(line, start_col, line.chars().count())
+                    char_range(line, start_col.saturating_sub(c), line.chars().count())
                 } else if absolute_index == end_line {
-                    char_range(line, 0, end_col)
+                    char_range(line, 0, end_col.saturating_sub(c))
                 } else {
                     line.clone()
                 };
@@ -959,11 +1010,13 @@ mod tui_state_tests {
         state.apply_update(&UiUpdate::ToolError {
             id,
             error: "boom".to_string(),
+            duration: std::time::Duration::ZERO,
+            content_sections: vec![],
         });
         assert!(matches!(
             state.chat_entries.last(),
             Some(ChatEntry::ToolBubble {
-                state: ToolCallState::Error { error },
+                state: ToolCallState::Error { error, .. },
                 ..
             }) if error == "boom"
         ));
@@ -1169,6 +1222,27 @@ mod tui_state_tests {
             .extract_chat_selection_text()
             .expect("should have selection");
         assert_eq!(result, "one\nline two\nline");
+    }
+
+    #[test]
+    fn chat_selection_strips_bubble_chrome_from_copied_text() {
+        // Simulate two bubble lines where chrome is "▌  " (3 chars).
+        let mut state = TuiState::new();
+        state.chat_rendered_lines = vec!["first content".to_string(), "second content".to_string()];
+        state.chat_rendered_line_chrome_widths = vec![3, 3];
+        // Selection starts at terminal col 3 (first content char) on line 0
+        // and ends at terminal col 6 ("con") on line 1.
+        state.chat_selection = Some(ChatSelection {
+            anchor_line: 0,
+            anchor_col: 3,
+            cursor_line: 1,
+            cursor_col: 9,
+        });
+        let result = state
+            .extract_chat_selection_text()
+            .expect("should have selection");
+        // chrome stripped: col 3 → 0, col 9 → 6
+        assert_eq!(result, "first content\nsecond");
     }
 
     #[test]
@@ -1485,7 +1559,8 @@ pub enum Effect {
     /// Send `AgentCommand::ApproveTool { id }` to the agent.
     ApproveTool { id: Uuid },
     /// Send `AgentCommand::DenyTool { id, reason }` to the agent.
-    DenyTool { id: Uuid },
+    /// `reason` is the user-typed denial text; empty when no reason was given.
+    DenyTool { id: Uuid, reason: String },
     /// Send `AgentCommand::Stop` to the agent.
     StopAgent,
     /// Quit the TUI event loop.
@@ -1634,6 +1709,9 @@ pub struct AppState {
     // ── chat selection / rendered lines ─────────────────────────────────────
     /// Plain text of every rendered line from the most recent draw call.
     pub chat_rendered_lines: Vec<String>,
+    /// Number of leading chrome characters stripped per line (see
+    /// `TuiState::chat_rendered_line_chrome_widths`).
+    pub chat_rendered_line_chrome_widths: Vec<usize>,
     /// Active or committed chat selection.
     pub chat_selection: Option<ChatSelection>,
 
@@ -1696,6 +1774,7 @@ impl AppState {
             steer_indicator: false,
 
             chat_rendered_lines: Vec::new(),
+            chat_rendered_line_chrome_widths: Vec::new(),
             chat_selection: None,
 
             toast: None,
@@ -1856,9 +1935,20 @@ impl AppState {
         if start_line > end_line || lines.is_empty() {
             return None;
         }
+        let chrome = |index: usize| -> usize {
+            self.chat_rendered_line_chrome_widths
+                .get(index)
+                .copied()
+                .unwrap_or(0)
+        };
         if start_line == end_line {
             let line = &lines[start_line];
-            Some(char_range(line, start_col, end_col))
+            let c = chrome(start_line);
+            Some(char_range(
+                line,
+                start_col.saturating_sub(c),
+                end_col.saturating_sub(c),
+            ))
         } else {
             let mut result = String::new();
             for (absolute_index, line) in lines
@@ -1867,10 +1957,11 @@ impl AppState {
                 .skip(start_line)
                 .take(end_line - start_line + 1)
             {
+                let c = chrome(absolute_index);
                 let fragment = if absolute_index == start_line {
-                    char_range(line, start_col, line.chars().count())
+                    char_range(line, start_col.saturating_sub(c), line.chars().count())
                 } else if absolute_index == end_line {
-                    char_range(line, 0, end_col)
+                    char_range(line, 0, end_col.saturating_sub(c))
                 } else {
                     line.clone()
                 };
@@ -1989,7 +2080,13 @@ impl AppState {
 
     /// Update the tool bubble for `id` to the Error state. If `id` was the
     /// tool awaiting approval, clear the approval focus and reset mode to Idle.
-    pub fn apply_tool_error(&mut self, id: Uuid, error: String) {
+    pub fn apply_tool_error(
+        &mut self,
+        id: Uuid,
+        error: String,
+        duration: std::time::Duration,
+        content_sections: Vec<crate::agent::tools::Section>,
+    ) {
         if let Some(entry) = self.find_tool_bubble_mut(id) {
             if let ChatEntry::ToolBubble {
                 state: bubble_state,
@@ -2002,8 +2099,26 @@ impl AppState {
                 if matches!(bubble_state, ToolCallState::Denied { .. }) {
                     return;
                 }
+                let preserved_title_arguments = match &*bubble_state {
+                    ToolCallState::Pending {
+                        title_arguments, ..
+                    }
+                    | ToolCallState::Running {
+                        title_arguments, ..
+                    }
+                    | ToolCallState::Done {
+                        title_arguments, ..
+                    }
+                    | ToolCallState::Error {
+                        title_arguments, ..
+                    } => title_arguments.clone(),
+                    _ => vec![],
+                };
                 *bubble_state = ToolCallState::Error {
                     error: error.clone(),
+                    title_arguments: preserved_title_arguments,
+                    duration,
+                    content_sections,
                 };
             }
         } else {
@@ -2044,7 +2159,8 @@ impl AppState {
     ///
     /// Called by the Driver immediately when `Effect::DenyTool` is executed,
     /// before the agent sends the corresponding `ToolError` response.
-    pub fn apply_tool_denied(&mut self, id: Uuid) {
+    /// `reason` is the user-supplied denial text; empty means no reason given.
+    pub fn apply_tool_denied(&mut self, id: Uuid, reason: &str) {
         if let Some(ChatEntry::ToolBubble {
             state: bubble_state,
             ..
@@ -2070,7 +2186,11 @@ impl AppState {
                 };
             *bubble_state = ToolCallState::Denied {
                 arguments: preserved_arguments,
-                error: "Denied by user".to_string(),
+                error: if reason.is_empty() {
+                    "Denied by user".to_string()
+                } else {
+                    format!("Denied by user: {reason}")
+                },
                 content_sections: preserved_content_sections,
                 title_arguments: preserved_title_arguments,
             };
@@ -2206,7 +2326,7 @@ mod tests {
             },
             collapsed: false,
         });
-        state.apply_tool_denied(id);
+        state.apply_tool_denied(id, "");
         assert!(
             matches!(
                 state.chat_entries.last(),
@@ -2236,7 +2356,12 @@ mod tests {
             },
             collapsed: false,
         });
-        state.apply_tool_error(id, "tool 'shell' was denied: Denied by user".to_string());
+        state.apply_tool_error(
+            id,
+            "Tool 'shell' was denied: Denied by user".to_string(),
+            std::time::Duration::ZERO,
+            vec![],
+        );
         assert!(
             matches!(
                 state.chat_entries.last(),
@@ -2264,12 +2389,17 @@ mod tests {
             },
             collapsed: false,
         });
-        state.apply_tool_error(id, "execution failed".to_string());
+        state.apply_tool_error(
+            id,
+            "execution failed".to_string(),
+            std::time::Duration::ZERO,
+            vec![],
+        );
         assert!(
             matches!(
                 state.chat_entries.last(),
                 Some(ChatEntry::ToolBubble {
-                    state: ToolCallState::Error { error },
+                    state: ToolCallState::Error { error, .. },
                     ..
                 }) if error == "execution failed"
             ),

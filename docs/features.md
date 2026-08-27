@@ -71,6 +71,13 @@ Every `role:"tool"` message carries its `content` as JSON struct
   Offset and limit are 0-based!
 - **write**: Write `content` to file at given `path`.  
 - **glob**: Search for paths using a glob `pattern`, including wildcards like `*`, `?`, `**`, `[...]`.
+- **bash**: Execute a shell command via `bash -c`. Requires explicit human approval
+  before execution (always `UserApprovalRequired`). stdout and stderr are merged in true
+  arrival order (concurrent async reads). Output is capped at 100 KB
+  (`tool_output_truncated` / `tool_output_truncated_at_bytes` properties present when
+  capped). Default timeout: 30 s (`DEFAULT_BASH_TIMEOUT_SECS`). On timeout or
+  cancellation the entire process group is killed via `SIGKILL` (Unix) using
+  `nix::sys::signal::killpg` — grandchildren spawned by the script are also cleaned up.
 
 ## Phase 4: TUI skeleton
 

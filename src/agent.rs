@@ -80,6 +80,9 @@ pub enum AgentEvent {
         id: Uuid,
         name: String,
         error: String,
+        partial_output: Option<String>,
+        duration: std::time::Duration,
+        content_sections: Vec<crate::agent::tools::Section>,
     },
     ToolKilled {
         id: Uuid,
@@ -119,6 +122,8 @@ pub enum UiUpdate {
     ToolError {
         id: Uuid,
         error: String,
+        duration: std::time::Duration,
+        content_sections: Vec<crate::agent::tools::Section>,
     },
     /// A tool call was denied automatically by the sandbox before it started.
     /// Creates a `Denied` bubble directly — no `ToolStart` is ever sent.
@@ -208,10 +213,10 @@ pub enum Message {
         id: Uuid,
         name: String,
         error: String,
+        duration: std::time::Duration,
     },
 }
 
-/// Single source of truth for the default system prompt in Phase 1. A later
 /// config phase (Phase 7 §4G layering) may source this from a SOUL.md file
 /// without changing call sites.
 pub const DEFAULT_SYSTEM_PROMPT: &str = "You are Ylva, a helpful agent with tool capabilities.";
@@ -302,8 +307,26 @@ impl Context {
         self.messages.push(Message::ToolResult { id, name, result });
     }
 
-    pub fn push_tool_error(&mut self, id: Uuid, name: String, error: String) {
-        self.messages.push(Message::ToolError { id, name, error });
+    pub fn push_tool_error(
+        &mut self,
+        id: Uuid,
+        name: String,
+        error: String,
+        partial_output: Option<&str>,
+    ) {
+        let llm_error = match partial_output.filter(|s| !s.is_empty()) {
+            Some(output) => format!(
+                "{error}\n\nThe tool produced the following output before being terminated:\n\
+                 {output}"
+            ),
+            None => error,
+        };
+        self.messages.push(Message::ToolError {
+            id,
+            name,
+            error: llm_error,
+            duration: std::time::Duration::ZERO,
+        });
     }
 
     pub fn messages(&self) -> &[Message] {
@@ -405,22 +428,45 @@ impl PendingTool {
                             })
                             .await;
                     }
-                    Ok((Err(error), _)) => {
+                    Ok((Err(error), duration)) => {
+                        let partial_output = error
+                            .partial_output()
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string);
+                        let content_sections: Vec<crate::agent::tools::Section> =
+                            if let Some(output) = &partial_output {
+                                vec![crate::agent::tools::Section::Content(
+                                    crate::agent::tools::ContentSection {
+                                        label: Some("partial output".to_string()),
+                                        content: output.clone(),
+                                        file_extension: None,
+                                        line_number_offset: Some(0),
+                                    },
+                                )]
+                            } else {
+                                vec![]
+                            };
                         let _ = agent_tx
                             .send(AgentEvent::ToolError {
                                 id,
                                 name,
                                 error: error.to_string(),
+                                partial_output,
+                                duration,
+                                content_sections,
                             })
                             .await;
                     }
                     Err(_elapsed) => {
-                        let message = format!("tool '{name}' timed out after {timeout_secs}s");
+                        let message = format!("Tool '{name}' timed out after {timeout_secs}s");
                         let _ = agent_tx
                             .send(AgentEvent::ToolError {
                                 id,
                                 name,
                                 error: message,
+                                partial_output: None,
+                                duration: Duration::from_secs(timeout_secs),
+                                content_sections: vec![],
                             })
                             .await;
                     }
@@ -588,12 +634,15 @@ impl AgentLoop {
                                         }
                                         None => {
                                             let error =
-                                                format!("unknown tool '{}'", assembled.name);
+                                                format!("Unknown tool '{}'", assembled.name);
                                             let _ = agent_tx
                                                 .send(AgentEvent::ToolError {
                                                     id: assembled.id,
                                                     name: assembled.name.clone(),
                                                     error,
+                                                    partial_output: None,
+                                                    duration: std::time::Duration::ZERO,
+                                                    content_sections: vec![],
                                                 })
                                                 .await;
                                         }
@@ -643,10 +692,15 @@ impl AgentLoop {
                                 )
                                 .await;
                             }
-                            AgentEvent::ToolError { id, name, error } => {
+                            AgentEvent::ToolError { id, name, error, partial_output, duration, content_sections } => {
                                 current_tool_cancel = None;
-                                context.push_tool_error(id, name, error.clone());
-                                let _ = ui_tx.send(UiUpdate::ToolError { id, error }).await;
+                                context.push_tool_error(id, name, error.clone(), partial_output.as_deref());
+                                let _ = ui_tx.send(UiUpdate::ToolError {
+                                    id,
+                                    error,
+                                    duration,
+                                    content_sections,
+                                }).await;
                                 advance_tool_queue(
                                     &mut pending_tools,
                                     &mut context,
@@ -744,11 +798,13 @@ impl AgentLoop {
                                     let name = denied.call.name().to_string();
                                     let call_id = denied.call.id();
                                     tracing::info!(tool = %name, tool_call_id = %call_id, "tool denied");
-                                    let mut error = format!("tool '{name}' was denied");
+                                    let mut error = format!("Tool '{name}' was denied by the user");
                                     if !reason.is_empty() {
-                                        error.push_str(&format!(": {reason}"));
+                                        error.push_str(&format!(
+                                            ". Here is their reason for the denial:\n\n{reason}"
+                                        ));
                                     }
-                                    context.push_tool_error(call_id, name.clone(), error.clone());
+                                    context.push_tool_error(call_id, name.clone(), error.clone(), None);
                                     // When the user supplied a reason, also push a
                                     // `user` role message so the model reads the
                                     // correction through the authoritative instruction
@@ -761,7 +817,12 @@ impl AgentLoop {
                                         ));
                                     }
                                     let _ = ui_tx
-                                        .send(UiUpdate::ToolError { id: call_id, error })
+                                        .send(UiUpdate::ToolError {
+                                            id: call_id,
+                                            error,
+                                            duration: std::time::Duration::ZERO,
+                                            content_sections: vec![],
+                                        })
                                         .await;
                                     advance_tool_queue(
                                         &mut pending_tools,
@@ -805,14 +866,21 @@ impl AgentLoop {
                                     for pending in pending_tools.iter() {
                                         let name = pending.call.name().to_string();
                                         let id = pending.call.id();
-                                        let mut error = format!("tool '{name}' was denied");
+                                        let mut error = format!("Tool '{name}' was denied by the user");
                                         if !reason.is_empty() {
-                                            error.push_str(&format!(": {reason}"));
+                                            error.push_str(&format!(
+                                                ". Here is their reason for the denial:\n\n{reason}"
+                                            ));
                                         }
-                                        context.push_tool_error(id, name, error.clone());
+                                        context.push_tool_error(id, name, error.clone(), None);
                                         if first {
                                             let _ = ui_tx
-                                                .send(UiUpdate::ToolError { id, error })
+                                                .send(UiUpdate::ToolError {
+                                                    id,
+                                                    error,
+                                                    duration: std::time::Duration::ZERO,
+                                                    content_sections: vec![],
+                                                })
                                                 .await;
                                             first = false;
                                         }
@@ -938,7 +1006,7 @@ async fn advance_tool_queue(
                         let title_arguments = pending.call.title_arguments();
                         let content_sections = pending.call.pending_content_sections();
                         tracing::info!(tool = %name, tool_call_id = %call_id, %reason, "tool auto-denied");
-                        context.push_tool_error(call_id, name.clone(), reason.clone());
+                        context.push_tool_error(call_id, name.clone(), reason.clone(), None);
                         let _ = ui_tx
                             .send(UiUpdate::ToolAutoDenied {
                                 id: call_id,
@@ -988,13 +1056,27 @@ fn start_request(
     let messages = context.messages().to_vec();
     let inner_cancel = cancel.clone();
     tokio::spawn(async move {
-        let mut stream = match engine.chat(messages, tools, inner_cancel).await {
+        let mut stream = match engine.chat(messages, tools, inner_cancel.clone()).await {
             Ok(stream) => stream,
             Err(error) => {
-                let message = format!("{error}");
-                tracing::error!(message = %message, "engine chat failed");
-                let _ = ui_tx.send(UiUpdate::Error(message.clone())).await;
-                let _ = agent_tx.send(AgentEvent::StreamError(message)).await;
+                // If the cancel token was already fired (e.g. user aborted
+                // while the server was still thinking), treat the resulting
+                // error as a cancellation rather than a hard error so
+                // domain_aborting receives StreamCancelled and exits cleanly.
+                if inner_cancel.is_cancelled() {
+                    tracing::debug!("engine chat failed after cancel; treating as StreamCancelled");
+                    let _ = ui_tx.send(UiUpdate::StreamCancelled).await;
+                    let _ = agent_tx
+                        .send(AgentEvent::StreamCancelled {
+                            partial: String::new(),
+                        })
+                        .await;
+                } else {
+                    let message = format!("{error}");
+                    tracing::error!(message = %message, "engine chat failed");
+                    let _ = ui_tx.send(UiUpdate::Error(message.clone())).await;
+                    let _ = agent_tx.send(AgentEvent::StreamError(message)).await;
+                }
                 return;
             }
         };
@@ -1148,6 +1230,7 @@ mod tests {
             id: Uuid::new_v4(),
             name: "tool".into(),
             error: "err".into(),
+            duration: std::time::Duration::ZERO,
         };
         assert!(matches!(system, Message::System { .. }));
         assert!(matches!(user, Message::User { .. }));
@@ -1262,7 +1345,7 @@ mod tests {
         let mut context = Context::new();
         let id = Uuid::new_v4();
         context.push_tool_result(id, "read".into(), "contents".into());
-        context.push_tool_error(id, "write".into(), "denied".into());
+        context.push_tool_error(id, "write".into(), "denied".into(), None);
         assert_eq!(
             context.messages()[2],
             Message::ToolResult {
@@ -1277,6 +1360,7 @@ mod tests {
                 id,
                 name: "write".into(),
                 error: "denied".into(),
+                duration: std::time::Duration::ZERO,
             }
         );
     }

@@ -215,10 +215,12 @@ async fn execute_effects(
                 configure_textarea(textarea);
             }
             Effect::RestoreTextarea => {
-                if let Some(snapshot) = state.pending_approval_input_snapshot.take() {
-                    *textarea = TextArea::from(snapshot);
-                    configure_textarea(textarea);
-                }
+                *textarea = if let Some(snapshot) = state.pending_approval_input_snapshot.take() {
+                    TextArea::from(snapshot)
+                } else {
+                    TextArea::default()
+                };
+                configure_textarea(textarea);
             }
             Effect::TextareaKey(key_event) => {
                 textarea.input(key_event);
@@ -245,12 +247,9 @@ async fn execute_effects(
             Effect::ApproveTool { id } => {
                 let _ = cmd_tx.try_send(AgentCommand::ApproveTool { id });
             }
-            Effect::DenyTool { id } => {
-                state.apply_tool_denied(id);
-                let _ = cmd_tx.try_send(AgentCommand::DenyTool {
-                    id,
-                    reason: "Denied by user".into(),
-                });
+            Effect::DenyTool { id, reason } => {
+                state.apply_tool_denied(id, &reason);
+                let _ = cmd_tx.try_send(AgentCommand::DenyTool { id, reason });
             }
             Effect::StopAgent => {
                 let _ = cmd_tx.try_send(AgentCommand::Stop {
@@ -326,8 +325,15 @@ async fn process_one_update(
     mouse_drag: &mut MouseDrag,
     clipboard: &mut dyn ClipboardSink,
 ) -> ActionOutcome {
-    if let UiUpdate::ToolError { id, error } = update {
-        state.apply_tool_error(*id, error.clone());
+    if let UiUpdate::ToolError {
+        id,
+        error,
+        duration,
+        content_sections,
+        ..
+    } = update
+    {
+        state.apply_tool_error(*id, error.clone(), *duration, content_sections.clone());
         return ActionOutcome::Continue;
     }
     if let UiUpdate::ToolAutoDenied {
@@ -380,6 +386,7 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
         input_area: input_area_rect,
         chat_area: chat_area_rect,
         chat_rendered_lines: app.chat_rendered_lines,
+        chat_rendered_line_chrome_widths: app.chat_rendered_line_chrome_widths,
         chat_selection: app.chat_selection,
         chat_drag_active: app.chat_drag_active,
         toast: app.toast,
@@ -1046,7 +1053,10 @@ mod tests {
 
         let ctx = textarea_ctx_from(&textarea);
         let effects = presenter::update(&mut state, TuiEvent::Input(InputEvent::CtrlC), &ctx);
-        assert!(effects.contains(&Effect::DenyTool { id: tool_id }));
+        assert!(effects.contains(&Effect::DenyTool {
+            id: tool_id,
+            reason: String::new(),
+        }));
         execute_effects(
             &mut state,
             &mut textarea,
@@ -1060,7 +1070,7 @@ mod tests {
             cmd_rx.try_recv(),
             Ok(AgentCommand::DenyTool {
                 id: tool_id,
-                reason: "Denied by user".into(),
+                reason: String::new(),
             })
         );
     }
@@ -1142,7 +1152,10 @@ mod tests {
 
         let ctx = textarea_ctx_from(&textarea);
         let effects = presenter::update(&mut state, TuiEvent::Input(InputEvent::Escape), &ctx);
-        assert!(effects.contains(&Effect::DenyTool { id: tool_id }));
+        assert!(effects.contains(&Effect::DenyTool {
+            id: tool_id,
+            reason: String::new(),
+        }));
         execute_effects(
             &mut state,
             &mut textarea,
@@ -1157,7 +1170,7 @@ mod tests {
             cmd_rx.try_recv(),
             Ok(AgentCommand::DenyTool {
                 id: tool_id,
-                reason: "Denied by user".into()
+                reason: String::new(),
             })
         );
     }

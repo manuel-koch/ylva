@@ -468,6 +468,7 @@ mod tests {
                 id,
                 name: "read".into(),
                 error: "boom".into(),
+                duration: std::time::Duration::ZERO,
             },
         ];
         let value = serialize_messages(&messages);

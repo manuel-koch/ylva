@@ -15,9 +15,9 @@
 //! Tool trait, registry, and the built-in file-system tools.
 //!
 //! Schemas are derived from typed argument structs via `schemars`, never
-//! hand-written JSON (blueprint §4D). The registry keeps a runtime `allowed`
-//! seam so a future Phase 6 whitelist (or Phase 5 headless filtering) can
-//! restrict the `tools` array without changing the agent loop.
+//! hand-written JSON. The registry keeps a runtime `allowed` seam so a future
+//! whitelist or headless filtering can restrict the `tools` array without
+//! changing the agent loop.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -28,9 +28,10 @@ use serde_json::Value;
 use crate::llm::ToolSchema;
 use crate::sandbox::ApprovalCheck;
 
+pub mod bash;
 pub mod fs;
 
-/// Default execution timeout for file-system tools (blueprint §4D: 5s).
+/// Default execution timeout for file-system tools.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 5;
 
 /// Failure from a single tool invocation, mapped to the flat
@@ -38,8 +39,13 @@ pub const DEFAULT_TIMEOUT_SECS: u64 = 5;
 /// `UiUpdate::ToolError` / `Message::ToolError`.
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
-    #[error("tool '{name}' failed: {message}")]
-    Failed { name: String, message: String },
+    #[error("Tool '{name}' failed: {message}")]
+    Failed {
+        name: String,
+        message: String,
+        /// Output the tool produced before the error or timeout (if any).
+        partial_output: Option<String>,
+    },
 }
 
 impl ToolError {
@@ -47,6 +53,30 @@ impl ToolError {
         ToolError::Failed {
             name: name.into(),
             message: message.into(),
+            partial_output: None,
+        }
+    }
+
+    pub fn failed_with_output(
+        name: impl Into<String>,
+        message: impl Into<String>,
+        partial_output: String,
+    ) -> Self {
+        ToolError::Failed {
+            name: name.into(),
+            message: message.into(),
+            partial_output: if partial_output.is_empty() {
+                None
+            } else {
+                Some(partial_output)
+            },
+        }
+    }
+
+    /// Returns the partial output carried by this error, if any.
+    pub fn partial_output(&self) -> Option<&str> {
+        match self {
+            ToolError::Failed { partial_output, .. } => partial_output.as_deref(),
         }
     }
 }
@@ -170,7 +200,7 @@ pub trait ToolCall: Send + Sync {
     ) -> futures::future::BoxFuture<'static, Result<Box<dyn ToolCallResult>, ToolError>>;
 }
 
-/// A named, schema-described tool the model may call (blueprint §4D).
+/// A named, schema-described tool the model may call.
 ///
 /// The trait exposes tool **data** and argument metadata. Actual execution is
 /// encapsulated in the [`ToolCall`] object created by [`Tool::create_call`].
@@ -318,7 +348,8 @@ fn to_tool_schema(tool: &dyn Tool) -> ToolSchema {
     }
 }
 
-/// Convenience: build the Phase 3 registry with the three file-system tools.
+/// Build the default registry with the file-system tools (`read`, `write`,
+/// `glob`) and the shell tool (`bash`).
 pub fn default_registry(
     sandbox: std::sync::Arc<std::sync::RwLock<crate::sandbox::Sandbox>>,
 ) -> ToolRegistry {
@@ -331,6 +362,9 @@ pub fn default_registry(
         Arc::clone(&sandbox),
     ))));
     registry.register(Arc::new(fs::GlobTool::new(SandboxContext::new(
+        Arc::clone(&sandbox),
+    ))));
+    registry.register(Arc::new(bash::BashTool::new(SandboxContext::new(
         Arc::clone(&sandbox),
     ))));
     registry
@@ -454,13 +488,14 @@ mod tests {
     }
 
     #[test]
-    fn default_registry_registers_all_three_tools() {
+    fn default_registry_registers_all_four_tools() {
         let sandbox = std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new()));
         let registry = default_registry(sandbox);
-        assert_eq!(registry.names().len(), 3);
+        assert_eq!(registry.names().len(), 4);
         assert!(registry.get("read").is_some());
         assert!(registry.get("write").is_some());
         assert!(registry.get("glob").is_some());
+        assert!(registry.get("bash").is_some());
     }
 
     #[test]

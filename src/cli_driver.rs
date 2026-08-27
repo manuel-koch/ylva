@@ -285,7 +285,7 @@ pub async fn run_cli_to(
                 writeln!(out, "[tool] {title} done ({duration_s:.3}s){summary_str}")?;
                 render_content_sections(out, &content_sections)?;
             }
-            Some(UiUpdate::ToolError { id, error }) => {
+            Some(UiUpdate::ToolError { id, error, .. }) => {
                 if !denied_tool_ids.remove(&id) {
                     writeln!(out, "[tool] error: {error}")?;
                 }

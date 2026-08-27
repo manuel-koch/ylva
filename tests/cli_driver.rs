@@ -150,9 +150,11 @@ async fn run_cli_auto_approves_read_and_runs_it() {
         calls: Arc::new(AtomicUsize::new(0)),
     });
     // Use the tempdir as the workspace root so the file is inside the sandbox.
-    let sandbox = std::sync::Arc::new(std::sync::RwLock::new(ylva::Sandbox {
-        workspace_root: dir.path().to_path_buf(),
-    }));
+    // Sandbox::with_root canonicalizes the path so symlink-backed temp dirs
+    // (e.g. /var/folders → /private/var/folders on macOS) compare correctly.
+    let sandbox = std::sync::Arc::new(std::sync::RwLock::new(ylva::Sandbox::with_root(
+        dir.path().to_path_buf(),
+    )));
     let registry = Arc::new(default_registry(sandbox));
     let mut output = Vec::new();
     let engine = Arc::new(EngineImpl::new(provider, common::test_engine_config()));

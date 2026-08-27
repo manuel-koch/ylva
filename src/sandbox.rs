@@ -51,9 +51,25 @@ pub struct Sandbox {
 
 impl Sandbox {
     /// Create a new sandbox rooted at the current working directory.
+    ///
+    /// The workspace root is canonicalized (symlinks resolved) so that
+    /// `check_path` comparisons are consistent on platforms where temp
+    /// directories live behind symlinks (e.g. macOS `/private/var/…`).
     pub fn new() -> Self {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         Sandbox {
-            workspace_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            workspace_root: std::fs::canonicalize(&cwd).unwrap_or(cwd),
+        }
+    }
+
+    /// Create a sandbox rooted at an explicit path.
+    ///
+    /// The path is canonicalized for the same reason as in [`Sandbox::new`].
+    /// Falls back to the raw path when canonicalization fails (e.g. the
+    /// directory does not yet exist).
+    pub fn with_root(root: PathBuf) -> Self {
+        Sandbox {
+            workspace_root: std::fs::canonicalize(&root).unwrap_or(root),
         }
     }
 }
@@ -144,6 +160,47 @@ impl SandboxContext {
         })
     }
 
+    /// Canonicalize `path`, resolving symlinks and normalizing the form.
+    ///
+    /// When the full path does not exist (e.g. a write target), falls back to
+    /// walking up the directory tree until a component that *does* exist is
+    /// found, canonicalizing that anchor, and reattaching the non-existent
+    /// tail. This ensures that a path like `/var/folders/ws/new_file.rs` is
+    /// resolved to `/private/var/folders/ws/new_file.rs` on macOS even though
+    /// `new_file.rs` has not been created yet — which is necessary for
+    /// workspace-membership comparisons when `workspace_root` is canonical.
+    /// On macOS, `/var` is a symlink to `/private/var`; canonicalizing the
+    /// existing ancestor `/var/folders/ws` follows that symlink, producing
+    /// the `/private/…` prefix that matches a canonical `workspace_root`.
+    fn canonicalize_best_effort(path: &Path) -> PathBuf {
+        if let Ok(canonical) = std::fs::canonicalize(path) {
+            return canonical;
+        }
+        // Walk up to find the deepest existing ancestor.
+        let mut current = path.to_path_buf();
+        let mut tail: Vec<std::ffi::OsString> = Vec::new();
+        loop {
+            if let Ok(canonical) = std::fs::canonicalize(&current) {
+                let mut result = canonical;
+                for component in tail.iter().rev() {
+                    result.push(component);
+                }
+                return result;
+            }
+            match current.file_name() {
+                Some(name) => {
+                    tail.push(name.to_owned());
+                    match current.parent() {
+                        Some(parent) => current = parent.to_path_buf(),
+                        None => break,
+                    }
+                }
+                None => break,
+            }
+        }
+        path.to_path_buf()
+    }
+
     /// Check whether `path` is allowed by the sandbox rules.
     ///
     /// Returns `None` when no rule fires — the sandbox abstains and the calling
@@ -151,12 +208,12 @@ impl SandboxContext {
     /// explicit opinion that the tool must honour unconditionally.
     ///
     /// **Path resolution:** the input is first normalized lexically (no filesystem
-    /// access), then resolved via [`std::fs::canonicalize`] if the path exists.
-    /// All rule evaluation — workspace membership, dot-path check, and glob rules —
-    /// runs against the canonical path when available, so symlinks cannot hide
-    /// their real location, name, or extension from rules.
-    /// For paths that do not yet exist (e.g. a write target), lexical normalization
-    /// is used as a fallback.
+    /// access), then resolved via [`canonicalize_best_effort`] which resolves
+    /// symlinks for existing paths and walks up to the deepest existing ancestor
+    /// for paths that do not yet exist (e.g. write targets). This ensures that
+    /// workspace-membership comparisons are correct even when the input path
+    /// uses a non-canonical prefix such as macOS
+    /// `/var/folders` → `/private/var/folders`.
     ///
     /// Rule evaluation order:
     /// 1. Outside-workspace → `Some(AutoDenied)`.
@@ -168,12 +225,14 @@ impl SandboxContext {
             let guard = self.sandbox.read().expect("sandbox lock poisoned");
             guard.workspace_root.clone()
         };
+        // Ensure workspace_root is canonical even when the Sandbox was built via
+        // direct struct construction rather than Sandbox::new() / Sandbox::with_root().
+        // This guards against macOS /var/folders → /private/var/folders mismatches.
+        let workspace_root = std::fs::canonicalize(&workspace_root).unwrap_or(workspace_root);
         let normalized = Self::normalize(&workspace_root, path);
 
-        // Resolve symlinks so rules see the real path, name, and extension.
-        // Falls back to the lexically-normalized path when the target does not
-        // exist yet (e.g. a write to a new file).
-        let effective = std::fs::canonicalize(&normalized).unwrap_or(normalized);
+        // Resolve symlinks and non-canonical prefixes (e.g. macOS /var → /private/var).
+        let effective = Self::canonicalize_best_effort(&normalized);
 
         // No implicit zeroth verdict — absence of a match returns None.
         let mut verdict: Option<ApprovalCheck> = None;
@@ -223,6 +282,19 @@ impl SandboxContext {
 
         verdict
     }
+
+    /// Check whether `command` is allowed by the sandbox.
+    ///
+    /// Returns `None` when no rule fires — the sandbox abstains and the calling
+    /// tool applies its own default (typically `UserApprovalRequired` for shell
+    /// commands). Returns `Some(verdict)` when a rule has an explicit opinion.
+    ///
+    /// Currently the sandbox has no command-specific rules and always abstains.
+    /// Future configuration (e.g. per-tool TOML allow/deny command globs) will
+    /// be evaluated here without changing call sites.
+    pub fn check_command(&self, _command: &str) -> Option<ApprovalCheck> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -230,9 +302,7 @@ mod tests {
     use super::*;
 
     fn make_sandbox(root: &Path) -> Arc<RwLock<Sandbox>> {
-        Arc::new(RwLock::new(Sandbox {
-            workspace_root: root.to_path_buf(),
-        }))
+        Arc::new(RwLock::new(Sandbox::with_root(root.to_path_buf())))
     }
 
     #[test]
@@ -319,7 +389,8 @@ mod tests {
     fn sandbox_default_uses_current_dir() {
         let sandbox = Sandbox::default();
         let cwd = std::env::current_dir().expect("cwd");
-        assert_eq!(sandbox.workspace_root, cwd);
+        let canonical_cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
+        assert_eq!(sandbox.workspace_root, canonical_cwd);
     }
 
     #[test]
@@ -337,8 +408,15 @@ mod tests {
         let temporary_dir = tempfile::tempdir().unwrap();
         let workspace = temporary_dir.path().to_path_buf();
         let sandbox = make_sandbox(&workspace);
-        let allow_pattern =
-            glob::Pattern::new(&format!("{}/allowed/**", workspace.to_string_lossy())).unwrap();
+        // Build the glob pattern from the canonical workspace_root stored in
+        // the sandbox, not from the raw `workspace` variable, so that the
+        // pattern matches the canonical `effective` path inside check_path.
+        let canonical_workspace = sandbox.read().unwrap().workspace_root.clone();
+        let allow_pattern = glob::Pattern::new(&format!(
+            "{}/allowed/**",
+            canonical_workspace.to_string_lossy()
+        ))
+        .unwrap();
         let mut context = SandboxContext::new(Arc::clone(&sandbox));
         context.rules.push(SandboxRule {
             verdict: ApprovalCheck::AutoApproved,
@@ -406,6 +484,29 @@ mod tests {
                 Some(ApprovalCheck::AutoDenied { .. })
             ),
             "symlink whose real target is a dot-file must be AutoDenied"
+        );
+    }
+
+    #[test]
+    fn check_command_always_abstains() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let sandbox = make_sandbox(temporary_dir.path());
+        let context = SandboxContext::new(Arc::clone(&sandbox));
+
+        assert_eq!(
+            context.check_command("echo hello"),
+            None,
+            "sandbox abstains for ordinary commands"
+        );
+        assert_eq!(
+            context.check_command("rm -rf /"),
+            None,
+            "sandbox abstains even for dangerous-looking commands (no rules configured)"
+        );
+        assert_eq!(
+            context.check_command(""),
+            None,
+            "sandbox abstains for empty command"
         );
     }
 }

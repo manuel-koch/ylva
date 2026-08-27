@@ -258,7 +258,7 @@ No user-visible behavior. Must be fully green before any tool work begins.
 
 **Goal:** Shell command execution with process-group kill and 30-second timeout.
 
-- [ ] 10. Create `src/agent/tools/bash.rs`. Define:
+- [x] 10. Create `src/agent/tools/bash.rs`. Define:
 
     ```rust
     #[derive(JsonSchema, Deserialize)]
@@ -284,15 +284,15 @@ No user-visible behavior. Must be fully green before any tool work begins.
   - Define `DEFAULT_BASH_TIMEOUT_SECS: u64 = 30` alongside `DEFAULT_TOOL_TIMEOUT_SECS`.
   - Define `BASH_OUTPUT_LIMIT_BYTES: usize = 100 * 1024`.
 
-- [ ] 11. Register `BashTool` in `default_registry()`.
+- [x] 11. Register `BashTool` in `default_registry()`.
 
-- [ ] 12. Write unit tests: happy path (`echo`), timeout kills child process group, cancellation
+- [x] 12. Write unit tests: happy path (`echo`), timeout kills child process group, cancellation
   token kills child process group, output truncated at 100 KB cap (`tool_output_truncated`
   metadata present), non-zero exit returns `ToolError`.
 
-- [ ] 13. Update `docs/features.md`: add `bash` entry (approval level, timeout, process-group kill).
+- [x] 13. Update `docs/features.md`: add `bash` entry (approval level, timeout, process-group kill).
 
-- [ ] 14. Run `make test` + `make test-coverage`.
+- [x] 14. Run `make test` + `make test-coverage`.
 
 ---
 

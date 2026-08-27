@@ -45,7 +45,19 @@ pub(crate) async fn post_with_retry(
     loop {
         let request = client.post(url).headers(headers.clone()).json(body);
 
-        let response = match request.send().await {
+        // Honour the cancel token during the initial HTTP round-trip.  The
+        // LLM server may take tens of seconds before sending back 200 +
+        // headers; without this check an in-flight `request.send()` would
+        // keep the request alive until the server finally responds, making
+        // cancellation appear stuck for the entire server-side think time.
+        let response = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                return Err(anyhow::anyhow!("cancelled"));
+            }
+            result = request.send() => result,
+        };
+        let response = match response {
             Ok(response) => response,
             Err(error) => {
                 if retries >= MAX_RETRIES {

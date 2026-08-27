@@ -128,7 +128,14 @@ fn keyboard_approval(
     match event {
         InputEvent::CtrlC | InputEvent::Escape => {
             state.focus = Focus::MainInput;
-            vec![Effect::DenyTool { id: tool_id }, Effect::RestoreTextarea]
+            // No reason given — deny silently without an implicit user message.
+            vec![
+                Effect::DenyTool {
+                    id: tool_id,
+                    reason: String::new(),
+                },
+                Effect::RestoreTextarea,
+            ]
         }
         InputEvent::SigInt => vec![Effect::StopAgent],
         InputEvent::KeyInput(key_event) if key_event.code == KeyCode::Enter => {
@@ -136,7 +143,16 @@ fn keyboard_approval(
             if textarea.is_empty {
                 vec![Effect::ApproveTool { id: tool_id }, Effect::RestoreTextarea]
             } else {
-                vec![Effect::DenyTool { id: tool_id }, Effect::RestoreTextarea]
+                // User typed a denial reason — pass it to the agent so it can
+                // be forwarded to the model as an implicit user message.
+                let reason = textarea.text.clone();
+                vec![
+                    Effect::DenyTool {
+                        id: tool_id,
+                        reason,
+                    },
+                    Effect::RestoreTextarea,
+                ]
             }
         }
         InputEvent::KeyInput(key_event) => vec![Effect::TextareaKey(key_event)],
@@ -398,7 +414,13 @@ fn route_mouse(
                 }
                 if in_deny {
                     state.focus = Focus::MainInput;
-                    return vec![Effect::DenyTool { id: tool_id }, Effect::RestoreTextarea];
+                    return vec![
+                        Effect::DenyTool {
+                            id: tool_id,
+                            reason: String::new(),
+                        },
+                        Effect::RestoreTextarea,
+                    ];
                 }
             }
 
@@ -872,7 +894,10 @@ fn domain_aborting(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
         }
         DomainEvent::ToolPending { id, .. } => {
             // While aborting, deny immediately without entering approval sub-mode.
-            vec![Effect::DenyTool { id }]
+            vec![Effect::DenyTool {
+                id,
+                reason: String::new(),
+            }]
         }
         DomainEvent::ToolStart {
             id,
@@ -1335,7 +1360,10 @@ mod tests {
             TuiEvent::Input(InputEvent::CtrlC),
             &empty_textarea(),
         );
-        assert!(effects.contains(&Effect::DenyTool { id: tool_id }));
+        assert!(effects.contains(&Effect::DenyTool {
+            id: tool_id,
+            reason: String::new(),
+        }));
         assert!(effects.contains(&Effect::RestoreTextarea));
         assert_eq!(state.focus, Focus::MainInput);
     }
@@ -1367,7 +1395,10 @@ mod tests {
             TuiEvent::Input(InputEvent::Escape),
             &empty_textarea(),
         );
-        assert!(effects.contains(&Effect::DenyTool { id: tool_id }));
+        assert!(effects.contains(&Effect::DenyTool {
+            id: tool_id,
+            reason: String::new(),
+        }));
         assert!(effects.contains(&Effect::RestoreTextarea));
     }
 
@@ -1479,7 +1510,10 @@ mod tests {
             TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
             &textarea_with("deny reason"),
         );
-        assert!(effects.contains(&Effect::DenyTool { id: tool_id }));
+        assert!(effects.contains(&Effect::DenyTool {
+            id: tool_id,
+            reason: "deny reason".to_string(),
+        }));
         assert!(effects.contains(&Effect::RestoreTextarea));
     }
 
@@ -1592,7 +1626,10 @@ mod tests {
             }),
             &empty_textarea(),
         );
-        assert!(effects.contains(&Effect::DenyTool { id: tool_id }));
+        assert!(effects.contains(&Effect::DenyTool {
+            id: tool_id,
+            reason: String::new(),
+        }));
         // Focus must not change to ToolApproval.
         assert_ne!(
             state.focus,

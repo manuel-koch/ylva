@@ -60,4 +60,21 @@ Create a four line poem about a little lamp and save it to `logs/poem.md`.
 Summarize current conversation and save it to `../logs/summary.md`.
 
 Create a 50 word sentence ( without newline ) and save it too `../logs/long-line.md`.
+
+Run `python3` to find out which version it is and where the python interpreter
+is located.
+
+Run `tests/e2e/long-running.bash`.
+
+Run the following command in bash: `date ; sleep 3 ; echo lorem ipsum ; date ; sleep 3 ; echo lorem ipsum ; date ; sleep 3 ; echo lorem ipsum ; date ; sleep 3 ; echo lorem ipsum`
+
+Run the following command exactly like given (as-is, don't re-write/collapse linebreaks ) in bash:
+```shell
+for n in seq 1 5 ; do
+  echo "$(date) lorem ipsum"
+  sleep 3
+done
+```
+
+Run `tests/e2e/heavy-output.bash`.
 ```
