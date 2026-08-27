@@ -7,7 +7,7 @@ make format lint test-coverage build-debug-and-run-with-logs
 ```
 
 ```text
-Implement open tasks in section "Phase 6.0" of
+Implement open tasks in section "Phase 6.2" of
 docs/plans/phase6-terminal-superpowers.md
 
 Don't stage or commit anything in git!
@@ -60,6 +60,14 @@ Create a four line poem about a little lamp and save it to `logs/poem.md`.
 Summarize current conversation and save it to `../logs/summary.md`.
 
 Create a 50 word sentence ( without newline ) and save it too `../logs/long-line.md`.
+
+Use search tool to find markdown files that contain the case-insensitive word `tool`.
+
+Use search tool to find Rust source files that contain the case-sensitive word `SearchTool`, provide 4 lines of context for each match.
+
+Use search tool to find Rust source files that contain the case-sensitive word `BashTool`, report only the paths that matched.
+
+Use search tool to find Rust source files that contain the case-sensitive regexp `\w+Tool`, report only the matched regexp without path/line info.
 
 Run `python3` to find out which version it is and where the python interpreter
 is located.

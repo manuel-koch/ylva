@@ -69,7 +69,7 @@ Every `role:"tool"` message carries its `content` as JSON struct
 - **read**: Read file content from given `path` using `mode`/`offset`/`limit`.
   Mode can be `bytes`/`chars`/`lines`.
   Offset and limit are 0-based!
-- **write**: Write `content` to file at given `path`.  
+- **write**: Write `content` to file at given `path`.
 - **glob**: Search for paths using a glob `pattern`, including wildcards like `*`, `?`, `**`, `[...]`.
 - **bash**: Execute a shell command via `bash -c`. Requires explicit human approval
   before execution (always `UserApprovalRequired`). stdout and stderr are merged in true
@@ -78,6 +78,22 @@ Every `role:"tool"` message carries its `content` as JSON struct
   capped). Default timeout: 30 s (`DEFAULT_BASH_TIMEOUT_SECS`). On timeout or
   cancellation the entire process group is killed via `SIGKILL` (Unix) using
   `nix::sys::signal::killpg` — grandchildren spawned by the script are also cleaned up.
+- **search**: Search file contents using a regular-expression `pattern` within a
+  directory tree (defaults to cwd when `path` is omitted). Uses `ignore` crate for
+  traversal (respects `.gitignore`). Binary files are skipped (null-byte heuristic on
+  first 8 KB). Results formatted in grep style: `filepath:lineno: content` for matches
+  and `filepath-lineno- content` for context lines. One structured result section per
+  matching file. Optional `glob` (e.g. `**/*.rs`, `*.txt`) restricts which files are searched,
+  matched against each file's path relative to the search root. Optional
+  `case_sensitive` (default `false`) and `context_lines` (default `0`). Optional
+  `files_with_matches: true` returns only matched file paths (no line content), like
+  `grep -l`. Optional `only_matches: true` returns only the matched substrings — one
+  entry per occurrence, ignoring context lines, like `grep -o`. `files_with_matches` and
+  `only_matches` are mutually exclusive. Result paths mirror the form of the input: a
+  relative `path` argument produces relative result paths; an absolute argument produces
+  absolute result paths. Output is capped at 100 KB (`tool_output_truncated` /
+  `tool_output_truncated_at_bytes` properties present when capped). Paths inside the
+  workspace are auto-approved; paths outside are auto-denied.
 
 ## Phase 4: TUI skeleton
 

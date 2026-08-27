@@ -176,6 +176,25 @@ impl ToolCall for BashCall {
             .collect()
     }
 
+    fn pending_content_sections(&self) -> Vec<crate::agent::tools::Section> {
+        let command = self
+            .raw_arguments
+            .get("command")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        if command.is_empty() {
+            return vec![];
+        }
+        vec![crate::agent::tools::Section::Content(
+            crate::agent::tools::ContentSection {
+                label: None,
+                content: command.to_string(),
+                file_extension: Some("sh".to_string()),
+                line_number_offset: None,
+            },
+        )]
+    }
+
     fn run(
         self: Box<Self>,
     ) -> futures::future::BoxFuture<'static, Result<Box<dyn ToolCallResult>, ToolError>> {

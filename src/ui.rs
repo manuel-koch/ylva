@@ -1129,18 +1129,30 @@ fn append_tool_bubble_lines(
         } => title_arguments.as_slice(),
         _ => &[],
     };
-    let scalar_value = |v: &serde_json::Value| -> Option<String> {
+    // Only strings and numbers qualify as the bare (keyless) primary arg.
+    // Booleans need their key name to be meaningful, so they stay in props.
+    let scalar_primary = |v: &serde_json::Value| -> Option<String> {
         match v {
             serde_json::Value::String(s) => Some(s.clone()),
             serde_json::Value::Number(n) => Some(n.to_string()),
-            serde_json::Value::Bool(b) => Some(b.to_string()),
             _ => None,
         }
     };
-    let mut iter = title_arguments.iter();
-    let primary_text: Option<String> = iter.next().and_then(|(_, v)| scalar_value(v));
+    let scalar_prop = |k: &str, v: &serde_json::Value| -> Option<String> {
+        match v {
+            serde_json::Value::Bool(b) => Some(format!("{k}={b}")),
+            serde_json::Value::String(s) => Some(format!("{k}={s}")),
+            serde_json::Value::Number(n) => Some(format!("{k}={n}")),
+            _ => None,
+        }
+    };
+    let mut iter = title_arguments.iter().peekable();
+    // Consume the first entry only if it is a bare-worthy scalar.
+    let primary_text: Option<String> = iter
+        .next_if(|(_, v)| scalar_primary(v).is_some())
+        .and_then(|(_, v)| scalar_primary(v));
     let props_text: String = iter
-        .filter_map(|(k, v)| scalar_value(v).map(|s| format!("{k}={s}")))
+        .filter_map(|(k, v)| scalar_prop(k, v))
         .collect::<Vec<_>>()
         .join(" ");
 
@@ -1504,7 +1516,14 @@ fn append_tool_bubble_lines(
     if !collapsed {
         if !content_sections.is_empty() {
             let show_labels = content_sections.len() > 1;
-            for section in &content_sections {
+            for (section_index, section) in content_sections.iter().enumerate() {
+                // Empty line between consecutive sections.
+                if section_index > 0 {
+                    lines.push(
+                        Line::from(vec![bar.clone(), margin.clone(), trailing_pad(0)])
+                            .patch_style(row_bg),
+                    );
+                }
                 match section {
                     crate::agent::tools::Section::Content(content_section) => {
                         // Label header (only when multiple sections).
@@ -1667,6 +1686,100 @@ fn append_tool_bubble_lines(
                                     ])
                                     .patch_style(row_bg),
                                 );
+                            }
+                        }
+                    }
+                    crate::agent::tools::Section::SearchResult(search_section) => {
+                        // Always show the file path label — line numbers are
+                        // meaningless without the filename, even when there is
+                        // only one section.
+                        let label_str = format!("  {}:", search_section.file_path);
+                        let label_len = label_str.chars().count();
+                        lines.push(
+                            Line::from(vec![
+                                bar.clone(),
+                                margin.clone(),
+                                Span::styled(
+                                    label_str,
+                                    Style::default()
+                                        .fg(Color::White)
+                                        .bg(TOOL_BUBBLE_BG_COLOR)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                                trailing_pad(label_len),
+                            ])
+                            .patch_style(row_bg),
+                        );
+
+                        let gutter_width = search_section
+                            .lines
+                            .iter()
+                            .map(|l| l.line_number)
+                            .max()
+                            .map(|n| n.to_string().len())
+                            .unwrap_or(1);
+
+                        for search_result_line in &search_section.lines {
+                            // Path already shown in the label; use only the
+                            // line number as the gutter prefix, right-aligned
+                            // to the widest number in this section.
+                            let prefix = if search_result_line.is_match {
+                                format!("  {:>gutter_width$}: ", search_result_line.line_number)
+                            } else {
+                                format!("  {:>gutter_width$}- ", search_result_line.line_number)
+                            };
+                            let prefix_len = prefix.chars().count();
+                            let content_width = wrap_width.saturating_sub(prefix_len).max(1);
+                            let highlighted_lines = highlighted_lines_cached(
+                                &search_result_line.content,
+                                search_section.file_extension.as_deref(),
+                            );
+                            let highlighted_line =
+                                highlighted_lines.into_iter().next().unwrap_or_default();
+                            let visual_rows =
+                                wrap_highlighted_line(highlighted_line, content_width);
+
+                            for (row_index, row_spans) in visual_rows.into_iter().enumerate() {
+                                let mut spans: Vec<Span<'static>> =
+                                    vec![bar.clone(), margin.clone()];
+
+                                if row_index == 0 {
+                                    let prefix_style = if search_result_line.is_match {
+                                        Style::default()
+                                            .fg(Color::DarkGray)
+                                            .bg(TOOL_BUBBLE_BG_COLOR)
+                                    } else {
+                                        Style::default()
+                                            .fg(Color::DarkGray)
+                                            .bg(TOOL_BUBBLE_BG_COLOR)
+                                            .add_modifier(Modifier::DIM)
+                                    };
+                                    spans.push(Span::styled(prefix.clone(), prefix_style));
+                                } else {
+                                    spans.push(Span::styled(
+                                        " ".repeat(prefix_len),
+                                        Style::default().bg(TOOL_BUBBLE_BG_COLOR),
+                                    ));
+                                }
+
+                                let content_text_len: usize = row_spans
+                                    .iter()
+                                    .map(|(_, token)| token.chars().count())
+                                    .sum();
+                                for (style, token) in row_spans {
+                                    let fg = Color::Rgb(
+                                        style.foreground.r,
+                                        style.foreground.g,
+                                        style.foreground.b,
+                                    );
+                                    spans.push(Span::styled(
+                                        token,
+                                        Style::default().fg(fg).bg(TOOL_BUBBLE_BG_COLOR),
+                                    ));
+                                }
+
+                                spans.push(trailing_pad(prefix_len + content_text_len));
+                                lines.push(Line::from(spans).patch_style(row_bg));
                             }
                         }
                     }

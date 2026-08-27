@@ -387,6 +387,14 @@ mod tests {
 
     #[test]
     fn sandbox_default_uses_current_dir() {
+        // Acquires SUBSCRIBER_LOCK to prevent concurrent execution with
+        // `init_logging_relative_filename_uses_current_directory`, which
+        // temporarily changes the process-global cwd while holding the same
+        // lock.  Without this guard the two tests race: one reads cwd during
+        // the other's cwd mutation, causing a spurious mismatch.
+        let _lock = crate::test_support::SUBSCRIBER_LOCK
+            .lock()
+            .expect("subscriber mutex poisoned");
         let sandbox = Sandbox::default();
         let cwd = std::env::current_dir().expect("cwd");
         let canonical_cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);

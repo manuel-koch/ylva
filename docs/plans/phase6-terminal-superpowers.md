@@ -300,7 +300,7 @@ No user-visible behavior. Must be fully green before any tool work begins.
 
 **Goal:** Text search using `ignore` + `regex`; no external binary.
 
-- [ ] 15. Create `src/agent/tools/search.rs`. Define:
+- [x] 15. Create `src/agent/tools/search.rs`. Define:
 
     ```rust
     #[derive(JsonSchema, Deserialize)]
@@ -331,15 +331,15 @@ No user-visible behavior. Must be fully green before any tool work begins.
   - If `args.path` is `Some(p)`: return `sandbox_context.check_path(p)`.
   - If `args.path` is `None` (defaults to cwd, inside workspace): return `AutoApproved`.
 
-- [ ] 16. Register `SearchTool` in `default_registry()`.
+- [x] 16. Register `SearchTool` in `default_registry()`.
 
-- [ ] 17. Write unit tests: match found, no match, invalid regex, case-insensitive, context lines,
+- [x] 17. Write unit tests: match found, no match, invalid regex, case-insensitive, context lines,
   explicit out-of-workspace path returns `AutoDenied`, binary file skipped (null byte),
   output truncated at 100 KB cap (`tool_output_truncated` metadata present).
 
-- [ ] 18. Update `docs/features.md`: add `search` entry.
+- [x] 18. Update `docs/features.md`: add `search` entry.
 
-- [ ] 19. Run `make test` + `make test-coverage`.
+- [x] 19. Run `make test` + `make test-coverage`.
 
 ---
 

@@ -30,6 +30,7 @@ use crate::sandbox::ApprovalCheck;
 
 pub mod bash;
 pub mod fs;
+pub mod search;
 
 /// Default execution timeout for file-system tools.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 5;
@@ -142,12 +143,37 @@ pub struct DiffSection {
     pub content: String,
 }
 
+/// A single line in a search result — either a match line or a context line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchResultLine {
+    /// 1-based line number within the source file.
+    pub line_number: usize,
+    /// `true` for a match line, `false` for a context line.
+    pub is_match: bool,
+    /// Raw line content with no path/line-number prefix.
+    pub content: String,
+}
+
+/// A block of search results from a single file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchResultSection {
+    /// Path of the file that was searched (mirrors the form of the `path`
+    /// argument: relative when the input was relative, absolute when absolute).
+    pub file_path: String,
+    /// Lowercase file-extension hint for syntax-highlighting the content lines.
+    /// `None` = plain text.
+    pub file_extension: Option<String>,
+    /// The matched (and context) lines in ascending line-number order.
+    pub lines: Vec<SearchResultLine>,
+}
+
 /// A content block produced by a tool call — either a rich file / text
 /// section or a unified diff.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Section {
     Content(ContentSection),
     Diff(DiffSection),
+    SearchResult(SearchResultSection),
 }
 
 /// An invocation object for a specific tool call. Carries the call ID,
@@ -213,10 +239,22 @@ pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
 
     /// A short display label for the tool (e.g. `Read`, `Web Search`).
-    /// Defaults to [`name`](Self::name); a tool author overrides it when the
-    /// canonical name is not a friendly label.
-    fn title(&self) -> &str {
+    /// Derived automatically from [`name`](Self::name) by splitting on `_`
+    /// and `-`, capitalising the first letter of each word, and joining with
+    /// spaces.  Override only when the canonical name cannot produce the
+    /// desired label.
+    fn title(&self) -> String {
         self.name()
+            .split(['-', '_'])
+            .map(|word| {
+                let mut chars = word.chars();
+                match chars.next() {
+                    None => String::new(),
+                    Some(first) => first.to_uppercase().to_string() + chars.as_str(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     /// A human-readable description fed to the model alongside the schema.
@@ -367,6 +405,9 @@ pub fn default_registry(
     registry.register(Arc::new(bash::BashTool::new(SandboxContext::new(
         Arc::clone(&sandbox),
     ))));
+    registry.register(Arc::new(search::SearchTool::new(SandboxContext::new(
+        Arc::clone(&sandbox),
+    ))));
     registry
 }
 
@@ -488,14 +529,15 @@ mod tests {
     }
 
     #[test]
-    fn default_registry_registers_all_four_tools() {
+    fn default_registry_registers_all_five_tools() {
         let sandbox = std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new()));
         let registry = default_registry(sandbox);
-        assert_eq!(registry.names().len(), 4);
+        assert_eq!(registry.names().len(), 5);
         assert!(registry.get("read").is_some());
         assert!(registry.get("write").is_some());
         assert!(registry.get("glob").is_some());
         assert!(registry.get("bash").is_some());
+        assert!(registry.get("search").is_some());
     }
 
     #[test]
@@ -529,6 +571,20 @@ mod tests {
     }
 
     #[test]
+    fn section_search_result_variant() {
+        let section = Section::SearchResult(SearchResultSection {
+            file_path: "file.rs".to_string(),
+            file_extension: Some("rs".to_string()),
+            lines: vec![SearchResultLine {
+                line_number: 42,
+                is_match: true,
+                content: "fn main() {}".to_string(),
+            }],
+        });
+        assert!(matches!(section, Section::SearchResult(_)));
+    }
+
+    #[test]
     fn tool_call_result_default_properties_is_empty() {
         let output = SimpleOutput("test".to_string());
         assert!(output.properties().is_empty());
@@ -549,9 +605,31 @@ mod tests {
     // `TestTool` does not override `title` or `is_default_argument`, so these
     // tests exercise the default trait method bodies.
     #[test]
-    fn tool_default_title_equals_name() {
+    fn tool_default_title_capitalises_name_words() {
         let tool = TestTool;
-        assert_eq!(tool.title(), tool.name());
+        // single word: first letter capitalised
+        assert_eq!(tool.title(), "Test");
+    }
+
+    #[test]
+    fn tool_title_splits_on_hyphen_and_underscore() {
+        // Verify the derivation logic directly.
+        fn derive(name: &str) -> String {
+            name.split(['-', '_'])
+                .map(|word| {
+                    let mut chars = word.chars();
+                    match chars.next() {
+                        None => String::new(),
+                        Some(first) => first.to_uppercase().to_string() + chars.as_str(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+        assert_eq!(derive("web_search"), "Web Search");
+        assert_eq!(derive("my-cool-tool"), "My Cool Tool");
+        assert_eq!(derive("bash"), "Bash");
+        assert_eq!(derive("read"), "Read");
     }
 
     #[test]

@@ -46,20 +46,22 @@ fn render_invocation_from_title_arguments(
     title_arguments: &[(String, serde_json::Value)],
 ) -> String {
     let mut line = title.to_string();
-    let mut iter = title_arguments.iter();
-    if let Some((_, value)) = iter.next() {
-        let primary = match value {
-            serde_json::Value::String(s) if s.len() <= STRING_ELIDE_LIMIT => {
-                Some(s.as_str().to_string())
-            }
+    let is_short = |s: &str| s.len() <= STRING_ELIDE_LIMIT;
+    let scalar_primary = |v: &serde_json::Value| -> Option<String> {
+        match v {
+            serde_json::Value::String(s) if is_short(s) => Some(s.as_str().to_string()),
             serde_json::Value::Number(n) => Some(n.to_string()),
-            serde_json::Value::Bool(b) => Some(b.to_string()),
             _ => None,
-        };
-        if let Some(primary) = primary {
-            line.push(' ');
-            line.push_str(&primary);
         }
+    };
+    let mut iter = title_arguments.iter().peekable();
+    // Consume the first entry only if it is a bare-worthy scalar (not a boolean).
+    if let Some(primary) = iter
+        .next_if(|(_, v)| scalar_primary(v).is_some())
+        .and_then(|(_, v)| scalar_primary(v))
+    {
+        line.push(' ');
+        line.push_str(&primary);
     }
     let rest: Vec<String> = iter
         .map(|(k, v)| format!("{k}={}", render_arg_value(v)))
@@ -98,6 +100,31 @@ fn render_content_sections(
                 }
                 for line in diff_section.content.lines() {
                     writeln!(out, "  {line}")?;
+                }
+            }
+            crate::agent::tools::Section::SearchResult(search_section) => {
+                writeln!(out, "  --- {} ---", search_section.file_path)?;
+                let gutter_width = search_section
+                    .lines
+                    .iter()
+                    .map(|l| l.line_number)
+                    .max()
+                    .map(|n| n.to_string().len())
+                    .unwrap_or(1);
+                for line in &search_section.lines {
+                    if line.is_match {
+                        writeln!(
+                            out,
+                            "  {:>gutter_width$}: {}",
+                            line.line_number, line.content
+                        )?;
+                    } else {
+                        writeln!(
+                            out,
+                            "  {:>gutter_width$}- {}",
+                            line.line_number, line.content
+                        )?;
+                    }
                 }
             }
         }
@@ -203,6 +230,8 @@ pub async fn run_cli_to(
 
     let mut denied_tool_ids: std::collections::HashSet<uuid::Uuid> =
         std::collections::HashSet::new();
+    let mut pending_invocations: std::collections::HashMap<uuid::Uuid, String> =
+        std::collections::HashMap::new();
     let mut response_finished = false;
     while !response_finished {
         match ui_rx.recv().await {
@@ -226,6 +255,7 @@ pub async fn run_cli_to(
                     .map(|tool| tool.title().to_string())
                     .unwrap_or_else(|| capitalize_first(&name));
                 let invocation = render_invocation_from_title_arguments(&title, &title_arguments);
+                pending_invocations.insert(id, invocation.clone());
                 let approval_check = registry
                     .get(&name)
                     .map(|tool| tool.needs_approval(&arguments))
@@ -237,7 +267,14 @@ pub async fn run_cli_to(
                         agent.send_command(AgentCommand::ApproveTool { id }).await;
                     }
                     ApprovalCheck::AutoDenied { reason } => {
-                        writeln!(out, "[tool] {invocation} → auto-denied: {reason}")?;
+                        let short_args: Vec<_> = title_arguments
+                            .iter()
+                            .filter(|(_, v)| !matches!(v, serde_json::Value::String(s) if s.len() > STRING_ELIDE_LIMIT))
+                            .cloned()
+                            .collect();
+                        let denied_invocation =
+                            render_invocation_from_title_arguments(&title, &short_args);
+                        writeln!(out, "[tool] {denied_invocation} → auto-denied: {reason}")?;
                         render_content_sections(out, &content_sections)?;
                         denied_tool_ids.insert(id);
                         agent
@@ -245,8 +282,15 @@ pub async fn run_cli_to(
                             .await;
                     }
                     ApprovalCheck::UserApprovalRequired => {
-                        let reason = "no --auto-approve-write configured";
-                        writeln!(out, "[tool] {invocation} → denied: {reason}")?;
+                        let reason = "tool requires approval, not supported in CLI mode";
+                        let short_args: Vec<_> = title_arguments
+                            .iter()
+                            .filter(|(_, v)| !matches!(v, serde_json::Value::String(s) if s.len() > STRING_ELIDE_LIMIT))
+                            .cloned()
+                            .collect();
+                        let denied_invocation =
+                            render_invocation_from_title_arguments(&title, &short_args);
+                        writeln!(out, "[tool] {denied_invocation} → denied: {reason}")?;
                         render_content_sections(out, &content_sections)?;
                         denied_tool_ids.insert(id);
                         agent
@@ -259,14 +303,9 @@ pub async fn run_cli_to(
                 }
             }
             Some(UiUpdate::ToolStart {
-                content_sections, ..
-            }) => {
-                render_content_sections(out, &content_sections)?;
-            }
-            Some(UiUpdate::ToolDone {
                 name,
-                summary,
-                duration,
+                id,
+                title_arguments,
                 content_sections,
                 ..
             }) => {
@@ -274,6 +313,25 @@ pub async fn run_cli_to(
                     .get(&name)
                     .map(|tool| tool.title().to_string())
                     .unwrap_or_else(|| capitalize_first(&name));
+                let invocation = render_invocation_from_title_arguments(&title, &title_arguments);
+                pending_invocations.insert(id, invocation.clone());
+                writeln!(out, "[tool] {invocation}")?;
+                render_content_sections(out, &content_sections)?;
+            }
+            Some(UiUpdate::ToolDone {
+                id,
+                name,
+                summary,
+                duration,
+                content_sections,
+                ..
+            }) => {
+                let title = pending_invocations.remove(&id).unwrap_or_else(|| {
+                    registry
+                        .get(&name)
+                        .map(|tool| tool.title().to_string())
+                        .unwrap_or_else(|| capitalize_first(&name))
+                });
                 let duration_s = duration.as_secs_f64();
                 let summary_str = if summary.is_empty() {
                     String::new()
@@ -378,8 +436,6 @@ fn render_tool_invocation(tool: &dyn Tool, arguments: &serde_json::Value) -> Str
     line
 }
 
-/// Render a single argument value: short strings, numbers, and booleans as-is;
-/// long strings elided to a length placeholder.
 fn render_arg_value(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::String(text) if text.len() > STRING_ELIDE_LIMIT => {

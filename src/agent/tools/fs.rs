@@ -472,10 +472,6 @@ impl Tool for ReadTool {
         "read"
     }
 
-    fn title(&self) -> &str {
-        "Read"
-    }
-
     fn description(&self) -> &str {
         "Read a file's contents. `offset`/`limit` count the unit selected by `mode`: `bytes` (default, raw and binary-safe), `lines` (split on newline), or `chars` (UTF-8 code points). `offset` is 0-based: line 1 is `offset: 0`, line 2 is `offset: 1`, and so on."
     }
@@ -580,10 +576,6 @@ impl Default for WriteTool {
 impl Tool for WriteTool {
     fn name(&self) -> &str {
         "write"
-    }
-
-    fn title(&self) -> &str {
-        "Write"
     }
 
     fn description(&self) -> &str {
@@ -698,10 +690,6 @@ impl Default for GlobTool {
 impl Tool for GlobTool {
     fn name(&self) -> &str {
         "glob"
-    }
-
-    fn title(&self) -> &str {
-        "Glob"
     }
 
     fn description(&self) -> &str {
