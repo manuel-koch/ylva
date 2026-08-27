@@ -59,53 +59,13 @@ them to a `tracing` macro.
 
 ### Tracing subscriber isolation in tests
 
-Any unit test that calls `tracing::subscriber::with_default(...)` or
-`init_logging(...)` **must** acquire `SUBSCRIBER_LOCK` for the entire duration:
+See [known-issues.md — Tracing subscriber isolation](known-issues.md#tracing-subscriber-isolation-in-tests)
+for the root cause, required lock acquisition rules, and `run_locked` usage.
 
-```rust
-let _lock = crate::test_support::SUBSCRIBER_LOCK
-    .lock()
-    .expect("subscriber mutex poisoned");
-```
+### Process-global cwd mutation in tests
 
-Any test that calls a function exercised by `capture_logs` tests (such as
-`read_file`, `write_file`, or `glob_files`) **must** use `run_locked` instead
-of `#[tokio::test]`:
-
-```rust
-#[test]
-fn my_test() {
-    crate::test_support::run_locked(async {
-        // async test body
-    });
-}
-```
-
-**Why:** `with_default(subscriber, ...)` calls `Dispatch::new(subscriber)`
-internally, which adds the dispatcher to a process-global `LOCKED_DISPATCHERS`
-list and then rebuilds every callsite's interest by ANDing together all live
-dispatchers (`Interest::and`). When two tests run `with_default` concurrently,
-an INFO-only dispatcher from one test can AND with the DEBUG dispatcher from
-`capture_logs`, yielding `Interest::never()` for DEBUG callsites — causing those
-events to be silently dropped even though the capturing subscriber is interested.
-The same applies to `init_logging`, which calls `set_global_default` →
-`rebuild_interest_cache` and can reset callsite interests globally.
-
-A subtler variant of the same bug: a callsite is only registered on its
-**first** access. `capture_logs` calls `rebuild_interest_cache()` before
-running the body, which updates all *already-registered* callsites. But if a
-concurrent test (without the lock) first accesses a callsite from a thread with
-no subscriber, the callsite is registered with `Dispatch::none()` →
-`Interest::never()`. Later, when `capture_logs`'s body hits that callsite, the
-cached "never" causes the event to be dropped — `rebuild_interest_cache()` never
-saw it because it wasn't registered yet when that was called. Tests that call
-tracing-instrumented functions (`read_file`, `write_file`, `glob_files`) must
-therefore use `run_locked` to ensure they cannot run concurrently with
-`capture_logs`.
-
-Holding `SUBSCRIBER_LOCK` for the full duration of the `with_default` closure
-(and the surrounding `Dispatch` lifetime) serialises subscriber registration
-across tests and prevents this class of flaky failure.
+See [known-issues.md — cwd mutation](known-issues.md#process-global-cwd-mutation-in-tests)
+for why tests that read `current_dir()` must also hold `SUBSCRIBER_LOCK`.
 
 ## Planned implementations
 
@@ -178,14 +138,5 @@ SSOT applies here as well.
 
 ## `cfg(test)` does not reach library code from integration tests
 
-The Rust compiler sets `cfg(test)` only for the crate being compiled as a test
-harness. For integration tests (`tests/*.rs`) the `ylva` library is compiled as
-a normal dependency — **`cfg(test)` is NOT set** for library source files when
-the caller is an integration test.
-
-Practical consequence: `#[cfg(not(test))]` guards inside `src/` do **not**
-prevent execution when called from `tests/*.rs`. Any side-effect that must be
-suppressed in tests (OS clipboard writes, network calls, file I/O, …) must be
-abstracted via a trait or closure that is injected by the caller, so integration
-tests can pass a no-op implementation and unit tests can continue using
-`#[cfg(test)]` guards for their own call sites.
+See [known-issues.md — cfg(test) does not reach library code](known-issues.md#cfgtest-does-not-reach-library-code-from-integration-tests)
+for the explanation and the required abstraction pattern.

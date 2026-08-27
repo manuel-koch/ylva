@@ -11,8 +11,11 @@ A Rust-based terminal UI that implements an agent-harness.
    - [configuration](./docs/configuration.md) (how to configure ylva runtime)
    - [keybindings](./docs/keybindings.md) (keybindings implemented in the TUI)
    - [plans](./docs/plans/) (planned implementations, one file per subject/feature)
+   - [known-issues](./docs/known-issues.md) (persistent quirks and required workarounds)
 2. **Testing:** While implementing code changes (consent given), write tests according to
-   [development-workflow](./docs/development-workflow.md)
+   [development-workflow](./docs/development-workflow.md). Before writing tests involving
+   `tracing`, cwd, or integration-test side-effects, read the relevant entries in
+   [known-issues](./docs/known-issues.md).
 3. **Before reporting done**, run the verification commands in
    [development-workflow](./docs/development-workflow.md) and fix any findings.
 4. **Plan execution:** Planned implementations are executed from their plan file
