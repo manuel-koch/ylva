@@ -5,7 +5,7 @@ Reference for Ylva's configuration files.
 ## Engine configuration (`EngineConfig`)
 
 `EngineConfig` is the single source of truth for sampling parameters tied to a
-named backend. In Phase 5 the fields are advisory — `EngineImpl` delegates
+named backend. In Phase 5 the fields are advisory: `EngineImpl` delegates
 directly to the wrapped `Provider`, which already bakes these settings in at
 construction time. Phase 7 will wire them into provider construction from a
 TOML config file.

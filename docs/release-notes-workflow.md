@@ -2,23 +2,23 @@
 
 ## Context
 
-When requested by user, create brief release notes for recent commits ( HEAD vs last tag,
-or an explicit range ).
+When requested by user, create brief release notes for recent commits (HEAD vs last tag,
+or an explicit range).
 Check the content of every commit, omit commits that are clearly not related to a
 feature or bugfix.
 
 Write the release notes to `docs/release-notes-<FROM>-to-<TO>.md`,
 e.g. `docs/release-notes-v0.2-to-v0.3.md` (overwrite if it already exists).
-Do NOT print the content to the conversation — only confirm the file was written.
+Do not print the content to the conversation — only confirm the file was written.
 
-Prefix the release notes with a one-sentence title that denotes most important
+Prefix the release notes with a one-sentence title naming the most important
 aspect(s) of the release.
 
 ## Entry Format
 
-Use the following format for each applicable commit ( curly braces denote dynamic
-content based on the commit ).
-Output entries one after another with NOTHING between them — no `---` separators,
+Use the following format for each applicable commit (curly braces denote dynamic
+content based on the commit).
+Output entries one after another with nothing between them — no `---` separators,
 only blank lines between entries, no numbered lists, no extra headings.
 The trailing blank line inside each entry is the only allowed spacing.
 
@@ -31,7 +31,7 @@ The trailing blank line inside each entry is the only allowed spacing.
 ## Release Notes Example
 
 Example file content for two consecutive entries in the generated release notes
-( do NOT deviate from this format ):
+( do not deviate from this format ):
 
 ```markdown
 # Minor bugfix and new agent tool availability

@@ -1,16 +1,17 @@
-# Inter Agent Communication
+# Inter-agent communication
 
-When the main-agent starts sub-agent(s) it may be helpful that
+When the main agent starts sub-agents, it may be useful if:
 
-- parent-agent can send steering message(s) to its child-agent(s)
-- child-agent can send steering/feedback message(s) to its parent-agent
+- the parent agent can send steering messages to its child agents
+- a child agent can send steering/feedback messages to its parent agent
 
 ## New tools
 
-We could introduce new tools for this communication, depending on the parent/child agent context.
+New tools could handle this communication, depending on the parent/child agent context.
 
-## Identifying agent
+## Identifying agents
 
-The `spawn_agent` tool has a tool-id, that could be used to identify the sub-agent.
-Or we assgn an internal agent-id and fed that back to llm, when `spawn_agent` is used
-so that parent-agent and child-agent know their counter-parts and can the use their inter-agent-communication-tool calls with the proper IDs.
+The `spawn_agent` tool has a tool-id that could identify the sub-agent.
+Or we assign an internal agent-id and feed that back to the LLM when `spawn_agent` is used,
+so that parent-agent and child-agent know their counterparts and can use their inter-agent
+communication tool calls with the proper IDs.

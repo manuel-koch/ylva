@@ -1,7 +1,7 @@
-# Read Tool Auto-Approve
+# Read tool auto-approve
 
-If a tool should be able to judge whether a given parameter set can be auto-approved,
-the `needs_approval()` would need the current tool arguments.
+If a tool needs to judge whether a given argument set can be auto-approved,
+`needs_approval()` must receive the current tool arguments.
 
 The approval check will return an enum value:
 
@@ -12,16 +12,15 @@ The approval check will return an enum value:
 ## Evaluation model: last-match wins
 
 All rules (named rules + glob list entries) form a single ordered sequence.
-Every rule in the sequence is tested against the input path. The **last matching
-rule's verdict** is the final answer. Earlier rules act as defaults; later rules
-override them.
+Every rule is tested against the input path. The **last matching rule's verdict**
+is the final answer. Earlier rules act as defaults; later rules override them.
 
-This is the same semantics as `.gitignore` and `rsync --filter`: a later
+This follows the same semantics as `.gitignore` and `rsync --filter`: a later
 `allow` can reopen what an earlier `deny` closed, and a later `deny` can
 narrow what an earlier `allow` opened.
 
-**Absent verdict (`None`):** when no rule matches at all, `check_path` returns
-`None` — the sandbox has no opinion. Each tool then applies its own default:
+**No match (`None`):** when no rule matches, `check_path` returns `None` — the
+sandbox has no opinion. Each tool then applies its own default:
 
 - Read → `AutoApproved` (reading is safe when nothing forbids it)
 - Write → `UserApprovalRequired` (writing always needs explicit sign-off unless a rule permits it)
@@ -31,9 +30,9 @@ explicit rule verdict, so a `user:*.secret` glob correctly overrides a read
 tool's default auto-approve, and an `allow:dist/**` glob correctly bypasses a
 write tool's default user-approval requirement.
 
-**Path resolution:** before evaluating any rule, the input path is first
-normalized lexically (collapsing `..` and `.` components without filesystem
-access), then resolved via `canonicalize` if the path exists on disk.
+**Path resolution:** before evaluating any rule, the input path is normalized
+lexically (collapsing `..` and `.` components without filesystem access), then
+resolved via `canonicalize` if the path exists on disk.
 All rule evaluation runs against the **canonical path** when available, so
 symlinks cannot hide their real location, name, or extension from rules
 (e.g. a workspace symlink named `config.txt` pointing at `.env` is caught
@@ -50,7 +49,7 @@ by the workspace-membership check). For paths that do not yet exist
 
 Named rules (`path_outside_workspace`, `dot_path`) are always evaluated before
 the glob list, regardless of where they appear in the TOML file. They are
-shorthand for common patterns that would otherwise require explicit glob entries.
+shorthand for common patterns that would otherwise need explicit glob entries.
 A glob rule placed later in the list can override a named rule's verdict.
 
 ## Named rules
@@ -68,12 +67,12 @@ cross_filesystem       = deny|allow|user  # default: allow
   detected workspace root.
 - `dot_path` fires when any path component of the path **relative to the
   workspace root** starts with `.` (e.g. `.env`, `.git/config`).
-- `cross_filesystem` fires when the canonicalized path resides on a different
+  `cross_filesystem` fires when the canonicalized path is on a different
   filesystem (device) than the workspace root. Useful when a remote share or
-  removable volume is mounted inside the workspace. **Not configured by default**
+  removable volume is mounted inside the workspace. Not configured by default
   (sandbox abstains — the tool's own default applies). Set to `deny` to restrict
   the tool to the workspace's own filesystem, or `user` to escalate cross-device
-  paths to human approval. Note: only reliable for paths that exist at check time;
+  paths to human approval. Only reliable for paths that exist at check time;
   for non-existent write targets the parent directory's device is compared instead.
 
 ## Glob rules

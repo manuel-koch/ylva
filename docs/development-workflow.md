@@ -41,7 +41,7 @@ re-list targets, otherwise the lists drift the next time the `Makefile` changes.
 
 ## Logging
 
-Diagnostics are emitted exclusively through the `tracing` facade macros
+Diagnostics are emitted through the `tracing` facade macros
 (`trace!`/`debug!`/`info!`/`warn!`/`error!`) with structured fields — never
 `println!`/`eprintln!` (console output is user-facing) and never a subscriber
 call; `src/logging.rs` owns the subscriber (level filter, a single file in the

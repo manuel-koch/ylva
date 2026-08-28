@@ -6,37 +6,36 @@ export OLLAMA_BASE_URL=http://localhost:11434/v1
 make format lint test-coverage build-debug-and-run-with-logs
 ```
 
-```text
+---
+
 Implement open tasks in section "Phase 6.2" of
 docs/plans/phase6-terminal-superpowers.md
 
 Don't stage or commit anything in git!
 Check linter/tests/coverage for issues!
 Checkmark done tasks in the plan section.
-```
 
-```text
+---
+
 Why is the sky blue?
 And why appear oceans green ?
 Why are clouds sometimes shiny bright white or dark gray black ?
-```
 
-```text
+---
+
 Please explain more.
-```
 
-```text
+---
 
-      Please read file `docs/development-workflow.md` and
-      create a three sentence abstract of its content.
+Please read file `docs/development-workflow.md` and
+create a three sentence abstract of its content.
 
-```
+---
 
-```text
 How many markdown files are in `docs` folder ?
-```
 
-```text
+---
+
 Why is the sky blue?
 And why appear oceans green ?
 Why are clouds sometimes shiny bright white or dark gray black ?
@@ -74,20 +73,28 @@ Create a 50 word sentence ( without newline ) and save it too `../logs/long-line
 
 Use search tool to find markdown files that contain the case-insensitive word `tool`.
 
-Use search tool to find Rust source files that contain the case-sensitive word `SearchTool`, provide 4 lines of context for each match.
+Use search tool to find Rust source files that contain the case-sensitive word `SearchTool`,
+provide 4 lines of context for each match.
 
-Use search tool to find Rust source files that contain the case-sensitive word `BashTool`, report only the paths that matched.
+Use search tool to find Rust source files that contain the case-sensitive word `BashTool`,
+report only the paths that matched.
 
-Use search tool to find Rust source files that contain the case-sensitive regexp `\w+Tool`, report only the matched regexp without path/line info.
+Use search tool to find Rust source files that contain the case-sensitive regexp `\w+Tool`,
+report only the matched regexp without path/line info.
 
 Run `python3` to find out which version it is and where the python interpreter
 is located.
 
 Run `tests/e2e/long-running.bash`.
 
-Run the following command in bash: `date ; sleep 3 ; echo lorem ipsum ; date ; sleep 3 ; echo lorem ipsum ; date ; sleep 3 ; echo lorem ipsum ; date ; sleep 3 ; echo lorem ipsum`
+Run the following command in bash:
+
+```shell
+date ; sleep 3 ; echo lorem ipsum ; date ; sleep 3 ; echo lorem ipsum ; date ; sleep 3 ; echo lorem ipsum ; date ; sleep 3 ; echo lorem ipsum
+```
 
 Run the following command exactly like given (as-is, don't re-write/collapse linebreaks ) in bash:
+
 ```shell
 for n in seq 1 5 ; do
   echo "$(date) lorem ipsum"
@@ -96,4 +103,3 @@ done
 ```
 
 Run `tests/e2e/heavy-output.bash`.
-```

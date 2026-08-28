@@ -1,15 +1,15 @@
 # Timing
 
-We should be able to track how long conversation events take:
+Track how long conversation events take:
 
 - request
 - thinking
 - tool call
 - idle
 
-We could visualize this as a header/footer row in TUI
-or use it for post-mortem analysis.
+This could be visualized as a header/footer row in the TUI
+or used for post-mortem analysis.
 
-While model is thinking, we should have an indicator in the TUI
-that model is thinking, updating the indicator with the current
-running duration and finally with overall duration of thinking.
+While the model is thinking, show an indicator in the TUI
+that updates with the current running duration and then shows
+the total duration when done.

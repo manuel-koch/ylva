@@ -1,9 +1,8 @@
-# Approval Verdict Trail
+# Approval verdict trail
 
-Every `ApprovalCheck` should carry info to be able to trace where / how it
-originated. That could be helpful in logs to trace approvals.
+Every `ApprovalCheck` should carry enough info to trace where and how it
+originated. Useful in logs to trace approvals.
 
-- `decision_maker`: Source module / class
-- `rule_origin`: From where did the rule come, that triggered the verdict
-  ( cli-option, config, default )
-- `parent`: If current decision was based on another approval
+- `decision_maker`: source module / class
+- `rule_origin`: where the triggering rule came from (cli-option, config, default)
+- `parent`: if the current decision was based on another approval

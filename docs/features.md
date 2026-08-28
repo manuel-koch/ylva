@@ -2,7 +2,7 @@
 
 ## General
 
-- Rust-based terminal AI agent application, runnable as a CLI
+- Rust-based terminal AI agent, runnable as a CLI or TUI
 - Implements agent-harness functionality
 
 ## Build Info
@@ -244,9 +244,9 @@ exit.
 
 ### Named engine configuration
 
-Backends are now described by named engine entries, each specifying the provider,
+Backends are described by named engine entries, each specifying the provider,
 model, sampling parameters, and connection details. Multiple engines can be defined
-and referenced by name — for example a fast local Ollama engine for everyday chat and
+and referenced by name, for example a fast local Ollama engine for chat and
 a more capable OpenRouter model for heavier tasks.
 
 See [configuration](./configuration.md) for all available fields.
@@ -257,7 +257,7 @@ A profile groups a default engine with optional per-agent overrides. This is the
 groundwork for Phase 6 child agents, which will let different agent types run against
 different engines automatically.
 
-**WIP:** Profile and engine definitions are constructed in code today; TOML file loading
+**WIP:** Profile and engine definitions are constructed in code; TOML file loading
 is introduced in Phase 7.
 
 ### `/models` command (coming soon)

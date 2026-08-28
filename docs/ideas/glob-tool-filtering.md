@@ -1,26 +1,22 @@
 # Glob tool filtering
 
-Include more properties to the `glob` tool exposed to AI models:
+Additional properties for the `glob` tool exposed to AI models:
 
-- `git_ignore`: a boolean flag (default false) to control whether
-  git-ignore rules in the workspace structure should be used when searching
-  for matching files.
-- `only_count`: a boolean flag (default false) to control whether glob result
-  only includes the number of matches but not the matched file path(s).
-- `limit`: a boolean flag (default false) to control whether glob result
-  should be clamped by given number of matches.
-- `only_files`: a boolean flag (default false) to control whether glob result
-  should only include files
-- `only_dirs`: a boolean flag (default false) to control whether glob result
-  should only include directories
+- `git_ignore`: boolean (default false). When true, applies git-ignore rules
+  when searching for matching files.
+- `only_count`: boolean (default false). When true, returns only the match count,
+  not the matched paths.
+- `limit`: integer. Caps the number of results returned.
+- `only_files`: boolean (default false). When true, returns only files.
+- `only_dirs`: boolean (default false). When true, returns only directories.
 
 ## Structured result metadata
 
-Enhance `ToolCallResult` with a `metadata` field (`serde_json::Value`) so tools
+Add a `metadata` field (`serde_json::Value`) to `ToolCallResult` so tools
 can return structured attributes alongside their text content. The metadata is
 serialized into the tool-role message sent to the LLM.
 
-Useful triggers:
+Useful cases:
 
 - **Truncation signalling** — when `limit` caps the result, metadata can carry
   `{"truncated": true, "total_matches": 500, "shown": 20}` so the LLM knows

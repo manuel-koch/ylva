@@ -24,6 +24,7 @@ future `src/` tree. It is explicitly called out as "standalone experiments, not
 part of the production code path" in `docs/blueprint.md` §Phase 0.
 
 **Acceptance criteria (verbatim from `docs/blueprint.md` §Spike 1 success criteria):**
+
 - Frame time consistently ≤ 17 ms.
 - Keyboard input (Enter, Ctrl+C, typing) responds instantly regardless of stream volume.
 - No memory growth after 10 minutes of continuous token injection.
@@ -31,6 +32,7 @@ part of the production code path" in `docs/blueprint.md` §Phase 0.
   stream and starts a new one without UI glitches.
 
 **Key constraints:**
+
 - Single-writer design: the generator task sends text over `mpsc`; the TUI task
   is the only consumer/renders. No shared mutable state, no `Arc<Mutex<_>>`.
 - Crossterm input is read on a `spawn_blocking` thread and bridged to the async
