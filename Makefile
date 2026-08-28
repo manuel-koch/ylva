@@ -6,9 +6,9 @@ export CARGO_TARGET_DIR := $(REPO_ROOT)/target
 endif
 
 # Minimum line coverage for testable files; enforced by `make test-coverage`
-# and `make test-coverage-missing`. `ui.rs` and `main.rs` are excluded because
-# they require a live terminal and cannot be unit-tested without a full
-# terminal emulator harness.
+# and `make test-coverage-missing`. `ui.rs`, `render.rs`, and `main.rs` are
+# excluded because they require a live terminal and cannot be unit-tested
+# without a full terminal emulator harness.
 COVERAGE_THRESHOLD := 80
 
 .PHONY: lint format \

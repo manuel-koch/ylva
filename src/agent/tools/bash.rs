@@ -18,8 +18,8 @@
 //! stdout and stderr are read concurrently by two separate async tasks and
 //! merged in true arrival order via an unbounded channel. Total output is
 //! capped at [`BASH_OUTPUT_LIMIT_BYTES`]; lines beyond the cap are silently
-//! discarded and the result carries `tool_output_truncated` /
-//! `tool_output_truncated_at_bytes` metadata.
+//! discarded and the result carries `truncated` /
+//! `truncated_at_bytes` metadata.
 //!
 //! Process-group kill is performed by a [`ProcessGroupGuard`] whose `Drop`
 //! implementation sends `SIGKILL` to the whole group. The guard lives in the
@@ -57,7 +57,7 @@ pub const BASH_OUTPUT_LIMIT_BYTES: usize = 100 * 1024;
 
 /// Arguments accepted by the `bash` tool.
 #[derive(Debug, Clone, JsonSchema, Deserialize)]
-pub struct BashArgs {
+pub struct BashInputArgs {
     /// The bash command or script to execute (passed verbatim to `bash -c`).
     ///
     /// May be a single command, a pipeline, or a **multi-line script** —
@@ -77,6 +77,19 @@ pub struct BashArgs {
 
 // ── Result ────────────────────────────────────────────────────────────────────
 
+/// Structured metadata for a successful `bash` invocation.
+#[derive(Debug, serde::Serialize, JsonSchema)]
+pub struct BashResultMetadata {
+    /// Total bytes in the merged stdout + stderr returned.
+    pub output_bytes: usize,
+    /// Present and `true` when output exceeded the byte cap and was truncated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
+    /// Byte offset at which truncation began (only present when `truncated` is `true`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated_at_bytes: Option<usize>,
+}
+
 /// Successful output from a `bash` invocation.
 #[derive(Debug)]
 pub struct BashResult {
@@ -89,19 +102,21 @@ pub struct BashResult {
 }
 
 impl ToolCallResult for BashResult {
-    fn text(&self) -> &str {
-        &self.output
+    fn text(&self) -> String {
+        self.output.clone()
     }
 
-    fn properties(&self) -> Vec<(&'static str, String)> {
-        let mut properties = vec![("output_bytes", self.output.len().to_string())];
-        if self.truncated {
-            properties.push(("tool_output_truncated", "true".to_string()));
-            if let Some(at_bytes) = self.truncated_at_bytes {
-                properties.push(("tool_output_truncated_at_bytes", at_bytes.to_string()));
-            }
-        }
-        properties
+    fn metadata(&self) -> Option<serde_json::Value> {
+        let metadata = BashResultMetadata {
+            output_bytes: self.output.len(),
+            truncated: self.truncated.then_some(true),
+            truncated_at_bytes: self.truncated.then_some(self.truncated_at_bytes).flatten(),
+        };
+        serde_json::to_value(metadata).ok()
+    }
+
+    fn metadata_schema(&self) -> Option<schemars::schema::RootSchema> {
+        Some(schemars::schema_for!(BashResultMetadata))
     }
 
     fn content_sections(&self) -> Vec<Section> {
@@ -176,25 +191,6 @@ impl ToolCall for BashCall {
             .collect()
     }
 
-    fn pending_content_sections(&self) -> Vec<crate::agent::tools::Section> {
-        let command = self
-            .raw_arguments
-            .get("command")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        if command.is_empty() {
-            return vec![];
-        }
-        vec![crate::agent::tools::Section::Content(
-            crate::agent::tools::ContentSection {
-                label: None,
-                content: command.to_string(),
-                file_extension: Some("sh".to_string()),
-                line_number_offset: None,
-            },
-        )]
-    }
-
     fn run(
         self: Box<Self>,
     ) -> futures::future::BoxFuture<'static, Result<Box<dyn ToolCallResult>, ToolError>> {
@@ -202,10 +198,9 @@ impl ToolCall for BashCall {
         let span = tracing::info_span!("tool_args", args = %serialized);
         Box::pin(
             async move {
-                let args =
-                    serde_json::from_value::<BashArgs>(self.raw_arguments).map_err(|error| {
-                        ToolError::failed("bash", format!("invalid arguments: {error}"))
-                    })?;
+                let args = serde_json::from_value::<BashInputArgs>(self.raw_arguments).map_err(
+                    |error| ToolError::failed("bash", format!("invalid arguments: {error}")),
+                )?;
                 run_bash(args, self.timeout_secs)
                     .await
                     .map(|result| -> Box<dyn ToolCallResult> { Box::new(result) })
@@ -283,8 +278,8 @@ impl Tool for BashTool {
         &self.description
     }
 
-    fn schema(&self) -> schemars::schema::RootSchema {
-        schema_for!(BashArgs)
+    fn input_schema(&self) -> schemars::schema::RootSchema {
+        schema_for!(BashInputArgs)
     }
 
     /// Delegates to the sandbox; the sandbox currently abstains for all
@@ -340,7 +335,7 @@ impl Tool for BashTool {
 /// - spawning fails,
 /// - the command exits with a non-zero status, or
 /// - the command does not finish within `timeout_secs`.
-pub async fn run_bash(args: BashArgs, timeout_secs: u64) -> Result<BashResult, ToolError> {
+pub async fn run_bash(args: BashInputArgs, timeout_secs: u64) -> Result<BashResult, ToolError> {
     tracing::debug!(command = %args.command, "executing bash command");
 
     let mut child = tokio::process::Command::new("bash")
@@ -504,8 +499,8 @@ mod tests {
     use super::*;
     use crate::test_support::run_locked;
 
-    fn make_bash_args(command: &str) -> BashArgs {
-        BashArgs {
+    fn make_bash_args(command: &str) -> BashInputArgs {
+        BashInputArgs {
             command: command.to_string(),
         }
     }
@@ -634,16 +629,15 @@ mod tests {
                 "output must not exceed the cap: got {} bytes",
                 result.output.len()
             );
-            // Verify properties contain the metadata keys.
-            let props = result.properties();
-            let prop_keys: Vec<&str> = props.iter().map(|(k, _)| *k).collect();
+            // Verify metadata contains the truncation keys.
+            let meta = result
+                .metadata()
+                .expect("truncated result must have metadata");
+            let obj = meta.as_object().expect("metadata is a JSON object");
+            assert!(obj.contains_key("truncated"), "truncated key missing");
             assert!(
-                prop_keys.contains(&"tool_output_truncated"),
-                "tool_output_truncated key missing"
-            );
-            assert!(
-                prop_keys.contains(&"tool_output_truncated_at_bytes"),
-                "tool_output_truncated_at_bytes key missing"
+                obj.contains_key("truncated_at_bytes"),
+                "truncated_at_bytes key missing"
             );
         });
     }
@@ -715,5 +709,11 @@ mod tests {
             truncated_at_bytes: None,
         };
         assert!(result.content_sections().is_empty());
+    }
+
+    #[test]
+    fn bash_input_args_all_properties_have_descriptions() {
+        let schema = BashTool::default().input_schema();
+        super::super::assert_all_properties_have_descriptions(&schema, "BashInputArgs");
     }
 }

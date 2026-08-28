@@ -265,8 +265,10 @@ async fn two_tool_calls_drain_serially_with_single_reprompt() {
 
     drop(agent);
     let context = handle.await.expect("loop ok").expect("context");
-    let mut results: Vec<&str> = context
-        .messages()
+    let messages = context.messages();
+
+    // Tool results carry only the raw text now.
+    let mut results: Vec<&str> = messages
         .iter()
         .filter_map(|m| match m {
             Message::ToolResult { result, .. } => Some(result.as_str()),
@@ -274,7 +276,26 @@ async fn two_tool_calls_drain_serially_with_single_reprompt() {
         })
         .collect();
     results.sort();
-    assert_eq!(results, ["AAAA", "BBBB"]);
+    assert_eq!(results, vec!["AAAA", "BBBB"]);
+
+    // Metadata is now embedded in the ToolResult envelope, not separate messages.
+    let results: Vec<&Message> = messages
+        .iter()
+        .filter(|m| matches!(m, Message::ToolResult { .. }))
+        .collect();
+    assert_eq!(results.len(), 2);
+    for message in results {
+        if let Message::ToolResult {
+            result_metadata, ..
+        } = message
+        {
+            let metadata = result_metadata
+                .as_ref()
+                .expect("read result must have metadata");
+            assert_eq!(metadata["read_bytes"], 4);
+            assert_eq!(metadata["read_lines"], 1);
+        }
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -477,8 +498,8 @@ struct SleepArgs {}
 struct SimpleStringOutput(String);
 
 impl ToolCallResult for SimpleStringOutput {
-    fn text(&self) -> &str {
-        &self.0
+    fn text(&self) -> String {
+        self.0.clone()
     }
 }
 
@@ -524,7 +545,7 @@ impl Tool for SleepTool {
     fn description(&self) -> &str {
         "sleeps almost forever"
     }
-    fn schema(&self) -> RootSchema {
+    fn input_schema(&self) -> RootSchema {
         schema_for!(SleepArgs)
     }
     fn needs_approval(&self, _args: &serde_json::Value) -> ApprovalCheck {

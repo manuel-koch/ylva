@@ -347,7 +347,7 @@ No user-visible behavior. Must be fully green before any tool work begins.
 
 **Goal:** Filtering flags and structured result metadata per `docs/ideas/glob-tool-filtering.md`.
 
-- [ ] 20. Extend `GlobArgs` in `src/agent/tools/fs.rs`:
+- [x] 20. Extend `GlobArgs` in `src/agent/tools/fs.rs`:
 
     ```rust
     #[serde(default = "default_true")] git_ignore: bool,  // default: true
@@ -357,7 +357,7 @@ No user-visible behavior. Must be fully green before any tool work begins.
     #[serde(default)] limit: Option<usize>,
     ```
 
-- [ ] 21. Update `GlobTool::run`:
+- [x] 21. Update `GlobTool::run`:
   - When `git_ignore` is `true` (default), use `ignore::WalkBuilder`; else use `glob` crate.
   - Return `ToolError` immediately if both `only_files` and `only_dirs` are `true`
     (contradictory combination).
@@ -367,22 +367,22 @@ No user-visible behavior. Must be fully green before any tool work begins.
   - When `only_count`: return count via `tool_output_total_matches` in metadata;
     content is empty string.
 
-- [ ] 22. Add `fn metadata(&self) -> Option<serde_json::Value> { None }` default method to
+- [x] 22. Add `fn metadata(&self) -> Option<serde_json::Value> { None }` default method to
   `ToolCallResult` trait. Override in `GlobResult` to return truncation/count metadata
   using the `tool_output_*` prefix (`tool_output_truncated`, `tool_output_total_matches`).
   Serialize metadata into the tool-role message alongside content.
 
-- [ ] 23. Update `GlobTool::needs_approval(&self, args)` to call
+- [x] 23. Update `GlobTool::needs_approval(&self, args)` to call
   `sandbox_context.check_path(resolved_root)` on the input path root only (before
   traversal); return `UserApprovalRequired` if the root falls outside the workspace.
   Do not check individual result paths — listing paths is not content access.
 
-- [ ] 24. Write unit tests for all new flags, truncation metadata (`tool_output_*` keys),
+- [x] 24. Write unit tests for all new flags, truncation metadata (`tool_output_*` keys),
   `ToolError` on contradictory `only_files + only_dirs`, and approval check.
 
-- [ ] 25. Update `docs/features.md`: update `glob` entry with new flags.
+- [x] 25. Update `docs/features.md`: update `glob` entry with new flags.
 
-- [ ] 26. Run `make test` + `make test-coverage`.
+- [x] 26. Run `make test` + `make test-coverage`.
 
 ---
 
@@ -720,9 +720,9 @@ chat; auto-switch only on child interactive pauses.
 
 ---
 
-### Phase 6.10 — Headless `--allow-child-agents` + Final Documentation
+### Phase 6.10 — Headless `--allow-child-agents`
 
-**Goal:** Enable child spawning in headless mode; finalise all documentation.
+**Goal:** Enable child spawning in headless mode with safety-flag inheritance.
 
 - [ ] 64. Add `--allow-child-agents` boolean CLI flag in `src/main.rs` (via `clap`, default
   `false`). Add `--auto-approve-spawn` boolean flag (default `false`). Pass both through
@@ -738,16 +738,54 @@ chat; auto-switch only on child interactive pauses.
   - Safety inheritance: child agents inherit parent `--auto-approve-write` and
     `--auto-approve-spawn` flags.
 
-- [ ] 66. Update `docs/features.md`: finalise all WIP notes from sub-phases; add
+- [ ] 66. Run `make test` + `make test-coverage`.
+
+---
+
+### Phase 6.11 — Token-Efficient Tool Schemas
+
+**Goal:** Minimise the token cost of every tool description and argument schema sent to
+the LLM. Descriptions must convey the full API contract (what the tool does, every
+argument, defaults, constraints, error conditions) in the fewest possible tokens —
+no prose filler, no motivational context, no examples beyond what is strictly necessary
+to disambiguate.
+
+Principles:
+
+- Start with a tight one-line summary of what the tool does.
+- List arguments inline as `arg (type, default): constraint — effect` rather than in
+  full sentences.
+- Replace hedging language ("you can", "this allows", "note that") with direct
+  imperative or declarative statements.
+- Remove all examples that duplicate information already in the type/constraint.
+- Cap total description length: aim for ≤120 tokens per tool, ≤30 tokens per argument.
+- [ ] 67. Audit every `fn description(&self) -> &str` implementation across all tools in
+  `src/agent/tools/` and `src/agent/tools.rs`. Rewrite each to be minimal: one-liner
+  summary, followed only by what cannot be inferred from the JSON schema alone
+  (e.g. side-effects, error conditions, non-obvious defaults). Remove prose entirely.
+- [ ] 68. Audit every `#[schemars(description = "...")]` and `///` doc-comment on
+  `JsonSchema`-derived argument structs (`ReadFileArgs`, `WriteFileArgs`, `GlobArgs`,
+  `BashArgs`, `SearchArgs`, `EditFileArgs`, `ClarifyArgs`, etc.). Rewrite to
+  `"type — purpose; constraint"` format. Strip full sentences.
+- [ ] 69. Run `make lint` to confirm no compilation errors from description changes.
+
+---
+
+### Phase 6.12 — Final Documentation
+
+**Goal:** Finalise all documentation for Phase 6; ensure every feature, flag, and
+ADR is recorded.
+
+- [ ] 70. Update `docs/features.md`: finalise all WIP notes from sub-phases; add
   `--allow-child-agents` documentation; verify every Phase 6 feature is described.
 
-- [ ] 67. Update `docs/configuration.md`: `--allow-child-agents` flag; `--auto-approve-spawn`
+- [ ] 71. Update `docs/configuration.md`: `--allow-child-agents` flag; `--auto-approve-spawn`
   flag; `can_spawn` agent-type key; `Sandbox` Phase 6 defaults (TOML config Phase 7).
 
-- [ ] 68. Run `rumdl fmt docs/features.md docs/keybindings.md docs/configuration.md
+- [ ] 72. Run `rumdl fmt docs/features.md docs/keybindings.md docs/configuration.md
   docs/plans/phase6-terminal-superpowers.md` and fix any findings.
 
-- [ ] 69. Run `make test` + `make test-coverage` — full suite must pass, all new modules ≥80%.
+- [ ] 73. Run `make test` + `make test-coverage` — full suite must pass, all new modules ≥80%.
 
 ## Implementation Hints
 
@@ -808,7 +846,7 @@ chat; auto-switch only on child interactive pauses.
 - **`AgentCommand::AnswerClarify(String)`:** new variant; `ApproveTool` match arms unchanged.
 - **Coverage gate:** `make test-coverage` fails below 80% — run after each sub-phase.
 - **ADR directory:** `docs/architecture-design-records/` is currently empty. Record two
-  new ADRs in Phase 6.10: one for pure-Rust `search` (no external binary dependency),
+  new ADRs in Phase 6.12: one for pure-Rust `search` (no external binary dependency),
   one for `SandboxContext` design (last-match-wins, normalization without filesystem hit,
   Phase 6 hardcoded defaults). UX decisions (drill-in model, `Section` enum, `clarify`
   choices) do not warrant ADRs.

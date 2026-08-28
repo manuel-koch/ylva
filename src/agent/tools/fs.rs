@@ -28,7 +28,7 @@ use std::path::Path;
 
 use schemars::schema::RootSchema;
 use schemars::{schema_for, JsonSchema};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::Instrument;
 
@@ -54,6 +54,10 @@ fn require_string_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, Approva
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
 /// The unit that `ReadFileArgs::offset`/`limit` count, chosen by the model.
 ///
 /// `Bytes` is the default and the only meaningful mode for binary files; an
@@ -73,6 +77,7 @@ pub enum ReadMode {
 /// `offset`/`limit` that count that unit.
 #[derive(Debug, Clone, JsonSchema, Deserialize)]
 pub struct ReadFileArgs {
+    /// Absolute or workspace-relative path of the file to read.
     pub path: String,
     #[serde(default)]
     pub mode: ReadMode,
@@ -89,14 +94,57 @@ pub struct ReadFileArgs {
 /// `write` arguments: a target path and the content to create/overwrite.
 #[derive(Debug, Clone, JsonSchema, Deserialize)]
 pub struct WriteFileArgs {
+    /// Absolute or workspace-relative path of the file to create or overwrite.
     pub path: String,
+    /// Full text content to write. Overwrites any existing content at `path`.
     pub content: String,
 }
 
 /// `glob` arguments: a glob pattern resolved against the current directory.
 #[derive(Debug, Clone, JsonSchema, Deserialize)]
-pub struct GlobArgs {
+pub struct GlobInputArgs {
+    /// Glob pattern to match against file-system paths (e.g. `**/*.rs`, `src/**/mod.rs`).
+    /// `*` matches within one path segment; `**` crosses directory boundaries;
+    /// `?` matches a single character; `[abc]` matches a character class.
     pub pattern: String,
+    /// When `true` (default), paths ignored by `.gitignore` rules are excluded.
+    /// Set to `false` to include gitignored paths.
+    #[serde(default = "default_true")]
+    pub git_ignore: bool,
+    /// When `true`, return only the total match count in result metadata (`matches`)
+    /// without listing any paths. Useful for counting without fetching all paths.
+    #[serde(default)]
+    pub only_count: bool,
+    /// When `true`, restrict results to regular files only (excludes directories and
+    /// symlinks). Use this instead of post-filtering to count or list only files.
+    /// Mutually exclusive with `only_dirs`.
+    /// When both `only_files` and `only_dirs` are `false` (the default), all path
+    /// types — files, directories, and symlinks — are included in results.
+    #[serde(default)]
+    pub only_files: bool,
+    /// When `true`, restrict results to directories only (excludes files and symlinks).
+    /// Mutually exclusive with `only_files`.
+    /// When both `only_files` and `only_dirs` are `false` (the default), all path
+    /// types — files, directories, and symlinks — are included in results.
+    #[serde(default)]
+    pub only_dirs: bool,
+    /// Maximum number of paths to return. When the cap is hit, excess paths are
+    /// excluded and `ignored_matches` in result metadata records the overflow count.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// When `true`, paths whose name starts with `.` are excluded.
+    /// Default `false` — hidden files are included, matching `find . -type f` behaviour.
+    #[serde(default)]
+    pub dot_ignore: bool,
+}
+
+/// Structured metadata for a successful `read` tool invocation.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ReadResultMetadata {
+    /// Total bytes in the file content returned.
+    pub read_bytes: usize,
+    /// Total lines in the file content returned.
+    pub read_lines: usize,
 }
 
 /// Output of a successful `read` tool invocation.
@@ -111,15 +159,20 @@ pub struct ReadResult {
 }
 
 impl ToolCallResult for ReadResult {
-    fn text(&self) -> &str {
-        &self.content
+    fn text(&self) -> String {
+        self.content.clone()
     }
 
-    fn properties(&self) -> Vec<(&'static str, String)> {
-        vec![
-            ("read_bytes", format!("{}", self.content.len())),
-            ("read_lines", format!("{}", self.content.lines().count())),
-        ]
+    fn metadata(&self) -> Option<serde_json::Value> {
+        let metadata = ReadResultMetadata {
+            read_bytes: self.content.len(),
+            read_lines: self.content.lines().count(),
+        };
+        serde_json::to_value(metadata).ok()
+    }
+
+    fn metadata_schema(&self) -> Option<schemars::schema::RootSchema> {
+        Some(schemars::schema_for!(ReadResultMetadata))
     }
 
     fn content_sections(&self) -> Vec<Section> {
@@ -137,6 +190,13 @@ impl ToolCallResult for ReadResult {
             line_number_offset: self.starting_line,
         })]
     }
+}
+
+/// Structured metadata for a successful `write` tool invocation.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct WriteResultMetadata {
+    /// Total bytes written to disk.
+    pub bytes_written: usize,
 }
 
 /// Output of a successful `write` tool invocation.
@@ -166,12 +226,19 @@ impl WriteResult {
 }
 
 impl ToolCallResult for WriteResult {
-    fn text(&self) -> &str {
-        &self.text
+    fn text(&self) -> String {
+        self.text.clone()
     }
 
-    fn properties(&self) -> Vec<(&'static str, String)> {
-        vec![("bytes_written", format!("{}", self.bytes_written))]
+    fn metadata(&self) -> Option<serde_json::Value> {
+        let metadata = WriteResultMetadata {
+            bytes_written: self.bytes_written,
+        };
+        serde_json::to_value(metadata).ok()
+    }
+
+    fn metadata_schema(&self) -> Option<schemars::schema::RootSchema> {
+        Some(schemars::schema_for!(WriteResultMetadata))
     }
 
     fn content_sections(&self) -> Vec<Section> {
@@ -191,41 +258,70 @@ impl ToolCallResult for WriteResult {
     }
 }
 
+/// Structured metadata for a successful `glob` tool invocation.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct GlobResultMetadata {
+    /// Net path count after all filters (`git_ignore`, `dot_ignore`, `only_files`,
+    /// `only_dirs`) and limit; unaffected by `only_count`.
+    pub matches: usize,
+    /// Paths excluded by any active filter or limit (only present when non-zero).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ignored_matches: Option<usize>,
+}
+
 /// Output of a successful `glob` tool invocation.
 #[derive(Debug)]
 pub struct GlobResult {
-    /// Matched paths, sorted.
+    /// Paths included in this response. Empty when `only_count=true`.
     pub matched_paths: Vec<String>,
-    /// Newline-joined paths — the text returned to the LLM.
-    text: String,
+    /// Net path count after all filters (git_ignore, dot_ignore, only_files, only_dirs) and
+    /// limit. Unaffected by `only_count` — counts paths regardless of whether they are
+    /// included in `matched_paths`.
+    pub matches: usize,
+    /// Paths excluded by any filter or limit. `matches + ignored_matches` equals the raw
+    /// candidate count before any filtering.
+    pub ignored_matches: usize,
 }
 
 impl GlobResult {
-    fn new(matched_paths: Vec<String>) -> Self {
-        let text = matched_paths.join("\n");
+    fn new(matched_paths: Vec<String>, matches: usize, ignored_matches: usize) -> Self {
         GlobResult {
             matched_paths,
-            text,
+            matches,
+            ignored_matches,
         }
     }
 }
 
 impl ToolCallResult for GlobResult {
-    fn text(&self) -> &str {
-        &self.text
+    fn text(&self) -> String {
+        if self.matched_paths.is_empty() && self.matches > 0 {
+            // only_count mode: no paths in response but the LLM needs the number.
+            return self.matches.to_string();
+        }
+        self.matched_paths.join("\n")
     }
 
-    fn properties(&self) -> Vec<(&'static str, String)> {
-        vec![("matches", self.matched_paths.len().to_string())]
+    fn metadata(&self) -> Option<serde_json::Value> {
+        let metadata = GlobResultMetadata {
+            matches: self.matches,
+            ignored_matches: (self.ignored_matches > 0).then_some(self.ignored_matches),
+        };
+        serde_json::to_value(metadata).ok()
+    }
+
+    fn metadata_schema(&self) -> Option<schemars::schema::RootSchema> {
+        Some(schemars::schema_for!(GlobResultMetadata))
     }
 
     fn content_sections(&self) -> Vec<Section> {
-        if self.text.is_empty() {
+        let text = self.matched_paths.join("\n");
+        if text.is_empty() {
             return vec![];
         }
         vec![Section::Content(ContentSection {
             label: None,
-            content: self.text.clone(),
+            content: text,
             file_extension: None,
             line_number_offset: Some(0),
         })]
@@ -405,10 +501,12 @@ impl ToolCall for GlobCall {
     }
 
     fn non_default_redacted_arguments(&self) -> Vec<(String, serde_json::Value)> {
+        let tool = GlobTool::default();
         self.raw_arguments
             .as_object()
             .into_iter()
             .flat_map(|map| map.iter())
+            .filter(|(key, value)| !tool.is_default_argument(key.as_str(), value))
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect()
     }
@@ -419,11 +517,10 @@ impl ToolCall for GlobCall {
         let span = tracing::info_span!("tool_args", args = %serialized);
         Box::pin(
             async move {
-                let args =
-                    serde_json::from_value::<GlobArgs>(self.raw_arguments).map_err(|error| {
-                        ToolError::failed("glob", format!("invalid arguments: {error}"))
-                    })?;
-                glob_files(&args.pattern)
+                let args = serde_json::from_value::<GlobInputArgs>(self.raw_arguments).map_err(
+                    |error| ToolError::failed("glob", format!("invalid arguments: {error}")),
+                )?;
+                glob_files(&args)
                     .await
                     .map(|o| -> Box<dyn ToolCallResult> { Box::new(o) })
             }
@@ -476,7 +573,7 @@ impl Tool for ReadTool {
         "Read a file's contents. `offset`/`limit` count the unit selected by `mode`: `bytes` (default, raw and binary-safe), `lines` (split on newline), or `chars` (UTF-8 code points). `offset` is 0-based: line 1 is `offset: 0`, line 2 is `offset: 1`, and so on."
     }
 
-    fn schema(&self) -> RootSchema {
+    fn input_schema(&self) -> RootSchema {
         schema_for!(ReadFileArgs)
     }
 
@@ -582,7 +679,7 @@ impl Tool for WriteTool {
         "Create or overwrite a file with the given content."
     }
 
-    fn schema(&self) -> RootSchema {
+    fn input_schema(&self) -> RootSchema {
         schema_for!(WriteFileArgs)
     }
 
@@ -657,8 +754,6 @@ impl Tool for WriteTool {
 #[derive(Debug)]
 pub struct GlobTool {
     timeout_secs: u64,
-    /// Sandbox context carried for when glob approval gains path-scoped rules.
-    #[allow(dead_code)]
     sandbox_context: SandboxContext,
 }
 
@@ -693,18 +788,48 @@ impl Tool for GlobTool {
     }
 
     fn description(&self) -> &str {
-        "List files matching a glob-wildcard pattern (e.g. `src/**/*.rs`, `*.txt`). Only the glob dialect is accepted (`*`, `?`, `**`, `[...]`) — never regular expressions. Patterns resolve relative to the current working directory; absolute path patterns are supported."
+        "List paths matching a glob-wildcard pattern (`*`, `?`, `**`, `[...]`). Patterns resolve relative to cwd; absolute patterns supported. Hidden files (dot-prefixed) are included by default — use `dot_ignore: true` to exclude them. `git_ignore` (default `true`) skips gitignored paths via `ignore::WalkBuilder`."
     }
 
-    fn schema(&self) -> RootSchema {
-        schema_for!(GlobArgs)
+    fn input_schema(&self) -> RootSchema {
+        schema_for!(GlobInputArgs)
     }
 
     fn needs_approval(&self, args: &Value) -> ApprovalCheck {
-        if let Err(denied) = require_string_arg(args, "pattern") {
-            return denied;
+        let pattern_str = match require_string_arg(args, "pattern") {
+            Ok(value) => value,
+            Err(denied) => return denied,
+        };
+        let root = pattern_root(pattern_str);
+        let sandbox_verdict = self.sandbox_context.check_path(std::path::Path::new(&root));
+        let approval = match sandbox_verdict {
+            None => ApprovalCheck::AutoApproved,
+            Some(verdict) => verdict,
+        };
+        tracing::debug!(
+            tool = "glob",
+            pattern = pattern_str,
+            root = root,
+            sandbox = match &approval {
+                ApprovalCheck::AutoApproved => "abstain→auto-approved",
+                ApprovalCheck::AutoDenied { .. } => "auto-denied",
+                ApprovalCheck::UserApprovalRequired => "user-approval-required",
+            },
+            "tool approval decision"
+        );
+        approval
+    }
+
+    fn is_default_argument(&self, key: &str, value: &Value) -> bool {
+        match (key, value) {
+            ("git_ignore", Value::Bool(git_ignore)) => *git_ignore,
+            ("only_count", Value::Bool(false)) => true,
+            ("only_files", Value::Bool(false)) => true,
+            ("only_dirs", Value::Bool(false)) => true,
+            ("dot_ignore", Value::Bool(false)) => true,
+            ("limit", Value::Null) => true,
+            _ => false,
         }
-        ApprovalCheck::AutoApproved
     }
 
     fn non_default_redacted_arguments(&self, arguments: &Value) -> Vec<(String, Value)> {
@@ -838,26 +963,146 @@ async fn write_file(args: WriteFileArgs) -> Result<WriteResult, ToolError> {
     Ok(WriteResult::new(args.path, args.content, bytes_written))
 }
 
-async fn glob_files(pattern: &str) -> Result<GlobResult, ToolError> {
-    tracing::debug!(pattern = %pattern, "glob searching");
-    let paths = glob::glob(pattern)
-        .map_err(|error| {
-            ToolError::failed("glob", format!("invalid pattern '{pattern}': {error}"))
-        })?
-        .filter_map(Result::ok)
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>();
-    let mut sorted = paths;
+fn pattern_root(pattern: &str) -> String {
+    let first_glob_position = pattern
+        .char_indices()
+        .find(|(_, character)| matches!(character, '*' | '?' | '['))
+        .map(|(index, _)| index);
+    let Some(first_glob_position) = first_glob_position else {
+        return ".".to_string();
+    };
+    let slash_position = pattern[..first_glob_position].rfind('/');
+    match slash_position {
+        None => ".".to_string(),
+        Some(0) => "/".to_string(),
+        Some(position) => pattern[..position].to_string(),
+    }
+}
+
+fn normalize_glob_match_path(path: &Path) -> String {
+    let path_string = path.display().to_string();
+    if path_string == "." {
+        String::new()
+    } else if let Some(stripped_prefix) = path_string.strip_prefix("./") {
+        stripped_prefix.to_string()
+    } else {
+        path_string
+    }
+}
+
+fn entry_matches_filters(entry: &ignore::DirEntry, args: &GlobInputArgs) -> bool {
+    if args.only_files {
+        return entry.file_type().map(|file_type| file_type.is_file()) == Some(true);
+    }
+    if args.only_dirs {
+        return entry.file_type().map(|file_type| file_type.is_dir()) == Some(true);
+    }
+    true
+}
+
+async fn glob_files(args: &GlobInputArgs) -> Result<GlobResult, ToolError> {
+    if args.only_files && args.only_dirs {
+        return Err(ToolError::failed(
+            "glob",
+            "arguments 'only_files' and 'only_dirs' cannot both be true",
+        ));
+    }
+    tracing::debug!(pattern = %args.pattern, "glob searching");
+    let (mut sorted, candidate_count): (Vec<String>, usize) = if args.git_ignore {
+        let compiled_pattern = glob::Pattern::new(&args.pattern).map_err(|error| {
+            ToolError::failed(
+                "glob",
+                format!("invalid pattern '{}': {error}", args.pattern),
+            )
+        })?;
+        let root = pattern_root(&args.pattern);
+        let mut candidate_count: usize = 0;
+        let mut collected_paths: Vec<String> = Vec::new();
+        let walker = ignore::WalkBuilder::new(&root)
+            .git_ignore(true)
+            .require_git(false)
+            .hidden(args.dot_ignore)
+            .build();
+        for entry in walker {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+            candidate_count += 1;
+            if !entry_matches_filters(&entry, args) {
+                continue;
+            }
+            let entry_path = entry.path();
+            let match_path = normalize_glob_match_path(entry_path);
+            if match_path.is_empty() || !compiled_pattern.matches(&match_path) {
+                continue;
+            }
+            collected_paths.push(entry_path.display().to_string());
+        }
+        (collected_paths, candidate_count)
+    } else {
+        let match_options = glob::MatchOptions {
+            require_literal_leading_dot: args.dot_ignore,
+            ..Default::default()
+        };
+        let all_matches: Vec<_> = glob::glob_with(&args.pattern, match_options)
+            .map_err(|error| {
+                ToolError::failed(
+                    "glob",
+                    format!("invalid pattern '{}': {error}", args.pattern),
+                )
+            })?
+            .filter_map(Result::ok)
+            .collect();
+        let candidate_count = all_matches.len();
+        let paths = all_matches
+            .into_iter()
+            .filter(|path| {
+                if args.only_files {
+                    return path.is_file();
+                }
+                if args.only_dirs {
+                    return path.is_dir();
+                }
+                true
+            })
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>();
+        (paths, candidate_count)
+    };
     sorted.sort();
-    tracing::debug!(matches = sorted.len(), "glob searched");
-    Ok(GlobResult::new(sorted))
+    if let Some(limit) = args.limit {
+        if sorted.len() > limit {
+            sorted.truncate(limit);
+        }
+    }
+    let matches = sorted.len();
+    let ignored = candidate_count - matches;
+    if args.only_count {
+        sorted.clear();
+    }
+    tracing::debug!(matches, ignored, "glob searched");
+    Ok(GlobResult::new(sorted, matches, ignored))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::capture_logs;
+    use serde_json::json;
     use tempfile::TempDir;
+
+    fn glob_args(pattern: impl Into<String>) -> GlobInputArgs {
+        GlobInputArgs {
+            pattern: pattern.into(),
+            git_ignore: true,
+            only_count: false,
+            only_files: false,
+            only_dirs: false,
+            limit: None,
+            dot_ignore: false,
+        }
+    }
 
     #[test]
     fn read_tool_auto_approves_workspace_path_and_has_default_timeout() {
@@ -962,7 +1207,7 @@ mod tests {
 
     #[test]
     fn read_tool_schema_includes_mode_selector() {
-        let schema = ReadTool::default().schema();
+        let schema = ReadTool::default().input_schema();
         let value = serde_json::to_value(&schema).expect("schema serializes");
         let required = value["required"].as_array().expect("required is an array");
         assert_eq!(required.len(), 1, "only `path` is required");
@@ -980,7 +1225,7 @@ mod tests {
 
     #[test]
     fn read_schema_documents_offset_as_zero_based() {
-        let schema = ReadTool::default().schema();
+        let schema = ReadTool::default().input_schema();
         let value = serde_json::to_value(&schema).expect("schema serializes");
         let offset_description = value["properties"]["offset"]["description"]
             .as_str()
@@ -1096,7 +1341,7 @@ mod tests {
     }
 
     #[test]
-    fn glob_matches_pattern_in_scratch_dir() {
+    fn glob_with_git_ignore_false_matches_files() {
         crate::test_support::run_locked(async {
             let dir = TempDir::new().expect("tempdir");
             let sub = dir.path().join("sub");
@@ -1106,10 +1351,15 @@ mod tests {
             }
             std::fs::write(sub.join("c.txt"), "c").expect("write");
 
-            let matches = glob_files(&format!("{}/*.txt", dir.path().display()))
-                .await
-                .expect("glob ok");
-            let lines: Vec<&str> = matches.text().lines().collect();
+            let matches = glob_files(&GlobInputArgs {
+                pattern: format!("{}/*.txt", dir.path().display()),
+                git_ignore: false,
+                ..glob_args("")
+            })
+            .await
+            .expect("glob ok");
+            let text = matches.text();
+            let lines: Vec<&str> = text.lines().collect();
             assert!(lines.iter().any(|l: &&str| l.ends_with("a.txt")));
             assert!(lines.iter().any(|l: &&str| l.ends_with("b.txt")));
             assert!(!lines.iter().any(|l: &&str| l.ends_with("c.txt")));
@@ -1117,9 +1367,174 @@ mod tests {
     }
 
     #[test]
+    fn glob_with_git_ignore_true_matches_files() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            std::fs::write(dir.path().join("a.txt"), "a").expect("write");
+            std::fs::write(dir.path().join("ignored.txt"), "ignored").expect("write");
+            std::fs::write(dir.path().join(".gitignore"), "ignored.txt\n").expect("write");
+
+            let result = glob_files(&glob_args(format!("{}/*.txt", dir.path().display())))
+                .await
+                .expect("glob ok");
+            assert!(result
+                .matched_paths
+                .iter()
+                .any(|path| path.ends_with("a.txt")));
+            assert!(!result
+                .matched_paths
+                .iter()
+                .any(|path| path.ends_with("ignored.txt")));
+        });
+    }
+
+    #[test]
+    fn glob_only_files_excludes_dirs() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            let subdirectory = dir.path().join("sub");
+            std::fs::create_dir_all(&subdirectory).expect("mkdir");
+            std::fs::write(dir.path().join("a.txt"), "a").expect("write");
+            std::fs::write(subdirectory.join("b.txt"), "b").expect("write");
+
+            let result = glob_files(&GlobInputArgs {
+                pattern: format!("{}/**", dir.path().display()),
+                only_files: true,
+                git_ignore: false,
+                ..glob_args("")
+            })
+            .await
+            .expect("glob ok");
+            assert!(result
+                .matched_paths
+                .iter()
+                .all(|path| std::path::Path::new(path).is_file()));
+        });
+    }
+
+    #[test]
+    fn glob_only_dirs_excludes_files() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            let subdirectory = dir.path().join("sub");
+            std::fs::create_dir_all(&subdirectory).expect("mkdir");
+            std::fs::write(dir.path().join("a.txt"), "a").expect("write");
+            std::fs::write(subdirectory.join("b.txt"), "b").expect("write");
+
+            let result = glob_files(&GlobInputArgs {
+                pattern: format!("{}/**", dir.path().display()),
+                only_dirs: true,
+                git_ignore: false,
+                ..glob_args("")
+            })
+            .await
+            .expect("glob ok");
+            assert!(!result.matched_paths.is_empty());
+            assert!(result
+                .matched_paths
+                .iter()
+                .all(|path| std::path::Path::new(path).is_dir()));
+        });
+    }
+
+    #[test]
+    fn glob_contradictory_only_files_and_dirs_is_error() {
+        crate::test_support::run_locked(async {
+            let result = glob_files(&GlobInputArgs {
+                pattern: "*.txt".to_string(),
+                only_files: true,
+                only_dirs: true,
+                ..glob_args("")
+            })
+            .await;
+            assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn glob_limit_caps_results_and_sets_truncated_metadata() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            for index in 0..5 {
+                std::fs::write(dir.path().join(format!("{index}.txt")), format!("{index}"))
+                    .expect("write");
+            }
+
+            let result = glob_files(&GlobInputArgs {
+                pattern: format!("{}/*.txt", dir.path().display()),
+                git_ignore: false,
+                limit: Some(3),
+                ..glob_args("")
+            })
+            .await
+            .expect("glob ok");
+
+            assert_eq!(result.matched_paths.len(), 3);
+            assert_eq!(result.matches, 3);
+            assert_eq!(
+                result.metadata(),
+                Some(json!({
+                    "matches": 3,
+                    "ignored_matches": 2,
+                }))
+            );
+        });
+    }
+
+    #[test]
+    fn glob_only_count_returns_empty_content_with_total_in_metadata() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            for index in 0..5 {
+                std::fs::write(dir.path().join(format!("{index}.txt")), format!("{index}"))
+                    .expect("write");
+            }
+
+            let result = glob_files(&GlobInputArgs {
+                pattern: format!("{}/*.txt", dir.path().display()),
+                git_ignore: false,
+                only_count: true,
+                ..glob_args("")
+            })
+            .await
+            .expect("glob ok");
+
+            assert_eq!(result.text(), "5");
+            assert!(result.matched_paths.is_empty());
+            assert_eq!(result.matches, 5);
+            assert_eq!(
+                result.metadata(),
+                Some(json!({
+                    "matches": 5,
+                }))
+            );
+        });
+    }
+
+    #[test]
+    fn glob_needs_approval_auto_approves_inside_workspace() {
+        let tool = GlobTool::default();
+        let args = serde_json::json!({ "pattern": "src/**/*.rs" });
+        assert!(matches!(
+            tool.needs_approval(&args),
+            ApprovalCheck::AutoApproved
+        ));
+    }
+
+    #[test]
+    fn glob_needs_approval_denies_outside_workspace() {
+        let tool = GlobTool::default();
+        let args = serde_json::json!({ "pattern": "/tmp/**" });
+        assert!(matches!(
+            tool.needs_approval(&args),
+            ApprovalCheck::AutoDenied { .. }
+        ));
+    }
+
+    #[test]
     fn glob_invalid_pattern_is_error() {
         crate::test_support::run_locked(async {
-            let result = glob_files("[").await;
+            let result = glob_files(&glob_args("[")).await;
             assert!(result.is_err());
         });
     }
@@ -1162,7 +1577,14 @@ mod tests {
             WriteTool::default().argument_order("path")
                 < WriteTool::default().argument_order("content")
         );
-        assert_eq!(GlobTool::default().argument_order("pattern"), 0);
+        let glob_tool = GlobTool::default();
+        assert_eq!(glob_tool.argument_order("pattern"), 0);
+        assert!(glob_tool.is_default_argument("git_ignore", &Value::Bool(true)));
+        assert!(glob_tool.is_default_argument("only_count", &Value::Bool(false)));
+        assert!(glob_tool.is_default_argument("only_files", &Value::Bool(false)));
+        assert!(glob_tool.is_default_argument("only_dirs", &Value::Bool(false)));
+        assert!(glob_tool.is_default_argument("limit", &Value::Null));
+        assert!(!glob_tool.is_default_argument("git_ignore", &Value::Bool(false)));
     }
 
     /// A `tracing` log target that appends to an in-memory buffer
@@ -1230,9 +1652,13 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         std::fs::write(dir.path().join("a.txt"), "a").expect("seed file");
         std::fs::write(dir.path().join("b.txt"), "b").expect("seed file");
-        let pattern = format!("{}/*.txt", dir.path().display());
+        let args = GlobInputArgs {
+            pattern: format!("{}/*.txt", dir.path().display()),
+            git_ignore: false,
+            ..glob_args("")
+        };
         let log = capture_logs(async move {
-            let result = glob_files(&pattern).await;
+            let result = glob_files(&args).await;
             assert!(result.is_ok());
         });
         assert!(
@@ -1383,10 +1809,10 @@ mod tests {
 
     #[test]
     fn glob_result_content_sections_empty_and_nonempty() {
-        let empty_result = GlobResult::new(vec![]);
+        let empty_result = GlobResult::new(vec![], 0, 0);
         assert!(empty_result.content_sections().is_empty());
 
-        let result = GlobResult::new(vec!["src/main.rs".to_string()]);
+        let result = GlobResult::new(vec!["src/main.rs".to_string()], 1, 0);
         let sections = result.content_sections();
         assert_eq!(sections.len(), 1);
         assert!(matches!(sections[0], super::Section::Content(_)));
@@ -1461,5 +1887,124 @@ mod tests {
         assert_eq!(write_tool.timeout_secs(), 20);
         let glob_tool = GlobTool::with_timeout(30, make_ctx());
         assert_eq!(glob_tool.timeout_secs(), 30);
+    }
+
+    #[test]
+    fn glob_default_includes_hidden_files() {
+        // dot_ignore defaults to false — hidden files must appear in results.
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            std::fs::write(dir.path().join("visible.txt"), "v").expect("write");
+            std::fs::write(dir.path().join(".hidden.txt"), "h").expect("write");
+
+            let result = glob_files(&GlobInputArgs {
+                pattern: format!("{}/*.txt", dir.path().display()),
+                git_ignore: false,
+                ..glob_args("")
+            })
+            .await
+            .expect("glob ok");
+
+            assert!(
+                result
+                    .matched_paths
+                    .iter()
+                    .any(|p| p.ends_with("visible.txt")),
+                "visible file must be present"
+            );
+            assert!(
+                result
+                    .matched_paths
+                    .iter()
+                    .any(|p| p.ends_with(".hidden.txt")),
+                "hidden file must be present when dot_ignore=false"
+            );
+        });
+    }
+
+    #[test]
+    fn glob_dot_ignore_excludes_hidden_files() {
+        // dot_ignore=true must exclude any path component starting with '.'.
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            std::fs::write(dir.path().join("visible.txt"), "v").expect("write");
+            std::fs::write(dir.path().join(".hidden.txt"), "h").expect("write");
+
+            let result = glob_files(&GlobInputArgs {
+                pattern: format!("{}/*.txt", dir.path().display()),
+                git_ignore: false,
+                dot_ignore: true,
+                ..glob_args("")
+            })
+            .await
+            .expect("glob ok");
+
+            assert!(
+                result
+                    .matched_paths
+                    .iter()
+                    .any(|p| p.ends_with("visible.txt")),
+                "visible file must be present"
+            );
+            assert!(
+                !result
+                    .matched_paths
+                    .iter()
+                    .any(|p| p.ends_with(".hidden.txt")),
+                "hidden file must be absent when dot_ignore=true"
+            );
+        });
+    }
+
+    #[test]
+    fn glob_dot_ignore_excludes_hidden_files_git_ignore_mode() {
+        // dot_ignore=true must also exclude hidden files in the git_ignore=true path.
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            std::fs::write(dir.path().join("visible.txt"), "v").expect("write");
+            std::fs::write(dir.path().join(".hidden.txt"), "h").expect("write");
+
+            let result = glob_files(&GlobInputArgs {
+                pattern: format!("{}/*.txt", dir.path().display()),
+                git_ignore: true,
+                dot_ignore: true,
+                ..glob_args("")
+            })
+            .await
+            .expect("glob ok");
+
+            assert!(
+                result
+                    .matched_paths
+                    .iter()
+                    .any(|p| p.ends_with("visible.txt")),
+                "visible file must be present"
+            );
+            assert!(
+                !result
+                    .matched_paths
+                    .iter()
+                    .any(|p| p.ends_with(".hidden.txt")),
+                "hidden file must be absent when dot_ignore=true"
+            );
+        });
+    }
+
+    #[test]
+    fn read_input_args_all_properties_have_descriptions() {
+        let schema = ReadTool::default().input_schema();
+        super::super::assert_all_properties_have_descriptions(&schema, "ReadFileArgs");
+    }
+
+    #[test]
+    fn write_input_args_all_properties_have_descriptions() {
+        let schema = WriteTool::default().input_schema();
+        super::super::assert_all_properties_have_descriptions(&schema, "WriteFileArgs");
+    }
+
+    #[test]
+    fn glob_input_args_all_properties_have_descriptions() {
+        let schema = GlobTool::default().input_schema();
+        super::super::assert_all_properties_have_descriptions(&schema, "GlobInputArgs");
     }
 }

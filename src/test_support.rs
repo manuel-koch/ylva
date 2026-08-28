@@ -146,7 +146,9 @@ pub(crate) static SUBSCRIBER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(
 /// from corrupting the per-callsite interest cache that `capture_logs` relies
 /// on. See `SUBSCRIBER_LOCK`'s doc comment for the full explanation.
 pub(crate) fn run_locked(body: impl std::future::Future<Output = ()>) {
-    let _lock = SUBSCRIBER_LOCK.lock().expect("subscriber mutex poisoned");
+    let _lock = SUBSCRIBER_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -155,7 +157,9 @@ pub(crate) fn run_locked(body: impl std::future::Future<Output = ()>) {
 }
 
 pub(crate) fn capture_logs(body: impl std::future::Future<Output = ()>) -> String {
-    let _lock = SUBSCRIBER_LOCK.lock().expect("subscriber mutex poisoned");
+    let _lock = SUBSCRIBER_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let log = SharedLog::default();
     let writer = log.clone();

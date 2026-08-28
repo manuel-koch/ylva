@@ -80,7 +80,7 @@ abbreviations (e.g. `case_sensitive_sort` not `cs`, `config_path` not `cp`,
 `format_timestamp` not `fmt_ts`).
 
 **Binary + library split.** The project ships both a `[[bin]]` (`src/main.rs`) and a
-`[lib]` (`src/lib.rs`) with the same crate name `yvla` (see `Cargo.toml`). Any
+`[lib]` (`src/lib.rs`) with the same crate name `ylva` (see `Cargo.toml`). Any
 type, function, or module that integration tests in `tests/` need to reach must be
 re-exported through `src/lib.rs` — `tests/*.rs` cannot `use` items from `src/main.rs`.
 

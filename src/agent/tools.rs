@@ -93,14 +93,27 @@ impl ToolError {
 ///   tool itself does not know.
 pub trait ToolCallResult: Send + Sync + std::fmt::Debug {
     /// The text returned to the LLM as the tool's result message.
-    fn text(&self) -> &str;
+    fn text(&self) -> String;
 
-    /// Key/value domain properties of the result (e.g. `("bytes_written",
-    /// "42")`).  Returned as an ordered vec so callers can present them in a
-    /// stable, meaningful sequence.  Defaults to an empty vec for tools whose
-    /// output is fully captured by [`text`](Self::text).
-    fn properties(&self) -> Vec<(&'static str, String)> {
-        Vec::new()
+    /// Structured metadata for this result.
+    ///
+    /// All keys are rendered as `key=value` in the TUI/CLI tool bubble and
+    /// embedded in the `result_metadata` field of the tool-response envelope.
+    ///
+    /// Returns `None` for tools whose text already captures everything relevant.
+    fn metadata(&self) -> Option<serde_json::Value> {
+        None
+    }
+
+    /// JSON Schema describing the fields that are actually present in
+    /// `metadata()` for this specific result instance.
+    ///
+    /// Return `None` (the default) when `metadata()` is `None`. Implementations
+    /// that return metadata should return `Some(schema_for!(TheirMetadataStruct))`.
+    /// Only fields emitted for this instance need to appear — conditional fields
+    /// may be omitted by returning a narrower schema.
+    fn metadata_schema(&self) -> Option<RootSchema> {
+        None
     }
 
     /// Rich content sections produced by this result (e.g. file text, command
@@ -261,7 +274,7 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &str;
 
     /// The `schemars`-derived parameter schema for the tool's arguments.
-    fn schema(&self) -> RootSchema;
+    fn input_schema(&self) -> RootSchema;
 
     /// Whether this tool call requires explicit human approval.
     ///
@@ -289,7 +302,7 @@ pub trait Tool: Send + Sync {
     /// schemars `preserve_order`), so no per-tool ordering needs to be
     /// hand-written. Unknown keys sort last.
     fn argument_order(&self, key: &str) -> usize {
-        let schema = self.schema();
+        let schema = self.input_schema();
         let properties = schema.schema.object.map(|object| object.properties);
         match properties {
             Some(properties) => properties
@@ -378,7 +391,8 @@ impl ToolRegistry {
 
 /// Wrap a tool's `schemars` root schema into the OpenAI function-tool envelope.
 fn to_tool_schema(tool: &dyn Tool) -> ToolSchema {
-    let parameters = serde_json::to_value(tool.schema()).unwrap_or_else(|_| serde_json::json!({}));
+    let parameters =
+        serde_json::to_value(tool.input_schema()).unwrap_or_else(|_| serde_json::json!({}));
     ToolSchema {
         name: tool.name().to_string(),
         description: tool.description().to_string(),
@@ -411,6 +425,36 @@ pub fn default_registry(
     registry
 }
 
+/// Asserts that every property in the top-level `properties` object of `schema`
+/// carries a non-empty `description` string.
+///
+/// Call this from each tool's input-args schema test to guard against fields that
+/// the LLM would see without any explanation.
+#[cfg(test)]
+pub(crate) fn assert_all_properties_have_descriptions(
+    schema: &schemars::schema::RootSchema,
+    context: &str,
+) {
+    let value = serde_json::to_value(schema).expect("schema serializes");
+    let properties = value["properties"]
+        .as_object()
+        .unwrap_or_else(|| panic!("{context}: schema has no properties object"));
+    for (field_name, property) in properties {
+        // $ref properties delegate to a definition — the description lives there.
+        if property.get("$ref").is_some() {
+            continue;
+        }
+        let description = property
+            .get("description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("");
+        assert!(
+            !description.is_empty(),
+            "{context}: field `{field_name}` is missing a doc-comment description in the schema"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -428,8 +472,8 @@ mod tests {
     struct SimpleOutput(String);
 
     impl ToolCallResult for SimpleOutput {
-        fn text(&self) -> &str {
-            &self.0
+        fn text(&self) -> String {
+            self.0.clone()
         }
     }
 
@@ -481,7 +525,7 @@ mod tests {
         fn description(&self) -> &str {
             "a test tool"
         }
-        fn schema(&self) -> RootSchema {
+        fn input_schema(&self) -> RootSchema {
             schema_for!(TestArgs)
         }
         fn needs_approval(&self, _args: &Value) -> ApprovalCheck {
@@ -585,9 +629,9 @@ mod tests {
     }
 
     #[test]
-    fn tool_call_result_default_properties_is_empty() {
+    fn tool_call_result_default_metadata_is_none() {
         let output = SimpleOutput("test".to_string());
-        assert!(output.properties().is_empty());
+        assert!(output.metadata().is_none());
         assert!(output.content_sections().is_empty());
     }
 

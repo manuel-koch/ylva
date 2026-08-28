@@ -72,6 +72,8 @@ pub enum AgentEvent {
         id: Uuid,
         name: String,
         result: String,
+        result_metadata: Option<serde_json::Value>,
+        result_metadata_schema: Option<serde_json::Value>,
         summary: Vec<(String, String)>,
         duration: std::time::Duration,
         content_sections: Vec<crate::agent::tools::Section>,
@@ -208,6 +210,10 @@ pub enum Message {
         id: Uuid,
         name: String,
         result: String,
+        /// Structured metadata emitted by the tool for this specific result.
+        result_metadata: Option<serde_json::Value>,
+        /// JSON Schema for the fields present in `result_metadata`.
+        result_metadata_schema: Option<serde_json::Value>,
     },
     ToolError {
         id: Uuid,
@@ -303,8 +309,21 @@ impl Context {
         });
     }
 
-    pub fn push_tool_result(&mut self, id: Uuid, name: String, result: String) {
-        self.messages.push(Message::ToolResult { id, name, result });
+    pub fn push_tool_result(
+        &mut self,
+        id: Uuid,
+        name: String,
+        result: String,
+        result_metadata: Option<serde_json::Value>,
+        result_metadata_schema: Option<serde_json::Value>,
+    ) {
+        self.messages.push(Message::ToolResult {
+            id,
+            name,
+            result,
+            result_metadata,
+            result_metadata_schema,
+        });
     }
 
     pub fn push_tool_error(
@@ -410,18 +429,49 @@ impl PendingTool {
                 };
                 match outcome {
                     Ok((Ok(tool_output), duration)) => {
-                        let result = tool_output.text().to_string();
-                        let summary = tool_output
-                            .properties()
-                            .into_iter()
-                            .map(|(key, value)| (key.to_string(), value))
-                            .collect::<Vec<_>>();
+                        let result_metadata = tool_output.metadata().and_then(|m| {
+                            if m.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+                                None
+                            } else {
+                                Some(m)
+                            }
+                        });
+                        let result_metadata_schema = result_metadata.as_ref().and_then(|_| {
+                            tool_output
+                                .metadata_schema()
+                                .and_then(|schema| serde_json::to_value(schema).ok())
+                        });
+                        let result = tool_output.text();
+                        // All metadata keys become the UI summary (key=value).
+                        let summary: Vec<(String, String)> = result_metadata
+                            .as_ref()
+                            .and_then(|m| {
+                                if let serde_json::Value::Object(obj) = m {
+                                    Some(obj)
+                                } else {
+                                    None
+                                }
+                            })
+                            .map(|obj| {
+                                obj.iter()
+                                    .map(|(k, v)| {
+                                        let display = match v {
+                                            serde_json::Value::String(s) => s.clone(),
+                                            other => other.to_string(),
+                                        };
+                                        (k.clone(), display)
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
                         let content_sections = tool_output.content_sections();
                         let _ = agent_tx
                             .send(AgentEvent::ToolDone {
                                 id,
                                 name,
                                 result,
+                                result_metadata,
+                                result_metadata_schema,
                                 summary,
                                 duration,
                                 content_sections,
@@ -664,9 +714,9 @@ impl AgentLoop {
                                 )
                                 .await;
                             }
-                            AgentEvent::ToolDone { id, name, result, summary, duration, content_sections } => {
+                            AgentEvent::ToolDone { id, name, result, result_metadata, result_metadata_schema, summary, duration, content_sections } => {
                                 current_tool_cancel = None;
-                                context.push_tool_result(id, name.clone(), result.clone());
+                                context.push_tool_result(id, name.clone(), result.clone(), result_metadata, result_metadata_schema);
                                 let _ = ui_tx
                                     .send(UiUpdate::ToolDone {
                                         id,
@@ -1225,6 +1275,8 @@ mod tests {
             id: Uuid::new_v4(),
             name: "tool".into(),
             result: "ok".into(),
+            result_metadata: None,
+            result_metadata_schema: None,
         };
         let tool_error = Message::ToolError {
             id: Uuid::new_v4(),
@@ -1344,7 +1396,7 @@ mod tests {
     fn push_tool_result_and_error_append_messages() {
         let mut context = Context::new();
         let id = Uuid::new_v4();
-        context.push_tool_result(id, "read".into(), "contents".into());
+        context.push_tool_result(id, "read".into(), "contents".into(), None, None);
         context.push_tool_error(id, "write".into(), "denied".into(), None);
         assert_eq!(
             context.messages()[2],
@@ -1352,6 +1404,8 @@ mod tests {
                 id,
                 name: "read".into(),
                 result: "contents".into(),
+                result_metadata: None,
+                result_metadata_schema: None,
             }
         );
         assert_eq!(

@@ -394,7 +394,7 @@ mod tests {
         // the other's cwd mutation, causing a spurious mismatch.
         let _lock = crate::test_support::SUBSCRIBER_LOCK
             .lock()
-            .expect("subscriber mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let sandbox = Sandbox::default();
         let cwd = std::env::current_dir().expect("cwd");
         let canonical_cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);

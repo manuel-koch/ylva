@@ -12,6 +12,7 @@ docs/plans/phase6-terminal-superpowers.md
 
 Don't stage or commit anything in git!
 Check linter/tests/coverage for issues!
+Checkmark done tasks in the plan section.
 ```
 
 ```text
@@ -48,7 +49,17 @@ Tell me a short story (200 words) about a little lamb that went to school.
 Please read file first 10 lines of `docs/development-workflow.md`
 and summaries it in one sentence.
 
-How many files are in project ?
+How many files are in project ( incl. git ignored files and hidden files) ?
+
+How many files are in project ( excl. git ignored files and hidden files ) ?
+
+How many directories are in project ( incl. git ignored dirs and hidden dirs ) ?
+
+How many directories are in project ( excl. git ignored dirs and hidden dirs ) ?
+
+How many files/directories are in project ( incl. git ignored paths and hidden paths ) ?
+
+How many files/directories are in project ( excl. git ignored paths and hidden paths ) ?
 
 How many markdown files are in `docs` folder ?
 

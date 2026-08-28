@@ -11,7 +11,7 @@ don't postpone fixing (pre-existing) flaky tests!
 
 Coverage threshold: **≥80% line coverage** is enforced on testable files
 by `make test-coverage` (below the threshold the command fails).
-`ui.rs` and `main.rs` are excluded because they require a live terminal.
+`ui.rs`, `render.rs`, and `main.rs` are excluded because they require a live terminal.
 
 The following `make` targets are available:
 
@@ -23,6 +23,7 @@ make test-coverage-missing           # same as test-coverage but also prints unc
 make test                            # cargo test — all tests must pass
 make build-debug                     # cargo build (debug)
 make build-debug-and-run             # build debug binary and launch it
+make build-debug-and-run-with-logs   # build debug binary and launch it with tracing logs enabled
 make build-release                   # cargo build (release)
 make build-release-and-run           # build release binary and launch it
 make install                         # cargo install --path . → ~/.cargo/bin/ylva

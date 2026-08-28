@@ -24,7 +24,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use schemars::{schema_for, JsonSchema};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::Instrument;
 
@@ -35,8 +35,8 @@ use super::{
 use crate::sandbox::{ApprovalCheck, SandboxContext};
 
 /// Maximum total bytes in the combined search output. Output beyond this cap
-/// is discarded; the result's `properties()` will carry
-/// `tool_output_truncated` and `tool_output_truncated_at_bytes`.
+/// is discarded; the result's `metadata()` will carry
+/// `truncated` and `truncated_at_bytes`.
 pub const SEARCH_OUTPUT_LIMIT_BYTES: usize = 100 * 1024;
 
 /// Number of bytes inspected to detect binary files (null-byte heuristic).
@@ -46,7 +46,7 @@ const BINARY_PROBE_BYTES: usize = 8 * 1024;
 
 /// Arguments accepted by the `search` tool.
 #[derive(Debug, Clone, JsonSchema, Deserialize)]
-pub struct SearchArgs {
+pub struct SearchInputArgs {
     /// Regular expression pattern to search for.
     pub pattern: String,
     /// Directory (or file) to search within. Defaults to the current working
@@ -77,6 +77,22 @@ pub struct SearchArgs {
 }
 
 // ── Result ────────────────────────────────────────────────────────────────────
+
+/// Structured metadata for a successful `search` invocation.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SearchResultMetadata {
+    /// Number of files containing at least one match.
+    pub matching_files: usize,
+    /// Total matching lines across all files (absent in files-with-matches mode).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matching_lines: Option<usize>,
+    /// Present and `true` when output exceeded the byte cap and was truncated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
+    /// Byte offset at which truncation began (only present when `truncated` is `true`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated_at_bytes: Option<usize>,
+}
 
 /// Successful output from a `search` invocation.
 #[derive(Debug)]
@@ -140,28 +156,28 @@ impl SearchResult {
 }
 
 impl ToolCallResult for SearchResult {
-    fn text(&self) -> &str {
-        &self.text
+    fn text(&self) -> String {
+        self.text.clone()
     }
 
-    fn properties(&self) -> Vec<(&'static str, String)> {
+    fn metadata(&self) -> Option<serde_json::Value> {
         let matching_lines: usize = self
             .sections
             .iter()
             .flat_map(|s| s.lines.iter())
             .filter(|l| l.is_match)
             .count();
-        let mut properties = vec![("matching_files", self.sections.len().to_string())];
-        if !self.files_with_matches {
-            properties.push(("matching_lines", matching_lines.to_string()));
-        }
-        if self.truncated {
-            properties.push(("tool_output_truncated", "true".to_string()));
-            if let Some(at_bytes) = self.truncated_at_bytes {
-                properties.push(("tool_output_truncated_at_bytes", at_bytes.to_string()));
-            }
-        }
-        properties
+        let metadata = SearchResultMetadata {
+            matching_files: self.sections.len(),
+            matching_lines: (!self.files_with_matches).then_some(matching_lines),
+            truncated: self.truncated.then_some(true),
+            truncated_at_bytes: self.truncated.then_some(self.truncated_at_bytes).flatten(),
+        };
+        serde_json::to_value(metadata).ok()
+    }
+
+    fn metadata_schema(&self) -> Option<schemars::schema::RootSchema> {
+        Some(schemars::schema_for!(SearchResultMetadata))
     }
 
     fn content_sections(&self) -> Vec<Section> {
@@ -232,10 +248,9 @@ impl ToolCall for SearchCall {
         let span = tracing::info_span!("tool_args", args = %serialized);
         Box::pin(
             async move {
-                let args =
-                    serde_json::from_value::<SearchArgs>(self.raw_arguments).map_err(|error| {
-                        ToolError::failed("search", format!("invalid arguments: {error}"))
-                    })?;
+                let args = serde_json::from_value::<SearchInputArgs>(self.raw_arguments).map_err(
+                    |error| ToolError::failed("search", format!("invalid arguments: {error}")),
+                )?;
                 search_files(args)
                     .await
                     .map(|result| -> Box<dyn ToolCallResult> { Box::new(result) })
@@ -297,8 +312,8 @@ impl Tool for SearchTool {
         mutually exclusive."
     }
 
-    fn schema(&self) -> schemars::schema::RootSchema {
-        schema_for!(SearchArgs)
+    fn input_schema(&self) -> schemars::schema::RootSchema {
+        schema_for!(SearchInputArgs)
     }
 
     fn needs_approval(&self, args: &Value) -> ApprovalCheck {
@@ -392,7 +407,7 @@ fn append_line(
     true
 }
 
-async fn search_files(args: SearchArgs) -> Result<SearchResult, ToolError> {
+async fn search_files(args: SearchInputArgs) -> Result<SearchResult, ToolError> {
     tracing::debug!(pattern = %args.pattern, "searching files");
 
     let regex = {
@@ -669,6 +684,7 @@ fn search_blocking(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use tempfile::TempDir;
 
     // ── approval ──────────────────────────────────────────────────────────────
@@ -711,7 +727,7 @@ mod tests {
         crate::test_support::run_locked(async {
             let dir = TempDir::new().expect("tempdir");
             std::fs::write(dir.path().join("hello.txt"), "hello world\nfoo bar\n").expect("write");
-            let result = search_files(SearchArgs {
+            let result = search_files(SearchInputArgs {
                 pattern: "hello".to_string(),
                 path: Some(dir.path().display().to_string()),
                 case_sensitive: false,
@@ -733,7 +749,7 @@ mod tests {
         crate::test_support::run_locked(async {
             let dir = TempDir::new().expect("tempdir");
             std::fs::write(dir.path().join("a.txt"), "apple banana\n").expect("write");
-            let result = search_files(SearchArgs {
+            let result = search_files(SearchInputArgs {
                 pattern: "cherry".to_string(),
                 path: Some(dir.path().display().to_string()),
                 case_sensitive: false,
@@ -752,7 +768,7 @@ mod tests {
     fn search_invalid_regex_returns_error() {
         crate::test_support::run_locked(async {
             let dir = TempDir::new().expect("tempdir");
-            let result = search_files(SearchArgs {
+            let result = search_files(SearchInputArgs {
                 pattern: "[unclosed".to_string(),
                 path: Some(dir.path().display().to_string()),
                 case_sensitive: false,
@@ -771,7 +787,7 @@ mod tests {
         crate::test_support::run_locked(async {
             let dir = TempDir::new().expect("tempdir");
             std::fs::write(dir.path().join("b.txt"), "Hello World\n").expect("write");
-            let result = search_files(SearchArgs {
+            let result = search_files(SearchInputArgs {
                 pattern: "hello".to_string(),
                 path: Some(dir.path().display().to_string()),
                 case_sensitive: false,
@@ -784,7 +800,7 @@ mod tests {
             .expect("search ok");
             assert_eq!(result.sections.len(), 1, "case-insensitive should match");
 
-            let case_sensitive_result = search_files(SearchArgs {
+            let case_sensitive_result = search_files(SearchInputArgs {
                 pattern: "hello".to_string(),
                 path: Some(dir.path().display().to_string()),
                 case_sensitive: true,
@@ -811,7 +827,7 @@ mod tests {
                 "line1\nline2\nMATCH\nline4\nline5\n",
             )
             .expect("write");
-            let result = search_files(SearchArgs {
+            let result = search_files(SearchInputArgs {
                 pattern: "MATCH".to_string(),
                 path: Some(dir.path().display().to_string()),
                 case_sensitive: true,
@@ -844,7 +860,7 @@ mod tests {
             // Also write a plain text file so the walker has something to visit.
             std::fs::write(dir.path().join("text.txt"), "text before binary after\n")
                 .expect("write");
-            let result = search_files(SearchArgs {
+            let result = search_files(SearchInputArgs {
                 pattern: "text before".to_string(),
                 path: Some(dir.path().display().to_string()),
                 case_sensitive: true,
@@ -870,7 +886,7 @@ mod tests {
             let line = "a".repeat(100) + " NEEDLE here\n";
             let content = line.repeat(1000);
             std::fs::write(dir.path().join("big.txt"), &content).expect("write");
-            let result = search_files(SearchArgs {
+            let result = search_files(SearchInputArgs {
                 pattern: "NEEDLE".to_string(),
                 path: Some(dir.path().display().to_string()),
                 case_sensitive: true,
@@ -886,14 +902,13 @@ mod tests {
                 result.truncated_at_bytes.is_some(),
                 "truncated_at_bytes must be set"
             );
-            // The properties() must advertise the truncation.
-            let props = result.properties();
-            let truncated_prop = props.iter().find(|(k, _)| *k == "tool_output_truncated");
-            assert!(
-                truncated_prop.is_some(),
-                "tool_output_truncated property expected"
-            );
-            assert_eq!(truncated_prop.unwrap().1, "true");
+            // The metadata() must advertise the truncation.
+            let meta = result
+                .metadata()
+                .expect("truncated result must have metadata");
+            let obj = meta.as_object().expect("metadata is a JSON object");
+            assert!(obj.contains_key("truncated"), "truncated key expected");
+            assert_eq!(obj["truncated"], json!(true));
         });
     }
 
@@ -903,7 +918,7 @@ mod tests {
             let dir = TempDir::new().expect("tempdir");
             let file_path = dir.path().join("labeled.txt");
             std::fs::write(&file_path, "target line\n").expect("write");
-            let result = search_files(SearchArgs {
+            let result = search_files(SearchInputArgs {
                 pattern: "target".to_string(),
                 path: Some(dir.path().display().to_string()),
                 case_sensitive: false,
@@ -956,7 +971,7 @@ mod tests {
             let dir = TempDir::new().expect("tempdir");
             std::fs::write(dir.path().join("code.rs"), "needle in rust\n").expect("write");
             std::fs::write(dir.path().join("docs.txt"), "needle in text\n").expect("write");
-            let result = search_files(SearchArgs {
+            let result = search_files(SearchInputArgs {
                 pattern: "needle".to_string(),
                 path: Some(dir.path().display().to_string()),
                 case_sensitive: true,
@@ -979,7 +994,7 @@ mod tests {
     fn search_invalid_glob_returns_error() {
         crate::test_support::run_locked(async {
             let dir = TempDir::new().expect("tempdir");
-            let result = search_files(SearchArgs {
+            let result = search_files(SearchInputArgs {
                 pattern: "needle".to_string(),
                 path: Some(dir.path().display().to_string()),
                 case_sensitive: false,
@@ -998,7 +1013,7 @@ mod tests {
         crate::test_support::run_locked(async {
             let dir = TempDir::new().expect("tempdir");
             for glob_str in ["../*.rs", "src/../*.rs", "../**/*.rs"] {
-                let result = search_files(SearchArgs {
+                let result = search_files(SearchInputArgs {
                     pattern: "needle".to_string(),
                     path: Some(dir.path().display().to_string()),
                     case_sensitive: false,
@@ -1022,7 +1037,7 @@ mod tests {
             let dir = TempDir::new().expect("tempdir");
             std::fs::write(dir.path().join("a.rs"), "fn foo() {}\nfn bar() {}\n").expect("write");
             std::fs::write(dir.path().join("b.rs"), "no match here\n").expect("write");
-            let result = search_files(SearchArgs {
+            let result = search_files(SearchInputArgs {
                 pattern: "fn foo".to_string(),
                 path: Some(dir.path().display().to_string()),
                 case_sensitive: true,
@@ -1057,7 +1072,7 @@ mod tests {
         crate::test_support::run_locked(async {
             let dir = TempDir::new().expect("tempdir");
             std::fs::write(dir.path().join("code.rs"), "foo bar foo\n").expect("write");
-            let result = search_files(SearchArgs {
+            let result = search_files(SearchInputArgs {
                 pattern: "foo".to_string(),
                 path: Some(dir.path().display().to_string()),
                 case_sensitive: true,
@@ -1090,7 +1105,7 @@ mod tests {
                 "context before\nfoo match\ncontext after\n",
             )
             .expect("write");
-            let result = search_files(SearchArgs {
+            let result = search_files(SearchInputArgs {
                 pattern: "foo".to_string(),
                 path: Some(dir.path().display().to_string()),
                 case_sensitive: true,
@@ -1115,7 +1130,7 @@ mod tests {
         crate::test_support::run_locked(async {
             let dir = TempDir::new().expect("tempdir");
             std::fs::write(dir.path().join("code.rs"), "foo\n").expect("write");
-            let result = search_files(SearchArgs {
+            let result = search_files(SearchInputArgs {
                 pattern: "foo".to_string(),
                 path: Some(dir.path().display().to_string()),
                 case_sensitive: true,
@@ -1130,5 +1145,11 @@ mod tests {
                 "files_with_matches and only_matches are mutually exclusive"
             );
         });
+    }
+
+    #[test]
+    fn search_input_args_all_properties_have_descriptions() {
+        let schema = SearchTool::default().input_schema();
+        super::super::assert_all_properties_have_descriptions(&schema, "SearchInputArgs");
     }
 }

@@ -43,3 +43,9 @@ against.
 | `OPENROUTER_BASE_URL` | — | OpenRouter base URL. Used only when no `OLLAMA_BASE_URL` is set. |
 | `OPENROUTER_MODEL` | `deepseek/deepseek-v4-flash-0731` | OpenRouter model. |
 | `OPENROUTER_API_KEY` | — | OpenRouter API key. |
+
+### Debug
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `YLVA_REQUEST_DUMP_PATH` | — | When set, each outgoing HTTP request body is written to a timestamped JSON file. The value is a path template: the directory and filename stem are extracted and the actual file is written as `<stem>_<unix_seconds>_<millis>.json`. A relative directory is resolved against the process working directory. Used by `make build-debug-and-run-with-logs`. |

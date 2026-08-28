@@ -1348,6 +1348,7 @@ dot_path               = deny   # default: deny
 ```
 
 Named rules:
+
 - `path_outside_workspace` — canonicalized path is not under the workspace root
 - `dot_path` — any component of the workspace-relative path starts with `.`
 - `cross_filesystem` — canonicalized path is on a different filesystem (device)

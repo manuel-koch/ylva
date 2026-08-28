@@ -36,8 +36,8 @@ Tool approval is host-driven: `read`/`glob` are auto-approved immediately;
 
 Tool status lines render as `[tool] <title> …` (e.g. `[tool] Read docs/features.md [limit=32]`)
 
-**WIP:** Provider selection is from environment variables with Ollama-first precedence
-(`OLLAMA_*`, then `OPENROUTER_*`), else `MockProvider` when no backend is configured.
+**WIP:** Provider selection is from environment variables; see
+[CLI options — Environment variables](./cli-options.md#environment-variables).
 
 ## TUI Runtime
 
@@ -57,10 +57,31 @@ Currently the following AI model providers are supported:
 The following tools can be used by AI models during a conversation turn.
 
 Tools report their results via **uniform tool-result envelope**:
-Every `role:"tool"` message carries its `content` as JSON struct
+Every `role:"tool"` message carries its `content` as a JSON struct derived from
+`ToolEnvelope`. The shape on success:
 
-- `{"ok":true,"result":...}` on success
-- `{"ok":false,"error":...}` on failure
+```json
+{
+  "ok": true,
+  "result": "...",
+  "result_metadata": { "field": value, ... },
+  "result_metadata_schema": { "field": { "type": "...", "description": "..." }, ... }
+}
+```
+
+On failure:
+
+```json
+{ "ok": false, "error": "..." }
+```
+
+`result_metadata` and `result_metadata_schema` are omitted when a tool produces
+no structured metadata. When present, `result_metadata_schema` is derived
+automatically from the tool's typed metadata struct (via `schemars`) and covers
+only the fields that are actually populated for that specific result — the schema
+can never drift from the data.
+
+Each tool description sent in the `tools` array includes its argument schema.
 
 **WIP:** `read` and `write` currently only support UTF-8 code points via lossy decode.
 
@@ -71,10 +92,19 @@ Every `role:"tool"` message carries its `content` as JSON struct
   Offset and limit are 0-based!
 - **write**: Write `content` to file at given `path`.
 - **glob**: Search for paths using a glob `pattern`, including wildcards like `*`, `?`, `**`, `[...]`.
+  Hidden files (dot-prefixed names) are **included by default**, matching `find . -type f` behaviour.
+  Optional `dot_ignore` (default `false`); set to `true` to exclude any path component that starts
+  with `.`. Optional `git_ignore` (default `true`) skips gitignored paths via `ignore::WalkBuilder`;
+  set to `false` to use plain `glob` matching without gitignore rules. Optional `only_files` /
+  `only_dirs` filters restrict results to files or directories only (mutually exclusive; both `true`
+  returns `ToolError`). Optional `limit` caps the result count; when capped, `ignored_matches` and
+  `matches` are set in result metadata. Optional `only_count`
+  returns only the match count via `matches` in metadata; content is empty.
+  Paths inside the workspace are auto-approved; paths outside are denied by the sandbox.
 - **bash**: Execute a shell command via `bash -c`. Requires explicit human approval
   before execution (always `UserApprovalRequired`). stdout and stderr are merged in true
   arrival order (concurrent async reads). Output is capped at 100 KB
-  (`tool_output_truncated` / `tool_output_truncated_at_bytes` properties present when
+  (`truncated` / `truncated_at_bytes` fields present in result metadata when
   capped). Default timeout: 30 s (`DEFAULT_BASH_TIMEOUT_SECS`). On timeout or
   cancellation the entire process group is killed via `SIGKILL` (Unix) using
   `nix::sys::signal::killpg` — grandchildren spawned by the script are also cleaned up.
@@ -91,8 +121,8 @@ Every `role:"tool"` message carries its `content` as JSON struct
   entry per occurrence, ignoring context lines, like `grep -o`. `files_with_matches` and
   `only_matches` are mutually exclusive. Result paths mirror the form of the input: a
   relative `path` argument produces relative result paths; an absolute argument produces
-  absolute result paths. Output is capped at 100 KB (`tool_output_truncated` /
-  `tool_output_truncated_at_bytes` properties present when capped). Paths inside the
+  absolute result paths. Output is capped at 100 KB (`truncated` / `truncated_at_bytes` fields present
+  in result metadata when capped). Paths inside the
   workspace are auto-approved; paths outside are auto-denied.
 
 ## Phase 4: TUI skeleton
