@@ -1022,10 +1022,19 @@ async fn advance_tool_queue(
                         tool_call_id = %front.call.id(),
                     )
                     .entered();
-                    registry
+                    // Validate arguments against the tool's input schema first.
+                    // Structurally invalid calls are denied immediately without an approval
+                    // prompt, for all tools uniformly.
+                    let validation = registry
                         .get(front.call.name())
-                        .map(|tool| tool.needs_approval(front.call.arguments()))
-                        .unwrap_or(crate::sandbox::ApprovalCheck::UserApprovalRequired)
+                        .map(|tool| tool.validate_args(front.call.arguments()));
+                    match validation {
+                        Some(Err(reason)) => crate::sandbox::ApprovalCheck::AutoDenied { reason },
+                        _ => registry
+                            .get(front.call.name())
+                            .map(|tool| tool.needs_approval(front.call.arguments()))
+                            .unwrap_or(crate::sandbox::ApprovalCheck::UserApprovalRequired),
+                    }
                 };
                 match approval {
                     crate::sandbox::ApprovalCheck::AutoApproved => {
@@ -1573,9 +1582,10 @@ mod tests {
         let log = capture_logs(async {
             let id = Uuid::new_v4();
             let (agent_tx, mut agent_rx) = mpsc::channel(8);
-            let registry = tools::default_registry(std::sync::Arc::new(std::sync::RwLock::new(
-                crate::sandbox::Sandbox::new(),
-            )));
+            let registry = tools::default_registry(
+                std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new())),
+                tools::ToolRegistryConfig::default(),
+            );
             let pending = PendingTool {
                 call: registry
                     .create_call(

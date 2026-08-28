@@ -391,7 +391,7 @@ No user-visible behavior. Must be fully green before any tool work begins.
 **Goal:** Line-based or search-and-replace file patching; diff preview via
 `pending_content_sections()`; write only after approval.
 
-- [ ] 27. Create `src/agent/tools/edit.rs`. Define:
+- [x] 27. Create `src/agent/tools/edit.rs`. Define:
 
     ```rust
     #[derive(JsonSchema, Deserialize)]
@@ -428,18 +428,18 @@ No user-visible behavior. Must be fully green before any tool work begins.
 
     `EditTool::needs_approval(&self, args)` calls `sandbox_context.check_path(path)`.
 
-- [ ] 28. Register `EditTool` in `default_registry()`.
+- [x] 28. Register `EditTool` in `default_registry()`.
 
-- [ ] 29. Write unit tests: `SearchReplace` happy path (first occurrence replaced) and diff output,
+- [x] 29. Write unit tests: `SearchReplace` happy path (first occurrence replaced) and diff output,
   not-found error, multiple-occurrence replaces only first,
   `LineRange` happy path and diff output, out-of-bounds error, `start_line > end_line` error,
   non-existent file returns `ToolError`,
   `pending_content_sections()` returns `Section::Diff`.
 
-- [ ] 30. Update `docs/features.md`: add `edit` entry (two modes, diff preview, approval flow).
+- [x] 30. Update `docs/features.md`: add `edit` entry (two modes, diff preview, approval flow).
   Remove the `write` WIP note — `write` is fully implemented and approval-gated.
 
-- [ ] 31. Run `make test` + `make test-coverage`.
+- [x] 31. Run `make test` + `make test-coverage`.
 
 ---
 

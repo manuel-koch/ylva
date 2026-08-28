@@ -29,6 +29,7 @@ use crate::llm::ToolSchema;
 use crate::sandbox::ApprovalCheck;
 
 pub mod bash;
+pub mod edit;
 pub mod fs;
 pub mod search;
 
@@ -211,10 +212,8 @@ pub trait ToolCall: Send + Sync {
 
     /// Schema-defined display rank for `key`. Lower ranks appear earlier in
     /// invocation summaries; the lowest-ranked argument is the primary one.
-    /// Defaults to `usize::MAX` (sort last — preserves LLM-supplied key order).
-    fn argument_order(&self, _key: &str) -> usize {
-        usize::MAX
-    }
+    /// Implementations must delegate to their corresponding [`Tool::argument_order`].
+    fn argument_order(&self, key: &str) -> usize;
 
     /// Non-content-section, non-null arguments sorted by schema-defined rank.
     fn title_arguments(&self) -> Vec<(String, serde_json::Value)> {
@@ -276,6 +275,20 @@ pub trait Tool: Send + Sync {
     /// The `schemars`-derived parameter schema for the tool's arguments.
     fn input_schema(&self) -> RootSchema;
 
+    /// Validates `arguments` against this tool's [`input_schema`](Tool::input_schema).
+    ///
+    /// Returns `Ok(())` when the arguments are structurally valid; `Err(reason)` with a
+    /// human-readable description otherwise. Called by the agent before
+    /// [`needs_approval`](Tool::needs_approval) so structurally invalid calls are rejected
+    /// immediately — without an approval prompt — for all tools.
+    ///
+    /// The default implementation compiles the tool's JSON Schema and validates `arguments`
+    /// against it. Tools with cross-field constraints that JSON Schema cannot express should
+    /// override this and call [`validate_args_with_schema`] first, then add the extra checks.
+    fn validate_args(&self, arguments: &Value) -> Result<(), String> {
+        validate_args_with_schema(&self.input_schema(), arguments)
+    }
+
     /// Whether this tool call requires explicit human approval.
     ///
     /// `AutoApproved` → execute immediately without pausing.
@@ -283,7 +296,7 @@ pub trait Tool: Send + Sync {
     /// `UserApprovalRequired` → pause for human.
     ///
     /// Defaults to `UserApprovalRequired` (safe-by-default).
-    fn needs_approval(&self, _args: &Value) -> ApprovalCheck {
+    fn needs_approval(&self, _arguments: &Value) -> ApprovalCheck {
         ApprovalCheck::UserApprovalRequired
     }
 
@@ -301,16 +314,37 @@ pub trait Tool: Send + Sync {
     /// order, which reflects the argument **struct's declaration order** (via
     /// schemars `preserve_order`), so no per-tool ordering needs to be
     /// hand-written. Unknown keys sort last.
+    ///
+    /// Handles schemas produced by `#[serde(flatten)]` on a tagged enum, where
+    /// schemars emits the outer struct's properties inside an `allOf` branch
+    /// alongside the inner `oneOf`/`anyOf` for the enum variants.
     fn argument_order(&self, key: &str) -> usize {
-        let schema = self.input_schema();
-        let properties = schema.schema.object.map(|object| object.properties);
-        match properties {
-            Some(properties) => properties
-                .keys()
-                .position(|name| name.as_str() == key)
-                .unwrap_or(properties.len()),
-            None => 0,
+        use schemars::schema::Schema;
+
+        fn collect_property_names(schema: &Schema, out: &mut Vec<String>) {
+            let Schema::Object(obj) = schema else { return };
+            if let Some(object) = &obj.object {
+                for name in object.properties.keys() {
+                    if !out.contains(name) {
+                        out.push(name.clone());
+                    }
+                }
+            }
+            if let Some(subschemas) = &obj.subschemas {
+                for branch in subschemas.all_of.iter().flatten() {
+                    collect_property_names(branch, out);
+                }
+            }
         }
+
+        let schema = self.input_schema();
+        let root = Schema::Object(schema.schema);
+        let mut names: Vec<String> = Vec::new();
+        collect_property_names(&root, &mut names);
+        names
+            .iter()
+            .position(|name| name.as_str() == key)
+            .unwrap_or(usize::MAX)
     }
 
     /// The supplied arguments that differ from the tool's defaults, as
@@ -400,19 +434,58 @@ fn to_tool_schema(tool: &dyn Tool) -> ToolSchema {
     }
 }
 
-/// Build the default registry with the file-system tools (`read`, `write`,
-/// `glob`) and the shell tool (`bash`).
+/// Validates `arguments` against the compiled JSON Schema derived from `schema`.
+///
+/// This is the building block used by the [`Tool::validate_args`] default implementation.
+/// Tool overrides that add cross-field constraints should call this first, then layer
+/// their own checks on top.
+pub(super) fn validate_args_with_schema(
+    schema: &RootSchema,
+    arguments: &Value,
+) -> Result<(), String> {
+    let schema_value = serde_json::to_value(schema)
+        .map_err(|error| format!("failed to serialize schema: {error}"))?;
+    let compiled = jsonschema::JSONSchema::compile(&schema_value)
+        .map_err(|error| format!("invalid schema: {error}"))?;
+    if let Err(errors) = compiled.validate(arguments) {
+        let messages: Vec<String> = errors.map(|error| error.to_string()).collect();
+        return Err(messages.join("; "));
+    }
+    Ok(())
+}
+
+/// Configuration for [`default_registry`], controlling per-tool approval policies
+/// and other options that would otherwise pile up as individual boolean arguments.
+#[derive(Debug, Default)]
+pub struct ToolRegistryConfig {
+    /// When `true`, `edit` tool calls are auto-approved without a user prompt.
+    /// Intended for automated / e2e testing where no human is present to approve.
+    pub auto_approve_edit: bool,
+    /// When `true`, `write` tool calls are auto-approved without a user prompt.
+    /// Intended for automated / e2e testing where no human is present to approve.
+    pub auto_approve_write: bool,
+}
+
+/// Build the default tool registry configured by [`ToolRegistryConfig`].
 pub fn default_registry(
     sandbox: std::sync::Arc<std::sync::RwLock<crate::sandbox::Sandbox>>,
+    config: ToolRegistryConfig,
 ) -> ToolRegistry {
     use crate::sandbox::SandboxContext;
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(fs::ReadTool::new(SandboxContext::new(
         Arc::clone(&sandbox),
     ))));
-    registry.register(Arc::new(fs::WriteTool::new(SandboxContext::new(
-        Arc::clone(&sandbox),
-    ))));
+    registry.register(Arc::new(fs::WriteTool::new({
+        let mut context = SandboxContext::new(Arc::clone(&sandbox));
+        if config.auto_approve_write {
+            context = context.with_rule(crate::sandbox::SandboxRule {
+                verdict: crate::sandbox::ApprovalCheck::AutoApproved,
+                pattern: glob::Pattern::new("**").expect("** is a valid glob"),
+            });
+        }
+        context
+    })));
     registry.register(Arc::new(fs::GlobTool::new(SandboxContext::new(
         Arc::clone(&sandbox),
     ))));
@@ -422,6 +495,17 @@ pub fn default_registry(
     registry.register(Arc::new(search::SearchTool::new(SandboxContext::new(
         Arc::clone(&sandbox),
     ))));
+    let edit_tool = {
+        let mut context = SandboxContext::new(Arc::clone(&sandbox));
+        if config.auto_approve_edit {
+            context = context.with_rule(crate::sandbox::SandboxRule {
+                verdict: crate::sandbox::ApprovalCheck::AutoApproved,
+                pattern: glob::Pattern::new("**").expect("** is a valid glob"),
+            });
+        }
+        edit::EditTool::new(context)
+    };
+    registry.register(Arc::new(edit_tool));
     registry
 }
 
@@ -496,6 +580,9 @@ mod tests {
         fn timeout_secs(&self) -> u64 {
             self.timeout_secs
         }
+        fn argument_order(&self, _key: &str) -> usize {
+            usize::MAX
+        }
         fn non_default_redacted_arguments(&self) -> Vec<(String, serde_json::Value)> {
             self.arguments
                 .as_object()
@@ -528,7 +615,7 @@ mod tests {
         fn input_schema(&self) -> RootSchema {
             schema_for!(TestArgs)
         }
-        fn needs_approval(&self, _args: &Value) -> ApprovalCheck {
+        fn needs_approval(&self, _arguments: &Value) -> ApprovalCheck {
             ApprovalCheck::AutoApproved
         }
         fn timeout_secs(&self) -> u64 {
@@ -573,15 +660,16 @@ mod tests {
     }
 
     #[test]
-    fn default_registry_registers_all_five_tools() {
+    fn default_registry_registers_all_six_tools() {
         let sandbox = std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new()));
-        let registry = default_registry(sandbox);
-        assert_eq!(registry.names().len(), 5);
+        let registry = default_registry(sandbox, ToolRegistryConfig::default());
+        assert_eq!(registry.names().len(), 6);
         assert!(registry.get("read").is_some());
         assert!(registry.get("write").is_some());
         assert!(registry.get("glob").is_some());
         assert!(registry.get("bash").is_some());
         assert!(registry.get("search").is_some());
+        assert!(registry.get("edit").is_some());
     }
 
     #[test]

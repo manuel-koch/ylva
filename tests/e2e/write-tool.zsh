@@ -15,26 +15,18 @@ echo "**" > "${LOG_DIR}/.gitignore"
 function ylva() {
   ${YLVA} --no-tui \
           --log-file $(git rev-parse --show-toplevel)/logs/${LOG_PREFIX}_$(date +%Y%m%d%H%M%S).log \
-          --log-level DEBUG --log-format ${LOG_FORMAT}
+          --log-level DEBUG --log-format ${LOG_FORMAT} \
+          --auto-approve-write
 }
 
 echo "----------------------------------------------------------"
 ylva << '__EOT__'
-Create file test.txt with the following content:
+Create file `logs/poem.md` with the following content:
 
 ```text
 Lorem ipsum hello world!
 Mary had a little lamb!
 And everywhere Mary went,
 the little lamb would surely follow her.
-```
-__EOT__
-
-echo "----------------------------------------------------------"
-ylva << '__EOT__'
-Create file ../test.txt with the following content:
-
-```text
-Lorem ipsum hello world!
 ```
 __EOT__

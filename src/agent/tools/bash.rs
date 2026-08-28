@@ -174,6 +174,10 @@ impl ToolCall for BashCall {
         &self.raw_arguments
     }
 
+    fn argument_order(&self, key: &str) -> usize {
+        BashTool::default().argument_order(key)
+    }
+
     fn timeout_secs(&self) -> u64 {
         // Return internal timeout plus a grace period so the outer wrapper
         // timeout in agent.rs always fires after bash's own internal timeout,
@@ -286,8 +290,8 @@ impl Tool for BashTool {
     /// commands, so the tool's own default (`UserApprovalRequired`) applies.
     /// When the sandbox gains command-glob rules they will be honoured here
     /// without any change to the agent loop.
-    fn needs_approval(&self, args: &Value) -> ApprovalCheck {
-        let command = args
+    fn needs_approval(&self, arguments: &Value) -> ApprovalCheck {
+        let command = arguments
             .get("command")
             .and_then(|value| value.as_str())
             .unwrap_or("");

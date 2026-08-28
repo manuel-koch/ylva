@@ -31,8 +31,8 @@ Initial user turn resolution: `--prompt <text>`, else piped stdin read to EOF
 (only when stdin is not a terminal) — e.g. `echo '…' | ylva`.
 
 Tool approval is host-driven: `read`/`glob` are auto-approved immediately;
-**WIP:** `write` is always denied and the denial is fed back to the model as a
-`ToolError` plus a follow-up prompt.
+`write` and `edit` require explicit user approval (sandbox-abstain → `UserApprovalRequired`);
+`bash` always requires user approval.
 
 Tool status lines render as `[tool] <title> …` (e.g. `[tool] Read docs/features.md [limit=32]`)
 
@@ -85,12 +85,26 @@ Each tool description sent in the `tools` array includes its argument schema.
 
 **WIP:** `read` and `write` currently only support UTF-8 code points via lossy decode.
 
-**WIP:** `write` is currenty a stub toolthat is unconditionally denied!
-
 - **read**: Read file content from given `path` using `mode`/`offset`/`limit`.
   Mode can be `bytes`/`chars`/`lines`.
   Offset and limit are 0-based!
-- **write**: Write `content` to file at given `path`.
+- **write**: Write `content` to file at given `path`. Requires user approval before
+  execution (approval-gated). Use to create new files or overwrite existing ones.
+- **edit**: Patch an existing file in-place. The file must already exist (use `write`
+  to create new files). Two modes:
+  - **SearchReplace** — supply `old_string` and `new_string`; replaces the **first**
+    occurrence by default. Set `replace_all: true` to replace every occurrence in one
+    call (useful when renaming a symbol throughout a file). Returns `ToolError` if
+    `old_string` is not found.
+  - **LineRange** — supply `start_line`, `end_line` (1-based, inclusive) and
+    `new_string`; replaces those lines. Returns `ToolError` if the range is out of
+    bounds or `start_line > end_line`.
+  A unified diff preview is shown before the user approves the call
+  (`pending_content_sections()` returns a `Section::Diff`). The diff bubble renders
+  a two-column line-number gutter (old file | new file) derived from the unified-diff
+  hunk headers, so each added, removed, and context line is annotated with its
+  position in the old and/or new file.
+  Requires user approval (sandbox path check → `UserApprovalRequired` by default).
 - **glob**: Search for paths using a glob `pattern`, including wildcards like `*`, `?`, `**`, `[...]`.
   Hidden files (dot-prefixed names) are **included by default**, matching `find . -type f` behaviour.
   Optional `dot_ignore` (default `false`); set to `true` to exclude any path component that starts

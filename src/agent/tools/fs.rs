@@ -577,8 +577,8 @@ impl Tool for ReadTool {
         schema_for!(ReadFileArgs)
     }
 
-    fn needs_approval(&self, args: &Value) -> ApprovalCheck {
-        let path_str = match require_string_arg(args, "path") {
+    fn needs_approval(&self, arguments: &Value) -> ApprovalCheck {
+        let path_str = match require_string_arg(arguments, "path") {
             Ok(value) => value,
             Err(denied) => return denied,
         };
@@ -683,12 +683,12 @@ impl Tool for WriteTool {
         schema_for!(WriteFileArgs)
     }
 
-    fn needs_approval(&self, args: &Value) -> ApprovalCheck {
-        let path_str = match require_string_arg(args, "path") {
+    fn needs_approval(&self, arguments: &Value) -> ApprovalCheck {
+        let path_str = match require_string_arg(arguments, "path") {
             Ok(value) => value,
             Err(denied) => return denied,
         };
-        if let Err(denied) = require_string_arg(args, "content") {
+        if let Err(denied) = require_string_arg(arguments, "content") {
             return denied;
         }
         // When the sandbox has no opinion, writes require explicit user approval.
@@ -795,8 +795,8 @@ impl Tool for GlobTool {
         schema_for!(GlobInputArgs)
     }
 
-    fn needs_approval(&self, args: &Value) -> ApprovalCheck {
-        let pattern_str = match require_string_arg(args, "pattern") {
+    fn needs_approval(&self, arguments: &Value) -> ApprovalCheck {
+        let pattern_str = match require_string_arg(arguments, "pattern") {
             Ok(value) => value,
             Err(denied) => return denied,
         };

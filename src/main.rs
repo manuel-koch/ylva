@@ -81,10 +81,22 @@ fn main() {
         )]),
     };
 
-    let factory = Arc::new(AgentFactory::new(HashMap::from([(
-        "default".to_string(),
-        engine as Arc<dyn Engine>,
-    )])));
+    let auto_approve_edit = args.contains(&"--auto-approve-edit".to_string());
+    let auto_approve_write = args.contains(&"--auto-approve-write".to_string());
+
+    let factory = Arc::new({
+        let mut factory = AgentFactory::new(HashMap::from([(
+            "default".to_string(),
+            engine as Arc<dyn Engine>,
+        )]));
+        if auto_approve_edit {
+            factory = factory.with_auto_approve_edit();
+        }
+        if auto_approve_write {
+            factory = factory.with_auto_approve_write();
+        }
+        factory
+    });
 
     let result = runtime.block_on(async {
         if std::io::stdout().is_terminal() && !args.contains(&"--no-tui".to_string()) {

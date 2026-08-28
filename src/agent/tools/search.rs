@@ -228,6 +228,10 @@ impl ToolCall for SearchCall {
         &self.raw_arguments
     }
 
+    fn argument_order(&self, key: &str) -> usize {
+        SearchTool::default().argument_order(key)
+    }
+
     fn timeout_secs(&self) -> u64 {
         self.timeout_secs
     }
@@ -316,8 +320,8 @@ impl Tool for SearchTool {
         schema_for!(SearchInputArgs)
     }
 
-    fn needs_approval(&self, args: &Value) -> ApprovalCheck {
-        match args.get("path").and_then(|v| v.as_str()) {
+    fn needs_approval(&self, arguments: &Value) -> ApprovalCheck {
+        match arguments.get("path").and_then(|v| v.as_str()) {
             Some(path_str) if !path_str.is_empty() => {
                 let sandbox_verdict = self.sandbox_context.check_path(Path::new(path_str));
                 let approval = match sandbox_verdict {

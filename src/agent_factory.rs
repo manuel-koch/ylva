@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use crate::agent::tools::default_registry;
+use crate::agent::tools::{default_registry, ToolRegistryConfig};
 use crate::agent::{AgentLoop, Role, UiUpdate};
 use crate::config::ProfileConfig;
 use crate::engine::Engine;
@@ -30,11 +30,33 @@ use crate::sandbox::Sandbox;
 /// Phase 6 implements it.
 pub struct AgentFactory {
     engines: HashMap<String, Arc<dyn Engine>>,
+    /// When `true`, the `edit` tool is auto-approved without user confirmation.
+    /// Intended for automated / e2e testing where no human is present to approve.
+    auto_approve_edit: bool,
+    /// When `true`, the `write` tool is auto-approved without user confirmation.
+    /// Intended for automated / e2e testing where no human is present to approve.
+    auto_approve_write: bool,
 }
 
 impl AgentFactory {
     pub fn new(engines: HashMap<String, Arc<dyn Engine>>) -> Self {
-        AgentFactory { engines }
+        AgentFactory {
+            engines,
+            auto_approve_edit: false,
+            auto_approve_write: false,
+        }
+    }
+
+    /// Enable automatic approval of `write` tool calls (no user prompt).
+    pub fn with_auto_approve_write(mut self) -> Self {
+        self.auto_approve_write = true;
+        self
+    }
+
+    /// Enable automatic approval of `edit` tool calls (no user prompt).
+    pub fn with_auto_approve_edit(mut self) -> Self {
+        self.auto_approve_edit = true;
+        self
     }
 
     /// Creates an [`AgentLoop`] and its paired UI-update receiver.
@@ -68,7 +90,13 @@ impl AgentFactory {
             .ok_or_else(|| anyhow::anyhow!("unknown engine: {engine_name}"))?;
 
         let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new()));
-        let registry = Arc::new(default_registry(sandbox));
+        let registry = Arc::new(default_registry(
+            sandbox,
+            ToolRegistryConfig {
+                auto_approve_edit: self.auto_approve_edit,
+                auto_approve_write: self.auto_approve_write,
+            },
+        ));
         let (agent_loop, ui_rx) = AgentLoop::new(Arc::clone(engine), registry);
         Ok((agent_loop, ui_rx))
     }

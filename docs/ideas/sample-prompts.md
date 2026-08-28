@@ -8,7 +8,7 @@ make format lint test-coverage build-debug-and-run-with-logs
 
 ---
 
-Implement open tasks in section "Phase 6.2" of
+Implement open tasks in section "Phase 6.3" of
 docs/plans/phase6-terminal-superpowers.md
 
 Don't stage or commit anything in git!
@@ -81,6 +81,14 @@ report only the paths that matched.
 
 Use search tool to find Rust source files that contain the case-sensitive regexp `\w+Tool`,
 report only the matched regexp without path/line info.
+
+Create a four line poem about a little lamp and save it to `logs/poem.md`.
+
+Replace all occurance of "lamp" in `logs/poem.md` by "frog" using the `edit` tool!
+
+Replace first occurance of "lamp" in `logs/poem.md` by "frog" using the `edit` tool!
+
+Replace line 2+3 in `logs/poem.md` by one line "hello world" using the `edit` tool!
 
 Run `python3` to find out which version it is and where the python interpreter
 is located.

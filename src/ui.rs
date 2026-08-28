@@ -1650,27 +1650,37 @@ fn append_tool_bubble_lines(
                             }
                         }
 
-                        // Render unified diff: + lines green, - lines red.
+                        // Pre-scan hunk headers to determine gutter column width.
+                        let gutter_col_width = diff_section
+                            .content
+                            .lines()
+                            .filter_map(parse_hunk_header)
+                            .flat_map(|(old_start, old_count, new_start, new_count)| {
+                                [
+                                    old_start.saturating_add(old_count).saturating_sub(1),
+                                    new_start.saturating_add(new_count).saturating_sub(1),
+                                ]
+                            })
+                            .max()
+                            .unwrap_or(1)
+                            .to_string()
+                            .len()
+                            .max(1);
+                        // "  {left:>w} {right:>w} " — 2 + w + 1 + w + 1 = 4 + 2w chars.
+                        let gutter_len = 4 + 2 * gutter_col_width;
+
+                        // Render unified diff with a two-column line-number gutter.
+                        // Left column: old-file line number (blank for `+` lines).
+                        // Right column: new-file line number (blank for `-` lines).
+                        let mut old_line: usize = 1;
+                        let mut new_line: usize = 1;
                         for diff_line in diff_section.content.lines() {
-                            let (line_color, prefix) = if diff_line.starts_with('+') {
-                                (Color::Green, "+")
-                            } else if diff_line.starts_with('-') {
-                                (Color::Red, "-")
-                            } else {
-                                (Color::DarkGray, " ")
-                            };
-                            let rest = diff_line.get(1..).unwrap_or("");
-                            // Diff line prefix is "  {prefix} " — 4 chars wide.
-                            let diff_prefix_len = 4;
-                            let diff_content_width =
-                                wrap_width.saturating_sub(diff_prefix_len).max(1);
-                            let wrapped_rest = textwrap::wrap(rest, diff_content_width);
-                            for (wrap_index, wrapped_chunk) in wrapped_rest.iter().enumerate() {
-                                let text_str = if wrap_index == 0 {
-                                    format!("  {prefix} {wrapped_chunk}")
-                                } else {
-                                    format!("    {wrapped_chunk}") // continuation indent, no prefix
-                                };
+                            if let Some((old_start, _, new_start, _)) = parse_hunk_header(diff_line)
+                            {
+                                old_line = old_start;
+                                new_line = new_start;
+                                // Render hunk header dim across the full width.
+                                let text_str = format!("  {diff_line}");
                                 let text_len = text_str.chars().count();
                                 lines.push(
                                     Line::from(vec![
@@ -1679,10 +1689,85 @@ fn append_tool_bubble_lines(
                                         Span::styled(
                                             text_str,
                                             Style::default()
+                                                .fg(Color::DarkGray)
+                                                .bg(TOOL_BUBBLE_BG_COLOR)
+                                                .add_modifier(Modifier::DIM),
+                                        ),
+                                        trailing_pad(text_len),
+                                    ])
+                                    .patch_style(row_bg),
+                                );
+                                continue;
+                            }
+
+                            let (line_color, left_num, right_num) = if diff_line.starts_with('+') {
+                                let n = new_line;
+                                new_line += 1;
+                                (Color::Green, None, Some(n))
+                            } else if diff_line.starts_with('-') {
+                                let n = old_line;
+                                old_line += 1;
+                                (Color::Red, Some(n), None)
+                            } else {
+                                let o = old_line;
+                                let n = new_line;
+                                old_line += 1;
+                                new_line += 1;
+                                (Color::DarkGray, Some(o), Some(n))
+                            };
+
+                            let left_str = left_num
+                                .map(|n| format!("{n:>gutter_col_width$}"))
+                                .unwrap_or_else(|| " ".repeat(gutter_col_width));
+                            let right_str = right_num
+                                .map(|n| format!("{n:>gutter_col_width$}"))
+                                .unwrap_or_else(|| " ".repeat(gutter_col_width));
+                            let gutter_str = format!("  {left_str} {right_str} ");
+
+                            let rest = diff_line.get(1..).unwrap_or("");
+                            // Content area: gutter + "+"/"-"/" " (1 char) + " " (1 char).
+                            let content_width = wrap_width.saturating_sub(gutter_len + 2).max(1);
+                            let wrapped_rest = textwrap::wrap(rest, content_width);
+                            for (wrap_index, wrapped_chunk) in wrapped_rest.iter().enumerate() {
+                                let prefix = if diff_line.starts_with('+') {
+                                    "+"
+                                } else if diff_line.starts_with('-') {
+                                    "-"
+                                } else {
+                                    " "
+                                };
+                                let (gutter_span, content_str) = if wrap_index == 0 {
+                                    (
+                                        Span::styled(
+                                            gutter_str.clone(),
+                                            Style::default()
+                                                .fg(Color::DarkGray)
+                                                .bg(TOOL_BUBBLE_BG_COLOR),
+                                        ),
+                                        format!("{prefix} {wrapped_chunk}"),
+                                    )
+                                } else {
+                                    (
+                                        Span::styled(
+                                            " ".repeat(gutter_len),
+                                            Style::default().bg(TOOL_BUBBLE_BG_COLOR),
+                                        ),
+                                        format!("  {wrapped_chunk}"),
+                                    )
+                                };
+                                let content_len = content_str.chars().count();
+                                lines.push(
+                                    Line::from(vec![
+                                        bar.clone(),
+                                        margin.clone(),
+                                        gutter_span,
+                                        Span::styled(
+                                            content_str,
+                                            Style::default()
                                                 .fg(line_color)
                                                 .bg(TOOL_BUBBLE_BG_COLOR),
                                         ),
-                                        trailing_pad(text_len),
+                                        trailing_pad(gutter_len + content_len),
                                     ])
                                     .patch_style(row_bg),
                                 );
@@ -1812,6 +1897,28 @@ fn append_tool_bubble_lines(
     let bubble_end_row = lines.len() - 1;
     bubble_title_rows.push((bubble_start_row, bubble_end_row, bubble_id));
     let _ = title_row_index; // retained for documentation; hit-testing uses the range
+}
+
+/// Parse a unified-diff hunk header of the form `@@ -a[,b] +c[,d] @@`.
+///
+/// Returns `(old_start, old_count, new_start, new_count)` on success.
+fn parse_hunk_header(line: &str) -> Option<(usize, usize, usize, usize)> {
+    let rest = line.strip_prefix("@@ -")?;
+    let (old_part, rest) = rest.split_once(' ')?;
+    let (old_start, old_count) = parse_hunk_range(old_part)?;
+    let rest = rest.strip_prefix('+')?;
+    let (new_part, _) = rest.split_once(' ')?;
+    let (new_start, new_count) = parse_hunk_range(new_part)?;
+    Some((old_start, old_count, new_start, new_count))
+}
+
+/// Parse `"a,b"` or `"a"` into `(start, count)`. Count defaults to 1 when absent.
+fn parse_hunk_range(s: &str) -> Option<(usize, usize)> {
+    if let Some((start, count)) = s.split_once(',') {
+        Some((start.parse().ok()?, count.parse().ok()?))
+    } else {
+        Some((s.parse().ok()?, 1))
+    }
 }
 
 fn draw_normal_footer(
@@ -2251,5 +2358,44 @@ mod tests {
                 "thumb overflows at offset {offset}: top={thumb_top} size={thumb_size}"
             );
         }
+    }
+
+    // ── parse_hunk_header ──────────────────────────────────────────────────
+
+    #[test]
+    fn parse_hunk_header_full_form() {
+        use super::parse_hunk_header;
+        let result = parse_hunk_header("@@ -10,5 +12,3 @@");
+        assert_eq!(result, Some((10, 5, 12, 3)));
+    }
+
+    #[test]
+    fn parse_hunk_header_count_omitted_defaults_to_one() {
+        use super::parse_hunk_header;
+        let result = parse_hunk_header("@@ -1 +1 @@");
+        assert_eq!(result, Some((1, 1, 1, 1)));
+    }
+
+    #[test]
+    fn parse_hunk_header_mixed_omission() {
+        use super::parse_hunk_header;
+        let result = parse_hunk_header("@@ -3,2 +5 @@");
+        assert_eq!(result, Some((3, 2, 5, 1)));
+    }
+
+    #[test]
+    fn parse_hunk_header_returns_none_for_non_header_line() {
+        use super::parse_hunk_header;
+        assert!(parse_hunk_header("+added line").is_none());
+        assert!(parse_hunk_header("-removed line").is_none());
+        assert!(parse_hunk_header(" context line").is_none());
+    }
+
+    #[test]
+    fn parse_hunk_header_with_trailing_context_label() {
+        use super::parse_hunk_header;
+        // similar::TextDiff may include a trailing function name after the second @@.
+        let result = parse_hunk_header("@@ -7,4 +7,4 @@ fn example() {");
+        assert_eq!(result, Some((7, 4, 7, 4)));
     }
 }

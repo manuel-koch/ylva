@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 
 use ylva::{
     cli_driver::run_cli_to, default_registry, AgentLoop, DeltaChunk, EngineImpl, Message,
-    MockEvent, Provider, Sandbox, StreamEvent, ToolRegistry, ToolSchema,
+    MockEvent, Provider, Sandbox, StreamEvent, ToolRegistry, ToolRegistryConfig, ToolSchema,
 };
 
 /// A provider that emits `phase_one` on the first `chat()` call and
@@ -155,7 +155,7 @@ async fn run_cli_auto_approves_read_and_runs_it() {
     let sandbox = std::sync::Arc::new(std::sync::RwLock::new(ylva::Sandbox::with_root(
         dir.path().to_path_buf(),
     )));
-    let registry = Arc::new(default_registry(sandbox));
+    let registry = Arc::new(default_registry(sandbox, ToolRegistryConfig::default()));
     let mut output = Vec::new();
     let engine = Arc::new(EngineImpl::new(provider, common::test_engine_config()));
     let (agent, ui_rx) = AgentLoop::new(engine, Arc::clone(&registry));
@@ -186,9 +186,10 @@ async fn run_cli_denies_write_and_fed_back_as_error() {
         interval: Duration::from_millis(1),
         calls: Arc::new(AtomicUsize::new(0)),
     });
-    let registry = Arc::new(default_registry(std::sync::Arc::new(
-        std::sync::RwLock::new(Sandbox::new()),
-    )));
+    let registry = Arc::new(default_registry(
+        std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new())),
+        ToolRegistryConfig::default(),
+    ));
     let mut output = Vec::new();
     let engine = Arc::new(EngineImpl::new(provider, common::test_engine_config()));
     let (agent, ui_rx) = AgentLoop::new(engine, Arc::clone(&registry));

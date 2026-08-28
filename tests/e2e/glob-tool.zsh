@@ -35,3 +35,33 @@ ylva << '__EOT__'
 Search for files in the project root (non-recursive).
 Count the number of found files!
 __EOT__
+
+echo "----------------------------------------------------------"
+ylva << '__EOT__'
+How many files are in project ( incl. git ignored files and hidden files) ?
+__EOT__
+
+echo "----------------------------------------------------------"
+ylva << '__EOT__'
+How many files are in project ( excl. git ignored files and hidden files ) ?
+__EOT__
+
+echo "----------------------------------------------------------"
+ylva << '__EOT__'
+How many directories are in project ( incl. git ignored dirs and hidden dirs ) ?
+__EOT__
+
+echo "----------------------------------------------------------"
+ylva << '__EOT__'
+How many directories are in project ( excl. git ignored dirs and hidden dirs ) ?
+__EOT__
+
+echo "----------------------------------------------------------"
+ylva << '__EOT__'
+How many files/directories are in project ( incl. git ignored paths and hidden paths ) ?
+__EOT__
+
+echo "----------------------------------------------------------"
+ylva << '__EOT__'
+How many files/directories are in project ( excl. git ignored paths and hidden paths ) ?
+__EOT__

@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use crate::agent::tools::default_registry;
+use crate::agent::tools::{default_registry, ToolRegistryConfig};
 use crate::agent::{AgentCommand, AgentLoop, Role, UiUpdate};
 use crate::agent_factory::AgentFactory;
 use crate::app::App;
@@ -169,7 +169,7 @@ impl ConsoleApp {
 impl App for ConsoleApp {
     async fn run(mut self) -> anyhow::Result<u8> {
         let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new()));
-        let registry = Arc::new(default_registry(sandbox));
+        let registry = Arc::new(default_registry(sandbox, ToolRegistryConfig::default()));
         let (agent, ui_rx) = self
             .factory
             .create(&self.profile, &self.agent_type, Role::Root)?;

@@ -115,6 +115,14 @@ impl SandboxContext {
         }
     }
 
+    /// Append a rule to the end of this context's rule list. Last match wins,
+    /// so appending a catch-all rule (e.g. `**` → `AutoApproved`) effectively
+    /// overrides any earlier verdict for every path.
+    pub fn with_rule(mut self, rule: SandboxRule) -> Self {
+        self.rules.push(rule);
+        self
+    }
+
     /// Collapse `path` to a clean absolute path using only lexical rules —
     /// no filesystem access, no symlink resolution.
     ///

@@ -27,7 +27,7 @@ use tokio::sync::mpsc;
 use ylva::{
     default_registry, AgentCommand, AgentLoop, ApprovalCheck, DeltaChunk, EngineImpl, Message,
     MockEvent, MockProvider, Sandbox, Tool, ToolCall, ToolCallResult, ToolError, ToolRegistry,
-    UiUpdate, MAX_TOOL_USE_ITERATIONS,
+    ToolRegistryConfig, UiUpdate, MAX_TOOL_USE_ITERATIONS,
 };
 
 /// Build a `MockEvent::Delta` carrying a complete tool call for `index`.
@@ -147,7 +147,7 @@ async fn tool_call_pauses_for_approval_then_reprompts_after_result() {
     let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox {
         workspace_root: dir.path().to_path_buf(),
     }));
-    let registry = Arc::new(default_registry(sandbox));
+    let registry = Arc::new(default_registry(sandbox, ToolRegistryConfig::default()));
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(
         vec![call(
@@ -211,7 +211,7 @@ async fn two_tool_calls_drain_serially_with_single_reprompt() {
     let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox {
         workspace_root: dir.path().to_path_buf(),
     }));
-    let registry = Arc::new(default_registry(sandbox));
+    let registry = Arc::new(default_registry(sandbox, ToolRegistryConfig::default()));
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(
         vec![
@@ -300,7 +300,10 @@ async fn two_tool_calls_drain_serially_with_single_reprompt() {
 
 #[tokio::test(start_paused = true)]
 async fn failing_tool_emits_tool_error_and_still_reprompts() {
-    let registry = Arc::new(default_registry(make_sandbox()));
+    let registry = Arc::new(default_registry(
+        make_sandbox(),
+        ToolRegistryConfig::default(),
+    ));
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(
         vec![call(
@@ -356,7 +359,10 @@ async fn failing_tool_emits_tool_error_and_still_reprompts() {
 async fn denied_write_is_fed_back_and_triggers_a_new_request() {
     let dir = TempDir::new().expect("tempdir");
     let file = scratch_file(&dir, "a.txt", "content");
-    let registry = Arc::new(default_registry(make_sandbox()));
+    let registry = Arc::new(default_registry(
+        make_sandbox(),
+        ToolRegistryConfig::default(),
+    ));
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(
         vec![
@@ -424,7 +430,7 @@ async fn stop_while_awaiting_approval_clears_pending_tools() {
     let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox {
         workspace_root: dir.path().to_path_buf(),
     }));
-    let registry = Arc::new(default_registry(sandbox));
+    let registry = Arc::new(default_registry(sandbox, ToolRegistryConfig::default()));
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(
         vec![
@@ -524,6 +530,9 @@ impl ToolCall for SleepToolCall {
     fn non_default_redacted_arguments(&self) -> Vec<(String, serde_json::Value)> {
         vec![]
     }
+    fn argument_order(&self, _key: &str) -> usize {
+        usize::MAX
+    }
     fn run(
         self: Box<Self>,
     ) -> futures::future::BoxFuture<'static, Result<Box<dyn ToolCallResult>, ToolError>> {
@@ -567,7 +576,7 @@ impl Tool for SleepTool {
 
 #[tokio::test(start_paused = true)]
 async fn stop_mid_tool_kills_tool_and_returns_to_idle() {
-    let mut registry = default_registry(make_sandbox());
+    let mut registry = default_registry(make_sandbox(), ToolRegistryConfig::default());
     registry.register(Arc::new(SleepTool));
     let registry = Arc::new(registry);
     let interval = Duration::from_millis(5);
@@ -617,7 +626,10 @@ async fn stop_mid_tool_kills_tool_and_returns_to_idle() {
 
 #[tokio::test(start_paused = true)]
 async fn iteration_guard_stops_after_max_reprompts() {
-    let registry = Arc::new(default_registry(make_sandbox()));
+    let registry = Arc::new(default_registry(
+        make_sandbox(),
+        ToolRegistryConfig::default(),
+    ));
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(
         vec![call(
