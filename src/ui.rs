@@ -142,7 +142,7 @@ fn highlighted_lines_cached(content: &str, file_extension: Option<&str>) -> High
 }
 
 use crate::agent::AgentMode;
-use crate::app_state::{ChatEntry, ToolCallState, TuiState, UserMessageState};
+use crate::app_state::{BannerDragSelection, ChatEntry, ToolCallState, TuiState, UserMessageState};
 use crate::build_info::BUILD_INFO;
 
 // User message border colors — extract into Theme struct in a later phase.
@@ -172,6 +172,12 @@ const TOOL_BUBBLE_BG_COLOR: Color = Color::Rgb(30, 0, 30);
 const HELP_POPUP_BORDER_COLOR: Color = Color::Blue;
 // Section heading foreground color inside the help popup content area.
 const HELP_POPUP_HEADING_COLOR: Color = Color::Blue;
+
+// Clarify banner colors.
+const CLARIFY_BANNER_FG_COLOR: Color = Color::Yellow;
+// Inverted selection: selected text rendered as black-on-yellow.
+const CLARIFY_BANNER_SELECTION_FG_COLOR: Color = Color::Black;
+const CLARIFY_BANNER_SCROLL_INDICATOR_COLOR: Color = Color::DarkGray;
 
 // Single hue used for all parts of the conversation-list scrollbar.
 // The track and inactive arrows use the same colour with Modifier::DIM so the
@@ -241,22 +247,80 @@ pub fn draw(
     //   slot_b → footer_row_2     │  slot_b → footer_row_1
     //   slot_c → input_area       │  slot_c → footer_row_2
     let approval_pending = state.pending_approval.is_some();
-    let [chat_area, separator_area, slot_a, slot_b, slot_c] = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Fill(1),
-            Constraint::Length(1),
-            Constraint::Length(if approval_pending { 1 } else { input_height }),
-            Constraint::Length(1),
-            Constraint::Length(if approval_pending { input_height } else { 1 }),
-        ])
-        .areas(area);
-
-    let (input_area, footer_row_1, footer_row_2) = if approval_pending {
-        (slot_c, slot_a, slot_b)
+    let clarify_banner_content_height = state
+        .pending_clarify
+        .as_ref()
+        .map(|(question, choices, context)| {
+            let context_rows = context.as_deref().map_or(0, |ctx| {
+                textwrap::wrap(ctx, area.width as usize).len() as u16
+            });
+            let question_rows = textwrap::wrap(question, area.width as usize).len().max(1) as u16;
+            context_rows + question_rows + choices.as_ref().map_or(0, Vec::len) as u16
+        })
+        .unwrap_or(0);
+    // Cap the visible height so the banner never consumes more than 40 % of
+    // the terminal.  When content is taller the user can scroll.
+    let clarify_banner_height = if clarify_banner_content_height > 0 {
+        let max_banner_height = (area.height * 40 / 100).max(3);
+        clarify_banner_content_height.min(max_banner_height)
     } else {
-        (slot_a, slot_b, slot_c)
+        0
     };
+    let (chat_area, separator_area, input_area, footer_row_1, footer_row_2, clarify_area) =
+        if approval_pending {
+            let [chat_area, separator_area, slot_a, slot_b, slot_c] = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Fill(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Length(input_height),
+                ])
+                .areas(area);
+            (chat_area, separator_area, slot_c, slot_a, slot_b, None)
+        } else if clarify_banner_height > 0 {
+            let [chat_area, separator_area, clarify_area, input_area, footer_row_1, footer_row_2] =
+                Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Fill(1),
+                        Constraint::Length(1),
+                        Constraint::Length(clarify_banner_height),
+                        Constraint::Length(input_height),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                    ])
+                    .areas(area);
+            (
+                chat_area,
+                separator_area,
+                input_area,
+                footer_row_1,
+                footer_row_2,
+                Some(clarify_area),
+            )
+        } else {
+            let [chat_area, separator_area, input_area, footer_row_1, footer_row_2] =
+                Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Fill(1),
+                        Constraint::Length(1),
+                        Constraint::Length(input_height),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                    ])
+                    .areas(area);
+            (
+                chat_area,
+                separator_area,
+                input_area,
+                footer_row_1,
+                footer_row_2,
+                None,
+            )
+        };
 
     draw_chat(frame, chat_area, state);
 
@@ -356,6 +420,25 @@ pub fn draw(
 
     // Store the input rect for mouse click/drag handling in the event loop.
     state.input_area = input_area;
+    // Store the clarify banner rect for mouse click-to-choose handling.
+    state.clarify_banner = clarify_area.unwrap_or_default();
+
+    if let (Some(clarify_area), Some((question, choices, context))) =
+        (clarify_area, state.pending_clarify.as_ref())
+    {
+        draw_clarify_banner(
+            frame,
+            clarify_area,
+            ClarifyBannerParams {
+                question,
+                choices: choices.as_ref(),
+                context: context.as_deref(),
+                drag: state.clarify_banner_drag,
+                scroll_offset: &mut state.clarify_scroll_offset,
+                content_height: clarify_banner_content_height as usize,
+            },
+        );
+    }
 
     let button_areas = if let Some((_, name, _)) = &state.pending_approval.clone() {
         draw_approval_footer(
@@ -368,7 +451,9 @@ pub fn draw(
             hint,
         )
     } else {
-        let keybinding_hint = if state.agent_mode != AgentMode::Idle && !input_is_empty {
+        let keybinding_hint = if state.pending_clarify.is_some() {
+            " enter: answer  click choice  ctrl-c/esc: cancel  F1: help"
+        } else if state.agent_mode != AgentMode::Idle && !input_is_empty {
             " enter: send  ctrl-c/esc: clear draft  F1: help"
         } else {
             " enter: send  ctrl-c/esc: cancel/quit  F1: help"
@@ -468,11 +553,11 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
             } => {
                 // Pending tool bubbles are deferred so they render at the bottom,
                 // close to the approve/deny footer buttons.
-                if matches!(bubble_state, ToolCallState::Pending { .. }) {
+                if matches!(bubble_state.as_ref(), ToolCallState::Pending { .. }) {
                     deferred_pending_tool_bubbles.push((
                         *id,
                         name.clone(),
-                        bubble_state.clone(),
+                        bubble_state.as_ref().clone(),
                         *collapsed,
                     ));
                     continue;
@@ -482,7 +567,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
                     ToolBubbleArgs {
                         id: *id,
                         name,
-                        state: bubble_state,
+                        state: bubble_state.as_ref(),
                         collapsed: *collapsed,
                         spinner_frame: state.spinner_frame,
                     },
@@ -1076,6 +1161,18 @@ struct ToolBubbleArgs<'a> {
     spinner_frame: u8,
 }
 
+/// Returns the display title for a result section, derived from the tool name and section ID.
+///
+/// Returns `None` for combinations that carry no label (e.g. plain tool output).
+fn result_section_title(tool_name: &str, section_id: &str) -> Option<String> {
+    use crate::agent::tools::clarify::ClarifyTool;
+    use crate::app_state::result_section_ids;
+    match (tool_name, section_id) {
+        (ClarifyTool::NAME, result_section_ids::USER_ANSWER) => Some("User answered:".to_string()),
+        _ => None,
+    }
+}
+
 fn append_tool_bubble_lines(
     lines: &mut Vec<Line>,
     bubble: ToolBubbleArgs<'_>,
@@ -1178,7 +1275,7 @@ fn append_tool_bubble_lines(
 
     let has_args = primary_text.as_ref().is_some_and(|s| !s.is_empty()) || !props_text.is_empty();
     let has_expandable_body = !content_sections.is_empty()
-        || matches!(state, ToolCallState::Done { result, .. } if !result.is_empty())
+        || matches!(state, ToolCallState::Done { result_section, .. } if !result_section.content.is_empty())
         || has_args;
     let expand_indicator = if has_expandable_body {
         if collapsed {
@@ -1512,18 +1609,18 @@ fn append_tool_bubble_lines(
         }
     }
 
-    // Body (body sections + fallback result text) — hidden when collapsed.
+    // Body (body sections + result) — hidden when collapsed.
     if !collapsed {
         if !content_sections.is_empty() {
             let show_labels = content_sections.len() > 1;
             for (section_index, section) in content_sections.iter().enumerate() {
-                // Empty line between consecutive sections.
-                if section_index > 0 {
-                    lines.push(
-                        Line::from(vec![bar.clone(), margin.clone(), trailing_pad(0)])
-                            .patch_style(row_bg),
-                    );
-                }
+                // Empty line before every section; separates sections from each
+                // other and from the title area above the body.
+                let _ = section_index;
+                lines.push(
+                    Line::from(vec![bar.clone(), margin.clone(), trailing_pad(0)])
+                        .patch_style(row_bg),
+                );
                 match section {
                     crate::agent::tools::Section::Content(content_section) => {
                         // Label header (only when multiple sections).
@@ -1870,20 +1967,89 @@ fn append_tool_bubble_lines(
                     }
                 }
             }
-        } else if let ToolCallState::Done { result, .. } = state {
-            // Fallback: no body sections — render plain result text.
-            for wrapped_line in textwrap::wrap(result, wrap_width) {
-                let line_str = wrapped_line.into_owned();
-                let line_len = line_str.chars().count();
-                lines.push(
-                    Line::from(vec![
-                        bar.clone(),
-                        margin.clone(),
-                        Span::styled(line_str, Style::default().bg(TOOL_BUBBLE_BG_COLOR)),
-                        trailing_pad(line_len),
-                    ])
-                    .patch_style(row_bg),
-                );
+
+            // After content sections, show the result only when it carries a derived title
+            // (e.g. USER_ANSWER). Plain results are already represented by their content sections.
+            if let ToolCallState::Done { result_section, .. } = state {
+                if let Some(title) = result_section_title(name, &result_section.id) {
+                    if !result_section.content.is_empty() {
+                        lines.push(
+                            Line::from(vec![bar.clone(), margin.clone(), trailing_pad(0)])
+                                .patch_style(row_bg),
+                        );
+                        let prefix = format!("{title} ");
+                        let answer_wrap_width =
+                            wrap_width.saturating_sub(2 + prefix.chars().count()).max(1);
+                        let mut first = true;
+                        for wrapped_line in
+                            textwrap::wrap(&result_section.content, answer_wrap_width)
+                        {
+                            let line_str = wrapped_line.into_owned();
+                            let display = if first {
+                                format!("{prefix}{line_str}")
+                            } else {
+                                format!("{}{line_str}", " ".repeat(prefix.chars().count()))
+                            };
+                            first = false;
+                            let line_len = 2 + display.chars().count();
+                            lines.push(
+                                Line::from(vec![
+                                    bar.clone(),
+                                    margin.clone(),
+                                    Span::styled("  ", Style::default().bg(TOOL_BUBBLE_BG_COLOR)),
+                                    Span::styled(
+                                        display,
+                                        Style::default()
+                                            .fg(Color::White)
+                                            .bg(TOOL_BUBBLE_BG_COLOR)
+                                            .add_modifier(Modifier::DIM),
+                                    ),
+                                    trailing_pad(line_len),
+                                ])
+                                .patch_style(row_bg),
+                            );
+                        }
+                    }
+                }
+            }
+        } else if let ToolCallState::Done { result_section, .. } = state {
+            // No body sections — render the result, with a title prefix when one is derived
+            // for this (tool, section-id) pair, or as plain text otherwise.
+            if !result_section.content.is_empty() {
+                let title = result_section_title(name, &result_section.id);
+                let prefix = title
+                    .as_deref()
+                    .map(|t| format!("{t} "))
+                    .unwrap_or_default();
+                let answer_wrap_width =
+                    wrap_width.saturating_sub(2 + prefix.chars().count()).max(1);
+                let mut first = true;
+                for wrapped_line in textwrap::wrap(&result_section.content, answer_wrap_width) {
+                    let line_str = wrapped_line.into_owned();
+                    let display = if first {
+                        format!("{prefix}{line_str}")
+                    } else {
+                        format!("{}{line_str}", " ".repeat(prefix.chars().count()))
+                    };
+                    first = false;
+                    let line_len = 2 + display.chars().count();
+                    lines.push(
+                        Line::from(vec![
+                            bar.clone(),
+                            margin.clone(),
+                            Span::styled("  ", Style::default().bg(TOOL_BUBBLE_BG_COLOR)),
+                            Span::styled(
+                                display,
+                                Style::default()
+                                    .fg(Color::White)
+                                    .bg(TOOL_BUBBLE_BG_COLOR)
+                                    .add_modifier(Modifier::DIM),
+                            ),
+                            trailing_pad(line_len),
+                        ])
+                        .patch_style(row_bg),
+                    );
+                }
             }
         }
     }
@@ -1933,7 +2099,9 @@ fn draw_normal_footer(
         AgentMode::Idle => "Idle",
         AgentMode::Pending => "Sending…",
         AgentMode::Streaming => "Streaming…",
-        AgentMode::ToolPending => "Running Tool…",
+        AgentMode::ToolPending => "Awaiting approval…",
+        AgentMode::ToolRunning => "Running tool…",
+        AgentMode::ClarifyPending => "Waiting for answer…",
         AgentMode::Aborting => "Aborting…",
     };
     let spinner_prefix = if state.agent_mode != AgentMode::Idle {
@@ -1979,6 +2147,190 @@ fn draw_normal_footer(
         row_2,
     );
 }
+
+struct ClarifyBannerParams<'a> {
+    question: &'a str,
+    choices: Option<&'a Vec<String>>,
+    context: Option<&'a str>,
+    drag: Option<BannerDragSelection>,
+    scroll_offset: &'a mut usize,
+    content_height: usize,
+}
+
+fn draw_clarify_banner(frame: &mut Frame, area: Rect, params: ClarifyBannerParams<'_>) {
+    let ClarifyBannerParams {
+        question,
+        choices,
+        context,
+        drag,
+        scroll_offset,
+        content_height,
+    } = params;
+    let wrap_width = area.width as usize;
+    let mut lines: Vec<Line> = vec![];
+    let mut content_row: usize = 0;
+
+    // Clamp scroll so we never display empty space at the bottom.
+    let viewport_height = area.height as usize;
+    let max_scroll = content_height.saturating_sub(viewport_height);
+    *scroll_offset = (*scroll_offset).min(max_scroll);
+    let effective_scroll = *scroll_offset;
+
+    // Each line's visual (terminal) row depends on the scroll position.
+    // Lines above the scroll offset are off-screen; they map to area.y
+    // (which is off-screen for drag purposes since the user can't click there).
+    let abs_row_for = |cr: usize| -> u16 {
+        area.y
+            .saturating_add(cr.saturating_sub(effective_scroll) as u16)
+    };
+
+    // Context block (dim) — rendered before the question when present.
+    if let Some(ctx) = context {
+        for chunk in textwrap::wrap(ctx, wrap_width) {
+            let abs_row = abs_row_for(content_row);
+            let line = banner_line_with_selection(chunk.into_owned(), abs_row, area.x, drag, false)
+                .patch_style(Style::default().add_modifier(Modifier::DIM));
+            lines.push(line);
+            content_row += 1;
+        }
+    }
+
+    // Question lines (bold).
+    let question_wrapped = textwrap::wrap(question, wrap_width);
+    let question_is_empty = question_wrapped.is_empty();
+    for chunk in question_wrapped {
+        let abs_row = abs_row_for(content_row);
+        lines.push(banner_line_with_selection(
+            chunk.into_owned(),
+            abs_row,
+            area.x,
+            drag,
+            true,
+        ));
+        content_row += 1;
+    }
+    if question_is_empty {
+        // Ensure at least one row when wrapping yields nothing.
+        let abs_row = abs_row_for(content_row);
+        lines.push(banner_line_with_selection(
+            question.to_string(),
+            abs_row,
+            area.x,
+            drag,
+            true,
+        ));
+        content_row += 1;
+    }
+
+    // Choice lines.
+    if let Some(choices) = choices {
+        for (index, choice) in choices.iter().enumerate() {
+            let abs_row = abs_row_for(content_row);
+            let text = format!(" {}. {}", index + 1, choice);
+            lines.push(banner_line_with_selection(
+                text, abs_row, area.x, drag, false,
+            ));
+            content_row += 1;
+        }
+    }
+    let _ = content_row;
+
+    frame.render_widget(
+        Paragraph::new(lines).scroll((effective_scroll as u16, 0)),
+        area,
+    );
+
+    // Scroll indicators at the right edge of the first / last visible row.
+    let scroll_indicator_style = Style::default().fg(CLARIFY_BANNER_SCROLL_INDICATOR_COLOR);
+    let indicator_col = area.x + area.width.saturating_sub(1);
+    if effective_scroll > 0 && area.height > 0 {
+        frame.render_widget(
+            Span::styled("▲", scroll_indicator_style),
+            Rect::new(indicator_col, area.y, 1, 1),
+        );
+    }
+    if effective_scroll < max_scroll && area.height > 0 {
+        frame.render_widget(
+            Span::styled("▼", scroll_indicator_style),
+            Rect::new(indicator_col, area.y + area.height - 1, 1, 1),
+        );
+    }
+}
+
+/// Builds a [`Line`] with the dragged column range highlighted and the rest
+/// in the normal banner style. `bold` applies the bold modifier to
+/// un-selected spans (used for question lines).
+fn banner_line_with_selection(
+    text: String,
+    abs_row: u16,
+    area_x: u16,
+    drag: Option<BannerDragSelection>,
+    bold: bool,
+) -> Line<'static> {
+    let normal_style = if bold {
+        Style::default()
+            .fg(CLARIFY_BANNER_FG_COLOR)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(CLARIFY_BANNER_FG_COLOR)
+    };
+    let selected_style = if bold {
+        Style::default()
+            .fg(CLARIFY_BANNER_SELECTION_FG_COLOR)
+            .bg(CLARIFY_BANNER_FG_COLOR)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(CLARIFY_BANNER_SELECTION_FG_COLOR)
+            .bg(CLARIFY_BANNER_FG_COLOR)
+    };
+
+    let Some(sel) = drag else {
+        return Line::styled(text, normal_style);
+    };
+
+    if abs_row < sel.start_row || abs_row > sel.end_row {
+        return Line::styled(text, normal_style);
+    }
+
+    let chars: Vec<char> = text.chars().collect();
+    let line_len = chars.len();
+
+    // Column offsets relative to the area's left edge.
+    let (sel_start, sel_end) = if sel.start_row == sel.end_row {
+        // Single-row selection.
+        let start = sel.start_col.saturating_sub(area_x) as usize;
+        let end = sel.end_col.saturating_sub(area_x) as usize;
+        (start.min(line_len), end.min(line_len))
+    } else if abs_row == sel.start_row {
+        let start = sel.start_col.saturating_sub(area_x) as usize;
+        (start.min(line_len), line_len)
+    } else if abs_row == sel.end_row {
+        let end = sel.end_col.saturating_sub(area_x) as usize;
+        (0, end.min(line_len))
+    } else {
+        (0, line_len)
+    };
+
+    if sel_start == sel_end {
+        return Line::styled(text, normal_style);
+    }
+
+    let before: String = chars[..sel_start].iter().collect();
+    let selected: String = chars[sel_start..sel_end].iter().collect();
+    let after: String = chars[sel_end..].iter().collect();
+
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(3);
+    if !before.is_empty() {
+        spans.push(Span::styled(before, normal_style));
+    }
+    spans.push(Span::styled(selected, selected_style));
+    if !after.is_empty() {
+        spans.push(Span::styled(after, normal_style));
+    }
+    Line::from(spans)
+}
+
 /// Returns the button `Rect`s for mouse hit-testing.
 fn draw_approval_footer(
     frame: &mut Frame,

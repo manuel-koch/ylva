@@ -138,6 +138,12 @@ Each tool description sent in the `tools` array includes its argument schema.
   absolute result paths. Output is capped at 100 KB (`truncated` / `truncated_at_bytes` fields present
   in result metadata when capped). Paths inside the
   workspace are auto-approved; paths outside are auto-denied.
+- **clarify**: Ask the user a question in the TUI and wait for their answer.
+  Optional `context` adds supporting detail. Optional `choices` supplies up to
+  5 numbered answers; clicking a choice copies it into the input box,
+  and `Enter` submits it as the tool result. The TUI renders the question in a
+  yellow banner above the footer. This tool is not registered in headless CLI
+  mode, so it never appears in the headless `tools` array.
 
 ## Phase 4: TUI skeleton
 

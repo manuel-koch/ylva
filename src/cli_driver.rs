@@ -20,7 +20,8 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use crate::agent::tools::{default_registry, ToolRegistryConfig};
+use crate::agent::tools::clarify::ClarifyTool;
+use crate::agent::tools::{default_registry, Tool, ToolRegistryConfig};
 use crate::agent::{AgentCommand, AgentLoop, Role, UiUpdate};
 use crate::agent_factory::AgentFactory;
 use crate::app::App;
@@ -29,9 +30,6 @@ use crate::engine::{EngineConfig, EngineImpl, DEFAULT_CONTEXT_LENGTH};
 use crate::llm::{serialize_messages, Provider};
 use crate::sandbox::{ApprovalCheck, Sandbox};
 use crate::ToolRegistry;
-
-#[cfg(test)]
-use crate::Tool;
 
 fn capitalize_first(s: &str) -> String {
     let mut chars = s.chars();
@@ -301,6 +299,19 @@ pub async fn run_cli_to(
                             .await;
                     }
                 }
+            }
+            Some(UiUpdate::ClarifyPending { id, question, .. }) => {
+                let clarify_title = ClarifyTool.title();
+                let clarify_name = ClarifyTool::NAME;
+                writeln!(
+                    out,
+                    "[tool] {clarify_title} [question={question}] → denied: {clarify_name} is not available in CLI mode"
+                )?;
+                denied_tool_ids.insert(id);
+                let _ = id;
+                agent
+                    .send_command(AgentCommand::AnswerClarify(String::new()))
+                    .await;
             }
             Some(UiUpdate::ToolStart {
                 name,

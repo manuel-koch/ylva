@@ -540,6 +540,8 @@ pub struct ReadTool {
 }
 
 impl ReadTool {
+    pub const NAME: &'static str = "read";
+
     pub fn new(sandbox_context: SandboxContext) -> Self {
         ReadTool {
             timeout_secs: 0,
@@ -566,7 +568,7 @@ impl Default for ReadTool {
 
 impl Tool for ReadTool {
     fn name(&self) -> &str {
-        "read"
+        Self::NAME
     }
 
     fn description(&self) -> &str {
@@ -646,6 +648,8 @@ pub struct WriteTool {
 }
 
 impl WriteTool {
+    pub const NAME: &'static str = "write";
+
     pub fn new(sandbox_context: SandboxContext) -> Self {
         WriteTool {
             timeout_secs: 0,
@@ -672,7 +676,7 @@ impl Default for WriteTool {
 
 impl Tool for WriteTool {
     fn name(&self) -> &str {
-        "write"
+        Self::NAME
     }
 
     fn description(&self) -> &str {
@@ -758,6 +762,8 @@ pub struct GlobTool {
 }
 
 impl GlobTool {
+    pub const NAME: &'static str = "glob";
+
     pub fn new(sandbox_context: SandboxContext) -> Self {
         GlobTool {
             timeout_secs: 0,
@@ -784,7 +790,7 @@ impl Default for GlobTool {
 
 impl Tool for GlobTool {
     fn name(&self) -> &str {
-        "glob"
+        Self::NAME
     }
 
     fn description(&self) -> &str {

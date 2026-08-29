@@ -42,6 +42,9 @@ pub enum AgentMode {
     Pending,
     Streaming,
     ToolPending,
+    /// A tool has been approved and is actively executing.
+    ToolRunning,
+    ClarifyPending,
     /// User requested abort (double Ctrl+C); `AgentCommand::Stop` has been
     /// sent. The TUI waits for the resulting `StreamCancelled` / `Idle`
     /// transition before quitting.
@@ -51,9 +54,20 @@ pub enum AgentMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentCommand {
     Prompt(String),
-    Stop { reason: String },
-    ApproveTool { id: Uuid },
-    DenyTool { id: Uuid, reason: String },
+    Stop {
+        reason: String,
+    },
+    ApproveTool {
+        id: Uuid,
+    },
+    DenyTool {
+        id: Uuid,
+        reason: String,
+    },
+    AnswerClarify(String),
+    /// Abort the pending clarify call without an answer.
+    /// The agent records a tool error and continues, so the LLM can react.
+    AbortClarify,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,10 +127,16 @@ pub enum UiUpdate {
         content_sections: Vec<crate::agent::tools::Section>,
         title_arguments: Vec<(String, serde_json::Value)>,
     },
+    ClarifyPending {
+        id: Uuid,
+        question: String,
+        context: Option<String>,
+        choices: Option<Vec<String>>,
+    },
     ToolDone {
         id: Uuid,
         name: String,
-        result: String,
+        result_section: crate::app_state::ResultSection,
         summary: Vec<(String, String)>,
         duration: std::time::Duration,
         content_sections: Vec<crate::agent::tools::Section>,
@@ -622,6 +642,7 @@ impl AgentLoop {
             let mut pending_steers: VecDeque<String> = VecDeque::new();
             let mut pending_tools: VecDeque<PendingTool> = VecDeque::new();
             let mut iterations = 0usize;
+            let mut clarify_started_at: Option<std::time::Instant> = None;
 
             loop {
                 tokio::select! {
@@ -711,6 +732,7 @@ impl AgentLoop {
                                     Arc::clone(&registry),
                                     ui_tx.clone(),
                                     agent_tx.clone(),
+                                    &mut clarify_started_at,
                                 )
                                 .await;
                             }
@@ -721,7 +743,7 @@ impl AgentLoop {
                                     .send(UiUpdate::ToolDone {
                                         id,
                                         name,
-                                        result,
+                                        result_section: crate::app_state::ResultSection::plain(result),
                                         summary,
                                         duration,
                                         content_sections,
@@ -739,6 +761,7 @@ impl AgentLoop {
                                     Arc::clone(&registry),
                                     ui_tx.clone(),
                                     agent_tx.clone(),
+                                    &mut clarify_started_at,
                                 )
                                 .await;
                             }
@@ -763,6 +786,7 @@ impl AgentLoop {
                                     Arc::clone(&registry),
                                     ui_tx.clone(),
                                     agent_tx.clone(),
+                                    &mut clarify_started_at,
                                 )
                                 .await;
                             }
@@ -886,6 +910,104 @@ impl AgentLoop {
                                         Arc::clone(&registry),
                                         ui_tx.clone(),
                                         agent_tx.clone(),
+                                        &mut clarify_started_at,
+                                    )
+                                    .await;
+                                }
+                            }
+                            AgentCommand::AnswerClarify(answer) => {
+                                let is_front = mode == AgentMode::ClarifyPending
+                                    && pending_tools
+                                        .front()
+                                        .is_some_and(|pending| pending.call.name() == "clarify");
+                                if is_front {
+                                    let pending = pending_tools.pop_front().expect("checked front");
+                                    let call_id = pending.call.id();
+                                    let choices_sections =
+                                        tools::clarify::ClarifyTool::answer_display_sections(
+                                            pending.call.arguments(),
+                                        );
+                                    context.push_tool_result(
+                                        call_id,
+                                        tools::clarify::ClarifyTool::NAME.to_string(),
+                                        answer.clone(),
+                                        None,
+                                        None,
+                                    );
+                                    let duration = clarify_started_at
+                                        .take()
+                                        .map(|started| started.elapsed())
+                                        .unwrap_or(std::time::Duration::ZERO);
+                                    let _ = ui_tx
+                                        .send(UiUpdate::ToolDone {
+                                            id: call_id,
+                                            name: tools::clarify::ClarifyTool::NAME.to_string(),
+                                            result_section: crate::app_state::ResultSection {
+                                                id: crate::app_state::result_section_ids::USER_ANSWER.to_string(),
+                                                content: answer,
+                                            },
+                                            summary: vec![],
+                                            duration,
+                                            content_sections: choices_sections,
+                                        })
+                                        .await;
+                                    mode = AgentMode::ToolPending;
+                                    advance_tool_queue(
+                                        &mut pending_tools,
+                                        &mut context,
+                                        &mut mode,
+                                        &mut current_cancel,
+                                        &mut current_tool_cancel,
+                                        &mut iterations,
+                                        true,
+                                        engine.clone(),
+                                        Arc::clone(&registry),
+                                        ui_tx.clone(),
+                                        agent_tx.clone(),
+                                        &mut clarify_started_at,
+                                    )
+                                    .await;
+                                }
+                            }
+                            AgentCommand::AbortClarify => {
+                                let is_front = mode == AgentMode::ClarifyPending
+                                    && pending_tools
+                                        .front()
+                                        .is_some_and(|pending| pending.call.name() == "clarify");
+                                if is_front {
+                                    let pending = pending_tools.pop_front().expect("checked front");
+                                    let call_id = pending.call.id();
+                                    let error =
+                                        "User aborted the clarify question without answering."
+                                            .to_string();
+                                    context.push_tool_error(
+                                        call_id,
+                                        tools::clarify::ClarifyTool::NAME.to_string(),
+                                        error.clone(),
+                                        None,
+                                    );
+                                    let _ = ui_tx
+                                        .send(UiUpdate::ToolError {
+                                            id: call_id,
+                                            error,
+                                            duration: std::time::Duration::ZERO,
+                                            content_sections: vec![],
+                                        })
+                                        .await;
+                                    mode = AgentMode::ToolPending;
+                                    advance_tool_queue(
+                                        &mut pending_tools,
+                                        &mut context,
+                                        &mut mode,
+                                        &mut current_cancel,
+                                        &mut current_tool_cancel,
+                                        &mut iterations,
+                                        true,
+                                        engine.clone(),
+                                        Arc::clone(&registry),
+                                        ui_tx.clone(),
+                                        agent_tx.clone(),
+                                        &mut clarify_started_at,
                                     )
                                     .await;
                                 }
@@ -906,7 +1028,42 @@ impl AgentLoop {
                                 if let Some(tool_cancel) = current_tool_cancel.take() {
                                     tool_cancel.cancel();
                                 }
-                                if mode == AgentMode::ToolPending {
+                                if mode == AgentMode::ClarifyPending {
+                                    if let Some(pending) = pending_tools.pop_front() {
+                                        let name = pending.call.name().to_string();
+                                        let id = pending.call.id();
+                                        let mut error =
+                                            format!("Tool '{name}' was denied by the user");
+                                        if !reason.is_empty() {
+                                            error.push_str(&format!(
+                                                ". Here is their reason for the denial:\n\n{reason}"
+                                            ));
+                                        }
+                                        context.push_tool_error(id, name, error.clone(), None);
+                                        let _ = ui_tx
+                                            .send(UiUpdate::ToolError {
+                                                id,
+                                                error,
+                                                duration: std::time::Duration::ZERO,
+                                                content_sections: vec![],
+                                            })
+                                            .await;
+                                    }
+                                    for pending in pending_tools.iter() {
+                                        let name = pending.call.name().to_string();
+                                        let id = pending.call.id();
+                                        let mut error =
+                                            format!("Tool '{name}' was denied by the user");
+                                        if !reason.is_empty() {
+                                            error.push_str(&format!(
+                                                ". Here is their reason for the denial:\n\n{reason}"
+                                            ));
+                                        }
+                                        context.push_tool_error(id, name, error, None);
+                                    }
+                                    pending_tools.clear();
+                                    mode = AgentMode::Idle;
+                                } else if mode == AgentMode::ToolPending {
                                     // Record a denial result for every pending
                                     // tool so the model history stays consistent
                                     // (every tool call must have a result).
@@ -982,6 +1139,7 @@ async fn advance_tool_queue(
     registry: Arc<ToolRegistry>,
     ui_tx: mpsc::Sender<UiUpdate>,
     agent_tx: mpsc::Sender<AgentEvent>,
+    clarify_started_at: &mut Option<std::time::Instant>,
 ) {
     loop {
         match pending_tools.front() {
@@ -1077,8 +1235,44 @@ async fn advance_tool_queue(
                             .await;
                         // Continue loop to handle next tool in queue.
                     }
+                    crate::sandbox::ApprovalCheck::UserApprovalRequired
+                        if front.call.name() == tools::clarify::ClarifyTool::NAME =>
+                    {
+                        let args = front.call.arguments();
+                        let question = args
+                            .get("question")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let context = args
+                            .get("context")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string);
+                        let choices =
+                            args.get("choices")
+                                .and_then(|value| value.as_array())
+                                .map(|values| {
+                                    values
+                                        .iter()
+                                        .filter_map(|value| value.as_str().map(str::to_string))
+                                        .collect()
+                                });
+                        let call_id = front.call.id();
+                        *mode = AgentMode::ClarifyPending;
+                        *clarify_started_at = Some(std::time::Instant::now());
+                        let _ = ui_tx
+                            .send(UiUpdate::ClarifyPending {
+                                id: call_id,
+                                question,
+                                context,
+                                choices,
+                            })
+                            .await;
+                        return;
+                    }
                     crate::sandbox::ApprovalCheck::UserApprovalRequired => {
                         log_tool_approval_request(front.call.as_ref());
+                        *mode = AgentMode::ToolPending;
                         let _ = ui_tx
                             .send(UiUpdate::ToolPending {
                                 name: front.call.name().to_string(),
@@ -1263,8 +1457,35 @@ fn inject_pending_steers(pending_steers: &mut VecDeque<String>, context: &mut Co
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     use crate::test_support::capture_logs;
+    use crate::{
+        agent::tools::{clarify::ClarifyTool, fs::WriteTool},
+        engine::{Engine, EngineConfig, EngineImpl, DEFAULT_CONTEXT_LENGTH},
+        llm::MockProvider,
+        sandbox::{Sandbox, SandboxContext},
+    };
+
+    fn test_engine() -> Arc<dyn Engine> {
+        Arc::new(EngineImpl::new(
+            Arc::new(MockProvider::new(vec![], Duration::from_millis(0))),
+            EngineConfig {
+                provider: "mock".to_string(),
+                model: "test-model".to_string(),
+                temperature: None,
+                context_length: DEFAULT_CONTEXT_LENGTH,
+                api_base_url: None,
+                api_key: None,
+            },
+        ))
+    }
+
+    fn test_sandbox() -> std::sync::Arc<std::sync::RwLock<Sandbox>> {
+        std::sync::Arc::new(std::sync::RwLock::new(Sandbox::with_root(PathBuf::from(
+            env!("CARGO_MANIFEST_DIR"),
+        ))))
+    }
 
     #[test]
     fn constructs_message_variants() {
@@ -1466,6 +1687,10 @@ mod tests {
             AgentCommand::DenyTool { id, reason: "r".into() },
             AgentCommand::DenyTool { id: got, .. } if got == id
         ));
+        assert!(matches!(
+            AgentCommand::AnswerClarify("answer".into()),
+            AgentCommand::AnswerClarify(answer) if answer == "answer"
+        ));
 
         assert!(matches!(
             AgentEvent::StreamDone { partial: "done".into() },
@@ -1488,6 +1713,20 @@ mod tests {
         assert!(matches!(
             UiUpdate::StreamCancelled,
             UiUpdate::StreamCancelled
+        ));
+        assert!(matches!(
+            UiUpdate::ClarifyPending {
+                id,
+                question: "question".into(),
+                context: None,
+                choices: None,
+            },
+            UiUpdate::ClarifyPending {
+                id: got,
+                question: got_question,
+                context: _,
+                choices: None,
+            } if got == id && got_question == "question"
         ));
         assert!(
             matches!(UiUpdate::Error("oops".into()), UiUpdate::Error(message) if message == "oops")
@@ -1515,6 +1754,7 @@ mod tests {
         assert_eq!(AgentMode::Idle, AgentMode::Idle);
         assert_eq!(AgentMode::Streaming, AgentMode::Streaming);
         assert_eq!(AgentMode::ToolPending, AgentMode::ToolPending);
+        assert_eq!(AgentMode::ClarifyPending, AgentMode::ClarifyPending);
     }
 
     #[test]
@@ -1628,5 +1868,111 @@ mod tests {
         );
         let written = std::fs::read_to_string(&write_path).expect("read written file");
         assert_eq!(written, "abc");
+    }
+
+    #[tokio::test]
+    async fn advance_tool_queue_emits_clarify_pending_for_clarify_tool() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(ClarifyTool));
+        let registry = Arc::new(registry);
+        let call_id = Uuid::new_v4();
+        let mut pending_tools = VecDeque::from([PendingTool {
+            call: registry
+                .create_call(
+                    "clarify",
+                    call_id,
+                    serde_json::json!({
+                        "question": "Pick one",
+                        "choices": ["a", "b"],
+                    }),
+                )
+                .expect("clarify tool registered"),
+        }]);
+        let (ui_tx, mut ui_rx) = mpsc::channel(4);
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+        let mut context = Context::new();
+        let mut mode = AgentMode::ToolPending;
+        let mut current_cancel = None;
+        let mut current_tool_cancel = None;
+        let mut iterations = 1usize;
+        let mut clarify_started_at = None;
+
+        advance_tool_queue(
+            &mut pending_tools,
+            &mut context,
+            &mut mode,
+            &mut current_cancel,
+            &mut current_tool_cancel,
+            &mut iterations,
+            false,
+            test_engine(),
+            registry,
+            ui_tx,
+            agent_tx,
+            &mut clarify_started_at,
+        )
+        .await;
+
+        assert_eq!(mode, AgentMode::ClarifyPending);
+        assert!(matches!(
+            ui_rx.recv().await,
+            Some(UiUpdate::ClarifyPending {
+                id,
+                question,
+                context: _,
+                choices: Some(choices),
+            }) if id == call_id && question == "Pick one" && choices == vec!["a".to_string(), "b".to_string()]
+        ));
+    }
+
+    #[tokio::test]
+    async fn advance_tool_queue_emits_tool_pending_for_non_clarify_tool() {
+        let sandbox = test_sandbox();
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(WriteTool::new(SandboxContext::new(sandbox))));
+        let registry = Arc::new(registry);
+        let call_id = Uuid::new_v4();
+        let mut pending_tools = VecDeque::from([PendingTool {
+            call: registry
+                .create_call(
+                    "write",
+                    call_id,
+                    serde_json::json!({
+                        "path": "Cargo.toml",
+                        "content": "ignored",
+                    }),
+                )
+                .expect("write tool registered"),
+        }]);
+        let (ui_tx, mut ui_rx) = mpsc::channel(4);
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+        let mut context = Context::new();
+        let mut mode = AgentMode::ToolPending;
+        let mut current_cancel = None;
+        let mut current_tool_cancel = None;
+        let mut iterations = 1usize;
+        let mut clarify_started_at = None;
+
+        advance_tool_queue(
+            &mut pending_tools,
+            &mut context,
+            &mut mode,
+            &mut current_cancel,
+            &mut current_tool_cancel,
+            &mut iterations,
+            false,
+            test_engine(),
+            registry,
+            ui_tx,
+            agent_tx,
+            &mut clarify_started_at,
+        )
+        .await;
+
+        assert_eq!(mode, AgentMode::ToolPending);
+        assert!(matches!(
+            ui_rx.recv().await,
+            Some(UiUpdate::ToolPending { id, name, .. }) if id == call_id && name == "write"
+        ));
     }
 }

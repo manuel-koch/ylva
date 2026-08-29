@@ -36,6 +36,7 @@ pub use logging::{init_logging, LogConfig, LogFormat, LogGuards};
 
 pub use agent::tools::{
     default_registry, Tool, ToolCall, ToolCallResult, ToolError, ToolRegistry, ToolRegistryConfig,
+    DEFAULT_CLI_TOOLS, DEFAULT_TUI_TOOLS,
 };
 pub use agent::{
     AgentCommand, AgentEvent, AgentLoop, AgentMode, AssembledToolCall, AssistantStatus, Context,

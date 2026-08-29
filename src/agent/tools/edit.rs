@@ -58,11 +58,11 @@ pub struct EditFileArgs {
     pub path: String,
     /// Editing strategy: `search_replace` or `line_range_replace`.
     pub mode: EditMode,
-    /// Replacement text used by both modes. May be empty to delete the matched text or lines.
-    pub new_string: String,
     /// (`search_replace`) The exact text to search for in the file.
     #[serde(default)]
     pub old_string: Option<String>,
+    /// Replacement text used by both modes. May be empty to delete the matched text or lines.
+    pub new_string: String,
     /// (`search_replace`) When `true`, replace every occurrence; default replaces only the first.
     #[serde(default)]
     pub replace_all: bool,
@@ -239,7 +239,7 @@ impl ToolCall for EditCall {
     }
 
     fn name(&self) -> &str {
-        "edit"
+        EditTool::NAME
     }
 
     fn arguments(&self) -> &serde_json::Value {
@@ -314,6 +314,8 @@ pub struct EditTool {
 }
 
 impl EditTool {
+    pub const NAME: &'static str = "edit";
+
     pub fn new(sandbox_context: SandboxContext) -> Self {
         EditTool {
             timeout_secs: 0,
@@ -340,7 +342,7 @@ impl Default for EditTool {
 
 impl Tool for EditTool {
     fn name(&self) -> &str {
-        "edit"
+        Self::NAME
     }
 
     fn description(&self) -> &str {
@@ -1046,8 +1048,8 @@ mod tests {
         // All fields are now top-level in `EditFileArgs`, so each receives a schema-driven rank.
         assert_eq!(tool.argument_order("path"), 0);
         assert_eq!(tool.argument_order("mode"), 1);
-        assert_eq!(tool.argument_order("new_string"), 2);
-        assert_eq!(tool.argument_order("old_string"), 3);
+        assert_eq!(tool.argument_order("new_string"), 3);
+        assert_eq!(tool.argument_order("old_string"), 2);
         assert_eq!(tool.argument_order("replace_all"), 4);
         assert_eq!(tool.argument_order("start_line"), 5);
         assert_eq!(tool.argument_order("end_line"), 6);

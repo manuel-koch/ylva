@@ -167,7 +167,7 @@ impl ToolCall for BashCall {
     }
 
     fn name(&self) -> &str {
-        "bash"
+        BashTool::NAME
     }
 
     fn arguments(&self) -> &Value {
@@ -242,6 +242,8 @@ fn build_description(timeout_secs: u64) -> String {
 }
 
 impl BashTool {
+    pub const NAME: &'static str = "bash";
+
     pub fn new(sandbox_context: SandboxContext) -> Self {
         BashTool {
             timeout_secs: 0,
@@ -275,7 +277,7 @@ impl Default for BashTool {
 
 impl Tool for BashTool {
     fn name(&self) -> &str {
-        "bash"
+        Self::NAME
     }
 
     fn description(&self) -> &str {

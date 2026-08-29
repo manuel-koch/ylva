@@ -29,6 +29,7 @@ use crate::llm::ToolSchema;
 use crate::sandbox::ApprovalCheck;
 
 pub mod bash;
+pub mod clarify;
 pub mod edit;
 pub mod fs;
 pub mod search;
@@ -454,9 +455,35 @@ pub(super) fn validate_args_with_schema(
     Ok(())
 }
 
+/// Names of the tools available in a CLI (headless) context.
+pub const DEFAULT_CLI_TOOLS: &[&str] = &[
+    fs::ReadTool::NAME,
+    fs::WriteTool::NAME,
+    fs::GlobTool::NAME,
+    bash::BashTool::NAME,
+    search::SearchTool::NAME,
+    edit::EditTool::NAME,
+];
+
+/// Names of the tools available in a TUI (interactive) context.
+/// Superset of [`DEFAULT_CLI_TOOLS`]; adds tools that require a live terminal.
+pub const DEFAULT_TUI_TOOLS: &[&str] = &[
+    fs::ReadTool::NAME,
+    fs::WriteTool::NAME,
+    fs::GlobTool::NAME,
+    bash::BashTool::NAME,
+    search::SearchTool::NAME,
+    edit::EditTool::NAME,
+    clarify::ClarifyTool::NAME,
+];
+
 /// Configuration for [`default_registry`], controlling per-tool approval policies
-/// and other options that would otherwise pile up as individual boolean arguments.
-#[derive(Debug, Default)]
+/// and the explicit set of tools to register.
+///
+/// Use [`Default`] for the CLI (headless) tool set ([`DEFAULT_CLI_TOOLS`]) or construct
+/// with a custom `allowed_tools` list. Per-agent restrictions pass a subset of
+/// [`DEFAULT_CLI_TOOLS`] or [`DEFAULT_TUI_TOOLS`] explicitly.
+#[derive(Debug)]
 pub struct ToolRegistryConfig {
     /// When `true`, `edit` tool calls are auto-approved without a user prompt.
     /// Intended for automated / e2e testing where no human is present to approve.
@@ -464,48 +491,88 @@ pub struct ToolRegistryConfig {
     /// When `true`, `write` tool calls are auto-approved without a user prompt.
     /// Intended for automated / e2e testing where no human is present to approve.
     pub auto_approve_write: bool,
+    /// Explicit list of tool names to register. Only tools whose name appears
+    /// here are added to the registry; all others are skipped regardless of
+    /// whether they exist in the candidate pool.
+    pub allowed_tools: Vec<String>,
+}
+
+impl Default for ToolRegistryConfig {
+    /// Defaults to [`DEFAULT_CLI_TOOLS`] (the six standard headless tools).
+    fn default() -> Self {
+        Self {
+            auto_approve_edit: false,
+            auto_approve_write: false,
+            allowed_tools: DEFAULT_CLI_TOOLS.iter().map(|s| s.to_string()).collect(),
+        }
+    }
 }
 
 /// Build the default tool registry configured by [`ToolRegistryConfig`].
+///
+/// The full candidate pool is: `read`, `write`, `glob`, `bash`, `search`, `edit`, `clarify`.
+/// Only tools whose name appears in `config.allowed_tools` are registered.
 pub fn default_registry(
     sandbox: std::sync::Arc<std::sync::RwLock<crate::sandbox::Sandbox>>,
     config: ToolRegistryConfig,
 ) -> ToolRegistry {
     use crate::sandbox::SandboxContext;
+
+    let allowed = &config.allowed_tools;
     let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(fs::ReadTool::new(SandboxContext::new(
-        Arc::clone(&sandbox),
-    ))));
-    registry.register(Arc::new(fs::WriteTool::new({
-        let mut context = SandboxContext::new(Arc::clone(&sandbox));
-        if config.auto_approve_write {
-            context = context.with_rule(crate::sandbox::SandboxRule {
-                verdict: crate::sandbox::ApprovalCheck::AutoApproved,
-                pattern: glob::Pattern::new("**").expect("** is a valid glob"),
-            });
-        }
-        context
-    })));
-    registry.register(Arc::new(fs::GlobTool::new(SandboxContext::new(
-        Arc::clone(&sandbox),
-    ))));
-    registry.register(Arc::new(bash::BashTool::new(SandboxContext::new(
-        Arc::clone(&sandbox),
-    ))));
-    registry.register(Arc::new(search::SearchTool::new(SandboxContext::new(
-        Arc::clone(&sandbox),
-    ))));
-    let edit_tool = {
-        let mut context = SandboxContext::new(Arc::clone(&sandbox));
-        if config.auto_approve_edit {
-            context = context.with_rule(crate::sandbox::SandboxRule {
-                verdict: crate::sandbox::ApprovalCheck::AutoApproved,
-                pattern: glob::Pattern::new("**").expect("** is a valid glob"),
-            });
-        }
-        edit::EditTool::new(context)
-    };
-    registry.register(Arc::new(edit_tool));
+
+    if allowed.iter().any(|name| name == fs::ReadTool::NAME) {
+        registry.register(Arc::new(fs::ReadTool::new(SandboxContext::new(
+            Arc::clone(&sandbox),
+        ))));
+    }
+    if allowed.iter().any(|name| name == fs::WriteTool::NAME) {
+        registry.register(Arc::new(fs::WriteTool::new({
+            let mut context = SandboxContext::new(Arc::clone(&sandbox));
+            if config.auto_approve_write {
+                context = context.with_rule(crate::sandbox::SandboxRule {
+                    verdict: crate::sandbox::ApprovalCheck::AutoApproved,
+                    pattern: glob::Pattern::new("**").expect("** is a valid glob"),
+                });
+            }
+            context
+        })));
+    }
+    if allowed.iter().any(|name| name == fs::GlobTool::NAME) {
+        registry.register(Arc::new(fs::GlobTool::new(SandboxContext::new(
+            Arc::clone(&sandbox),
+        ))));
+    }
+    if allowed.iter().any(|name| name == bash::BashTool::NAME) {
+        registry.register(Arc::new(bash::BashTool::new(SandboxContext::new(
+            Arc::clone(&sandbox),
+        ))));
+    }
+    if allowed.iter().any(|name| name == search::SearchTool::NAME) {
+        registry.register(Arc::new(search::SearchTool::new(SandboxContext::new(
+            Arc::clone(&sandbox),
+        ))));
+    }
+    if allowed.iter().any(|name| name == edit::EditTool::NAME) {
+        let edit_tool = {
+            let mut context = SandboxContext::new(Arc::clone(&sandbox));
+            if config.auto_approve_edit {
+                context = context.with_rule(crate::sandbox::SandboxRule {
+                    verdict: crate::sandbox::ApprovalCheck::AutoApproved,
+                    pattern: glob::Pattern::new("**").expect("** is a valid glob"),
+                });
+            }
+            edit::EditTool::new(context)
+        };
+        registry.register(Arc::new(edit_tool));
+    }
+    if allowed
+        .iter()
+        .any(|name| name == clarify::ClarifyTool::NAME)
+    {
+        registry.register(Arc::new(clarify::ClarifyTool));
+    }
+
     registry
 }
 
@@ -660,16 +727,50 @@ mod tests {
     }
 
     #[test]
-    fn default_registry_registers_all_six_tools() {
+    fn default_registry_registers_cli_tools() {
         let sandbox = std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new()));
         let registry = default_registry(sandbox, ToolRegistryConfig::default());
         assert_eq!(registry.names().len(), 6);
-        assert!(registry.get("read").is_some());
-        assert!(registry.get("write").is_some());
-        assert!(registry.get("glob").is_some());
-        assert!(registry.get("bash").is_some());
-        assert!(registry.get("search").is_some());
-        assert!(registry.get("edit").is_some());
+        assert!(registry.get(fs::ReadTool::NAME).is_some());
+        assert!(registry.get(fs::WriteTool::NAME).is_some());
+        assert!(registry.get(fs::GlobTool::NAME).is_some());
+        assert!(registry.get(bash::BashTool::NAME).is_some());
+        assert!(registry.get(search::SearchTool::NAME).is_some());
+        assert!(registry.get(edit::EditTool::NAME).is_some());
+        assert!(registry.get(clarify::ClarifyTool::NAME).is_none());
+    }
+
+    #[test]
+    fn default_registry_registers_tui_tools_including_clarify() {
+        let sandbox = std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new()));
+        let registry = default_registry(
+            sandbox,
+            ToolRegistryConfig {
+                allowed_tools: DEFAULT_TUI_TOOLS.iter().map(|s| s.to_string()).collect(),
+                ..ToolRegistryConfig::default()
+            },
+        );
+        assert_eq!(registry.names().len(), 7);
+        assert!(registry.get(clarify::ClarifyTool::NAME).is_some());
+    }
+
+    #[test]
+    fn default_registry_respects_explicit_allowed_tools_subset() {
+        let sandbox = std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new()));
+        let registry = default_registry(
+            sandbox,
+            ToolRegistryConfig {
+                allowed_tools: vec![
+                    bash::BashTool::NAME.to_string(),
+                    fs::ReadTool::NAME.to_string(),
+                ],
+                ..ToolRegistryConfig::default()
+            },
+        );
+        assert_eq!(registry.names().len(), 2);
+        assert!(registry.get(bash::BashTool::NAME).is_some());
+        assert!(registry.get(fs::ReadTool::NAME).is_some());
+        assert!(registry.get(edit::EditTool::NAME).is_none());
     }
 
     #[test]
@@ -760,8 +861,8 @@ mod tests {
         }
         assert_eq!(derive("web_search"), "Web Search");
         assert_eq!(derive("my-cool-tool"), "My Cool Tool");
-        assert_eq!(derive("bash"), "Bash");
-        assert_eq!(derive("read"), "Read");
+        assert_eq!(derive("compile"), "Compile");
+        assert_eq!(derive("deploy"), "Deploy");
     }
 
     #[test]

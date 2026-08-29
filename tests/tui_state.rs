@@ -775,9 +775,9 @@ fn pending_tool_bubble_renders_after_completed_entries() {
         matches!(
             entry,
             ChatEntry::ToolBubble {
-                state: ToolCallState::Pending { .. },
+                state,
                 ..
-            }
+            } if matches!(state.as_ref(), ToolCallState::Pending { .. })
         )
     });
     assert!(

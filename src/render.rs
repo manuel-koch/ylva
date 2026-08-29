@@ -24,7 +24,7 @@
 use ratatui::Frame;
 use ratatui_textarea::TextArea;
 
-use crate::app_state::{AppState, Focus, TuiState};
+use crate::app_state::{AppState, BannerDragSelection, Focus, TuiState};
 use crate::ui::{self, ButtonAreas};
 
 /// Draw one TUI frame.
@@ -71,20 +71,52 @@ fn project_for_draw(state: &AppState) -> TuiState {
         scroll_locked: state.scroll_locked,
         chat_area_height: state.chat_area_height,
         pending_approval,
+        pending_clarify: if let crate::app_state::TuiMode::ClarifyPending {
+            question,
+            context,
+            choices,
+            ..
+        } = &state.mode
+        {
+            Some((question.clone(), choices.clone(), context.clone()))
+        } else {
+            None
+        },
         pending_approval_input_snapshot: state.pending_approval_input_snapshot.clone(),
         input_history: state.input_history.clone(),
         history_index: state.history_index,
         draft: state.draft.clone(),
         input_area: state.layout.input_area.rect,
         chat_area: state.layout.chat_area.rect,
+        clarify_banner: ratatui::layout::Rect::default(),
         chat_rendered_lines: state.chat_rendered_lines.clone(),
         chat_rendered_line_chrome_widths: state.chat_rendered_line_chrome_widths.clone(),
         chat_selection: state.chat_selection,
         chat_drag_active: state.chat_drag_active,
+        clarify_banner_drag: match (
+            state.clarify_choice_mousedown,
+            state.clarify_banner_drag_end,
+        ) {
+            (Some((c1, r1)), Some((c2, r2))) => {
+                let ((start_row, start_col), (end_row, end_col)) = if (r1, c1) <= (r2, c2) {
+                    ((r1, c1), (r2, c2))
+                } else {
+                    ((r2, c2), (r1, c1))
+                };
+                Some(BannerDragSelection {
+                    start_row,
+                    start_col,
+                    end_row,
+                    end_col,
+                })
+            }
+            _ => None,
+        },
         toast: state.toast.clone(),
         spinner_frame: state.spinner_frame,
         help_scroll_offset: state.help_scroll_offset,
         help_scroll_x: state.help_scroll_x,
+        clarify_scroll_offset: state.clarify_scroll_offset,
         input_scroll_top: state.input_scroll_top,
         bubble_title_rows: state.bubble_title_rows.clone(),
     }
@@ -95,6 +127,7 @@ fn project_for_draw(state: &AppState) -> TuiState {
 fn sync_from_draw(state: &mut AppState, rendered: TuiState, button_areas: Option<ButtonAreas>) {
     state.layout.input_area.rect = rendered.input_area;
     state.layout.chat_area.rect = rendered.chat_area;
+    state.layout.clarify_banner = rendered.clarify_banner;
     if let Some(buttons) = button_areas {
         state.layout.approve_button = buttons.approve;
         state.layout.deny_button = buttons.deny;
@@ -110,5 +143,6 @@ fn sync_from_draw(state: &mut AppState, rendered: TuiState, button_areas: Option
     state.chat_rendered_line_chrome_widths = rendered.chat_rendered_line_chrome_widths;
     state.help_scroll_offset = rendered.help_scroll_offset;
     state.help_scroll_x = rendered.help_scroll_x;
+    state.clarify_scroll_offset = rendered.clarify_scroll_offset;
     state.toast = rendered.toast;
 }

@@ -190,7 +190,7 @@ async fn tool_call_pauses_for_approval_then_reprompts_after_result() {
     ));
     assert!(matches!(
         after.iter().find(|u| matches!(u, UiUpdate::ToolDone { .. })),
-        Some(UiUpdate::ToolDone { result, .. }) if result.contains("wrote")
+        Some(UiUpdate::ToolDone { result_section, .. }) if result_section.content.contains("wrote")
     ));
 
     drop(agent);

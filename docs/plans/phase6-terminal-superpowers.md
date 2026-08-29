@@ -447,7 +447,7 @@ No user-visible behavior. Must be fully green before any tool work begins.
 
 **Goal:** Interactive model-to-user question; optional multiple-choice (≤5); excluded in headless.
 
-- [ ] 32. Create `src/agent/tools/clarify.rs`. Define:
+- [x] 32. Create `src/agent/tools/clarify.rs`. Define:
 
     ```rust
     #[derive(JsonSchema, Deserialize)]
@@ -468,32 +468,32 @@ No user-visible behavior. Must be fully green before any tool work begins.
   (e.g. session replay), return `ToolError` with message
   `"clarify is not available in headless mode"`.
 
-- [ ] 33. Add `AgentCommand::AnswerClarify(String)` to `src/agent.rs`. Agent loop handles
+- [x] 33. Add `AgentCommand::AnswerClarify(String)` to `src/agent.rs`. Agent loop handles
   `clarify` calls specially:
   - Pause loop; emit `UiUpdate::ClarifyPending { question, choices }`.
   - Await `AgentCommand::AnswerClarify(answer)` or `AgentCommand::Stop`.
   - Inject the answer as the tool result; resume.
 
-- [ ] 34. Add `TuiMode::ClarifyPending { question: String, choices: Option<Vec<String>> }` to
+- [x] 34. Add `TuiMode::ClarifyPending { question: String, choices: Option<Vec<String>> }` to
   `src/app_state.rs`. Add `DomainEvent::ClarifyPending` and handle in `presenter.rs`.
 
-- [ ] 35. In `tui_driver.rs` / `render.rs`: when `TuiMode::ClarifyPending`, render a yellow
+- [x] 35. In `tui_driver.rs` / `render.rs`: when `TuiMode::ClarifyPending`, render a yellow
   banner with the question text. If `choices` is `Some`, render numbered items `1.`–`5.`.
   Pressing `1`–`5` populates the input field with the chosen text. `Enter` sends
   `AgentCommand::AnswerClarify(input)`.
 
-- [ ] 36. Write unit tests: choice-count validation (≤5 ok, 6 → error); presenter tests for the
+- [x] 36. Write unit tests: choice-count validation (≤5 ok, 6 → error); presenter tests for the
   `ClarifyPending` state transition.
 
-- [ ] 36a. Verify that the agent loop branches on tool name before emitting the pending `UiUpdate`:
+- [x] 36a. Verify that the agent loop branches on tool name before emitting the pending `UiUpdate`:
       `ClarifyTool` must emit `UiUpdate::ClarifyPending` and route through
       `AgentCommand::AnswerClarify`; all other tools must emit `UiUpdate::ToolPending` and
       route through `ApproveTool`/`DenyTool`. No path may send `ToolPending` for a `clarify`
       call or `ClarifyPending` for a non-clarify call. Add regression tests for both branches.
 
-- [ ] 37. Update `docs/features.md`: add `clarify` entry (banner, choices, headless exclusion).
+- [x] 37. Update `docs/features.md`: add `clarify` entry (banner, choices, headless exclusion).
 
-- [ ] 38. Run `make test` + `make test-coverage`.
+- [x] 38. Run `make test` + `make test-coverage`.
 
 ---
 

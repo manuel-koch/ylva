@@ -221,7 +221,7 @@ impl ToolCall for SearchCall {
     }
 
     fn name(&self) -> &str {
-        "search"
+        SearchTool::NAME
     }
 
     fn arguments(&self) -> &Value {
@@ -275,6 +275,8 @@ pub struct SearchTool {
 }
 
 impl SearchTool {
+    pub const NAME: &'static str = "search";
+
     pub fn new(sandbox_context: SandboxContext) -> Self {
         SearchTool {
             timeout_secs: 0,
@@ -301,7 +303,7 @@ impl Default for SearchTool {
 
 impl Tool for SearchTool {
     fn name(&self) -> &str {
-        "search"
+        Self::NAME
     }
 
     fn description(&self) -> &str {

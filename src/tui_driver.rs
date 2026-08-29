@@ -39,6 +39,7 @@ use ratatui_textarea::{Scrolling, TextArea};
 use tokio::select;
 use tokio::sync::mpsc;
 
+use crate::agent::tools::DEFAULT_TUI_TOOLS;
 use crate::agent::{AgentCommand, AgentLoop, Role, UiUpdate};
 use crate::agent_factory::AgentFactory;
 use crate::app::App;
@@ -147,6 +148,17 @@ fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
             content_sections: content_sections.clone(),
             title_arguments: title_arguments.clone(),
         }),
+        UiUpdate::ClarifyPending {
+            id,
+            question,
+            context,
+            choices,
+        } => Some(DomainEvent::ClarifyPending {
+            id: *id,
+            question: question.clone(),
+            context: context.clone(),
+            choices: choices.clone(),
+        }),
         UiUpdate::ToolStart {
             id,
             name,
@@ -164,14 +176,14 @@ fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
         UiUpdate::ToolDone {
             id,
             name,
-            result,
+            result_section,
             summary,
             duration,
             content_sections,
         } => Some(DomainEvent::ToolDone {
             id: *id,
             name: name.clone(),
-            result: result.clone(),
+            result_section: result_section.clone(),
             summary: summary.clone(),
             duration: *duration,
             content_sections: content_sections.clone(),
@@ -222,6 +234,12 @@ async fn execute_effects(
                 };
                 configure_textarea(textarea);
             }
+            Effect::SetInputText(text) => {
+                let lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
+                *textarea = TextArea::from(lines);
+                configure_textarea(textarea);
+                textarea.move_cursor(ratatui_textarea::CursorMove::End);
+            }
             Effect::TextareaKey(key_event) => {
                 textarea.input(key_event);
             }
@@ -250,6 +268,12 @@ async fn execute_effects(
             Effect::DenyTool { id, reason } => {
                 state.apply_tool_denied(id, &reason);
                 let _ = cmd_tx.try_send(AgentCommand::DenyTool { id, reason });
+            }
+            Effect::AnswerClarify(answer) => {
+                let _ = cmd_tx.try_send(AgentCommand::AnswerClarify(answer));
+            }
+            Effect::AbortClarify => {
+                let _ = cmd_tx.try_send(AgentCommand::AbortClarify);
             }
             Effect::StopAgent => {
                 let _ = cmd_tx.try_send(AgentCommand::Stop {
@@ -367,6 +391,17 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
     // Extract method results before consuming fields.
     let agent_mode = app.agent_mode();
     let show_help = app.show_help();
+    let pending_clarify = if let TuiMode::ClarifyPending {
+        question,
+        context,
+        choices,
+        ..
+    } = &app.mode
+    {
+        Some((question.clone(), choices.clone(), context.clone()))
+    } else {
+        None
+    };
     let input_area_rect = app.layout.input_area.rect;
     let chat_area_rect = app.layout.chat_area.rect;
     TuiState {
@@ -379,20 +414,24 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
         scroll_locked: app.scroll_locked,
         chat_area_height: app.chat_area_height,
         pending_approval: None,
+        pending_clarify,
         pending_approval_input_snapshot: app.pending_approval_input_snapshot,
         input_history: app.input_history,
         history_index: app.history_index,
         draft: app.draft,
         input_area: input_area_rect,
         chat_area: chat_area_rect,
+        clarify_banner: ratatui::layout::Rect::default(),
         chat_rendered_lines: app.chat_rendered_lines,
         chat_rendered_line_chrome_widths: app.chat_rendered_line_chrome_widths,
         chat_selection: app.chat_selection,
         chat_drag_active: app.chat_drag_active,
+        clarify_banner_drag: None,
         toast: app.toast,
         spinner_frame: app.spinner_frame,
         help_scroll_offset: app.help_scroll_offset,
         help_scroll_x: app.help_scroll_x,
+        clarify_scroll_offset: app.clarify_scroll_offset,
         input_scroll_top: app.input_scroll_top,
         bubble_title_rows: app.bubble_title_rows,
     }
@@ -775,10 +814,13 @@ pub async fn run_tui_on_stdout(
         api_key: None,
     };
     let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(provider, engine_config));
-    let factory = Arc::new(AgentFactory::new(std::collections::HashMap::from([(
-        "default".to_string(),
-        engine,
-    )])));
+    let factory = Arc::new(
+        AgentFactory::new(std::collections::HashMap::from([(
+            "default".to_string(),
+            engine,
+        )]))
+        .with_allowed_tools(DEFAULT_TUI_TOOLS),
+    );
     let profile = ProfileConfig {
         default_engine: "default".to_string(),
         compact_engine: None,

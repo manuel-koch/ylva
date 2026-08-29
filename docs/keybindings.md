@@ -22,6 +22,11 @@ Reference for Ylva's TUI keybindings.
 | `esc` | Approval sub-mode | Deny tool |
 | `ctrl-c` (×1) | Approval sub-mode | Show cancel hint |
 | `ctrl-c` (×2 ≤ 2 s) | Approval sub-mode | Interrupt conversation |
+| click choice | Clarify sub-mode with choices | Copy the clicked choice into the input field |
+| `enter` | Clarify sub-mode | Send the current input as the clarify answer |
+| `ctrl-c` | Clarify sub-mode | Abort the clarify prompt; sends a tool error to the model |
+| `esc` (input empty) | Clarify sub-mode | Abort the clarify prompt; sends a tool error to the model |
+| `esc` (input non-empty) | Clarify sub-mode | Clear the input field |
 | `F1` | Any | Toggle Help popup |
 | `↑` (cursor on first line) | Input focused | Load previous user message; save draft |
 | `↓` (cursor on last line) | Input focused | Load next user message; restore draft at newest |

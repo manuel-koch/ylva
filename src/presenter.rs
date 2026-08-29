@@ -26,6 +26,7 @@ use std::time::Instant;
 use crossterm::event::{KeyCode, KeyModifiers, MouseEventKind};
 use uuid::Uuid;
 
+use crate::agent::tools::clarify::ClarifyTool;
 use crate::app_state::{
     AppState, ChatEntry, ChatSelection, DomainEvent, Effect, Focus, HistoryDirection, InputEvent,
     ToolCallState, TuiMode, UserMessageState,
@@ -169,6 +170,9 @@ fn keyboard_main(
     event: InputEvent,
     textarea: &TextareaContext,
 ) -> Vec<Effect> {
+    if matches!(state.mode, TuiMode::ClarifyPending { .. }) {
+        return keyboard_clarify(state, event, textarea);
+    }
     match event {
         InputEvent::ShowHelp => {
             state.focus = Focus::HelpPopup;
@@ -179,6 +183,143 @@ fn keyboard_main(
         InputEvent::Escape => handle_escape_main(state, textarea),
         InputEvent::Paste(text) => vec![Effect::Paste(text)],
         InputEvent::KeyInput(key_event) => handle_key_main(state, key_event, textarea),
+    }
+}
+
+/// Extracts the plain text from the clarify banner rows between `from_row` and
+/// `to_row` (absolute screen rows, inclusive). Used when the user drags to
+/// select text in the banner.
+fn extract_clarify_banner_text(
+    state: &AppState,
+    from_row: u16,
+    from_col: u16,
+    to_row: u16,
+    to_col: u16,
+) -> String {
+    let TuiMode::ClarifyPending {
+        ref question,
+        ref choices,
+        ref context,
+        ..
+    } = state.mode
+    else {
+        return String::new();
+    };
+    let banner = state.layout.clarify_banner;
+    if banner.width == 0 {
+        return String::new();
+    }
+    let wrap_width = banner.width as usize;
+    let mut all_lines: Vec<String> = Vec::new();
+    if let Some(ctx) = context.as_deref() {
+        for chunk in textwrap::wrap(ctx, wrap_width) {
+            all_lines.push(chunk.into_owned());
+        }
+    }
+    let question_lines: Vec<String> = textwrap::wrap(question, wrap_width)
+        .into_iter()
+        .map(|s| s.into_owned())
+        .collect();
+    all_lines.extend(question_lines);
+    if let Some(ref choices_list) = choices {
+        for (i, c) in choices_list.iter().enumerate() {
+            all_lines.push(format!(" {}. {}", i + 1, c));
+        }
+    }
+
+    // Normalise drag direction so (start, start_col) is always before (end, end_col).
+    let (start_row, start_col, end_row, end_col) = if (from_row, from_col) <= (to_row, to_col) {
+        (from_row, from_col, to_row, to_col)
+    } else {
+        (to_row, to_col, from_row, from_col)
+    };
+
+    let min_row =
+        (start_row.saturating_sub(banner.y) as usize).saturating_add(state.clarify_scroll_offset);
+    let max_row = ((end_row.saturating_sub(banner.y) as usize)
+        .saturating_add(state.clarify_scroll_offset))
+    .min(all_lines.len().saturating_sub(1));
+    let start_col_offset = start_col.saturating_sub(banner.x) as usize;
+    let end_col_offset = end_col.saturating_sub(banner.x) as usize;
+
+    if min_row >= all_lines.len() {
+        return String::new();
+    }
+
+    let selected: Vec<String> = all_lines[min_row..=max_row]
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let chars: Vec<char> = line.chars().collect();
+            let line_len = chars.len();
+            let (col_start, col_end) = if min_row == max_row {
+                // Single-row drag: apply both column offsets.
+                (start_col_offset.min(line_len), end_col_offset.min(line_len))
+            } else if index == 0 {
+                // First line of a multi-row drag: trim from start column.
+                (start_col_offset.min(line_len), line_len)
+            } else if index == max_row - min_row {
+                // Last line of a multi-row drag: trim to end column.
+                (0, end_col_offset.min(line_len))
+            } else {
+                // Middle lines: include in full.
+                (0, line_len)
+            };
+            chars[col_start..col_end].iter().collect()
+        })
+        .collect();
+
+    selected.join("\n")
+}
+
+fn keyboard_clarify(
+    state: &mut AppState,
+    event: InputEvent,
+    textarea: &TextareaContext,
+) -> Vec<Effect> {
+    match event {
+        InputEvent::ShowHelp => {
+            state.focus = Focus::HelpPopup;
+            vec![]
+        }
+        InputEvent::SigInt => vec![Effect::StopAgent],
+        InputEvent::CtrlC => {
+            state.mode = TuiMode::Pending;
+            vec![Effect::AbortClarify, Effect::RestoreTextarea]
+        }
+        InputEvent::Escape => {
+            if textarea.is_empty {
+                state.mode = TuiMode::Pending;
+                vec![Effect::AbortClarify, Effect::RestoreTextarea]
+            } else {
+                vec![Effect::ClearTextarea]
+            }
+        }
+        InputEvent::Paste(text) => vec![Effect::Paste(text)],
+        InputEvent::KeyInput(key_event) if key_event.code == KeyCode::Enter => {
+            state.mode = TuiMode::Pending;
+            vec![
+                Effect::AnswerClarify(textarea.text.clone()),
+                Effect::RestoreTextarea,
+            ]
+        }
+        InputEvent::KeyInput(key_event) if key_event.code == KeyCode::Up => {
+            state.clarify_scroll_up(1);
+            vec![]
+        }
+        InputEvent::KeyInput(key_event) if key_event.code == KeyCode::Down => {
+            state.clarify_scroll_down(1);
+            vec![]
+        }
+        InputEvent::KeyInput(key_event) if key_event.code == KeyCode::PageUp => {
+            state.clarify_scroll_up(5);
+            vec![]
+        }
+        InputEvent::KeyInput(key_event) if key_event.code == KeyCode::PageDown => {
+            state.clarify_scroll_down(5);
+            vec![]
+        }
+        InputEvent::KeyInput(key_event) => vec![Effect::TextareaKey(key_event)],
     }
 }
 
@@ -361,11 +502,20 @@ fn route_mouse(
     match event.kind {
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
             let scroll_up = matches!(event.kind, MouseEventKind::ScrollUp);
+            let b = state.layout.clarify_banner;
+            let in_clarify_banner =
+                column >= b.x && column < b.x + b.width && row >= b.y && row < b.y + b.height;
             if matches!(state.focus, Focus::HelpPopup) {
                 if scroll_up {
                     state.help_scroll_up(1);
                 } else {
                     state.help_scroll_down(1);
+                }
+            } else if in_clarify_banner {
+                if scroll_up {
+                    state.clarify_scroll_up(1);
+                } else {
+                    state.clarify_scroll_down(1);
                 }
             } else if state.layout.input_area.contains(column, row) {
                 // Input area scroll is driver-owned (textarea); emit a key effect.
@@ -427,6 +577,23 @@ fn route_mouse(
             let in_chat = state.layout.chat_area.contains(column, row);
             let in_input = state.layout.input_area.contains(column, row);
 
+            // Clarify banner: record mousedown for the whole banner area so the
+            // user can drag-select any text (question or choices). The choice is
+            // filled on mouseup only when the position matches (click, not drag).
+            if matches!(state.mode, TuiMode::ClarifyPending { .. }) {
+                let banner = state.layout.clarify_banner;
+                if !banner.is_empty()
+                    && column >= banner.x
+                    && column < banner.x + banner.width
+                    && row >= banner.y
+                    && row < banner.y + banner.height
+                {
+                    state.clarify_choice_mousedown = Some((column, row));
+                    state.clarify_banner_drag_end = None;
+                    return vec![];
+                }
+            }
+
             if in_chat {
                 let anchor_line = state
                     .scroll_offset
@@ -448,6 +615,11 @@ fn route_mouse(
         }
 
         MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+            // Banner drag: update the highlight endpoint; suppress input selection.
+            if state.clarify_choice_mousedown.is_some() {
+                state.clarify_banner_drag_end = Some((column, row));
+                return vec![];
+            }
             if state.chat_drag_active {
                 if let Some(sel) = state.chat_selection.as_mut() {
                     sel.cursor_line = state.scroll_offset.saturating_add(
@@ -463,6 +635,55 @@ fn route_mouse(
         }
 
         MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+            // Clarify banner: click selects a choice; drag copies selected text.
+            if let Some((down_col, down_row)) = state.clarify_choice_mousedown.take() {
+                let drag_end = state.clarify_banner_drag_end.take();
+                if let Some((up_col, up_row)) =
+                    drag_end.or(if column == down_col && row == down_row {
+                        None
+                    } else {
+                        Some((column, row))
+                    })
+                {
+                    // Drag — extract the text of selected banner rows and copy.
+                    let text =
+                        extract_clarify_banner_text(state, down_row, down_col, up_row, up_col);
+                    if !text.is_empty() {
+                        return vec![Effect::CopyToClipboard(text)];
+                    }
+                    return vec![];
+                }
+                // Click — fill textarea with choice text if on a choice row.
+                if let TuiMode::ClarifyPending {
+                    ref question,
+                    ref context,
+                    choices: Some(ref choices_list),
+                    ..
+                } = state.mode.clone()
+                {
+                    let banner = state.layout.clarify_banner;
+                    let wrap_width = banner.width as usize;
+                    let context_rows = context
+                        .as_deref()
+                        .map_or(0, |ctx| textwrap::wrap(ctx, wrap_width).len() as u16);
+                    let question_rows = textwrap::wrap(question, wrap_width).len().max(1) as u16;
+                    let choices_start_row = context_rows + question_rows;
+                    let relative_row = row.saturating_sub(banner.y);
+                    let content_row = relative_row as usize + state.clarify_scroll_offset;
+                    if content_row >= choices_start_row as usize {
+                        let choice_index = content_row - choices_start_row as usize;
+                        if let Some(choice_text) = choices_list.get(choice_index) {
+                            let rendered = format!(" {}. {}", choice_index + 1, choice_text);
+                            let text_end_col = banner.x + rendered.chars().count() as u16;
+                            if column < text_end_col {
+                                return vec![Effect::SetInputText(choice_text.clone())];
+                            }
+                        }
+                    }
+                }
+                return vec![];
+            }
+
             if state.chat_drag_active {
                 state.chat_drag_active = false;
                 let selected_text = state.extract_chat_selection_text();
@@ -507,6 +728,7 @@ fn route_domain(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
         TuiMode::Idle => domain_idle(state, event),
         TuiMode::Pending => domain_pending(state, event),
         TuiMode::Streaming => domain_streaming(state, event),
+        TuiMode::ClarifyPending { .. } => domain_clarify_pending(state, event),
         TuiMode::Aborting => domain_aborting(state, event),
         TuiMode::DoublePressAbort {
             pressed_at,
@@ -534,17 +756,52 @@ fn domain_idle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             state.chat_entries.push(ChatEntry::ToolBubble {
                 id,
                 name: name.clone(),
-                state: ToolCallState::Pending {
+                state: Box::new(ToolCallState::Pending {
                     arguments: arguments.clone(),
                     content_sections: content_sections.clone(),
                     title_arguments: title_arguments.clone(),
-                },
+                }),
                 collapsed: true,
             });
             state.focus = Focus::ToolApproval {
                 tool_id: id,
                 tool_name: name,
             };
+            vec![Effect::SaveTextareaAndClear]
+        }
+        DomainEvent::ClarifyPending {
+            id,
+            question,
+            context,
+            choices,
+        } => {
+            let mut bubble_arguments = serde_json::json!({ "question": question });
+            if let Some(ref ctx) = context {
+                bubble_arguments["context"] = serde_json::Value::String(ctx.clone());
+            }
+            if let Some(ref choices_list) = choices {
+                bubble_arguments["choices"] = serde_json::json!(choices_list);
+            }
+            state.chat_entries.push(ChatEntry::ToolBubble {
+                id,
+                name: ClarifyTool::NAME.to_string(),
+                state: Box::new(ToolCallState::Running {
+                    arguments: bubble_arguments,
+                    content_sections: vec![],
+                    title_arguments: vec![(
+                        "question".to_string(),
+                        serde_json::Value::String(question.clone()),
+                    )],
+                }),
+                collapsed: false,
+            });
+            state.mode = TuiMode::ClarifyPending {
+                id,
+                question,
+                context,
+                choices,
+            };
+            state.focus = Focus::MainInput;
             vec![Effect::SaveTextareaAndClear]
         }
         DomainEvent::Error(message) => {
@@ -586,7 +843,7 @@ fn domain_idle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
         DomainEvent::ToolDone {
             id,
             name,
-            result,
+            result_section,
             summary,
             duration,
             content_sections,
@@ -595,7 +852,7 @@ fn domain_idle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
                 state,
                 id,
                 name,
-                result,
+                result_section,
                 content_sections,
                 summary,
                 duration,
@@ -658,17 +915,52 @@ fn domain_pending(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             state.chat_entries.push(ChatEntry::ToolBubble {
                 id,
                 name: name.clone(),
-                state: ToolCallState::Pending {
+                state: Box::new(ToolCallState::Pending {
                     arguments: arguments.clone(),
                     content_sections: content_sections.clone(),
                     title_arguments: title_arguments.clone(),
-                },
+                }),
                 collapsed: true,
             });
             state.focus = Focus::ToolApproval {
                 tool_id: id,
                 tool_name: name,
             };
+            vec![Effect::SaveTextareaAndClear]
+        }
+        DomainEvent::ClarifyPending {
+            id,
+            question,
+            context,
+            choices,
+        } => {
+            let mut bubble_arguments = serde_json::json!({ "question": question });
+            if let Some(ref ctx) = context {
+                bubble_arguments["context"] = serde_json::Value::String(ctx.clone());
+            }
+            if let Some(ref choices_list) = choices {
+                bubble_arguments["choices"] = serde_json::json!(choices_list);
+            }
+            state.chat_entries.push(ChatEntry::ToolBubble {
+                id,
+                name: ClarifyTool::NAME.to_string(),
+                state: Box::new(ToolCallState::Running {
+                    arguments: bubble_arguments,
+                    content_sections: vec![],
+                    title_arguments: vec![(
+                        "question".to_string(),
+                        serde_json::Value::String(question.clone()),
+                    )],
+                }),
+                collapsed: false,
+            });
+            state.mode = TuiMode::ClarifyPending {
+                id,
+                question,
+                context,
+                choices,
+            };
+            state.focus = Focus::MainInput;
             vec![Effect::SaveTextareaAndClear]
         }
         DomainEvent::SteerQueued => {
@@ -705,7 +997,7 @@ fn domain_pending(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
         DomainEvent::ToolDone {
             id,
             name,
-            result,
+            result_section,
             summary,
             duration,
             content_sections,
@@ -714,7 +1006,7 @@ fn domain_pending(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
                 state,
                 id,
                 name,
-                result,
+                result_section,
                 content_sections,
                 summary,
                 duration,
@@ -776,17 +1068,52 @@ fn domain_streaming(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             state.chat_entries.push(ChatEntry::ToolBubble {
                 id,
                 name: name.clone(),
-                state: ToolCallState::Pending {
+                state: Box::new(ToolCallState::Pending {
                     arguments: arguments.clone(),
                     content_sections: content_sections.clone(),
                     title_arguments: title_arguments.clone(),
-                },
+                }),
                 collapsed: true,
             });
             state.focus = Focus::ToolApproval {
                 tool_id: id,
                 tool_name: name,
             };
+            vec![Effect::SaveTextareaAndClear]
+        }
+        DomainEvent::ClarifyPending {
+            id,
+            question,
+            context,
+            choices,
+        } => {
+            let mut bubble_arguments = serde_json::json!({ "question": question });
+            if let Some(ref ctx) = context {
+                bubble_arguments["context"] = serde_json::Value::String(ctx.clone());
+            }
+            if let Some(ref choices_list) = choices {
+                bubble_arguments["choices"] = serde_json::json!(choices_list);
+            }
+            state.chat_entries.push(ChatEntry::ToolBubble {
+                id,
+                name: ClarifyTool::NAME.to_string(),
+                state: Box::new(ToolCallState::Running {
+                    arguments: bubble_arguments,
+                    content_sections: vec![],
+                    title_arguments: vec![(
+                        "question".to_string(),
+                        serde_json::Value::String(question.clone()),
+                    )],
+                }),
+                collapsed: false,
+            });
+            state.mode = TuiMode::ClarifyPending {
+                id,
+                question,
+                context,
+                choices,
+            };
+            state.focus = Focus::MainInput;
             vec![Effect::SaveTextareaAndClear]
         }
         DomainEvent::ToolStart {
@@ -809,7 +1136,7 @@ fn domain_streaming(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
         DomainEvent::ToolDone {
             id,
             name,
-            result,
+            result_section,
             summary,
             duration,
             content_sections,
@@ -818,7 +1145,7 @@ fn domain_streaming(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
                 state,
                 id,
                 name,
-                result,
+                result_section,
                 content_sections,
                 summary,
                 duration,
@@ -856,6 +1183,17 @@ fn domain_streaming(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             vec![]
         }
         DomainEvent::ConfirmExpired => vec![],
+        _ => vec![],
+    }
+}
+
+fn domain_clarify_pending(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
+    match event {
+        DomainEvent::AgentIdle | DomainEvent::StreamCancelled => {
+            state.mode = TuiMode::Idle;
+            state.focus = Focus::MainInput;
+            vec![]
+        }
         _ => vec![],
     }
 }
@@ -919,7 +1257,7 @@ fn domain_aborting(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
         DomainEvent::ToolDone {
             id,
             name,
-            result,
+            result_section,
             summary,
             duration,
             content_sections,
@@ -928,7 +1266,7 @@ fn domain_aborting(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
                 state,
                 id,
                 name,
-                result,
+                result_section,
                 content_sections,
                 summary,
                 duration,
@@ -1019,7 +1357,7 @@ fn update_tool_bubble_to_running(
             ..
         } = entry
         {
-            *bubble_state = ToolCallState::Running {
+            **bubble_state = ToolCallState::Running {
                 arguments: arguments.clone(),
                 content_sections: content_sections.clone(),
                 title_arguments: title_arguments.clone(),
@@ -1029,11 +1367,11 @@ fn update_tool_bubble_to_running(
         state.chat_entries.push(ChatEntry::ToolBubble {
             id,
             name,
-            state: ToolCallState::Running {
+            state: Box::new(ToolCallState::Running {
                 arguments,
                 content_sections,
                 title_arguments,
-            },
+            }),
             collapsed: true,
         });
     }
@@ -1047,7 +1385,7 @@ fn update_tool_bubble_to_done(
     state: &mut AppState,
     id: Uuid,
     name: String,
-    result: String,
+    result_section: crate::app_state::ResultSection,
     content_sections: Vec<crate::agent::tools::Section>,
     summary: Vec<(String, String)>,
     duration: std::time::Duration,
@@ -1060,7 +1398,7 @@ fn update_tool_bubble_to_done(
                 ..
             } = entry
             {
-                match bubble_state {
+                match bubble_state.as_ref() {
                     ToolCallState::Running {
                         arguments,
                         title_arguments,
@@ -1084,9 +1422,9 @@ fn update_tool_bubble_to_done(
             ..
         } = entry
         {
-            *bubble_state = ToolCallState::Done {
+            **bubble_state = ToolCallState::Done {
                 arguments: previous_arguments,
-                result,
+                result_section,
                 content_sections,
                 summary,
                 duration,
@@ -1097,14 +1435,14 @@ fn update_tool_bubble_to_done(
         state.chat_entries.push(ChatEntry::ToolBubble {
             id,
             name,
-            state: ToolCallState::Done {
+            state: Box::new(ToolCallState::Done {
                 arguments: serde_json::Value::Null,
-                result,
+                result_section,
                 content_sections,
                 summary,
                 duration,
                 title_arguments: vec![],
-            },
+            }),
             collapsed: true,
         });
     }
@@ -1117,13 +1455,13 @@ fn update_tool_bubble_to_killed(state: &mut AppState, id: Uuid) {
             ..
         } = entry
         {
-            *bubble_state = ToolCallState::Killed;
+            **bubble_state = ToolCallState::Killed;
         }
     } else {
         state.chat_entries.push(ChatEntry::ToolBubble {
             id,
             name: String::new(),
-            state: ToolCallState::Killed,
+            state: Box::new(ToolCallState::Killed),
             collapsed: true,
         });
     }
@@ -1139,7 +1477,7 @@ fn update_tool_bubble_to_denied(state: &mut AppState, id: Uuid) {
     }) = state.find_tool_bubble_mut(id)
     {
         let (preserved_arguments, preserved_content_sections, preserved_title_arguments) =
-            match bubble_state {
+            match bubble_state.as_ref() {
                 ToolCallState::Pending {
                     arguments,
                     content_sections,
@@ -1156,7 +1494,7 @@ fn update_tool_bubble_to_denied(state: &mut AppState, id: Uuid) {
                 ),
                 _ => (serde_json::Value::Null, vec![], vec![]),
             };
-        *bubble_state = ToolCallState::Denied {
+        **bubble_state = ToolCallState::Denied {
             arguments: preserved_arguments,
             error: "Denied by user".to_string(),
             content_sections: preserved_content_sections,
@@ -1517,6 +1855,348 @@ mod tests {
         assert!(effects.contains(&Effect::RestoreTextarea));
     }
 
+    #[test]
+    fn domain_clarify_pending_sets_tui_mode() {
+        let mut state = AppState::new();
+        let effects = update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ClarifyPending {
+                id: Uuid::new_v4(),
+                question: "Test?".to_string(),
+                context: None,
+                choices: None,
+            }),
+            &empty_textarea(),
+        );
+        assert!(effects.contains(&Effect::SaveTextareaAndClear));
+        assert!(matches!(
+            state.mode,
+            TuiMode::ClarifyPending { ref question, choices: None, .. } if question == "Test?"
+        ));
+    }
+
+    #[test]
+    fn clarify_digit_passes_through_to_textarea() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::ClarifyPending {
+            id: Uuid::new_v4(),
+            question: "Pick one".to_string(),
+            context: None,
+            choices: Some(vec!["alpha".to_string(), "beta".to_string()]),
+        };
+        let key = key_event(KeyCode::Char('2'));
+        let effects = update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key)),
+            &empty_textarea(),
+        );
+        assert_eq!(
+            effects,
+            vec![Effect::TextareaKey(key_event(KeyCode::Char('2')))]
+        );
+    }
+
+    #[test]
+    fn clarify_enter_answers_and_restores_textarea() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::ClarifyPending {
+            id: Uuid::new_v4(),
+            question: "Pick one".to_string(),
+            context: None,
+            choices: None,
+        };
+        let effects = update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+            &textarea_with("free-form answer"),
+        );
+        assert_eq!(state.mode, TuiMode::Pending);
+        assert_eq!(
+            effects,
+            vec![
+                Effect::AnswerClarify("free-form answer".to_string()),
+                Effect::RestoreTextarea,
+            ]
+        );
+    }
+
+    #[test]
+    fn clarify_esc_with_empty_input_aborts_question() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::ClarifyPending {
+            id: Uuid::new_v4(),
+            question: "Pick one".to_string(),
+            context: None,
+            choices: None,
+        };
+        let effects = update(
+            &mut state,
+            TuiEvent::Input(InputEvent::Escape),
+            &empty_textarea(),
+        );
+        assert_eq!(state.mode, TuiMode::Pending);
+        assert!(effects.contains(&Effect::AbortClarify));
+        assert!(effects.contains(&Effect::RestoreTextarea));
+    }
+
+    #[test]
+    fn clarify_esc_with_non_empty_input_clears_input_only() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::ClarifyPending {
+            id: Uuid::new_v4(),
+            question: "Pick one".to_string(),
+            context: None,
+            choices: None,
+        };
+        let effects = update(
+            &mut state,
+            TuiEvent::Input(InputEvent::Escape),
+            &textarea_with("partial answer"),
+        );
+        assert!(
+            matches!(state.mode, TuiMode::ClarifyPending { .. }),
+            "mode must stay ClarifyPending when input is not empty"
+        );
+        assert_eq!(effects, vec![Effect::ClearTextarea]);
+    }
+
+    #[test]
+    fn clarify_choice_click_fills_textarea() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::ClarifyPending {
+            id: Uuid::new_v4(),
+            question: "Pick?".to_string(),
+            context: None,
+            choices: Some(vec!["alpha".to_string(), "beta".to_string()]),
+        };
+        // Banner starts at row 5, width 40. Question is 1 row tall.
+        // Choices start at row 6.
+        state.layout.clarify_banner = ratatui::layout::Rect::new(0, 5, 40, 4);
+
+        let mouse_down = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 5,
+            row: 6,
+            modifiers: KeyModifiers::NONE,
+        };
+        let effects_down = update(&mut state, TuiEvent::Mouse(mouse_down), &empty_textarea());
+        assert!(effects_down.is_empty(), "mousedown alone must not select");
+        assert_eq!(state.clarify_choice_mousedown, Some((5, 6)));
+
+        let mouse_up = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: 5,
+            row: 6,
+            modifiers: KeyModifiers::NONE,
+        };
+        let effects_up = update(&mut state, TuiEvent::Mouse(mouse_up), &empty_textarea());
+        assert_eq!(
+            effects_up,
+            vec![Effect::SetInputText("alpha".to_string())],
+            "mouseup at same position must fill textarea with choice text"
+        );
+        assert!(state.clarify_choice_mousedown.is_none());
+    }
+
+    #[test]
+    fn clarify_choice_click_on_blank_area_does_not_select() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::ClarifyPending {
+            id: Uuid::new_v4(),
+            question: "Pick?".to_string(),
+            context: None,
+            choices: Some(vec!["alpha".to_string()]),
+        };
+        // Banner at x=0, y=5, width=40.
+        // " 1. alpha" is 9 chars wide; clicking at col 20 is past the text.
+        state.layout.clarify_banner = ratatui::layout::Rect::new(0, 5, 40, 3);
+
+        let mouse_down = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 20,
+            row: 6,
+            modifiers: KeyModifiers::NONE,
+        };
+        update(&mut state, TuiEvent::Mouse(mouse_down), &empty_textarea());
+
+        let mouse_up = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: 20,
+            row: 6,
+            modifiers: KeyModifiers::NONE,
+        };
+        let effects_up = update(&mut state, TuiEvent::Mouse(mouse_up), &empty_textarea());
+        assert!(
+            effects_up.is_empty(),
+            "click past choice text must not select the choice; got {effects_up:?}"
+        );
+    }
+
+    #[test]
+    fn clarify_choice_click_with_context_offsets_correctly() {
+        let mut state = AppState::new();
+        // Context is 1 row, question is 1 row → choices start at row banner.y + 2.
+        state.mode = TuiMode::ClarifyPending {
+            id: Uuid::new_v4(),
+            question: "Pick an animal?".to_string(),
+            context: Some("Context line.".to_string()),
+            choices: Some(vec!["rhino".to_string(), "panda".to_string()]),
+        };
+        // banner.y = 5, width = 40 → context row 5, question row 6, choices at 7 and 8.
+        state.layout.clarify_banner = ratatui::layout::Rect::new(0, 5, 40, 5);
+
+        let click_row = 7u16; // first choice row
+        let mouse_down = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 3,
+            row: click_row,
+            modifiers: KeyModifiers::NONE,
+        };
+        update(&mut state, TuiEvent::Mouse(mouse_down), &empty_textarea());
+
+        let mouse_up = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: 3,
+            row: click_row,
+            modifiers: KeyModifiers::NONE,
+        };
+        let effects_up = update(&mut state, TuiEvent::Mouse(mouse_up), &empty_textarea());
+        assert_eq!(
+            effects_up,
+            vec![Effect::SetInputText("rhino".to_string())],
+            "click on first choice row with context present must select first choice"
+        );
+    }
+
+    #[test]
+    fn clarify_choice_click_with_scroll_offset_selects_correct_choice() {
+        let mut state = AppState::new();
+        // 2 context rows, 1 question row → choices start at content row 3.
+        // With scroll_offset=3 the banner top shows the first choice at visual row banner.y.
+        state.mode = TuiMode::ClarifyPending {
+            id: Uuid::new_v4(),
+            question: "Pick?".to_string(),
+            context: Some("line one\nline two".to_string()),
+            choices: Some(vec!["alpha".to_string(), "beta".to_string()]),
+        };
+        state.layout.clarify_banner = ratatui::layout::Rect::new(0, 5, 40, 2);
+        state.clarify_scroll_offset = 3; // scrolled so first choice is at visual top
+
+        let click_row = 5u16; // banner.y — visually the first choice
+        let mouse_down = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 3,
+            row: click_row,
+            modifiers: KeyModifiers::NONE,
+        };
+        update(&mut state, TuiEvent::Mouse(mouse_down), &empty_textarea());
+
+        let mouse_up = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: 3,
+            row: click_row,
+            modifiers: KeyModifiers::NONE,
+        };
+        let effects_up = update(&mut state, TuiEvent::Mouse(mouse_up), &empty_textarea());
+        assert_eq!(
+            effects_up,
+            vec![Effect::SetInputText("alpha".to_string())],
+            "click at visual top of scrolled banner must resolve to first choice"
+        );
+    }
+
+    #[test]
+    fn clarify_choice_drag_copies_text_to_clipboard() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::ClarifyPending {
+            id: Uuid::new_v4(),
+            question: "Pick?".to_string(),
+            context: None,
+            choices: Some(vec!["alpha".to_string(), "beta".to_string()]),
+        };
+        state.layout.clarify_banner = ratatui::layout::Rect::new(0, 5, 40, 4);
+
+        let mouse_down = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 5,
+            row: 6,
+            modifiers: KeyModifiers::NONE,
+        };
+        update(&mut state, TuiEvent::Mouse(mouse_down), &empty_textarea());
+
+        // Drag to a different column — simulates text selection.
+        let mouse_drag = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            column: 15,
+            row: 6,
+            modifiers: KeyModifiers::NONE,
+        };
+        update(&mut state, TuiEvent::Mouse(mouse_drag), &empty_textarea());
+        assert_eq!(state.clarify_banner_drag_end, Some((15, 6)));
+
+        let mouse_up = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: 15,
+            row: 6,
+            modifiers: KeyModifiers::NONE,
+        };
+        let effects_up = update(&mut state, TuiEvent::Mouse(mouse_up), &empty_textarea());
+        assert!(
+            effects_up.contains(&Effect::CopyToClipboard("lpha".to_string())),
+            "drag must copy selected banner text (trimmed to dragged column range) to clipboard"
+        );
+        assert!(state.clarify_choice_mousedown.is_none());
+        assert!(state.clarify_banner_drag_end.is_none());
+    }
+
+    #[test]
+    fn clarify_choice_multiline_drag_copies_trimmed_text() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::ClarifyPending {
+            id: Uuid::new_v4(),
+            question: "Pick?".to_string(),
+            context: None,
+            choices: Some(vec!["alpha".to_string(), "beta".to_string()]),
+        };
+        // Banner at x=0, y=5, width=40.
+        // Row 5: "Pick?" (question)
+        // Row 6: " 1. alpha"
+        // Row 7: " 2. beta"
+        state.layout.clarify_banner = ratatui::layout::Rect::new(0, 5, 40, 4);
+
+        // Drag starts at col=4, row=6 ("alpha") and ends at col=7, row=7 (" 2. beta").
+        // First line trimmed from col 4: "alpha"[4..] = "a" (chars 4..end, but " 1. alpha"[4..9] = "alpha")
+        // Wait: " 1. alpha" -> index 4 = 'a' -> chars[4..9] = "alpha"
+        // Last line trimmed to col 7: " 2. beta"[0..7] = " 2. bet"
+        let mouse_down = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 4,
+            row: 6,
+            modifiers: KeyModifiers::NONE,
+        };
+        update(&mut state, TuiEvent::Mouse(mouse_down), &empty_textarea());
+
+        let mouse_drag = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            column: 7,
+            row: 7,
+            modifiers: KeyModifiers::NONE,
+        };
+        update(&mut state, TuiEvent::Mouse(mouse_drag), &empty_textarea());
+
+        let mouse_up = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: 7,
+            row: 7,
+            modifiers: KeyModifiers::NONE,
+        };
+        let effects_up = update(&mut state, TuiEvent::Mouse(mouse_up), &empty_textarea());
+        assert!(
+            effects_up.contains(&Effect::CopyToClipboard("alpha\n 2. bet".to_string())),
+            "multiline drag must copy first line trimmed from start col, last line trimmed to end col; got {effects_up:?}"
+        );
+    }
+
     // ── Help scroll ───────────────────────────────────────────────────────────
 
     #[test]
@@ -1704,11 +2384,10 @@ mod tests {
             &empty_textarea(),
         );
         let denied_bubble = state.chat_entries.iter().find_map(|entry| {
-            if let ChatEntry::ToolBubble {
-                state: ToolCallState::Denied { arguments, .. },
-                ..
-            } = entry
-            {
+            let ChatEntry::ToolBubble { state, .. } = entry else {
+                return None;
+            };
+            if let ToolCallState::Denied { arguments, .. } = state.as_ref() {
                 return Some(arguments.clone());
             }
             None

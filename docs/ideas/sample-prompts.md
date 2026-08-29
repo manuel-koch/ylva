@@ -8,7 +8,7 @@ make format lint test-coverage build-debug-and-run-with-logs
 
 ---
 
-Implement open tasks in section "Phase 6.3" of
+Implement open tasks in section "Phase 6.5" of
 docs/plans/phase6-terminal-superpowers.md
 
 Don't stage or commit anything in git!
@@ -71,6 +71,8 @@ Summarize current conversation and save it to `../logs/summary.md`.
 
 Create a 50 word sentence ( without newline ) and save it too `../logs/long-line.md`.
 
+Create a 50 word sentence ( without newline ) and save it too `logs/long-line.md`.
+
 Use search tool to find markdown files that contain the case-insensitive word `tool`.
 
 Use search tool to find Rust source files that contain the case-sensitive word `SearchTool`,
@@ -89,6 +91,17 @@ Replace all occurance of "lamp" in `logs/poem.md` by "frog" using the `edit` too
 Replace first occurance of "lamp" in `logs/poem.md` by "frog" using the `edit` tool!
 
 Replace line 2+3 in `logs/poem.md` by one line "hello world" using the `edit` tool!
+
+Read `logs/poem.md` and ask user which other animal ( free text, no constraint or pre-selected options ) to use to replace existing animal in the poem.
+
+Read `logs/poem.md` and ask user which other animal to use to replace existing animal
+in the poem.
+Give user 5 random animal options to choose from.
+
+Read `logs/poem.md` and ask user which other animal to use to replace existing animal
+in the poem.
+Provide the current poem as context for the question.
+Give user 3 random animal options to choose from.
 
 Run `python3` to find out which version it is and where the python interpreter
 is located.

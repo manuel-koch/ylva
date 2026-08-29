@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use crate::agent::tools::{default_registry, ToolRegistryConfig};
+use crate::agent::tools::{default_registry, ToolRegistryConfig, DEFAULT_CLI_TOOLS};
 use crate::agent::{AgentLoop, Role, UiUpdate};
 use crate::config::ProfileConfig;
 use crate::engine::Engine;
@@ -36,6 +36,8 @@ pub struct AgentFactory {
     /// When `true`, the `write` tool is auto-approved without user confirmation.
     /// Intended for automated / e2e testing where no human is present to approve.
     auto_approve_write: bool,
+    /// Explicit list of tool names to register. Defaults to [`DEFAULT_CLI_TOOLS`].
+    allowed_tools: Vec<String>,
 }
 
 impl AgentFactory {
@@ -44,6 +46,7 @@ impl AgentFactory {
             engines,
             auto_approve_edit: false,
             auto_approve_write: false,
+            allowed_tools: DEFAULT_CLI_TOOLS.iter().map(|s| s.to_string()).collect(),
         }
     }
 
@@ -56,6 +59,13 @@ impl AgentFactory {
     /// Enable automatic approval of `edit` tool calls (no user prompt).
     pub fn with_auto_approve_edit(mut self) -> Self {
         self.auto_approve_edit = true;
+        self
+    }
+
+    /// Override the allowed tool set. Pass [`DEFAULT_CLI_TOOLS`], [`DEFAULT_TUI_TOOLS`],
+    /// or a custom subset for per-agent restrictions.
+    pub fn with_allowed_tools(mut self, tools: &[&str]) -> Self {
+        self.allowed_tools = tools.iter().map(|s| s.to_string()).collect();
         self
     }
 
@@ -95,6 +105,7 @@ impl AgentFactory {
             ToolRegistryConfig {
                 auto_approve_edit: self.auto_approve_edit,
                 auto_approve_write: self.auto_approve_write,
+                allowed_tools: self.allowed_tools.clone(),
             },
         ));
         let (agent_loop, ui_rx) = AgentLoop::new(Arc::clone(engine), registry);

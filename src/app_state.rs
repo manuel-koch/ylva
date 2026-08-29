@@ -41,6 +41,16 @@ const TOAST_DURATION: Duration = Duration::from_millis(1500);
 // ─── ChatSelection ───────────────────────────────────────────────────────────
 
 /// Screen-space selection state for the chat area. Line and column are
+/// Normalised (start ≤ end) drag selection inside the clarify banner, in
+/// absolute screen coordinates. Used only for rendering the highlight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BannerDragSelection {
+    pub start_row: u16,
+    pub start_col: u16,
+    pub end_row: u16,
+    pub end_col: u16,
+}
+
 /// absolute line indices into `TuiState::chat_rendered_lines`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChatSelection {
@@ -105,6 +115,35 @@ pub enum UserMessageState {
     Cancelled,
 }
 
+/// Well-known result-section IDs used to identify [`ResultSection`] content in tool output.
+///
+/// The UI derives display titles from the combination of a tool name and one of these IDs.
+pub mod result_section_ids {
+    /// Standard tool output (used by all tools that return plain text results).
+    pub const RESULT: &str = "result";
+    /// The user's answer to a clarify question (used by the `clarify` tool).
+    pub const USER_ANSWER: &str = "user_answer";
+}
+
+/// How the tool's result string is displayed in its completed bubble.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResultSection {
+    /// Stable identifier for the section. See [`result_section_ids`] for known values.
+    pub id: String,
+    /// The result text.
+    pub content: String,
+}
+
+impl ResultSection {
+    /// Convenience constructor for a plain result with the standard [`result_section_ids::RESULT`] ID.
+    pub fn plain(content: impl Into<String>) -> Self {
+        Self {
+            id: result_section_ids::RESULT.to_string(),
+            content: content.into(),
+        }
+    }
+}
+
 /// State of a tool call bubble in the TUI chat history.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolCallState {
@@ -123,7 +162,7 @@ pub enum ToolCallState {
     /// Completed successfully.
     Done {
         arguments: serde_json::Value,
-        result: String,
+        result_section: ResultSection,
         content_sections: Vec<crate::agent::tools::Section>,
         summary: Vec<(String, String)>,
         duration: std::time::Duration,
@@ -162,7 +201,7 @@ pub enum ChatEntry {
     ToolBubble {
         id: uuid::Uuid,
         name: String,
-        state: ToolCallState,
+        state: Box<ToolCallState>,
         /// Whether the bubble body (arguments, result) is hidden; only the title
         /// line is rendered when `true`. Toggled by clicking the title line.
         collapsed: bool,
@@ -198,6 +237,9 @@ pub struct TuiState {
     /// Set by `UiUpdate::ToolPending`; cleared by `ToolStart`/`ToolKilled`/
     /// `StreamCancelled`. While `Some`, the TUI is in approval sub-mode.
     pub pending_approval: Option<(Uuid, String, serde_json::Value)>, // (tool_id, tool_name, arguments)
+    /// Set by `UiUpdate::ClarifyPending`; cleared once the user answers or the
+    /// stream returns to idle.
+    pub pending_clarify: Option<(String, Option<Vec<String>>, Option<String>)>,
     /// Textarea lines saved when a `ToolPending` approval sub-mode starts so
     /// the unsubmitted draft can be restored once the approval is resolved.
     /// `None` when no approval is in progress or the input was empty.
@@ -215,6 +257,10 @@ pub struct TuiState {
     /// On-screen rect of the chat content area (not the scrollbar column),
     /// written each frame by `ui::draw_chat` for mouse hit-testing.
     pub chat_area: ratatui::layout::Rect,
+    /// On-screen rect of the clarify banner, written each frame by `ui::draw`
+    /// for mouse click-to-select-choice hit-testing. Zero-sized when no
+    /// clarify is pending.
+    pub clarify_banner: ratatui::layout::Rect,
     /// Plain text of every rendered line built by the most recent `draw_chat`
     /// call. Indexed by absolute line number (before scroll offset). Used for
     /// extracting selected text on mouse-up.
@@ -229,6 +275,10 @@ pub struct TuiState {
     /// True while the left mouse button is held down in the chat area (drag
     /// in progress). Cleared on mouse-up.
     pub chat_drag_active: bool,
+    /// While the user drags in the clarify banner, holds the normalised
+    /// selection (start_row, start_col, end_row, end_col) in absolute screen
+    /// coordinates, for highlighting. `None` when no drag is in progress.
+    pub clarify_banner_drag: Option<BannerDragSelection>,
     /// Transient notification displayed as a floating overlay, auto-dismissed
     /// after [`TOAST_DURATION`]. Set by e.g. clipboard copy; `None` when no
     /// notification is active.
@@ -242,6 +292,10 @@ pub struct TuiState {
     /// Current horizontal scroll offset inside the help popup (columns from
     /// the left). Clamped to the valid range by `draw_help_popup` each frame.
     pub help_scroll_x: usize,
+    /// Current vertical scroll offset inside the clarify banner (lines from
+    /// the top of the content). Clamped to the valid range by
+    /// `draw_clarify_banner` each frame.
+    pub clarify_scroll_offset: usize,
     /// Mirrors ratatui-textarea's internal scroll-top (in wrapped screen rows)
     /// so that the input-field scroll indicators reflect the actual rendered
     /// viewport position rather than the cursor row.
@@ -267,20 +321,24 @@ impl TuiState {
             scroll_locked: true,
             chat_area_height: 0,
             pending_approval: None,
+            pending_clarify: None,
             pending_approval_input_snapshot: None,
             input_history: Vec::new(),
             history_index: None,
             draft: String::new(),
             input_area: ratatui::layout::Rect::default(),
             chat_area: ratatui::layout::Rect::default(),
+            clarify_banner: ratatui::layout::Rect::default(),
             chat_rendered_lines: Vec::new(),
             chat_rendered_line_chrome_widths: Vec::new(),
             chat_selection: None,
             chat_drag_active: false,
+            clarify_banner_drag: None,
             toast: None,
             spinner_frame: 0,
             help_scroll_offset: 0,
             help_scroll_x: 0,
+            clarify_scroll_offset: 0,
             input_scroll_top: 0,
             bubble_title_rows: Vec::new(),
         }
@@ -383,6 +441,7 @@ impl TuiState {
                 if self.agent_mode != AgentMode::Aborting {
                     self.agent_mode = AgentMode::Streaming;
                 }
+                self.pending_clarify = None;
                 self.partial_assistant_text.clear();
             }
             UiUpdate::AppendText(text) => {
@@ -393,6 +452,7 @@ impl TuiState {
             }
             UiUpdate::StreamDone => {
                 self.flush_partial_assistant_message(false);
+                self.pending_clarify = None;
                 self.agent_mode = AgentMode::Idle;
                 self.scroll_locked = true;
                 self.scroll_offset = 0;
@@ -402,6 +462,7 @@ impl TuiState {
                 self.transition_queued_messages_to(UserMessageState::Cancelled);
                 self.steer_indicator = false;
                 self.pending_approval = None;
+                self.pending_clarify = None;
                 self.agent_mode = AgentMode::Idle;
                 self.scroll_locked = true;
                 self.scroll_offset = 0;
@@ -433,14 +494,57 @@ impl TuiState {
                 self.chat_entries.push(ChatEntry::ToolBubble {
                     id: *id,
                     name: name.clone(),
-                    state: ToolCallState::Pending {
+                    state: Box::new(ToolCallState::Pending {
                         arguments: arguments.clone(),
                         content_sections: content_sections.clone(),
                         title_arguments: title_arguments.clone(),
-                    },
+                    }),
                     collapsed: true,
                 });
                 self.pending_approval = Some((*id, name.clone(), arguments.clone()));
+                self.pending_clarify = None;
+            }
+            UiUpdate::ClarifyPending {
+                id,
+                question,
+                context,
+                choices,
+                ..
+            } => {
+                self.flush_partial_assistant_message(false);
+                self.pending_approval = None;
+                self.pending_clarify = Some((question.clone(), choices.clone(), context.clone()));
+                self.clarify_scroll_offset = 0;
+                self.agent_mode = AgentMode::ClarifyPending;
+
+                // Push a bubble in Running state so the question and choices
+                // are preserved in the chat history after the user answers.
+                let mut arguments = serde_json::json!({ "question": question });
+                if let Some(ref context_text) = context {
+                    arguments["context"] = serde_json::Value::String(context_text.clone());
+                }
+                if let Some(ref choices_list) = choices {
+                    arguments["choices"] = serde_json::Value::Array(
+                        choices_list
+                            .iter()
+                            .map(|c| serde_json::Value::String(c.clone()))
+                            .collect(),
+                    );
+                }
+                let title_arguments = vec![(
+                    "question".to_string(),
+                    serde_json::Value::String(question.clone()),
+                )];
+                self.chat_entries.push(ChatEntry::ToolBubble {
+                    id: *id,
+                    name: "clarify".to_string(),
+                    state: Box::new(ToolCallState::Running {
+                        arguments,
+                        content_sections: vec![],
+                        title_arguments,
+                    }),
+                    collapsed: false,
+                });
             }
             UiUpdate::ToolStart {
                 name,
@@ -452,7 +556,7 @@ impl TuiState {
             } => {
                 if let Some(entry) = self.find_tool_bubble_mut(*id) {
                     if let ChatEntry::ToolBubble { state, .. } = entry {
-                        *state = ToolCallState::Running {
+                        **state = ToolCallState::Running {
                             arguments: arguments.clone(),
                             content_sections: content_sections.clone(),
                             title_arguments: title_arguments.clone(),
@@ -462,20 +566,26 @@ impl TuiState {
                     self.chat_entries.push(ChatEntry::ToolBubble {
                         id: *id,
                         name: name.clone(),
-                        state: ToolCallState::Running {
+                        state: Box::new(ToolCallState::Running {
                             arguments: arguments.clone(),
                             content_sections: content_sections.clone(),
                             title_arguments: title_arguments.clone(),
-                        },
+                        }),
                         collapsed: true,
                     });
                 }
                 self.pending_approval = None;
+                self.pending_clarify = None;
+                if self.agent_mode == AgentMode::ClarifyPending {
+                    self.agent_mode = AgentMode::Streaming;
+                } else if self.agent_mode != AgentMode::Aborting {
+                    self.agent_mode = AgentMode::ToolRunning;
+                }
             }
             UiUpdate::ToolDone {
                 id,
                 name,
-                result,
+                result_section,
                 summary,
                 duration,
                 content_sections,
@@ -484,7 +594,7 @@ impl TuiState {
                     .find_tool_bubble_mut(*id)
                     .and_then(|entry| {
                         if let ChatEntry::ToolBubble { state, .. } = entry {
-                            match state {
+                            match state.as_ref() {
                                 ToolCallState::Running {
                                     arguments,
                                     title_arguments,
@@ -504,9 +614,9 @@ impl TuiState {
                     .unwrap_or((serde_json::Value::Null, vec![]));
                 if let Some(entry) = self.find_tool_bubble_mut(*id) {
                     if let ChatEntry::ToolBubble { state, .. } = entry {
-                        *state = ToolCallState::Done {
+                        **state = ToolCallState::Done {
                             arguments: previous_arguments,
-                            result: result.clone(),
+                            result_section: result_section.clone(),
                             content_sections: content_sections.clone(),
                             summary: summary.clone(),
                             duration: *duration,
@@ -517,16 +627,22 @@ impl TuiState {
                     self.chat_entries.push(ChatEntry::ToolBubble {
                         id: *id,
                         name: name.clone(),
-                        state: ToolCallState::Done {
+                        state: Box::new(ToolCallState::Done {
                             arguments: serde_json::Value::Null,
-                            result: result.clone(),
+                            result_section: result_section.clone(),
                             content_sections: content_sections.clone(),
                             summary: summary.clone(),
                             duration: *duration,
                             title_arguments: vec![],
-                        },
+                        }),
                         collapsed: true,
                     });
+                }
+                self.pending_clarify = None;
+                if self.agent_mode == AgentMode::ClarifyPending {
+                    self.agent_mode = AgentMode::Idle;
+                } else if self.agent_mode == AgentMode::ToolRunning {
+                    self.agent_mode = AgentMode::Streaming;
                 }
             }
             UiUpdate::ToolError {
@@ -537,7 +653,7 @@ impl TuiState {
             } => {
                 if let Some(entry) = self.find_tool_bubble_mut(*id) {
                     if let ChatEntry::ToolBubble { state, .. } = entry {
-                        let preserved_title_arguments = match &*state {
+                        let preserved_title_arguments = match state.as_ref() {
                             ToolCallState::Pending {
                                 title_arguments, ..
                             }
@@ -555,7 +671,7 @@ impl TuiState {
                             } => title_arguments.clone(),
                             _ => vec![],
                         };
-                        *state = ToolCallState::Error {
+                        **state = ToolCallState::Error {
                             error: error.clone(),
                             title_arguments: preserved_title_arguments,
                             duration: *duration,
@@ -578,6 +694,12 @@ impl TuiState {
                     self.pending_approval = None;
                     self.agent_mode = AgentMode::Idle;
                 }
+                self.pending_clarify = None;
+                if self.agent_mode == AgentMode::ClarifyPending {
+                    self.agent_mode = AgentMode::Idle;
+                } else if self.agent_mode == AgentMode::ToolRunning {
+                    self.agent_mode = AgentMode::Streaming;
+                }
             }
             UiUpdate::ToolAutoDenied {
                 id,
@@ -589,34 +711,42 @@ impl TuiState {
                 self.chat_entries.push(ChatEntry::ToolBubble {
                     id: *id,
                     name: name.clone(),
-                    state: ToolCallState::Denied {
+                    state: Box::new(ToolCallState::Denied {
                         arguments: serde_json::Value::Null,
                         error: reason.clone(),
                         content_sections: content_sections.clone(),
                         title_arguments: title_arguments.clone(),
-                    },
+                    }),
                     collapsed: false,
                 });
+                self.pending_clarify = None;
             }
             UiUpdate::ToolKilled { id } => {
                 if let Some(entry) = self.find_tool_bubble_mut(*id) {
                     if let ChatEntry::ToolBubble { state, .. } = entry {
-                        *state = ToolCallState::Killed;
+                        **state = ToolCallState::Killed;
                     }
                 } else {
                     self.chat_entries.push(ChatEntry::ToolBubble {
                         id: *id,
                         name: String::new(),
-                        state: ToolCallState::Killed,
+                        state: Box::new(ToolCallState::Killed),
                         collapsed: true,
                     });
                 }
                 self.pending_approval = None;
+                self.pending_clarify = None;
+                if self.agent_mode == AgentMode::ClarifyPending
+                    || self.agent_mode == AgentMode::ToolRunning
+                {
+                    self.agent_mode = AgentMode::Idle;
+                }
             }
             UiUpdate::Error(message) => {
                 self.chat_entries.push(ChatEntry::ErrorLine {
                     message: message.clone(),
                 });
+                self.pending_clarify = None;
                 self.agent_mode = AgentMode::Idle;
             }
         }
@@ -669,6 +799,17 @@ impl TuiState {
     /// applied in `draw_help_popup`, which knows the maximum line width.
     pub fn help_scroll_right(&mut self, columns: usize) {
         self.help_scroll_x = self.help_scroll_x.saturating_add(columns);
+    }
+
+    /// Scroll the clarify banner up (toward earlier content).
+    pub fn clarify_scroll_up(&mut self, lines: usize) {
+        self.clarify_scroll_offset = self.clarify_scroll_offset.saturating_sub(lines);
+    }
+
+    /// Scroll the clarify banner down (toward later content). The upper bound
+    /// is applied in `draw_clarify_banner`, which knows the total content height.
+    pub fn clarify_scroll_down(&mut self, lines: usize) {
+        self.clarify_scroll_offset = self.clarify_scroll_offset.saturating_add(lines);
     }
 
     /// Called on End key or scroll-to-bottom event — re-enables auto-scroll.
@@ -965,9 +1106,9 @@ mod tui_state_tests {
             state.chat_entries.last(),
             Some(ChatEntry::ToolBubble {
                 name,
-                state: ToolCallState::Pending { .. },
+                state,
                 ..
-            }) if name == "write"
+            }) if name == "write" && matches!(state.as_ref(), ToolCallState::Pending { .. })
         ));
         state.apply_update(&UiUpdate::ToolStart {
             name: "write".to_string(),
@@ -981,9 +1122,9 @@ mod tui_state_tests {
         assert!(matches!(
             state.chat_entries.last(),
             Some(ChatEntry::ToolBubble {
-                state: ToolCallState::Running { .. },
+                state,
                 ..
-            })
+            }) if matches!(state.as_ref(), ToolCallState::Running { .. })
         ));
     }
 
@@ -1016,9 +1157,9 @@ mod tui_state_tests {
         assert!(matches!(
             state.chat_entries.last(),
             Some(ChatEntry::ToolBubble {
-                state: ToolCallState::Error { error, .. },
+                state,
                 ..
-            }) if error == "boom"
+            }) if matches!(state.as_ref(), ToolCallState::Error { error, .. } if error == "boom")
         ));
     }
 
@@ -1285,9 +1426,9 @@ mod tui_state_tests {
         assert!(matches!(
             state.chat_entries.last(),
             Some(ChatEntry::ToolBubble {
-                state: ToolCallState::Running { arguments, .. },
+                state,
                 ..
-            }) if *arguments == start_args
+            }) if matches!(state.as_ref(), ToolCallState::Running { arguments, .. } if *arguments == start_args)
         ));
     }
 
@@ -1315,7 +1456,7 @@ mod tui_state_tests {
         state.apply_update(&UiUpdate::ToolDone {
             id,
             name: "read".to_string(),
-            result: "file contents".to_string(),
+            result_section: ResultSection::plain("file contents"),
             summary: Vec::new(),
             duration: std::time::Duration::from_millis(0),
             content_sections: vec![],
@@ -1323,9 +1464,9 @@ mod tui_state_tests {
         assert!(matches!(
             state.chat_entries.last(),
             Some(ChatEntry::ToolBubble {
-                state: ToolCallState::Done { result, .. },
+                state,
                 ..
-            }) if result == "file contents"
+            }) if matches!(state.as_ref(), ToolCallState::Done { result_section, .. } if result_section.content == "file contents")
         ));
     }
 
@@ -1351,19 +1492,18 @@ mod tui_state_tests {
         state.apply_update(&UiUpdate::ToolDone {
             id,
             name: "read".to_string(),
-            result: "line one\nline two\n".to_string(),
+            result_section: ResultSection::plain("line one\nline two\n"),
             summary: Vec::new(),
             duration: std::time::Duration::from_millis(0),
             content_sections: sections.clone(),
         });
         let stored = state.chat_entries.iter().find_map(|e| {
-            if let ChatEntry::ToolBubble {
-                state:
-                    ToolCallState::Done {
-                        content_sections, ..
-                    },
-                ..
-            } = e
+            let ChatEntry::ToolBubble { state, .. } = e else {
+                return None;
+            };
+            if let ToolCallState::Done {
+                content_sections, ..
+            } = state.as_ref()
             {
                 Some(content_sections.clone())
             } else {
@@ -1401,9 +1541,9 @@ mod tui_state_tests {
         assert!(matches!(
             state.chat_entries.last(),
             Some(ChatEntry::ToolBubble {
-                state: ToolCallState::Killed,
+                state,
                 ..
-            })
+            }) if matches!(state.as_ref(), ToolCallState::Killed)
         ));
     }
 }
@@ -1422,6 +1562,13 @@ pub enum TuiMode {
     Pending,
     /// Provider is streaming a response.
     Streaming,
+    /// Waiting for the user to answer a `clarify` tool question.
+    ClarifyPending {
+        id: Uuid,
+        question: String,
+        context: Option<String>,
+        choices: Option<Vec<String>>,
+    },
     /// `AgentCommand::Stop` has been sent; waiting for `StreamCancelled` or
     /// the agent to become idle.
     Aborting,
@@ -1505,6 +1652,13 @@ pub enum DomainEvent {
         content_sections: Vec<crate::agent::tools::Section>,
         title_arguments: Vec<(String, serde_json::Value)>,
     },
+    /// The model is asking the user to clarify something.
+    ClarifyPending {
+        id: Uuid,
+        question: String,
+        context: Option<String>,
+        choices: Option<Vec<String>>,
+    },
     /// A tool call started executing (approved).
     ToolStart {
         id: Uuid,
@@ -1517,7 +1671,7 @@ pub enum DomainEvent {
     ToolDone {
         id: Uuid,
         name: String,
-        result: String,
+        result_section: ResultSection,
         summary: Vec<(String, String)>,
         duration: std::time::Duration,
         content_sections: Vec<crate::agent::tools::Section>,
@@ -1552,6 +1706,8 @@ pub enum Effect {
     SaveTextareaAndClear,
     /// Restore the textarea from the snapshot saved by `SaveTextareaAndClear`.
     RestoreTextarea,
+    /// Replace the textarea content with the given text.
+    SetInputText(String),
     /// Feed a key event into the textarea.
     TextareaKey(KeyEvent),
     /// Feed a pasted string (dedented) into the textarea.
@@ -1561,6 +1717,10 @@ pub enum Effect {
     /// Send `AgentCommand::DenyTool { id, reason }` to the agent.
     /// `reason` is the user-typed denial text; empty when no reason was given.
     DenyTool { id: Uuid, reason: String },
+    /// Send `AgentCommand::AnswerClarify(answer)` to the agent.
+    AnswerClarify(String),
+    /// Send `AgentCommand::AbortClarify` to the agent (user cancelled without answering).
+    AbortClarify,
     /// Send `AgentCommand::Stop` to the agent.
     StopAgent,
     /// Quit the TUI event loop.
@@ -1655,6 +1815,8 @@ pub struct AppLayout {
     pub chat_area: ChatArea,
     pub input_area: InputAreaLayout,
     pub help_popup: HelpPopupLayout,
+    /// Rect of the clarify banner. Zero-sized when no clarify is pending.
+    pub clarify_banner: ratatui::layout::Rect,
     /// Rect of the Approve button rendered in the tool-approval footer.
     /// Written by the Driver after each `ui::draw` call; zero-sized when
     /// no approval footer is visible.
@@ -1725,6 +1887,12 @@ pub struct AppState {
     pub help_scroll_offset: usize,
     pub help_scroll_x: usize,
 
+    // ── clarify banner ───────────────────────────────────────────────────────
+    /// Current vertical scroll offset inside the clarify banner (lines from
+    /// the top of the content). Clamped to the valid range by
+    /// `draw_clarify_banner` each frame.
+    pub clarify_scroll_offset: usize,
+
     // ── input field ─────────────────────────────────────────────────────────
     /// Mirrors ratatui-textarea's internal scroll-top so scroll indicators
     /// reflect the actual rendered viewport position.
@@ -1742,6 +1910,17 @@ pub struct AppState {
     // ── chat drag selection ──────────────────────────────────────────────────
     /// `true` while the left mouse button is held down in the chat area.
     pub chat_drag_active: bool,
+
+    // ── clarify choice click tracking ────────────────────────────────────────
+    /// Terminal position where the left button was pressed inside a clarify
+    /// choice row. Cleared on mouse-up. A mouse-up at the same position is a
+    /// click (→ fill textarea); a mouse-up at a different position is a drag
+    /// (→ no action, allows text selection).
+    pub clarify_choice_mousedown: Option<(u16, u16)>,
+    /// Updated on every `MouseDrag` event while `clarify_choice_mousedown` is
+    /// set. Together with the down position this defines the highlighted row
+    /// range in the banner. Cleared on mouse-up.
+    pub clarify_banner_drag_end: Option<(u16, u16)>,
 
     // ── abort-exit flag ──────────────────────────────────────────────────────
     /// `true` when `TuiMode::Aborting` was entered via Ctrl+C double-press,
@@ -1783,6 +1962,8 @@ impl AppState {
             help_scroll_offset: 0,
             help_scroll_x: 0,
 
+            clarify_scroll_offset: 0,
+
             input_scroll_top: 0,
 
             bubble_title_rows: Vec::new(),
@@ -1790,6 +1971,8 @@ impl AppState {
             _history_direction: None,
 
             chat_drag_active: false,
+            clarify_choice_mousedown: None,
+            clarify_banner_drag_end: None,
             aborting_exit: false,
         }
     }
@@ -1907,6 +2090,17 @@ impl AppState {
     /// Scroll the help popup right.
     pub fn help_scroll_right(&mut self, columns: usize) {
         self.help_scroll_x = self.help_scroll_x.saturating_add(columns);
+    }
+
+    /// Scroll the clarify banner up (toward earlier content).
+    pub fn clarify_scroll_up(&mut self, lines: usize) {
+        self.clarify_scroll_offset = self.clarify_scroll_offset.saturating_sub(lines);
+    }
+
+    /// Scroll the clarify banner down (toward later content). The upper bound
+    /// is applied in `draw_clarify_banner`, which knows the total content height.
+    pub fn clarify_scroll_down(&mut self, lines: usize) {
+        self.clarify_scroll_offset = self.clarify_scroll_offset.saturating_add(lines);
     }
 
     /// Toggle the collapsed/expanded state of the tool bubble with the given id.
@@ -2048,11 +2242,13 @@ impl AppState {
                     AgentMode::Streaming
                 }
             }
+            TuiMode::ClarifyPending { .. } => AgentMode::ClarifyPending,
             TuiMode::Aborting => AgentMode::Aborting,
             TuiMode::DoublePressAbort { return_to, .. } => match return_to.as_ref() {
                 TuiMode::Idle | TuiMode::DoublePressAbort { .. } => AgentMode::Idle,
                 TuiMode::Pending => AgentMode::Pending,
                 TuiMode::Streaming => AgentMode::Streaming,
+                TuiMode::ClarifyPending { .. } => AgentMode::ClarifyPending,
                 TuiMode::Aborting => AgentMode::Aborting,
             },
         }
@@ -2096,10 +2292,10 @@ impl AppState {
                 // Skip bubbles already transitioned to Denied by the Driver
                 // (via apply_tool_denied). The ToolError that the agent sends
                 // after processing a DenyTool command is redundant for those.
-                if matches!(bubble_state, ToolCallState::Denied { .. }) {
+                if matches!(bubble_state.as_ref(), ToolCallState::Denied { .. }) {
                     return;
                 }
-                let preserved_title_arguments = match &*bubble_state {
+                let preserved_title_arguments = match bubble_state.as_ref() {
                     ToolCallState::Pending {
                         title_arguments, ..
                     }
@@ -2114,7 +2310,7 @@ impl AppState {
                     } => title_arguments.clone(),
                     _ => vec![],
                 };
-                *bubble_state = ToolCallState::Error {
+                **bubble_state = ToolCallState::Error {
                     error: error.clone(),
                     title_arguments: preserved_title_arguments,
                     duration,
@@ -2145,12 +2341,12 @@ impl AppState {
         self.chat_entries.push(ChatEntry::ToolBubble {
             id,
             name,
-            state: ToolCallState::Denied {
+            state: Box::new(ToolCallState::Denied {
                 arguments: serde_json::Value::Null,
                 error: reason,
                 content_sections,
                 title_arguments,
-            },
+            }),
             collapsed: false,
         });
     }
@@ -2167,7 +2363,7 @@ impl AppState {
         }) = self.find_tool_bubble_mut(id)
         {
             let (preserved_arguments, preserved_content_sections, preserved_title_arguments) =
-                match bubble_state {
+                match bubble_state.as_mut() {
                     ToolCallState::Pending {
                         arguments,
                         content_sections,
@@ -2184,7 +2380,7 @@ impl AppState {
                     ),
                     _ => (serde_json::Value::Null, vec![], vec![]),
                 };
-            *bubble_state = ToolCallState::Denied {
+            **bubble_state = ToolCallState::Denied {
                 arguments: preserved_arguments,
                 error: if reason.is_empty() {
                     "Denied by user".to_string()
@@ -2311,6 +2507,18 @@ mod tests {
     }
 
     #[test]
+    fn agent_mode_maps_clarify_pending_to_clarify_pending() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::ClarifyPending {
+            id: Uuid::new_v4(),
+            question: "Test?".to_string(),
+            context: None,
+            choices: None,
+        };
+        assert_eq!(state.agent_mode(), AgentMode::ClarifyPending);
+    }
+
+    #[test]
     fn apply_tool_denied_preserves_arguments() {
         let mut state = AppState::new();
         let id = Uuid::new_v4();
@@ -2318,12 +2526,12 @@ mod tests {
         state.chat_entries.push(ChatEntry::ToolBubble {
             id,
             name: "shell".to_string(),
-            state: ToolCallState::Pending {
+            state: Box::new(ToolCallState::Pending {
                 arguments: args.clone(),
                 content_sections: vec![],
 
                 title_arguments: vec![],
-            },
+            }),
             collapsed: false,
         });
         state.apply_tool_denied(id, "");
@@ -2331,9 +2539,9 @@ mod tests {
             matches!(
                 state.chat_entries.last(),
                 Some(ChatEntry::ToolBubble {
-                    state: ToolCallState::Denied { arguments, error, .. },
+                    state,
                     ..
-                }) if *arguments == args && error == "Denied by user"
+                }) if matches!(state.as_ref(), ToolCallState::Denied { arguments, error, .. } if *arguments == args && error == "Denied by user")
             ),
             "apply_tool_denied must produce Denied with the original Pending arguments"
         );
@@ -2347,13 +2555,13 @@ mod tests {
         state.chat_entries.push(ChatEntry::ToolBubble {
             id,
             name: "shell".to_string(),
-            state: ToolCallState::Denied {
+            state: Box::new(ToolCallState::Denied {
                 arguments: args.clone(),
                 error: "Denied by user".to_string(),
                 content_sections: vec![],
 
                 title_arguments: vec![],
-            },
+            }),
             collapsed: false,
         });
         state.apply_tool_error(
@@ -2366,9 +2574,9 @@ mod tests {
             matches!(
                 state.chat_entries.last(),
                 Some(ChatEntry::ToolBubble {
-                    state: ToolCallState::Denied { arguments, .. },
+                    state,
                     ..
-                }) if *arguments == args
+                }) if matches!(state.as_ref(), ToolCallState::Denied { arguments, .. } if *arguments == args)
             ),
             "apply_tool_error must not overwrite a Denied bubble"
         );
@@ -2381,12 +2589,12 @@ mod tests {
         state.chat_entries.push(ChatEntry::ToolBubble {
             id,
             name: "shell".to_string(),
-            state: ToolCallState::Running {
+            state: Box::new(ToolCallState::Running {
                 arguments: serde_json::json!({"cmd": "ls"}),
                 content_sections: vec![],
 
                 title_arguments: vec![],
-            },
+            }),
             collapsed: false,
         });
         state.apply_tool_error(
@@ -2399,9 +2607,9 @@ mod tests {
             matches!(
                 state.chat_entries.last(),
                 Some(ChatEntry::ToolBubble {
-                    state: ToolCallState::Error { error, .. },
+                    state,
                     ..
-                }) if error == "execution failed"
+                }) if matches!(state.as_ref(), ToolCallState::Error { error, .. } if error == "execution failed")
             ),
             "Running + ToolError must produce Error"
         );

@@ -21,7 +21,7 @@ use ylva::llm::{MockProvider, OpenAiProvider, Provider};
 use ylva::logging::{init_logging, LogConfig, LogFormat};
 use ylva::{
     AgentConfig, AgentFactory, App, ConsoleApp, Engine, EngineConfig, EngineImpl, ProfileConfig,
-    TuiApp, DEFAULT_CONTEXT_LENGTH,
+    TuiApp, DEFAULT_CONTEXT_LENGTH, DEFAULT_TUI_TOOLS,
 };
 
 /// Fallback demo prompt used when neither `--prompt` nor piped stdin supplies
@@ -83,12 +83,16 @@ fn main() {
 
     let auto_approve_edit = args.contains(&"--auto-approve-edit".to_string());
     let auto_approve_write = args.contains(&"--auto-approve-write".to_string());
+    let use_tui = std::io::stdout().is_terminal() && !args.contains(&"--no-tui".to_string());
 
     let factory = Arc::new({
         let mut factory = AgentFactory::new(HashMap::from([(
             "default".to_string(),
             engine as Arc<dyn Engine>,
         )]));
+        if use_tui {
+            factory = factory.with_allowed_tools(DEFAULT_TUI_TOOLS);
+        }
         if auto_approve_edit {
             factory = factory.with_auto_approve_edit();
         }
@@ -99,7 +103,7 @@ fn main() {
     });
 
     let result = runtime.block_on(async {
-        if std::io::stdout().is_terminal() && !args.contains(&"--no-tui".to_string()) {
+        if use_tui {
             // The TUI starts with an empty input box. An explicit `--prompt` (or
             // piped stdin) still auto-sends, but the hardcoded demo prompt is only
             // for the headless path — it must not pre-populate the interactive UI.
