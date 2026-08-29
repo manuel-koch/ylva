@@ -1006,12 +1006,43 @@ fn entry_matches_filters(entry: &ignore::DirEntry, args: &GlobInputArgs) -> bool
     true
 }
 
+/// Reject glob patterns that contain constructs the `glob` crate silently
+/// misinterprets, giving the caller a clear error instead of empty results.
+///
+/// Currently detected:
+/// - `!` outside a `[...]` character class: the `glob` crate treats it as a
+///   literal character, so patterns like `!*.rs` or `**/!foo` never match
+///   anything. Negation is not supported; the caller must filter results
+///   programmatically instead.
+fn validate_glob_pattern(pattern: &str) -> Result<(), String> {
+    let mut inside_bracket = false;
+    for character in pattern.chars() {
+        match character {
+            '[' => inside_bracket = true,
+            ']' => inside_bracket = false,
+            '!' if !inside_bracket => {
+                return Err(format!(
+                    "invalid pattern '{pattern}': '!' outside '[...]' is not supported \
+                     (the glob crate treats it as a literal character, so the pattern \
+                     would never match). Negation is not supported; remove '!' and filter \
+                     results after matching instead."
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 async fn glob_files(args: &GlobInputArgs) -> Result<GlobResult, ToolError> {
     if args.only_files && args.only_dirs {
         return Err(ToolError::failed(
             "glob",
             "arguments 'only_files' and 'only_dirs' cannot both be true",
         ));
+    }
+    if let Err(reason) = validate_glob_pattern(&args.pattern) {
+        return Err(ToolError::failed("glob", reason));
     }
     tracing::debug!(pattern = %args.pattern, "glob searching");
     let (mut sorted, candidate_count): (Vec<String>, usize) = if args.git_ignore {
@@ -1650,6 +1681,51 @@ mod tests {
         assert!(
             !log.contains("TOP-SECRET-DATA"),
             "write_file must never log the written content: {log}"
+        );
+    }
+
+    #[test]
+    fn validate_glob_pattern_rejects_negation_outside_brackets() {
+        assert!(validate_glob_pattern("docs/**/!*.md").is_err());
+        assert!(validate_glob_pattern("!*.rs").is_err());
+        assert!(validate_glob_pattern("src/**/!foo").is_err());
+        // Quoted-style artifact the LLM produced
+        assert!(validate_glob_pattern("docs/**/!*\"").is_err());
+    }
+
+    #[test]
+    fn validate_glob_pattern_allows_negation_inside_brackets() {
+        // [!abc] is valid glob syntax (character class negation)
+        assert!(validate_glob_pattern("src/[!_]*.rs").is_ok());
+        assert!(validate_glob_pattern("**/*.[!d]").is_ok());
+    }
+
+    #[test]
+    fn validate_glob_pattern_allows_normal_patterns() {
+        assert!(validate_glob_pattern("**/*.rs").is_ok());
+        assert!(validate_glob_pattern("docs/**/*.md").is_ok());
+        assert!(validate_glob_pattern("src/**/mod.rs").is_ok());
+        assert!(validate_glob_pattern("").is_ok());
+    }
+
+    #[test]
+    fn glob_files_returns_error_for_negation_pattern() {
+        let args = GlobInputArgs {
+            pattern: "docs/**/!*.md".to_string(),
+            git_ignore: false,
+            ..glob_args("")
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(glob_files(&args));
+        assert!(result.is_err());
+        let message = result.unwrap_err().to_string();
+        assert!(
+            message.contains("'!'"),
+            "error should mention the offending character: {message}"
+        );
+        assert!(
+            message.contains("not supported"),
+            "error should say negation is not supported: {message}"
         );
     }
 
