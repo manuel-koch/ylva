@@ -92,7 +92,7 @@ mechanics, making Ylva capable of editing code autonomously while remaining huma
 - `--auto-approve-spawn` bypasses approval for `spawn_subagent`; children inherit it.
 - All existing tests pass; new modules meet ≥80% line-coverage threshold.
 - `docs/features.md`, `docs/configuration.md`, and `docs/keybindings.md` are updated
-  (`Ctrl+B` back-to-parent keybinding added in Phase 6.8).
+  (`Ctrl+B` back-to-parent keybinding added in Phase 6.9).
 
 **Key constraints:**
 
@@ -497,43 +497,127 @@ No user-visible behavior. Must be fully green before any tool work begins.
 
 ---
 
-### Phase 6.6 — Approval UX (diff overlay in TUI)
+### Phase 6.6 — Markdown rendering for chat bubbles and clarify banner
 
-**Goal:** Render `Section::Diff` sections from `pending_content_sections()` during tool
-approval. The `ApprovalCheck` loop wiring was already done in Phase 6.0 step 6.
+**Goal:** Render Markdown in assistant messages, user messages, clarify `question`, and
+clarify `context` fields. Plain text fallback is preserved when content contains no
+Markdown syntax.
 
-- [ ] 39. In `render.rs` / `ui.rs`: during `TuiMode::ToolApproval`, call
-  `pending_call.pending_content_sections()` and render each section:
-  - `Section::Diff(d)`: scrollable diff overlay above the footer — `+` lines green,
-    `−` lines red, context lines default style. Collapses to a one-line summary if
-    terminal height is below 20 rows.
-  - `Section::Content(c)`: render as a read-only code block (existing path).
-    Both types scroll with `PageUp`/`PageDown`.
+Currently `append_assistant_lines`, `append_user_lines`, and `draw_clarify_banner` all
+call `textwrap::wrap` on raw text, producing no formatting. This phase replaces that with
+a lightweight Markdown-to-`ratatui` `Line` conversion.
 
-- [ ] 40. Expose `pending_content_sections()` on the `PendingTool` state in `AppState` so
-  `render.rs` can call it without holding a full `Box<dyn ToolCall>` beyond the driver.
-  Add `sections: Vec<Section>` to `AppState::pending_tool_sections`, populated in
-  `tui_driver.rs` when `UiUpdate::ToolPending` arrives.
+- [ ] 39. Add `tui-markdown` (or `pulldown-cmark` with a custom `ratatui` renderer) to
+  `Cargo.toml`. Prefer a crate that emits `Vec<Line<'static>>` directly; avoid pulling in
+  a full browser-side HTML pipeline. Evaluate `tui-markdown` v0.x before choosing.
 
-- [ ] 41. Update `docs/features.md`: document diff overlay and section rendering.
+- [ ] 40. Create `src/markdown.rs`: a `render_markdown(text: &str, width: usize) ->
+  Vec<Line<'static>>` function that converts Markdown to styled `ratatui` lines. Supported
+  elements (minimum viable set):
+  - Paragraphs with hard-wrapped lines at `width` columns.
+  - **Bold** and *italic* via `Modifier::BOLD` / `Modifier::ITALIC`.
+  - `inline code` via a distinct foreground color (reuse the existing
+    `INLINE_CODE_FG` constant or introduce one).
+  - Fenced code blocks: rendered as-is in a dim style, no syntax highlighting.
+  - Bullet lists: `•` prefix, indented continuation lines.
+  - Numbered lists: `N.` prefix, indented continuation lines.
+  - Headings: bold, prefixed with `#` / `##` etc. (no decorative bars).
+  - Blockquotes: `│` prefix in `DarkGray`.
+  - Horizontal rules: a line of `─` characters spanning `width`.
+  - Anything else passes through as unstyled text (no crash, no data loss).
 
-- [ ] 42. Run `make test` + `make test-coverage`.
+- [ ] 41. Replace `textwrap::wrap` in `append_assistant_lines` and
+  `append_streaming_lines` (`ui.rs`) with `render_markdown`. Keep the existing
+  left-border bar (`▌`), background fill, and `interrupted` / dim styling — only the
+  inner text spans change.
+
+- [ ] 42. Replace `textwrap::wrap` in `append_user_lines` (`ui.rs`) with
+  `render_markdown`. User messages often contain code snippets or lists pasted from
+  terminals; rendering them formatted improves readability.
+
+- [ ] 43. Replace `textwrap::wrap` for `question` and `context` in
+  `draw_clarify_banner` (`ui.rs`) with `render_markdown`. Bold on question lines and
+  dim on context lines are already applied via `patch_style` — keep those overrides.
+
+- [ ] 44. Unit-test `render_markdown` in `src/markdown.rs`: cover bold/italic, inline
+  code, fenced block, bullet list, numbered list, heading, blockquote, horizontal rule,
+  and plain text (regression guard). Use `ANSI`-free assertions on span content and
+  modifiers.
+
+- [ ] 45. Update `docs/features.md`: document Markdown rendering in chat bubbles and
+  clarify banner.
+
+- [ ] 46. Run `make test` + `make test-coverage`.
 
 ---
 
-### Phase 6.7 — `spawn_subagent` + `ChildAgentManager` + `finish` Tool
+### Phase 6.7 — Thinking-block bubble
+
+**Goal:** Surface LLM thinking output (extended-thinking / reasoning tokens) in the TUI
+as a collapsible bubble that renders its content as Markdown. Thinking content must flow
+through the streaming pipeline without affecting the assistant text or tool-call logic.
+
+Currently `StreamEvent` has no thinking variant and `UiUpdate` carries no thinking
+payload. This phase adds the full path from the SSE stream to a rendered bubble.
+
+- [ ] 47. Add `StreamEvent::Thinking(String)` to the `pub enum StreamEvent` in
+  `src/agent.rs`. Update `MockLlm` in `src/llm.rs` to include a matching
+  `MockEvent::Thinking(String)` variant so tests can inject thinking tokens.
+
+- [ ] 48. In `src/llm/openai_provider.rs`, parse Anthropic-style
+  `content_block_delta` events where `delta.type == "thinking_delta"` (field
+  `delta.thinking`) and OpenAI-style `reasoning_content` deltas, emitting
+  `StreamEvent::Thinking(fragment)`. All other SSE payloads are unaffected.
+
+- [ ] 49. Add `UiUpdate::AppendThinking(String)` to `pub enum UiUpdate` in
+  `src/agent.rs`. In the `StreamEvent::Thinking` arm of the agent stream loop
+  (`src/agent.rs`), send this update; do **not** append to `partial` (the
+  assistant text accumulator).
+
+- [ ] 50. In `src/app_state.rs`, add `partial_thinking_text: String` alongside
+  `partial_assistant_text`. Handle `UiUpdate::AppendThinking` by appending to it.
+  On `UiUpdate::StreamDone`, if `partial_thinking_text` is non-empty, push a
+  `ChatEntry::ThinkingMessage { text: partial_thinking_text.drain(..).collect(),
+  collapsed: true }` **before** the assistant bubble. On `UiUpdate::StreamStarted`,
+  reset `partial_thinking_text`.
+
+- [ ] 51. Add `ChatEntry::ThinkingMessage { text: String, collapsed: bool }` to the
+  `ChatEntry` enum in `src/app_state.rs`. Persist `collapsed` state per entry;
+  toggle with a keypress or click on the bubble header (handled in Phase 6.7 step 53).
+
+- [ ] 52. In `src/ui.rs`, add `append_thinking_lines` (mirrors `append_assistant_lines`
+  structure). Use a distinct border color (`THINKING_BORDER_COLOR`, dim cyan) and
+  background (`THINKING_BG_COLOR`). When `collapsed`, render only a single summary
+  line: `▌  💭 Thinking  (N lines)` where N is the line count of the full text.
+  When expanded, render the content via `render_markdown` (Phase 6.6). Add a
+  streaming variant `append_streaming_thinking_lines` for live thinking output
+  (same style, no collapse toggle while streaming).
+
+- [ ] 53. Wire collapse toggle in `src/presenter.rs` / `src/tui_driver.rs`: clicking the
+  collapsed thinking header line (or pressing `T` when the cursor is on a thinking
+  bubble) toggles `collapsed`. Mirror the existing tool-bubble collapse pattern.
+
+- [ ] 54. Update `docs/features.md`: document the thinking bubble, collapse behaviour,
+  and that thinking-token emission is a model capability (not provider-specific) — models
+  must be configured with extended-thinking / reasoning enabled to produce this output.
+
+- [ ] 55. Run `make test` + `make test-coverage`.
+
+---
+
+### Phase 6.8 — `spawn_subagent` + `ChildAgentManager` + `finish` Tool
 
 **Goal:** One-level agent delegation; child runs concurrently with parent; parent continues
 processing messages and tools while a child is active.
 
-- [ ] 43. Implement `Role::Child` construction in `AgentFactory::create`
+- [ ] 56. Implement `Role::Child` construction in `AgentFactory::create`
   (`src/agent_factory.rs`). Remove `create_returns_err_for_child_role` test (line 147 in
   `src/agent_factory.rs`, left failing since Phase 5); replace with a positive assertion.
   This must be done before any other child-agent steps (6.7–6.9) can compile. Wire
   `briefing`, `parent_cancel`, `subagent_ui_tx`, and the
   `finish_tx: mpsc::Sender<FinishResult>` from `Role::Child` fields.
 
-- [ ] 44. Create `src/child_agent_manager.rs`:
+- [ ] 57. Create `src/child_agent_manager.rs`:
 
     ```rust
     pub struct ChildAgentManager {
@@ -558,7 +642,7 @@ processing messages and tools while a child is active.
   `AgentLoop` creates `mpsc::channel::<FinishResult>()` at startup; passes `Sender`
   to `ChildAgentManager::new` and keeps `Receiver` in its own `select!` loop.
 
-- [ ] 45. Create `src/agent/tools/spawn_subagent.rs`. `SpawnSubagentArgs { task, briefing,
+- [ ] 58. Create `src/agent/tools/spawn_subagent.rs`. `SpawnSubagentArgs { task, briefing,
   agent_type }`. `needs_approval` returns `UserApprovalRequired` (or `AutoApproved`
   when `--auto-approve-spawn` is set). After approval, the agent loop calls
   `child_agent_manager.spawn(...)`. The tool returns `{ "status": "spawned", "run_id": "<uuid>" }`
@@ -566,12 +650,12 @@ processing messages and tools while a child is active.
   it is enqueued behind an active child. The child's `finish` result arrives later as a
   tool result message tied to this `spawn_subagent` call id (see step 47).
 
-- [ ] 46. Create `src/agent/tools/finish.rs`. `FinishArgs { status, result, error, sources }`.
+- [ ] 59. Create `src/agent/tools/finish.rs`. `FinishArgs { status, result, error, sources }`.
   `FinishTool::run` sends `FinishResult` via `finish_tx` and returns a success envelope.
   Child loop exits unconditionally on `ChildFinish` (exempt from iteration cap). Injected
   only into `Role::Child` registries.
 
-- [ ] 47. Update `AgentLoop` (`src/agent.rs`):
+- [ ] 60. Update `AgentLoop` (`src/agent.rs`):
   - Hold `child_agent_manager: Option<ChildAgentManager>` (present when
     `role = Root && agent_type.can_spawn`).
   - Add `finish_rx` arm to `tokio::select!`. On `FinishResult` received: inject the
@@ -596,31 +680,31 @@ processing messages and tools while a child is active.
   - Parent processes user messages and runs its own tools concurrently with the child;
     no suspension of the parent ReAct loop while a child is active.
 
-- [ ] 48. Write unit tests: `spawn` returns `Queued` when a child is already running; multiple
+- [ ] 61. Write unit tests: `spawn` returns `Queued` when a child is already running; multiple
   queued spawns are drained in FIFO order after each child finishes; `cancel_all` fires
   child token and empties the queue; `finish_rx` receives result when child calls `finish`;
   cancelled child writes `child_result` with `status: "cancelled"`;
   unstructured fallback when `finish` never called.
 
-- [ ] 49. Update `docs/features.md`: add child-agent delegation section.
+- [ ] 62. Update `docs/features.md`: add child-agent delegation section.
   Update `docs/configuration.md` with `can_spawn` key.
 
-- [ ] 50. Run `make test` + `make test-coverage`.
+- [ ] 63. Run `make test` + `make test-coverage`.
 
 ---
 
-### Phase 6.8 — Drill-in TUI Conversation Model
+### Phase 6.9 — Drill-in TUI Conversation Model
 
 **Goal:** Child conversation as a first-class full-screen view; spawn-bubble in parent
 chat; auto-switch only on child interactive pauses.
 
-- [ ] 51. Add `session_id` is already in `AgentLoop` after Phase 6.0 step 6. Add
+- [ ] 64. Add `session_id` is already in `AgentLoop` after Phase 6.0 step 6. Add
   `UiUpdate` variants emitted from `ChildAgentManager` via `subagent_ui_tx`:
   `ChildAgentStarted { run_id, agent_type, task }`,
   `ChildAgentToken(String)`,
   `ChildAgentDone { status, result }` in `src/agent.rs`.
 
-- [ ] 52. Define `ConversationView` in `src/app_state.rs`:
+- [ ] 65. Define `ConversationView` in `src/app_state.rs`:
 
     ```rust
     pub enum ConversationView {
@@ -634,7 +718,7 @@ chat; auto-switch only on child interactive pauses.
   - `child_messages: Vec<Message>`
   - `auto_switched_to_child: bool`
 
-- [ ] 53. Update `presenter.rs`:
+- [ ] 66. Update `presenter.rs`:
   - On `ChildAgentStarted`: create a spawn-bubble entry in `root_messages` (distinct
     style: magenta, shows task + "running…"); initialize `child_messages = vec![]`.
     **Do not change `active_view`** — user stays in parent view until they click or
@@ -652,7 +736,7 @@ chat; auto-switch only on child interactive pauses.
   - Child interactive pauses take precedence over any simultaneous parent pending tool:
     auto-switch to child; resume parent pending state after child resolves.
 
-- [ ] 54. Update `render.rs`:
+- [ ] 67. Update `render.rs`:
   - When `active_view == Child`: render `child_messages` in the main chat area.
     Add a **non-scrolling 1-row header**:
     `🔍 <agent_type>: "<task>" [← Back (Ctrl+B)]`.
@@ -665,24 +749,24 @@ chat; auto-switch only on child interactive pauses.
     - Child running (not paused): input disabled; show muted hint
       `"Waiting for child agent…"`. User input is not buffered.
 
-- [ ] 55. Add `Ctrl+B` keybinding for "back to parent" in `presenter.rs`. Document in
+- [ ] 68. Add `Ctrl+B` keybinding for "back to parent" in `presenter.rs`. Document in
   `docs/keybindings.md`.
 
-- [ ] 56. Write presenter unit tests: spawn does not auto-switch view; interactive child pause
+- [ ] 69. Write presenter unit tests: spawn does not auto-switch view; interactive child pause
   auto-switches; manual navigation prevents auto-return; back-to-parent keybinding works.
 
-- [ ] 57. Update `docs/features.md`: document drill-in model, spawn-bubble, back navigation,
+- [ ] 70. Update `docs/features.md`: document drill-in model, spawn-bubble, back navigation,
   auto-switch rules. Update `docs/keybindings.md`.
 
-- [ ] 58. Run `make test` + `make test-coverage`.
+- [ ] 71. Run `make test` + `make test-coverage`.
 
 ---
 
-### Phase 6.9 — Child-Agent Persistence
+### Phase 6.10 — Child-Agent Persistence
 
 **Goal:** Durable `child_start` / `child_result` records in the parent session file.
 
-- [ ] 59. Create `src/store.rs` (Phase 6 minimal subset; full JSONL session store is Phase 7).
+- [ ] 72. Create `src/store.rs` (Phase 6 minimal subset; full JSONL session store is Phase 7).
   Define:
 
     ```rust
@@ -707,42 +791,42 @@ chat; auto-switch only on child interactive pauses.
     {"type":"child_result","v":1,"id":"<run-uuid>","parent_session":"<uuid>","status":"...","result":"...","sources":[...],"completed_at":"..."}
     ```
 
-- [ ] 60. Pass a `Arc<Store>` into `AgentLoop`. Call `append_child_start` from
+- [ ] 73. Pass a `Arc<Store>` into `AgentLoop`. Call `append_child_start` from
   `ChildAgentManager::spawn` and `append_child_result` from the `finish_rx` handler.
   Persistence errors are logged (non-fatal); they must not crash the agent.
 
-- [ ] 61. Write unit tests using `tempfile::tempdir()`: correct JSON shapes; two sequential calls
+- [ ] 74. Write unit tests using `tempfile::tempdir()`: correct JSON shapes; two sequential calls
   produce two valid JSONL lines; single-writer correctness confirmed by re-parsing lines.
 
-- [ ] 62. Update `docs/features.md`: document persistence records.
+- [ ] 75. Update `docs/features.md`: document persistence records.
 
-- [ ] 63. Run `make test` + `make test-coverage`.
+- [ ] 76. Run `make test` + `make test-coverage`.
 
 ---
 
-### Phase 6.10 — Headless `--allow-child-agents`
+### Phase 6.11 — Headless `--allow-child-agents`
 
 **Goal:** Enable child spawning in headless mode with safety-flag inheritance.
 
-- [ ] 64. Add `--allow-child-agents` boolean CLI flag in `src/main.rs` (via `clap`, default
+- [ ] 77. Add `--allow-child-agents` boolean CLI flag in `src/main.rs` (via `clap`, default
   `false`). Add `--auto-approve-spawn` boolean flag (default `false`). Pass both through
   to `ConsoleApp` / `cli_driver`. When `--allow-child-agents` is `false`, `ChildAgentManager`
   is `None` in `AgentLoop`; `spawn_subagent` is absent from the active tool registry.
   When `--auto-approve-spawn` is `true`, `spawn_subagent::needs_approval` returns
   `AutoApproved`; children inherit this flag alongside `--auto-approve-write`.
 
-- [ ] 65. When `--allow-child-agents` is active in headless mode, emit to stderr:
+- [ ] 78. When `--allow-child-agents` is active in headless mode, emit to stderr:
   - `Spawned child agent '<type>' for task '<task>'\n` on spawn.
   - `Queued child agent '<type>' for task '<task>'\n` when enqueued.
   - `Child agent '<type>' completed: <status>\n` on finish.
   - Safety inheritance: child agents inherit parent `--auto-approve-write` and
     `--auto-approve-spawn` flags.
 
-- [ ] 66. Run `make test` + `make test-coverage`.
+- [ ] 79. Run `make test` + `make test-coverage`.
 
 ---
 
-### Phase 6.11 — Token-Efficient Tool Schemas
+### Phase 6.12 — Token-Efficient Tool Schemas
 
 **Goal:** Minimise the token cost of every tool description and argument schema sent to
 the LLM. Descriptions must convey the full API contract (what the tool does, every
@@ -759,40 +843,40 @@ Principles:
   imperative or declarative statements.
 - Remove all examples that duplicate information already in the type/constraint.
 - Cap total description length: aim for ≤120 tokens per tool, ≤30 tokens per argument.
-- [ ] 67. Audit every `fn description(&self) -> &str` implementation across all tools in
+- [ ] 80. Audit every `fn description(&self) -> &str` implementation across all tools in
   `src/agent/tools/` and `src/agent/tools.rs`. Rewrite each to be minimal: one-liner
   summary, followed only by what cannot be inferred from the JSON schema alone
   (e.g. side-effects, error conditions, non-obvious defaults). Remove prose entirely.
-- [ ] 68. Audit every `#[schemars(description = "...")]` and `///` doc-comment on
+- [ ] 81. Audit every `#[schemars(description = "...")]` and `///` doc-comment on
   `JsonSchema`-derived argument structs (`ReadFileArgs`, `WriteFileArgs`, `GlobArgs`,
   `BashArgs`, `SearchArgs`, `EditFileArgs`, `ClarifyArgs`, etc.). Rewrite to
   `"type — purpose; constraint"` format. Strip full sentences.
-- [ ] 69. Run `make lint` to confirm no compilation errors from description changes.
+- [ ] 82. Run `make lint` to confirm no compilation errors from description changes.
 
 ---
 
-### Phase 6.12 — Final Documentation
+### Phase 6.13 — Final Documentation
 
 **Goal:** Finalise all documentation for Phase 6; ensure every feature, flag, and
 ADR is recorded.
 
-- [ ] 70. Update `docs/features.md`: finalise all WIP notes from sub-phases; add
+- [ ] 83. Update `docs/features.md`: finalise all WIP notes from sub-phases; add
   `--allow-child-agents` documentation; verify every Phase 6 feature is described.
 
-- [ ] 71. Update `docs/configuration.md`: `--allow-child-agents` flag; `--auto-approve-spawn`
+- [ ] 84. Update `docs/configuration.md`: `--allow-child-agents` flag; `--auto-approve-spawn`
   flag; `can_spawn` agent-type key; `Sandbox` Phase 6 defaults (TOML config Phase 7).
 
-- [ ] 72. Run `rumdl fmt docs/features.md docs/keybindings.md docs/configuration.md
+- [ ] 85. Run `rumdl fmt docs/features.md docs/keybindings.md docs/configuration.md
   docs/plans/phase6-terminal-superpowers.md` and fix any findings.
 
-- [ ] 73. Run `make test` + `make test-coverage` — full suite must pass, all new modules ≥80%.
+- [ ] 86. Run `make test` + `make test-coverage` — full suite must pass, all new modules ≥80%.
 
 ## Implementation Hints
 
 - **Existing `ToolRegistry`:** `src/agent/tools.rs` — `register`, `filter`, `schemas`,
   `default_registry`. Phase 6.0 adds `sandbox: Arc<RwLock<Sandbox>>` parameter.
 - **Existing `Role` enum:** `src/agent.rs` lines ~445–458. `Role::Child` fields are stubs;
-  Phase 6.7 step 43 fills them in.
+  Phase 6.8 step 43 fills them in.
 - **`AgentFactory::create` test at line 147 of `src/agent_factory.rs`:** replaced in step 43.
 - **Existing tool timeout:** `DEFAULT_TOOL_TIMEOUT_SECS = 5` in `src/agent.rs`; define
   `DEFAULT_BASH_TIMEOUT_SECS: u64 = 30` alongside it.
@@ -838,7 +922,7 @@ ADR is recorded.
 - **`Store` concurrency:** `Mutex<HashMap<Uuid, BufWriter<File>>>` — one entry per session
   file; serialize all writes to the same file through the mutex.
 - **`session_id: Uuid`:** added to `AgentLoop` in Phase 6.0 step 6 (`Uuid::new_v4()` in
-  `new()`); used by `Store` in Phase 6.9.
+  `new()`); used by `Store` in Phase 6.10.
 - **Drill-in auto-switch rule:** TUI stays in parent view on child spawn; parent remains
   active (processes messages and tools concurrently with child); auto-switches to child
   view only when the child needs user input (approval / clarify); auto-returns to parent
@@ -846,7 +930,7 @@ ADR is recorded.
 - **`AgentCommand::AnswerClarify(String)`:** new variant; `ApproveTool` match arms unchanged.
 - **Coverage gate:** `make test-coverage` fails below 80% — run after each sub-phase.
 - **ADR directory:** `docs/architecture-design-records/` is currently empty. Record two
-  new ADRs in Phase 6.12: one for pure-Rust `search` (no external binary dependency),
+  new ADRs in Phase 6.13: one for pure-Rust `search` (no external binary dependency),
   one for `SandboxContext` design (last-match-wins, normalization without filesystem hit,
   Phase 6 hardcoded defaults). UX decisions (drill-in model, `Section` enum, `clarify`
   choices) do not warrant ADRs.
