@@ -507,11 +507,11 @@ Currently `append_assistant_lines`, `append_user_lines`, and `draw_clarify_banne
 call `textwrap::wrap` on raw text, producing no formatting. This phase replaces that with
 a lightweight Markdown-to-`ratatui` `Line` conversion.
 
-- [ ] 39. Add `tui-markdown` (or `pulldown-cmark` with a custom `ratatui` renderer) to
+- [x] 39. Add `tui-markdown` (or `pulldown-cmark` with a custom `ratatui` renderer) to
   `Cargo.toml`. Prefer a crate that emits `Vec<Line<'static>>` directly; avoid pulling in
   a full browser-side HTML pipeline. Evaluate `tui-markdown` v0.x before choosing.
 
-- [ ] 40. Create `src/markdown.rs`: a `render_markdown(text: &str, width: usize) ->
+- [x] 40. Create `src/markdown.rs`: a `render_markdown(text: &str, width: usize) ->
   Vec<Line<'static>>` function that converts Markdown to styled `ratatui` lines. Supported
   elements (minimum viable set):
   - Paragraphs with hard-wrapped lines at `width` columns.
@@ -526,28 +526,28 @@ a lightweight Markdown-to-`ratatui` `Line` conversion.
   - Horizontal rules: a line of `─` characters spanning `width`.
   - Anything else passes through as unstyled text (no crash, no data loss).
 
-- [ ] 41. Replace `textwrap::wrap` in `append_assistant_lines` and
+- [x] 41. Replace `textwrap::wrap` in `append_assistant_lines` and
   `append_streaming_lines` (`ui.rs`) with `render_markdown`. Keep the existing
   left-border bar (`▌`), background fill, and `interrupted` / dim styling — only the
   inner text spans change.
 
-- [ ] 42. Replace `textwrap::wrap` in `append_user_lines` (`ui.rs`) with
+- [x] 42. Replace `textwrap::wrap` in `append_user_lines` (`ui.rs`) with
   `render_markdown`. User messages often contain code snippets or lists pasted from
   terminals; rendering them formatted improves readability.
 
-- [ ] 43. Replace `textwrap::wrap` for `question` and `context` in
+- [x] 43. Replace `textwrap::wrap` for `question` and `context` in
   `draw_clarify_banner` (`ui.rs`) with `render_markdown`. Bold on question lines and
   dim on context lines are already applied via `patch_style` — keep those overrides.
 
-- [ ] 44. Unit-test `render_markdown` in `src/markdown.rs`: cover bold/italic, inline
+- [x] 44. Unit-test `render_markdown` in `src/markdown.rs`: cover bold/italic, inline
   code, fenced block, bullet list, numbered list, heading, blockquote, horizontal rule,
   and plain text (regression guard). Use `ANSI`-free assertions on span content and
   modifiers.
 
-- [ ] 45. Update `docs/features.md`: document Markdown rendering in chat bubbles and
+- [x] 45. Update `docs/features.md`: document Markdown rendering in chat bubbles and
   clarify banner.
 
-- [ ] 46. Run `make test` + `make test-coverage`.
+- [x] 46. Run `make test` + `make test-coverage`.
 
 ---
 

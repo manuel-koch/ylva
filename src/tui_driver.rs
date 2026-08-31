@@ -321,10 +321,12 @@ async fn execute_effects(
                 }
             }
             Effect::FinalizeInputSelection => {
-                textarea.copy();
-                let yanked = textarea.yank_text();
-                if !yanked.is_empty() && clipboard.write_text(yanked) {
-                    state.set_toast("Copied to clipboard");
+                if mouse_drag.moved {
+                    textarea.copy();
+                    let yanked = textarea.yank_text();
+                    if !yanked.is_empty() && clipboard.write_text(yanked) {
+                        state.set_toast("Copied to clipboard");
+                    }
                 }
                 *mouse_drag = MouseDrag::default();
             }

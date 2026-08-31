@@ -23,127 +23,13 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 use ratatui::Frame;
 use ratatui_textarea::TextArea;
-use std::cell::RefCell;
-use std::collections::HashMap;
 
-use syntect::easy::HighlightLines;
-use syntect::highlighting::{Style as SyntectStyle, Theme, ThemeSet};
-use syntect::parsing::SyntaxSet;
-
-/// Lazily initialised default syntax set — loaded once, reused every frame.
-static SYNTAX_SET: std::sync::OnceLock<SyntaxSet> = std::sync::OnceLock::new();
-/// Lazily initialised default theme set — loaded once, reused every frame.
-static THEME_SET: std::sync::OnceLock<ThemeSet> = std::sync::OnceLock::new();
-
-fn syntax_set() -> &'static SyntaxSet {
-    SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines)
-}
-
-fn highlight_theme() -> &'static Theme {
-    let theme_set = THEME_SET.get_or_init(ThemeSet::load_defaults);
-    &theme_set.themes["base16-ocean.dark"]
-}
-
-/// Pre-computed highlighted lines keyed by a hash of `(content, file_extension)`.
-/// No invalidation needed — the hash is the identity.
-type HighlightedLine = Vec<(SyntectStyle, String)>;
-type HighlightedLines = Vec<HighlightedLine>;
-type HighlightCacheMap = HashMap<u64, HighlightedLines>;
-
-/// Splits a single highlighted line's token-spans into multiple visual rows,
-/// each at most `available_width` characters wide.  Splitting occurs at
-/// character boundaries within tokens (code content), not at word boundaries.
-fn wrap_highlighted_line(spans: HighlightedLine, available_width: usize) -> Vec<HighlightedLine> {
-    if available_width == 0 {
-        return vec![spans];
-    }
-    let mut rows: Vec<HighlightedLine> = Vec::new();
-    let mut current_row: HighlightedLine = Vec::new();
-    let mut current_width: usize = 0;
-
-    for (style, token) in spans {
-        let mut remaining: &str = &token;
-        while !remaining.is_empty() {
-            let available = available_width.saturating_sub(current_width);
-            let token_chars = remaining.chars().count();
-            if token_chars <= available {
-                current_row.push((style, remaining.to_string()));
-                current_width += token_chars;
-                remaining = "";
-            } else {
-                // Split: take only `available` chars into the current row.
-                let split_byte = remaining
-                    .char_indices()
-                    .nth(available)
-                    .map(|(byte_idx, _)| byte_idx)
-                    .unwrap_or(remaining.len());
-                let (head, tail) = remaining.split_at(split_byte);
-                if !head.is_empty() {
-                    current_row.push((style, head.to_string()));
-                }
-                rows.push(std::mem::take(&mut current_row));
-                current_width = 0;
-                remaining = tail;
-            }
-        }
-    }
-
-    if !current_row.is_empty() {
-        rows.push(current_row);
-    }
-    if rows.is_empty() {
-        rows.push(Vec::new());
-    }
-    rows
-}
-
-thread_local! {
-    static HIGHLIGHT_CACHE: RefCell<HighlightCacheMap> = RefCell::new(HashMap::new());
-}
-
-fn highlight_cache_key(content: &str, file_extension: Option<&str>) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    content.hash(&mut hasher);
-    file_extension.hash(&mut hasher);
-    hasher.finish()
-}
-
-/// Returns highlighted lines for `content`, using a content-addressed cache so
-/// syntect is not re-run on every render frame.
-fn highlighted_lines_cached(content: &str, file_extension: Option<&str>) -> HighlightedLines {
-    let key = highlight_cache_key(content, file_extension);
-    HIGHLIGHT_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        if let Some(lines) = cache.get(&key) {
-            return lines.clone();
-        }
-        let ss = syntax_set();
-        let theme = highlight_theme();
-        let syntax = file_extension
-            .and_then(|ext| ss.find_syntax_by_extension(ext))
-            .or_else(|| ss.find_syntax_by_first_line(content))
-            .unwrap_or_else(|| ss.find_syntax_plain_text());
-        let mut highlighter = HighlightLines::new(syntax, theme);
-        let lines: HighlightedLines = content
-            .lines()
-            .map(|line| {
-                highlighter
-                    .highlight_line(line, ss)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|(style, token)| (style, token.to_string()))
-                    .collect()
-            })
-            .collect();
-        cache.insert(key, lines.clone());
-        lines
-    })
-}
+use crate::highlight::{highlighted_lines_cached, syntect_token_to_span, wrap_highlighted_line};
 
 use crate::agent::AgentMode;
 use crate::app_state::{BannerDragSelection, ChatEntry, ToolCallState, TuiState, UserMessageState};
 use crate::build_info::BUILD_INFO;
+use crate::markdown::render_markdown;
 
 // User message border colors — extract into Theme struct in a later phase.
 const USER_MESSAGE_BORDER_COLOR: Color = Color::Green;
@@ -189,6 +75,12 @@ const TOAST_FG_COLOR: Color = Color::White;
 
 /// Braille spinner animation frames, cycled while the agent is busy.
 const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// Question-mark animation frames, cycled while waiting for clarify input.
+/// Each symbol is repeated so it holds for ~400 ms at a 60 ms tick rate.
+const CLARIFY_FRAMES: &[char] = &[
+    '?', '?', '?', '?', '?', '?', '?', '¿', '¿', '¿', '¿', '¿', '¿', '¿',
+];
 
 /// ASCII-art "Ylva" wordmark shown while the conversation is empty so the
 /// initial frame is never blank. Each line must be the same width.
@@ -252,10 +144,14 @@ pub fn draw(
         .as_ref()
         .map(|(question, choices, context)| {
             let context_rows = context.as_deref().map_or(0, |ctx| {
-                textwrap::wrap(ctx, area.width as usize).len() as u16
+                render_markdown(ctx, area.width as usize).len() as u16
             });
-            let question_rows = textwrap::wrap(question, area.width as usize).len().max(1) as u16;
-            context_rows + question_rows + choices.as_ref().map_or(0, Vec::len) as u16
+            let context_spacer = u16::from(context.is_some());
+            let question_rows = render_markdown(question, area.width as usize).len().max(1) as u16;
+            context_rows
+                + context_spacer
+                + question_rows
+                + choices.as_ref().map_or(0, Vec::len) as u16
         })
         .unwrap_or(0);
     // Cap the visible height so the banner never consumes more than 40 % of
@@ -577,11 +473,16 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
                 );
             }
             ChatEntry::ErrorLine { message } => {
-                for wrapped in textwrap::wrap(message, wrap_width) {
-                    lines.push(Line::styled(
-                        wrapped.into_owned(),
-                        Style::default().fg(Color::Red),
-                    ));
+                for (index, wrapped) in textwrap::wrap(message, wrap_width.saturating_sub(6).max(1))
+                    .into_iter()
+                    .enumerate()
+                {
+                    let display = if index == 0 {
+                        format!("  ⚠️  {}", wrapped)
+                    } else {
+                        format!("      {}", wrapped)
+                    };
+                    lines.push(Line::styled(display, Style::default().fg(Color::Red)));
                 }
             }
         }
@@ -648,8 +549,12 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
     let mut chrome_widths: Vec<usize> = Vec::with_capacity(lines.len());
     for line in &lines {
         let raw: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        // A bubble line always starts with `▌`; the chrome is `▌  ` (3 chars).
-        let chrome = if raw.starts_with('▌') {
+        // Body content lines are `▌  ` (bar + margin = 3 chars) followed by a
+        // 2-char structural gutter `  `, making 5 chars of chrome before real
+        // content. Title and separator lines have only the 3-char `▌  ` prefix.
+        let chrome = if raw.starts_with("▌    ") {
+            5.min(raw.chars().count())
+        } else if raw.starts_with('▌') {
             3.min(raw.chars().count())
         } else {
             0
@@ -912,6 +817,91 @@ fn append_logo(lines: &mut Vec<Line>) {
     lines.push(Line::default());
 }
 
+/// Common visual scaffolding shared by every chat "bubble" renderer
+/// (assistant, user, streaming-assistant, and tool bubbles): a colored
+/// left-border bar, a 2-space margin between the bar and content, and a
+/// background style so each row's background fills to the right edge of the
+/// content area via [`BubbleStyle::trailing_pad`].
+struct BubbleStyle {
+    bar: Span<'static>,
+    margin: Span<'static>,
+    row_bg: Style,
+    row_width: usize,
+}
+
+impl BubbleStyle {
+    fn new(border_color: Color, bg_color: Color, row_width: usize) -> Self {
+        Self {
+            bar: Span::styled("▌", Style::default().fg(border_color).bg(bg_color)),
+            margin: Span::styled("  ", Style::default().bg(bg_color)),
+            row_bg: Style::default().bg(bg_color),
+            row_width,
+        }
+    }
+
+    /// Fills the cells after the last content span so the row's background
+    /// reaches the right edge of the content area. `text_len` is the
+    /// visible character count already written after the bar(1) +
+    /// margin(2) = 3 prefix columns.
+    fn trailing_pad(&self, text_len: usize) -> Span<'static> {
+        let used = 3 + text_len;
+        let pad = self.row_width.saturating_sub(used + 1);
+        Span::styled(" ".repeat(pad + 1), self.row_bg)
+    }
+
+    /// Pushes a blank bar-only row, used for the 1-char top/bottom padding
+    /// that separates a bubble from neighboring entries. `extra_style` is
+    /// patched the same way as [`BubbleStyle::content_line`] so padding rows
+    /// stay visually consistent with the bubble's content rows (e.g. both
+    /// dimmed for a queued/cancelled message).
+    fn push_padding_line(&self, lines: &mut Vec<Line<'static>>, extra_style: Style) {
+        lines.push(
+            Line::from(vec![
+                self.bar.clone(),
+                self.margin.clone(),
+                self.trailing_pad(0),
+            ])
+            .patch_style(extra_style)
+            .patch_style(self.row_bg),
+        );
+    }
+
+    /// Assembles one content row: bar + margin + `spans` + trailing pad.
+    /// `extra_style` is patched onto the assembled line before `row_bg`, so
+    /// it can override foreground/modifiers (e.g. dim for queued/cancelled
+    /// messages) while `row_bg` still fills in the background — mirroring
+    /// how `render_markdown`'s inline styling (bold, inline code, ...) is
+    /// preserved through `patch_style`, since `row_bg` only sets `bg`.
+    fn content_line(&self, spans: Vec<Span<'static>>, extra_style: Style) -> Line<'static> {
+        let line_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let mut full_spans = vec![self.bar.clone(), self.margin.clone()];
+        full_spans.extend(spans);
+        full_spans.push(self.trailing_pad(line_len));
+        Line::from(full_spans)
+            .patch_style(extra_style)
+            .patch_style(self.row_bg)
+    }
+
+    /// Renders `text` as Markdown wrapped to `width`, pushing one
+    /// [`BubbleStyle::content_line`] per resulting line with `extra_style`
+    /// applied to each.
+    fn push_markdown_lines(
+        &self,
+        lines: &mut Vec<Line<'static>>,
+        text: &str,
+        width: usize,
+        extra_style: Style,
+    ) {
+        let mut wrapped = render_markdown(text, width);
+        if wrapped.is_empty() {
+            wrapped.push(Line::from(""));
+        }
+        for md_line in wrapped {
+            lines.push(self.content_line(md_line.spans, extra_style));
+        }
+    }
+}
+
 /// Render a user message as wrapped lines with a colored left bar and soft
 /// background: a 1-char top/bottom pad and a 2-char margin between the bar
 /// and the text. Cancelled messages get a dimmed "Not sent." line.
@@ -920,7 +910,7 @@ fn append_logo(lines: &mut Vec<Line>) {
 /// Render a committed assistant message as a blue-bordered bubble.
 /// Interrupted messages use a `DarkGray` border and append a "…" suffix.
 fn append_assistant_lines(
-    lines: &mut Vec<Line>,
+    lines: &mut Vec<Line<'static>>,
     text: &str,
     interrupted: bool,
     width: usize,
@@ -931,146 +921,68 @@ fn append_assistant_lines(
     } else {
         ASSISTANT_STREAM_BORDER_COLOR
     };
-    let bar = Span::styled(
-        "▌",
-        Style::default()
-            .fg(border_color)
-            .bg(ASSISTANT_STREAM_BG_COLOR),
-    );
-    let margin = Span::styled("  ", Style::default().bg(ASSISTANT_STREAM_BG_COLOR));
+    let style = BubbleStyle::new(border_color, ASSISTANT_STREAM_BG_COLOR, row_width);
     let text_style = if interrupted {
-        Style::default()
-            .fg(Color::DarkGray)
-            .bg(ASSISTANT_STREAM_BG_COLOR)
+        Style::default().fg(Color::DarkGray)
     } else {
-        Style::default().bg(ASSISTANT_STREAM_BG_COLOR)
-    };
-    let row_bg = Style::default().bg(ASSISTANT_STREAM_BG_COLOR);
-    let trailing_pad = |text_len: usize| -> Span<'static> {
-        let used = 3 + text_len;
-        let pad = row_width.saturating_sub(used + 1);
-        Span::styled(
-            " ".repeat(pad + 1),
-            Style::default().bg(ASSISTANT_STREAM_BG_COLOR),
-        )
+        Style::default()
     };
 
-    lines.push(Line::from(vec![bar.clone(), margin.clone(), trailing_pad(0)]).patch_style(row_bg));
-
-    let mut wrapped = textwrap::wrap(text, width);
-    if wrapped.is_empty() {
-        wrapped.push(std::borrow::Cow::Borrowed(""));
-    }
-    for line in wrapped.into_iter() {
-        let line_str = line.into_owned();
-        let line_len = line_str.chars().count();
-        let content = Span::styled(line_str, text_style);
-        lines.push(
-            Line::from(vec![
-                bar.clone(),
-                margin.clone(),
-                content,
-                trailing_pad(line_len),
-            ])
-            .patch_style(row_bg),
-        );
-    }
+    style.push_padding_line(lines, Style::default());
+    style.push_markdown_lines(lines, text, width, text_style);
     if interrupted {
         let ellipsis = "…";
-        lines.push(
-            Line::from(vec![
-                bar.clone(),
-                margin.clone(),
-                Span::styled(
-                    ellipsis,
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .bg(ASSISTANT_STREAM_BG_COLOR),
-                ),
-                trailing_pad(ellipsis.len()),
-            ])
-            .patch_style(row_bg),
-        );
+        lines.push(style.content_line(
+            vec![Span::styled(ellipsis, Style::default().fg(Color::DarkGray))],
+            Style::default(),
+        ));
     }
-
-    lines.push(Line::from(vec![bar, margin, trailing_pad(0)]).patch_style(row_bg));
+    style.push_padding_line(lines, Style::default());
 }
 
 /// `row_width` is the full content-area column count; every row is padded with
 /// Render in-progress assistant text as a blue-bordered bubble with a blinking
 /// cursor on the last line. Mirrors the layout of `append_user_lines`.
-fn append_streaming_lines(lines: &mut Vec<Line>, text: &str, width: usize, row_width: usize) {
-    let bar = Span::styled(
-        "▌",
-        Style::default()
-            .fg(ASSISTANT_STREAM_BORDER_COLOR)
-            .bg(ASSISTANT_STREAM_BG_COLOR),
+fn append_streaming_lines(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    width: usize,
+    row_width: usize,
+) {
+    let style = BubbleStyle::new(
+        ASSISTANT_STREAM_BORDER_COLOR,
+        ASSISTANT_STREAM_BG_COLOR,
+        row_width,
     );
-    let margin = Span::styled("  ", Style::default().bg(ASSISTANT_STREAM_BG_COLOR));
-    let text_style = Style::default().bg(ASSISTANT_STREAM_BG_COLOR);
-    let row_bg = Style::default().bg(ASSISTANT_STREAM_BG_COLOR);
-    let trailing_pad = |text_len: usize| -> Span<'static> {
-        let used = 3 + text_len;
-        let pad = row_width.saturating_sub(used + 1);
-        Span::styled(
-            " ".repeat(pad + 1),
-            Style::default().bg(ASSISTANT_STREAM_BG_COLOR),
-        )
-    };
 
-    // Top padding.
-    lines.push(Line::from(vec![bar.clone(), margin.clone(), trailing_pad(0)]).patch_style(row_bg));
+    style.push_padding_line(lines, Style::default());
 
-    let mut wrapped = textwrap::wrap(text, width);
+    let mut wrapped = render_markdown(text, width);
     if wrapped.is_empty() {
-        wrapped.push(std::borrow::Cow::Borrowed(""));
+        wrapped.push(Line::from(""));
     }
     let last_index = wrapped.len().saturating_sub(1);
-    for (i, line) in wrapped.into_iter().enumerate() {
-        let line_str = line.into_owned();
-        let line_len = line_str.chars().count();
-        let content = Span::styled(line_str, text_style);
+    for (i, md_line) in wrapped.into_iter().enumerate() {
+        let mut spans = md_line.spans;
         if i == last_index {
             // Append blinking cursor on the last content line.
-            let cursor = Span::styled(
+            spans.push(Span::styled(
                 "▊",
                 Style::default()
                     .fg(ASSISTANT_STREAM_BORDER_COLOR)
-                    .bg(ASSISTANT_STREAM_BG_COLOR)
                     .add_modifier(Modifier::BOLD),
-            );
-            let cursor_len = 1;
-            lines.push(
-                Line::from(vec![
-                    bar.clone(),
-                    margin.clone(),
-                    content,
-                    cursor,
-                    trailing_pad(line_len + cursor_len),
-                ])
-                .patch_style(row_bg),
-            );
-        } else {
-            lines.push(
-                Line::from(vec![
-                    bar.clone(),
-                    margin.clone(),
-                    content,
-                    trailing_pad(line_len),
-                ])
-                .patch_style(row_bg),
-            );
+            ));
         }
+        lines.push(style.content_line(spans, Style::default()));
     }
 
-    // Bottom padding.
-    lines.push(Line::from(vec![bar, margin, trailing_pad(0)]).patch_style(row_bg));
+    style.push_padding_line(lines, Style::default());
 }
 
 /// trailing spaces to that width so the `USER_MESSAGE_BG_COLOR` background
 /// fills the entire terminal row — not just the cells that contain characters.
 fn append_user_lines(
-    lines: &mut Vec<Line>,
+    lines: &mut Vec<Line<'static>>,
     text: &str,
     state: UserMessageState,
     width: usize,
@@ -1082,74 +994,30 @@ fn append_user_lines(
         UserMessageState::Steered => (USER_MESSAGE_STEERED_BORDER_COLOR, false),
         UserMessageState::Cancelled => (USER_MESSAGE_CANCELLED_BORDER_COLOR, true),
     };
-    let bar = Span::styled(
-        "▌",
-        Style::default().fg(border_color).bg(USER_MESSAGE_BG_COLOR),
-    );
-    // 2-char margin between the left border and the content.
-    let margin = Span::styled("  ", Style::default().bg(USER_MESSAGE_BG_COLOR));
+    let style = BubbleStyle::new(border_color, USER_MESSAGE_BG_COLOR, row_width);
     let text_style = if dim {
-        Style::default()
-            .bg(USER_MESSAGE_BG_COLOR)
-            .add_modifier(Modifier::DIM)
+        Style::default().add_modifier(Modifier::DIM)
     } else {
-        Style::default().bg(USER_MESSAGE_BG_COLOR)
-    };
-    // Line-level background fills the rest of the row after the spans.
-    let row_bg = Style::default().bg(USER_MESSAGE_BG_COLOR);
-    // Trailing pad fills cells after the last span so the background reaches
-    // the right edge of the content area. bar(1) + margin(2) = 3 prefix cols.
-    let trailing_pad = |text_len: usize| -> Span<'static> {
-        let used = 3 + text_len;
-        let pad = row_width.saturating_sub(used + 1);
-        Span::styled(
-            " ".repeat(pad + 1),
-            Style::default().bg(USER_MESSAGE_BG_COLOR),
-        )
+        Style::default()
     };
 
     // 1-char top padding keeps the bubble from crowding the entry above.
-    lines.push(Line::from(vec![bar.clone(), margin.clone(), trailing_pad(0)]).patch_style(row_bg));
+    style.push_padding_line(lines, text_style);
 
-    let mut wrapped = textwrap::wrap(text, width);
-    if wrapped.is_empty() {
-        wrapped.push(std::borrow::Cow::Borrowed(""));
-    }
-    for line in wrapped.into_iter() {
-        let line_str = line.into_owned();
-        let line_len = line_str.chars().count();
-        let content = Span::styled(line_str, text_style);
-        lines.push(
-            Line::from(vec![
-                bar.clone(),
-                margin.clone(),
-                content,
-                trailing_pad(line_len),
-            ])
-            .patch_style(row_bg),
-        );
-    }
+    style.push_markdown_lines(lines, text, width, text_style);
+
     if state == UserMessageState::Cancelled {
         let label = "Not sent.";
-        let label_len = label.len();
-        lines.push(
-            Line::from(vec![
-                bar.clone(),
-                margin.clone(),
-                Span::styled(
-                    label,
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .bg(USER_MESSAGE_BG_COLOR)
-                        .add_modifier(Modifier::DIM),
-                ),
-                trailing_pad(label_len),
-            ])
-            .patch_style(row_bg),
-        );
+        lines.push(style.content_line(
+            vec![Span::styled(
+                label,
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+            )],
+            Style::default(),
+        ));
     }
     // 1-char bottom padding separates the bubble from the entry below.
-    lines.push(Line::from(vec![bar, margin, trailing_pad(0)]).patch_style(row_bg));
+    style.push_padding_line(lines, text_style);
 }
 
 /// Per-bubble inputs for [`append_tool_bubble_lines`].
@@ -1173,8 +1041,62 @@ fn result_section_title(tool_name: &str, section_id: &str) -> Option<String> {
     }
 }
 
+/// Renders a tool's result-section `content` (e.g. a clarify tool's
+/// `USER_ANSWER` result) as Markdown, optionally prefixed on the first line
+/// with an underlined `title` label and indented on continuation lines to
+/// align under the label. Mirrors the layout other bubble content uses via
+/// [`render_markdown`] so inline styling (bold, inline code, ...) in the
+/// result is preserved.
+fn append_result_section_lines(
+    lines: &mut Vec<Line<'static>>,
+    style: &BubbleStyle,
+    title: Option<&str>,
+    content: &str,
+    wrap_width: usize,
+) {
+    let prefix = title.map(|t| format!("{t} ")).unwrap_or_default();
+    let content_wrap_width = wrap_width.saturating_sub(2 + prefix.chars().count()).max(1);
+    // DIM is patched onto each span individually (not passed as `content_line`'s
+    // line-level `extra_style`) so it only dims the label/content text —
+    // patching it at the line level would also dim the bubble's left-border
+    // bar, since unset modifiers are unioned in, not overridden, when a span
+    // has no modifier of its own.
+    let dim = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::DIM);
+    let mut md_lines = render_markdown(content, content_wrap_width);
+    if md_lines.is_empty() {
+        md_lines.push(Line::from(""));
+    }
+    let mut first = true;
+    for md_line in md_lines {
+        // Extra indent block matching the standard bar+margin, so the
+        // label/content aligns one level deeper than ordinary bubble text.
+        let mut spans: Vec<Span<'static>> = vec![Span::styled("  ", dim)];
+        if first && !prefix.is_empty() {
+            let label = title.unwrap_or_default().to_string();
+            spans.push(Span::styled(label, dim.add_modifier(Modifier::UNDERLINED)));
+            spans.push(Span::styled(" ", dim));
+        } else if !prefix.is_empty() {
+            spans.push(Span::styled(" ".repeat(prefix.chars().count()), dim));
+        }
+        // `dim` is the base (fg White + DIM, matching other section titles
+        // like "Context:"/"Choices:"); each markdown span's own style (e.g.
+        // inline-code color, bold) patches on top so per-span styling still
+        // overrides the White fallback, while DIM always applies.
+        spans.extend(
+            md_line
+                .spans
+                .into_iter()
+                .map(|span| Span::styled(span.content, dim.patch(span.style))),
+        );
+        lines.push(style.content_line(spans, Style::default()));
+        first = false;
+    }
+}
+
 fn append_tool_bubble_lines(
-    lines: &mut Vec<Line>,
+    lines: &mut Vec<Line<'static>>,
     bubble: ToolBubbleArgs<'_>,
     bubble_title_rows: &mut Vec<(usize, usize, uuid::Uuid)>,
     wrap_width: usize,
@@ -1187,22 +1109,11 @@ fn append_tool_bubble_lines(
         collapsed,
         spinner_frame,
     } = bubble;
-    let bar = Span::styled(
-        "▌",
-        Style::default()
-            .fg(TOOL_BUBBLE_BORDER_COLOR)
-            .bg(TOOL_BUBBLE_BG_COLOR),
-    );
-    let margin = Span::styled("  ", Style::default().bg(TOOL_BUBBLE_BG_COLOR));
-    let row_bg = Style::default().bg(TOOL_BUBBLE_BG_COLOR);
-    let trailing_pad = |text_len: usize| -> Span<'static> {
-        let used = 3 + text_len;
-        let pad = row_width.saturating_sub(used + 1);
-        Span::styled(
-            " ".repeat(pad + 1),
-            Style::default().bg(TOOL_BUBBLE_BG_COLOR),
-        )
-    };
+    let style = BubbleStyle::new(TOOL_BUBBLE_BORDER_COLOR, TOOL_BUBBLE_BG_COLOR, row_width);
+    let bar = style.bar.clone();
+    let margin = style.margin.clone();
+    let row_bg = style.row_bg;
+    let trailing_pad = |text_len: usize| -> Span<'static> { style.trailing_pad(text_len) };
 
     // Format arguments for the title:
     // - primary arg (schema rank 0): value only, rendered in bold.
@@ -1626,18 +1537,20 @@ fn append_tool_bubble_lines(
                         // Label header (only when multiple sections).
                         if show_labels {
                             if let Some(label) = &content_section.label {
-                                let label_str = format!("  {label}:");
-                                let label_len = label_str.chars().count();
+                                let label_str = format!("{label}:");
+                                let label_len = 2 + label_str.chars().count();
+                                let dim_style = Style::default()
+                                    .fg(Color::White)
+                                    .bg(TOOL_BUBBLE_BG_COLOR)
+                                    .add_modifier(Modifier::DIM);
                                 lines.push(
                                     Line::from(vec![
                                         bar.clone(),
                                         margin.clone(),
+                                        Span::styled("  ", dim_style),
                                         Span::styled(
                                             label_str,
-                                            Style::default()
-                                                .fg(Color::White)
-                                                .bg(TOOL_BUBBLE_BG_COLOR)
-                                                .add_modifier(Modifier::DIM),
+                                            dim_style.add_modifier(Modifier::UNDERLINED),
                                         ),
                                         trailing_pad(label_len),
                                     ])
@@ -1707,14 +1620,10 @@ fn append_tool_bubble_lines(
                                 let content_text_len: usize =
                                     row_spans.iter().map(|(_, t)| t.chars().count()).sum();
                                 for (style, token) in row_spans {
-                                    let fg = Color::Rgb(
-                                        style.foreground.r,
-                                        style.foreground.g,
-                                        style.foreground.b,
-                                    );
-                                    spans.push(Span::styled(
+                                    spans.push(syntect_token_to_span(
+                                        style,
                                         token,
-                                        Style::default().fg(fg).bg(TOOL_BUBBLE_BG_COLOR),
+                                        TOOL_BUBBLE_BG_COLOR,
                                     ));
                                 }
 
@@ -1727,18 +1636,20 @@ fn append_tool_bubble_lines(
                         // Label header (only when multiple sections).
                         if show_labels {
                             if let Some(label) = &diff_section.label {
-                                let label_str = format!("  {label}:");
-                                let label_len = label_str.chars().count();
+                                let label_str = format!("{label}:");
+                                let label_len = 2 + label_str.chars().count();
+                                let dim_style = Style::default()
+                                    .fg(Color::White)
+                                    .bg(TOOL_BUBBLE_BG_COLOR)
+                                    .add_modifier(Modifier::DIM);
                                 lines.push(
                                     Line::from(vec![
                                         bar.clone(),
                                         margin.clone(),
+                                        Span::styled("  ", dim_style),
                                         Span::styled(
                                             label_str,
-                                            Style::default()
-                                                .fg(Color::White)
-                                                .bg(TOOL_BUBBLE_BG_COLOR)
-                                                .add_modifier(Modifier::DIM),
+                                            dim_style.add_modifier(Modifier::UNDERLINED),
                                         ),
                                         trailing_pad(label_len),
                                     ])
@@ -1973,42 +1884,14 @@ fn append_tool_bubble_lines(
             if let ToolCallState::Done { result_section, .. } = state {
                 if let Some(title) = result_section_title(name, &result_section.id) {
                     if !result_section.content.is_empty() {
-                        lines.push(
-                            Line::from(vec![bar.clone(), margin.clone(), trailing_pad(0)])
-                                .patch_style(row_bg),
+                        style.push_padding_line(lines, Style::default());
+                        append_result_section_lines(
+                            lines,
+                            &style,
+                            Some(&title),
+                            &result_section.content,
+                            wrap_width,
                         );
-                        let prefix = format!("{title} ");
-                        let answer_wrap_width =
-                            wrap_width.saturating_sub(2 + prefix.chars().count()).max(1);
-                        let mut first = true;
-                        for wrapped_line in
-                            textwrap::wrap(&result_section.content, answer_wrap_width)
-                        {
-                            let line_str = wrapped_line.into_owned();
-                            let display = if first {
-                                format!("{prefix}{line_str}")
-                            } else {
-                                format!("{}{line_str}", " ".repeat(prefix.chars().count()))
-                            };
-                            first = false;
-                            let line_len = 2 + display.chars().count();
-                            lines.push(
-                                Line::from(vec![
-                                    bar.clone(),
-                                    margin.clone(),
-                                    Span::styled("  ", Style::default().bg(TOOL_BUBBLE_BG_COLOR)),
-                                    Span::styled(
-                                        display,
-                                        Style::default()
-                                            .fg(Color::White)
-                                            .bg(TOOL_BUBBLE_BG_COLOR)
-                                            .add_modifier(Modifier::DIM),
-                                    ),
-                                    trailing_pad(line_len),
-                                ])
-                                .patch_style(row_bg),
-                            );
-                        }
                     }
                 }
             }
@@ -2017,39 +1900,13 @@ fn append_tool_bubble_lines(
             // for this (tool, section-id) pair, or as plain text otherwise.
             if !result_section.content.is_empty() {
                 let title = result_section_title(name, &result_section.id);
-                let prefix = title
-                    .as_deref()
-                    .map(|t| format!("{t} "))
-                    .unwrap_or_default();
-                let answer_wrap_width =
-                    wrap_width.saturating_sub(2 + prefix.chars().count()).max(1);
-                let mut first = true;
-                for wrapped_line in textwrap::wrap(&result_section.content, answer_wrap_width) {
-                    let line_str = wrapped_line.into_owned();
-                    let display = if first {
-                        format!("{prefix}{line_str}")
-                    } else {
-                        format!("{}{line_str}", " ".repeat(prefix.chars().count()))
-                    };
-                    first = false;
-                    let line_len = 2 + display.chars().count();
-                    lines.push(
-                        Line::from(vec![
-                            bar.clone(),
-                            margin.clone(),
-                            Span::styled("  ", Style::default().bg(TOOL_BUBBLE_BG_COLOR)),
-                            Span::styled(
-                                display,
-                                Style::default()
-                                    .fg(Color::White)
-                                    .bg(TOOL_BUBBLE_BG_COLOR)
-                                    .add_modifier(Modifier::DIM),
-                            ),
-                            trailing_pad(line_len),
-                        ])
-                        .patch_style(row_bg),
-                    );
-                }
+                append_result_section_lines(
+                    lines,
+                    &style,
+                    title.as_deref(),
+                    &result_section.content,
+                    wrap_width,
+                );
             }
         }
     }
@@ -2104,7 +1961,10 @@ fn draw_normal_footer(
         AgentMode::ClarifyPending => "Waiting for answer…",
         AgentMode::Aborting => "Aborting…",
     };
-    let spinner_prefix = if state.agent_mode != AgentMode::Idle {
+    let spinner_prefix = if state.agent_mode == AgentMode::ClarifyPending {
+        let index = state.spinner_frame as usize % CLARIFY_FRAMES.len();
+        format!("{} ", CLARIFY_FRAMES[index])
+    } else if state.agent_mode != AgentMode::Idle {
         let index = state.spinner_frame as usize % SPINNER_FRAMES.len();
         format!("{} ", SPINNER_FRAMES[index])
     } else {
@@ -2131,7 +1991,7 @@ fn draw_normal_footer(
         } else {
             format!("{queued_count} steers queued")
         };
-        format!(" {spinner_prefix}{mode_word}  ⋮ {steer_label}")
+        format!(" {spinner_prefix}{mode_word} ⋮ {steer_label}")
     } else {
         format!(" {spinner_prefix}{mode_word}")
     };
@@ -2186,26 +2046,24 @@ fn draw_clarify_banner(frame: &mut Frame, area: Rect, params: ClarifyBannerParam
 
     // Context block (dim) — rendered before the question when present.
     if let Some(ctx) = context {
-        for chunk in textwrap::wrap(ctx, wrap_width) {
+        for md_line in render_markdown(ctx, wrap_width) {
             let abs_row = abs_row_for(content_row);
-            let line = banner_line_with_selection(chunk.into_owned(), abs_row, area.x, drag, false)
-                .patch_style(Style::default().add_modifier(Modifier::DIM));
+            let line = banner_markdown_line_with_selection(md_line, abs_row, area.x, drag, false);
             lines.push(line);
             content_row += 1;
         }
+        // Spacer between context and question.
+        lines.push(Line::default());
+        content_row += 1;
     }
 
     // Question lines (bold).
-    let question_wrapped = textwrap::wrap(question, wrap_width);
+    let question_wrapped = render_markdown(question, wrap_width);
     let question_is_empty = question_wrapped.is_empty();
-    for chunk in question_wrapped {
+    for md_line in question_wrapped {
         let abs_row = abs_row_for(content_row);
-        lines.push(banner_line_with_selection(
-            chunk.into_owned(),
-            abs_row,
-            area.x,
-            drag,
-            true,
+        lines.push(banner_markdown_line_with_selection(
+            md_line, abs_row, area.x, drag, true,
         ));
         content_row += 1;
     }
@@ -2226,7 +2084,7 @@ fn draw_clarify_banner(frame: &mut Frame, area: Rect, params: ClarifyBannerParam
     if let Some(choices) = choices {
         for (index, choice) in choices.iter().enumerate() {
             let abs_row = abs_row_for(content_row);
-            let text = format!(" {}. {}", index + 1, choice);
+            let text = format!("{}. {}", index + 1, choice);
             lines.push(banner_line_with_selection(
                 text, abs_row, area.x, drag, false,
             ));
@@ -2255,6 +2113,35 @@ fn draw_clarify_banner(frame: &mut Frame, area: Rect, params: ClarifyBannerParam
             Rect::new(indicator_col, area.y + area.height - 1, 1, 1),
         );
     }
+}
+
+/// Wraps a Markdown-rendered [`Line`] (from [`render_markdown`]) with the
+/// clarify-banner's base foreground color and bold/dim overlay, preserving
+/// inline markdown styling (bold, inline code, ...). While the user is
+/// actively dragging a selection over this row, falls back to a flattened
+/// plain-text line so the existing character-range highlight in
+/// [`banner_line_with_selection`] still applies — markdown styling is not
+/// preserved for the duration of the drag.
+fn banner_markdown_line_with_selection(
+    md_line: Line<'static>,
+    abs_row: u16,
+    area_x: u16,
+    drag: Option<BannerDragSelection>,
+    bold: bool,
+) -> Line<'static> {
+    let overlay = if bold {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().add_modifier(Modifier::DIM)
+    };
+    let in_drag_range = drag.is_some_and(|sel| abs_row >= sel.start_row && abs_row <= sel.end_row);
+    let line = if in_drag_range {
+        let text: String = md_line.spans.iter().map(|s| s.content.as_ref()).collect();
+        banner_line_with_selection(text, abs_row, area_x, drag, bold)
+    } else {
+        md_line.patch_style(Style::default().fg(CLARIFY_BANNER_FG_COLOR))
+    };
+    line.patch_style(overlay)
 }
 
 /// Builds a [`Line`] with the dragged column range highlighted and the rest

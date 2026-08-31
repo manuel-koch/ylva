@@ -1153,11 +1153,12 @@ async fn advance_tool_queue(
                             iterations = *iterations,
                             "max tool-use iterations exceeded"
                         );
-                        let _ = ui_tx
-                            .send(UiUpdate::Error(
-                                "max tool-use iterations exceeded".to_string(),
-                            ))
-                            .await;
+                        let message = format!(
+                            "Max tool-use iterations ({}) exceeded.",
+                            MAX_TOOL_USE_ITERATIONS
+                        );
+                        context.push_assistant(message.clone(), AssistantStatus::Interrupted);
+                        let _ = ui_tx.send(UiUpdate::Error(message)).await;
                         *mode = AgentMode::Idle;
                         return;
                     }

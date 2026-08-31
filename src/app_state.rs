@@ -514,7 +514,7 @@ impl TuiState {
                 self.flush_partial_assistant_message(false);
                 self.pending_approval = None;
                 self.pending_clarify = Some((question.clone(), choices.clone(), context.clone()));
-                self.clarify_scroll_offset = 0;
+                self.clarify_scroll_offset = usize::MAX;
                 self.agent_mode = AgentMode::ClarifyPending;
 
                 // Push a bubble in Running state so the question and choices

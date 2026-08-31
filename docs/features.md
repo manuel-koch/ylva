@@ -259,6 +259,17 @@ exit.
   (e.g., `"Copied to clipboard"`) and auto-dismiss after ~1.5 seconds.
 - **Scrollbar:** the chat scrollbar's thumb reaches the very bottom of the
   track at the end of the list (and the top at the start).
+- **Markdown rendering:** assistant messages, user messages, the clarify
+  banner's question/context text, and a user's clarify answer (shown in the
+  "User answered:" result of the clarify tool bubble) render Markdown instead
+  of plain wrapped text (`src/markdown.rs`). Supported: **bold**/*italic*,
+  `inline code` (distinct color), fenced code blocks (dim, verbatim,
+  syntax-highlighted when a language tag is given), bullet/numbered lists,
+  headings, blockquotes (`│` prefix), horizontal rules, and tables
+  (column-aligned, bold header row, `│` column separators). Plain text with
+  no Markdown syntax renders identically to the previous plain-wrap behavior.
+  Unsupported syntax (links, images, HTML) degrades to plain text — inner
+  text is preserved — rather than crashing or dropping content.
 
 ## Phase 5: Named engines and profiles
 

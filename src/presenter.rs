@@ -31,6 +31,7 @@ use crate::app_state::{
     AppState, ChatEntry, ChatSelection, DomainEvent, Effect, Focus, HistoryDirection, InputEvent,
     ToolCallState, TuiMode, UserMessageState,
 };
+use crate::markdown::render_markdown;
 
 // ─── Public surface ───────────────────────────────────────────────────────────
 
@@ -212,18 +213,17 @@ fn extract_clarify_banner_text(
     let wrap_width = banner.width as usize;
     let mut all_lines: Vec<String> = Vec::new();
     if let Some(ctx) = context.as_deref() {
-        for chunk in textwrap::wrap(ctx, wrap_width) {
-            all_lines.push(chunk.into_owned());
+        for md_line in render_markdown(ctx, wrap_width) {
+            all_lines.push(md_line.spans.iter().map(|s| s.content.as_ref()).collect());
         }
+        all_lines.push(String::new()); // spacer between context and question
     }
-    let question_lines: Vec<String> = textwrap::wrap(question, wrap_width)
-        .into_iter()
-        .map(|s| s.into_owned())
-        .collect();
-    all_lines.extend(question_lines);
+    for md_line in render_markdown(question, wrap_width) {
+        all_lines.push(md_line.spans.iter().map(|s| s.content.as_ref()).collect());
+    }
     if let Some(ref choices_list) = choices {
         for (i, c) in choices_list.iter().enumerate() {
-            all_lines.push(format!(" {}. {}", i + 1, c));
+            all_lines.push(format!("{}. {}", i + 1, c));
         }
     }
 
@@ -665,15 +665,16 @@ fn route_mouse(
                     let wrap_width = banner.width as usize;
                     let context_rows = context
                         .as_deref()
-                        .map_or(0, |ctx| textwrap::wrap(ctx, wrap_width).len() as u16);
-                    let question_rows = textwrap::wrap(question, wrap_width).len().max(1) as u16;
-                    let choices_start_row = context_rows + question_rows;
+                        .map_or(0, |ctx| render_markdown(ctx, wrap_width).len() as u16);
+                    let context_spacer = u16::from(context.is_some());
+                    let question_rows = render_markdown(question, wrap_width).len().max(1) as u16;
+                    let choices_start_row = context_rows + context_spacer + question_rows;
                     let relative_row = row.saturating_sub(banner.y);
                     let content_row = relative_row as usize + state.clarify_scroll_offset;
                     if content_row >= choices_start_row as usize {
                         let choice_index = content_row - choices_start_row as usize;
                         if let Some(choice_text) = choices_list.get(choice_index) {
-                            let rendered = format!(" {}. {}", choice_index + 1, choice_text);
+                            let rendered = format!("{}. {}", choice_index + 1, choice_text);
                             let text_end_col = banner.x + rendered.chars().count() as u16;
                             if column < text_end_col {
                                 return vec![Effect::SetInputText(choice_text.clone())];
@@ -1969,8 +1970,8 @@ mod tests {
             context: None,
             choices: Some(vec!["alpha".to_string(), "beta".to_string()]),
         };
-        // Banner starts at row 5, width 40. Question is 1 row tall.
-        // Choices start at row 6.
+        // Banner starts at row 5, width 40.
+        // Row 5: "Pick?" (question), row 6: "1. alpha" (choices start at content row 1).
         state.layout.clarify_banner = ratatui::layout::Rect::new(0, 5, 40, 4);
 
         let mouse_down = crossterm::event::MouseEvent {
@@ -2008,7 +2009,7 @@ mod tests {
             choices: Some(vec!["alpha".to_string()]),
         };
         // Banner at x=0, y=5, width=40.
-        // " 1. alpha" is 9 chars wide; clicking at col 20 is past the text.
+        // "1. alpha" is 8 chars wide; clicking at col 20 is past the text.
         state.layout.clarify_banner = ratatui::layout::Rect::new(0, 5, 40, 3);
 
         let mouse_down = crossterm::event::MouseEvent {
@@ -2035,17 +2036,18 @@ mod tests {
     #[test]
     fn clarify_choice_click_with_context_offsets_correctly() {
         let mut state = AppState::new();
-        // Context is 1 row, question is 1 row → choices start at row banner.y + 2.
+        // Context is 1 row, spacer is 1 row, question is 1 row → choices start at banner.y + 3.
         state.mode = TuiMode::ClarifyPending {
             id: Uuid::new_v4(),
             question: "Pick an animal?".to_string(),
             context: Some("Context line.".to_string()),
             choices: Some(vec!["rhino".to_string(), "panda".to_string()]),
         };
-        // banner.y = 5, width = 40 → context row 5, question row 6, choices at 7 and 8.
-        state.layout.clarify_banner = ratatui::layout::Rect::new(0, 5, 40, 5);
+        // banner.y = 5, width = 40 → context row 5, context→question spacer row 6,
+        // question row 7, choices at 8 and 9.
+        state.layout.clarify_banner = ratatui::layout::Rect::new(0, 5, 40, 7);
 
-        let click_row = 7u16; // first choice row
+        let click_row = 8u16; // first choice row
         let mouse_down = crossterm::event::MouseEvent {
             kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
             column: 3,
@@ -2071,7 +2073,10 @@ mod tests {
     #[test]
     fn clarify_choice_click_with_scroll_offset_selects_correct_choice() {
         let mut state = AppState::new();
-        // 2 context rows, 1 question row → choices start at content row 3.
+        // context "line one\nline two" → 1 rendered line (soft break joins)
+        // context→question spacer = 1 row
+        // question "Pick?" → 1 rendered line
+        // choices start at content row 3.
         // With scroll_offset=3 the banner top shows the first choice at visual row banner.y.
         state.mode = TuiMode::ClarifyPending {
             id: Uuid::new_v4(),
@@ -2114,6 +2119,7 @@ mod tests {
             context: None,
             choices: Some(vec!["alpha".to_string(), "beta".to_string()]),
         };
+        // Row 5: "Pick?", row 6: "1. alpha", row 7: "2. beta".
         state.layout.clarify_banner = ratatui::layout::Rect::new(0, 5, 40, 4);
 
         let mouse_down = crossterm::event::MouseEvent {
@@ -2142,7 +2148,7 @@ mod tests {
         };
         let effects_up = update(&mut state, TuiEvent::Mouse(mouse_up), &empty_textarea());
         assert!(
-            effects_up.contains(&Effect::CopyToClipboard("lpha".to_string())),
+            effects_up.contains(&Effect::CopyToClipboard("pha".to_string())),
             "drag must copy selected banner text (trimmed to dragged column range) to clipboard"
         );
         assert!(state.clarify_choice_mousedown.is_none());
@@ -2159,15 +2165,11 @@ mod tests {
             choices: Some(vec!["alpha".to_string(), "beta".to_string()]),
         };
         // Banner at x=0, y=5, width=40.
-        // Row 5: "Pick?" (question)
-        // Row 6: " 1. alpha"
-        // Row 7: " 2. beta"
+        // Row 5: "Pick?" (question), row 6: "1. alpha", row 7: "2. beta"
         state.layout.clarify_banner = ratatui::layout::Rect::new(0, 5, 40, 4);
 
-        // Drag starts at col=4, row=6 ("alpha") and ends at col=7, row=7 (" 2. beta").
-        // First line trimmed from col 4: "alpha"[4..] = "a" (chars 4..end, but " 1. alpha"[4..9] = "alpha")
-        // Wait: " 1. alpha" -> index 4 = 'a' -> chars[4..9] = "alpha"
-        // Last line trimmed to col 7: " 2. beta"[0..7] = " 2. bet"
+        // Drag starts at col=4, row=6 ("1. alpha"[4..] = "lpha") and ends
+        // at col=7, row=7 ("2. beta"[0..7] = "2. beta").
         let mouse_down = crossterm::event::MouseEvent {
             kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
             column: 4,
@@ -2192,7 +2194,7 @@ mod tests {
         };
         let effects_up = update(&mut state, TuiEvent::Mouse(mouse_up), &empty_textarea());
         assert!(
-            effects_up.contains(&Effect::CopyToClipboard("alpha\n 2. bet".to_string())),
+            effects_up.contains(&Effect::CopyToClipboard("lpha\n2. beta".to_string())),
             "multiline drag must copy first line trimmed from start col, last line trimmed to end col; got {effects_up:?}"
         );
     }

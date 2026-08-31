@@ -116,16 +116,13 @@ pub struct GlobInputArgs {
     #[serde(default)]
     pub only_count: bool,
     /// When `true`, restrict results to regular files only (excludes directories and
-    /// symlinks). Use this instead of post-filtering to count or list only files.
-    /// Mutually exclusive with `only_dirs`.
-    /// When both `only_files` and `only_dirs` are `false` (the default), all path
-    /// types — files, directories, and symlinks — are included in results.
+    /// symlinks). **Mutually exclusive with `only_dirs` — setting both to `true` is an
+    /// error.** Omit both flags (default) to include all path types.
     #[serde(default)]
     pub only_files: bool,
     /// When `true`, restrict results to directories only (excludes files and symlinks).
-    /// Mutually exclusive with `only_files`.
-    /// When both `only_files` and `only_dirs` are `false` (the default), all path
-    /// types — files, directories, and symlinks — are included in results.
+    /// **Mutually exclusive with `only_files` — setting both to `true` is an error.**
+    /// Omit both flags (default) to include all path types.
     #[serde(default)]
     pub only_dirs: bool,
     /// Maximum number of paths to return. When the cap is hit, excess paths are
@@ -794,7 +791,7 @@ impl Tool for GlobTool {
     }
 
     fn description(&self) -> &str {
-        "List paths matching a glob-wildcard pattern (`*`, `?`, `**`, `[...]`). Patterns resolve relative to cwd; absolute patterns supported. Hidden files (dot-prefixed) are included by default — use `dot_ignore: true` to exclude them. `git_ignore` (default `true`) skips gitignored paths via `ignore::WalkBuilder`."
+        "List paths matching a glob-wildcard pattern (`*`, `?`, `**`, `[...]`). Patterns resolve relative to cwd; absolute patterns supported. Hidden files (dot-prefixed) are included by default — use `dot_ignore: true` to exclude them. `git_ignore` (default `true`) skips gitignored paths via `ignore::WalkBuilder`. Use `only_files: true` to list files only, or `only_dirs: true` to list directories only — these flags are mutually exclusive and setting both to `true` is an error; omit both to include all path types."
     }
 
     fn input_schema(&self) -> RootSchema {

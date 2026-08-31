@@ -26,11 +26,13 @@ use crate::sandbox::ApprovalCheck;
 #[allow(dead_code)]
 struct ClarifyArgs {
     #[schemars(
-        description = "The question to ask the user. Do not embed answer choices here; pass them via the `choices` field instead."
+        description = "The question to ask the user. Do not embed answer choices here; pass them via the `choices` field instead. Rendered as Markdown; use a real newline character for line breaks, not an escaped \\n sequence."
     )]
     question: String,
     #[serde(default)]
-    #[schemars(description = "Optional context to provide alongside the question.")]
+    #[schemars(
+        description = "Optional context to provide alongside the question. Rendered as Markdown (headings, lists, code blocks, etc. are supported); use a real newline character for line breaks, not an escaped \\n sequence."
+    )]
     context: Option<String>,
     #[serde(default)]
     #[schemars(
@@ -97,7 +99,7 @@ impl Tool for ClarifyTool {
     }
 
     fn description(&self) -> &str {
-        "Ask the user a clarifying question. If offering choices, pass them via the `choices` field — do not embed them in the question string. The user can always type a free-text answer even when choices are given."
+        "Ask the user a clarifying question. If offering choices, pass them via the `choices` field — do not embed them in the question string. The user can always type a free-text answer even when choices are given. The `question` and `context` fields are rendered as Markdown (headings, lists, code blocks, emphasis, etc.), so format them accordingly. Emit actual newline characters for line breaks in these JSON string values — never an escaped `\\n` sequence, which would render as literal backslash-n text."
     }
 
     fn input_schema(&self) -> schemars::schema::RootSchema {
