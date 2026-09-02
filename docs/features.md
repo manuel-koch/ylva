@@ -157,7 +157,7 @@ The TUI follows a **reducer/MVP** split across source modules:
 
 #### Model
 
-`src/app_state.rs` — pure view-model with no I/O. Defines `AppState`,
+`src/tui_reducer_state.rs` — pure view-model with no I/O. Defines `AppState`,
 `TuiMode`, `Focus`, `AppLayout`, `Effect`, `InputEvent`, and `DomainEvent`.
 
 #### Presenter

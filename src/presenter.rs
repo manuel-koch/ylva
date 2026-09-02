@@ -27,11 +27,11 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseEventKind};
 use uuid::Uuid;
 
 use crate::agent::tools::clarify::ClarifyTool;
-use crate::app_state::{
+use crate::markdown::render_markdown;
+use crate::tui_reducer_state::{
     AppState, ChatEntry, ChatSelection, ConfirmKey, DomainEvent, Effect, Focus, HistoryDirection,
     InputEvent, ToolCallState, TuiMode, UserMessageState,
 };
-use crate::markdown::render_markdown;
 
 // ─── Public surface ───────────────────────────────────────────────────────────
 
@@ -774,7 +774,7 @@ fn route_mouse(
                         })
                         .copied()
                     {
-                        if entry_index == crate::app_state::STREAMING_THINKING_ENTRY_INDEX {
+                        if entry_index == crate::tui_reducer_state::STREAMING_THINKING_ENTRY_INDEX {
                             state.toggle_partial_thinking_collapsed();
                         } else {
                             state.toggle_thinking_collapsed(entry_index);
@@ -1513,7 +1513,7 @@ fn update_tool_bubble_to_done(
     state: &mut AppState,
     id: Uuid,
     name: String,
-    result_section: crate::app_state::ResultSection,
+    result_section: crate::tui_reducer_state::ResultSection,
     content_sections: Vec<crate::agent::tools::Section>,
     summary: Vec<(String, String)>,
     duration: std::time::Duration,
@@ -1658,7 +1658,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::app_state::{AppState, ChatEntry, Focus, InputEvent, ToolCallState, TuiMode};
+    use crate::tui_reducer_state::{
+        AppState, ChatEntry, Focus, InputEvent, ToolCallState, TuiMode,
+    };
 
     fn empty_textarea() -> TextareaContext {
         TextareaContext {
@@ -2546,7 +2548,11 @@ mod tests {
         state.partial_thinking_text = "pondering...".to_string();
         state.partial_thinking_collapsed = false;
         // (start_row=0, end_row=2, sentinel index) — title row is start + 1 = 1.
-        state.thinking_title_rows = vec![(0, 2, crate::app_state::STREAMING_THINKING_ENTRY_INDEX)];
+        state.thinking_title_rows = vec![(
+            0,
+            2,
+            crate::tui_reducer_state::STREAMING_THINKING_ENTRY_INDEX,
+        )];
         state.chat_drag_active = true;
         state.chat_rendered_lines = vec![String::new(), String::new(), String::new()];
         // A zero-width selection at the title row is a plain click, not a drag.

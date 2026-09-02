@@ -615,23 +615,23 @@ split. `app_state.rs` is TUI-only canonical reducer state mutated by `presenter:
 its own. Neither name communicates that today. Public API (`AppState`, `TuiState`, and all
 other re-exported type names) is unchanged — this is a module-path rename only.
 
-- [ ] 56. Rename `src/app_state.rs` to `src/tui_reducer_state.rs`. Update `src/lib.rs`:
+- [x] 56. Rename `src/app_state.rs` to `src/tui_reducer_state.rs`. Update `src/lib.rs`:
   `pub mod app_state;` → `pub mod tui_reducer_state;`; `pub use app_state::{...}` →
   `pub use tui_reducer_state::{...}` (exported type names — `AppState`, `ChatEntry`,
   `TuiMode`, etc. — are unchanged).
 
-- [ ] 57. Rename `src/tui_state.rs` to `src/tui_render_state.rs`. Update `src/lib.rs`:
+- [x] 57. Rename `src/tui_state.rs` to `src/tui_render_state.rs`. Update `src/lib.rs`:
   `pub mod tui_state;` → `pub mod tui_render_state;`; `pub use tui_state::TuiState;` →
   `pub use tui_render_state::TuiState;` (type name `TuiState` unchanged).
 
-- [ ] 58. Update every internal reference across `src/ui.rs`, `src/render.rs`,
+- [x] 58. Update every internal reference across `src/ui.rs`, `src/render.rs`,
   `src/tui_driver.rs`, `src/presenter.rs`, `src/agent.rs`, and the two renamed files
   themselves: `crate::app_state::` → `crate::tui_reducer_state::`; `crate::tui_state::` →
   `crate::tui_render_state::`. Covers fully-qualified call sites (e.g.
   `STREAMING_THINKING_ENTRY_INDEX`, `result_section_ids`, `TuiMode`, `ResultSection`) as
   well as `use` statements.
 
-- [ ] 59. Update module-level `//!` doc comments and intra-doc links
+- [x] 59. Update module-level `//!` doc comments and intra-doc links
   (`` [`crate::app_state::AppState`] ``, `` [`crate::tui_state::TuiState`] ``) inside
   `src/tui_reducer_state.rs` and `src/tui_render_state.rs` to reference the new module
   paths and file names.
@@ -641,16 +641,16 @@ other re-exported type names) is unchanged — this is a module-path rename only
   is the canonical state mutated only via `presenter::update`; `tui_render_state` is a
   disposable, rebuilt-every-frame render snapshot with no reducer of its own.
 
-- [ ] 61. Update `docs/features.md` and `docs/blueprint.md`: replace `src/app_state.rs` /
+- [x] 61. Update `docs/features.md` and `docs/blueprint.md`: replace `src/app_state.rs` /
   `src/tui_state.rs` references with `src/tui_reducer_state.rs` / `src/tui_render_state.rs`.
   Leave already-completed (`[x]`) historical checklist entries elsewhere in this plan file
   that mention the old paths unchanged — they describe what was true at the time.
 
-- [ ] 62. Rename `tests/tui_state.rs` to `tests/tui_render_state.rs` for consistency (it
+- [x] 62. Rename `tests/tui_state.rs` to `tests/tui_render_state.rs` for consistency (it
   imports only the public `ylva::` API, so no internal path changes are required beyond
   the file rename).
 
-- [ ] 63. Run `make test` + `make test-coverage`.
+- [x] 63. Run `make test` + `make test-coverage`.
 
 ---
 

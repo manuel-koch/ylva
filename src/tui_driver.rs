@@ -43,17 +43,17 @@ use crate::agent::tools::DEFAULT_TUI_TOOLS;
 use crate::agent::{AgentCommand, AgentLoop, Role, UiUpdate};
 use crate::agent_factory::AgentFactory;
 use crate::app::App;
-use crate::app_state::{
-    AppState, ConfirmKey, DomainEvent, Effect, Focus, HistoryDirection, InputEvent, TuiMode,
-    UserMessageState,
-};
 use crate::config::{AgentConfig, ProfileConfig};
 use crate::engine::{Engine, EngineConfig, EngineImpl, DEFAULT_CONTEXT_LENGTH};
 use crate::events::{spawn_crossterm_bridge, AppAction};
 use crate::llm::Provider;
 use crate::presenter::{self, TextareaContext, TuiEvent};
 use crate::render;
-use crate::tui_state::TuiState;
+use crate::tui_reducer_state::{
+    AppState, ConfirmKey, DomainEvent, Effect, Focus, HistoryDirection, InputEvent, TuiMode,
+    UserMessageState,
+};
+use crate::tui_render_state::TuiState;
 use crate::ToolRegistry;
 
 /// Abstracts writing text to the OS clipboard so the Driver can be tested

@@ -540,7 +540,7 @@ pub struct AppLayout {
 ///
 /// This is the single source of truth: `presenter::update` mutates it in
 /// response to [`DomainEvent`]s, and every frame `render::project_for_draw`
-/// derives a fresh [`crate::tui_state::TuiState`] snapshot from it for
+/// derives a fresh [`crate::tui_render_state::TuiState`] snapshot from it for
 /// `ui::draw` to render. `TuiState` is never the source of truth and is not fed back into
 /// `AppState` except for the handful of view-geometry fields `ui::draw`
 /// itself writes (see `render::sync_from_draw`).

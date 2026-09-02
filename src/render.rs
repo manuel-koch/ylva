@@ -24,8 +24,8 @@
 use ratatui::Frame;
 use ratatui_textarea::TextArea;
 
-use crate::app_state::{AppState, BannerDragSelection, Focus};
-use crate::tui_state::TuiState;
+use crate::tui_reducer_state::{AppState, BannerDragSelection, Focus};
+use crate::tui_render_state::TuiState;
 use crate::ui::{self, ButtonAreas};
 
 /// Draw one TUI frame.
@@ -76,7 +76,7 @@ fn project_for_draw(state: &AppState) -> TuiState {
         scroll_locked: state.scroll_locked,
         chat_area_height: state.chat_area_height,
         pending_approval,
-        pending_clarify: if let crate::app_state::TuiMode::ClarifyPending {
+        pending_clarify: if let crate::tui_reducer_state::TuiMode::ClarifyPending {
             question,
             context,
             choices,

@@ -2553,7 +2553,7 @@ Decisions recorded during implementation:
   Scrolling back to the bottom re-enables auto-scroll.
 - **Wordmark.** The chat list always opens with a centered ASCII-art "Ylva" wordmark so the
   initial frame is not empty while the first response streams.
-- **`run_tui` returns the final `TuiState`** so integration tests (`tests/tui_state.rs`) can
+- **`run_tui` returns the final `TuiState`** so integration tests (`tests/tui_render_state.rs`) can
   assert on the resulting view state; the production entry point discards it.
 
 ### Phase 4 Reducer Refactor (TUI state handling)
@@ -2562,7 +2562,7 @@ Decisions recorded during implementation:
 pure reducer pattern (`update(state, event) → Vec<Effect>`) and a clean MVP module split.
 See reducer-state-handling-plan.md.
 
-- [x] **`src/app_state.rs` (Model):** pure view-model; defines `AppState`, `TuiMode`, `Focus`,
+- [x] **`src/tui_reducer_state.rs` (Model):** pure view-model; defines `AppState`, `TuiMode`, `Focus`,
       `AppLayout`, `Effect`, `InputEvent`, `DomainEvent`. No ratatui backend, no channel types.
 - [x] **`src/presenter.rs` (Presenter):** `update()` + routing helpers (`route_keyboard`,
       `route_mouse`, `route_domain`); no I/O. All state-machine logic lives here; fully unit-tested
@@ -2585,8 +2585,9 @@ See reducer-state-handling-plan.md.
   clippy catches violations.
 - **Unit tests without a terminal.** Each handler in `presenter.rs` is tested by setting
   `state.mode`/`state.focus` and asserting `Vec<Effect>` — no channel, no crossterm needed.
-- **Integration tests unchanged.** `tests/tui_state.rs` exercises the full Driver + Presenter +
-  View composition; type imports updated to new names (`AppState`, `TuiMode`, `Focus`).
+- **Integration tests unchanged.** `tests/tui_render_state.rs` exercises the full Driver +
+  Presenter + View composition; type imports updated to new names (`AppState`, `TuiMode`,
+  `Focus`).
 
 ### Phase 5: Interface Seams
 

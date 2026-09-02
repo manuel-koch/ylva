@@ -15,25 +15,25 @@
 //! Render-projection snapshot consumed by the View/Driver layers.
 //!
 //! This module defines [`TuiState`] — rebuilt every frame from the canonical
-//! [`crate::app_state::AppState`] by `render::project_for_draw` (see
+//! [`crate::tui_reducer_state::AppState`] by `render::project_for_draw` (see
 //! `src/render.rs`) and by `tui_driver::app_state_to_tui_state`. It is *not*
 //! itself authoritative and must never be mutated directly by the Driver or
 //! Presenter in production. It carries no reducer of its own — all state
-//! transitions live in [`crate::app_state::AppState`] / `presenter::update`.
+//! transitions live in [`crate::tui_reducer_state::AppState`] / `presenter::update`.
 
 use std::time::Instant;
 
 use crate::agent::AgentMode;
-use crate::app_state::{BannerDragSelection, ChatEntry, ChatSelection, InputArea};
+use crate::tui_reducer_state::{BannerDragSelection, ChatEntry, ChatSelection, InputArea};
 
 /// Render-projection snapshot consumed by [`crate::ui::draw`].
 ///
-/// Rebuilt every frame from the canonical [`crate::app_state::AppState`] by
+/// Rebuilt every frame from the canonical [`crate::tui_reducer_state::AppState`] by
 /// `render::project_for_draw` (see `src/render.rs`) and by
 /// `tui_driver::app_state_to_tui_state`; it is *not* itself authoritative and
 /// must never be mutated directly by the Driver or Presenter in production.
 /// It carries no reducer of its own — all state transitions live in
-/// [`crate::app_state::AppState`] / `presenter::update`.
+/// [`crate::tui_reducer_state::AppState`] / `presenter::update`.
 pub struct TuiState {
     pub agent_mode: AgentMode,
     pub chat_entries: Vec<ChatEntry>,

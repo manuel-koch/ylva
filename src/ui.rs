@@ -28,10 +28,10 @@ use std::time::Instant;
 use crate::highlight::{highlighted_lines_cached, syntect_token_to_span, wrap_highlighted_line};
 
 use crate::agent::AgentMode;
-use crate::app_state::{BannerDragSelection, ChatEntry, ToolCallState, UserMessageState};
 use crate::build_info::BUILD_INFO;
 use crate::markdown::render_markdown;
-use crate::tui_state::TuiState;
+use crate::tui_reducer_state::{BannerDragSelection, ChatEntry, ToolCallState, UserMessageState};
+use crate::tui_render_state::TuiState;
 
 // User message border colors — extract into Theme struct in a later phase.
 const USER_MESSAGE_BORDER_COLOR: Color = Color::Green;
@@ -1179,7 +1179,7 @@ fn append_streaming_thinking_lines(
     thinking_title_rows.push((
         bubble_start_row,
         bubble_end_row,
-        crate::app_state::STREAMING_THINKING_ENTRY_INDEX,
+        crate::tui_reducer_state::STREAMING_THINKING_ENTRY_INDEX,
     ));
 }
 
@@ -1238,7 +1238,7 @@ struct ToolBubbleArgs<'a> {
 /// Returns `None` for combinations that carry no label (e.g. plain tool output).
 fn result_section_title(tool_name: &str, section_id: &str) -> Option<String> {
     use crate::agent::tools::clarify::ClarifyTool;
-    use crate::app_state::result_section_ids;
+    use crate::tui_reducer_state::result_section_ids;
     match (tool_name, section_id) {
         (ClarifyTool::NAME, result_section_ids::USER_ANSWER) => Some("User answered:".to_string()),
         _ => None,

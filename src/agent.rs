@@ -136,7 +136,7 @@ pub enum UiUpdate {
     ToolDone {
         id: Uuid,
         name: String,
-        result_section: crate::app_state::ResultSection,
+        result_section: crate::tui_reducer_state::ResultSection,
         summary: Vec<(String, String)>,
         duration: std::time::Duration,
         content_sections: Vec<crate::agent::tools::Section>,
@@ -754,7 +754,7 @@ impl AgentLoop {
                                     .send(UiUpdate::ToolDone {
                                         id,
                                         name,
-                                        result_section: crate::app_state::ResultSection::plain(result),
+                                        result_section: crate::tui_reducer_state::ResultSection::plain(result),
                                         summary,
                                         duration,
                                         content_sections,
@@ -956,8 +956,8 @@ impl AgentLoop {
                                         .send(UiUpdate::ToolDone {
                                             id: call_id,
                                             name: tools::clarify::ClarifyTool::NAME.to_string(),
-                                            result_section: crate::app_state::ResultSection {
-                                                id: crate::app_state::result_section_ids::USER_ANSWER.to_string(),
+                                            result_section: crate::tui_reducer_state::ResultSection {
+                                                id: crate::tui_reducer_state::result_section_ids::USER_ANSWER.to_string(),
                                                 content: answer,
                                             },
                                             summary: vec![],
