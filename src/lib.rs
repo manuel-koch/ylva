@@ -29,6 +29,7 @@ pub mod presenter;
 pub mod render;
 pub mod sandbox;
 pub mod tui_driver;
+pub mod tui_state;
 pub mod ui;
 
 #[cfg(test)]
@@ -50,8 +51,7 @@ pub use agent_factory::AgentFactory;
 pub use app::App;
 pub use app_state::{
     AppLayout, AppState, ChatArea, ChatEntry, ChatSelection, DomainEvent, Effect, Focus,
-    HelpPopupLayout, InputAreaLayout, InputEvent, ToolCallState, TuiMode, TuiState,
-    UserMessageState,
+    HelpPopupLayout, InputAreaLayout, InputEvent, ToolCallState, TuiMode, UserMessageState,
 };
 pub use build_info::{BuildInfo, BUILD_INFO};
 pub use cli_driver::{run_cli, run_cli_to, ConsoleApp};
@@ -62,3 +62,4 @@ pub use llm::{MockEvent, MockProvider, ModelInfo, OpenAiProvider, Provider, Tool
 pub use presenter::{TextareaContext, TuiEvent};
 pub use sandbox::{ApprovalCheck, Sandbox, SandboxContext};
 pub use tui_driver::TuiApp;
+pub use tui_state::TuiState;

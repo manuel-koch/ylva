@@ -44,7 +44,7 @@ use crate::agent::{AgentCommand, AgentLoop, Role, UiUpdate};
 use crate::agent_factory::AgentFactory;
 use crate::app::App;
 use crate::app_state::{
-    AppState, DomainEvent, Effect, Focus, HistoryDirection, InputEvent, TuiMode, TuiState,
+    AppState, ConfirmKey, DomainEvent, Effect, Focus, HistoryDirection, InputEvent, TuiMode,
     UserMessageState,
 };
 use crate::config::{AgentConfig, ProfileConfig};
@@ -53,6 +53,7 @@ use crate::events::{spawn_crossterm_bridge, AppAction};
 use crate::llm::Provider;
 use crate::presenter::{self, TextareaContext, TuiEvent};
 use crate::render;
+use crate::tui_state::TuiState;
 use crate::ToolRegistry;
 
 /// Abstracts writing text to the OS clipboard so the Driver can be tested
@@ -131,6 +132,7 @@ fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
     match update {
         UiUpdate::StreamStarted => Some(DomainEvent::StreamStarted),
         UiUpdate::AppendText(text) => Some(DomainEvent::StreamChunk(text.clone())),
+        UiUpdate::AppendThinking(text) => Some(DomainEvent::StreamThinkingChunk(text.clone())),
         UiUpdate::StreamDone => Some(DomainEvent::StreamDone),
         UiUpdate::StreamCancelled => Some(DomainEvent::StreamCancelled),
         UiUpdate::SteerQueued => Some(DomainEvent::SteerQueued),
@@ -410,6 +412,10 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
         agent_mode,
         chat_entries: app.chat_entries,
         partial_assistant_text: app.partial_assistant_text,
+        partial_thinking_text: app.partial_thinking_text,
+        thinking_started_at: app.thinking_started_at,
+        partial_thinking_collapsed: app.partial_thinking_collapsed,
+        queued_steer_texts: app.queued_steer_texts,
         show_help,
         steer_indicator: app.steer_indicator,
         scroll_offset: app.scroll_offset,
@@ -424,6 +430,7 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
         input_area: input_area_rect,
         chat_area: chat_area_rect,
         clarify_banner: ratatui::layout::Rect::default(),
+        help_popup_rect: app.layout.help_popup.rect,
         chat_rendered_lines: app.chat_rendered_lines,
         chat_rendered_line_chrome_widths: app.chat_rendered_line_chrome_widths,
         chat_selection: app.chat_selection,
@@ -436,6 +443,7 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
         clarify_scroll_offset: app.clarify_scroll_offset,
         input_scroll_top: app.input_scroll_top,
         bubble_title_rows: app.bubble_title_rows,
+        thinking_title_rows: app.thinking_title_rows,
     }
 }
 
@@ -709,11 +717,21 @@ fn confirm_hint(state: &AppState) -> Option<String> {
     if matches!(state.mode, TuiMode::Aborting) {
         return None;
     }
-    if let TuiMode::DoublePressAbort { return_to, .. } = &state.mode {
-        let hint = if matches!(**return_to, TuiMode::Idle) {
-            " Press Ctrl+C or Esc again to quit"
-        } else {
-            " Press Ctrl+C or Esc again to cancel"
+    if let TuiMode::DoublePressAbort {
+        return_to,
+        armed_by,
+        ..
+    } = &state.mode
+    {
+        let is_idle = matches!(**return_to, TuiMode::Idle);
+        // Only the same key's second press confirms (see `ConfirmKey`), so
+        // name that one key explicitly rather than both — naming both would
+        // wrongly imply either key finishes the same action.
+        let hint = match (armed_by, is_idle) {
+            (ConfirmKey::CtrlC, true) => " Press ctrl-c again to quit",
+            (ConfirmKey::CtrlC, false) => " Press ctrl-c again to cancel & quit",
+            (ConfirmKey::Escape, true) => " Press esc again to clear",
+            (ConfirmKey::Escape, false) => " Press esc again to cancel",
         };
         Some(hint.to_string())
     } else {

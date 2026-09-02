@@ -178,12 +178,21 @@ impl Provider for OpenAiProvider {
 ///
 /// Returns [`None`] for frames that must be silently skipped — comment lines
 /// (already dropped by the SSE parser, but blank `data:` frames can still
-/// arrive) and deltas with no user-facing `content` and no `tool_calls`
-/// (reasoning deltas, the `role`-only first chunk). These must never be
-/// emitted as `StreamEvent::Text`. A `delta.tool_calls` chunk becomes a
-/// [`StreamEvent::Delta`] (raw fragment; assembly is the agent's task). A
-/// chunk with both `content` and `tool_calls` prefers `content` (the text is
-/// user-facing). Malformed JSON yields [`StreamEvent::Error`].
+/// arrive) and deltas with no user-facing `content`, no thinking/reasoning
+/// fragment, and no `tool_calls` (the `role`-only first chunk). These must
+/// never be emitted as `StreamEvent::Text`. A `delta.tool_calls` chunk
+/// becomes a [`StreamEvent::Delta`] (raw fragment; assembly is the agent's
+/// task). A chunk with both `content` and `tool_calls` prefers `content`
+/// (the text is user-facing). Malformed JSON yields [`StreamEvent::Error`].
+///
+/// Extended-thinking / reasoning-token fragments become
+/// [`StreamEvent::Thinking`] — this is a model capability, not
+/// provider-specific, so three shapes are recognised: Anthropic-style
+/// `content_block_delta` deltas relayed with `delta.type ==
+/// "thinking_delta"` (fragment in `delta.thinking`), OpenAI-compatible
+/// `delta.reasoning_content` string fragments (e.g. DeepSeek, OpenRouter
+/// passthrough), and bare `delta.reasoning` string fragments (e.g. Ollama's
+/// and vLLM's OpenAI-compatible chat-completions endpoints).
 pub(crate) fn parse_sse_payload(data: &str) -> Option<StreamEvent> {
     if data.is_empty() {
         return None;
@@ -204,9 +213,37 @@ pub(crate) fn parse_sse_payload(data: &str) -> Option<StreamEvent> {
         .and_then(|choices| choices.get(0))
         .and_then(|choice| choice.get("delta"));
 
+    let is_anthropic_thinking_delta =
+        delta.and_then(|d| d.get("type")).and_then(|t| t.as_str()) == Some("thinking_delta");
+    if is_anthropic_thinking_delta {
+        if let Some(serde_json::Value::String(thinking)) = delta.and_then(|d| d.get("thinking")) {
+            if !thinking.is_empty() {
+                return Some(StreamEvent::Thinking(thinking.clone()));
+            }
+        }
+    }
+
+    // `content` wins over `reasoning_content`/`reasoning` when a delta
+    // somehow carries both, matching the tests' documented convention.
     if let Some(serde_json::Value::String(content)) = delta.and_then(|d| d.get("content")) {
         if !content.is_empty() {
             return Some(StreamEvent::Text(content.clone()));
+        }
+    }
+
+    if let Some(serde_json::Value::String(reasoning)) =
+        delta.and_then(|d| d.get("reasoning_content"))
+    {
+        if !reasoning.is_empty() {
+            return Some(StreamEvent::Thinking(reasoning.clone()));
+        }
+    }
+
+    // Bare `reasoning` (no `_content` suffix) — Ollama's and vLLM's
+    // OpenAI-compatible endpoints use this field name for the same purpose.
+    if let Some(serde_json::Value::String(reasoning)) = delta.and_then(|d| d.get("reasoning")) {
+        if !reasoning.is_empty() {
+            return Some(StreamEvent::Thinking(reasoning.clone()));
         }
     }
 
@@ -271,8 +308,56 @@ mod tests {
     fn parse_delta_without_content_is_skipped() {
         // `role`-only first chunk.
         assert!(parse_sse_payload(r#"{"choices":[{"delta":{"role":"assistant"}}]}"#).is_none());
-        // Reasoning delta with neither content nor tool_calls.
-        assert!(parse_sse_payload(r#"{"choices":[{"delta":{"reasoning":"thinking"}}]}"#).is_none());
+    }
+
+    #[test]
+    fn parse_anthropic_style_thinking_delta_emits_thinking() {
+        let event = parse_sse_payload(
+            r#"{"choices":[{"delta":{"type":"thinking_delta","thinking":"pondering..."}}]}"#,
+        );
+        assert!(matches!(event, Some(StreamEvent::Thinking(text)) if text == "pondering..."));
+    }
+
+    #[test]
+    fn parse_empty_anthropic_thinking_delta_is_skipped() {
+        assert!(parse_sse_payload(
+            r#"{"choices":[{"delta":{"type":"thinking_delta","thinking":""}}]}"#
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn parse_reasoning_content_delta_emits_thinking() {
+        let event =
+            parse_sse_payload(r#"{"choices":[{"delta":{"reasoning_content":"because..."}}]}"#);
+        assert!(matches!(event, Some(StreamEvent::Thinking(text)) if text == "because..."));
+    }
+
+    #[test]
+    fn parse_empty_reasoning_content_delta_is_skipped() {
+        assert!(parse_sse_payload(r#"{"choices":[{"delta":{"reasoning_content":""}}]}"#).is_none());
+    }
+
+    #[test]
+    fn parse_bare_reasoning_delta_emits_thinking() {
+        // Ollama's and vLLM's OpenAI-compatible endpoints use bare `reasoning`
+        // (no `_content` suffix) for the same purpose as `reasoning_content`.
+        let event = parse_sse_payload(r#"{"choices":[{"delta":{"reasoning":"thinking..."}}]}"#);
+        assert!(matches!(event, Some(StreamEvent::Thinking(text)) if text == "thinking..."));
+    }
+
+    #[test]
+    fn parse_empty_bare_reasoning_delta_is_skipped() {
+        assert!(parse_sse_payload(r#"{"choices":[{"delta":{"reasoning":""}}]}"#).is_none());
+    }
+
+    #[test]
+    fn parse_content_prefers_over_reasoning_content() {
+        // If a delta somehow carries both, user-facing content wins.
+        let event = parse_sse_payload(
+            r#"{"choices":[{"delta":{"content":"hi","reasoning_content":"because..."}}]}"#,
+        );
+        assert!(matches!(event, Some(StreamEvent::Text(text)) if text == "hi"));
     }
 
     #[test]
@@ -354,6 +439,7 @@ mod tests {
                     Some(StreamEvent::Error(_)) => panic!("comment fixture must not error"),
                     Some(StreamEvent::Cancelled) => {}
                     Some(StreamEvent::Delta(_)) => {}
+                    Some(StreamEvent::Thinking(_)) => {}
                     None => {}
                 }
             }
@@ -375,6 +461,7 @@ mod tests {
                     Some(StreamEvent::Error(_)) => panic!("reasoning fixture must not error"),
                     Some(StreamEvent::Cancelled) => {}
                     Some(StreamEvent::Delta(_)) => {}
+                    Some(StreamEvent::Thinking(_)) => {}
                     None => {}
                 }
             }

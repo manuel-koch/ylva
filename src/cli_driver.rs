@@ -204,6 +204,42 @@ pub async fn run_cli(
     .await
 }
 
+/// Which kind of assistant output is currently being written to the CLI
+/// stream, mirroring the TUI's `partial_thinking_text` /
+/// `partial_assistant_text` split (see `AppState`). The CLI has no bubbles to
+/// flush into, so a section switch is rendered as a header/footer line
+/// instead, but the switching rules are the same: a response chunk closes an
+/// open thinking segment and vice versa, and a tool call or stream end closes
+/// whatever segment is open.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StreamSection {
+    None,
+    Thinking,
+    Response,
+}
+
+/// Close an open `Thinking` section, printing its elapsed duration footer
+/// (mirrors `AppState::flush_partial_thinking_message`). No-op for `None` /
+/// `Response`. Leaves `current_section` at `None` either way — callers that
+/// need a header for what comes next (e.g. `AppendText`) print it themselves,
+/// since the header text depends on what section is opening, not on what
+/// just closed.
+fn flush_thinking_section(
+    out: &mut (dyn Write + Send),
+    current_section: &mut StreamSection,
+    thinking_started_at: &mut Option<std::time::Instant>,
+) -> anyhow::Result<()> {
+    if *current_section == StreamSection::Thinking {
+        let elapsed = thinking_started_at
+            .take()
+            .map(|started_at| started_at.elapsed())
+            .unwrap_or_default();
+        writeln!(out, "\n[thought for {:.3}s]", elapsed.as_secs_f64())?;
+    }
+    *current_section = StreamSection::None;
+    Ok(())
+}
+
 /// [`run_cli`] with an explicit output writer (used by tests to capture
 /// the emitted lines without redirecting process stdout).
 #[doc(hidden)]
@@ -231,12 +267,50 @@ pub async fn run_cli_to(
     let mut pending_invocations: std::collections::HashMap<uuid::Uuid, String> =
         std::collections::HashMap::new();
     let mut response_finished = false;
+    // Tracks whether the assistant is currently emitting thinking/reasoning
+    // output or its final reply, so switches between the two (and switches
+    // caused by a tool call) are rendered in the right order — see
+    // `StreamSection` above.
+    let mut current_section = StreamSection::None;
+    let mut thinking_started_at: Option<std::time::Instant> = None;
     while !response_finished {
         match ui_rx.recv().await {
             Some(UiUpdate::StreamStarted) => {
-                writeln!(out, "\n---[ Assistant ]---")?;
+                // The header is deferred to the first `AppendThinking` /
+                // `AppendText` of this round, since its text depends on
+                // which section opens first (`---[ Assistant Thinking ]---`
+                // vs `---[ Assistant ]---`).
+                current_section = StreamSection::None;
+                thinking_started_at = None;
+            }
+            Some(UiUpdate::AppendThinking(text)) => {
+                if current_section != StreamSection::Thinking {
+                    // A thinking chunk following response text means the
+                    // model switched back to thinking; the response segment
+                    // needs no footer, just a new thinking header. This is
+                    // also the header for the very first chunk of the round
+                    // when it happens to be thinking (merged with the
+                    // "Assistant" label, since there's no separate response
+                    // section yet to distinguish it from).
+                    writeln!(out, "\n---[ Assistant Thinking ]---")?;
+                    thinking_started_at = Some(std::time::Instant::now());
+                    current_section = StreamSection::Thinking;
+                }
+                write!(out, "{text}")?;
+                out.flush()?;
             }
             Some(UiUpdate::AppendText(text)) => {
+                if current_section == StreamSection::Thinking {
+                    flush_thinking_section(out, &mut current_section, &mut thinking_started_at)?;
+                }
+                if current_section != StreamSection::Response {
+                    // Prints once per round: either this is the very first
+                    // chunk (no thinking preceded it) or a thinking segment
+                    // was just flushed above — either way the response
+                    // section is opening for the first time.
+                    writeln!(out, "\n---[ Assistant ]---")?;
+                }
+                current_section = StreamSection::Response;
                 write!(out, "{text}")?;
                 out.flush()?;
             }
@@ -248,6 +322,10 @@ pub async fn run_cli_to(
                 arguments,
                 ..
             }) => {
+                // A tool call always closes whatever thinking/response
+                // segment preceded it, mirroring `flush_partial_assistant_message`.
+                flush_thinking_section(out, &mut current_section, &mut thinking_started_at)?;
+                current_section = StreamSection::None;
                 let title = registry
                     .get(&name)
                     .map(|tool| tool.title().to_string())
@@ -301,6 +379,8 @@ pub async fn run_cli_to(
                 }
             }
             Some(UiUpdate::ClarifyPending { id, question, .. }) => {
+                flush_thinking_section(out, &mut current_section, &mut thinking_started_at)?;
+                current_section = StreamSection::None;
                 let clarify_title = ClarifyTool.title();
                 let clarify_name = ClarifyTool::NAME;
                 writeln!(
@@ -320,6 +400,12 @@ pub async fn run_cli_to(
                 content_sections,
                 ..
             }) => {
+                // First appearance of this tool call (auto-run tool with no
+                // approval step, so no prior `ToolPending`): flush any
+                // thinking/response text accumulated before it, mirroring
+                // `update_tool_bubble_to_running`'s flush for the same case.
+                flush_thinking_section(out, &mut current_section, &mut thinking_started_at)?;
+                current_section = StreamSection::None;
                 let title = registry
                     .get(&name)
                     .map(|tool| tool.title().to_string())
@@ -360,6 +446,8 @@ pub async fn run_cli_to(
                 }
             }
             Some(UiUpdate::ToolAutoDenied { name, reason, .. }) => {
+                flush_thinking_section(out, &mut current_section, &mut thinking_started_at)?;
+                current_section = StreamSection::None;
                 writeln!(out, "[tool] auto-denied '{name}': {reason}")?;
             }
             Some(UiUpdate::ToolKilled { .. }) => {
@@ -367,14 +455,17 @@ pub async fn run_cli_to(
             }
             Some(UiUpdate::SteerQueued) | Some(UiUpdate::SteerApplied) => {}
             Some(UiUpdate::StreamDone) => {
+                flush_thinking_section(out, &mut current_section, &mut thinking_started_at)?;
                 writeln!(out)?;
                 response_finished = true;
             }
             Some(UiUpdate::StreamCancelled) => {
+                flush_thinking_section(out, &mut current_section, &mut thinking_started_at)?;
                 writeln!(out, "---[ Interrupted ]---")?;
                 response_finished = true;
             }
             Some(UiUpdate::Error(error)) => {
+                flush_thinking_section(out, &mut current_section, &mut thinking_started_at)?;
                 writeln!(out, "---[ Error ]---\n{error}")?;
                 response_finished = true;
             }

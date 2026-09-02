@@ -190,11 +190,18 @@ exit.
 - **Input always active:** the input box is never disabled. `Enter` sends
   unconditionally — while the model is streaming the message is queued as a
   pending steer, and `Ctrl+C`/`Esc` interrupt the current round.
-- **Steer bubble lifecycle:** a user message appears immediately on `Enter`. It
-  is rendered `Queued` (yellow) while pending, then becomes `Steered` (light
-  green) when `SteerApplied` arrives — visually distinct from a normal `Sent`
-  message to identify mid-stream corrections.
-- **Cancelled steers:** interrupting marks all pending bubbles `Cancelled`
+- **Steer bubble lifecycle:** a steer (a message typed while the agent is
+  busy) is rendered `Queued` (dimmed green, same hue as a normal sent
+  message) immediately, near the bottom of the
+  chat, but is only *staged*, not yet committed to the conversation log —
+  this avoids fixing its position ahead of thinking/tool-call content for
+  the in-flight round that hasn't been flushed yet. It becomes `Steered`
+  and is committed to the log — after everything already flushed for that
+  round — once `SteerApplied` arrives, at which point it renders identically
+  to a normal `Sent` message (same solid green): once injected, the model has
+  seen it like any other user message, so the UI only distinguishes
+  "queued" from "seen", not *why* a message was seen.
+- **Cancelled steers:** interrupting commits all staged steers as `Cancelled`
   (grey) with a dimmed "Not sent." line. The text is retained in input history
   so it can be recovered with `↑`.
 - **Tool approval sub-mode:** when a tool awaits approval the footer switches
@@ -204,10 +211,14 @@ exit.
   denial (a dimmed `"Enter reason for denial here…"` placeholder appears when
   the field is empty). The user's draft is snapshotted when approval sub-mode
   starts and restored automatically after the tool is approved or denied.
-- **Double-press `Ctrl+C`/`Esc`:** a key-agnostic confirm with a 2-second
-  window (`CONFIRM_TIMEOUT`). While streaming/tool-pending the first press
-  shows `"Press again to cancel"` and the second stops the round; while idle
-  `Ctrl+C` double-press quits and `Esc` just clears the input. A natural
+- **Double-press `Ctrl+C`/`Esc`:** each key has its own 2-second confirm
+  window (`CONFIRM_TIMEOUT`); only a second press of the *same* key confirms
+  — pressing the other key starts its own fresh window instead, so e.g.
+  `Ctrl+C` then `Esc` never quits on that `Esc`. While streaming/tool-pending
+  the first press shows a per-key hint (`Esc`: cancel only; `Ctrl+C`: cancel
+  & quit) and the second confirms that key's action; while idle `Ctrl+C`
+  double-press quits and `Esc` immediately clears the input (single press,
+  never quits — and dismisses a pending `Ctrl+C` quit confirm). A natural
   transition to `Idle` clears confirm state. OS SIGINT stops immediately (no
   double-press).
 - **Help popup (`F1`):** toggles a centered popup with the full keybinding
@@ -232,8 +243,16 @@ exit.
   piped stdin still auto-sends on startup.
 - **Sending state:** after `Enter` (or an auto-sent initial prompt) the footer
   shows `"Sending…"` until the first stream event arrives, instead of `"Idle"`.
+- **Footer distinguishes thinking / responding / tool execution:** while
+  streaming, the footer shows `"Thinking…"` when the model is emitting
+  extended-thinking/reasoning tokens with no assistant text yet,
+  `"Streaming…"` once assistant text (or tool-call argument deltas with no
+  visible text) is flowing, and `"Running tool…"` once a tool bubble has
+  actually started executing (`ToolCallState::Running`) — rather than a
+  single generic `"Streaming…"` for the whole in-flight turn.
 - **Input as a message:** the input box renders like a sent user message — a
-  colored left border (Cyan), no full frame and no `"Input"` title. Long text
+  colored left border (dimmed Green, matching the sent user-message bubble's
+  border), no full frame and no `"Input"` title. Long text
   **word-wraps** inside the box (no horizontal scrollbar), and the box grows
   with its content up to the 1/3 height cap.
 - **Mouse editing:** a left-click in the input box places the cursor at the
@@ -262,14 +281,24 @@ exit.
 - **Markdown rendering:** assistant messages, user messages, the clarify
   banner's question/context text, and a user's clarify answer (shown in the
   "User answered:" result of the clarify tool bubble) render Markdown instead
-  of plain wrapped text (`src/markdown.rs`). Supported: **bold**/*italic*,
+  of plain wrapped text. Supported: **bold**/*italic*,
   `inline code` (distinct color), fenced code blocks (dim, verbatim,
   syntax-highlighted when a language tag is given), bullet/numbered lists,
   headings, blockquotes (`│` prefix), horizontal rules, and tables
   (column-aligned, bold header row, `│` column separators). Plain text with
-  no Markdown syntax renders identically to the previous plain-wrap behavior.
+  no Markdown syntax wraps as plain text.
   Unsupported syntax (links, images, HTML) degrades to plain text — inner
   text is preserved — rather than crashing or dropping content.
+- **Thinking bubble:** extended-thinking/reasoning output (Anthropic
+  `thinking_delta`, OpenAI `reasoning_content`, or bare `reasoning` from
+  Ollama/vLLM) gets its own bubble: dim-blue border, Markdown rendering,
+  shown before the assistant's reply (even on thinking-only turns that go
+  straight into a tool call). Starts expanded; title shows a live elapsed
+  timer while streaming, then the total duration once done. Click the title
+  or left border to expand/collapse, same as tool bubbles. Depends on the
+  model having extended-thinking/reasoning enabled, not on the provider.
+  Interleaved thinking, replies, and tool calls each flush into their own
+  bubble in order.
 
 ## Phase 5: Named engines and profiles
 

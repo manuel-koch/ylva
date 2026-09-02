@@ -10,14 +10,19 @@ Reference for Ylva's TUI keybindings.
 | `shift-enter` / `alt-enter` | Input focused | Insert newline |
 | `home` / `fn-left` | Input focused | Move to start of line; if already at column 0, move to end of previous line |
 | `end` / `fn-right` | Input focused | Move to end of line; if already at line end, move to start of next line |
-| `ctrl-c` or `esc` (×1) | Streaming / ToolPending, input empty | Show `"Press again to cancel"` hint |
-| `ctrl-c` or `esc` (×2 ≤ 2 s) | Streaming / ToolPending, input empty | Interrupt conversation |
+| `esc` (×1) | Streaming / ToolPending, input empty | Show `"Press again to cancel"` hint |
+| `esc` (×2, same key, ≤ 2 s) | Streaming / ToolPending, input empty | Interrupt conversation; TUI stays open |
+| `ctrl-c` (×1) | Streaming / ToolPending, input empty | Show `"Press again to cancel & quit"` hint |
+| `ctrl-c` (×2, same key, ≤ 2 s) | Streaming / ToolPending, input empty | Interrupt conversation, then quit TUI |
 | `ctrl-c` or `esc` | Streaming / ToolPending, input non-empty | Clear input field and exit history browsing (no interrupt) |
 | `ctrl-c` (×1) | Idle, input empty | Show `"Press again to quit"` hint |
-| `ctrl-c` (×2 ≤ 2 s) | Idle, input empty | Quit TUI |
-| `ctrl-c` | Idle, input non-empty | Clear input field (no quit) |
-| `esc` | Idle | Clear input field (no quit) |
+| `ctrl-c` (×2, same key, ≤ 2 s) | Idle, input empty | Quit TUI |
+| `ctrl-c` (×1) | Idle, input non-empty | Show `"Press again to quit"` hint (draft is *not* cleared) |
+| `ctrl-c` (×2, same key, ≤ 2 s) | Idle, input non-empty | Quit TUI, discarding the draft |
+| `esc` | Idle | Clear input field (no quit); also dismisses a pending `ctrl-c` quit confirm |
 | `esc` | Help popup open | Close popup |
+| Left-click inside popup | Help popup open | No effect (stays open) |
+| Left-click outside popup | Help popup open | Close popup |
 | `enter` | Approval sub-mode | Approve tool |
 | `esc` | Approval sub-mode | Deny tool |
 | `ctrl-c` (×1) | Approval sub-mode | Show cancel hint |
@@ -39,6 +44,12 @@ Reference for Ylva's TUI keybindings.
 | Left-click | Input focused | Move the cursor to the clicked character (word-wrapping honored) |
 | Left-drag | Input focused | Select text; click (no drag) just places the cursor |
 | Left-click on tool bubble title / border | Any | Toggle tool bubble expand (`▼`) / collapse (`▶`) |
+
+Only a second press of the *same* key confirms a pending double-press action.
+Pressing the other key instead starts that key's own fresh confirm window
+(and dismisses the one it replaced) — e.g. `esc` then `ctrl-c` never quits on
+that `ctrl-c`, and `ctrl-c` then `esc` never quits on that `esc`; each key's
+first press must be repeated to confirm its own action.
 
 `shift-enter` / `alt-enter` rely on the kitty keyboard protocol: the TUI
 enables `DISAMBIGUATE_ESCAPE_CODES` on startup (pushed with the alternate

@@ -24,7 +24,8 @@
 use ratatui::Frame;
 use ratatui_textarea::TextArea;
 
-use crate::app_state::{AppState, BannerDragSelection, Focus, TuiState};
+use crate::app_state::{AppState, BannerDragSelection, Focus};
+use crate::tui_state::TuiState;
 use crate::ui::{self, ButtonAreas};
 
 /// Draw one TUI frame.
@@ -65,6 +66,10 @@ fn project_for_draw(state: &AppState) -> TuiState {
         agent_mode: state.agent_mode(),
         chat_entries: state.chat_entries.clone(),
         partial_assistant_text: state.partial_assistant_text.clone(),
+        partial_thinking_text: state.partial_thinking_text.clone(),
+        thinking_started_at: state.thinking_started_at,
+        partial_thinking_collapsed: state.partial_thinking_collapsed,
+        queued_steer_texts: state.queued_steer_texts.clone(),
         show_help: state.show_help(),
         steer_indicator: state.steer_indicator,
         scroll_offset: state.scroll_offset,
@@ -89,6 +94,7 @@ fn project_for_draw(state: &AppState) -> TuiState {
         input_area: state.layout.input_area.rect,
         chat_area: state.layout.chat_area.rect,
         clarify_banner: ratatui::layout::Rect::default(),
+        help_popup_rect: state.layout.help_popup.rect,
         chat_rendered_lines: state.chat_rendered_lines.clone(),
         chat_rendered_line_chrome_widths: state.chat_rendered_line_chrome_widths.clone(),
         chat_selection: state.chat_selection,
@@ -119,6 +125,7 @@ fn project_for_draw(state: &AppState) -> TuiState {
         clarify_scroll_offset: state.clarify_scroll_offset,
         input_scroll_top: state.input_scroll_top,
         bubble_title_rows: state.bubble_title_rows.clone(),
+        thinking_title_rows: state.thinking_title_rows.clone(),
     }
 }
 
@@ -128,6 +135,7 @@ fn sync_from_draw(state: &mut AppState, rendered: TuiState, button_areas: Option
     state.layout.input_area.rect = rendered.input_area;
     state.layout.chat_area.rect = rendered.chat_area;
     state.layout.clarify_banner = rendered.clarify_banner;
+    state.layout.help_popup.rect = rendered.help_popup_rect;
     if let Some(buttons) = button_areas {
         state.layout.approve_button = buttons.approve;
         state.layout.deny_button = buttons.deny;
@@ -139,6 +147,7 @@ fn sync_from_draw(state: &mut AppState, rendered: TuiState, button_areas: Option
     state.scroll_offset = rendered.scroll_offset;
     state.scroll_locked = rendered.scroll_locked;
     state.bubble_title_rows = rendered.bubble_title_rows;
+    state.thinking_title_rows = rendered.thinking_title_rows;
     state.chat_rendered_lines = rendered.chat_rendered_lines;
     state.chat_rendered_line_chrome_widths = rendered.chat_rendered_line_chrome_widths;
     state.help_scroll_offset = rendered.help_scroll_offset;

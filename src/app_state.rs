@@ -31,12 +31,20 @@ use crossterm::event::KeyEvent;
 use ratatui::layout::Rect;
 use uuid::Uuid;
 
-use crate::agent::{AgentMode, UiUpdate};
+use crate::agent::AgentMode;
 
 // ─── Duration constant ───────────────────────────────────────────────────────
 
 /// Duration a toast notification remains visible before it auto-dismisses.
 const TOAST_DURATION: Duration = Duration::from_millis(1500);
+
+/// Sentinel `entry_index` used in `thinking_title_rows` for the in-flight
+/// (not yet flushed) thinking bubble rendered from `partial_thinking_text`.
+/// Real entries are keyed by their `chat_entries` index (always `< usize::MAX`
+/// in practice), so this value can never collide with a genuine index; it
+/// lets click handling route to `AppState::toggle_partial_thinking_collapsed`
+/// instead of `AppState::toggle_thinking_collapsed`.
+pub const STREAMING_THINKING_ENTRY_INDEX: usize = usize::MAX;
 
 // ─── ChatSelection ───────────────────────────────────────────────────────────
 
@@ -107,8 +115,8 @@ pub enum UserMessageState {
     /// Pending steer: queued, not yet injected.
     Queued,
     /// Steer successfully applied: injected into the model context as a
-    /// mid-stream correction. Visually distinct from a regular `Sent` bubble
-    /// so the user can always tell which messages were steers.
+    /// mid-stream correction — once injected, the LLM has seen it just like
+    /// any other user message, and that's the only distinction that matters.
     Steered,
     /// Cancelled: stream was interrupted before injection; text retained in
     /// input_history so the user can recover via ↑.
@@ -197,6 +205,20 @@ pub enum ChatEntry {
         text: String,
         interrupted: bool,
     },
+    /// Extended-thinking / reasoning output emitted before the assistant's
+    /// visible reply. It is collapsible; it starts expanded
+    /// (`collapsed: false`) as soon as thinking starts — how this default is
+    /// configured is not yet defined — and flushing from the completed
+    /// stream carries that collapse state through unchanged rather than
+    /// resetting it, so it never auto-collapses when thinking ends; only an
+    /// explicit user toggle changes it.
+    ThinkingMessage {
+        text: String,
+        collapsed: bool,
+        /// Wall-clock time between the first and last thinking fragment of
+        /// this stream, shown in the collapsed summary line.
+        duration: std::time::Duration,
+    },
     /// A single bubble representing all lifecycle stages of one tool invocation.
     ToolBubble {
         id: uuid::Uuid,
@@ -216,1336 +238,6 @@ pub enum ChatEntry {
 pub enum HistoryDirection {
     Up,
     Down,
-}
-
-// ─── TuiState ────────────────────────────────────────────────────────────────
-
-/// The TUI's live rendering state. Populated exclusively by
-/// [`TuiState::apply_update`] (from `UiUpdate`) and the driver helpers below.
-pub struct TuiState {
-    pub agent_mode: AgentMode,
-    pub chat_entries: Vec<ChatEntry>,
-    pub partial_assistant_text: String,
-    pub show_help: bool,
-    /// true while ≥1 steer is queued.
-    pub steer_indicator: bool,
-    pub scroll_offset: usize,
-    /// true = auto-scroll to bottom.
-    pub scroll_locked: bool,
-    /// updated on every resize.
-    pub chat_area_height: u16,
-    /// Set by `UiUpdate::ToolPending`; cleared by `ToolStart`/`ToolKilled`/
-    /// `StreamCancelled`. While `Some`, the TUI is in approval sub-mode.
-    pub pending_approval: Option<(Uuid, String, serde_json::Value)>, // (tool_id, tool_name, arguments)
-    /// Set by `UiUpdate::ClarifyPending`; cleared once the user answers or the
-    /// stream returns to idle.
-    pub pending_clarify: Option<(String, Option<Vec<String>>, Option<String>)>,
-    /// Textarea lines saved when a `ToolPending` approval sub-mode starts so
-    /// the unsubmitted draft can be restored once the approval is resolved.
-    /// `None` when no approval is in progress or the input was empty.
-    pub pending_approval_input_snapshot: Option<Vec<String>>,
-    /// All `UserMessage` texts, oldest → newest (including pending and
-    /// cancelled steers, so the user can recover them via ↑).
-    pub input_history: Vec<String>,
-    /// `None` = live draft; `Some(i)` = browsing history at index `i`.
-    pub history_index: Option<usize>,
-    /// Saved live draft while browsing.
-    pub draft: String,
-    /// On-screen rect of the input box, written each frame by `ui::draw` for
-    /// mouse hit-testing (click-to-cursor / drag-select).
-    pub input_area: InputArea,
-    /// On-screen rect of the chat content area (not the scrollbar column),
-    /// written each frame by `ui::draw_chat` for mouse hit-testing.
-    pub chat_area: ratatui::layout::Rect,
-    /// On-screen rect of the clarify banner, written each frame by `ui::draw`
-    /// for mouse click-to-select-choice hit-testing. Zero-sized when no
-    /// clarify is pending.
-    pub clarify_banner: ratatui::layout::Rect,
-    /// Plain text of every rendered line built by the most recent `draw_chat`
-    /// call. Indexed by absolute line number (before scroll offset). Used for
-    /// extracting selected text on mouse-up.
-    pub chat_rendered_lines: Vec<String>,
-    /// Number of leading chrome characters (`▌  `) stripped from the
-    /// corresponding `chat_rendered_lines` entry. Zero for non-bubble lines.
-    /// Used by `extract_chat_selection_text` to map terminal columns (which
-    /// include the chrome) back to content columns.
-    pub chat_rendered_line_chrome_widths: Vec<usize>,
-    /// Active or committed chat selection. `None` = no selection.
-    pub chat_selection: Option<ChatSelection>,
-    /// True while the left mouse button is held down in the chat area (drag
-    /// in progress). Cleared on mouse-up.
-    pub chat_drag_active: bool,
-    /// While the user drags in the clarify banner, holds the normalised
-    /// selection (start_row, start_col, end_row, end_col) in absolute screen
-    /// coordinates, for highlighting. `None` when no drag is in progress.
-    pub clarify_banner_drag: Option<BannerDragSelection>,
-    /// Transient notification displayed as a floating overlay, auto-dismissed
-    /// after [`TOAST_DURATION`]. Set by e.g. clipboard copy; `None` when no
-    /// notification is active.
-    pub toast: Option<(String, Instant)>,
-    /// Incremented on every tick while the agent is busy; used to animate the
-    /// footer spinner.
-    pub spinner_frame: u8,
-    /// Current scroll offset inside the help popup (lines from the top of the
-    /// content). Clamped to the valid range by `draw_help_popup` each frame.
-    pub help_scroll_offset: usize,
-    /// Current horizontal scroll offset inside the help popup (columns from
-    /// the left). Clamped to the valid range by `draw_help_popup` each frame.
-    pub help_scroll_x: usize,
-    /// Current vertical scroll offset inside the clarify banner (lines from
-    /// the top of the content). Clamped to the valid range by
-    /// `draw_clarify_banner` each frame.
-    pub clarify_scroll_offset: usize,
-    /// Mirrors ratatui-textarea's internal scroll-top (in wrapped screen rows)
-    /// so that the input-field scroll indicators reflect the actual rendered
-    /// viewport position rather than the cursor row.
-    pub input_scroll_top: usize,
-    /// Maps each rendered tool bubble to its absolute line-index range
-    /// `(start_row, end_row, id)` (inclusive, before scroll offset). Populated
-    /// by `ui::draw_chat` every frame. Used to route click events to the
-    /// correct bubble's expand/collapse toggle: a click on any row in
-    /// `[start_row, end_row]` at column 0 (the border bar) toggles the bubble,
-    /// as does a click anywhere on the title row regardless of column.
-    pub bubble_title_rows: Vec<(usize, usize, uuid::Uuid)>,
-}
-
-impl TuiState {
-    pub fn new() -> Self {
-        TuiState {
-            agent_mode: AgentMode::Idle,
-            chat_entries: Vec::new(),
-            partial_assistant_text: String::new(),
-            show_help: false,
-            steer_indicator: false,
-            scroll_offset: 0,
-            scroll_locked: true,
-            chat_area_height: 0,
-            pending_approval: None,
-            pending_clarify: None,
-            pending_approval_input_snapshot: None,
-            input_history: Vec::new(),
-            history_index: None,
-            draft: String::new(),
-            input_area: ratatui::layout::Rect::default(),
-            chat_area: ratatui::layout::Rect::default(),
-            clarify_banner: ratatui::layout::Rect::default(),
-            chat_rendered_lines: Vec::new(),
-            chat_rendered_line_chrome_widths: Vec::new(),
-            chat_selection: None,
-            chat_drag_active: false,
-            clarify_banner_drag: None,
-            toast: None,
-            spinner_frame: 0,
-            help_scroll_offset: 0,
-            help_scroll_x: 0,
-            clarify_scroll_offset: 0,
-            input_scroll_top: 0,
-            bubble_title_rows: Vec::new(),
-        }
-    }
-
-    /// Commit the in-flight partial assistant text into a full
-    /// `AssistantMessage` entry and clear the partial buffer.
-    ///
-    /// Any steer (`UserMessage { state: Queued }`) entries that arrived while
-    /// this stream was in progress are currently sitting *before* the not-yet-
-    /// committed assistant response in `chat_entries`. They are lifted out,
-    /// the `AssistantMessage` is appended first, and then the steers are
-    /// re-appended so the logical order is always:
-    /// `… → AssistantMessage → QueuedSteer → …`
-    fn flush_partial_assistant_message(&mut self, interrupted: bool) {
-        if !self.partial_assistant_text.is_empty() {
-            let queued_steers: Vec<ChatEntry> = self
-                .chat_entries
-                .iter()
-                .filter(|entry| {
-                    matches!(
-                        entry,
-                        ChatEntry::UserMessage {
-                            state: UserMessageState::Queued,
-                            ..
-                        }
-                    )
-                })
-                .cloned()
-                .collect();
-            self.chat_entries.retain(|entry| {
-                !matches!(
-                    entry,
-                    ChatEntry::UserMessage {
-                        state: UserMessageState::Queued,
-                        ..
-                    }
-                )
-            });
-            self.chat_entries.push(ChatEntry::AssistantMessage {
-                text: std::mem::take(&mut self.partial_assistant_text),
-                interrupted,
-            });
-            self.chat_entries.extend(queued_steers);
-        } else {
-            self.partial_assistant_text.clear();
-        }
-    }
-
-    fn transition_queued_messages_to(&mut self, state: UserMessageState) {
-        for entry in self.chat_entries.iter_mut() {
-            if let ChatEntry::UserMessage {
-                state: entry_state, ..
-            } = entry
-            {
-                if *entry_state == UserMessageState::Queued {
-                    *entry_state = state;
-                }
-            }
-        }
-    }
-
-    fn find_tool_bubble_mut(&mut self, target_id: Uuid) -> Option<&mut ChatEntry> {
-        self.chat_entries
-            .iter_mut()
-            .rev()
-            .find(|entry| matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == target_id))
-    }
-
-    /// Toggle the collapsed/expanded state of the tool bubble with the given
-    /// `id`. A no-op when no matching bubble is found.
-    ///
-    /// Disables auto-scroll so the bubble's top edge stays at the same screen
-    /// position after the content height changes. `draw_chat` writes the
-    /// effective `scroll_offset` back to `state` every frame, so the correct
-    /// offset is already present when this is called.
-    pub fn toggle_tool_bubble_collapsed(&mut self, target_id: Uuid) {
-        for entry in &mut self.chat_entries {
-            if let ChatEntry::ToolBubble { id, collapsed, .. } = entry {
-                if *id == target_id {
-                    *collapsed = !*collapsed;
-                    self.scroll_locked = false;
-                    return;
-                }
-            }
-        }
-    }
-
-    /// Apply a single `UiUpdate` to the view state.
-    pub fn apply_update(&mut self, update: &UiUpdate) {
-        match update {
-            UiUpdate::StreamStarted => {
-                // Commit any text that accumulated during the previous stream
-                // (e.g. prose that preceded tool calls) so it is preserved as
-                // a permanent AssistantMessage bubble before the new stream
-                // clears the partial buffer.
-                self.flush_partial_assistant_message(false);
-                // While aborting, keep the Aborting mode so the TUI can
-                // detect the eventual Idle transition and quit.
-                if self.agent_mode != AgentMode::Aborting {
-                    self.agent_mode = AgentMode::Streaming;
-                }
-                self.pending_clarify = None;
-                self.partial_assistant_text.clear();
-            }
-            UiUpdate::AppendText(text) => {
-                self.partial_assistant_text.push_str(text);
-                if self.scroll_locked {
-                    self.scroll_offset = 0;
-                }
-            }
-            UiUpdate::StreamDone => {
-                self.flush_partial_assistant_message(false);
-                self.pending_clarify = None;
-                self.agent_mode = AgentMode::Idle;
-                self.scroll_locked = true;
-                self.scroll_offset = 0;
-            }
-            UiUpdate::StreamCancelled => {
-                self.flush_partial_assistant_message(true);
-                self.transition_queued_messages_to(UserMessageState::Cancelled);
-                self.steer_indicator = false;
-                self.pending_approval = None;
-                self.pending_clarify = None;
-                self.agent_mode = AgentMode::Idle;
-                self.scroll_locked = true;
-                self.scroll_offset = 0;
-            }
-            UiUpdate::SteerQueued => {
-                self.steer_indicator = true;
-            }
-            UiUpdate::SteerApplied => {
-                self.transition_queued_messages_to(UserMessageState::Steered);
-                self.steer_indicator = false;
-            }
-            UiUpdate::ToolPending {
-                name,
-                id,
-                arguments,
-                content_sections,
-                title_arguments,
-            } => {
-                // While aborting, skip approval sub-mode entirely: the agent
-                // will process the pending Stop command and deny this tool on
-                // its own; showing the approval UI here would be misleading.
-                if self.agent_mode == AgentMode::Aborting {
-                    return;
-                }
-                // Commit any text that arrived in the same stream as the tool
-                // calls (prose before/alongside the call) so it is preserved
-                // as a permanent AssistantMessage bubble.
-                self.flush_partial_assistant_message(false);
-                self.chat_entries.push(ChatEntry::ToolBubble {
-                    id: *id,
-                    name: name.clone(),
-                    state: Box::new(ToolCallState::Pending {
-                        arguments: arguments.clone(),
-                        content_sections: content_sections.clone(),
-                        title_arguments: title_arguments.clone(),
-                    }),
-                    collapsed: true,
-                });
-                self.pending_approval = Some((*id, name.clone(), arguments.clone()));
-                self.pending_clarify = None;
-            }
-            UiUpdate::ClarifyPending {
-                id,
-                question,
-                context,
-                choices,
-                ..
-            } => {
-                self.flush_partial_assistant_message(false);
-                self.pending_approval = None;
-                self.pending_clarify = Some((question.clone(), choices.clone(), context.clone()));
-                self.clarify_scroll_offset = usize::MAX;
-                self.agent_mode = AgentMode::ClarifyPending;
-
-                // Push a bubble in Running state so the question and choices
-                // are preserved in the chat history after the user answers.
-                let mut arguments = serde_json::json!({ "question": question });
-                if let Some(ref context_text) = context {
-                    arguments["context"] = serde_json::Value::String(context_text.clone());
-                }
-                if let Some(ref choices_list) = choices {
-                    arguments["choices"] = serde_json::Value::Array(
-                        choices_list
-                            .iter()
-                            .map(|c| serde_json::Value::String(c.clone()))
-                            .collect(),
-                    );
-                }
-                let title_arguments = vec![(
-                    "question".to_string(),
-                    serde_json::Value::String(question.clone()),
-                )];
-                self.chat_entries.push(ChatEntry::ToolBubble {
-                    id: *id,
-                    name: "clarify".to_string(),
-                    state: Box::new(ToolCallState::Running {
-                        arguments,
-                        content_sections: vec![],
-                        title_arguments,
-                    }),
-                    collapsed: false,
-                });
-            }
-            UiUpdate::ToolStart {
-                name,
-                id,
-                arguments,
-                content_sections,
-                title_arguments,
-                ..
-            } => {
-                if let Some(entry) = self.find_tool_bubble_mut(*id) {
-                    if let ChatEntry::ToolBubble { state, .. } = entry {
-                        **state = ToolCallState::Running {
-                            arguments: arguments.clone(),
-                            content_sections: content_sections.clone(),
-                            title_arguments: title_arguments.clone(),
-                        };
-                    }
-                } else {
-                    self.chat_entries.push(ChatEntry::ToolBubble {
-                        id: *id,
-                        name: name.clone(),
-                        state: Box::new(ToolCallState::Running {
-                            arguments: arguments.clone(),
-                            content_sections: content_sections.clone(),
-                            title_arguments: title_arguments.clone(),
-                        }),
-                        collapsed: true,
-                    });
-                }
-                self.pending_approval = None;
-                self.pending_clarify = None;
-                if self.agent_mode == AgentMode::ClarifyPending {
-                    self.agent_mode = AgentMode::Streaming;
-                } else if self.agent_mode != AgentMode::Aborting {
-                    self.agent_mode = AgentMode::ToolRunning;
-                }
-            }
-            UiUpdate::ToolDone {
-                id,
-                name,
-                result_section,
-                summary,
-                duration,
-                content_sections,
-            } => {
-                let (previous_arguments, previous_title_arguments) = self
-                    .find_tool_bubble_mut(*id)
-                    .and_then(|entry| {
-                        if let ChatEntry::ToolBubble { state, .. } = entry {
-                            match state.as_ref() {
-                                ToolCallState::Running {
-                                    arguments,
-                                    title_arguments,
-                                    ..
-                                }
-                                | ToolCallState::Pending {
-                                    arguments,
-                                    title_arguments,
-                                    ..
-                                } => Some((arguments.clone(), title_arguments.clone())),
-                                _ => None,
-                            }
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or((serde_json::Value::Null, vec![]));
-                if let Some(entry) = self.find_tool_bubble_mut(*id) {
-                    if let ChatEntry::ToolBubble { state, .. } = entry {
-                        **state = ToolCallState::Done {
-                            arguments: previous_arguments,
-                            result_section: result_section.clone(),
-                            content_sections: content_sections.clone(),
-                            summary: summary.clone(),
-                            duration: *duration,
-                            title_arguments: previous_title_arguments,
-                        };
-                    }
-                } else {
-                    self.chat_entries.push(ChatEntry::ToolBubble {
-                        id: *id,
-                        name: name.clone(),
-                        state: Box::new(ToolCallState::Done {
-                            arguments: serde_json::Value::Null,
-                            result_section: result_section.clone(),
-                            content_sections: content_sections.clone(),
-                            summary: summary.clone(),
-                            duration: *duration,
-                            title_arguments: vec![],
-                        }),
-                        collapsed: true,
-                    });
-                }
-                self.pending_clarify = None;
-                if self.agent_mode == AgentMode::ClarifyPending {
-                    self.agent_mode = AgentMode::Idle;
-                } else if self.agent_mode == AgentMode::ToolRunning {
-                    self.agent_mode = AgentMode::Streaming;
-                }
-            }
-            UiUpdate::ToolError {
-                id,
-                error,
-                duration,
-                content_sections,
-            } => {
-                if let Some(entry) = self.find_tool_bubble_mut(*id) {
-                    if let ChatEntry::ToolBubble { state, .. } = entry {
-                        let preserved_title_arguments = match state.as_ref() {
-                            ToolCallState::Pending {
-                                title_arguments, ..
-                            }
-                            | ToolCallState::Running {
-                                title_arguments, ..
-                            }
-                            | ToolCallState::Done {
-                                title_arguments, ..
-                            }
-                            | ToolCallState::Denied {
-                                title_arguments, ..
-                            }
-                            | ToolCallState::Error {
-                                title_arguments, ..
-                            } => title_arguments.clone(),
-                            _ => vec![],
-                        };
-                        **state = ToolCallState::Error {
-                            error: error.clone(),
-                            title_arguments: preserved_title_arguments,
-                            duration: *duration,
-                            content_sections: content_sections.clone(),
-                        };
-                    }
-                } else {
-                    self.chat_entries.push(ChatEntry::ErrorLine {
-                        message: error.clone(),
-                    });
-                }
-                // When the errored tool was the one awaiting approval, the
-                // agent aborted it without reprompting (e.g. via Stop) — clear
-                // the approval footer and return to idle.
-                if self
-                    .pending_approval
-                    .as_ref()
-                    .is_some_and(|(pending_id, _, _)| pending_id == id)
-                {
-                    self.pending_approval = None;
-                    self.agent_mode = AgentMode::Idle;
-                }
-                self.pending_clarify = None;
-                if self.agent_mode == AgentMode::ClarifyPending {
-                    self.agent_mode = AgentMode::Idle;
-                } else if self.agent_mode == AgentMode::ToolRunning {
-                    self.agent_mode = AgentMode::Streaming;
-                }
-            }
-            UiUpdate::ToolAutoDenied {
-                id,
-                name,
-                title_arguments,
-                content_sections,
-                reason,
-            } => {
-                self.chat_entries.push(ChatEntry::ToolBubble {
-                    id: *id,
-                    name: name.clone(),
-                    state: Box::new(ToolCallState::Denied {
-                        arguments: serde_json::Value::Null,
-                        error: reason.clone(),
-                        content_sections: content_sections.clone(),
-                        title_arguments: title_arguments.clone(),
-                    }),
-                    collapsed: false,
-                });
-                self.pending_clarify = None;
-            }
-            UiUpdate::ToolKilled { id } => {
-                if let Some(entry) = self.find_tool_bubble_mut(*id) {
-                    if let ChatEntry::ToolBubble { state, .. } = entry {
-                        **state = ToolCallState::Killed;
-                    }
-                } else {
-                    self.chat_entries.push(ChatEntry::ToolBubble {
-                        id: *id,
-                        name: String::new(),
-                        state: Box::new(ToolCallState::Killed),
-                        collapsed: true,
-                    });
-                }
-                self.pending_approval = None;
-                self.pending_clarify = None;
-                if self.agent_mode == AgentMode::ClarifyPending
-                    || self.agent_mode == AgentMode::ToolRunning
-                {
-                    self.agent_mode = AgentMode::Idle;
-                }
-            }
-            UiUpdate::Error(message) => {
-                self.chat_entries.push(ChatEntry::ErrorLine {
-                    message: message.clone(),
-                });
-                self.pending_clarify = None;
-                self.agent_mode = AgentMode::Idle;
-            }
-        }
-    }
-
-    /// Called by the driver before sending `AgentCommand::Prompt`.
-    /// `state == Queued` when `agent_mode != Idle` (steer); `Sent` otherwise.
-    /// Appends text to `input_history` and resets `history_index` to `None`.
-    pub fn push_user_bubble(&mut self, text: String, state: UserMessageState) {
-        self.chat_entries.push(ChatEntry::UserMessage {
-            text: text.clone(),
-            state,
-        });
-        self.input_history.push(text);
-        self.history_index = None;
-    }
-
-    /// Called when the user scrolls up (toward earlier content) — disables
-    /// auto-scroll and decreases the row offset. Clamped at 0 (the top).
-    pub fn scroll_up(&mut self, lines: usize) {
-        self.scroll_locked = false;
-        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
-    }
-
-    /// Called when the user scrolls down (toward later content) — disables
-    /// auto-scroll and increases the row offset. The upper bound is applied in
-    /// `ui::draw`, which knows the rendered content height.
-    pub fn scroll_down(&mut self, lines: usize) {
-        self.scroll_locked = false;
-        self.scroll_offset = self.scroll_offset.saturating_add(lines);
-    }
-
-    /// Scroll the help popup up (toward earlier content).
-    pub fn help_scroll_up(&mut self, lines: usize) {
-        self.help_scroll_offset = self.help_scroll_offset.saturating_sub(lines);
-    }
-
-    /// Scroll the help popup down (toward later content). The upper bound is
-    /// applied in `draw_help_popup`, which knows the total content height.
-    pub fn help_scroll_down(&mut self, lines: usize) {
-        self.help_scroll_offset = self.help_scroll_offset.saturating_add(lines);
-    }
-
-    /// Scroll the help popup left (toward earlier columns).
-    pub fn help_scroll_left(&mut self, columns: usize) {
-        self.help_scroll_x = self.help_scroll_x.saturating_sub(columns);
-    }
-
-    /// Scroll the help popup right (toward later columns). The upper bound is
-    /// applied in `draw_help_popup`, which knows the maximum line width.
-    pub fn help_scroll_right(&mut self, columns: usize) {
-        self.help_scroll_x = self.help_scroll_x.saturating_add(columns);
-    }
-
-    /// Scroll the clarify banner up (toward earlier content).
-    pub fn clarify_scroll_up(&mut self, lines: usize) {
-        self.clarify_scroll_offset = self.clarify_scroll_offset.saturating_sub(lines);
-    }
-
-    /// Scroll the clarify banner down (toward later content). The upper bound
-    /// is applied in `draw_clarify_banner`, which knows the total content height.
-    pub fn clarify_scroll_down(&mut self, lines: usize) {
-        self.clarify_scroll_offset = self.clarify_scroll_offset.saturating_add(lines);
-    }
-
-    /// Called on End key or scroll-to-bottom event — re-enables auto-scroll.
-    pub fn scroll_to_bottom(&mut self) {
-        self.scroll_locked = true;
-        self.scroll_offset = 0;
-    }
-
-    /// Extract the text covered by the current `chat_selection` from
-    /// `chat_rendered_lines`. Returns `None` when there is no selection or the
-    /// selection is empty (anchor == cursor).
-    pub fn extract_chat_selection_text(&self) -> Option<String> {
-        let sel = self.chat_selection.as_ref()?;
-        if sel.is_empty() {
-            return None;
-        }
-        let (start_line, start_col, end_line, end_col) = sel.normalized();
-        let lines = &self.chat_rendered_lines;
-        let start_line = start_line.min(lines.len().saturating_sub(1));
-        let end_line = end_line.min(lines.len().saturating_sub(1));
-        if start_line > end_line || lines.is_empty() {
-            return None;
-        }
-        // Subtract per-line chrome width so the border and indent are not
-        // included in the copied text.
-        let chrome = |index: usize| -> usize {
-            self.chat_rendered_line_chrome_widths
-                .get(index)
-                .copied()
-                .unwrap_or(0)
-        };
-        if start_line == end_line {
-            let line = &lines[start_line];
-            let c = chrome(start_line);
-            Some(char_range(
-                line,
-                start_col.saturating_sub(c),
-                end_col.saturating_sub(c),
-            ))
-        } else {
-            let mut result = String::new();
-            for (absolute_index, line) in lines
-                .iter()
-                .enumerate()
-                .skip(start_line)
-                .take(end_line - start_line + 1)
-            {
-                let c = chrome(absolute_index);
-                let fragment = if absolute_index == start_line {
-                    char_range(line, start_col.saturating_sub(c), line.chars().count())
-                } else if absolute_index == end_line {
-                    char_range(line, 0, end_col.saturating_sub(c))
-                } else {
-                    line.clone()
-                };
-                if !result.is_empty() {
-                    result.push('\n');
-                }
-                result.push_str(&fragment);
-            }
-            Some(result)
-        }
-    }
-
-    /// Show a transient toast notification for [`TOAST_DURATION`]. Replaces
-    /// any currently visible toast.
-    pub fn set_toast(&mut self, message: impl Into<String>) {
-        self.toast = Some((message.into(), Instant::now() + TOAST_DURATION));
-    }
-
-    /// Remove an expired toast. Called once per frame before rendering so
-    /// the overlay disappears on time without requiring a separate timer.
-    pub fn clear_expired_toast(&mut self) {
-        if let Some((_, expires_at)) = &self.toast {
-            if Instant::now() >= *expires_at {
-                self.toast = None;
-            }
-        }
-    }
-
-    /// Navigate input history. Returns the text to load into the textarea,
-    /// or `None` if the boundary was already reached (no change).
-    ///
-    /// - `Up` from live draft: save current textarea content as draft, move to
-    ///   the newest history entry.
-    /// - `Up` at oldest entry: no change.
-    /// - `Down` at newest entry: restore the saved draft (exit browsing).
-    /// - `Down` at live draft: no change.
-    pub fn navigate_input_message_history(
-        &mut self,
-        direction: HistoryDirection,
-        current_text: &str,
-    ) -> Option<String> {
-        match direction {
-            HistoryDirection::Up => {
-                if self.input_history.is_empty() {
-                    return None;
-                }
-                match self.history_index {
-                    None => {
-                        self.draft = current_text.to_string();
-                        self.history_index = Some(self.input_history.len() - 1);
-                    }
-                    Some(0) => return None,
-                    Some(index) => {
-                        self.history_index = Some(index - 1);
-                    }
-                }
-                Some(self.input_history[self.history_index.expect("just set")].clone())
-            }
-            HistoryDirection::Down => {
-                match self.history_index {
-                    None => None,
-                    Some(index) if index < self.input_history.len() - 1 => {
-                        self.history_index = Some(index + 1);
-                        Some(self.input_history[index + 1].clone())
-                    }
-                    Some(_) => {
-                        // At newest entry: restore the saved draft and exit.
-                        self.history_index = None;
-                        Some(std::mem::take(&mut self.draft))
-                    }
-                }
-            }
-        }
-    }
-
-    /// Exit history browsing (if active), copying the browsed entry into the
-    /// live draft, before an edit keypress is processed.
-    pub fn exit_input_history_browsing(&mut self, current_text: &str) {
-        if self.history_index.is_some() {
-            self.draft = current_text.to_string();
-            self.history_index = None;
-        }
-    }
-}
-
-impl Default for TuiState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// ─── TuiState tests (moved from app.rs) ──────────────────────────────────────
-
-#[cfg(test)]
-mod tui_state_tests {
-    use super::*;
-    use uuid::Uuid;
-
-    fn tool_pending() -> UiUpdate {
-        UiUpdate::ToolPending {
-            name: "read".to_string(),
-            id: Uuid::new_v4(),
-            arguments: serde_json::json!({}),
-            content_sections: vec![],
-
-            title_arguments: vec![],
-        }
-    }
-
-    #[test]
-    fn pending_transitions_to_correct_mode_on_stream_events() {
-        let mut state = TuiState::new();
-
-        state.agent_mode = AgentMode::Pending;
-        state.apply_update(&UiUpdate::StreamStarted);
-        assert_eq!(
-            state.agent_mode,
-            AgentMode::Streaming,
-            "StreamStarted → Streaming"
-        );
-
-        state.agent_mode = AgentMode::Pending;
-        state.apply_update(&UiUpdate::StreamDone);
-        assert_eq!(state.agent_mode, AgentMode::Idle, "StreamDone → Idle");
-
-        state.agent_mode = AgentMode::Pending;
-        state.apply_update(&UiUpdate::StreamCancelled);
-        assert_eq!(state.agent_mode, AgentMode::Idle, "StreamCancelled → Idle");
-
-        state.agent_mode = AgentMode::Pending;
-        state.apply_update(&UiUpdate::Error("boom".to_string()));
-        assert_eq!(state.agent_mode, AgentMode::Idle, "Error → Idle");
-    }
-
-    #[test]
-    fn stream_started_sets_streaming_mode_and_clears_partial() {
-        let mut state = TuiState::new();
-        state.apply_update(&UiUpdate::AppendText("hello".to_string()));
-        state.apply_update(&UiUpdate::StreamStarted);
-        assert_eq!(state.agent_mode, AgentMode::Streaming);
-        assert_eq!(state.partial_assistant_text, "");
-    }
-
-    #[test]
-    fn append_text_accumulates_partial() {
-        let mut state = TuiState::new();
-        state.apply_update(&UiUpdate::StreamStarted);
-        state.apply_update(&UiUpdate::AppendText("foo".to_string()));
-        state.apply_update(&UiUpdate::AppendText("bar".to_string()));
-        assert_eq!(state.partial_assistant_text, "foobar");
-    }
-
-    #[test]
-    fn stream_done_commits_assistant_and_idles() {
-        let mut state = TuiState::new();
-        state.apply_update(&UiUpdate::StreamStarted);
-        state.apply_update(&UiUpdate::AppendText("done".to_string()));
-        state.apply_update(&UiUpdate::StreamDone);
-        assert_eq!(state.agent_mode, AgentMode::Idle);
-        assert_eq!(state.partial_assistant_text, "");
-        assert_eq!(
-            state.chat_entries.last(),
-            Some(&ChatEntry::AssistantMessage {
-                text: "done".to_string(),
-                interrupted: false
-            })
-        );
-        assert!(state.scroll_locked);
-    }
-
-    #[test]
-    fn stream_cancelled_marks_queued_cancelled_and_clears_approval() {
-        let mut state = TuiState::new();
-        state.push_user_bubble("steer".to_string(), UserMessageState::Queued);
-        state.apply_update(&tool_pending());
-        assert!(state.pending_approval.is_some());
-        state.apply_update(&UiUpdate::StreamStarted);
-        state.apply_update(&UiUpdate::AppendText("partial".to_string()));
-        state.apply_update(&UiUpdate::StreamCancelled);
-        assert_eq!(state.agent_mode, AgentMode::Idle);
-        assert_eq!(state.pending_approval, None);
-        assert!(!state.steer_indicator);
-        assert_eq!(
-            state.chat_entries[1],
-            ChatEntry::AssistantMessage {
-                text: "partial".to_string(),
-                interrupted: true
-            }
-        );
-        assert_eq!(
-            state.chat_entries.last(),
-            Some(&ChatEntry::UserMessage {
-                text: "steer".to_string(),
-                state: UserMessageState::Cancelled
-            })
-        );
-    }
-
-    #[test]
-    fn steer_queued_sets_indicator_and_steer_applied_marks_sent() {
-        let mut state = TuiState::new();
-        state.push_user_bubble("a".to_string(), UserMessageState::Queued);
-        state.push_user_bubble("b".to_string(), UserMessageState::Queued);
-        state.apply_update(&UiUpdate::SteerQueued);
-        assert!(state.steer_indicator);
-        state.apply_update(&UiUpdate::SteerApplied);
-        assert!(!state.steer_indicator);
-        assert_eq!(
-            state.chat_entries[0],
-            ChatEntry::UserMessage {
-                text: "a".to_string(),
-                state: UserMessageState::Steered
-            }
-        );
-        assert_eq!(
-            state.chat_entries[1],
-            ChatEntry::UserMessage {
-                text: "b".to_string(),
-                state: UserMessageState::Steered
-            }
-        );
-    }
-
-    #[test]
-    fn tool_pending_sets_approval_and_tool_start_clears_it() {
-        let mut state = TuiState::new();
-        let id = Uuid::new_v4();
-        let args = serde_json::json!({"path": "foo.txt"});
-        state.apply_update(&UiUpdate::ToolPending {
-            name: "write".to_string(),
-            id,
-            arguments: args.clone(),
-            content_sections: vec![],
-
-            title_arguments: vec![],
-        });
-        assert_eq!(
-            state.pending_approval,
-            Some((id, "write".to_string(), args.clone()))
-        );
-        assert!(matches!(
-            state.chat_entries.last(),
-            Some(ChatEntry::ToolBubble {
-                name,
-                state,
-                ..
-            }) if name == "write" && matches!(state.as_ref(), ToolCallState::Pending { .. })
-        ));
-        state.apply_update(&UiUpdate::ToolStart {
-            name: "write".to_string(),
-            id,
-            arguments: serde_json::json!({}),
-            content_sections: vec![],
-
-            title_arguments: vec![],
-        });
-        assert_eq!(state.pending_approval, None);
-        assert!(matches!(
-            state.chat_entries.last(),
-            Some(ChatEntry::ToolBubble {
-                state,
-                ..
-            }) if matches!(state.as_ref(), ToolCallState::Running { .. })
-        ));
-    }
-
-    #[test]
-    fn tool_error_becomes_error_line() {
-        let mut state = TuiState::new();
-        let id = Uuid::new_v4();
-        state.apply_update(&UiUpdate::ToolPending {
-            name: "read".to_string(),
-            id,
-            arguments: serde_json::json!({}),
-            content_sections: vec![],
-
-            title_arguments: vec![],
-        });
-        state.apply_update(&UiUpdate::ToolStart {
-            id,
-            name: "read".to_string(),
-            arguments: serde_json::json!({}),
-            content_sections: vec![],
-
-            title_arguments: vec![],
-        });
-        state.apply_update(&UiUpdate::ToolError {
-            id,
-            error: "boom".to_string(),
-            duration: std::time::Duration::ZERO,
-            content_sections: vec![],
-        });
-        assert!(matches!(
-            state.chat_entries.last(),
-            Some(ChatEntry::ToolBubble {
-                state,
-                ..
-            }) if matches!(state.as_ref(), ToolCallState::Error { error, .. } if error == "boom")
-        ));
-    }
-
-    #[test]
-    fn error_update_idles() {
-        let mut state = TuiState::new();
-        state.apply_update(&UiUpdate::StreamStarted);
-        state.apply_update(&UiUpdate::Error("fatal".to_string()));
-        assert_eq!(state.agent_mode, AgentMode::Idle);
-        assert_eq!(
-            state.chat_entries.last(),
-            Some(&ChatEntry::ErrorLine {
-                message: "fatal".to_string()
-            })
-        );
-    }
-
-    #[test]
-    fn push_user_bubble_appends_history_and_resets_browsing() {
-        let mut state = TuiState::new();
-        state.push_user_bubble("first".to_string(), UserMessageState::Sent);
-        state.push_user_bubble("second".to_string(), UserMessageState::Queued);
-        assert_eq!(state.input_history, vec!["first", "second"]);
-        assert_eq!(state.history_index, None);
-        assert_eq!(
-            state.chat_entries[0],
-            ChatEntry::UserMessage {
-                text: "first".to_string(),
-                state: UserMessageState::Sent
-            }
-        );
-    }
-
-    #[test]
-    fn scroll_up_moves_toward_top_and_disables_auto_scroll() {
-        let mut state = TuiState::new();
-        assert!(state.scroll_locked);
-        state.scroll_down(5);
-        assert!(!state.scroll_locked);
-        assert_eq!(state.scroll_offset, 5);
-        state.scroll_up(2);
-        assert!(!state.scroll_locked);
-        assert_eq!(state.scroll_offset, 3);
-        state.scroll_up(10);
-        assert_eq!(state.scroll_offset, 0, "clamped at the top");
-        state.scroll_to_bottom();
-        assert!(state.scroll_locked);
-        assert_eq!(state.scroll_offset, 0);
-    }
-
-    #[test]
-    fn scroll_down_increases_offset_toward_bottom() {
-        let mut state = TuiState::new();
-        state.scroll_down(4);
-        assert!(!state.scroll_locked);
-        assert_eq!(state.scroll_offset, 4);
-        state.scroll_down(3);
-        assert_eq!(state.scroll_offset, 7);
-        assert!(!state.scroll_locked);
-    }
-
-    #[test]
-    fn navigate_input_message_history_up_down_and_draft_restore() {
-        let mut state = TuiState::new();
-        state.push_user_bubble("old".to_string(), UserMessageState::Sent);
-        state.push_user_bubble("new".to_string(), UserMessageState::Sent);
-
-        let text = state
-            .navigate_input_message_history(HistoryDirection::Up, "live draft")
-            .expect("moves to newest");
-        assert_eq!(text, "new");
-        assert_eq!(state.history_index, Some(1));
-
-        let text = state
-            .navigate_input_message_history(HistoryDirection::Up, "new")
-            .expect("moves to oldest");
-        assert_eq!(text, "old");
-        assert_eq!(state.history_index, Some(0));
-
-        assert_eq!(
-            state.navigate_input_message_history(HistoryDirection::Up, "old"),
-            None
-        );
-        assert_eq!(state.history_index, Some(0));
-
-        let text = state
-            .navigate_input_message_history(HistoryDirection::Down, "old")
-            .expect("moves forward");
-        assert_eq!(text, "new");
-        assert_eq!(state.history_index, Some(1));
-
-        let text = state
-            .navigate_input_message_history(HistoryDirection::Down, "new")
-            .expect("restores draft");
-        assert_eq!(text, "live draft");
-        assert_eq!(state.history_index, None);
-    }
-
-    #[test]
-    fn navigate_input_message_history_down_from_live_draft_is_noop() {
-        let mut state = TuiState::new();
-        state.push_user_bubble("only".to_string(), UserMessageState::Sent);
-        assert_eq!(
-            state.navigate_input_message_history(HistoryDirection::Down, ""),
-            None
-        );
-    }
-
-    #[test]
-    fn navigate_input_message_history_up_on_empty_history_is_noop() {
-        let mut state = TuiState::new();
-        assert_eq!(
-            state.navigate_input_message_history(HistoryDirection::Up, ""),
-            None
-        );
-    }
-
-    #[test]
-    fn exit_input_history_browsing_saves_current_text_as_draft() {
-        let mut state = TuiState::new();
-        state.push_user_bubble("history".to_string(), UserMessageState::Sent);
-        state
-            .navigate_input_message_history(HistoryDirection::Up, "")
-            .expect("enters browsing");
-        assert!(state.history_index.is_some());
-        state.exit_input_history_browsing("history");
-        assert_eq!(state.history_index, None);
-        assert_eq!(state.draft, "history");
-    }
-
-    #[test]
-    fn set_toast_stores_message_and_expiry() {
-        let before = Instant::now();
-        let mut state = TuiState::new();
-        state.set_toast("hello");
-        let (msg, expires_at) = state.toast.as_ref().expect("toast set");
-        assert_eq!(msg, "hello");
-        assert!(*expires_at >= before + Duration::from_secs(1));
-        assert!(*expires_at <= before + Duration::from_secs(4));
-    }
-
-    #[test]
-    fn clear_expired_toast_removes_past_toast_and_keeps_future_toast() {
-        let mut state = TuiState::new();
-        state.toast = Some(("stale".to_string(), Instant::now() - Duration::from_secs(1)));
-        state.clear_expired_toast();
-        assert!(state.toast.is_none(), "expired toast must be cleared");
-
-        state.set_toast("fresh");
-        state.clear_expired_toast();
-        assert!(
-            state.toast.is_some(),
-            "non-expired toast must not be cleared"
-        );
-    }
-
-    #[test]
-    fn chat_selection_extract_empty_returns_none() {
-        let mut state = TuiState::new();
-        state.chat_rendered_lines = vec!["hello world".to_string()];
-        state.chat_selection = Some(ChatSelection {
-            anchor_line: 0,
-            anchor_col: 3,
-            cursor_line: 0,
-            cursor_col: 3,
-        });
-        assert_eq!(state.extract_chat_selection_text(), None);
-    }
-
-    #[test]
-    fn chat_selection_extract_single_line() {
-        let mut state = TuiState::new();
-        state.chat_rendered_lines = vec!["hello world".to_string()];
-        state.chat_selection = Some(ChatSelection {
-            anchor_line: 0,
-            anchor_col: 6,
-            cursor_line: 0,
-            cursor_col: 11,
-        });
-        assert_eq!(
-            state.extract_chat_selection_text(),
-            Some("world".to_string())
-        );
-    }
-
-    #[test]
-    fn chat_selection_extract_multi_line() {
-        let mut state = TuiState::new();
-        state.chat_rendered_lines = vec![
-            "line one".to_string(),
-            "line two".to_string(),
-            "line three".to_string(),
-        ];
-        state.chat_selection = Some(ChatSelection {
-            anchor_line: 0,
-            anchor_col: 5,
-            cursor_line: 2,
-            cursor_col: 4,
-        });
-        let result = state
-            .extract_chat_selection_text()
-            .expect("should have selection");
-        assert_eq!(result, "one\nline two\nline");
-    }
-
-    #[test]
-    fn chat_selection_strips_bubble_chrome_from_copied_text() {
-        // Simulate two bubble lines where chrome is "▌  " (3 chars).
-        let mut state = TuiState::new();
-        state.chat_rendered_lines = vec!["first content".to_string(), "second content".to_string()];
-        state.chat_rendered_line_chrome_widths = vec![3, 3];
-        // Selection starts at terminal col 3 (first content char) on line 0
-        // and ends at terminal col 6 ("con") on line 1.
-        state.chat_selection = Some(ChatSelection {
-            anchor_line: 0,
-            anchor_col: 3,
-            cursor_line: 1,
-            cursor_col: 9,
-        });
-        let result = state
-            .extract_chat_selection_text()
-            .expect("should have selection");
-        // chrome stripped: col 3 → 0, col 9 → 6
-        assert_eq!(result, "first content\nsecond");
-    }
-
-    #[test]
-    fn chat_selection_normalized_reverses_if_anchor_after_cursor() {
-        let selection = ChatSelection {
-            anchor_line: 5,
-            anchor_col: 10,
-            cursor_line: 2,
-            cursor_col: 3,
-        };
-        let (start_line, start_col, end_line, end_col) = selection.normalized();
-        assert_eq!(start_line, 2);
-        assert_eq!(start_col, 3);
-        assert_eq!(end_line, 5);
-        assert_eq!(end_col, 10);
-    }
-
-    #[test]
-    fn tool_start_updates_existing_bubble_to_running() {
-        let mut state = TuiState::new();
-        let id = Uuid::new_v4();
-        let pending_args = serde_json::json!({"path": "foo.txt"});
-        let start_args = serde_json::json!({"path": "foo.txt"});
-        state.apply_update(&UiUpdate::ToolPending {
-            name: "read".to_string(),
-            id,
-            arguments: pending_args,
-            content_sections: vec![],
-
-            title_arguments: vec![],
-        });
-        state.apply_update(&UiUpdate::ToolStart {
-            name: "read".to_string(),
-            id,
-            arguments: start_args.clone(),
-            content_sections: vec![],
-
-            title_arguments: vec![],
-        });
-        assert!(matches!(
-            state.chat_entries.last(),
-            Some(ChatEntry::ToolBubble {
-                state,
-                ..
-            }) if matches!(state.as_ref(), ToolCallState::Running { arguments, .. } if *arguments == start_args)
-        ));
-    }
-
-    #[test]
-    fn tool_done_updates_existing_bubble_to_done() {
-        let mut state = TuiState::new();
-        let id = Uuid::new_v4();
-        let arguments = serde_json::json!({"path": "foo.txt"});
-        state.apply_update(&UiUpdate::ToolPending {
-            name: "read".to_string(),
-            id,
-            arguments: arguments.clone(),
-            content_sections: vec![],
-
-            title_arguments: vec![],
-        });
-        state.apply_update(&UiUpdate::ToolStart {
-            name: "read".to_string(),
-            id,
-            arguments: arguments.clone(),
-            content_sections: vec![],
-
-            title_arguments: vec![],
-        });
-        state.apply_update(&UiUpdate::ToolDone {
-            id,
-            name: "read".to_string(),
-            result_section: ResultSection::plain("file contents"),
-            summary: Vec::new(),
-            duration: std::time::Duration::from_millis(0),
-            content_sections: vec![],
-        });
-        assert!(matches!(
-            state.chat_entries.last(),
-            Some(ChatEntry::ToolBubble {
-                state,
-                ..
-            }) if matches!(state.as_ref(), ToolCallState::Done { result_section, .. } if result_section.content == "file contents")
-        ));
-    }
-
-    #[test]
-    fn tool_done_content_sections_stored_in_state() {
-        use crate::agent::tools::{ContentSection, Section};
-        let mut state = TuiState::new();
-        let id = Uuid::new_v4();
-        let sections = vec![Section::Content(ContentSection {
-            label: None,
-            content: "line one\nline two\n".to_string(),
-            file_extension: Some("rs".to_string()),
-            line_number_offset: Some(0),
-        })];
-        state.apply_update(&UiUpdate::ToolStart {
-            name: "read".to_string(),
-            id,
-            arguments: serde_json::json!({"path": "foo.rs"}),
-            content_sections: vec![],
-
-            title_arguments: vec![],
-        });
-        state.apply_update(&UiUpdate::ToolDone {
-            id,
-            name: "read".to_string(),
-            result_section: ResultSection::plain("line one\nline two\n"),
-            summary: Vec::new(),
-            duration: std::time::Duration::from_millis(0),
-            content_sections: sections.clone(),
-        });
-        let stored = state.chat_entries.iter().find_map(|e| {
-            let ChatEntry::ToolBubble { state, .. } = e else {
-                return None;
-            };
-            if let ToolCallState::Done {
-                content_sections, ..
-            } = state.as_ref()
-            {
-                Some(content_sections.clone())
-            } else {
-                None
-            }
-        });
-        assert_eq!(
-            stored,
-            Some(sections),
-            "content_sections must survive apply_update"
-        );
-    }
-
-    #[test]
-    fn tool_killed_updates_existing_bubble_to_killed() {
-        let mut state = TuiState::new();
-        let id = Uuid::new_v4();
-        state.apply_update(&UiUpdate::ToolPending {
-            name: "exec".to_string(),
-            id,
-            arguments: serde_json::json!({}),
-            content_sections: vec![],
-
-            title_arguments: vec![],
-        });
-        state.apply_update(&UiUpdate::ToolStart {
-            name: "exec".to_string(),
-            id,
-            arguments: serde_json::json!({}),
-            content_sections: vec![],
-
-            title_arguments: vec![],
-        });
-        state.apply_update(&UiUpdate::ToolKilled { id });
-        assert!(matches!(
-            state.chat_entries.last(),
-            Some(ChatEntry::ToolBubble {
-                state,
-                ..
-            }) if matches!(state.as_ref(), ToolCallState::Killed)
-        ));
-    }
 }
 
 // ─── TuiMode ─────────────────────────────────────────────────────────────────
@@ -1572,13 +264,26 @@ pub enum TuiMode {
     /// `AgentCommand::Stop` has been sent; waiting for `StreamCancelled` or
     /// the agent to become idle.
     Aborting,
-    /// First Ctrl+C has been received; waiting for a second press within the
-    /// confirm window to actually quit/stop, or for the window to expire.
+    /// A first confirm-key press (Ctrl+C or Esc) has been received; waiting
+    /// for a second press of the *same* key within the confirm window to
+    /// actually quit/stop, or for the window to expire.
     DoublePressAbort {
         pressed_at: Instant,
         /// The mode to restore when the confirm window expires.
         return_to: Box<TuiMode>,
+        /// Which key armed this confirm window. Only a second press of the
+        /// *same* key confirms; a press of the other key starts its own
+        /// fresh confirm window instead (so e.g. Esc-then-Ctrl+C never
+        /// quits, and Ctrl+C-then-Esc never confirms Ctrl+C's quit).
+        armed_by: ConfirmKey,
     },
+}
+
+/// The key that armed a pending [`TuiMode::DoublePressAbort`] confirm window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmKey {
+    CtrlC,
+    Escape,
 }
 
 // ─── Focus ────────────────────────────────────────────────────────────────────
@@ -1688,6 +393,8 @@ pub enum DomainEvent {
     SteerQueued,
     /// All queued steers have been injected into the LLM context.
     SteerApplied,
+    /// A fragment of extended-thinking / reasoning-token output arrived.
+    StreamThinkingChunk(String),
 }
 
 // ─── Effect ───────────────────────────────────────────────────────────────────
@@ -1831,6 +538,13 @@ pub struct AppLayout {
 
 /// The authoritative TUI view-model owned by the Driver.
 ///
+/// This is the single source of truth: `presenter::update` mutates it in
+/// response to [`DomainEvent`]s, and every frame `render::project_for_draw`
+/// derives a fresh [`crate::tui_state::TuiState`] snapshot from it for
+/// `ui::draw` to render. `TuiState` is never the source of truth and is not fed back into
+/// `AppState` except for the handful of view-geometry fields `ui::draw`
+/// itself writes (see `render::sync_from_draw`).
+///
 /// Fields that require `TextArea` to interpret (e.g. `mouse_drag`, used by
 /// `cursor_for_click`) or that exist purely to pass rendering artifacts between
 /// draw calls (e.g. `button_areas`) are kept in the Driver and excluded here.
@@ -1842,6 +556,27 @@ pub struct AppState {
     // ── chat view-model ─────────────────────────────────────────────────────
     pub chat_entries: Vec<ChatEntry>,
     pub partial_assistant_text: String,
+    /// In-flight extended-thinking/reasoning fragments, accumulated separately
+    /// from `partial_assistant_text` so they never contaminate the assistant
+    /// reply. Flushed into a `ChatEntry::ThinkingMessage` on `StreamDone`.
+    pub partial_thinking_text: String,
+    /// Set when the first fragment of `partial_thinking_text` arrives;
+    /// cleared on flush and on `StreamStarted`. Used to compute the
+    /// `ChatEntry::ThinkingMessage::duration` shown in the collapsed summary.
+    /// Not part of `TuiState`: rendering only needs the final `duration` once
+    /// baked into a flushed `ChatEntry`, not the live start instant.
+    pub thinking_started_at: Option<Instant>,
+    /// Collapse state for the thinking bubble that will be produced when
+    /// `partial_thinking_text` is flushed. Set to `false` (expanded) alongside
+    /// `thinking_started_at` when a new thinking stream starts, then carried
+    /// unchanged into the flushed `ChatEntry::ThinkingMessage` — flushing never
+    /// overrides it, so a manual collapse/expand made while the bubble was
+    /// still in-flight (if ever supported) would survive the flush.
+    pub partial_thinking_collapsed: bool,
+    /// Steers (user messages sent while the agent is busy) staged for live
+    /// rendering as `Queued` bubbles, not yet committed to `chat_entries`.
+    /// See `queue_steer_message` / `commit_queued_steer_messages`.
+    pub queued_steer_texts: Vec<String>,
 
     // ── scroll state ────────────────────────────────────────────────────────
     pub scroll_offset: usize,
@@ -1902,6 +637,11 @@ pub struct AppState {
     /// Maps each rendered tool bubble to its absolute line-index range
     /// `(start_row, end_row, id)` (inclusive, before scroll offset).
     pub bubble_title_rows: Vec<(usize, usize, Uuid)>,
+    /// Maps each rendered thinking bubble to its absolute line-index range
+    /// `(start_row, end_row, chat_entries index)` (inclusive, before scroll
+    /// offset). Mirrors `bubble_title_rows` but is index-keyed since
+    /// `ChatEntry::ThinkingMessage` has no `Uuid`.
+    pub thinking_title_rows: Vec<(usize, usize, usize)>,
 
     // ── history navigation helper ────────────────────────────────────────────
     /// Exposes history navigation for use by the presenter.
@@ -1939,6 +679,10 @@ impl AppState {
 
             chat_entries: Vec::new(),
             partial_assistant_text: String::new(),
+            partial_thinking_text: String::new(),
+            thinking_started_at: None,
+            partial_thinking_collapsed: false,
+            queued_steer_texts: Vec::new(),
 
             scroll_offset: 0,
             scroll_locked: true,
@@ -1967,6 +711,7 @@ impl AppState {
             input_scroll_top: 0,
 
             bubble_title_rows: Vec::new(),
+            thinking_title_rows: Vec::new(),
 
             _history_direction: None,
 
@@ -1985,54 +730,94 @@ impl AppState {
             .unwrap_or(false)
     }
 
+    /// Flush only the in-flight thinking buffer into a `ChatEntry::ThinkingMessage`,
+    /// leaving `partial_assistant_text` untouched. Used when a stream switches
+    /// from thinking to response text (or hits a tool call) mid-turn, so each
+    /// segment renders as its own bubble in chronological order rather than
+    /// merging every thinking fragment of the turn into a single bubble.
+    /// No-op when there is no pending thinking text.
+    pub fn flush_partial_thinking_message(&mut self) {
+        if self.partial_thinking_text.is_empty() {
+            return;
+        }
+        let text = std::mem::take(&mut self.partial_thinking_text);
+        let collapsed = self.partial_thinking_collapsed;
+        let duration = self
+            .thinking_started_at
+            .take()
+            .map(|started_at| started_at.elapsed())
+            .unwrap_or_default();
+        self.chat_entries.push(ChatEntry::ThinkingMessage {
+            text,
+            collapsed,
+            duration,
+        });
+    }
+
+    /// Flush only the in-flight assistant reply buffer into a
+    /// `ChatEntry::AssistantMessage`, leaving `partial_thinking_text` untouched.
+    /// Used when a stream switches from response text back to thinking mid-turn
+    /// (mirrors `flush_partial_thinking_message`). Unlike
+    /// `flush_partial_assistant_message`, this never relocates queued steers —
+    /// those only need to move once, at the true end of the turn — and never
+    /// marks the bubble interrupted, since a mid-turn segment switch is not
+    /// an interruption. No-op when there is no pending assistant text.
+    pub fn flush_partial_response_message(&mut self) {
+        if self.partial_assistant_text.is_empty() {
+            return;
+        }
+        let text = std::mem::take(&mut self.partial_assistant_text);
+        self.chat_entries.push(ChatEntry::AssistantMessage {
+            text,
+            interrupted: false,
+        });
+    }
+
     /// Commit the in-flight partial assistant text into a full `AssistantMessage`
-    /// entry and clear the partial buffer. Queued steers are moved after the new entry.
+    /// entry and clear the partial buffer.
+    ///
+    /// If `partial_thinking_text` is non-empty, a `ChatEntry::ThinkingMessage` is
+    /// pushed immediately before the assistant bubble — even when
+    /// `partial_assistant_text` itself is empty (a thinking-only turn, e.g. the
+    /// model reasons and then immediately calls a tool with no visible prose).
     pub fn flush_partial_assistant_message(&mut self, interrupted: bool) {
-        if !self.partial_assistant_text.is_empty() {
-            let queued_steers: Vec<ChatEntry> = self
-                .chat_entries
-                .iter()
-                .filter(|entry| {
-                    matches!(
-                        entry,
-                        ChatEntry::UserMessage {
-                            state: UserMessageState::Queued,
-                            ..
-                        }
-                    )
-                })
-                .cloned()
-                .collect();
-            self.chat_entries.retain(|entry| {
-                !matches!(
-                    entry,
-                    ChatEntry::UserMessage {
-                        state: UserMessageState::Queued,
-                        ..
-                    }
-                )
+        let thinking_text = (!self.partial_thinking_text.is_empty())
+            .then(|| std::mem::take(&mut self.partial_thinking_text));
+        let thinking_collapsed = self.partial_thinking_collapsed;
+        let thinking_duration = self
+            .thinking_started_at
+            .take()
+            .map(|started_at| started_at.elapsed())
+            .unwrap_or_default();
+        if let Some(text) = thinking_text {
+            self.chat_entries.push(ChatEntry::ThinkingMessage {
+                text,
+                collapsed: thinking_collapsed,
+                duration: thinking_duration,
             });
+        }
+        if !self.partial_assistant_text.is_empty() {
             self.chat_entries.push(ChatEntry::AssistantMessage {
                 text: std::mem::take(&mut self.partial_assistant_text),
                 interrupted,
             });
-            self.chat_entries.extend(queued_steers);
         } else {
             self.partial_assistant_text.clear();
         }
     }
 
-    /// Mark all `UserMessage { state: Queued }` entries with the given state.
-    pub fn transition_queued_messages_to(&mut self, state: UserMessageState) {
-        for entry in self.chat_entries.iter_mut() {
-            if let ChatEntry::UserMessage {
-                state: entry_state, ..
-            } = entry
-            {
-                if *entry_state == UserMessageState::Queued {
-                    *entry_state = state;
-                }
-            }
+    /// Commit every staged queued-steer text (see `queue_steer_message`) into
+    /// `chat_entries` as a `UserMessage` with the given final `state`
+    /// (`Steered` once applied to the model, `Cancelled` once the round is
+    /// interrupted), in the order they were typed, then clear the staging
+    /// list. Must be called after any other flush for the same event (e.g.
+    /// `flush_partial_assistant_message`) so the committed bubbles land after
+    /// everything that happened while they were staged, rather than at the
+    /// stale position where the user happened to press `Enter`.
+    pub fn commit_queued_steer_messages(&mut self, state: UserMessageState) {
+        for text in std::mem::take(&mut self.queued_steer_texts) {
+            self.chat_entries
+                .push(ChatEntry::UserMessage { text, state });
         }
     }
 
@@ -2045,11 +830,30 @@ impl AppState {
     }
 
     /// Append a user message bubble and record the text in input history.
+    /// Only for messages sent immediately (`UserMessageState::Sent`); a steer
+    /// sent while the agent is busy must go through `queue_steer_message`
+    /// instead, since it isn't safe to commit to `chat_entries` yet.
     pub fn push_user_bubble(&mut self, text: String, state: UserMessageState) {
         self.chat_entries.push(ChatEntry::UserMessage {
             text: text.clone(),
             state,
         });
+        self.input_history.push(text);
+        self.history_index = None;
+    }
+
+    /// Stage a steer (a user message sent while the agent is busy) without
+    /// committing it to `chat_entries` yet. Committing immediately would fix
+    /// its position in the list before thinking/tool-call content for the
+    /// in-flight round has been flushed, wedging the steer bubble ahead of
+    /// content that chronologically precedes it. The staged text renders as
+    /// a live `Queued` bubble near the bottom of the chat (via
+    /// `TuiState::queued_steer_texts`) until `commit_queued_steer_messages`
+    /// — called on `SteerApplied` or cancellation — commits it to
+    /// `chat_entries` at the then-current tail, guaranteed to be after
+    /// everything already flushed.
+    pub fn queue_steer_message(&mut self, text: String) {
+        self.queued_steer_texts.push(text.clone());
         self.input_history.push(text);
         self.history_index = None;
     }
@@ -2104,15 +908,65 @@ impl AppState {
     }
 
     /// Toggle the collapsed/expanded state of the tool bubble with the given id.
+    ///
+    /// Collapsing a bubble whose body extends below the viewport shrinks the
+    /// total content height, which can push `scroll_offset` past the new
+    /// `max_offset` and re-lock the view to the bottom, scrolling the bubble's
+    /// title out of sight. Clamping `scroll_offset` to the bubble's own start
+    /// row keeps that title row visible in the current viewport.
     pub fn toggle_tool_bubble_collapsed(&mut self, target_id: Uuid) {
         for entry in &mut self.chat_entries {
             if let ChatEntry::ToolBubble { id, collapsed, .. } = entry {
                 if *id == target_id {
                     *collapsed = !*collapsed;
                     self.scroll_locked = false;
+                    if let Some((start_row, _, _)) = self
+                        .bubble_title_rows
+                        .iter()
+                        .find(|(_, _, bubble_id)| *bubble_id == target_id)
+                    {
+                        self.scroll_offset = self.scroll_offset.min(*start_row);
+                    }
                     return;
                 }
             }
+        }
+    }
+
+    /// Toggle the collapsed state of the `ChatEntry::ThinkingMessage` at
+    /// `target_index` in `chat_entries`. Mirrors `toggle_tool_bubble_collapsed`
+    /// but is index-keyed since thinking bubbles carry no `Uuid`.
+    pub fn toggle_thinking_collapsed(&mut self, target_index: usize) {
+        if let Some(ChatEntry::ThinkingMessage { collapsed, .. }) =
+            self.chat_entries.get_mut(target_index)
+        {
+            *collapsed = !*collapsed;
+            self.scroll_locked = false;
+            if let Some((start_row, _, _)) = self
+                .thinking_title_rows
+                .iter()
+                .find(|(_, _, entry_index)| *entry_index == target_index)
+            {
+                self.scroll_offset = self.scroll_offset.min(*start_row);
+            }
+        }
+    }
+
+    /// Toggle the collapsed state of the in-flight (not yet flushed) thinking
+    /// bubble rendered from `partial_thinking_text`. Mirrors
+    /// `toggle_thinking_collapsed` but flips `partial_thinking_collapsed`
+    /// directly since there is no `ChatEntry` yet — the value carries through
+    /// unchanged into the flushed `ChatEntry::ThinkingMessage` once the
+    /// stream ends (see `flush_partial_thinking_message`).
+    pub fn toggle_partial_thinking_collapsed(&mut self) {
+        self.partial_thinking_collapsed = !self.partial_thinking_collapsed;
+        self.scroll_locked = false;
+        if let Some((start_row, _, _)) = self
+            .thinking_title_rows
+            .iter()
+            .find(|(_, _, entry_index)| *entry_index == STREAMING_THINKING_ENTRY_INDEX)
+        {
+            self.scroll_offset = self.scroll_offset.min(*start_row);
         }
     }
 
@@ -2173,15 +1027,6 @@ impl AppState {
         self.toast = Some((message.into(), Instant::now() + TOAST_DURATION));
     }
 
-    /// Remove an expired toast.
-    pub fn clear_expired_toast(&mut self) {
-        if let Some((_, expires_at)) = &self.toast {
-            if Instant::now() >= *expires_at {
-                self.toast = None;
-            }
-        }
-    }
-
     /// Navigate input history. Returns the text to load, or `None` if boundary reached.
     pub fn navigate_input_message_history(
         &mut self,
@@ -2238,6 +1083,8 @@ impl AppState {
             TuiMode::Streaming => {
                 if matches!(self.focus, Focus::ToolApproval { .. }) {
                     AgentMode::ToolPending
+                } else if self.has_running_tool_bubble() {
+                    AgentMode::ToolRunning
                 } else {
                     AgentMode::Streaming
                 }
@@ -2247,11 +1094,31 @@ impl AppState {
             TuiMode::DoublePressAbort { return_to, .. } => match return_to.as_ref() {
                 TuiMode::Idle | TuiMode::DoublePressAbort { .. } => AgentMode::Idle,
                 TuiMode::Pending => AgentMode::Pending,
-                TuiMode::Streaming => AgentMode::Streaming,
+                TuiMode::Streaming => {
+                    if self.has_running_tool_bubble() {
+                        AgentMode::ToolRunning
+                    } else {
+                        AgentMode::Streaming
+                    }
+                }
                 TuiMode::ClarifyPending { .. } => AgentMode::ClarifyPending,
                 TuiMode::Aborting => AgentMode::Aborting,
             },
         }
+    }
+
+    /// Returns `true` if any `ChatEntry::ToolBubble` is currently in the
+    /// `Running` state, i.e. a tool call has started but not yet finished
+    /// (`Done`/`Error`/`Denied`/`Killed`). Used by `agent_mode` to
+    /// distinguish "a tool is executing" from plain LLM streaming (thinking
+    /// or assistant text) in the footer.
+    fn has_running_tool_bubble(&self) -> bool {
+        self.chat_entries.iter().any(|entry| {
+            matches!(
+                entry,
+                ChatEntry::ToolBubble { state, .. } if matches!(state.as_ref(), ToolCallState::Running { .. })
+            )
+        })
     }
 
     /// Returns `true` when the help popup is currently displayed.
@@ -2498,6 +1365,7 @@ mod tests {
         let mode = TuiMode::DoublePressAbort {
             pressed_at: now,
             return_to: Box::new(TuiMode::Idle),
+            armed_by: ConfirmKey::CtrlC,
         };
         if let TuiMode::DoublePressAbort { return_to, .. } = &mode {
             assert_eq!(**return_to, TuiMode::Idle);
@@ -2516,6 +1384,46 @@ mod tests {
             choices: None,
         };
         assert_eq!(state.agent_mode(), AgentMode::ClarifyPending);
+    }
+
+    #[test]
+    fn agent_mode_reports_tool_running_when_a_tool_bubble_is_running() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::Streaming;
+        state.chat_entries.push(ChatEntry::ToolBubble {
+            id: Uuid::new_v4(),
+            name: "read".to_string(),
+            state: Box::new(ToolCallState::Running {
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+            }),
+            collapsed: true,
+        });
+        assert_eq!(state.agent_mode(), AgentMode::ToolRunning);
+    }
+
+    #[test]
+    fn agent_mode_reports_streaming_when_no_tool_bubble_is_running() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::Streaming;
+        state.chat_entries.push(ChatEntry::ToolBubble {
+            id: Uuid::new_v4(),
+            name: "read".to_string(),
+            state: Box::new(ToolCallState::Done {
+                arguments: serde_json::json!({}),
+                result_section: ResultSection {
+                    id: "output".to_string(),
+                    content: String::new(),
+                },
+                content_sections: vec![],
+                summary: vec![],
+                duration: std::time::Duration::ZERO,
+                title_arguments: vec![],
+            }),
+            collapsed: true,
+        });
+        assert_eq!(state.agent_mode(), AgentMode::Streaming);
     }
 
     #[test]
@@ -2613,5 +1521,247 @@ mod tests {
             ),
             "Running + ToolError must produce Error"
         );
+    }
+
+    // ── Thinking bubble flush / toggle ────────────────────────────────────────
+
+    #[test]
+    fn flush_partial_assistant_message_pushes_thinking_before_assistant_bubble() {
+        let mut state = AppState::new();
+        state.partial_thinking_text = "pondering...".to_string();
+        state.partial_assistant_text = "the answer".to_string();
+        state.flush_partial_assistant_message(false);
+
+        assert!(state.partial_thinking_text.is_empty());
+        assert!(state.partial_assistant_text.is_empty());
+        assert_eq!(state.chat_entries.len(), 2);
+        assert!(matches!(
+            &state.chat_entries[0],
+            ChatEntry::ThinkingMessage { text, collapsed, .. } if text == "pondering..." && !*collapsed
+        ));
+        assert!(matches!(
+            &state.chat_entries[1],
+            ChatEntry::AssistantMessage { text, interrupted } if text == "the answer" && !*interrupted
+        ));
+    }
+
+    #[test]
+    fn flush_partial_assistant_message_computes_thinking_duration_from_started_at() {
+        let mut state = AppState::new();
+        state.partial_thinking_text = "pondering...".to_string();
+        state.thinking_started_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(50));
+        state.flush_partial_assistant_message(false);
+
+        assert!(state.thinking_started_at.is_none());
+        assert!(matches!(
+            &state.chat_entries[0],
+            ChatEntry::ThinkingMessage { duration, .. } if *duration >= std::time::Duration::from_millis(50)
+        ));
+    }
+
+    #[test]
+    fn flush_partial_assistant_message_defaults_thinking_duration_when_not_started() {
+        let mut state = AppState::new();
+        state.partial_thinking_text = "pondering...".to_string();
+        state.flush_partial_assistant_message(false);
+
+        assert!(matches!(
+            &state.chat_entries[0],
+            ChatEntry::ThinkingMessage { duration, .. } if *duration == std::time::Duration::ZERO
+        ));
+    }
+
+    #[test]
+    fn flush_partial_assistant_message_pushes_thinking_only_when_assistant_text_empty() {
+        // A thinking-only turn: the model reasons, then calls a tool with no
+        // visible prose. Must still flush the thinking bubble, without an
+        // empty AssistantMessage.
+        let mut state = AppState::new();
+        state.partial_thinking_text = "considering options...".to_string();
+        state.flush_partial_assistant_message(false);
+
+        assert!(state.partial_thinking_text.is_empty());
+        assert_eq!(state.chat_entries.len(), 1);
+        assert!(matches!(
+            &state.chat_entries[0],
+            ChatEntry::ThinkingMessage { text, collapsed, .. } if text == "considering options..." && !*collapsed
+        ));
+    }
+
+    #[test]
+    fn flush_partial_assistant_message_pushes_nothing_when_both_empty() {
+        let mut state = AppState::new();
+        state.flush_partial_assistant_message(false);
+        assert!(state.chat_entries.is_empty());
+    }
+
+    #[test]
+    fn flush_partial_thinking_message_pushes_thinking_bubble_and_leaves_assistant_text_untouched() {
+        let mut state = AppState::new();
+        state.partial_thinking_text = "pondering...".to_string();
+        state.partial_assistant_text = "so far so good".to_string();
+        state.flush_partial_thinking_message();
+
+        assert!(state.partial_thinking_text.is_empty());
+        assert_eq!(
+            state.partial_assistant_text, "so far so good",
+            "must not touch the assistant buffer"
+        );
+        assert_eq!(state.chat_entries.len(), 1);
+        assert!(matches!(
+            &state.chat_entries[0],
+            ChatEntry::ThinkingMessage { text, .. } if text == "pondering..."
+        ));
+    }
+
+    #[test]
+    fn flush_partial_thinking_message_is_noop_when_no_pending_thinking_text() {
+        let mut state = AppState::new();
+        state.flush_partial_thinking_message();
+        assert!(state.chat_entries.is_empty());
+    }
+
+    #[test]
+    fn flush_partial_response_message_pushes_assistant_bubble_and_leaves_thinking_text_untouched() {
+        let mut state = AppState::new();
+        state.partial_assistant_text = "the answer".to_string();
+        state.partial_thinking_text = "still pondering...".to_string();
+        state.flush_partial_response_message();
+
+        assert!(state.partial_assistant_text.is_empty());
+        assert_eq!(
+            state.partial_thinking_text, "still pondering...",
+            "must not touch the thinking buffer"
+        );
+        assert_eq!(state.chat_entries.len(), 1);
+        assert!(matches!(
+            &state.chat_entries[0],
+            ChatEntry::AssistantMessage { text, interrupted } if text == "the answer" && !*interrupted
+        ));
+    }
+
+    #[test]
+    fn flush_partial_response_message_is_noop_when_no_pending_assistant_text() {
+        let mut state = AppState::new();
+        state.flush_partial_response_message();
+        assert!(state.chat_entries.is_empty());
+    }
+
+    #[test]
+    fn toggle_thinking_collapsed_flips_state_at_index() {
+        let mut state = AppState::new();
+        state.chat_entries.push(ChatEntry::ThinkingMessage {
+            text: "reasoning".to_string(),
+            collapsed: true,
+            duration: std::time::Duration::from_secs(3),
+        });
+        state.scroll_locked = true;
+
+        state.toggle_thinking_collapsed(0);
+
+        assert!(matches!(
+            &state.chat_entries[0],
+            ChatEntry::ThinkingMessage { collapsed, .. } if !*collapsed
+        ));
+        assert!(!state.scroll_locked);
+    }
+
+    #[test]
+    fn toggle_partial_thinking_collapsed_flips_state_while_streaming() {
+        let mut state = AppState::new();
+        state.partial_thinking_text = "pondering...".to_string();
+        state.partial_thinking_collapsed = false;
+        state.scroll_locked = true;
+
+        state.toggle_partial_thinking_collapsed();
+
+        assert!(state.partial_thinking_collapsed);
+        assert!(!state.scroll_locked);
+
+        state.toggle_partial_thinking_collapsed();
+
+        assert!(!state.partial_thinking_collapsed);
+    }
+
+    #[test]
+    fn toggle_partial_thinking_collapsed_clamps_scroll_offset_to_bubble_start_row() {
+        let mut state = AppState::new();
+        state.partial_thinking_text = "pondering...".to_string();
+        // Simulate a previous render pass recording the in-flight bubble's
+        // title row under the streaming sentinel index.
+        state.thinking_title_rows = vec![(5, 40, STREAMING_THINKING_ENTRY_INDEX)];
+        state.scroll_offset = 30;
+        state.scroll_locked = false;
+
+        state.toggle_partial_thinking_collapsed();
+
+        assert_eq!(state.scroll_offset, 5);
+    }
+
+    #[test]
+    fn toggle_thinking_collapsed_clamps_scroll_offset_to_bubble_start_row() {
+        let mut state = AppState::new();
+        state.chat_entries.push(ChatEntry::ThinkingMessage {
+            text: "reasoning".to_string(),
+            collapsed: false,
+            duration: std::time::Duration::from_secs(3),
+        });
+        // Simulate a previous render pass recording this bubble's title row
+        // and a viewport scrolled well below it (e.g. the long expanded body
+        // pushed the view down).
+        state.thinking_title_rows = vec![(5, 40, 0)];
+        state.scroll_offset = 30;
+        state.scroll_locked = false;
+
+        state.toggle_thinking_collapsed(0);
+
+        // The offset must not exceed the bubble's own start row, otherwise
+        // the title scrolls out of the viewport once the body collapses.
+        assert_eq!(state.scroll_offset, 5);
+    }
+
+    #[test]
+    fn toggle_tool_bubble_collapsed_clamps_scroll_offset_to_bubble_start_row() {
+        let mut state = AppState::new();
+        let id = Uuid::new_v4();
+        state.chat_entries.push(ChatEntry::ToolBubble {
+            id,
+            name: "read".to_string(),
+            state: Box::new(ToolCallState::Running {
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+            }),
+            collapsed: false,
+        });
+        // Simulate a previous render pass recording this bubble's title row
+        // and a viewport scrolled well below it (e.g. the long expanded body
+        // pushed the view down).
+        state.bubble_title_rows = vec![(5, 40, id)];
+        state.scroll_offset = 30;
+        state.scroll_locked = false;
+
+        state.toggle_tool_bubble_collapsed(id);
+
+        // The offset must not exceed the bubble's own start row, otherwise
+        // the title scrolls out of the viewport once the body collapses.
+        assert_eq!(state.scroll_offset, 5);
+    }
+
+    #[test]
+    fn toggle_thinking_collapsed_ignores_out_of_range_or_wrong_variant_index() {
+        let mut state = AppState::new();
+        state.chat_entries.push(ChatEntry::AssistantMessage {
+            text: "hi".to_string(),
+            interrupted: false,
+        });
+        // Neither index should panic or mutate anything.
+        state.toggle_thinking_collapsed(0);
+        state.toggle_thinking_collapsed(5);
+        assert!(matches!(
+            &state.chat_entries[0],
+            ChatEntry::AssistantMessage { .. }
+        ));
     }
 }

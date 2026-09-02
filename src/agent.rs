@@ -164,6 +164,11 @@ pub enum UiUpdate {
     SteerQueued,
     /// All previously queued steers have been injected into the LLM context.
     SteerApplied,
+    /// A fragment of extended-thinking / reasoning-token output arrived.
+    /// Appended to `partial_thinking_text`, never to the assistant-text
+    /// accumulator; flushed into a `ChatEntry::ThinkingMessage` bubble ahead
+    /// of the assistant bubble on `StreamDone`.
+    AppendThinking(String),
 }
 
 /// A raw tool-call fragment emitted by a provider, to be assembled by the
@@ -179,6 +184,11 @@ pub struct DeltaChunk {
 #[derive(Debug)]
 pub enum StreamEvent {
     Text(String),
+    /// A fragment of extended-thinking / reasoning-token output. Distinct
+    /// from `Text` so it never contaminates the assistant text accumulator;
+    /// it is purely a model capability (models must have extended-thinking
+    /// / reasoning enabled to produce it) and is provider-agnostic.
+    Thinking(String),
     Delta(DeltaChunk),
     Done,
     Cancelled,
@@ -733,6 +743,7 @@ impl AgentLoop {
                                     ui_tx.clone(),
                                     agent_tx.clone(),
                                     &mut clarify_started_at,
+                                    &mut pending_steers,
                                 )
                                 .await;
                             }
@@ -762,6 +773,7 @@ impl AgentLoop {
                                     ui_tx.clone(),
                                     agent_tx.clone(),
                                     &mut clarify_started_at,
+                                    &mut pending_steers,
                                 )
                                 .await;
                             }
@@ -787,6 +799,7 @@ impl AgentLoop {
                                     ui_tx.clone(),
                                     agent_tx.clone(),
                                     &mut clarify_started_at,
+                                    &mut pending_steers,
                                 )
                                 .await;
                             }
@@ -911,6 +924,7 @@ impl AgentLoop {
                                         ui_tx.clone(),
                                         agent_tx.clone(),
                                         &mut clarify_started_at,
+                                        &mut pending_steers,
                                     )
                                     .await;
                                 }
@@ -965,6 +979,7 @@ impl AgentLoop {
                                         ui_tx.clone(),
                                         agent_tx.clone(),
                                         &mut clarify_started_at,
+                                        &mut pending_steers,
                                     )
                                     .await;
                                 }
@@ -1008,6 +1023,7 @@ impl AgentLoop {
                                         ui_tx.clone(),
                                         agent_tx.clone(),
                                         &mut clarify_started_at,
+                                        &mut pending_steers,
                                     )
                                     .await;
                                 }
@@ -1140,6 +1156,7 @@ async fn advance_tool_queue(
     ui_tx: mpsc::Sender<UiUpdate>,
     agent_tx: mpsc::Sender<AgentEvent>,
     clarify_started_at: &mut Option<std::time::Instant>,
+    pending_steers: &mut VecDeque<String>,
 ) {
     loop {
         match pending_tools.front() {
@@ -1162,6 +1179,14 @@ async fn advance_tool_queue(
                         *mode = AgentMode::Idle;
                         return;
                     }
+                }
+                // All tool results for this round are now in context — this is
+                // the earliest safe point to inject queued steers (pending user
+                // messages typed while tools were running), so they reach the
+                // model on the very next request rather than waiting for a full
+                // tool-free turn to complete via StreamDone.
+                if inject_pending_steers(pending_steers, context) {
+                    let _ = ui_tx.send(UiUpdate::SteerApplied).await;
                 }
                 *mode = AgentMode::Streaming;
                 *current_cancel = Some(start_request(
@@ -1342,6 +1367,11 @@ fn start_request(
                 StreamEvent::Text(text) => {
                     partial.push_str(&text);
                     let _ = ui_tx.send(UiUpdate::AppendText(text)).await;
+                }
+                StreamEvent::Thinking(text) => {
+                    // Never appended to `partial` — thinking content must
+                    // not affect the assistant text or tool-call logic.
+                    let _ = ui_tx.send(UiUpdate::AppendThinking(text)).await;
                 }
                 StreamEvent::Delta(delta) => {
                     let accumulator =
@@ -1709,6 +1739,10 @@ mod tests {
         assert!(
             matches!(UiUpdate::AppendText("tok".into()), UiUpdate::AppendText(text) if text == "tok")
         );
+        assert!(matches!(
+            UiUpdate::AppendThinking("hmm".into()),
+            UiUpdate::AppendThinking(text) if text == "hmm"
+        ));
         assert!(matches!(UiUpdate::StreamStarted, UiUpdate::StreamStarted));
         assert!(matches!(UiUpdate::StreamDone, UiUpdate::StreamDone));
         assert!(matches!(
@@ -1736,6 +1770,10 @@ mod tests {
         assert!(
             matches!(StreamEvent::Text("tok".into()), StreamEvent::Text(text) if text == "tok")
         );
+        assert!(matches!(
+            StreamEvent::Thinking("hmm".into()),
+            StreamEvent::Thinking(text) if text == "hmm"
+        ));
         assert!(matches!(StreamEvent::Done, StreamEvent::Done));
         assert!(matches!(StreamEvent::Cancelled, StreamEvent::Cancelled));
         assert!(matches!(
@@ -1897,6 +1935,7 @@ mod tests {
         let mut current_tool_cancel = None;
         let mut iterations = 1usize;
         let mut clarify_started_at = None;
+        let mut pending_steers = VecDeque::new();
 
         advance_tool_queue(
             &mut pending_tools,
@@ -1911,6 +1950,7 @@ mod tests {
             ui_tx,
             agent_tx,
             &mut clarify_started_at,
+            &mut pending_steers,
         )
         .await;
 
@@ -1953,6 +1993,7 @@ mod tests {
         let mut current_tool_cancel = None;
         let mut iterations = 1usize;
         let mut clarify_started_at = None;
+        let mut pending_steers = VecDeque::new();
 
         advance_tool_queue(
             &mut pending_tools,
@@ -1967,6 +2008,7 @@ mod tests {
             ui_tx,
             agent_tx,
             &mut clarify_started_at,
+            &mut pending_steers,
         )
         .await;
 
@@ -1975,5 +2017,59 @@ mod tests {
             ui_rx.recv().await,
             Some(UiUpdate::ToolPending { id, name, .. }) if id == call_id && name == "write"
         ));
+    }
+
+    #[tokio::test]
+    async fn advance_tool_queue_injects_pending_steers_before_starting_next_request() {
+        // Regression test: queued steers (pending user messages typed while
+        // tools were running) must reach the model on the very next request
+        // once all tool results for this round are in context, rather than
+        // waiting for a full tool-free turn to complete via StreamDone.
+        let registry = Arc::new(ToolRegistry::new());
+        let mut pending_tools: VecDeque<PendingTool> = VecDeque::new();
+        let (ui_tx, mut ui_rx) = mpsc::channel(4);
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+        let mut context = Context::new();
+        context.push_tool_result(
+            Uuid::new_v4(),
+            "write".to_string(),
+            "ok".to_string(),
+            None,
+            None,
+        );
+        let mut mode = AgentMode::ToolPending;
+        let mut current_cancel = None;
+        let mut current_tool_cancel = None;
+        let mut iterations = 1usize;
+        let mut clarify_started_at = None;
+        let mut pending_steers = VecDeque::from(["steered while tool ran".to_string()]);
+
+        advance_tool_queue(
+            &mut pending_tools,
+            &mut context,
+            &mut mode,
+            &mut current_cancel,
+            &mut current_tool_cancel,
+            &mut iterations,
+            true,
+            test_engine(),
+            registry,
+            ui_tx,
+            agent_tx,
+            &mut clarify_started_at,
+            &mut pending_steers,
+        )
+        .await;
+
+        assert_eq!(mode, AgentMode::Streaming);
+        assert!(pending_steers.is_empty(), "steer must be drained");
+        assert_eq!(
+            context.messages().last(),
+            Some(&Message::User {
+                content: "steered while tool ran".to_string(),
+                kind: UserMessageKind::Explicit,
+            })
+        );
+        assert!(matches!(ui_rx.recv().await, Some(UiUpdate::SteerApplied)));
     }
 }

@@ -106,6 +106,7 @@ pub trait Provider: Send + Sync {
 #[derive(Debug, Clone)]
 pub enum MockEvent {
     Text(String),
+    Thinking(String),
     Delta(DeltaChunk),
 }
 
@@ -162,6 +163,7 @@ impl Provider for MockProvider {
                 for (index, event) in script.into_iter().enumerate() {
                     let stream_event = match event {
                         MockEvent::Text(text) => StreamEvent::Text(text),
+                        MockEvent::Thinking(text) => StreamEvent::Thinking(text),
                         MockEvent::Delta(delta) => StreamEvent::Delta(delta),
                     };
                     if tx.send(stream_event).await.is_err() {

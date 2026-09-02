@@ -92,6 +92,13 @@ Replace first occurance of "lamp" in `logs/poem.md` by "frog" using the `edit` t
 
 Replace line 2+3 in `logs/poem.md` by one line "hello world" using the `edit` tool!
 
+Replace line 1+2 in `logs/poem.md` by 
+```text
+lorem ipsum
+this is a nice place to be"
+```
+using the `edit` tool!
+
 Read `logs/poem.md` and ask user which other animal ( free text, no constraint or pre-selected options ) to use to replace existing animal in the poem.
 
 Read `logs/poem.md` and ask user which other animal to use to replace existing animal
@@ -107,9 +114,9 @@ Give user 3 random animal options to choose from.
 
 Read project documentation and summarize the goal and main features of the project:
 
-- README.md
-- AGENTS.md
-- docs/*.md
+- ./README.md (must read)
+- ./AGENTS.md (must read)
+- ./docs/*.md (pick/read files that seem to related to the topic in question)
 
 Summarize features with brief description in a markdown table.
 Summerize current state of planned implementation progress.

@@ -61,6 +61,7 @@ impl Provider for MockProviderWithScript {
                 for (index, event) in script.into_iter().enumerate() {
                     let stream_event = match event {
                         MockEvent::Text(text) => StreamEvent::Text(text),
+                        MockEvent::Thinking(text) => StreamEvent::Thinking(text),
                         MockEvent::Delta(delta) => StreamEvent::Delta(delta),
                     };
                     if tx.send(stream_event).await.is_err() {
@@ -136,6 +137,102 @@ async fn run_cli_streams_user_and_assistant_and_history() {
     assert!(
         output.contains("\"role\":\"assistant\""),
         "output: {output}"
+    );
+}
+
+#[tokio::test]
+async fn run_cli_renders_thinking_before_response_in_order() {
+    let provider = Arc::new(MockProviderWithScript {
+        phase_one: vec![
+            MockEvent::Thinking("pondering ".into()),
+            MockEvent::Thinking("some more".into()),
+            MockEvent::Text("here's ".into()),
+            MockEvent::Text("the answer".into()),
+        ],
+        phase_two: Vec::new(),
+        interval: Duration::from_millis(1),
+        calls: Arc::new(AtomicUsize::new(0)),
+    });
+    let registry = Arc::new(ToolRegistry::new());
+    let mut output = Vec::new();
+    let engine = Arc::new(EngineImpl::new(provider, common::test_engine_config()));
+    let (agent, ui_rx) = AgentLoop::new(engine, Arc::clone(&registry));
+    run_cli_to(agent, ui_rx, registry, "explain".to_string(), &mut output)
+        .await
+        .expect("headless run succeeds");
+    let output = String::from_utf8(output).expect("utf8 output");
+
+    let thinking_header_at = output
+        .find("---[ Assistant Thinking ]---")
+        .expect("has thinking header");
+    let thinking_text_at = output
+        .find("pondering some more")
+        .expect("has thinking text");
+    let footer_at = output
+        .find("[thought for")
+        .expect("has thought-duration footer");
+    let response_header_at = output
+        .find("---[ Assistant ]---")
+        .expect("has response header");
+    let response_text_at = output.find("here's the answer").expect("has response text");
+    assert!(
+        thinking_header_at < thinking_text_at
+            && thinking_text_at < footer_at
+            && footer_at < response_header_at
+            && response_header_at < response_text_at,
+        "output not in expected order: {output}"
+    );
+}
+
+#[tokio::test]
+async fn run_cli_closes_thinking_section_before_tool_call() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = write_scratch(&dir, "doc.md", "file body");
+    let provider = Arc::new(MockProviderWithScript {
+        phase_one: vec![
+            MockEvent::Thinking("checking the file".into()),
+            tool_call("read", serde_json::json!({ "path": path })),
+        ],
+        phase_two: vec![MockEvent::Text("ok".into())],
+        interval: Duration::from_millis(1),
+        calls: Arc::new(AtomicUsize::new(0)),
+    });
+    let sandbox = std::sync::Arc::new(std::sync::RwLock::new(ylva::Sandbox::with_root(
+        dir.path().to_path_buf(),
+    )));
+    let registry = Arc::new(default_registry(sandbox, ToolRegistryConfig::default()));
+    let mut output = Vec::new();
+    let engine = Arc::new(EngineImpl::new(provider, common::test_engine_config()));
+    let (agent, ui_rx) = AgentLoop::new(engine, Arc::clone(&registry));
+    run_cli_to(
+        agent,
+        ui_rx,
+        registry,
+        "read the file".to_string(),
+        &mut output,
+    )
+    .await
+    .expect("headless run succeeds");
+    let output = String::from_utf8(output).expect("utf8 output");
+
+    let thinking_at = output.find("checking the file").expect("has thinking text");
+    let footer_at = output
+        .find("[thought for")
+        .expect("has thought-duration footer");
+    let tool_at = output.find("[tool] Read").expect("has tool line");
+    assert!(
+        thinking_at < footer_at && footer_at < tool_at,
+        "output not in expected order: {output}"
+    );
+    // The follow-up round's response ("ok") reuses the plain "Assistant"
+    // header, not a separate "Response" label.
+    let response_header_at = output
+        .rfind("---[ Assistant ]---")
+        .expect("has response header for follow-up round");
+    let response_text_at = output.find("\nok").expect("has follow-up response text");
+    assert!(
+        tool_at < response_header_at && response_header_at < response_text_at,
+        "output not in expected order: {output}"
     );
 }
 

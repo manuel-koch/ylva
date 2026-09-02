@@ -23,21 +23,29 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 use ratatui::Frame;
 use ratatui_textarea::TextArea;
+use std::time::Instant;
 
 use crate::highlight::{highlighted_lines_cached, syntect_token_to_span, wrap_highlighted_line};
 
 use crate::agent::AgentMode;
-use crate::app_state::{BannerDragSelection, ChatEntry, ToolCallState, TuiState, UserMessageState};
+use crate::app_state::{BannerDragSelection, ChatEntry, ToolCallState, UserMessageState};
 use crate::build_info::BUILD_INFO;
 use crate::markdown::render_markdown;
+use crate::tui_state::TuiState;
 
 // User message border colors — extract into Theme struct in a later phase.
 const USER_MESSAGE_BORDER_COLOR: Color = Color::Green;
-// Bright RGB value so the queued border is visually distinct from plain Green
-// even in terminals where Color::LightGreen and Color::Green look the same.
-const USER_MESSAGE_QUEUED_BORDER_COLOR: Color = Color::Yellow;
-// Applied steer: lighter green to stay distinct from both Sent (Green) and Queued (Yellow).
-const USER_MESSAGE_STEERED_BORDER_COLOR: Color = Color::LightGreen;
+// Pending steer: same border color as Sent, but rendered dimmed (see the
+// `dim` flag in `append_user_lines`) so a queued-not-yet-injected message
+// reads as a dimmed version of a normal sent message, not an unrelated hue.
+const USER_MESSAGE_QUEUED_BORDER_COLOR: Color = USER_MESSAGE_BORDER_COLOR;
+// Applied steer: once injected, the LLM has seen it just like a normal Sent
+// message, and that's the only distinction that matters to the user — so
+// this renders identically to Sent (same color, not dimmed). Kept as its own
+// constant (rather than reusing USER_MESSAGE_BORDER_COLOR directly) so a
+// future color theme can still distinguish steers from turn-starting
+// messages without touching call sites.
+const USER_MESSAGE_STEERED_BORDER_COLOR: Color = USER_MESSAGE_BORDER_COLOR;
 const USER_MESSAGE_CANCELLED_BORDER_COLOR: Color = Color::DarkGray;
 // Soft background shade applied to all user message blocks.
 const USER_MESSAGE_BG_COLOR: Color = Color::Rgb(20, 20, 40);
@@ -45,14 +53,24 @@ const USER_MESSAGE_BG_COLOR: Color = Color::Rgb(20, 20, 40);
 /// fraction of the terminal height (e.g. 3 → one-third).  Adjust here to
 /// change the maximum visible height of the input area.
 const USER_MESSAGE_INPUT_HEIGHT_TERMINAL_FRACTION: u16 = 3;
+// The input field's border reuses the (Sent) user-message border color,
+// dimmed, so it reads as "this will become a user-message bubble" rather
+// than introducing an unrelated hue.
+const INPUT_BORDER_COLOR: Color = USER_MESSAGE_BORDER_COLOR;
 
 // Assistant streaming bubble colors.
 const ASSISTANT_STREAM_BORDER_COLOR: Color = Color::Blue;
 const ASSISTANT_STREAM_BG_COLOR: Color = Color::Rgb(15, 20, 35);
-
 // Tool bubble colors — magenta left border, dark magenta background tint.
 const TOOL_BUBBLE_BORDER_COLOR: Color = Color::Magenta;
 const TOOL_BUBBLE_BG_COLOR: Color = Color::Rgb(30, 0, 30);
+
+// Thinking bubble colors — same blue family as the assistant-response bubble
+// (dimmed via the bubble's own Modifier::DIM text styling) so the two read
+// as related, rather than the previous cyan which was too close to the
+// input field's border color.
+const THINKING_BORDER_COLOR: Color = Color::Blue;
+const THINKING_BG_COLOR: Color = ASSISTANT_STREAM_BG_COLOR;
 
 // Help popup border, title, section headings, and scroll-indicator color.
 const HELP_POPUP_BORDER_COLOR: Color = Color::Blue;
@@ -65,11 +83,12 @@ const CLARIFY_BANNER_FG_COLOR: Color = Color::Yellow;
 const CLARIFY_BANNER_SELECTION_FG_COLOR: Color = Color::Black;
 const CLARIFY_BANNER_SCROLL_INDICATOR_COLOR: Color = Color::DarkGray;
 
-// Single hue used for all parts of the conversation-list scrollbar.
+const SEPARATOR_LINE_COLOR: Color = Color::White;
+// Single hue used for all parts of the conversation-list scrollbar, matching
+// the horizontal divider between the conversation list and input/footer.
 // The track and inactive arrows use the same colour with Modifier::DIM so the
 // thumb and active arrows stand out without introducing a second colour.
-const CHAT_SCROLLBAR_COLOR: Color = Color::Blue;
-const SEPARATOR_LINE_COLOR: Color = Color::White;
+const CHAT_SCROLLBAR_COLOR: Color = SEPARATOR_LINE_COLOR;
 const TOAST_BG_COLOR: Color = Color::Blue;
 const TOAST_FG_COLOR: Color = Color::White;
 
@@ -246,7 +265,11 @@ pub fn draw(
                 bottom_left: "▌",
                 ..ratatui::symbols::border::PLAIN
             })
-            .border_style(Style::default().fg(Color::Cyan))
+            .border_style(
+                Style::default()
+                    .fg(INPUT_BORDER_COLOR)
+                    .add_modifier(Modifier::DIM),
+            )
             .style(Style::default().bg(USER_MESSAGE_BG_COLOR)),
     );
     frame.render_widget(&*textarea, input_area);
@@ -271,7 +294,9 @@ pub fn draw(
 
     // Show ↑/↓ based on the tracked viewport position, not the cursor row.
     if wrapped_rows > input_height as usize && input_area.height >= 1 && input_area.width >= 1 {
-        let input_indicator_style = Style::default().fg(Color::Cyan);
+        let input_indicator_style = Style::default()
+            .fg(INPUT_BORDER_COLOR)
+            .add_modifier(Modifier::DIM);
         if state.input_scroll_top > 0 {
             frame.render_widget(
                 Paragraph::new("↑").style(input_indicator_style),
@@ -351,8 +376,17 @@ pub fn draw(
             " enter: answer  click choice  ctrl-c/esc: cancel  F1: help"
         } else if state.agent_mode != AgentMode::Idle && !input_is_empty {
             " enter: send  ctrl-c/esc: clear draft  F1: help"
+        } else if state.agent_mode != AgentMode::Idle {
+            // Busy with an empty draft: esc only stops the turn, ctrl-c stops
+            // the turn *and* quits the TUI. Naming both keys avoids a user
+            // reading "cancel/quit" as ambiguous about which key does what.
+            " enter: send  esc: cancel  ctrl-c: cancel & quit  F1: help"
+        } else if !input_is_empty {
+            // Idle with a draft: esc clears it (no quit); ctrl-c does not
+            // clear it and quits on a second press, same as idle-empty.
+            " enter: send  esc: clear draft  ctrl-c: quit  F1: help"
         } else {
-            " enter: send  ctrl-c/esc: cancel/quit  F1: help"
+            " enter: send  ctrl-c: quit  F1: help"
         };
         draw_normal_footer(
             frame,
@@ -401,9 +435,6 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
     let wrap_width = bubble_row_width.saturating_sub(1).max(1);
 
     let mut lines: Vec<Line> = Vec::new();
-    // Queued (steer) user messages are deferred until after the in-progress
-    // stream bubble so they appear visually after the current response.
-    let mut deferred_queued_messages: Vec<String> = Vec::new();
     // Pending tool bubbles (awaiting approval) are deferred to the very end
     // of the conversation so they stay close to the approve/deny footer
     // regardless of how many earlier entries exist.
@@ -412,6 +443,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
     // Rebuilt every frame; assigned to state after the loop (avoids a borrow
     // conflict between iterating state.chat_entries and mutating state).
     let mut bubble_title_rows_out: Vec<(usize, usize, uuid::Uuid)> = Vec::new();
+    let mut thinking_title_rows_out: Vec<(usize, usize, usize)> = Vec::new();
     // Show the logo wordmark only when the conversation is empty; once
     // the user has submitted a message the logo is hidden.
     if state.chat_entries.is_empty() {
@@ -419,18 +451,8 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
     } else {
         lines.push(Line::default());
     }
-    for entry in &state.chat_entries {
+    for (entry_index, entry) in state.chat_entries.iter().enumerate() {
         match entry {
-            ChatEntry::UserMessage {
-                text,
-                state: UserMessageState::Queued,
-            } => {
-                // Defer queued steer bubbles; they will be appended after the
-                // in-progress streaming section below.
-                deferred_queued_messages.push(text.clone());
-                // Skip the blank separator here; it is added when we flush.
-                continue;
-            }
             ChatEntry::UserMessage { text, state } => {
                 // User bubbles carry a 1-char left border bar plus a 2-char
                 // margin, so wrap to a narrower width to keep lines on-screen.
@@ -440,6 +462,25 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
             ChatEntry::AssistantMessage { text, interrupted } => {
                 let msg_width = bubble_row_width.saturating_sub(4).max(1);
                 append_assistant_lines(&mut lines, text, *interrupted, msg_width, bubble_row_width);
+            }
+            ChatEntry::ThinkingMessage {
+                text,
+                collapsed,
+                duration,
+            } => {
+                let msg_width = bubble_row_width.saturating_sub(4).max(1);
+                append_thinking_lines(
+                    &mut lines,
+                    ThinkingBubbleArgs {
+                        text,
+                        collapsed: *collapsed,
+                        duration: *duration,
+                        entry_index,
+                    },
+                    &mut thinking_title_rows_out,
+                    msg_width,
+                    bubble_row_width,
+                );
             }
             ChatEntry::ToolBubble {
                 name,
@@ -490,6 +531,20 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
         lines.push(Line::default());
     }
 
+    if state.agent_mode == AgentMode::Streaming && !state.partial_thinking_text.is_empty() {
+        let stream_width = bubble_row_width.saturating_sub(4).max(1);
+        append_streaming_thinking_lines(
+            &mut lines,
+            &state.partial_thinking_text.clone(),
+            state.thinking_started_at,
+            state.partial_thinking_collapsed,
+            &mut thinking_title_rows_out,
+            stream_width,
+            bubble_row_width,
+        );
+        lines.push(Line::default());
+    }
+
     if state.agent_mode == AgentMode::Streaming && !state.partial_assistant_text.is_empty() {
         let stream_width = bubble_row_width.saturating_sub(4).max(1);
         append_streaming_lines(
@@ -504,9 +559,10 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
         lines.push(Line::default());
     }
 
-    // Flush deferred queued steer messages after the stream bubble so they
-    // appear visually after the current in-progress response.
-    for queued_text in &deferred_queued_messages {
+    // Flush staged (not-yet-committed) queued steer messages after the
+    // stream bubble so they appear visually after the current in-progress
+    // response/thinking/tool-call content. See `AppState::queue_steer_message`.
+    for queued_text in &state.queued_steer_texts {
         let user_width = bubble_row_width.saturating_sub(4).max(1);
         append_user_lines(
             &mut lines,
@@ -538,6 +594,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
     }
 
     state.bubble_title_rows = bubble_title_rows_out;
+    state.thinking_title_rows = thinking_title_rows_out;
 
     // Extract plain text of every line for selection/copy support.
     // Tool bubble lines are prefixed with the `▌  ` chrome (border + margin);
@@ -979,6 +1036,153 @@ fn append_streaming_lines(
     style.push_padding_line(lines, Style::default());
 }
 
+struct ThinkingBubbleArgs<'a> {
+    text: &'a str,
+    collapsed: bool,
+    duration: std::time::Duration,
+    entry_index: usize,
+}
+
+/// Render a committed thinking bubble (extended-thinking/reasoning output),
+/// distinct from the assistant reply. When `collapsed`, renders only a single
+/// summary line `▶ Thought for {duration}`; when expanded, the content is
+/// rendered via `render_markdown` under a `▼ Thought for {duration}` title
+/// line. `duration` is the wall-clock time spent thinking.
+///
+/// Records the bubble's absolute row range in `thinking_title_rows` (keyed by
+/// `entry_index`, since `ChatEntry::ThinkingMessage` carries no `Uuid`) so
+/// mouse clicks can route to `AppState::toggle_thinking_collapsed`.
+fn append_thinking_lines(
+    lines: &mut Vec<Line<'static>>,
+    bubble: ThinkingBubbleArgs<'_>,
+    thinking_title_rows: &mut Vec<(usize, usize, usize)>,
+    width: usize,
+    row_width: usize,
+) {
+    let ThinkingBubbleArgs {
+        text,
+        collapsed,
+        duration,
+        entry_index,
+    } = bubble;
+    let style = BubbleStyle::new(THINKING_BORDER_COLOR, THINKING_BG_COLOR, row_width);
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let title_text = format!("Thought for {:.3}s", duration.as_secs_f64());
+
+    let bubble_start_row = lines.len();
+    style.push_padding_line(lines, dim);
+
+    if collapsed {
+        let summary = format!("▶ {title_text}");
+        lines.push(style.content_line(vec![Span::styled(summary, dim)], dim));
+    } else {
+        // Body lines are indented two spaces, matching the "▼ " title prefix
+        // width, so they read as nested under the title rather than flush
+        // with the bubble's left border. Wrap narrower to account for it.
+        let body_width = width.saturating_sub(2).max(1);
+        let mut wrapped = render_markdown(text, body_width);
+        if wrapped.is_empty() {
+            wrapped.push(Line::from(""));
+        }
+        let mut first = true;
+        for md_line in wrapped {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            if first {
+                spans.push(Span::styled("▼ ", dim));
+                spans.push(Span::styled(title_text.clone(), dim));
+                lines.push(style.content_line(spans, dim));
+                first = false;
+            }
+            spans = vec![Span::styled("  ", dim)];
+            spans.extend(
+                md_line
+                    .spans
+                    .into_iter()
+                    .map(|span| Span::styled(span.content, dim.patch(span.style))),
+            );
+            lines.push(style.content_line(spans, dim));
+        }
+    }
+
+    style.push_padding_line(lines, dim);
+    let bubble_end_row = lines.len().saturating_sub(1);
+    thinking_title_rows.push((bubble_start_row, bubble_end_row, entry_index));
+}
+
+/// Render in-progress thinking text as a cyan-bordered bubble with a blinking
+/// cursor, mirroring `append_streaming_lines`. Honors `collapsed` (mirrored
+/// from `AppState::partial_thinking_collapsed`) so the bubble can be toggled
+/// before it is flushed into a `ChatEntry::ThinkingMessage` — clicking its
+/// title routes through `thinking_title_rows`, keyed by the
+/// `STREAMING_THINKING_ENTRY_INDEX` sentinel since there is no real
+/// `chat_entries` index yet. The title shows the live elapsed time
+/// (`Thinking... ({elapsed})`) computed from `thinking_started_at`, updating
+/// every redraw while the stream is active.
+fn append_streaming_thinking_lines(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    thinking_started_at: Option<Instant>,
+    collapsed: bool,
+    thinking_title_rows: &mut Vec<(usize, usize, usize)>,
+    width: usize,
+    row_width: usize,
+) {
+    let style = BubbleStyle::new(THINKING_BORDER_COLOR, THINKING_BG_COLOR, row_width);
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let elapsed = thinking_started_at
+        .map(|started_at| started_at.elapsed())
+        .unwrap_or_default();
+    let title_text = format!("Thinking... ({:.1}s)", elapsed.as_secs_f64());
+
+    let bubble_start_row = lines.len();
+    style.push_padding_line(lines, dim);
+
+    if collapsed {
+        let summary = format!("▶ {title_text}");
+        lines.push(style.content_line(vec![Span::styled(summary, dim)], dim));
+    } else {
+        lines.push(style.content_line(
+            vec![Span::styled("▼ ", dim), Span::styled(title_text, dim)],
+            dim,
+        ));
+
+        // Body lines are indented two spaces to match the "▼ " title prefix,
+        // mirroring `append_thinking_lines`'s flushed rendering.
+        let body_width = width.saturating_sub(2).max(1);
+        let mut wrapped = render_markdown(text, body_width);
+        if wrapped.is_empty() {
+            wrapped.push(Line::from(""));
+        }
+        let last_index = wrapped.len().saturating_sub(1);
+        for (i, md_line) in wrapped.into_iter().enumerate() {
+            let mut spans: Vec<Span<'static>> = vec![Span::styled("  ", dim)];
+            spans.extend(
+                md_line
+                    .spans
+                    .into_iter()
+                    .map(|span| Span::styled(span.content, dim.patch(span.style))),
+            );
+            if i == last_index {
+                spans.push(Span::styled(
+                    "▊",
+                    Style::default()
+                        .fg(THINKING_BORDER_COLOR)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+            lines.push(style.content_line(spans, dim));
+        }
+    }
+
+    style.push_padding_line(lines, dim);
+    let bubble_end_row = lines.len().saturating_sub(1);
+    thinking_title_rows.push((
+        bubble_start_row,
+        bubble_end_row,
+        crate::app_state::STREAMING_THINKING_ENTRY_INDEX,
+    ));
+}
+
 /// trailing spaces to that width so the `USER_MESSAGE_BG_COLOR` background
 /// fills the entire terminal row — not just the cells that contain characters.
 fn append_user_lines(
@@ -1146,26 +1350,70 @@ fn append_tool_bubble_lines(
             _ => None,
         }
     };
-    let scalar_prop = |k: &str, v: &serde_json::Value| -> Option<String> {
+    let scalar_prop_value = |v: &serde_json::Value| -> Option<String> {
         match v {
-            serde_json::Value::Bool(b) => Some(format!("{k}={b}")),
-            serde_json::Value::String(s) => Some(format!("{k}={s}")),
-            serde_json::Value::Number(n) => Some(format!("{k}={n}")),
+            serde_json::Value::Bool(b) => Some(b.to_string()),
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Number(n) => Some(n.to_string()),
             _ => None,
         }
     };
+    // Multiline scalar values (e.g. edit's `old_string`/`new_string`) would
+    // otherwise embed raw newlines into the single-line title/args area,
+    // breaking its layout. Replace them with a visible placeholder so the
+    // title stays single-line, and stash the untouched value as its own
+    // expandable content section so the full text remains readable.
+    let sanitize_inline = |s: &str| -> String {
+        s.chars()
+            .map(|c| match c {
+                '\n' | '\r' => '↵',
+                '\t' => ' ',
+                c => c,
+            })
+            .collect()
+    };
+    let mut extra_content_sections: Vec<crate::agent::tools::Section> = vec![];
+    let mut multiline_section = |key: &str, value: &str| {
+        extra_content_sections.push(crate::agent::tools::Section::Content(
+            crate::agent::tools::ContentSection {
+                label: Some(key.to_string()),
+                content: value.to_string(),
+                file_extension: None,
+                line_number_offset: None,
+            },
+        ));
+    };
     let mut iter = title_arguments.iter().peekable();
     // Consume the first entry only if it is a bare-worthy scalar.
-    let primary_text: Option<String> = iter
-        .next_if(|(_, v)| scalar_primary(v).is_some())
-        .and_then(|(_, v)| scalar_primary(v));
+    let primary_text: Option<String> =
+        iter.next_if(|(_, v)| scalar_primary(v).is_some())
+            .and_then(|(k, v)| {
+                scalar_primary(v).map(|s| {
+                    if s.contains('\n') {
+                        multiline_section(k, &s);
+                        sanitize_inline(&s)
+                    } else {
+                        s
+                    }
+                })
+            });
     let props_text: String = iter
-        .filter_map(|(k, v)| scalar_prop(k, v))
+        .filter_map(|(k, v)| {
+            scalar_prop_value(v).map(|value| {
+                let display_value = if value.contains('\n') {
+                    multiline_section(k, &value);
+                    sanitize_inline(&value)
+                } else {
+                    value
+                };
+                format!("{k}={display_value}")
+            })
+        })
         .collect::<Vec<_>>()
         .join(" ");
 
     // Compute body sections for the collapsible bubble body.
-    let content_sections: Vec<crate::agent::tools::Section> = match state {
+    let mut content_sections: Vec<crate::agent::tools::Section> = match state {
         ToolCallState::Pending {
             content_sections, ..
         }
@@ -1183,6 +1431,7 @@ fn append_tool_bubble_lines(
         } => content_sections.clone(),
         _ => vec![],
     };
+    content_sections.extend(extra_content_sections);
 
     let has_args = primary_text.as_ref().is_some_and(|s| !s.is_empty()) || !props_text.is_empty();
     let has_expandable_body = !content_sections.is_empty()
@@ -1955,7 +2204,13 @@ fn draw_normal_footer(
     let mode_word = match state.agent_mode {
         AgentMode::Idle => "Idle",
         AgentMode::Pending => "Sending…",
-        AgentMode::Streaming => "Streaming…",
+        AgentMode::Streaming => {
+            if !state.partial_thinking_text.is_empty() && state.partial_assistant_text.is_empty() {
+                "Thinking…"
+            } else {
+                "Streaming…"
+            }
+        }
         AgentMode::ToolPending => "Awaiting approval…",
         AgentMode::ToolRunning => "Running tool…",
         AgentMode::ClarifyPending => "Waiting for answer…",
@@ -1973,25 +2228,16 @@ fn draw_normal_footer(
     let row_1_text = if let Some(hint) = hint {
         hint.to_string()
     } else if state.steer_indicator {
-        let queued_count = state
-            .chat_entries
-            .iter()
-            .filter(|entry| {
-                matches!(
-                    entry,
-                    ChatEntry::UserMessage {
-                        state: UserMessageState::Queued,
-                        ..
-                    }
-                )
-            })
-            .count();
-        let steer_label = if queued_count == 1 {
-            "1 steer queued".to_string()
+        let queued_count = state.queued_steer_texts.len();
+        // "Queued" is the state the user actually cares about (not yet seen
+        // by the LLM); "steer" is internal jargon for how such a message
+        // reaches the model, so it's kept out of user-facing text.
+        let queued_label = if queued_count == 1 {
+            "1 message queued".to_string()
         } else {
-            format!("{queued_count} steers queued")
+            format!("{queued_count} messages queued")
         };
-        format!(" {spinner_prefix}{mode_word} ⋮ {steer_label}")
+        format!(" {spinner_prefix}{mode_word} ⋮ {queued_label}")
     } else {
         format!(" {spinner_prefix}{mode_word}")
     };
@@ -2344,6 +2590,9 @@ fn draw_help_popup(frame: &mut Frame, state: &mut TuiState) {
     let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
     let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
     let popup = Rect::new(x, y, popup_width, popup_height);
+    // Store the popup rect so mouse-click handling can tell inside from
+    // outside clicks (dismiss-on-outside-click; clicks inside must not close).
+    state.help_popup_rect = popup;
 
     frame.render_widget(Clear, popup);
     let block = Block::default()
@@ -2375,13 +2624,15 @@ fn draw_help_popup(frame: &mut Frame, state: &mut TuiState) {
                 ("ctrl-c (x1)", "Show \"Press again to quit\" hint (idle)"),
                 ("ctrl-c (x2, <=2s)", "Quit TUI"),
                 (
-                    "ctrl-c / esc (x1)",
+                    "esc (x1)",
                     "Show \"Press again to cancel\" hint (busy, empty input)",
                 ),
+                ("esc (x2, <=2s)", "Interrupt generation, TUI stays open"),
                 (
-                    "ctrl-c / esc (x2, <=2s)",
-                    "Interrupt generation (busy, empty input)",
+                    "ctrl-c (x1, busy)",
+                    "Show \"Press again to cancel & quit\" hint (empty input)",
                 ),
+                ("ctrl-c (x2, <=2s, busy)", "Interrupt generation, then quit"),
                 ("esc", "Close popup"),
             ],
         },
@@ -2427,11 +2678,19 @@ fn draw_help_popup(frame: &mut Frame, state: &mut TuiState) {
         all_lines.push(Line::styled(section.heading, heading_style));
         if section.heading == "Build" {
             for bi_line in BUILD_INFO.render().lines() {
-                all_lines.push(Line::from(bi_line.to_owned()));
+                all_lines.push(Line::from(format!("  {bi_line}")));
             }
         } else {
+            // Align descriptions to the longest key within this section only,
+            // so short-key sections don't inherit padding from long-key ones.
+            let key_width = section
+                .entries
+                .iter()
+                .map(|(key, _)| key.chars().count())
+                .max()
+                .unwrap_or(0);
             for (key, desc) in section.entries {
-                all_lines.push(Line::from(format!("  {key:<40}{desc}")));
+                all_lines.push(Line::from(format!("  {key:<key_width$}  {desc}")));
             }
         }
     }

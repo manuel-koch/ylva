@@ -17,7 +17,7 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 use tokio::sync::mpsc;
@@ -166,7 +166,11 @@ async fn double_press_ctrl_c_mid_stream_cancels_pending_steer() {
 }
 
 #[tokio::test]
-async fn key_agnostic_ctrl_c_then_escape_stops_stream() {
+async fn ctrl_c_then_mismatched_escape_does_not_stop_stream() {
+    // Regression: Ctrl-C arms its own quit-confirm window. A *different* key
+    // (Esc) must not confirm it — it starts Esc's own fresh confirm window
+    // instead, leaving the current turn (and any queued steer) to complete
+    // normally.
     let provider = MockProvider::new(
         vec![
             "a".to_string(),
@@ -205,22 +209,24 @@ async fn key_agnostic_ctrl_c_then_escape_stops_stream() {
     type_and_enter(&action_tx, "first").await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     type_and_enter(&action_tx, "steer").await;
-    send(&action_tx, AppAction::CtrlC).await;
-    send(&action_tx, AppAction::Escape).await; // second press (key-agnostic) → Stop
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    send(&action_tx, AppAction::CtrlC).await; // arms ctrl-c's confirm
+    send(&action_tx, AppAction::Escape).await; // mismatched key: must not stop
+                                               // Wait for both turns to complete naturally.
+    tokio::time::sleep(Duration::from_millis(400)).await;
     drop(action_tx);
 
     let state = run_handle.await.expect("task joined");
     assert_eq!(state.agent_mode, ylva::AgentMode::Idle);
     assert!(
-        state.chat_entries.iter().any(|entry| matches!(
+        !state.chat_entries.iter().any(|entry| matches!(
             entry,
             ChatEntry::UserMessage {
                 state: UserMessageState::Cancelled,
                 ..
             }
         )),
-        "queued steer should be cancelled"
+        "queued steer must not be cancelled by a mismatched-key double press: {:?}",
+        state.chat_entries
     );
 }
 
@@ -418,18 +424,28 @@ fn steer_bubble_renders_below_streaming_not_above() {
     use ratatui::Terminal;
     use ratatui_textarea::TextArea;
     use ylva::ui;
-    use ylva::UiUpdate;
+    use ylva::AgentMode;
 
     let backend = TestBackend::new(60, 20);
     let mut terminal = Terminal::new(backend).expect("terminal");
 
-    let mut state = ylva::TuiState::new();
+    // Equivalent to: push_user_bubble("hello", Sent) → StreamStarted →
+    // AppendText("world") → queue_steer_message("steer me"). Built directly
+    // (rather than through a reducer) since this test targets
+    // `ui::draw_chat`'s deferred-rendering order, not state transitions.
+    // Queued steers are staged in `queued_steer_texts`, not `chat_entries`
+    // (see `AppState::queue_steer_message`).
+    let mut state = ylva::TuiState {
+        chat_entries: vec![ChatEntry::UserMessage {
+            text: "hello".to_string(),
+            state: UserMessageState::Sent,
+        }],
+        queued_steer_texts: vec!["steer me".to_string()],
+        partial_assistant_text: "world".to_string(),
+        agent_mode: AgentMode::Streaming,
+        ..ylva::TuiState::new()
+    };
     let mut textarea = TextArea::default();
-
-    state.push_user_bubble("hello".to_string(), UserMessageState::Sent);
-    state.apply_update(&UiUpdate::StreamStarted);
-    state.apply_update(&UiUpdate::AppendText("world".to_string()));
-    state.push_user_bubble("steer me".to_string(), UserMessageState::Queued);
 
     terminal
         .draw(|frame| {
@@ -468,19 +484,23 @@ fn steer_sent_before_first_chunk_does_not_jump_above_stream() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use ratatui_textarea::TextArea;
-    use ylva::{ui, UiUpdate};
+    use ylva::ui;
+    use ylva::AgentMode;
 
     let backend = TestBackend::new(60, 20);
     let mut terminal = Terminal::new(backend).expect("terminal");
 
-    let mut state = ylva::TuiState::new();
-    let mut textarea = TextArea::default();
-
     // Stream started but no text yet; user already queued a steer.
-    state.push_user_bubble("hello".to_string(), UserMessageState::Sent);
-    state.apply_update(&UiUpdate::StreamStarted);
-    // Steer arrives before any AppendText chunk.
-    state.push_user_bubble("steer me".to_string(), UserMessageState::Queued);
+    let mut state = ylva::TuiState {
+        chat_entries: vec![ChatEntry::UserMessage {
+            text: "hello".to_string(),
+            state: UserMessageState::Sent,
+        }],
+        queued_steer_texts: vec!["steer me".to_string()],
+        agent_mode: AgentMode::Streaming,
+        ..ylva::TuiState::new()
+    };
+    let mut textarea = TextArea::default();
 
     terminal
         .draw(|frame| {
@@ -512,7 +532,7 @@ fn steer_sent_before_first_chunk_does_not_jump_above_stream() {
     );
 
     // Now simulate the first chunk arriving; steer must still be below it.
-    state.apply_update(&UiUpdate::AppendText("world".to_string()));
+    state.partial_assistant_text.push_str("world");
     terminal
         .draw(|frame| {
             ui::draw(frame, &mut state, &mut textarea, None, None);
@@ -545,12 +565,18 @@ fn steer_sent_before_first_chunk_does_not_jump_above_stream() {
 /// Trace the full steer lifecycle visually: stream-1 live → steer queued →
 /// stream-1 done → stream-2 live.  Shows what the screen looks like at each
 /// phase so we can confirm the expected ordering.
+///
+/// Each phase's `TuiState` is built directly (the exact result a reducer
+/// would have produced) rather than driven through one, since this test
+/// targets `ui::draw_chat`'s rendering order, not state-transition logic
+/// (which is covered by `AppState`/`presenter.rs` tests).
 #[test]
 fn steer_render_order_across_full_steer_cycle() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use ratatui_textarea::TextArea;
-    use ylva::{ui, UiUpdate};
+    use ylva::ui;
+    use ylva::AgentMode;
 
     let render = |state: &mut ylva::TuiState| -> Vec<String> {
         let backend = TestBackend::new(60, 24);
@@ -571,12 +597,16 @@ fn steer_render_order_across_full_steer_cycle() {
             .collect()
     };
 
-    let mut state = ylva::TuiState::new();
-    state.push_user_bubble("hello".to_string(), UserMessageState::Sent);
-    state.apply_update(&UiUpdate::StreamStarted);
-    state.apply_update(&UiUpdate::AppendText("stream1".to_string()));
-
     // Phase 1: stream-1 live, no steer yet — "stream1" should be visible.
+    let mut state = ylva::TuiState {
+        chat_entries: vec![ChatEntry::UserMessage {
+            text: "hello".to_string(),
+            state: UserMessageState::Sent,
+        }],
+        partial_assistant_text: "stream1".to_string(),
+        agent_mode: AgentMode::Streaming,
+        ..ylva::TuiState::new()
+    };
     let rows = render(&mut state);
     assert!(
         rows.iter().any(|r| r.contains("stream1")),
@@ -584,7 +614,7 @@ fn steer_render_order_across_full_steer_cycle() {
     );
 
     // Phase 2: steer queued during stream-1.
-    state.push_user_bubble("steer".to_string(), UserMessageState::Queued);
+    state.queued_steer_texts.push("steer".to_string());
     let rows = render(&mut state);
     let stream_row = rows
         .iter()
@@ -599,11 +629,26 @@ fn steer_render_order_across_full_steer_cycle() {
         "phase2: steer (row {steer_row}) must be BELOW stream1 (row {stream_row})"
     );
 
-    // Phase 3: stream-1 done → steer applied → stream-2 starts.
-    state.apply_update(&UiUpdate::StreamDone);
-    state.apply_update(&UiUpdate::SteerApplied);
-    state.apply_update(&UiUpdate::StreamStarted);
-    state.apply_update(&UiUpdate::AppendText("stream2".to_string()));
+    // Phase 3: stream-1 done → steer applied → stream-2 starts. This is what
+    // `flush_partial_assistant_message` + `commit_queued_steer_messages`
+    // would have produced: the committed AssistantMessage sits between the
+    // original user message and the (now Steered) steer bubble.
+    state.queued_steer_texts.clear();
+    state.chat_entries = vec![
+        ChatEntry::UserMessage {
+            text: "hello".to_string(),
+            state: UserMessageState::Sent,
+        },
+        ChatEntry::AssistantMessage {
+            text: "stream1".to_string(),
+            interrupted: false,
+        },
+        ChatEntry::UserMessage {
+            text: "steer".to_string(),
+            state: UserMessageState::Steered,
+        },
+    ];
+    state.partial_assistant_text = "stream2".to_string();
     let rows = render(&mut state);
     let stream1_row = rows
         .iter()
@@ -717,29 +762,45 @@ fn pending_tool_bubble_renders_after_completed_entries() {
     // even when there are earlier completed entries above it.
     use ratatui_textarea::TextArea;
     use ylva::ui;
-    use ylva::{ToolCallState, UiUpdate};
+    use ylva::ToolCallState;
 
     let backend = TestBackend::new(60, 30);
     let mut terminal = Terminal::new(backend).expect("terminal");
 
-    let mut state = ylva::TuiState::new();
-    let mut textarea = TextArea::default();
-
     // An assistant message comes first, then a tool is requested.
-    state.push_user_bubble("run something".to_string(), UserMessageState::Sent);
-    state.apply_update(&UiUpdate::StreamStarted);
-    state.apply_update(&UiUpdate::AppendText("I will use a tool".to_string()));
-    state.apply_update(&UiUpdate::StreamDone);
-
     let tool_id = uuid::Uuid::new_v4();
-    state.apply_update(&UiUpdate::ToolPending {
-        id: tool_id,
-        name: "glob".to_string(),
-        arguments: serde_json::json!({"pattern": "**/*.rs"}),
-        content_sections: vec![],
-
-        title_arguments: vec![],
-    });
+    let mut state = ylva::TuiState {
+        chat_entries: vec![
+            ChatEntry::UserMessage {
+                text: "run something".to_string(),
+                state: UserMessageState::Sent,
+            },
+            ChatEntry::AssistantMessage {
+                text: "I will use a tool".to_string(),
+                interrupted: false,
+            },
+            ChatEntry::ToolBubble {
+                id: tool_id,
+                name: "glob".to_string(),
+                state: Box::new(ToolCallState::Pending {
+                    arguments: serde_json::json!({"pattern": "**/*.rs"}),
+                    content_sections: vec![],
+                    title_arguments: vec![],
+                }),
+                collapsed: true,
+            },
+        ],
+        // The approve/deny footer (drawn only when `pending_approval` is
+        // `Some`) is where the lowercase tool name actually renders; the
+        // bubble title itself shows the capitalised form ("Glob").
+        pending_approval: Some((
+            tool_id,
+            "glob".to_string(),
+            serde_json::json!({"pattern": "**/*.rs"}),
+        )),
+        ..ylva::TuiState::new()
+    };
+    let mut textarea = TextArea::default();
 
     terminal
         .draw(|frame| {
@@ -783,6 +844,95 @@ fn pending_tool_bubble_renders_after_completed_entries() {
     assert!(
         has_pending,
         "chat_entries should still contain a Pending tool bubble"
+    );
+}
+
+#[test]
+fn expanded_tool_bubble_with_multiline_title_argument_stays_single_line_and_gets_a_section() {
+    // A multiline scalar title argument (e.g. edit's `old_string`/`new_string`)
+    // must not embed raw newlines into the args line of an expanded tool
+    // bubble — that breaks the args line's layout by bleeding into
+    // neighbouring key=value pairs. Instead it should render as a
+    // placeholder-sanitized single line, with the full text available as its
+    // own expandable content section.
+    use ratatui_textarea::TextArea;
+    use ylva::ui;
+    use ylva::ToolCallState;
+
+    let backend = TestBackend::new(80, 30);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+
+    let tool_id = uuid::Uuid::new_v4();
+    let mut state = ylva::TuiState {
+        chat_entries: vec![ChatEntry::ToolBubble {
+            id: tool_id,
+            name: "edit".to_string(),
+            state: Box::new(ToolCallState::Running {
+                arguments: serde_json::json!({
+                    "path": "logs/poem.md",
+                    "mode": "search_replace",
+                    "old_string": "line one\nline two",
+                    "new_string": "replaced one\nreplaced two",
+                    "replace_all": true,
+                }),
+                content_sections: vec![],
+                title_arguments: vec![
+                    ("path".to_string(), serde_json::json!("logs/poem.md")),
+                    ("mode".to_string(), serde_json::json!("search_replace")),
+                    (
+                        "old_string".to_string(),
+                        serde_json::json!("line one\nline two"),
+                    ),
+                    (
+                        "new_string".to_string(),
+                        serde_json::json!("replaced one\nreplaced two"),
+                    ),
+                    ("replace_all".to_string(), serde_json::json!(true)),
+                ],
+            }),
+            collapsed: false,
+        }],
+        ..ylva::TuiState::new()
+    };
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            ui::draw(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("draw");
+
+    let buf = terminal.backend().buffer().clone();
+    let rows: Vec<String> = (0..30u16)
+        .map(|y| {
+            (0..80u16)
+                .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
+                .collect::<String>()
+        })
+        .collect();
+
+    // The args line renders "old_string=<value>" as a single sanitized row
+    // (word-wrapping to the next row afterwards is fine — what must not
+    // happen is a raw embedded newline splitting the *value* itself).
+    let args_row = rows
+        .iter()
+        .position(|r| r.contains("old_string="))
+        .expect("args row containing old_string= should be present");
+    assert!(
+        rows[args_row].contains('↵'),
+        "embedded newline should render as a placeholder glyph, got: {:?}",
+        rows[args_row]
+    );
+
+    // The full multiline value must still be readable, as its own labelled
+    // content section in the expanded body.
+    assert!(
+        rows.iter().any(|r| r.contains("old_string:")),
+        "expanded body should contain a labelled old_string content section"
+    );
+    assert!(
+        rows.iter().any(|r| r.contains("line one")) && rows.iter().any(|r| r.contains("line two")),
+        "full old_string text should be visible across its own content-section lines"
     );
 }
 
@@ -834,4 +984,110 @@ async fn escape_twice_while_streaming_stops_stream_but_keeps_tui_open() {
 
     let state = run_handle.await.expect("task joined");
     assert_eq!(state.agent_mode, ylva::AgentMode::Idle);
+}
+
+#[tokio::test]
+async fn click_inside_help_popup_keeps_it_open() {
+    let provider = MockProvider::new(vec!["hello".to_string()], Duration::from_millis(200));
+    let backend = TestBackend::new(80, 24);
+    let terminal = Terminal::new(backend).expect("test terminal");
+    let (action_tx, action_rx) = mpsc::channel(64);
+    let registry = Arc::new(ToolRegistry::new());
+
+    let run_handle = tokio::spawn({
+        let mut terminal = terminal;
+        async move {
+            let engine = Arc::new(EngineImpl::new(
+                Arc::new(provider),
+                common::test_engine_config(),
+            ));
+            let (agent, ui_rx) = AgentLoop::new(engine, registry);
+            tui_driver::run_tui(
+                &mut terminal,
+                agent,
+                ui_rx,
+                None,
+                action_rx,
+                &mut NoopClipboard,
+            )
+            .await
+            .expect("run_tui completed")
+        }
+    });
+
+    send(&action_tx, AppAction::ShowHelp).await;
+    tokio::time::sleep(Duration::from_millis(50)).await; // let the popup render, setting its rect
+
+    // Click well inside the popup (80x24 terminal → popup spans x:10..70, y:4..20).
+    send(
+        &action_tx,
+        AppAction::MouseInput(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 40,
+            row: 10,
+            modifiers: KeyModifiers::NONE,
+        }),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    drop(action_tx);
+
+    let state = run_handle.await.expect("task joined");
+    assert!(
+        state.show_help,
+        "click inside the help popup must not close it"
+    );
+}
+
+#[tokio::test]
+async fn click_outside_help_popup_closes_it() {
+    let provider = MockProvider::new(vec!["hello".to_string()], Duration::from_millis(200));
+    let backend = TestBackend::new(80, 24);
+    let terminal = Terminal::new(backend).expect("test terminal");
+    let (action_tx, action_rx) = mpsc::channel(64);
+    let registry = Arc::new(ToolRegistry::new());
+
+    let run_handle = tokio::spawn({
+        let mut terminal = terminal;
+        async move {
+            let engine = Arc::new(EngineImpl::new(
+                Arc::new(provider),
+                common::test_engine_config(),
+            ));
+            let (agent, ui_rx) = AgentLoop::new(engine, registry);
+            tui_driver::run_tui(
+                &mut terminal,
+                agent,
+                ui_rx,
+                None,
+                action_rx,
+                &mut NoopClipboard,
+            )
+            .await
+            .expect("run_tui completed")
+        }
+    });
+
+    send(&action_tx, AppAction::ShowHelp).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Click outside the popup (top-left corner is outside the centered popup).
+    send(
+        &action_tx,
+        AppAction::MouseInput(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        }),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    drop(action_tx);
+
+    let state = run_handle.await.expect("task joined");
+    assert!(
+        !state.show_help,
+        "click outside the help popup must close it"
+    );
 }

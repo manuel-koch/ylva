@@ -676,6 +676,65 @@ async fn iteration_guard_stops_after_max_reprompts() {
         .any(|m| matches!(m, Message::ToolError { name, .. } if name == "write")));
 }
 
+#[tokio::test(start_paused = true)]
+async fn thinking_deltas_surface_separately_from_assistant_text() {
+    // Thinking/reasoning fragments must never contaminate the assistant text
+    // accumulator: they arrive via `UiUpdate::AppendThinking` and are absent
+    // from the final `Message::Assistant` content.
+    let registry = Arc::new(default_registry(
+        make_sandbox(),
+        ToolRegistryConfig::default(),
+    ));
+    let interval = Duration::from_millis(5);
+    let provider = MockProvider::with_script(
+        vec![
+            MockEvent::Thinking("pondering...".into()),
+            MockEvent::Thinking(" still pondering...".into()),
+            MockEvent::Text("answer".into()),
+        ],
+        interval,
+    );
+    let (mut agent, mut ui_rx) = AgentLoop::new(
+        Arc::new(EngineImpl::new(
+            Arc::new(provider),
+            common::test_engine_config(),
+        )),
+        Arc::clone(&registry),
+    );
+
+    agent
+        .send_command(AgentCommand::Prompt("think it through".into()))
+        .await;
+    let handle = agent.run();
+    let updates =
+        collect_until_advancing(&mut ui_rx, interval, |u| matches!(u, UiUpdate::StreamDone)).await;
+
+    let thinking_texts: Vec<&str> = updates
+        .iter()
+        .filter_map(|u| match u {
+            UiUpdate::AppendThinking(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(thinking_texts, vec!["pondering...", " still pondering..."]);
+
+    let assistant_texts: Vec<&str> = updates
+        .iter()
+        .filter_map(|u| match u {
+            UiUpdate::AppendText(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(assistant_texts, vec!["answer"]);
+
+    drop(agent);
+    let context = handle.await.expect("loop ok").expect("context");
+    assert!(matches!(
+        context.messages().last(),
+        Some(Message::Assistant { content, .. }) if content == "answer"
+    ));
+}
+
 fn is_stream_started(update: &UiUpdate) -> bool {
     matches!(update, UiUpdate::StreamStarted)
 }

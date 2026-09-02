@@ -250,6 +250,16 @@ impl ToolCall for EditCall {
         EditTool::default().argument_order(key)
     }
 
+    // `old_string`/`new_string` are already fully represented by the diff
+    // section (`pending_content_sections`/`content_sections`), so keep them
+    // out of the inline invocation summary to avoid showing the same content
+    // twice. When the edit failed before a diff could be computed (e.g.
+    // `old_string` not found), no diff section exists, so keep them visible
+    // — they're the only place left to see what was searched for.
+    fn is_body_argument(&self, key: &str) -> bool {
+        self.error.is_none() && matches!(key, "old_string" | "new_string")
+    }
+
     fn timeout_secs(&self) -> u64 {
         self.timeout_secs
     }
@@ -838,6 +848,41 @@ mod tests {
             assert!(diff.content.contains("-hello"));
             assert!(diff.content.contains("+hi"));
         }
+    }
+
+    #[test]
+    fn title_arguments_excludes_old_and_new_string_when_diff_is_available() {
+        // old_string/new_string are already fully represented by the diff
+        // section, so they must not also appear in the inline title args.
+        let file = write_temp("hello\nworld\n");
+        let path = file.path().to_str().unwrap().to_string();
+        let args = make_args_search_replace(&path, "hello", "hi");
+        let call = create_edit_call(uuid::Uuid::new_v4(), args, DEFAULT_TIMEOUT_SECS);
+        let title_arguments = call.title_arguments();
+        assert!(
+            title_arguments
+                .iter()
+                .all(|(k, _)| k != "old_string" && k != "new_string"),
+            "old_string/new_string should be excluded from title_arguments: {title_arguments:?}"
+        );
+        // Other scalar args (path, mode) remain visible.
+        assert!(title_arguments.iter().any(|(k, _)| k == "path"));
+        assert!(title_arguments.iter().any(|(k, _)| k == "mode"));
+    }
+
+    #[test]
+    fn title_arguments_keeps_old_and_new_string_when_no_diff_was_computed() {
+        // When old_string isn't found, no diff section is produced, so
+        // old_string/new_string are the only place left to see what was
+        // searched for — keep them in the title args.
+        let file = write_temp("hello\nworld\n");
+        let path = file.path().to_str().unwrap().to_string();
+        let args = make_args_search_replace(&path, "not-present", "hi");
+        let call = create_edit_call(uuid::Uuid::new_v4(), args, DEFAULT_TIMEOUT_SECS);
+        assert!(call.pending_content_sections().is_empty());
+        let title_arguments = call.title_arguments();
+        assert!(title_arguments.iter().any(|(k, _)| k == "old_string"));
+        assert!(title_arguments.iter().any(|(k, _)| k == "new_string"));
     }
 
     #[tokio::test]
