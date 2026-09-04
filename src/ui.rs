@@ -1323,11 +1323,22 @@ fn append_tool_bubble_lines(
     // - primary arg (schema rank 0): value only, rendered in bold.
     // - remaining args: `key=value` pairs, rendered dim.
     // - body arguments (declared by the tool) are omitted from the title.
-    let title_arguments = match state {
+    // `Running`'s interim `progress_arguments` (e.g. `spawn_subagent`
+    // reporting `status=running`/`queued` + `run_id`) are appended after the
+    // call's real `title_arguments` — kept as a separate owned buffer here
+    // since `Done` has no equivalent field, so once the call truly finishes
+    // these interim values are naturally gone rather than lingering stale.
+    let combined_title_arguments: Vec<(String, serde_json::Value)> = match state {
+        ToolCallState::Running {
+            title_arguments,
+            progress_arguments,
+            ..
+        } => title_arguments
+            .iter()
+            .chain(progress_arguments.iter())
+            .cloned()
+            .collect(),
         ToolCallState::Pending {
-            title_arguments, ..
-        }
-        | ToolCallState::Running {
             title_arguments, ..
         }
         | ToolCallState::Done {
@@ -1338,9 +1349,10 @@ fn append_tool_bubble_lines(
         }
         | ToolCallState::Error {
             title_arguments, ..
-        } => title_arguments.as_slice(),
-        _ => &[],
+        } => title_arguments.clone(),
+        _ => vec![],
     };
+    let title_arguments = combined_title_arguments.as_slice();
     // Only strings and numbers qualify as the bare (keyless) primary arg.
     // Booleans need their key name to be meaningful, so they stay in props.
     let scalar_primary = |v: &serde_json::Value| -> Option<String> {
@@ -1447,14 +1459,8 @@ fn append_tool_bubble_lines(
         " "
     };
 
-    // Capitalise the tool name for display.
-    let display_title: String = {
-        let mut chars = name.chars();
-        match chars.next() {
-            None => String::new(),
-            Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-        }
-    };
+    // Title-case the tool name for display (e.g. `spawn_subagent` → `Spawn Subagent`).
+    let display_title: String = crate::agent::tools::title_case_tool_name(name);
 
     // Duration shown in the title for Done and Error states.
     let summary_text: String = match state {
@@ -1546,7 +1552,21 @@ fn append_tool_bubble_lines(
         .bg(TOOL_BUBBLE_BG_COLOR)
         .add_modifier(Modifier::BOLD);
 
-    let spinner_or_margin: Span = if matches!(state, ToolCallState::Running { .. }) {
+    let is_queued_subagent = title_arguments
+        .iter()
+        .any(|(key, value)| key == "status" && value == "queued");
+
+    let spinner_or_margin: Span = if is_queued_subagent {
+        // Queued (not yet actually running): a static glyph, not the
+        // animated spinner, since nothing is actively executing yet — the
+        // child is only waiting for the currently running one to finish.
+        Span::styled(
+            "≡ ",
+            Style::default()
+                .fg(TOOL_BUBBLE_BORDER_COLOR)
+                .bg(TOOL_BUBBLE_BG_COLOR),
+        )
+    } else if matches!(state, ToolCallState::Running { .. }) {
         let spinner_char = SPINNER_FRAMES[spinner_frame as usize % SPINNER_FRAMES.len()];
         Span::styled(
             format!("{spinner_char} "),
@@ -1806,6 +1826,36 @@ fn append_tool_bubble_lines(
                                     .patch_style(row_bg),
                                 );
                             }
+                        }
+
+                        // Markdown-flagged sections (e.g. `spawn_subagent`'s `task`/
+                        // `briefing`) render through the project's own Markdown
+                        // renderer (headings, bullets, bold, ...) instead of the
+                        // syntect code-highlighting path below, since they carry
+                        // prose, not source code.
+                        if content_section.file_extension.as_deref() == Some("md") {
+                            let content_width = wrap_width.saturating_sub(2).max(1);
+                            let mut md_lines =
+                                render_markdown(&content_section.content, content_width);
+                            if md_lines.is_empty() {
+                                md_lines.push(Line::from(""));
+                            }
+                            for md_line in md_lines {
+                                let content_text_len: usize = md_line
+                                    .spans
+                                    .iter()
+                                    .map(|span| span.content.chars().count())
+                                    .sum();
+                                let mut spans: Vec<Span<'static>> = vec![
+                                    bar.clone(),
+                                    margin.clone(),
+                                    Span::styled("  ", Style::default().bg(TOOL_BUBBLE_BG_COLOR)),
+                                ];
+                                spans.extend(md_line.spans);
+                                spans.push(trailing_pad(2 + content_text_len));
+                                lines.push(Line::from(spans).patch_style(row_bg));
+                            }
+                            continue;
                         }
 
                         // Determine line-number gutter width.
@@ -2895,5 +2945,151 @@ mod tests {
         // similar::TextDiff may include a trailing function name after the second @@.
         let result = parse_hunk_header("@@ -7,4 +7,4 @@ fn example() {");
         assert_eq!(result, Some((7, 4, 7, 4)));
+    }
+
+    #[test]
+    fn tool_bubble_renders_markdown_content_section_as_prose_not_code() {
+        use super::{append_tool_bubble_lines, ToolBubbleArgs};
+        use crate::agent::tools::{ContentSection, Section};
+        use crate::tui_reducer_state::{ResultSection, ToolCallState};
+
+        let state = ToolCallState::Done {
+            arguments: serde_json::json!({"task": "# Investigate the bug"}),
+            result_section: ResultSection::plain("ok"),
+            content_sections: vec![Section::Content(ContentSection {
+                label: Some("Task".to_string()),
+                content: "# Investigate the bug\n\n- check logs\n- reproduce it".to_string(),
+                file_extension: Some("md".to_string()),
+                line_number_offset: None,
+            })],
+            summary: vec![],
+            duration: std::time::Duration::ZERO,
+            title_arguments: vec![],
+        };
+        let mut lines: Vec<Line<'static>> = vec![];
+        let mut bubble_title_rows = vec![];
+        append_tool_bubble_lines(
+            &mut lines,
+            ToolBubbleArgs {
+                id: uuid::Uuid::new_v4(),
+                name: "spawn_subagent",
+                state: &state,
+                collapsed: false,
+                spinner_frame: 0,
+            },
+            &mut bubble_title_rows,
+            80,
+            100,
+        );
+
+        let rendered: String = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect();
+
+        // Markdown list rendering turns `- item` into a bullet-prefixed line
+        // (`• item`); the syntect code-highlighting path would never do
+        // this — it passes raw text through verbatim with a line-number-style
+        // gutter instead. Bullet rendering is therefore proof the markdown
+        // path (not the code path) handled this section.
+        assert!(
+            rendered.contains("Investigate the bug"),
+            "expected heading text in rendered bubble, got: {rendered:?}"
+        );
+        assert!(
+            rendered.contains('•'),
+            "expected markdown bullet rendering, got: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("check logs") && rendered.contains("reproduce it"),
+            "expected bullet items in rendered bubble, got: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn queued_subagent_bubble_shows_static_glyph_not_spinner() {
+        use super::{append_tool_bubble_lines, ToolBubbleArgs};
+        use crate::tui_reducer_state::ToolCallState;
+
+        let state = ToolCallState::Running {
+            arguments: serde_json::json!({"task": "investigate"}),
+            content_sections: vec![],
+            title_arguments: vec![],
+            progress_arguments: vec![("status".to_string(), serde_json::json!("queued"))],
+        };
+        let mut lines: Vec<Line<'static>> = vec![];
+        let mut bubble_title_rows = vec![];
+        append_tool_bubble_lines(
+            &mut lines,
+            ToolBubbleArgs {
+                id: uuid::Uuid::new_v4(),
+                name: "spawn_subagent",
+                state: &state,
+                collapsed: false,
+                spinner_frame: 3,
+            },
+            &mut bubble_title_rows,
+            80,
+            100,
+        );
+
+        let rendered: String = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(
+            rendered.contains('≡'),
+            "expected static queued glyph, got: {rendered:?}"
+        );
+        for spinner_char in super::SPINNER_FRAMES {
+            assert!(
+                !rendered.contains(*spinner_char),
+                "queued bubble must not show the animated spinner, got: {rendered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn running_subagent_bubble_shows_spinner_not_queued_glyph() {
+        use super::{append_tool_bubble_lines, ToolBubbleArgs};
+        use crate::tui_reducer_state::ToolCallState;
+
+        let state = ToolCallState::Running {
+            arguments: serde_json::json!({"task": "investigate"}),
+            content_sections: vec![],
+            title_arguments: vec![],
+            progress_arguments: vec![("status".to_string(), serde_json::json!("running"))],
+        };
+        let mut lines: Vec<Line<'static>> = vec![];
+        let mut bubble_title_rows = vec![];
+        append_tool_bubble_lines(
+            &mut lines,
+            ToolBubbleArgs {
+                id: uuid::Uuid::new_v4(),
+                name: "spawn_subagent",
+                state: &state,
+                collapsed: false,
+                spinner_frame: 0,
+            },
+            &mut bubble_title_rows,
+            80,
+            100,
+        );
+
+        let rendered: String = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(
+            rendered.contains(super::SPINNER_FRAMES[0]),
+            "expected animated spinner glyph, got: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains('≡'),
+            "running bubble must not show the static queued glyph, got: {rendered:?}"
+        );
     }
 }

@@ -161,3 +161,45 @@ done
 ```
 
 Run `tests/e2e/heavy-output.bash`.
+
+---
+
+Run the follow task in a subagent and let it report its findings back:
+
+Analyze the TUI functionality implemented in source code
+and list currently implemented features in a table with brief descriptions.
+ONLY use "bash" tool to search for relevant files!
+
+---
+
+Discover the project structure related to agent tool implementations.
+Provide a 2-3 sentence summary for every source file.
+Run the summary task on each file in separate subagent and let it report its findings back.
+
+Format the result using markdown headers (per file) and the
+related file summary paragraph.
+Save the complete summary to `logs/summary.md`, don't edit an existing file nor use
+its current content.
+
+---
+
+Run the follow task in a subagent and let it report its findings back as structure JSON:
+
+Analyze the TUI functionality implemented in source code
+and list currently implemented features in a table with brief descriptions.
+Format result in structured JSON:
+```json
+{
+  "analysed_files": [
+    {
+      "path": "<source-code-file>",
+      "features": [
+        "<description of the feature a in 1-3 sentences>",
+        "<description of the feature b in 1-3 sentences>",
+        ...
+        ]
+    },
+    ...
+  ]
+}
+```

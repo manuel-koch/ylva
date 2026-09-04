@@ -367,6 +367,10 @@ impl Tool for EditTool {
         schema_for!(EditFileArgs)
     }
 
+    fn path_like_arguments(&self) -> &'static [&'static str] {
+        &["path"]
+    }
+
     fn validate_args(&self, arguments: &Value) -> Result<(), String> {
         validate_args_with_schema(&self.input_schema(), arguments)?;
         let mode = arguments

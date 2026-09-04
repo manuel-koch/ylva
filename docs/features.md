@@ -17,6 +17,14 @@ configuration file).
 See [CLI options](./cli-options.md) for usage of `--log-file`, `--log-level`
 and `--log-format` options.
 
+At startup (when logging is enabled), two `INFO`-level events are logged
+before anything else: a `"build info"` event carrying `version`, `commit`,
+`built`, and `profile` (the same values as `ylva --version`), and a
+`"starting"` event carrying `app` (`"cli"` or `"tui"`, matching the mode
+`main.rs` selected). This makes the running app and exact build identifiable
+from the log file alone, without cross-referencing a separate `--version`
+invocation.
+
 ## CLI Runtime
 
 Non-interactive, one-shot session: the initial user turn is sent to the
@@ -35,6 +43,18 @@ Tool approval is host-driven: `read`/`glob` are auto-approved immediately;
 `bash` always requires user approval.
 
 Tool status lines render as `[tool] <title> …` (e.g. `[tool] Read docs/features.md [limit=32]`)
+
+When `--auto-approve-spawn` is set and the assistant calls `spawn_subagent`, the
+CLI keeps the process alive past the assistant's own final `StreamDone` until
+every spawned/queued child call has reported a terminal outcome (`ToolDone` on
+success/failure/cancellation, or `ToolError` in the structurally-unreachable
+no-`ChildAgentManager` fail-safe) — otherwise the one-shot process would exit
+as soon as the parent goes idle, silently discarding the child's result since
+`spawn_subagent` resolves immediately with `{"status": "running"/"queued"}`
+while the child keeps running concurrently (see
+[Child-agent delegation](#child-agent-delegation)). Without `--auto-approve-spawn`,
+`spawn_subagent` is denied outright in CLI mode (`UserApprovalRequired` has no
+approval path headless), so this only matters when that flag is used.
 
 **WIP:** Provider selection is from environment variables; see
 [CLI options — Environment variables](./cli-options.md#environment-variables).
@@ -82,6 +102,16 @@ only the fields that are actually populated for that specific result — the sch
 can never drift from the data.
 
 Each tool description sent in the `tools` array includes its argument schema.
+
+Path-like arguments (`read`/`write`/`edit`/`search`'s `path`, `glob`'s `pattern`)
+are normalized before dispatch: an absolute value that falls inside the
+process's current working directory is rewritten to its cwd-relative form —
+this is what actually executes and what the UI renders for the call, not
+merely cosmetic. Values that are already relative, or absolute but outside
+the cwd, pass through unchanged. This is a display/consistency nicety, not a
+security boundary — sandbox approval checks run independently on whichever
+path form ends up being used. Each tool declares its own path-like argument
+keys via `Tool::path_like_arguments()`.
 
 **WIP:** `read` and `write` currently only support UTF-8 code points via lossy decode.
 
@@ -144,6 +174,85 @@ Each tool description sent in the `tools` array includes its argument schema.
   and `Enter` submits it as the tool result. The TUI renders the question in a
   yellow banner above the footer. This tool is not registered in headless CLI
   mode, so it never appears in the headless `tools` array.
+- **spawn_subagent**: Delegate a self-contained `task` (plus a required `label`
+  summarising the delegated task for display, and optional `briefing` and
+  `agent_type`) to a child agent that runs concurrently with the parent. `label`
+  is shown as the tool-call bubble's primary title text — including while
+  collapsed — so the bubble hints at the child's purpose without expanding it.
+  Only registered for `Role::Root` agents whose resolved `AgentConfig::can_spawn` is
+  `true`; structurally absent from a child's own registry (no nesting — delegation
+  is one level deep). Requires user approval unless `--auto-approve-spawn` is set.
+  Resolves immediately with `{ "status": "running" | "queued", "run_id": "<uuid>" }` —
+  `"queued"` when another child is already running (at most one runs at a time; further
+  spawns queue in an unbounded FIFO drained automatically as each child finishes). The
+  tool's description explicitly tells the model not to poll or `bash sleep`-wait for the
+  child inline — some models (observed with DeepSeek) otherwise burn tool-call budget on
+  sleep loops instead of trusting the automatic re-prompt described below. The
+  child's eventual outcome arrives later as a trailing `system` message announcing
+  the finish (referencing the same `tool_call_id`), once the child calls its own
+  `agent_finish` tool (or is cancelled, hits the iteration cap, or otherwise goes idle
+  without calling `agent_finish` — see below). The original provisional tool result is
+  never rewritten or duplicated: the tool-calling wire protocol permits only one
+  `role: "tool"` message per `tool_call_id`, so the real outcome is appended as a
+  distinct `system` message instead of a second tool result.
+- **agent_finish**: Only registered for `Role::Child` agents (never appears in a parent's
+  registry). Reports `status` (`"success"` or `"failure"`), an optional `result` /
+  `error`, and optional `sources`, then unconditionally ends the child's loop — exempt
+  from the max-tool-iterations cap. The parent receives this as the `spawn_subagent`
+  call's outcome. The parent never sees the child's own conversation (prior turns, tool
+  calls, or reasoning) — only the `result`/`error` string — so the tool's description and
+  the `result` field's schema description both instruct the child to make `result`
+  self-contained (e.g. inline the full requested table/findings) rather than referencing
+  "earlier"/"above" content the parent cannot see. If a child goes idle (final assistant
+  text with no tool call, a killed tool, or the iteration cap) without ever calling
+  `agent_finish`, the parent instead receives a synthesized `status: "unstructured"`
+  result built from the child's last assistant message.
+
+## Child-agent delegation
+
+One level of agent delegation lets a `Role::Root` agent hand off a self-contained task
+to a `Role::Child` agent that runs **concurrently** with the parent — the parent keeps
+processing its own messages and tools while the child works.
+
+- `AgentFactory::create` wires a `ChildAgentManager` onto any `Role::Root` `AgentLoop`
+  whose resolved `AgentConfig::can_spawn` is `true`; children are constructed via the
+  same factory (`Role::Child(ChildRoleConfig { .. })`) and never receive `spawn_subagent`
+  themselves.
+- At most one child runs at a time; further `spawn_subagent` calls are queued in an
+  unbounded FIFO and started automatically as each preceding child finishes.
+- A child's outcome — success, failure, or an "unstructured" fallback — is injected into
+  the parent's conversation as a new trailing `system` message referencing the original
+  `spawn_subagent` call's `tool_call_id`, never by rewriting or duplicating that call's
+  provisional tool result; the tool-calling wire protocol only permits one tool-result
+  message per `tool_call_id`. That system message also tells the root that the result is
+  already shown to the user verbatim (the tool bubble's Result/Error/Sources sections),
+  so it should not repeat/quote it back — only add new analysis, a decision, or a next
+  step — keeping the visible reply free of duplicated noise and wasted output tokens. If
+  the root agent is otherwise idle at that moment (no stream or tool in flight), this
+  immediately re-prompts the root LLM with the updated context so it reacts to the result
+  without waiting for a new user message (essential for one-shot headless sessions, which
+  never get a "next turn" otherwise); if the root is still busy with unrelated work
+  (mid-stream or running its own tool round), the result is picked up once that work's own
+  queue-drain/`StreamDone` re-prompt happens next.
+- `AgentCommand::Stop` on the parent cancels the running child (and drains the queue)
+  via `ChildAgentManager::cancel_all`; each cancelled/queued call is resolved to a
+  terminal `ToolDone` (`status: "cancelled"`) and logged (`tracing::info!`) — durable
+  persistence of child outcomes is deferred to a later phase. Unlike a natural finish,
+  this never re-prompts the root (the user explicitly asked to stop).
+- Use `--auto-approve-spawn` to skip the human-approval prompt for `spawn_subagent`
+  calls (mirrors `--auto-approve-edit` / `--auto-approve-write`).
+- A child's own tool calls go through the exact same `ToolPending` → approve/deny
+  pause as the root's — a child is never auto-denied just for being a child. Each
+  `AgentLoop` stamps its own `run_id` (`None` for the root, `Some(child_run_id)` for a
+  `Role::Child`) onto every `UiUpdate::ToolPending`/`ClarifyPending` it emits. Drivers
+  (`cli_driver`, `tui_driver`) track that `run_id` alongside the pending call and, when
+  answering, wrap the verdict in `AgentCommand::ForChild { run_id, command }` whenever
+  it's `Some`. The root's command loop resolves `run_id` to the still-running child's
+  own command channel via `ChildAgentManager::running_command_sender` and forwards the
+  inner command verbatim; a `run_id` with no matching running child (already finished,
+  or unknown) is logged (`tracing::warn!`) and dropped rather than panicking or stalling
+  the root. This is what lets a spawned child safely pause on `bash`/`write`/etc. without
+  ever hanging the whole session.
 
 ## Phase 4: TUI skeleton
 
@@ -164,6 +273,15 @@ The TUI follows a **reducer/MVP** split across source modules:
 
 `src/presenter.rs` — pure `update(state, event) → Vec<Effect>` reducer. No
 ratatui imports, no channel sends; fully unit-testable without a live terminal.
+
+`route_domain` (the `DomainEvent` dispatch entry point) logs a `DEBUG`
+`"domain event handled"` event for every `DomainEvent`, carrying only the
+event's variant tag (`event`), its tool/clarify `id` when it has one
+(`correlation_id`), and the `TuiMode` transition (`mode_before`/`mode_after`)
+— never chunk text, tool arguments, or tool output. This is enough to follow
+the TUI's state-transition flow and match up a call's
+`ToolStart`/`ToolProgress`/`ToolDone` (or `ClarifyPending`) sequence across
+log lines, without risking sensitive payloads in the log file.
 
 #### View
 
@@ -250,6 +368,19 @@ exit.
   visible text) is flowing, and `"Running tool…"` once a tool bubble has
   actually started executing (`ToolCallState::Running`) — rather than a
   single generic `"Streaming…"` for the whole in-flight turn.
+- **Footer stays "Running tool…" while a spawned child is still working:**
+  the root loop's own turn can settle to idle (e.g. right after
+  `spawn_subagent` acks with `"running"`) before the child finishes; the
+  footer keeps showing `"Running tool…"` — driven by the `spawn_subagent`
+  tool bubble still being `ToolCallState::Running` — instead of `"Idle"`,
+  so an in-progress subagent never looks finished/stuck.
+- **Queued subagent bubbles show a static glyph, not the spinner:** the
+  animated Braille spinner (`ToolCallState::Running`) means "actively
+  executing" for every other tool, but a `spawn_subagent` call queued behind
+  another running child (`status=queued`) isn't doing anything yet — it's
+  waiting for the running slot to free up. That bubble shows a static `≡`
+  instead; the spinner only appears once `status=running` (the child has
+  actually started).
 - **Input as a message:** the input box renders like a sent user message — a
   colored left border (dimmed Green, matching the sent user-message bubble's
   border), no full frame and no `"Input"` title. Long text
@@ -282,11 +413,15 @@ exit.
   banner's question/context text, and a user's clarify answer (shown in the
   "User answered:" result of the clarify tool bubble) render Markdown instead
   of plain wrapped text. Supported: **bold**/*italic*,
-  `inline code` (distinct color), fenced code blocks (dim, verbatim,
-  syntax-highlighted when a language tag is given), bullet/numbered lists,
-  headings, blockquotes (`│` prefix), horizontal rules, and tables
-  (column-aligned, bold header row, `│` column separators). Plain text with
-  no Markdown syntax wraps as plain text.
+  `inline code` (distinct color), fenced code blocks (dim, verbatim — no
+  word-boundary reflow — syntax-highlighted when a language tag is given),
+  bullet/numbered lists, headings, blockquotes (`│` prefix), horizontal
+  rules, and tables (column-aligned, bold header row, `│` column
+  separators). Plain text with no Markdown syntax wraps as plain text.
+  A fenced code block line that is still too long to fit after the
+  line-number gutter is character-wrapped onto blank-gutter continuation
+  rows (never clipped), so long code lines never render past the message
+  bubble's right edge.
   Unsupported syntax (links, images, HTML) degrades to plain text — inner
   text is preserved — rather than crashing or dropping content.
 - **Thinking bubble:** extended-thinking/reasoning output (Anthropic

@@ -103,9 +103,14 @@ pub struct WriteFileArgs {
 /// `glob` arguments: a glob pattern resolved against the current directory.
 #[derive(Debug, Clone, JsonSchema, Deserialize)]
 pub struct GlobInputArgs {
-    /// Glob pattern to match against file-system paths (e.g. `**/*.rs`, `src/**/mod.rs`).
-    /// `*` matches within one path segment; `**` crosses directory boundaries;
-    /// `?` matches a single character; `[abc]` matches a character class.
+    /// A single glob pattern to match against file-system paths (e.g. `**/*.rs`
+    /// or `src/**/mod.rs` — these are two separate examples, not a combinable
+    /// pair). `*` matches within one path segment; `**` crosses directory
+    /// boundaries; `?` matches a single character; `[abc]` matches a character
+    /// class. Comma-separated lists (`*.rs,*.toml`) and brace alternation
+    /// (`*.{rs,toml}`) are **not** supported — either is treated as one
+    /// literal pattern and silently matches nothing. To match several
+    /// patterns, call this tool once per pattern.
     pub pattern: String,
     /// When `true` (default), paths ignored by `.gitignore` rules are excluded.
     /// Set to `false` to include gitignored paths.
@@ -576,6 +581,10 @@ impl Tool for ReadTool {
         schema_for!(ReadFileArgs)
     }
 
+    fn path_like_arguments(&self) -> &'static [&'static str] {
+        &["path"]
+    }
+
     fn needs_approval(&self, arguments: &Value) -> ApprovalCheck {
         let path_str = match require_string_arg(arguments, "path") {
             Ok(value) => value,
@@ -682,6 +691,10 @@ impl Tool for WriteTool {
 
     fn input_schema(&self) -> RootSchema {
         schema_for!(WriteFileArgs)
+    }
+
+    fn path_like_arguments(&self) -> &'static [&'static str] {
+        &["path"]
     }
 
     fn needs_approval(&self, arguments: &Value) -> ApprovalCheck {
@@ -791,11 +804,15 @@ impl Tool for GlobTool {
     }
 
     fn description(&self) -> &str {
-        "List paths matching a glob-wildcard pattern (`*`, `?`, `**`, `[...]`). Patterns resolve relative to cwd; absolute patterns supported. Hidden files (dot-prefixed) are included by default — use `dot_ignore: true` to exclude them. `git_ignore` (default `true`) skips gitignored paths via `ignore::WalkBuilder`. Use `only_files: true` to list files only, or `only_dirs: true` to list directories only — these flags are mutually exclusive and setting both to `true` is an error; omit both to include all path types."
+        "List paths matching a single glob-wildcard pattern (`*`, `?`, `**`, `[...]`). Only one pattern per call — comma-separated lists and `{a,b}` brace alternation are not supported and silently match nothing; call this tool once per pattern instead. Patterns resolve relative to cwd; absolute patterns supported. Hidden files (dot-prefixed) are included by default — use `dot_ignore: true` to exclude them. `git_ignore` (default `true`) skips gitignored paths via `ignore::WalkBuilder`. Use `only_files: true` to list files only, or `only_dirs: true` to list directories only — these flags are mutually exclusive and setting both to `true` is an error; omit both to include all path types."
     }
 
     fn input_schema(&self) -> RootSchema {
         schema_for!(GlobInputArgs)
+    }
+
+    fn path_like_arguments(&self) -> &'static [&'static str] {
+        &["pattern"]
     }
 
     fn needs_approval(&self, arguments: &Value) -> ApprovalCheck {

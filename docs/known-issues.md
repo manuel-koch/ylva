@@ -101,3 +101,23 @@ Abstract the side-effectful operation behind a trait or callback parameter and
 inject a no-op implementation from integration test call sites. Do not rely on
 `#[cfg(not(test))]` in library code to suppress behaviour from integration
 tests.
+
+## Backlog of issues discovered while testing
+
+- [ ] When a tool approval arrives for a tool that was called from a subagent,
+      the approval dialog doesn't indicate the "agent" scope. User doesn't
+      see whether the tool wants to start in main-conversion or subagent.
+      Maybe we can only address this in a later phase when drill-down
+      on subagent conversion-list is implemented ?
+
+- [ ] Just noticed that the TUI may show "Running Tool.." while main conversation is
+      idle (waiting for spawned subagent to finish)
+
+- [ ] Regarding implementation before phase 6.10 ( intermediate WIP, no drill-down
+      for subagent conversion-list yet avail ).
+      It looks like main agent and subagent replies/thinking are mixed up in TUI,
+      depending on timing within the llm responses ( more on strong/fast llm,
+      less on weaker/slow llm ).
+      I saw rapid interchanged assistent reply/thinking bubbles in TUI that
+      contained garbled/unrelated content as if reply/thinking of parent agent
+      is mixed with events of subagent.

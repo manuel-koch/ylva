@@ -28,11 +28,13 @@ use serde_json::Value;
 use crate::llm::ToolSchema;
 use crate::sandbox::ApprovalCheck;
 
+pub mod agent_finish;
 pub mod bash;
 pub mod clarify;
 pub mod edit;
 pub mod fs;
 pub mod search;
+pub mod spawn_subagent;
 
 /// Default execution timeout for file-system tools.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 5;
@@ -213,7 +215,13 @@ pub trait ToolCall: Send + Sync {
 
     /// Schema-defined display rank for `key`. Lower ranks appear earlier in
     /// invocation summaries; the lowest-ranked argument is the primary one.
-    /// Implementations must delegate to their corresponding [`Tool::argument_order`].
+    /// Implementations must delegate to their corresponding
+    /// [`Tool::argument_order`] (e.g. `MyTool::new(..).argument_order(key)`) —
+    /// its default already derives rank from the schema's declared property
+    /// order, so a hand-rolled `match` is redundant and can silently drift out
+    /// of sync as fields are added, renamed, or reordered. Only write a custom
+    /// `match` if a tool genuinely needs an order that diverges from its
+    /// schema's field order.
     fn argument_order(&self, key: &str) -> usize;
 
     /// Non-content-section, non-null arguments sorted by schema-defined rank.
@@ -239,6 +247,24 @@ pub trait ToolCall: Send + Sync {
     ) -> futures::future::BoxFuture<'static, Result<Box<dyn ToolCallResult>, ToolError>>;
 }
 
+/// Derives a display title from a tool's canonical `name` (e.g. `read` →
+/// `Read`, `spawn_subagent` → `Spawn Subagent`): split on `-`/`_`, capitalise
+/// the first letter of each word, join with spaces. Shared by
+/// [`Tool::title`]'s default implementation and the TUI's tool-bubble title
+/// rendering, so both stay in sync automatically for any tool name.
+pub fn title_case_tool_name(name: &str) -> String {
+    name.split(['-', '_'])
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => first.to_uppercase().to_string() + chars.as_str(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// A named, schema-described tool the model may call.
 ///
 /// The trait exposes tool **data** and argument metadata. Actual execution is
@@ -252,22 +278,11 @@ pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
 
     /// A short display label for the tool (e.g. `Read`, `Web Search`).
-    /// Derived automatically from [`name`](Self::name) by splitting on `_`
-    /// and `-`, capitalising the first letter of each word, and joining with
-    /// spaces.  Override only when the canonical name cannot produce the
-    /// desired label.
+    /// Derived automatically from [`name`](Self::name) via
+    /// [`title_case_tool_name`]. Override only when the canonical name cannot
+    /// produce the desired label.
     fn title(&self) -> String {
-        self.name()
-            .split(['-', '_'])
-            .map(|word| {
-                let mut chars = word.chars();
-                match chars.next() {
-                    None => String::new(),
-                    Some(first) => first.to_uppercase().to_string() + chars.as_str(),
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
+        title_case_tool_name(self.name())
     }
 
     /// A human-readable description fed to the model alongside the schema.
@@ -367,6 +382,16 @@ pub trait Tool: Send + Sync {
     /// its argument definitions and stays explicit.
     fn non_default_redacted_arguments(&self, arguments: &Value) -> Vec<(String, Value)>;
 
+    /// Argument keys whose value is a file-system path or glob pattern that
+    /// should be normalized to a cwd-relative form before dispatch, when the
+    /// supplied value is an absolute path that falls inside the current
+    /// working directory (see [`ToolRegistry::create_call`]). Defaults to
+    /// none; tools that accept path-like arguments override this so the
+    /// registry never has to guess based on argument names.
+    fn path_like_arguments(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// Default execution timeout (seconds) for this tool.
     fn timeout_secs(&self) -> u64;
 
@@ -404,15 +429,43 @@ impl ToolRegistry {
 
     /// Create a [`ToolCall`] for the named tool, or `None` if the tool is not
     /// registered.
+    ///
+    /// Before dispatch, rewrites each of the tool's
+    /// [`Tool::path_like_arguments`] string values that is an absolute path
+    /// inside the current working directory to its cwd-relative form (see
+    /// [`crate::sandbox::to_relative_path`]). Some LLMs emit absolute paths
+    /// even where a relative one would do; normalizing here means the
+    /// rewritten path is both what actually executes and what the UI renders
+    /// for the call, rather than just cosmetic. Paths outside the current
+    /// directory, and already-relative paths, pass through unchanged — this
+    /// is not a security boundary, just a display/consistency nicety;
+    /// sandbox approval checks run independently on whatever path is used.
+    /// Normalization is keyed off the process's actual cwd rather than a
+    /// sandbox's configured workspace root, because that is what relative
+    /// paths in tool execution (e.g. `std::fs::read`) resolve against.
     pub fn create_call(
         &self,
         name: &str,
         id: uuid::Uuid,
-        arguments: serde_json::Value,
+        mut arguments: serde_json::Value,
     ) -> Option<Box<dyn ToolCall>> {
-        self.tools
-            .get(name)
-            .map(|tool| tool.create_call(id, arguments))
+        let tool = self.tools.get(name)?;
+        if let Some(object) = arguments.as_object_mut() {
+            if let Ok(current_dir) = std::env::current_dir() {
+                for key in tool.path_like_arguments() {
+                    let relative = match object.get(*key) {
+                        Some(Value::String(path_str)) => {
+                            crate::sandbox::to_relative_path(path_str, &current_dir)
+                        }
+                        _ => None,
+                    };
+                    if let Some(relative) = relative {
+                        object.insert((*key).to_string(), Value::String(relative));
+                    }
+                }
+            }
+        }
+        Some(tool.create_call(id, arguments))
     }
 
     /// The OpenAI wire schemas for every registered tool (the `tools` array).
@@ -491,10 +544,21 @@ pub struct ToolRegistryConfig {
     /// When `true`, `write` tool calls are auto-approved without a user prompt.
     /// Intended for automated / e2e testing where no human is present to approve.
     pub auto_approve_write: bool,
+    /// When `true`, `spawn_subagent` tool calls are auto-approved without a
+    /// user prompt. Intended for automated / e2e testing where no human is
+    /// present to approve.
+    pub auto_approve_spawn: bool,
     /// Explicit list of tool names to register. Only tools whose name appears
     /// here are added to the registry; all others are skipped regardless of
     /// whether they exist in the candidate pool.
     pub allowed_tools: Vec<String>,
+    /// When `true`, registers `spawn_subagent`. Set only for `Role::Root`
+    /// agents whose `AgentConfig::can_spawn` is `true`; structurally absent
+    /// otherwise (never gated by `allowed_tools`).
+    pub include_spawn_subagent: bool,
+    /// Present only for `Role::Child` agents: registers `agent_finish`, wired to
+    /// send its result through this config's channel/ids.
+    pub agent_finish: Option<agent_finish::AgentFinishToolConfig>,
 }
 
 impl Default for ToolRegistryConfig {
@@ -503,7 +567,10 @@ impl Default for ToolRegistryConfig {
         Self {
             auto_approve_edit: false,
             auto_approve_write: false,
+            auto_approve_spawn: false,
             allowed_tools: DEFAULT_CLI_TOOLS.iter().map(|s| s.to_string()).collect(),
+            include_spawn_subagent: false,
+            agent_finish: None,
         }
     }
 }
@@ -571,6 +638,19 @@ pub fn default_registry(
         .any(|name| name == clarify::ClarifyTool::NAME)
     {
         registry.register(Arc::new(clarify::ClarifyTool));
+    }
+    // Neither `spawn_subagent` nor `agent_finish` is gated by `allowed_tools`: the
+    // former is structural (present only when the agent can spawn children),
+    // the latter is injected only into `Role::Child` registries.
+    if config.include_spawn_subagent {
+        registry.register(Arc::new(spawn_subagent::SpawnSubagentTool::new(
+            config.auto_approve_spawn,
+        )));
+    }
+    if let Some(agent_finish_config) = config.agent_finish.clone() {
+        registry.register(Arc::new(agent_finish::AgentFinishTool::new(
+            agent_finish_config,
+        )));
     }
 
     registry
@@ -682,6 +762,9 @@ mod tests {
         fn input_schema(&self) -> RootSchema {
             schema_for!(TestArgs)
         }
+        fn path_like_arguments(&self) -> &'static [&'static str] {
+            &["field"]
+        }
         fn needs_approval(&self, _arguments: &Value) -> ApprovalCheck {
             ApprovalCheck::AutoApproved
         }
@@ -774,6 +857,74 @@ mod tests {
     }
 
     #[test]
+    fn create_call_rewrites_absolute_path_like_argument_to_cwd_relative() {
+        // Reads std::env::current_dir(); must hold SUBSCRIBER_LOCK to avoid
+        // racing the logging test that temporarily mutates process cwd (see
+        // docs/known-issues.md "Process-global cwd mutation in tests").
+        let _lock = crate::test_support::SUBSCRIBER_LOCK
+            .lock()
+            .expect("subscriber mutex poisoned");
+        let cwd = std::env::current_dir().expect("cwd");
+        let absolute_path = cwd.join("Cargo.toml");
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(TestTool));
+        let call = registry
+            .create_call(
+                "test",
+                uuid::Uuid::new_v4(),
+                serde_json::json!({ "field": absolute_path.to_str().unwrap() }),
+            )
+            .expect("test tool is registered");
+        assert_eq!(
+            call.arguments()["field"],
+            serde_json::json!("Cargo.toml"),
+            "absolute path-like argument inside cwd should be rewritten cwd-relative before dispatch"
+        );
+    }
+
+    #[test]
+    fn create_call_leaves_out_of_cwd_absolute_path_unchanged() {
+        let _lock = crate::test_support::SUBSCRIBER_LOCK
+            .lock()
+            .expect("subscriber mutex poisoned");
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let outside_path = temporary_dir.path().join("other/file.rs");
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(TestTool));
+        let call = registry
+            .create_call(
+                "test",
+                uuid::Uuid::new_v4(),
+                serde_json::json!({ "field": outside_path.to_str().unwrap() }),
+            )
+            .expect("test tool is registered");
+        assert_eq!(
+            call.arguments()["field"],
+            serde_json::json!(outside_path.to_str().unwrap()),
+            "absolute path outside cwd should pass through unchanged"
+        );
+    }
+
+    #[test]
+    fn create_call_leaves_non_path_like_argument_unchanged() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(TestTool));
+        // TestTool only declares "field" as path-like; a plain string value
+        // that happens to be a real absolute path is untouched under any
+        // other key.
+        let call = registry
+            .create_call(
+                "test",
+                uuid::Uuid::new_v4(),
+                serde_json::json!({ "field": "hello", "other": "/etc/hosts" }),
+            )
+            .expect("test tool is registered");
+        assert_eq!(call.arguments()["other"], serde_json::json!("/etc/hosts"));
+    }
+
+    #[test]
     fn write_tool_always_needs_user_approval() {
         let write_tool = fs::WriteTool::default();
         let args = serde_json::json!({ "path": "src/main.rs", "content": "hello" });
@@ -846,23 +997,13 @@ mod tests {
 
     #[test]
     fn tool_title_splits_on_hyphen_and_underscore() {
-        // Verify the derivation logic directly.
-        fn derive(name: &str) -> String {
-            name.split(['-', '_'])
-                .map(|word| {
-                    let mut chars = word.chars();
-                    match chars.next() {
-                        None => String::new(),
-                        Some(first) => first.to_uppercase().to_string() + chars.as_str(),
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(" ")
-        }
-        assert_eq!(derive("web_search"), "Web Search");
-        assert_eq!(derive("my-cool-tool"), "My Cool Tool");
-        assert_eq!(derive("compile"), "Compile");
-        assert_eq!(derive("deploy"), "Deploy");
+        assert_eq!(title_case_tool_name("web_search"), "Web Search");
+        assert_eq!(title_case_tool_name("my-cool-tool"), "My Cool Tool");
+        assert_eq!(title_case_tool_name("compile"), "Compile");
+        assert_eq!(title_case_tool_name("deploy"), "Deploy");
+        // Regression: the tool-bubble title must render as "Spawn Subagent",
+        // not "Spawn_subagent" (only the leading char capitalised).
+        assert_eq!(title_case_tool_name("spawn_subagent"), "Spawn Subagent");
     }
 
     #[test]

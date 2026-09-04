@@ -27,12 +27,12 @@ After Phase 5 the agent has named engines, `AgentFactory`, `Engine`/`EngineImpl`
    `write`/`edit` (Ask); `clarify` interactive banner (Interactive)
 8. `spawn_subagent` tool + `ChildAgentManager` (unbounded FIFO queue; one child active at
    a time; no nesting)
-9. `finish` tool (child-only; unstructured fallback if never called)
+9. `agent_finish` tool (child-only; unstructured fallback if never called)
 10. Child-agent persistence records (`child_start` / `child_result` JSONL) in parent session
 11. Drill-in TUI conversation model: child agent replaces main view with breadcrumb header
     and "back" button; parent chat shows a clickable spawn-bubble; auto-switch on interactive
     child pauses (approval / `clarify`); parent continues running concurrently while a child
-    is active; `spawn_subagent` returns immediately and child `finish` arrives as an async
+    is active; `spawn_subagent` returns immediately and child `agent_finish` arrives as an async
     observation
 12. `--allow-child-agents` headless flag; stderr status lines for child lifecycle
 
@@ -73,7 +73,7 @@ mechanics, making Ylva capable of editing code autonomously while remaining huma
 - `spawn_subagent` requires human approval by default (`UserApprovalRequired`);
   `--auto-approve-spawn` bypasses this. Children inherit the parent's `--auto-approve-spawn`
   and `--auto-approve-write` flags. No blanket `--auto-approve-all` flag exists.
-- `finish` terminates the child's ReAct loop (uses same max-iterations limit as parent);
+- `agent_finish` terminates the child's ReAct loop (uses same max-iterations limit as parent);
   unstructured fallback activates on timeout or max iterations.
 - `child_start` / `child_result` JSONL records are appended to the parent session file.
   Cancelled children (parent stopped, or queue drained) write a `child_result` record
@@ -654,19 +654,19 @@ other re-exported type names) is unchanged — this is a module-path rename only
 
 ---
 
-### Phase 6.9 — `spawn_subagent` + `ChildAgentManager` + `finish` Tool
+### Phase 6.9 — `spawn_subagent` + `ChildAgentManager` + `agent_finish` Tool
 
 **Goal:** One-level agent delegation; child runs concurrently with parent; parent continues
 processing messages and tools while a child is active.
 
-- [ ] 64. Implement `Role::Child` construction in `AgentFactory::create`
+- [x] 64. Implement `Role::Child` construction in `AgentFactory::create`
   (`src/agent_factory.rs`). Remove `create_returns_err_for_child_role` test (line 147 in
   `src/agent_factory.rs`, left failing since Phase 5); replace with a positive assertion.
   This must be done before any other child-agent steps (6.7–6.10) can compile. Wire
   `briefing`, `parent_cancel`, `subagent_ui_tx`, and the
   `finish_tx: mpsc::Sender<FinishResult>` from `Role::Child` fields.
 
-- [ ] 65. Create `src/child_agent_manager.rs`:
+- [x] 65. Create `src/child_agent_manager.rs`:
 
     ```rust
     pub struct ChildAgentManager {
@@ -691,27 +691,32 @@ processing messages and tools while a child is active.
   `AgentLoop` creates `mpsc::channel::<FinishResult>()` at startup; passes `Sender`
   to `ChildAgentManager::new` and keeps `Receiver` in its own `select!` loop.
 
-- [ ] 66. Create `src/agent/tools/spawn_subagent.rs`. `SpawnSubagentArgs { task, briefing,
+- [x] 66. Create `src/agent/tools/spawn_subagent.rs`. `SpawnSubagentArgs { task, briefing,
   agent_type }`. `needs_approval` returns `UserApprovalRequired` (or `AutoApproved`
   when `--auto-approve-spawn` is set). After approval, the agent loop calls
   `child_agent_manager.spawn(...)`. The tool returns `{ "status": "spawned", "run_id": "<uuid>" }`
   when the child starts immediately, or `{ "status": "queued", "run_id": "<uuid>" }` when
-  it is enqueued behind an active child. The child's `finish` result arrives later as a
+  it is enqueued behind an active child. The child's `agent_finish` result arrives later as a
   tool result message tied to this `spawn_subagent` call id (see step 47).
 
-- [ ] 67. Create `src/agent/tools/finish.rs`. `FinishArgs { status, result, error, sources }`.
-  `FinishTool::run` sends `FinishResult` via `finish_tx` and returns a success envelope.
+- [x] 67. Create `src/agent/tools/agent_finish.rs`.
+  `AgentFinishArgs { status, result, error, sources }`.
+  `AgentFinishTool::run` sends `FinishResult` via `finish_tx` and returns a success envelope.
   Child loop exits unconditionally on `ChildFinish` (exempt from iteration cap). Injected
   only into `Role::Child` registries.
 
-- [ ] 68. Update `AgentLoop` (`src/agent.rs`):
+- [x] 68. Update `AgentLoop` (`src/agent.rs`):
   - Hold `child_agent_manager: Option<ChildAgentManager>` (present when
     `role = Root && agent_type.can_spawn`).
   - Add `finish_rx` arm to `tokio::select!`. On `FinishResult` received: inject the
     result as a **tool result message** (role: `tool`, tool_call_id: the original
-    `spawn_subagent` call id) into the parent conversation context. Enqueue it for
-    the normal ReAct loop to pick up on its next iteration — no forced re-prompt.
-    If the next request is queued in `ChildAgentManager`, start it now.
+    `spawn_subagent` call id) into the parent conversation context. If the parent's
+    `mode` is `Idle` (no stream/tool in flight), re-prompt immediately so the root LLM
+    reacts to the result without waiting for a new user turn — critical for headless
+    one-shot sessions, which never get one otherwise; if the parent is mid-stream/
+    mid-tool, the result is picked up the next time that work's own queue-drain
+    re-prompt happens (no interruption). If the next request is queued in
+    `ChildAgentManager`, start it now.
   - On `AgentCommand::Stop`: call `child_agent_manager.cancel_all()` (fires child
     `CancellationToken`, drains queue); write a `child_result` JSONL record with
     `status: "cancelled"` for the running child (if any). Persistence errors are
@@ -721,7 +726,7 @@ processing messages and tools while a child is active.
     approval, call `child_agent_manager.spawn(...)`, return
     `{ "status": "spawned"/"queued", "run_id": "<uuid>" }` immediately to the LLM.
     The parent loop continues normally.
-  - Unstructured fallback: if child's `JoinHandle` completes without `finish` being called
+  - Unstructured fallback: if child's `JoinHandle` completes without `agent_finish` being called
     (timeout or max iterations — same cap as parent), extract last `Message::Assistant`
     text, wrap as `FinishResult { status: "unstructured", ... }` and inject as a tool
     result message tied to the original `spawn_subagent` call id.
@@ -729,16 +734,44 @@ processing messages and tools while a child is active.
   - Parent processes user messages and runs its own tools concurrently with the child;
     no suspension of the parent ReAct loop while a child is active.
 
-- [ ] 69. Write unit tests: `spawn` returns `Queued` when a child is already running; multiple
-  queued spawns are drained in FIFO order after each child finishes; `cancel_all` fires
-  child token and empties the queue; `finish_rx` receives result when child calls `finish`;
-  cancelled child writes `child_result` with `status: "cancelled"`;
-  unstructured fallback when `finish` never called.
+  > Implementation note: the `child_result` JSONL write on `AgentCommand::Stop`
+  > requires `Store` (Phase 6.11, not yet implemented as of Phase 6.9); the
+  > cancelled-child case is logged via `tracing::info!` for now and will gain
+  > durable persistence when Phase 6.11 lands.
 
-- [ ] 70. Update `docs/features.md`: add child-agent delegation section.
+- [x] 69. Write unit tests: `spawn` returns `Queued` when a child is already running; multiple
+  queued spawns are drained in FIFO order after each child finishes; `cancel_all` fires
+  child token and empties the queue; `finish_rx` receives result when child calls `agent_finish`;
+  cancelled child writes `child_result` with `status: "cancelled"`;
+  unstructured fallback when `agent_finish` never called.
+
+  > `cancelled child writes child_result with status: "cancelled"` is deferred to
+  > Phase 6.11 alongside the `Store`-backed persistence it depends on; all other
+  > listed cases are covered (`src/child_agent_manager.rs`, `src/agent.rs`,
+  > `src/agent_factory.rs` test modules).
+
+- [x] 70. Update `docs/features.md`: add child-agent delegation section.
   Update `docs/configuration.md` with `can_spawn` key.
 
-- [ ] 71. Run `make test` + `make test-coverage`.
+- [x] 71. Run `make test` + `make test-coverage`.
+
+#### Open Questions / Bugs
+
+- [x] CLI should improve rendering spawn_subagent:
+      '[tool] Spawn Subagent Analyze TUI Features' blurs the tool-name and the
+      the "label" attribute. Maybe use
+      '[tool] Spawn Subagent "Analyze TUI Features"'
+- [x] CLI seems to print spawing the subagent, but afterwards the conversation is
+      finished without the subagent result.
+- [x] When CLI prompt triggers a subagent spawn, I can see that
+      main-conversation kicks off the subagent and that subagent starts.
+      Eventually subagent is done and I can see in console
+      ```text
+      [tool] Finish success [result=<2454-char string elided>]
+      [tool] Spawn Subagent "TUI Feature Analysis" done (123.958s) status=success
+      ```
+      But the main conversation doesn't seem to reply to that subagent result.
+      The main conversion just stops and is done too.
 
 ---
 
@@ -958,9 +991,11 @@ ADR is recorded.
   (`tool_output_truncated`, `tool_output_truncated_at_bytes`).
 - **Concurrent parent + child model:** `spawn_subagent` returns
   `{ "status": "spawned"/"queued", "run_id": "..." }` immediately; the parent ReAct loop
-  continues. When the child calls `finish`, `AgentLoop` injects the result as a **tool
-  result message** (role: `tool`, tool_call_id: original `spawn_subagent` call id) and
-  enqueues it for the normal ReAct loop — no forced re-prompt. Additional `spawn` calls
+  continues. When the child calls `agent_finish`, `AgentLoop` injects the result as a **tool
+  result message** (role: `tool`, tool_call_id: original `spawn_subagent` call id); if
+  the parent is `Idle` at that moment this re-prompts immediately (headless one-shot
+  sessions never get a later "next turn" otherwise), else it's picked up by the normal
+  ReAct loop the next time its queue drains. Additional `spawn` calls
   while a child is running are enqueued in an unbounded FIFO (`VecDeque`) inside
   `ChildAgentManager`; each starts automatically when the previous child's `finish_rx`
   fires. Parent approval takes lower precedence than child approval (child shown first).

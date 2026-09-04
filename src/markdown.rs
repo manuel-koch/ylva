@@ -15,7 +15,7 @@ use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::highlight::{highlighted_lines_cached, syntect_fg_span};
+use crate::highlight::{highlighted_lines_cached, syntect_fg_span, wrap_highlighted_line};
 
 /// Foreground color used for `inline code` spans.
 pub const INLINE_CODE_FG: Color = Color::Rgb(224, 168, 82);
@@ -64,8 +64,11 @@ enum ListKind {
 }
 
 /// Convert `text` (Markdown) into styled, word-wrapped lines no wider than
-/// `width` columns (fenced code block lines are the one exception: they are
-/// rendered verbatim, unwrapped, to preserve code formatting).
+/// `width` columns. Fenced code block lines are the one exception to
+/// word-wrapping: their content is preserved verbatim (no word-boundary
+/// reflow) to keep code formatting intact, but a line that is still too long
+/// to fit is character-wrapped onto continuation rows — never clipped — so
+/// it never renders past the bubble's right edge.
 pub fn render_markdown(text: &str, width: usize) -> Vec<Line<'static>> {
     let width = width.max(1);
     let parser = Parser::new_ext(text, Options::ENABLE_TABLES);
@@ -181,6 +184,7 @@ pub fn render_markdown(text: &str, width: usize) -> Vec<Line<'static>> {
                             &mut out,
                             &content,
                             code_block_language.take().as_deref(),
+                            width,
                         );
                         push_spacer_if_needed(&mut out);
                     }
@@ -424,6 +428,7 @@ fn push_highlighted_code_block(
     out: &mut Vec<Line<'static>>,
     content: &str,
     language: Option<&str>,
+    width: usize,
 ) {
     let trimmed = content.strip_suffix('\n').unwrap_or(content);
     if let Some(lang) = language.map(str::trim).filter(|s| !s.is_empty()) {
@@ -441,6 +446,13 @@ fn push_highlighted_code_block(
     let line_count = trimmed.lines().count();
     let gutter_width = line_count.to_string().len();
     let gutter_style = Style::default().fg(MARKDOWN_DIM_FG);
+    // "{:>gutter_width$} │ " — digits, one space, the "│" glyph, one space.
+    let gutter_prefix_width = gutter_width + 3;
+    let continuation_gutter = Span::styled(" ".repeat(gutter_prefix_width), gutter_style);
+    // Room left for code tokens once the gutter has been carved off. Lines
+    // that don't fit are wrapped (never clipped) so they never render past
+    // the bubble's right edge; see wrap_highlighted_line for the rationale.
+    let content_width = width.saturating_sub(gutter_prefix_width).max(1);
     let ext = language
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -448,13 +460,24 @@ fn push_highlighted_code_block(
     let highlighted = highlighted_lines_cached(trimmed, ext.as_deref());
     for (line_index, hl_line) in highlighted.into_iter().enumerate() {
         let line_number = format!("{:>gutter_width$} │ ", line_index + 1);
-        let mut spans = vec![Span::styled(line_number, gutter_style)];
-        spans.extend(
-            hl_line
-                .into_iter()
-                .map(|(style, token)| syntect_fg_span(style, token)),
-        );
-        out.push(Line::from(spans));
+        let gutter = Span::styled(line_number, gutter_style);
+        for (row_index, row_tokens) in wrap_highlighted_line(hl_line, content_width)
+            .into_iter()
+            .enumerate()
+        {
+            let mut spans = Vec::with_capacity(row_tokens.len() + 1);
+            spans.push(if row_index == 0 {
+                gutter.clone()
+            } else {
+                continuation_gutter.clone()
+            });
+            spans.extend(
+                row_tokens
+                    .into_iter()
+                    .map(|(style, token)| syntect_fg_span(style, token)),
+            );
+            out.push(Line::from(spans));
+        }
     }
 }
 
@@ -651,15 +674,33 @@ mod tests {
 
     #[test]
     fn fenced_code_block_renders_verbatim_with_syntax_highlighting() {
-        let lines = render_markdown("```\nfn main() {}\n    indented\n```", 5);
+        // Wide enough that neither source line needs to wrap.
+        let lines = render_markdown("```\nfn main() {}\n    indented\n```", 80);
         let rendered: Vec<String> = lines.iter().map(plain_text).collect();
-        // Unwrapped despite the narrow width — code blocks are verbatim.
+        // Unwrapped: no word-boundary reflow — code blocks are verbatim.
         // Trailing spacer added after the block.
         assert_eq!(rendered, vec!["1 │ fn main() {}", "2 │     indented"]);
         // Each non-blank line starts with a dim gutter span.
         for line in lines.iter().filter(|l| !l.spans.is_empty()) {
             assert_eq!(line.spans[0].style.fg, Some(MARKDOWN_DIM_FG));
         }
+    }
+
+    #[test]
+    fn fenced_code_block_line_too_long_for_width_wraps_onto_continuation_rows() {
+        // gutter_prefix_width = 4 ("1 │ "), leaving content_width = 8 at
+        // width 12. A 10-char code line must split into two visual rows
+        // instead of overflowing the bubble's right edge.
+        let lines = render_markdown("```\nabcdefghij\n```", 12);
+        let rendered: Vec<String> = lines.iter().map(plain_text).collect();
+        assert_eq!(rendered, vec!["1 │ abcdefgh", "    ij"]);
+        // No row exceeds the requested width.
+        for line in &rendered {
+            assert!(line.chars().count() <= 12, "line {line:?} exceeds width 12");
+        }
+        // The continuation row's gutter placeholder is blank, not repeating
+        // the line number or gutter glyph.
+        assert!(!rendered[1].contains('│'));
     }
 
     #[test]

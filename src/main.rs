@@ -53,6 +53,16 @@ fn main() {
         }
     };
 
+    let use_tui = std::io::stdout().is_terminal() && !args.contains(&"--no-tui".to_string());
+    tracing::info!(
+        version = ylva::BUILD_INFO.version,
+        commit = ylva::BUILD_INFO.git_commit,
+        built = ylva::BUILD_INFO.build_timestamp_utc,
+        profile = ylva::BUILD_INFO.profile,
+        "build info"
+    );
+    tracing::info!(app = if use_tui { "tui" } else { "cli" }, "starting");
+
     let provider: Arc<dyn Provider> = select_provider();
     let runtime = tokio::runtime::Runtime::new().expect("failed to start Tokio runtime");
 
@@ -83,7 +93,7 @@ fn main() {
 
     let auto_approve_edit = args.contains(&"--auto-approve-edit".to_string());
     let auto_approve_write = args.contains(&"--auto-approve-write".to_string());
-    let use_tui = std::io::stdout().is_terminal() && !args.contains(&"--no-tui".to_string());
+    let auto_approve_spawn = args.contains(&"--auto-approve-spawn".to_string());
 
     let factory = Arc::new({
         let mut factory = AgentFactory::new(HashMap::from([(
@@ -98,6 +108,9 @@ fn main() {
         }
         if auto_approve_write {
             factory = factory.with_auto_approve_write();
+        }
+        if auto_approve_spawn {
+            factory = factory.with_auto_approve_spawn();
         }
         factory
     });
@@ -269,11 +282,103 @@ fn prompt_from_stdin() -> Option<String> {
 const DEFAULT_OLLAMA_MODEL: &str = "gemma4:e4b-mlx";
 /// Default OpenRouter model when `OPENROUTER_MODEL` is unset.
 const DEFAULT_OPENROUTER_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
+/// Default OpenRouter base URL when `OPENROUTER_BASE_URL` is unset. Unlike
+/// Ollama (which runs on an arbitrary user-chosen host), OpenRouter is a
+/// single hosted service reachable at this fixed endpoint, so it doesn't need
+/// to be exported explicitly.
+const DEFAULT_OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
+
+/// Snapshot of the env vars that [`resolve_provider_from_env`] reads. Kept as
+/// a plain struct (rather than reading `std::env::var` inline) so the
+/// selection logic is a pure function that unit tests can exercise directly,
+/// without mutating real process env vars (which are process-global and
+/// unsafe to touch from parallel tests).
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
+struct ProviderEnv {
+    ollama_base_url: Option<String>,
+    ollama_model: Option<String>,
+    ollama_api_key: Option<String>,
+    openrouter_base_url: Option<String>,
+    openrouter_model: Option<String>,
+    openrouter_api_key: Option<String>,
+}
+
+impl ProviderEnv {
+    /// Read the real process environment.
+    fn from_process_env() -> Self {
+        Self {
+            ollama_base_url: std::env::var("OLLAMA_BASE_URL").ok(),
+            ollama_model: std::env::var("OLLAMA_MODEL").ok(),
+            ollama_api_key: std::env::var("OLLAMA_API_KEY").ok(),
+            openrouter_base_url: std::env::var("OPENROUTER_BASE_URL").ok(),
+            openrouter_model: std::env::var("OPENROUTER_MODEL").ok(),
+            openrouter_api_key: std::env::var("OPENROUTER_API_KEY").ok(),
+        }
+    }
+}
+
+/// The backend selected by [`resolve_provider_from_env`], carrying every
+/// value needed to either construct a provider or log/reproduce the
+/// selection, without re-reading env vars.
+#[derive(Debug, PartialEq, Eq)]
+enum ProviderSelection {
+    Ollama {
+        base_url: String,
+        model: String,
+        api_key: Option<String>,
+    },
+    OpenRouter {
+        base_url: String,
+        model: String,
+        api_key: Option<String>,
+    },
+    Mock,
+}
+
+/// Pick the backend for the given env snapshot, with **Ollama-first**
+/// precedence: `OLLAMA_BASE_URL` (no universal default; a non-empty value
+/// selects Ollama), then any OpenRouter var (`OPENROUTER_BASE_URL`/`_MODEL`/
+/// `_API_KEY` — OpenRouter has one well-known endpoint, so setting any of
+/// these opts in and `OPENROUTER_BASE_URL` defaults to it), else `Mock`.
+fn resolve_provider_from_env(env: &ProviderEnv) -> ProviderSelection {
+    if let Some(base_url) = env.ollama_base_url.as_ref().filter(|url| !url.is_empty()) {
+        let model = env
+            .ollama_model
+            .clone()
+            .unwrap_or_else(|| DEFAULT_OLLAMA_MODEL.to_string());
+        return ProviderSelection::Ollama {
+            base_url: base_url.clone(),
+            model,
+            api_key: env.ollama_api_key.clone(),
+        };
+    }
+    let openrouter_requested = [
+        &env.openrouter_base_url,
+        &env.openrouter_model,
+        &env.openrouter_api_key,
+    ]
+    .into_iter()
+    .any(|value| value.as_ref().is_some_and(|value| !value.is_empty()));
+    if openrouter_requested {
+        let base_url = env
+            .openrouter_base_url
+            .clone()
+            .filter(|url| !url.is_empty())
+            .unwrap_or_else(|| DEFAULT_OPENROUTER_BASE_URL.to_string());
+        let model = env
+            .openrouter_model
+            .clone()
+            .unwrap_or_else(|| DEFAULT_OPENROUTER_MODEL.to_string());
+        return ProviderSelection::OpenRouter {
+            base_url,
+            model,
+            api_key: env.openrouter_api_key.clone(),
+        };
+    }
+    ProviderSelection::Mock
+}
 
 /// Return the model name that matches the active provider's env vars.
-///
-/// Mirrors the precedence of [`select_provider`]: Ollama first, then
-/// OpenRouter, then an empty string for the `MockProvider` fallback.
 ///
 /// TODO: this duplicates provider-specific knowledge that should live on the
 /// provider itself (see `docs/ideas/resolving-provider.md`). Once a
@@ -281,19 +386,11 @@ const DEFAULT_OPENROUTER_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
 /// `model_from_env` with a single `ProviderRegistry::resolve_provider` call
 /// that returns a fully-configured provider (including model).
 fn model_from_env() -> String {
-    if let Ok(base_url) = std::env::var("OLLAMA_BASE_URL") {
-        if !base_url.is_empty() {
-            return std::env::var("OLLAMA_MODEL")
-                .unwrap_or_else(|_| DEFAULT_OLLAMA_MODEL.to_string());
-        }
+    match resolve_provider_from_env(&ProviderEnv::from_process_env()) {
+        ProviderSelection::Ollama { model, .. } => model,
+        ProviderSelection::OpenRouter { model, .. } => model,
+        ProviderSelection::Mock => String::new(),
     }
-    if let Ok(base_url) = std::env::var("OPENROUTER_BASE_URL") {
-        if !base_url.is_empty() {
-            return std::env::var("OPENROUTER_MODEL")
-                .unwrap_or_else(|_| DEFAULT_OPENROUTER_MODEL.to_string());
-        }
-    }
-    String::new()
 }
 
 /// Select the Phase 2 demo provider from environment variables with
@@ -306,11 +403,12 @@ fn model_from_env() -> String {
 /// of surfacing only as a confusing downstream error. Only the *presence* of an
 /// API key is logged — `"set"`/`"unset"` — never the key value itself.
 fn select_provider() -> Arc<dyn Provider> {
-    if let Ok(base_url) = std::env::var("OLLAMA_BASE_URL") {
-        if !base_url.is_empty() {
-            let model =
-                std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| DEFAULT_OLLAMA_MODEL.to_string());
-            let api_key = std::env::var("OLLAMA_API_KEY").ok();
+    match resolve_provider_from_env(&ProviderEnv::from_process_env()) {
+        ProviderSelection::Ollama {
+            base_url,
+            model,
+            api_key,
+        } => {
             tracing::debug!(
                 provider = "ollama",
                 base_url,
@@ -318,19 +416,18 @@ fn select_provider() -> Arc<dyn Provider> {
                 api_key = if api_key.is_some() { "set" } else { "unset" },
                 "provider selected"
             );
-            return Arc::new(OpenAiProvider::new(
+            Arc::new(OpenAiProvider::new(
                 "ollama".to_string(),
                 base_url,
                 model,
                 api_key,
-            ));
+            ))
         }
-    }
-    if let Ok(base_url) = std::env::var("OPENROUTER_BASE_URL") {
-        if !base_url.is_empty() {
-            let model = std::env::var("OPENROUTER_MODEL")
-                .unwrap_or_else(|_| DEFAULT_OPENROUTER_MODEL.to_string());
-            let api_key = std::env::var("OPENROUTER_API_KEY").ok();
+        ProviderSelection::OpenRouter {
+            base_url,
+            model,
+            api_key,
+        } => {
             tracing::debug!(
                 provider = "openrouter",
                 base_url,
@@ -338,34 +435,152 @@ fn select_provider() -> Arc<dyn Provider> {
                 api_key = if api_key.is_some() { "set" } else { "unset" },
                 "provider selected"
             );
-            return Arc::new(OpenAiProvider::new(
+            Arc::new(OpenAiProvider::new(
                 "openrouter".to_string(),
                 base_url,
                 model,
                 api_key,
-            ));
+            ))
+        }
+        ProviderSelection::Mock => {
+            tracing::debug!(
+                provider = "mock",
+                base_url = "-",
+                model = "-",
+                api_key = "unset",
+                "provider selected"
+            );
+            Arc::new(MockProvider::new(
+                vec![
+                    "The sky looks blue ".to_string(),
+                    "because air molecules scatter ".to_string(),
+                    "blue light more than other colors.".to_string(),
+                ],
+                Duration::from_millis(60),
+            ))
         }
     }
-    tracing::debug!(
-        provider = "mock",
-        base_url = "-",
-        model = "-",
-        api_key = "unset",
-        "provider selected"
-    );
-    Arc::new(MockProvider::new(
-        vec![
-            "The sky looks blue ".to_string(),
-            "because air molecules scatter ".to_string(),
-            "blue light more than other colors.".to_string(),
-        ],
-        Duration::from_millis(60),
-    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_provider_from_env_falls_back_to_mock_when_nothing_set() {
+        let env = ProviderEnv::default();
+        assert_eq!(resolve_provider_from_env(&env), ProviderSelection::Mock);
+    }
+
+    #[test]
+    fn resolve_provider_from_env_selects_ollama_when_base_url_set() {
+        let env = ProviderEnv {
+            ollama_base_url: Some("http://localhost:11434".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_provider_from_env(&env),
+            ProviderSelection::Ollama {
+                base_url: "http://localhost:11434".to_string(),
+                model: DEFAULT_OLLAMA_MODEL.to_string(),
+                api_key: None,
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_provider_from_env_ignores_ollama_when_base_url_empty() {
+        let env = ProviderEnv {
+            ollama_base_url: Some(String::new()),
+            openrouter_api_key: Some("sk-or-key".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_provider_from_env(&env),
+            ProviderSelection::OpenRouter {
+                base_url: DEFAULT_OPENROUTER_BASE_URL.to_string(),
+                model: DEFAULT_OPENROUTER_MODEL.to_string(),
+                api_key: Some("sk-or-key".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_provider_from_env_selects_openrouter_from_api_key_alone() {
+        let env = ProviderEnv {
+            openrouter_api_key: Some("sk-or-key".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_provider_from_env(&env),
+            ProviderSelection::OpenRouter {
+                base_url: DEFAULT_OPENROUTER_BASE_URL.to_string(),
+                model: DEFAULT_OPENROUTER_MODEL.to_string(),
+                api_key: Some("sk-or-key".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_provider_from_env_selects_openrouter_from_model_alone() {
+        let env = ProviderEnv {
+            openrouter_model: Some("anthropic/claude-3.5-haiku".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_provider_from_env(&env),
+            ProviderSelection::OpenRouter {
+                base_url: DEFAULT_OPENROUTER_BASE_URL.to_string(),
+                model: "anthropic/claude-3.5-haiku".to_string(),
+                api_key: None,
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_provider_from_env_honors_explicit_openrouter_base_url() {
+        let env = ProviderEnv {
+            openrouter_base_url: Some("https://custom.example/v1".to_string()),
+            openrouter_api_key: Some("sk-or-key".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_provider_from_env(&env),
+            ProviderSelection::OpenRouter {
+                base_url: "https://custom.example/v1".to_string(),
+                model: DEFAULT_OPENROUTER_MODEL.to_string(),
+                api_key: Some("sk-or-key".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_provider_from_env_ignores_openrouter_empty_values() {
+        let env = ProviderEnv {
+            openrouter_base_url: Some(String::new()),
+            openrouter_model: Some(String::new()),
+            openrouter_api_key: Some(String::new()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_provider_from_env(&env), ProviderSelection::Mock);
+    }
+
+    #[test]
+    fn resolve_provider_from_env_prefers_ollama_over_openrouter() {
+        let env = ProviderEnv {
+            ollama_base_url: Some("http://localhost:11434".to_string()),
+            openrouter_api_key: Some("sk-or-key".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_provider_from_env(&env),
+            ProviderSelection::Ollama {
+                base_url: "http://localhost:11434".to_string(),
+                model: DEFAULT_OLLAMA_MODEL.to_string(),
+                api_key: None,
+            }
+        );
+    }
 
     #[test]
     fn logging_from_args_accepts_mixed_case_values() {

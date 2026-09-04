@@ -166,6 +166,14 @@ pub enum ToolCallState {
         arguments: serde_json::Value,
         content_sections: Vec<crate::agent::tools::Section>,
         title_arguments: Vec<(String, serde_json::Value)>,
+        /// Interim status key/value pairs patched in by `ToolProgress` (e.g.
+        /// `spawn_subagent` reporting `status=spawned`/`queued` + `run_id`),
+        /// shown alongside `title_arguments` while running. Deliberately
+        /// **not** carried forward into `Done` (which has no equivalent
+        /// field) — once the call truly finishes, `Done`'s own `summary`
+        /// is the single source of truth for its final status, so a stale
+        /// in-flight value here can never linger into the terminal bubble.
+        progress_arguments: Vec<(String, serde_json::Value)>,
     },
     /// Completed successfully.
     Done {
@@ -279,6 +287,21 @@ pub enum TuiMode {
     },
 }
 
+impl TuiMode {
+    /// Short, stable variant tag for logging state transitions — omits the
+    /// `ClarifyPending`/`DoublePressAbort` payloads (question text, timers).
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            TuiMode::Idle => "Idle",
+            TuiMode::Pending => "Pending",
+            TuiMode::Streaming => "Streaming",
+            TuiMode::ClarifyPending { .. } => "ClarifyPending",
+            TuiMode::Aborting => "Aborting",
+            TuiMode::DoublePressAbort { .. } => "DoublePressAbort",
+        }
+    }
+}
+
 /// The key that armed a pending [`TuiMode::DoublePressAbort`] confirm window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfirmKey {
@@ -372,6 +395,13 @@ pub enum DomainEvent {
         content_sections: Vec<crate::agent::tools::Section>,
         title_arguments: Vec<(String, serde_json::Value)>,
     },
+    /// A still-running tool call reports an interim status update; the
+    /// bubble stays `Running` (spinner keeps going) — only its
+    /// `title_arguments` are patched. See `UiUpdate::ToolProgress`.
+    ToolProgress {
+        id: Uuid,
+        title_arguments: Vec<(String, serde_json::Value)>,
+    },
     /// A tool call completed successfully.
     ToolDone {
         id: Uuid,
@@ -395,6 +425,50 @@ pub enum DomainEvent {
     SteerApplied,
     /// A fragment of extended-thinking / reasoning-token output arrived.
     StreamThinkingChunk(String),
+}
+
+impl DomainEvent {
+    /// Short, stable variant tag for logging state transitions — deliberately
+    /// omits payloads (chunk text, tool arguments/content) so per-event
+    /// logging stays cheap and never leaks tool output into the log.
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            DomainEvent::StreamStarted => "StreamStarted",
+            DomainEvent::StreamChunk(_) => "StreamChunk",
+            DomainEvent::StreamDone => "StreamDone",
+            DomainEvent::StreamCancelled => "StreamCancelled",
+            DomainEvent::AgentIdle => "AgentIdle",
+            DomainEvent::ToolPending { .. } => "ToolPending",
+            DomainEvent::ClarifyPending { .. } => "ClarifyPending",
+            DomainEvent::ToolStart { .. } => "ToolStart",
+            DomainEvent::ToolProgress { .. } => "ToolProgress",
+            DomainEvent::ToolDone { .. } => "ToolDone",
+            DomainEvent::ToolKilled { .. } => "ToolKilled",
+            DomainEvent::ToolDenied { .. } => "ToolDenied",
+            DomainEvent::Error(_) => "Error",
+            DomainEvent::ConfirmExpired => "ConfirmExpired",
+            DomainEvent::SteerQueued => "SteerQueued",
+            DomainEvent::SteerApplied => "SteerApplied",
+            DomainEvent::StreamThinkingChunk(_) => "StreamThinkingChunk",
+        }
+    }
+
+    /// The tool-call/clarify `id` this event correlates to, if any — the one
+    /// piece of payload worth logging alongside `kind()`, since it is what
+    /// lets a `ToolStart`/`ToolProgress`/`ToolDone` (or `ClarifyPending`)
+    /// sequence for the *same* call be followed across log lines.
+    pub(crate) fn correlation_id(&self) -> Option<Uuid> {
+        match self {
+            DomainEvent::ToolPending { id, .. }
+            | DomainEvent::ClarifyPending { id, .. }
+            | DomainEvent::ToolStart { id, .. }
+            | DomainEvent::ToolProgress { id, .. }
+            | DomainEvent::ToolDone { id, .. }
+            | DomainEvent::ToolKilled { id }
+            | DomainEvent::ToolDenied { id } => Some(*id),
+            _ => None,
+        }
+    }
 }
 
 // ─── Effect ───────────────────────────────────────────────────────────────────
@@ -1078,7 +1152,19 @@ impl AppState {
     /// [`AgentMode`] used by `ui.rs` for footer and spinner rendering.
     pub fn agent_mode(&self) -> AgentMode {
         match &self.mode {
-            TuiMode::Idle => AgentMode::Idle,
+            // A spawned subagent keeps its `spawn_subagent` tool bubble in
+            // `Running` until the child actually finishes, independently of
+            // the root loop's own `TuiMode` — the root can go `Idle` (its
+            // own turn ended) while the child is still working. Report
+            // `ToolRunning` in that case so the footer/spinner doesn't look
+            // finished while a child is still active.
+            TuiMode::Idle => {
+                if self.has_running_tool_bubble() {
+                    AgentMode::ToolRunning
+                } else {
+                    AgentMode::Idle
+                }
+            }
             TuiMode::Pending => AgentMode::Pending,
             TuiMode::Streaming => {
                 if matches!(self.focus, Focus::ToolApproval { .. }) {
@@ -1092,7 +1178,13 @@ impl AppState {
             TuiMode::ClarifyPending { .. } => AgentMode::ClarifyPending,
             TuiMode::Aborting => AgentMode::Aborting,
             TuiMode::DoublePressAbort { return_to, .. } => match return_to.as_ref() {
-                TuiMode::Idle | TuiMode::DoublePressAbort { .. } => AgentMode::Idle,
+                TuiMode::Idle | TuiMode::DoublePressAbort { .. } => {
+                    if self.has_running_tool_bubble() {
+                        AgentMode::ToolRunning
+                    } else {
+                        AgentMode::Idle
+                    }
+                }
                 TuiMode::Pending => AgentMode::Pending,
                 TuiMode::Streaming => {
                     if self.has_running_tool_bubble() {
@@ -1111,7 +1203,9 @@ impl AppState {
     /// `Running` state, i.e. a tool call has started but not yet finished
     /// (`Done`/`Error`/`Denied`/`Killed`). Used by `agent_mode` to
     /// distinguish "a tool is executing" from plain LLM streaming (thinking
-    /// or assistant text) in the footer.
+    /// or assistant text) in the footer, and — for `TuiMode::Idle` — to
+    /// detect a still-running `spawn_subagent` bubble whose child hasn't
+    /// finished yet even though the root loop's own turn already has.
     fn has_running_tool_bubble(&self) -> bool {
         self.chat_entries.iter().any(|entry| {
             matches!(
@@ -1240,6 +1334,7 @@ impl AppState {
                         arguments,
                         content_sections,
                         title_arguments,
+                        ..
                     } => (
                         std::mem::replace(arguments, serde_json::Value::Null),
                         std::mem::take(content_sections),
@@ -1397,10 +1492,41 @@ mod tests {
                 arguments: serde_json::json!({}),
                 content_sections: vec![],
                 title_arguments: vec![],
+                progress_arguments: vec![],
             }),
             collapsed: true,
         });
         assert_eq!(state.agent_mode(), AgentMode::ToolRunning);
+    }
+
+    #[test]
+    fn agent_mode_reports_tool_running_when_idle_but_a_spawned_child_is_still_running() {
+        // Regression: the root loop's own turn can settle to `TuiMode::Idle`
+        // (e.g. after `spawn_subagent` acked with "running") while the
+        // spawned child is still working — its `spawn_subagent` tool bubble
+        // stays `Running` until the child actually finishes. The footer must
+        // not report `Idle` in that case; that made a genuinely-running
+        // subagent look finished/stuck (see docs/known-issues.md).
+        let mut state = AppState::new();
+        state.mode = TuiMode::Idle;
+        state.chat_entries.push(ChatEntry::ToolBubble {
+            id: Uuid::new_v4(),
+            name: "spawn_subagent".to_string(),
+            state: Box::new(ToolCallState::Running {
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                progress_arguments: vec![],
+            }),
+            collapsed: true,
+        });
+        assert_eq!(state.agent_mode(), AgentMode::ToolRunning);
+    }
+
+    #[test]
+    fn agent_mode_reports_idle_when_no_tool_bubble_is_running() {
+        let state = AppState::new();
+        assert_eq!(state.agent_mode(), AgentMode::Idle);
     }
 
     #[test]
@@ -1500,8 +1626,8 @@ mod tests {
             state: Box::new(ToolCallState::Running {
                 arguments: serde_json::json!({"cmd": "ls"}),
                 content_sections: vec![],
-
                 title_arguments: vec![],
+                progress_arguments: vec![],
             }),
             collapsed: false,
         });
@@ -1732,6 +1858,7 @@ mod tests {
                 arguments: serde_json::json!({}),
                 content_sections: vec![],
                 title_arguments: vec![],
+                progress_arguments: vec![],
             }),
             collapsed: false,
         });

@@ -21,6 +21,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::agent::tools::clarify::ClarifyTool;
+use crate::agent::tools::spawn_subagent::SpawnSubagentTool;
 use crate::agent::tools::{default_registry, Tool, ToolRegistryConfig};
 use crate::agent::{AgentCommand, AgentLoop, Role, UiUpdate};
 use crate::agent_factory::AgentFactory;
@@ -32,10 +33,21 @@ use crate::sandbox::{ApprovalCheck, Sandbox};
 use crate::ToolRegistry;
 
 fn capitalize_first(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+    crate::agent::tools::title_case_tool_name(s)
+}
+
+/// Wraps `command` in `AgentCommand::ForChild { run_id, .. }` when `run_id`
+/// is `Some` — i.e. when the pending tool/clarify call that produced
+/// `command` was forwarded up from a child agent (`UiUpdate::ToolPending`/
+/// `ClarifyPending::run_id`) rather than raised by the root itself.
+/// Otherwise returns `command` unchanged, exactly as sent today.
+fn route_command(run_id: Option<uuid::Uuid>, command: AgentCommand) -> AgentCommand {
+    match run_id {
+        Some(run_id) => AgentCommand::ForChild {
+            run_id,
+            command: Box::new(command),
+        },
+        None => command,
     }
 }
 
@@ -59,7 +71,19 @@ fn render_invocation_from_title_arguments(
         .and_then(|(_, v)| scalar_primary(v))
     {
         line.push(' ');
-        line.push_str(&primary);
+        // A literal identifier (path, glob pattern, regex, ...) reads fine
+        // bare even after a multi-word title, since it visually contrasts
+        // with the surrounding words. Free-form prose doesn't — e.g.
+        // `spawn_subagent`'s "Spawn Subagent" title followed by a bare
+        // multi-word `label` blurs into one run-on phrase. Quote only when
+        // *both* the title and the primary value are multi-word, so the
+        // quotes appear exactly where that ambiguity exists.
+        let is_multi_word = |s: &str| s.split_whitespace().count() > 1;
+        if is_multi_word(title) && is_multi_word(&primary) {
+            line.push_str(&format!("\"{primary}\""));
+        } else {
+            line.push_str(&primary);
+        }
     }
     let rest: Vec<String> = iter
         .map(|(k, v)| format!("{k}={}", render_arg_value(v)))
@@ -273,6 +297,29 @@ pub async fn run_cli_to(
     // `StreamSection` above.
     let mut current_section = StreamSection::None;
     let mut thinking_started_at: Option<std::time::Instant> = None;
+    // Headless mode has nobody to keep the process alive after the visible
+    // conversation turn ends, unlike the TUI. A `spawn_subagent` call
+    // resolves immediately with `{"status": "running"/"queued"}` (see
+    // `resolve_spawn_subagent`), so the parent can go idle (`StreamDone`)
+    // while its child is still running — the child's real outcome only
+    // arrives later, tied to the same call id, as either a `ToolDone` (the
+    // normal `finish_rx` path and the `AgentCommand::Stop` cancellation
+    // path both resolve this way) or, in the structurally-unreachable
+    // fail-safe case where no `ChildAgentManager` is wired, a `ToolError`.
+    // Ending the loop on the first `StreamDone` would drop the agent
+    // (closing `cmd_tx`) before that terminal event ever fires, silently
+    // discarding the child's result. Worse, if the parent was idle when the
+    // child finishes, `AgentLoop` re-prompts it immediately (see the
+    // `finish_rx` arm in `AgentLoop::run`) so it can react to the result —
+    // guaranteeing a further `StreamStarted`/`StreamDone` round that must
+    // not be raced past either. So finalizing is deferred entirely to the
+    // `StreamDone`/`StreamCancelled` arms below, gated on every spawned call
+    // id (tracked by id, not just a count, so any of
+    // `ToolDone`/`ToolError`/`ToolKilled` reliably clears it) having
+    // reported back — if any are still outstanding at that point, the loop
+    // keeps waiting for the guaranteed follow-up round instead of exiting.
+    let mut pending_spawn_call_ids: std::collections::HashSet<uuid::Uuid> =
+        std::collections::HashSet::new();
     while !response_finished {
         match ui_rx.recv().await {
             Some(UiUpdate::StreamStarted) => {
@@ -320,7 +367,7 @@ pub async fn run_cli_to(
                 title_arguments,
                 content_sections,
                 arguments,
-                ..
+                run_id,
             }) => {
                 // A tool call always closes whatever thinking/response
                 // segment preceded it, mirroring `flush_partial_assistant_message`.
@@ -340,7 +387,9 @@ pub async fn run_cli_to(
                     ApprovalCheck::AutoApproved => {
                         writeln!(out, "[tool] {invocation}")?;
                         render_content_sections(out, &content_sections)?;
-                        agent.send_command(AgentCommand::ApproveTool { id }).await;
+                        agent
+                            .send_command(route_command(run_id, AgentCommand::ApproveTool { id }))
+                            .await;
                     }
                     ApprovalCheck::AutoDenied { reason } => {
                         let short_args: Vec<_> = title_arguments
@@ -354,7 +403,10 @@ pub async fn run_cli_to(
                         render_content_sections(out, &content_sections)?;
                         denied_tool_ids.insert(id);
                         agent
-                            .send_command(AgentCommand::DenyTool { id, reason })
+                            .send_command(route_command(
+                                run_id,
+                                AgentCommand::DenyTool { id, reason },
+                            ))
                             .await;
                     }
                     ApprovalCheck::UserApprovalRequired => {
@@ -370,15 +422,23 @@ pub async fn run_cli_to(
                         render_content_sections(out, &content_sections)?;
                         denied_tool_ids.insert(id);
                         agent
-                            .send_command(AgentCommand::DenyTool {
-                                id,
-                                reason: reason.into(),
-                            })
+                            .send_command(route_command(
+                                run_id,
+                                AgentCommand::DenyTool {
+                                    id,
+                                    reason: reason.into(),
+                                },
+                            ))
                             .await;
                     }
                 }
             }
-            Some(UiUpdate::ClarifyPending { id, question, .. }) => {
+            Some(UiUpdate::ClarifyPending {
+                id,
+                question,
+                run_id,
+                ..
+            }) => {
                 flush_thinking_section(out, &mut current_section, &mut thinking_started_at)?;
                 current_section = StreamSection::None;
                 let clarify_title = ClarifyTool.title();
@@ -390,7 +450,10 @@ pub async fn run_cli_to(
                 denied_tool_ids.insert(id);
                 let _ = id;
                 agent
-                    .send_command(AgentCommand::AnswerClarify(String::new()))
+                    .send_command(route_command(
+                        run_id,
+                        AgentCommand::AnswerClarify(String::new()),
+                    ))
                     .await;
             }
             Some(UiUpdate::ToolStart {
@@ -414,6 +477,14 @@ pub async fn run_cli_to(
                 pending_invocations.insert(id, invocation.clone());
                 writeln!(out, "[tool] {invocation}")?;
                 render_content_sections(out, &content_sections)?;
+                if name == SpawnSubagentTool::NAME {
+                    pending_spawn_call_ids.insert(id);
+                    tracing::debug!(
+                        tool_call_id = %id,
+                        pending = pending_spawn_call_ids.len(),
+                        "cli_driver: tracking spawned child, deferring conversation end"
+                    );
+                }
             }
             Some(UiUpdate::ToolDone {
                 id,
@@ -439,10 +510,24 @@ pub async fn run_cli_to(
                 };
                 writeln!(out, "[tool] {title} done ({duration_s:.3}s){summary_str}")?;
                 render_content_sections(out, &content_sections)?;
+                if pending_spawn_call_ids.remove(&id) {
+                    tracing::debug!(
+                        tool_call_id = %id,
+                        pending = pending_spawn_call_ids.len(),
+                        "cli_driver: spawned child reported ToolDone"
+                    );
+                }
             }
             Some(UiUpdate::ToolError { id, error, .. }) => {
                 if !denied_tool_ids.remove(&id) {
                     writeln!(out, "[tool] error: {error}")?;
+                }
+                if pending_spawn_call_ids.remove(&id) {
+                    tracing::debug!(
+                        tool_call_id = %id,
+                        pending = pending_spawn_call_ids.len(),
+                        "cli_driver: spawned child reported ToolError"
+                    );
                 }
             }
             Some(UiUpdate::ToolAutoDenied { name, reason, .. }) => {
@@ -450,19 +535,51 @@ pub async fn run_cli_to(
                 current_section = StreamSection::None;
                 writeln!(out, "[tool] auto-denied '{name}': {reason}")?;
             }
-            Some(UiUpdate::ToolKilled { .. }) => {
+            Some(UiUpdate::ToolKilled { id }) => {
                 writeln!(out, "[tool] killed")?;
+                if pending_spawn_call_ids.remove(&id) {
+                    tracing::debug!(
+                        tool_call_id = %id,
+                        pending = pending_spawn_call_ids.len(),
+                        "cli_driver: spawned child reported ToolKilled"
+                    );
+                }
             }
             Some(UiUpdate::SteerQueued) | Some(UiUpdate::SteerApplied) => {}
+            // No-op in headless mode: there's no live bubble to patch a
+            // status update onto (see `UiUpdate::ToolProgress`'s doc comment
+            // for its TUI-only purpose). The eventual `ToolDone` still
+            // prints the real outcome once the child actually finishes.
+            Some(UiUpdate::ToolProgress { .. }) => {}
             Some(UiUpdate::StreamDone) => {
                 flush_thinking_section(out, &mut current_section, &mut thinking_started_at)?;
                 writeln!(out)?;
-                response_finished = true;
+                if pending_spawn_call_ids.is_empty() {
+                    tracing::debug!(
+                        "cli_driver: StreamDone with no pending spawns, ending conversation"
+                    );
+                    response_finished = true;
+                } else {
+                    tracing::debug!(
+                        pending = pending_spawn_call_ids.len(),
+                        "cli_driver: StreamDone but children still outstanding, waiting for them"
+                    );
+                }
             }
             Some(UiUpdate::StreamCancelled) => {
                 flush_thinking_section(out, &mut current_section, &mut thinking_started_at)?;
                 writeln!(out, "---[ Interrupted ]---")?;
-                response_finished = true;
+                if pending_spawn_call_ids.is_empty() {
+                    tracing::debug!(
+                        "cli_driver: StreamCancelled with no pending spawns, ending conversation"
+                    );
+                    response_finished = true;
+                } else {
+                    tracing::debug!(
+                        pending = pending_spawn_call_ids.len(),
+                        "cli_driver: StreamCancelled but children still outstanding, waiting for them"
+                    );
+                }
             }
             Some(UiUpdate::Error(error)) => {
                 flush_thinking_section(out, &mut current_section, &mut thinking_started_at)?;
@@ -619,5 +736,39 @@ mod tests {
             !rendered.contains("Lorem ipsum"),
             "content must not appear: {rendered}"
         );
+    }
+
+    #[test]
+    fn render_invocation_quotes_primary_when_title_and_primary_are_both_multi_word() {
+        let rendered = render_invocation_from_title_arguments(
+            "Spawn Subagent",
+            &[(
+                "label".to_string(),
+                serde_json::json!("Analyze TUI Features"),
+            )],
+        );
+        assert_eq!(rendered, "Spawn Subagent \"Analyze TUI Features\"");
+    }
+
+    #[test]
+    fn render_invocation_leaves_bare_primary_when_title_is_single_word() {
+        // Single-word title ("Glob") reads fine against a bare (even
+        // multi-word-looking) pattern, so no quoting is added.
+        let rendered = render_invocation_from_title_arguments(
+            "Glob",
+            &[("pattern".to_string(), serde_json::json!("src/**/*.rs"))],
+        );
+        assert_eq!(rendered, "Glob src/**/*.rs");
+    }
+
+    #[test]
+    fn render_invocation_leaves_bare_primary_when_value_is_single_word() {
+        // Multi-word title but a single-word primary value: no ambiguity, no
+        // quoting needed.
+        let rendered = render_invocation_from_title_arguments(
+            "Spawn Subagent",
+            &[("label".to_string(), serde_json::json!("Refactor"))],
+        );
+        assert_eq!(rendered, "Spawn Subagent Refactor");
     }
 }

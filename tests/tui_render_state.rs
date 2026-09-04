@@ -889,6 +889,7 @@ fn expanded_tool_bubble_with_multiline_title_argument_stays_single_line_and_gets
                     ),
                     ("replace_all".to_string(), serde_json::json!(true)),
                 ],
+                progress_arguments: vec![],
             }),
             collapsed: false,
         }],

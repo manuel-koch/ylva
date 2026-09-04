@@ -735,6 +735,127 @@ async fn thinking_deltas_surface_separately_from_assistant_text() {
     ));
 }
 
+#[tokio::test(start_paused = true)]
+async fn stop_while_spawn_subagent_is_running_resolves_it_to_cancelled_tool_done() {
+    // Regression test for the ToolProgress redesign: `spawn_subagent`'s
+    // "running" acknowledgment is now a non-terminal `ToolProgress`, so a
+    // `Stop` command must still resolve the bubble to a real, terminal
+    // `ToolDone` (status=cancelled) instead of leaving it stuck mid-flight.
+    use tokio_util::sync::CancellationToken;
+    use ylva::child_agent_manager::{ChildAgentManager, SpawnFn};
+
+    let registry = Arc::new(default_registry(
+        make_sandbox(),
+        ToolRegistryConfig {
+            include_spawn_subagent: true,
+            auto_approve_spawn: true,
+            ..ToolRegistryConfig::default()
+        },
+    ));
+    let interval = Duration::from_millis(5);
+    let provider = MockProvider::with_script(
+        vec![call(
+            "spawn_subagent",
+            0,
+            serde_json::json!({ "label": "Do the thing", "task": "do the thing", "briefing": "context" }),
+        )],
+        interval,
+    );
+    let (mut agent, mut ui_rx) = AgentLoop::new(
+        Arc::new(EngineImpl::new(
+            Arc::new(provider),
+            common::test_engine_config(),
+        )),
+        Arc::clone(&registry),
+    );
+
+    let (finish_tx, finish_rx) = mpsc::channel(1);
+    let (subagent_ui_tx, subagent_ui_rx) = mpsc::channel(8);
+    // Never actually finishes on its own — only cancellation ends it, so the
+    // test can observe `Stop` resolving the bubble rather than a real finish.
+    let spawn_fn: SpawnFn = Box::new(move |_request, cancel: CancellationToken, _ui_tx| {
+        let handle = tokio::spawn(async move {
+            cancel.cancelled().await;
+        });
+        ylva::child_agent_manager::SpawnOutcome {
+            command_sender: None,
+            handle,
+        }
+    });
+    let manager = ChildAgentManager::new(subagent_ui_tx, spawn_fn);
+    agent = agent.with_child_agent_manager(manager, finish_rx, subagent_ui_rx);
+    drop(finish_tx);
+
+    agent
+        .send_command(AgentCommand::Prompt("delegate it".into()))
+        .await;
+    let handle = agent.run();
+    let _ = collect_until_advancing(&mut ui_rx, interval, is_stream_started).await;
+    let started = collect_until_advancing(&mut ui_rx, interval, |u| {
+        matches!(u, UiUpdate::ToolStart { .. })
+    })
+    .await;
+    assert!(
+        matches!(started.last(), Some(UiUpdate::ToolStart { name, .. }) if name == "spawn_subagent")
+    );
+
+    // The "running" acknowledgment now arrives as a non-terminal ToolProgress.
+    let progressed = collect_until_advancing(&mut ui_rx, interval, |u| {
+        matches!(u, UiUpdate::ToolProgress { .. })
+    })
+    .await;
+    assert!(progressed
+        .iter()
+        .any(|u| matches!(u, UiUpdate::ToolProgress { .. })));
+
+    agent
+        .send_command(AgentCommand::Stop {
+            reason: "aborted by user".into(),
+        })
+        .await;
+    let done = collect_until_advancing(
+        &mut ui_rx,
+        interval,
+        |u| matches!(u, UiUpdate::ToolDone { name, .. } if name == "spawn_subagent"),
+    )
+    .await;
+    let tool_done = done
+        .iter()
+        .find(|u| matches!(u, UiUpdate::ToolDone { name, .. } if name == "spawn_subagent"))
+        .expect("expected a spawn_subagent ToolDone after Stop");
+    match tool_done {
+        UiUpdate::ToolDone { summary, .. } => {
+            assert!(
+                summary
+                    .iter()
+                    .any(|(key, value)| key == "status" && value == "cancelled"),
+                "expected status=cancelled in the ToolDone summary, got: {summary:?}"
+            );
+        }
+        _ => unreachable!(),
+    }
+
+    // `spawn_subagent` resolves synchronously (unlike a real running tool
+    // task), so the loop may already be reprompting again by the time Stop
+    // lands — the mock provider script is deterministic and would keep
+    // re-issuing the same call forever. Force termination here rather than
+    // asserting quiescence.
+    drop(agent);
+    let context = handle.await.expect("loop ok").expect("context");
+    let saw_cancelled_notice = context.messages().iter().any(|message| {
+        matches!(
+            message,
+            Message::System { content }
+                if content.contains("spawn_subagent") && content.contains("cancelled")
+        )
+    });
+    assert!(
+        saw_cancelled_notice,
+        "expected a trailing system message announcing the cancelled spawn_subagent child, got: {:?}",
+        context.messages()
+    );
+}
+
 fn is_stream_started(update: &UiUpdate) -> bool {
     matches!(update, UiUpdate::StreamStarted)
 }
@@ -745,4 +866,62 @@ fn is_tool_pending(update: &UiUpdate) -> bool {
 
 fn is_tool_error(update: &UiUpdate) -> bool {
     matches!(update, UiUpdate::ToolError { .. })
+}
+
+#[tokio::test(start_paused = true)]
+async fn for_child_targeting_an_unknown_run_id_is_dropped_without_hanging_the_root() {
+    // Regression test for `AgentCommand::ForChild`'s "stale target" case: a
+    // command addressed to a `run_id` the root's `ChildAgentManager` doesn't
+    // recognize (already finished, or never existed) must be logged and
+    // dropped, not panic or silently wedge the root loop's `select!` — the
+    // root must stay fully responsive to its own, unrelated commands
+    // afterwards.
+    let registry = Arc::new(default_registry(
+        make_sandbox(),
+        ToolRegistryConfig::default(),
+    ));
+    let interval = Duration::from_millis(5);
+    let provider = MockProvider::with_script(vec![MockEvent::Text("hi there".into())], interval);
+    let (mut agent, mut ui_rx) = AgentLoop::new(
+        Arc::new(EngineImpl::new(
+            Arc::new(provider),
+            common::test_engine_config(),
+        )),
+        Arc::clone(&registry),
+    );
+
+    // No `ChildAgentManager` is wired at all, so this is the strongest form
+    // of "no live child recognizes this run_id".
+    let stray_run_id = uuid::Uuid::new_v4();
+    agent
+        .send_command(AgentCommand::ForChild {
+            run_id: stray_run_id,
+            command: Box::new(AgentCommand::ApproveTool { id: stray_run_id }),
+        })
+        .await;
+
+    let handle = agent.run();
+
+    // The root must still be able to run a completely ordinary prompt
+    // afterwards — if the stray `ForChild` had wedged the `select!` loop,
+    // this would hang forever instead of completing.
+    agent
+        .send_command(AgentCommand::Prompt("hello".into()))
+        .await;
+    let updates = collect_until_advancing(
+        &mut ui_rx,
+        interval,
+        |u| matches!(u, UiUpdate::AppendText(text) if text == "hi there"),
+    )
+    .await;
+    assert!(
+        updates
+            .iter()
+            .any(|u| matches!(u, UiUpdate::AppendText(text) if text == "hi there")),
+        "expected the root to still process an ordinary prompt after a stale \
+         ForChild, got: {updates:?}"
+    );
+
+    drop(agent);
+    handle.await.expect("loop ok").expect("context");
 }

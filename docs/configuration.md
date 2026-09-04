@@ -34,7 +34,7 @@ A profile groups engine selection and per-agent settings for a runtime session.
 | Field | Type | Description |
 |---|---|---|
 | `engine` | `Option<String>` | Override the engine for this agent type. When absent, `ProfileConfig::default_engine` is used. |
-| `allowed_tools` | `Option<Vec<String>>` | Restrict which tool names this agent may invoke. `None` allows all registered tools. Tool filtering is implemented in Phase 6. |
+| `allowed_tools` | `Option<Vec<String>>` | Restrict which tool names this agent may invoke. `None` falls back to the caller's flat default tool list (`AgentFactory::with_allowed_tools`, or `DEFAULT_CLI_TOOLS`/`DEFAULT_TUI_TOOLS` when unset). `Some(names)` is honored per `agent_type` by `AgentFactory::build`, so a distinct `agent_type` — including one used only for spawned children — can be restricted to a genuinely different tool set than the root or any other agent type. |
 | `timeout_secs` | `Option<u64>` | Maximum wall-clock seconds before the agent is cancelled. `None` means no timeout. |
 | `persona` | `Option<String>` | Optional persona instruction prepended to the system prompt. |
-| `can_spawn` | `bool` | When `true` the agent is permitted to spawn child agents via `AgentFactory::create` with `Role::Child`. Checked in Phase 6. |
+| `can_spawn` | `bool` | When `true` (and this is a `Role::Root` agent), `AgentFactory::create` registers the `spawn_subagent` tool and wires a `ChildAgentManager` so this agent may delegate self-contained tasks to a concurrently-running `Role::Child` agent (one level deep; children cannot spawn further children). Use `--auto-approve-spawn` to skip the human-approval prompt for `spawn_subagent` calls. See "Child-agent delegation" in `docs/features.md`. |

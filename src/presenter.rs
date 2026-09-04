@@ -795,7 +795,10 @@ fn route_mouse(
 // ─── Domain routing ───────────────────────────────────────────────────────────
 
 fn route_domain(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
-    match state.mode.clone() {
+    let event_kind = event.kind();
+    let correlation_id = event.correlation_id();
+    let mode_before = state.mode.kind();
+    let effects = match state.mode.clone() {
         TuiMode::Idle => domain_idle(state, event),
         TuiMode::Pending => domain_pending(state, event),
         TuiMode::Streaming => domain_streaming(state, event),
@@ -806,7 +809,20 @@ fn route_domain(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             return_to,
             armed_by,
         } => domain_double_press(state, event, pressed_at, return_to, armed_by),
-    }
+    };
+    // Deliberately logs only the event's variant tag, its correlation `id`
+    // (when it has one), and the mode transition — never chunk text, tool
+    // arguments, or tool output — just enough to follow the state-transition
+    // flow and match up a call's `ToolStart`/`ToolProgress`/`ToolDone` (or
+    // `ClarifyPending`) sequence across log lines.
+    tracing::debug!(
+        event = event_kind,
+        correlation_id = ?correlation_id,
+        mode_before,
+        mode_after = state.mode.kind(),
+        "domain event handled"
+    );
+    effects
 }
 
 fn domain_idle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
@@ -865,6 +881,7 @@ fn domain_idle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
                         "question".to_string(),
                         serde_json::Value::String(question.clone()),
                     )],
+                    progress_arguments: vec![],
                 }),
                 collapsed: false,
             });
@@ -914,6 +931,13 @@ fn domain_idle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
                 content_sections,
                 title_arguments,
             );
+            vec![]
+        }
+        DomainEvent::ToolProgress {
+            id,
+            title_arguments,
+        } => {
+            update_tool_bubble_progress(state, id, title_arguments);
             vec![]
         }
         DomainEvent::ToolDone {
@@ -1028,6 +1052,7 @@ fn domain_pending(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
                         "question".to_string(),
                         serde_json::Value::String(question.clone()),
                     )],
+                    progress_arguments: vec![],
                 }),
                 collapsed: false,
             });
@@ -1072,6 +1097,13 @@ fn domain_pending(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
                 content_sections,
                 title_arguments,
             );
+            vec![]
+        }
+        DomainEvent::ToolProgress {
+            id,
+            title_arguments,
+        } => {
+            update_tool_bubble_progress(state, id, title_arguments);
             vec![]
         }
         DomainEvent::ToolDone {
@@ -1209,6 +1241,7 @@ fn domain_streaming(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
                         "question".to_string(),
                         serde_json::Value::String(question.clone()),
                     )],
+                    progress_arguments: vec![],
                 }),
                 collapsed: false,
             });
@@ -1239,6 +1272,13 @@ fn domain_streaming(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
                 content_sections,
                 title_arguments,
             );
+            vec![]
+        }
+        DomainEvent::ToolProgress {
+            id,
+            title_arguments,
+        } => {
+            update_tool_bubble_progress(state, id, title_arguments);
             vec![]
         }
         DomainEvent::ToolDone {
@@ -1362,6 +1402,13 @@ fn domain_aborting(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             );
             vec![]
         }
+        DomainEvent::ToolProgress {
+            id,
+            title_arguments,
+        } => {
+            update_tool_bubble_progress(state, id, title_arguments);
+            vec![]
+        }
         DomainEvent::ToolDone {
             id,
             name,
@@ -1481,6 +1528,7 @@ fn update_tool_bubble_to_running(
                 arguments: arguments.clone(),
                 content_sections: content_sections.clone(),
                 title_arguments: title_arguments.clone(),
+                progress_arguments: vec![],
             };
         }
     } else {
@@ -1499,6 +1547,7 @@ fn update_tool_bubble_to_running(
                 arguments,
                 content_sections,
                 title_arguments,
+                progress_arguments: vec![],
             }),
             collapsed: true,
         });
@@ -1506,6 +1555,35 @@ fn update_tool_bubble_to_running(
     // Clear ToolApproval focus if it was for this tool.
     if matches!(state.focus, Focus::ToolApproval { tool_id, .. } if tool_id == id) {
         state.focus = Focus::MainInput;
+    }
+}
+
+/// Patches `progress_arguments` on an existing `Running` tool bubble without
+/// otherwise changing its state — used for interim status updates (e.g.
+/// `spawn_subagent` reporting `status=spawned`/`queued` + `run_id`) that
+/// don't mean the call itself is done. Deliberately separate from
+/// `title_arguments` (the call's real, static arguments): `Done` has no
+/// `progress_arguments` field, so these interim values are naturally
+/// dropped once the call truly finishes instead of lingering stale on the
+/// terminal bubble (see `ToolCallState::Running::progress_arguments`). A
+/// no-op if the bubble isn't found or isn't currently `Running` (e.g. it
+/// already reached a terminal state).
+fn update_tool_bubble_progress(
+    state: &mut AppState,
+    id: Uuid,
+    title_arguments: Vec<(String, serde_json::Value)>,
+) {
+    if let Some(ChatEntry::ToolBubble {
+        state: bubble_state,
+        ..
+    }) = state.find_tool_bubble_mut(id)
+    {
+        if let ToolCallState::Running {
+            progress_arguments, ..
+        } = bubble_state.as_mut()
+        {
+            *progress_arguments = title_arguments;
+        }
     }
 }
 
@@ -1615,6 +1693,7 @@ fn update_tool_bubble_to_denied(state: &mut AppState, id: Uuid) {
                     arguments,
                     content_sections,
                     title_arguments,
+                    ..
                 } => (
                     arguments.clone(),
                     content_sections.clone(),
@@ -1678,6 +1757,65 @@ mod tests {
             cursor_row: 0,
             cursor_row_is_last: true,
         }
+    }
+
+    #[test]
+    fn route_domain_logs_event_kind_and_mode_transition_without_chunk_text() {
+        let log = crate::test_support::capture_logs(async {
+            let mut state = AppState::new();
+            state.mode = TuiMode::Streaming;
+            update(
+                &mut state,
+                TuiEvent::Domain(DomainEvent::StreamChunk(
+                    "super-secret-assistant-text".to_string(),
+                )),
+                &empty_textarea(),
+            );
+        });
+        assert!(
+            log.contains("domain event handled"),
+            "route_domain must log a state-transition event: {log}"
+        );
+        assert!(
+            log.contains("event=\"StreamChunk\""),
+            "the event's variant tag must be logged: {log}"
+        );
+        assert!(
+            log.contains("mode_before=\"Streaming\"") && log.contains("mode_after=\"Streaming\""),
+            "the mode transition must be logged: {log}"
+        );
+        assert!(
+            !log.contains("super-secret-assistant-text"),
+            "chunk payload text must never be logged: {log}"
+        );
+    }
+
+    #[test]
+    fn route_domain_logs_correlation_id_for_tool_events() {
+        let id = Uuid::new_v4();
+        let log = crate::test_support::capture_logs(async {
+            let mut state = AppState::new();
+            state.mode = TuiMode::Streaming;
+            update(
+                &mut state,
+                TuiEvent::Domain(DomainEvent::ToolStart {
+                    id,
+                    name: "read".to_string(),
+                    arguments: serde_json::json!({"path": "/secret/path"}),
+                    content_sections: vec![],
+                    title_arguments: vec![],
+                }),
+                &empty_textarea(),
+            );
+        });
+        assert!(
+            log.contains(&format!("correlation_id=Some({id})")),
+            "the tool call's id must be logged for correlation: {log}"
+        );
+        assert!(
+            !log.contains("/secret/path"),
+            "tool arguments must never be logged: {log}"
+        );
     }
 
     fn key_event(code: KeyCode) -> crossterm::event::KeyEvent {
@@ -2698,6 +2836,214 @@ mod tests {
             &state.chat_entries[1],
             ChatEntry::ToolBubble { id, .. } if *id == tool_id
         ));
+    }
+
+    #[test]
+    fn domain_tool_progress_patches_progress_arguments_on_running_bubble() {
+        // `ToolProgress` is an interim status update (e.g. `spawn_subagent`
+        // reporting status=spawned/queued) — it must patch `progress_arguments`
+        // on the existing `Running` bubble (not `title_arguments`, which stays
+        // the call's real, static arguments) without transitioning it to a
+        // terminal state (spinner keeps going, content sections untouched).
+        let mut state = AppState::new();
+        state.mode = TuiMode::Streaming;
+        let tool_id = Uuid::new_v4();
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolStart {
+                id: tool_id,
+                name: "spawn_subagent".to_string(),
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![(
+                    "label".to_string(),
+                    serde_json::json!("Refactor auth token validation"),
+                )],
+            }),
+            &empty_textarea(),
+        );
+
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolProgress {
+                id: tool_id,
+                title_arguments: vec![
+                    ("status".to_string(), serde_json::json!("running")),
+                    ("run_id".to_string(), serde_json::json!("abc-123")),
+                ],
+            }),
+            &empty_textarea(),
+        );
+
+        let entry = state
+            .chat_entries
+            .iter()
+            .find(|entry| matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == tool_id))
+            .expect("tool bubble should still exist");
+        match entry {
+            ChatEntry::ToolBubble { state: bubble, .. } => match bubble.as_ref() {
+                ToolCallState::Running {
+                    title_arguments,
+                    progress_arguments,
+                    ..
+                } => {
+                    assert_eq!(
+                        title_arguments,
+                        &vec![(
+                            "label".to_string(),
+                            serde_json::json!("Refactor auth token validation")
+                        )],
+                        "the call's real title_arguments must be untouched by ToolProgress"
+                    );
+                    assert_eq!(
+                        progress_arguments,
+                        &vec![
+                            ("status".to_string(), serde_json::json!("running")),
+                            ("run_id".to_string(), serde_json::json!("abc-123")),
+                        ]
+                    );
+                }
+                other => panic!("expected the bubble to remain Running, got: {other:?}"),
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn domain_tool_done_does_not_inherit_stale_progress_arguments() {
+        // Regression test: once ToolDone arrives, any interim
+        // `progress_arguments` (e.g. status=spawned/run_id=...) must not
+        // linger in the terminal bubble — only the call's real
+        // `title_arguments` (e.g. `label`) survive, and the final status
+        // comes solely from `summary`.
+        let mut state = AppState::new();
+        state.mode = TuiMode::Streaming;
+        let tool_id = Uuid::new_v4();
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolStart {
+                id: tool_id,
+                name: "spawn_subagent".to_string(),
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![(
+                    "label".to_string(),
+                    serde_json::json!("Refactor auth token validation"),
+                )],
+            }),
+            &empty_textarea(),
+        );
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolProgress {
+                id: tool_id,
+                title_arguments: vec![
+                    ("status".to_string(), serde_json::json!("running")),
+                    ("run_id".to_string(), serde_json::json!("abc-123")),
+                ],
+            }),
+            &empty_textarea(),
+        );
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolDone {
+                id: tool_id,
+                name: "spawn_subagent".to_string(),
+                result_section: crate::tui_reducer_state::ResultSection::plain(String::new()),
+                content_sections: vec![],
+                summary: vec![("status".to_string(), "unstructured".to_string())],
+                duration: std::time::Duration::from_millis(1500),
+            }),
+            &empty_textarea(),
+        );
+
+        let entry = state
+            .chat_entries
+            .iter()
+            .find(|entry| matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == tool_id))
+            .expect("tool bubble should still exist");
+        match entry {
+            ChatEntry::ToolBubble { state: bubble, .. } => match bubble.as_ref() {
+                ToolCallState::Done {
+                    title_arguments,
+                    summary,
+                    duration,
+                    ..
+                } => {
+                    assert_eq!(
+                        title_arguments,
+                        &vec![(
+                            "label".to_string(),
+                            serde_json::json!("Refactor auth token validation")
+                        )],
+                        "the stale spawned/run_id progress values must not leak into Done"
+                    );
+                    assert_eq!(
+                        summary,
+                        &vec![("status".to_string(), "unstructured".to_string())]
+                    );
+                    assert_eq!(*duration, std::time::Duration::from_millis(1500));
+                }
+                other => panic!("expected the bubble to be Done, got: {other:?}"),
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn domain_tool_progress_is_a_no_op_when_bubble_is_not_running() {
+        // Once a bubble reached a terminal state, a stray/late ToolProgress
+        // must not resurrect or otherwise mutate it.
+        let mut state = AppState::new();
+        state.mode = TuiMode::Streaming;
+        let tool_id = Uuid::new_v4();
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolStart {
+                id: tool_id,
+                name: "spawn_subagent".to_string(),
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+            }),
+            &empty_textarea(),
+        );
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolDone {
+                id: tool_id,
+                name: "spawn_subagent".to_string(),
+                result_section: crate::tui_reducer_state::ResultSection::plain(String::new()),
+                content_sections: vec![],
+                summary: vec![("status".to_string(), "success".to_string())],
+                duration: std::time::Duration::ZERO,
+            }),
+            &empty_textarea(),
+        );
+
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolProgress {
+                id: tool_id,
+                title_arguments: vec![("status".to_string(), serde_json::json!("running"))],
+            }),
+            &empty_textarea(),
+        );
+
+        let entry = state
+            .chat_entries
+            .iter()
+            .find(|entry| matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == tool_id))
+            .expect("tool bubble should still exist");
+        match entry {
+            ChatEntry::ToolBubble { state: bubble, .. } => {
+                assert!(
+                    matches!(bubble.as_ref(), ToolCallState::Done { .. }),
+                    "a late ToolProgress must not move the bubble out of Done, got: {bubble:?}"
+                );
+            }
+            _ => unreachable!(),
+        }
     }
 
     #[test]

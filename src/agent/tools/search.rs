@@ -322,6 +322,10 @@ impl Tool for SearchTool {
         schema_for!(SearchInputArgs)
     }
 
+    fn path_like_arguments(&self) -> &'static [&'static str] {
+        &["path"]
+    }
+
     fn needs_approval(&self, arguments: &Value) -> ApprovalCheck {
         match arguments.get("path").and_then(|v| v.as_str()) {
             Some(path_str) if !path_str.is_empty() => {

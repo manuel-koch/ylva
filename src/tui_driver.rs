@@ -104,6 +104,46 @@ pub enum ActionOutcome {
     Quit,
 }
 
+/// Driver-local tracking of which child agent (if any) raised each pending
+/// tool/clarify approval. The Presenter/`AppState`/`Effect` surface stays
+/// agent-agnostic (an `Effect::ApproveTool { id }` carries no `run_id`); this
+/// struct is threaded separately through the Driver alongside `AppState` so
+/// the resulting `AgentCommand` can still be routed correctly.
+///
+/// - `tool_run_ids` maps a pending tool call's `id` (as carried on
+///   `UiUpdate::ToolPending`/`Effect::ApproveTool`/`Effect::DenyTool`) to the
+///   child's `run_id` that raised it. Populated in `process_one_update` when
+///   a `ToolPending` update carries `Some(run_id)`; consumed (removed) in
+///   `execute_effects` when the corresponding `ApproveTool`/`DenyTool` effect
+///   fires. A missing key means "root's own pending tool" — same meaning as
+///   `run_id: None` on the originating `UiUpdate`.
+/// - `clarify_run_id` tracks the *current* pending clarify's `run_id`
+///   separately, because `Effect::AnswerClarify`/`Effect::AbortClarify`
+///   carry no `id` at all (unlike `ApproveTool`/`DenyTool`) — the Presenter
+///   already resets `AppState::mode` out of `ClarifyPending` in the same
+///   `presenter::update` call that produces these effects, so the id can't
+///   be recovered from `state.mode` by the time `execute_effects` runs. Set
+///   in `process_one_update` from `UiUpdate::ClarifyPending::run_id`; taken
+///   (cleared) in `execute_effects` when `AnswerClarify`/`AbortClarify` fires.
+#[derive(Debug, Default)]
+struct PendingRunIds {
+    tool_run_ids: std::collections::HashMap<uuid::Uuid, uuid::Uuid>,
+    clarify_run_id: Option<uuid::Uuid>,
+}
+
+/// Wraps `command` in `AgentCommand::ForChild { run_id, .. }` when `run_id`
+/// is `Some`; otherwise returns `command` unchanged, exactly as sent today
+/// for the root's own pending items.
+fn route_command(run_id: Option<uuid::Uuid>, command: AgentCommand) -> AgentCommand {
+    match run_id {
+        Some(run_id) => AgentCommand::ForChild {
+            run_id,
+            command: Box::new(command),
+        },
+        None => command,
+    }
+}
+
 /// Apply the standard Ylva textarea configuration: word-or-glyph wrapping and
 /// no cursor-line underline decoration.
 fn configure_textarea(textarea: &mut TextArea<'_>) {
@@ -143,6 +183,7 @@ fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
             arguments,
             content_sections,
             title_arguments,
+            run_id: _,
         } => Some(DomainEvent::ToolPending {
             id: *id,
             name: name.clone(),
@@ -155,6 +196,7 @@ fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
             question,
             context,
             choices,
+            run_id: _,
         } => Some(DomainEvent::ClarifyPending {
             id: *id,
             question: question.clone(),
@@ -173,6 +215,13 @@ fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
             name: name.clone(),
             arguments: arguments.clone(),
             content_sections: content_sections.clone(),
+            title_arguments: title_arguments.clone(),
+        }),
+        UiUpdate::ToolProgress {
+            id,
+            title_arguments,
+        } => Some(DomainEvent::ToolProgress {
+            id: *id,
             title_arguments: title_arguments.clone(),
         }),
         UiUpdate::ToolDone {
@@ -208,6 +257,7 @@ async fn execute_effects(
     effects: Vec<Effect>,
     mouse_drag: &mut MouseDrag,
     clipboard: &mut dyn ClipboardSink,
+    pending_run_ids: &mut PendingRunIds,
 ) -> ActionOutcome {
     for effect in effects {
         match effect {
@@ -265,17 +315,22 @@ async fn execute_effects(
                 }
             }
             Effect::ApproveTool { id } => {
-                let _ = cmd_tx.try_send(AgentCommand::ApproveTool { id });
+                let run_id = pending_run_ids.tool_run_ids.remove(&id);
+                let _ = cmd_tx.try_send(route_command(run_id, AgentCommand::ApproveTool { id }));
             }
             Effect::DenyTool { id, reason } => {
                 state.apply_tool_denied(id, &reason);
-                let _ = cmd_tx.try_send(AgentCommand::DenyTool { id, reason });
+                let run_id = pending_run_ids.tool_run_ids.remove(&id);
+                let _ =
+                    cmd_tx.try_send(route_command(run_id, AgentCommand::DenyTool { id, reason }));
             }
             Effect::AnswerClarify(answer) => {
-                let _ = cmd_tx.try_send(AgentCommand::AnswerClarify(answer));
+                let run_id = pending_run_ids.clarify_run_id.take();
+                let _ = cmd_tx.try_send(route_command(run_id, AgentCommand::AnswerClarify(answer)));
             }
             Effect::AbortClarify => {
-                let _ = cmd_tx.try_send(AgentCommand::AbortClarify);
+                let run_id = pending_run_ids.clarify_run_id.take();
+                let _ = cmd_tx.try_send(route_command(run_id, AgentCommand::AbortClarify));
             }
             Effect::StopAgent => {
                 let _ = cmd_tx.try_send(AgentCommand::Stop {
@@ -344,6 +399,7 @@ async fn execute_effects(
 
 /// Process one [`UiUpdate`]: convert to a [`DomainEvent`] (or handle directly
 /// for `ToolError`) and run the resulting effects.
+#[allow(clippy::too_many_arguments)]
 async fn process_one_update(
     state: &mut AppState,
     textarea: &mut TextArea<'_>,
@@ -352,6 +408,7 @@ async fn process_one_update(
     update: &UiUpdate,
     mouse_drag: &mut MouseDrag,
     clipboard: &mut dyn ClipboardSink,
+    pending_run_ids: &mut PendingRunIds,
 ) -> ActionOutcome {
     if let UiUpdate::ToolError {
         id,
@@ -381,9 +438,32 @@ async fn process_one_update(
         );
         return ActionOutcome::Continue;
     }
+    // Record which child (if any) raised this pending approval *before*
+    // converting to the agent-agnostic `DomainEvent`/`Effect` surface — see
+    // `PendingRunIds`.
+    if let UiUpdate::ToolPending {
+        id,
+        run_id: Some(run_id),
+        ..
+    } = update
+    {
+        pending_run_ids.tool_run_ids.insert(*id, *run_id);
+    }
+    if let UiUpdate::ClarifyPending { run_id, .. } = update {
+        pending_run_ids.clarify_run_id = *run_id;
+    }
     if let Some(domain_event) = ui_update_to_domain_event(update) {
         let effects = presenter::update(state, TuiEvent::Domain(domain_event), textarea_ctx);
-        execute_effects(state, textarea, cmd_tx, effects, mouse_drag, clipboard).await
+        execute_effects(
+            state,
+            textarea,
+            cmd_tx,
+            effects,
+            mouse_drag,
+            clipboard,
+            pending_run_ids,
+        )
+        .await
     } else {
         ActionOutcome::Continue
     }
@@ -474,6 +554,7 @@ where
     // Driver-local tracking — not part of AppState.
     let mut mouse_pos: Option<(u16, u16)> = None;
     let mut mouse_drag = MouseDrag::default();
+    let mut pending_run_ids = PendingRunIds::default();
 
     let handle = agent.run();
 
@@ -544,6 +625,7 @@ where
                         presenter::update(&mut state, TuiEvent::Mouse(mouse), &textarea_ctx);
                     if execute_effects(
                         &mut state, &mut textarea, &cmd_tx, effects, &mut mouse_drag, clipboard,
+                        &mut pending_run_ids,
                     )
                     .await
                         == ActionOutcome::Quit
@@ -557,6 +639,7 @@ where
                 let effects = presenter::update(&mut state, event, &textarea_ctx);
                 if execute_effects(
                     &mut state, &mut textarea, &cmd_tx, effects, &mut mouse_drag, clipboard,
+                    &mut pending_run_ids,
                 )
                 .await
                     == ActionOutcome::Quit
@@ -570,7 +653,7 @@ where
 
                 if process_one_update(
                     &mut state, &mut textarea, &cmd_tx, &textarea_ctx, &update, &mut mouse_drag,
-                    clipboard,
+                    clipboard, &mut pending_run_ids,
                 )
                 .await
                     == ActionOutcome::Quit
@@ -584,7 +667,7 @@ where
                         Ok(next) => {
                             if process_one_update(
                                 &mut state, &mut textarea, &cmd_tx, &textarea_ctx,
-                                &next, &mut mouse_drag, clipboard,
+                                &next, &mut mouse_drag, clipboard, &mut pending_run_ids,
                             )
                             .await
                                 == ActionOutcome::Quit
@@ -609,6 +692,7 @@ where
                 );
                 execute_effects(
                     &mut state, &mut textarea, &cmd_tx, effects, &mut mouse_drag, clipboard,
+                    &mut pending_run_ids,
                 )
                 .await;
             }
@@ -966,6 +1050,7 @@ mod tests {
             effects,
             &mut MouseDrag::default(),
             &mut NoopClipboard,
+            &mut PendingRunIds::default(),
         )
         .await;
         assert_eq!(outcome, ActionOutcome::Quit);
@@ -987,6 +1072,7 @@ mod tests {
             effects,
             &mut MouseDrag::default(),
             &mut NoopClipboard,
+            &mut PendingRunIds::default(),
         )
         .await;
         assert_eq!(textarea.lines(), &[""]);
@@ -1008,6 +1094,7 @@ mod tests {
             effects,
             &mut MouseDrag::default(),
             &mut NoopClipboard,
+            &mut PendingRunIds::default(),
         )
         .await;
         assert_eq!(textarea.lines(), &[""]);
@@ -1034,6 +1121,7 @@ mod tests {
             effects2,
             &mut MouseDrag::default(),
             &mut NoopClipboard,
+            &mut PendingRunIds::default(),
         )
         .await;
         assert!(matches!(cmd_rx.try_recv(), Ok(AgentCommand::Stop { .. })));
@@ -1054,6 +1142,7 @@ mod tests {
             effects,
             &mut MouseDrag::default(),
             &mut NoopClipboard,
+            &mut PendingRunIds::default(),
         )
         .await;
         assert!(matches!(cmd_rx.try_recv(), Ok(AgentCommand::Stop { .. })));
@@ -1079,6 +1168,7 @@ mod tests {
             effects,
             &mut MouseDrag::default(),
             &mut NoopClipboard,
+            &mut PendingRunIds::default(),
         )
         .await;
         assert_eq!(textarea.lines(), &[""]);
@@ -1109,6 +1199,7 @@ mod tests {
             effects,
             &mut MouseDrag::default(),
             &mut NoopClipboard,
+            &mut PendingRunIds::default(),
         )
         .await;
         assert!(matches!(state.focus, Focus::ToolApproval { .. }));
@@ -1126,6 +1217,7 @@ mod tests {
             effects,
             &mut MouseDrag::default(),
             &mut NoopClipboard,
+            &mut PendingRunIds::default(),
         )
         .await;
         assert_eq!(
@@ -1160,6 +1252,7 @@ mod tests {
             setup_effects,
             &mut MouseDrag::default(),
             &mut NoopClipboard,
+            &mut PendingRunIds::default(),
         )
         .await;
 
@@ -1177,6 +1270,7 @@ mod tests {
             effects,
             &mut MouseDrag::default(),
             &mut NoopClipboard,
+            &mut PendingRunIds::default(),
         )
         .await;
         assert!(matches!(state.focus, Focus::MainInput));
@@ -1209,6 +1303,7 @@ mod tests {
             setup_effects,
             &mut MouseDrag::default(),
             &mut NoopClipboard,
+            &mut PendingRunIds::default(),
         )
         .await;
 
@@ -1225,6 +1320,7 @@ mod tests {
             effects,
             &mut MouseDrag::default(),
             &mut NoopClipboard,
+            &mut PendingRunIds::default(),
         )
         .await;
         assert!(matches!(state.focus, Focus::MainInput));
@@ -1261,6 +1357,7 @@ mod tests {
             setup_effects,
             &mut MouseDrag::default(),
             &mut NoopClipboard,
+            &mut PendingRunIds::default(),
         )
         .await;
         assert_eq!(
@@ -1277,6 +1374,7 @@ mod tests {
             vec![Effect::RestoreTextarea],
             &mut MouseDrag::default(),
             &mut NoopClipboard,
+            &mut PendingRunIds::default(),
         )
         .await;
         assert_eq!(textarea.lines(), &["hello world"]);

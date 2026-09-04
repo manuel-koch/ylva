@@ -40,9 +40,9 @@ against.
 | `OLLAMA_BASE_URL` | — | Base URL of the Ollama server. A non-empty value selects the Ollama backend. |
 | `OLLAMA_MODEL` | `gemma4:e4b-mlx` | Ollama model. |
 | `OLLAMA_API_KEY` | — | Optional Ollama API key. |
-| `OPENROUTER_BASE_URL` | — | OpenRouter base URL. Used only when no `OLLAMA_BASE_URL` is set. |
+| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | OpenRouter base URL. Used only when no `OLLAMA_BASE_URL` is set. Unlike Ollama, OpenRouter is a single hosted service, so this has a working default and never has to be set manually. |
 | `OPENROUTER_MODEL` | `deepseek/deepseek-v4-flash-0731` | OpenRouter model. |
-| `OPENROUTER_API_KEY` | — | OpenRouter API key. |
+| `OPENROUTER_API_KEY` | — | OpenRouter API key. Setting `OPENROUTER_API_KEY` (or `OPENROUTER_MODEL`) alone, with no `OLLAMA_BASE_URL` set, is enough to select the OpenRouter backend — `OPENROUTER_BASE_URL` does not need to be exported. |
 
 ### Debug
 

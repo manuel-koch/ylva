@@ -16,6 +16,7 @@ pub mod agent;
 pub mod agent_factory;
 pub mod app;
 pub mod build_info;
+pub mod child_agent_manager;
 pub mod cli_driver;
 pub mod config;
 pub mod engine;
@@ -42,14 +43,15 @@ pub use agent::tools::{
     DEFAULT_CLI_TOOLS, DEFAULT_TUI_TOOLS,
 };
 pub use agent::{
-    AgentCommand, AgentEvent, AgentLoop, AgentMode, AssembledToolCall, AssistantStatus, Context,
-    DeltaChunk, Message, PendingTool, Role, StreamEvent, ToolCallRequest, UiUpdate,
-    UserMessageKind, DEFAULT_SYSTEM_PROMPT, DEFAULT_TOOL_TIMEOUT_SECS, MAX_TOOL_USE_ITERATIONS,
-    TOOL_PROTOCOL_SYSTEM_PROMPT,
+    AgentCommand, AgentEvent, AgentLoop, AgentMode, AssembledToolCall, AssistantStatus,
+    ChildRoleConfig, Context, DeltaChunk, Message, PendingTool, Role, StreamEvent, ToolCallRequest,
+    UiUpdate, UserMessageKind, DEFAULT_SYSTEM_PROMPT, DEFAULT_TOOL_TIMEOUT_SECS,
+    MAX_TOOL_USE_ITERATIONS, TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
 pub use agent_factory::AgentFactory;
 pub use app::App;
 pub use build_info::{BuildInfo, BUILD_INFO};
+pub use child_agent_manager::{ChildAgentManager, FinishResult, SpawnRequest, SpawnStatus};
 pub use cli_driver::{run_cli, run_cli_to, ConsoleApp};
 pub use config::{AgentConfig, ProfileConfig};
 pub use engine::{Engine, EngineConfig, EngineImpl, DEFAULT_CONTEXT_LENGTH};

@@ -1484,7 +1484,7 @@ The child is a fully independent ReAct agent with:
 - Its own `CancellationToken` (linked to the parent's tool cancel)
 - Its own `subagent_ui_tx` channel for live updates to the TUI sidebar
 
-When the child finishes (via `finish` tool, timeout, or user cancellation),
+When the child finishes (via `agent_finish` tool, timeout, or user cancellation),
 it sends `AgentEvent::ToolDone` back to the root agent loop via `agent_rx`.
 The root loop appends the result to its own `Context` and re-prompts.
 
@@ -1783,12 +1783,12 @@ child agents as well.
    process `Prompt` (steering) and `Stop` commands from the user. The child
    and root run concurrently. If the root LLM produces new tokens while the
    child is working, both appear in the TUI (main chat + sidebar panel).
-4. **Finish:** the child must call a special `finish` tool to return its
-   result. The `finish` schema is:
+4. **Finish:** the child must call a special `agent_finish` tool to return its
+   result. The `agent_finish` schema is:
 
    ```rust
    #[derive(JsonSchema, Deserialize)]
-   struct FinishArgs {
+   struct AgentFinishArgs {
        status: String, // "success" | "error"
        result: String,
        #[serde(default)]
@@ -1798,8 +1798,8 @@ child agents as well.
    }
    ```
 
-   The `finish` call is **exempt** from the iteration cap; it is the natural
-   termination state. If the child never calls `finish` (timeout, max
+   The `agent_finish` call is **exempt** from the iteration cap; it is the natural
+   termination state. If the child never calls `agent_finish` (timeout, max
    iterations, or user abort), the system extracts the last assistant message as
    raw text, wraps it in a synthetic `{"status": "unstructured", "result": "..."}`
    object, and returns that to the parent.
@@ -2030,7 +2030,7 @@ stored.
      own `<sub-session>.jsonl` (same `project_key`, own `meta` header with an
      auto-title = child-agent `task`). Not streamed live.
    - Rationale: child agents are short and loss-tolerant (their result is already
-     summarized into the parent context by `finish`); avoiding a second live
+     summarized into the parent context by `agent_finish`); avoiding a second live
      flocked append stream per child agent keeps the machinery simple. A
      mid-run killed child agent loses only its reasoning transcript; its start
      line still marks that a run occurred.
@@ -2374,8 +2374,11 @@ top of a proven agent loop.
       base 1 s, max 30 s, jitter, honoring `Retry-After`; never retry mid-stream (§4A).
 
 - [x] **Demo wiring (Phase 2, no CLI/config):** `main.rs` selects the provider from env vars with
-      **Ollama-first** precedence — `OLLAMA_BASE_URL`/`OLLAMA_MODEL`/`OLLAMA_API_KEY`, then
-      `OPENROUTER_BASE_URL`/`OPENROUTER_MODEL`/`OPENROUTER_API_KEY`, else fall back to `MockProvider`.
+      **Ollama-first** precedence — a non-empty `OLLAMA_BASE_URL` (+ optional `OLLAMA_MODEL`/
+      `OLLAMA_API_KEY`) selects Ollama; otherwise any of `OPENROUTER_BASE_URL`/`OPENROUTER_MODEL`/
+      `OPENROUTER_API_KEY` being set selects OpenRouter, defaulting `OPENROUTER_BASE_URL` to
+      `https://openrouter.ai/api/v1` when unset (OpenRouter is a single hosted service, unlike
+      Ollama's arbitrary host); else fall back to `MockProvider`.
 
 - [x] No TUI yet. Still stdout/stderr only.
 
@@ -2648,7 +2651,8 @@ See reducer-state-handling-plan.md.
 
 - [ ] `ChildAgentManager` that owns child-agent lifecycle (spawn, timeout, cancel via `CancellationToken`)
 
-- [ ] `finish` tool available only inside child-agent runs; fallback to unstructured text if never called
+- [ ] `agent_finish` tool available only inside child-agent runs; fallback to unstructured
+      text if never called
 
 - [ ] Child-agent persistence records (`child_start` / `child_result`) with parent session linkage (§4H)
 
@@ -2913,7 +2917,7 @@ where they are documented in the body of this document.
 | **Child-agent nesting**         | Forbidden; one level only (structural: `Child` role strips `spawn_subagent`)                                                                                                                   | §4G Agent Types & Delegation                  |
 | **Child-agent execution**       | One child at a time; runs **in parallel** with the root agent, which never blocks                                                                                                               | §4G Agent Types & Delegation                  |
 | **Child-agent steering**        | Root steer queues and injects at the next natural point; child finishes naturally in the background                                                                                            | §4G Agent Types & Delegation                  |
-| **Child-agent result**          | Tool-based `finish` with unstructured fallback                                                                                                                                                | §4G Child-Agent Lifecycle                    |
+| **Child-agent result**          | Tool-based `agent_finish` with unstructured fallback                                                                                                                                                | §4G Child-Agent Lifecycle                    |
 | **Agent-type tools**            | Global agent files define whitelist; profiles can override                                                                                                                                      | §4G Agent-Type File Formats                  |
 | **Agent-type config format**    | `.toml` flat or `.md` with TOML frontmatter (body = system_prompt)                                                                                                                              | §4G Agent-Type File Formats                   |
 | **Child-agent safety**          | Inherits parent safety settings                                                                                                                                                                | §4G Safety Inheritance                        |

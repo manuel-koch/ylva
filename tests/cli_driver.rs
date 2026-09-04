@@ -304,3 +304,397 @@ async fn run_cli_denies_write_and_fed_back_as_error() {
     assert!(output.contains("denied"), "output: {output}");
     // error line is suppressed when the denial was already shown at ToolPending
 }
+
+#[tokio::test]
+async fn run_cli_waits_for_spawned_child_before_ending_conversation() {
+    use tokio_util::sync::CancellationToken;
+    use ylva::child_agent_manager::SpawnFn;
+    use ylva::{ChildAgentManager, FinishResult};
+
+    // Regression test: `spawn_subagent` resolves the parent's own turn
+    // (`StreamDone`) immediately, well before the child actually finishes.
+    // `run_cli_to` must not tear down the `AgentLoop` at that first
+    // `StreamDone` while a spawned child is still outstanding — otherwise
+    // the child's eventual `agent_finish` result is silently discarded.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider = Arc::new(MockProviderWithScript {
+        phase_one: vec![tool_call(
+            "spawn_subagent",
+            serde_json::json!({ "label": "Do it", "task": "do it" }),
+        )],
+        phase_two: vec![MockEvent::Text("delegated, wrapping up".into())],
+        interval: Duration::from_millis(1),
+        calls: Arc::clone(&calls),
+    });
+    let registry = Arc::new(default_registry(
+        std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new())),
+        ToolRegistryConfig {
+            include_spawn_subagent: true,
+            auto_approve_spawn: true,
+            ..ToolRegistryConfig::default()
+        },
+    ));
+    let mut output = Vec::new();
+    let engine = Arc::new(EngineImpl::new(provider, common::test_engine_config()));
+    let (mut agent, ui_rx) = AgentLoop::new(engine, Arc::clone(&registry));
+
+    let (finish_tx, finish_rx) = mpsc::channel(1);
+    let (subagent_ui_tx, subagent_ui_rx) = mpsc::channel(8);
+    // Finishes well after the parent's own turn ends, to reproduce the race
+    // the fix addresses.
+    let spawn_fn: SpawnFn = Box::new(move |request, cancel: CancellationToken, _ui_tx| {
+        let finish_tx = finish_tx.clone();
+        let handle = tokio::spawn(async move {
+            tokio::select! {
+                _ = cancel.cancelled() => {}
+                _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                    let _ = finish_tx
+                        .send(FinishResult {
+                            run_id: request.run_id,
+                            call_id: request.call_id,
+                            status: "success".to_string(),
+                            result: Some("child result payload".to_string()),
+                            error: None,
+                            sources: vec![],
+                        })
+                        .await;
+                }
+            }
+        });
+        ylva::child_agent_manager::SpawnOutcome {
+            command_sender: None,
+            handle,
+        }
+    });
+    let manager = ChildAgentManager::new(subagent_ui_tx, spawn_fn);
+    agent = agent.with_child_agent_manager(manager, finish_rx, subagent_ui_rx);
+
+    run_cli_to(
+        agent,
+        ui_rx,
+        registry,
+        "delegate it".to_string(),
+        &mut output,
+    )
+    .await
+    .expect("headless run succeeds");
+    let output = String::from_utf8(output).expect("utf8 output");
+
+    assert!(
+        output.contains("child result payload"),
+        "expected the child's result to be printed before the CLI exits, output: {output}"
+    );
+    // Regression check for the forced re-prompt: the mock provider is only
+    // called again once (call #2, the reprompt right after `spawn_subagent`
+    // resolves) if the root never reacts to the child's finish. A third call
+    // proves `AgentLoop` re-prompted the root LLM after the child's result
+    // landed in context (see the `finish_rx` arm's `mode == Idle` check).
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        3,
+        "expected a third provider call: the reprompt after the child's finish result, output: {output}"
+    );
+}
+
+/// A provider that returns a `spawn_subagent` tool call on its first `chat()`
+/// call, and plain text embedding the 1-based call index on every
+/// subsequent call (`"auto-reply-<n>"`). Used to distinguish, purely from
+/// printed output, which of several interleaved provider calls (shared by
+/// the root and its child, since [`ylva::AgentFactory`] resolves both
+/// against the same named engine) produced a given piece of text.
+struct CallCountingProvider {
+    calls: Arc<AtomicUsize>,
+}
+
+impl Provider for CallCountingProvider {
+    fn chat<'a>(
+        &'a self,
+        _messages: Vec<Message>,
+        _tools: Vec<ToolSchema>,
+        _cancel: CancellationToken,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        let call_index = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        Box::pin(async move {
+            let (tx, rx) = mpsc::channel(16);
+            tokio::spawn(async move {
+                if call_index == 1 {
+                    let _ = tx
+                        .send(StreamEvent::Delta(DeltaChunk {
+                            tool_call_index: 0,
+                            tool_call_id: None,
+                            function_name: Some("spawn_subagent".to_string()),
+                            arguments_fragment: Some(
+                                serde_json::json!({
+                                    "label": "Do it",
+                                    "task": "do it",
+                                })
+                                .to_string(),
+                            ),
+                        }))
+                        .await;
+                } else {
+                    let _ = tx
+                        .send(StreamEvent::Text(format!("auto-reply-{call_index}")))
+                        .await;
+                }
+                let _ = tx.send(StreamEvent::Done).await;
+            });
+            Ok(rx)
+        })
+    }
+
+    fn name(&self) -> &str {
+        "mock"
+    }
+
+    fn list_models(&self) -> futures::future::BoxFuture<'_, anyhow::Result<Vec<ylva::ModelInfo>>> {
+        Box::pin(async { Ok(vec![]) })
+    }
+}
+
+#[tokio::test]
+async fn console_app_reacts_to_child_finish_through_real_agent_factory_and_run_child() {
+    // Regression/end-to-end test: unlike
+    // `run_cli_waits_for_spawned_child_before_ending_conversation` (which
+    // wires a hand-rolled `SpawnFn`/`ChildAgentManager` directly onto
+    // `AgentLoop`), this test goes through the *real* production path:
+    // `ylva::AgentFactory::create` (the same call `ConsoleApp::run` makes)
+    // wiring a real `Role::Child` agent run via `run_child`
+    // (`src/agent_factory.rs`), including its `forward_task`/`child_loop`
+    // drain-on-drop cleanup. It exercises the "child never called
+    // `agent_finish`" unstructured-fallback path, since the mock child's
+    // reply here is plain text with no tool call.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider: Arc<dyn Provider> = Arc::new(CallCountingProvider {
+        calls: Arc::clone(&calls),
+    });
+    let engine: Arc<dyn ylva::Engine> =
+        Arc::new(EngineImpl::new(provider, common::test_engine_config()));
+
+    let profile = ylva::ProfileConfig {
+        default_engine: "default".to_string(),
+        compact_engine: None,
+        agents: std::collections::HashMap::from([(
+            "default".to_string(),
+            ylva::AgentConfig {
+                engine: None,
+                allowed_tools: None,
+                timeout_secs: None,
+                persona: None,
+                can_spawn: true,
+            },
+        )]),
+    };
+
+    let factory = ylva::AgentFactory::new(std::collections::HashMap::from([(
+        "default".to_string(),
+        engine,
+    )]))
+    .with_auto_approve_spawn();
+
+    let (agent, ui_rx) = factory
+        .create(&profile, "default", ylva::Role::Root)
+        .expect("factory creates root agent");
+
+    let registry = Arc::new(default_registry(
+        std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new())),
+        ToolRegistryConfig::default(),
+    ));
+
+    let mut output = Vec::new();
+    run_cli_to(
+        agent,
+        ui_rx,
+        registry,
+        "delegate it".to_string(),
+        &mut output,
+    )
+    .await
+    .expect("headless run succeeds");
+    let output = String::from_utf8(output).expect("utf8 output");
+
+    // Exactly 4 provider calls are causally required: #1 the root's
+    // `spawn_subagent` tool call; #2 the root's immediate reprompt once
+    // `spawn_subagent` resolves with `{"status":"running"}`; #3 the child's
+    // own (sole) turn, which never calls `agent_finish` so `run_child`
+    // sends an "unstructured" fallback `FinishResult`; #4 the root's
+    // reprompt once that fallback result lands in its context via the
+    // `finish_rx` arm. #4 can only be dispatched after #3 completes, so it
+    // is always the last call made, whichever of #2/#3 the scheduler
+    // happens to run first.
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        4,
+        "expected the root to react to the child's result with a 4th provider call, output: {output}"
+    );
+    assert!(
+        output.contains("auto-reply-4"),
+        "expected the root's post-finish reprompt reply to be printed, output: {output}"
+    );
+}
+
+/// A provider shared by a root agent and its spawned child (both resolved
+/// against the same named engine by `AgentFactory`), that tells the two
+/// apart by whether `agent_finish` appears in the tool schema list handed to
+/// `chat()` — only a `Role::Child` registry has that tool (see
+/// `AgentFactory::create`). Each side gets its own independent call counter,
+/// so the root and child scripts don't need to reason about which of them
+/// the scheduler happens to invoke first.
+struct RootAndChildProvider {
+    root_calls: Arc<AtomicUsize>,
+    child_calls: Arc<AtomicUsize>,
+}
+
+impl Provider for RootAndChildProvider {
+    fn chat<'a>(
+        &'a self,
+        _messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        _cancel: CancellationToken,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        let is_child = tools.iter().any(|tool| tool.name == "agent_finish");
+        let call_index = if is_child {
+            self.child_calls.fetch_add(1, Ordering::SeqCst) + 1
+        } else {
+            self.root_calls.fetch_add(1, Ordering::SeqCst) + 1
+        };
+        Box::pin(async move {
+            let (tx, rx) = mpsc::channel(16);
+            tokio::spawn(async move {
+                let event = match (is_child, call_index) {
+                    (false, 1) => StreamEvent::Delta(DeltaChunk {
+                        tool_call_index: 0,
+                        tool_call_id: None,
+                        function_name: Some("spawn_subagent".to_string()),
+                        arguments_fragment: Some(
+                            serde_json::json!({ "label": "Run a command", "task": "run echo hi" })
+                                .to_string(),
+                        ),
+                    }),
+                    (true, 1) => StreamEvent::Delta(DeltaChunk {
+                        tool_call_index: 0,
+                        tool_call_id: None,
+                        function_name: Some("bash".to_string()),
+                        arguments_fragment: Some(
+                            serde_json::json!({ "command": "echo hi" }).to_string(),
+                        ),
+                    }),
+                    (true, _) => StreamEvent::Delta(DeltaChunk {
+                        tool_call_index: 0,
+                        tool_call_id: None,
+                        function_name: Some("agent_finish".to_string()),
+                        arguments_fragment: Some(
+                            serde_json::json!({
+                                "status": "success",
+                                "result": "child result payload",
+                            })
+                            .to_string(),
+                        ),
+                    }),
+                    (false, _) => StreamEvent::Text(format!("root-reply-{call_index}")),
+                };
+                let _ = tx.send(event).await;
+                let _ = tx.send(StreamEvent::Done).await;
+            });
+            Ok(rx)
+        })
+    }
+
+    fn name(&self) -> &str {
+        "mock"
+    }
+
+    fn list_models(&self) -> futures::future::BoxFuture<'_, anyhow::Result<Vec<ylva::ModelInfo>>> {
+        Box::pin(async { Ok(vec![]) })
+    }
+}
+
+#[tokio::test]
+async fn spawned_child_bash_approval_is_routed_to_the_child_not_the_root() {
+    // Regression/end-to-end test for the original hang: a spawned child
+    // agent's own tool call (`bash`, `UserApprovalRequired`) must resolve
+    // against *that child's* pending queue when the driver answers it, not
+    // be silently dropped or (mis)applied to the root's queue — the latter
+    // is exactly how the original bug hung forever, since the child never
+    // saw an answer to its own `ToolPending` and the root had nothing
+    // pending to match the stray command against.
+    //
+    // `cli_driver::run_cli_to` always auto-denies `UserApprovalRequired`
+    // tools ("not supported in CLI mode"), but critically it must route
+    // that denial back to the *child* (via `AgentCommand::ForChild`,
+    // resolved through `ChildAgentManager::running_command_sender`) using
+    // the `run_id` stamped on the child's `UiUpdate::ToolPending`. If that
+    // routing were broken, the child would stay parked at `ToolPending`
+    // forever and the whole run would hang, reproducing the original bug.
+    let root_calls = Arc::new(AtomicUsize::new(0));
+    let child_calls = Arc::new(AtomicUsize::new(0));
+    let provider: Arc<dyn Provider> = Arc::new(RootAndChildProvider {
+        root_calls: Arc::clone(&root_calls),
+        child_calls: Arc::clone(&child_calls),
+    });
+    let engine: Arc<dyn ylva::Engine> =
+        Arc::new(EngineImpl::new(provider, common::test_engine_config()));
+
+    let profile = ylva::ProfileConfig {
+        default_engine: "default".to_string(),
+        compact_engine: None,
+        agents: std::collections::HashMap::from([(
+            "default".to_string(),
+            ylva::AgentConfig {
+                engine: None,
+                allowed_tools: None,
+                timeout_secs: None,
+                persona: None,
+                can_spawn: true,
+            },
+        )]),
+    };
+
+    let factory = ylva::AgentFactory::new(std::collections::HashMap::from([(
+        "default".to_string(),
+        engine,
+    )]))
+    .with_auto_approve_spawn();
+
+    let (agent, ui_rx) = factory
+        .create(&profile, "default", ylva::Role::Root)
+        .expect("factory creates root agent");
+
+    let registry = Arc::new(default_registry(
+        std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new())),
+        ToolRegistryConfig::default(),
+    ));
+
+    let mut output = Vec::new();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        run_cli_to(
+            agent,
+            ui_rx,
+            registry,
+            "delegate a command".to_string(),
+            &mut output,
+        ),
+    )
+    .await
+    .expect("run must not hang: the child's bash approval must be routed to it, not dropped")
+    .expect("headless run succeeds");
+    let output = String::from_utf8(output).expect("utf8 output");
+
+    assert!(
+        output.contains("not supported in CLI mode"),
+        "expected the child's bash call to surface an auto-denial, output: {output}"
+    );
+    assert!(
+        output.contains("child result payload"),
+        "expected the child to still report its result after the denied bash call \
+         (proving it wasn't stuck waiting for an approval that never reached it), \
+         output: {output}"
+    );
+    assert_eq!(
+        child_calls.load(Ordering::SeqCst),
+        2,
+        "expected exactly 2 child provider calls: the bash call, then agent_finish \
+         after the denial is fed back, output: {output}"
+    );
+}

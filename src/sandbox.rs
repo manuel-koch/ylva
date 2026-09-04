@@ -74,6 +74,41 @@ impl Sandbox {
     }
 }
 
+/// Collapse `path` to a form relative to `base` when `path` is absolute and
+/// falls inside `base`'s directory tree; returns `None` otherwise (`path` is
+/// already relative, or lies outside `base`).
+///
+/// Used by [`crate::agent::tools::ToolRegistry::create_call`] to rewrite
+/// absolute tool-call `path`/`pattern` arguments — some LLMs emit these even
+/// where a relative path would do just as well — to their cwd-relative form
+/// before dispatch, so both the executed argument and the on-screen
+/// tool-call rendering are short and workspace-portable. `base` is expected
+/// to be the process's actual current working directory, not necessarily a
+/// [`Sandbox`]'s configured `workspace_root`: relative paths in tool
+/// execution (e.g. `std::fs::read`) resolve against cwd, and the two need
+/// not coincide (e.g. in tests that point a sandbox at a tempdir without
+/// changing the process's cwd).
+///
+/// Symlinked prefixes (e.g. macOS `/var` → `/private/var`) are resolved the
+/// same way as [`SandboxContext::check_path`] before comparing against
+/// `base`. Works for glob patterns too: wildcard segments (`**`, `*.rs`) are
+/// treated as opaque path components and passed through unchanged in the
+/// returned tail.
+pub fn to_relative_path(path: &str, base: &Path) -> Option<String> {
+    let candidate = Path::new(path);
+    if !candidate.is_absolute() {
+        return None;
+    }
+    let base = std::fs::canonicalize(base).unwrap_or_else(|_| base.to_path_buf());
+    let normalized = SandboxContext::normalize(&base, candidate);
+    let effective = SandboxContext::canonicalize_best_effort(&normalized);
+    let relative = effective.strip_prefix(&base).ok()?;
+    if relative.as_os_str().is_empty() {
+        return None;
+    }
+    Some(relative.to_string_lossy().replace('\\', "/"))
+}
+
 impl Default for Sandbox {
     fn default() -> Self {
         Sandbox::new()
@@ -524,5 +559,53 @@ mod tests {
             None,
             "sandbox abstains for empty command"
         );
+    }
+
+    #[test]
+    fn to_relative_path_rewrites_absolute_path_inside_base() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(temporary_dir.path()).unwrap();
+        std::fs::create_dir_all(base.join("src")).unwrap();
+        let absolute = base.join("src/main.rs");
+
+        assert_eq!(
+            to_relative_path(absolute.to_str().unwrap(), &base),
+            Some("src/main.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn to_relative_path_rewrites_absolute_glob_pattern_inside_base() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(temporary_dir.path()).unwrap();
+        std::fs::create_dir_all(base.join("src")).unwrap();
+        let pattern = format!("{}/src/**/*.rs", base.display());
+
+        assert_eq!(
+            to_relative_path(&pattern, &base),
+            Some("src/**/*.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn to_relative_path_returns_none_for_relative_path() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        assert_eq!(to_relative_path("src/main.rs", temporary_dir.path()), None);
+    }
+
+    #[test]
+    fn to_relative_path_returns_none_for_path_outside_base() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let base = temporary_dir.path().join("workspace");
+        std::fs::create_dir_all(&base).unwrap();
+        let outside = temporary_dir.path().join("other/file.rs");
+        assert_eq!(to_relative_path(outside.to_str().unwrap(), &base), None);
+    }
+
+    #[test]
+    fn to_relative_path_returns_none_for_base_itself() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(temporary_dir.path()).unwrap();
+        assert_eq!(to_relative_path(base.to_str().unwrap(), &base), None);
     }
 }
