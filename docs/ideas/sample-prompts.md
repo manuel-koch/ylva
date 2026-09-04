@@ -8,7 +8,7 @@ make format lint test-coverage build-debug-and-run-with-logs
 
 ---
 
-Implement open tasks in section "Phase 6.5" of
+Implement open tasks in section "Phase 6.x" of
 docs/plans/phase6-terminal-superpowers.md
 
 Don't stage or commit anything in git!
@@ -164,7 +164,14 @@ Run `tests/e2e/heavy-output.bash`.
 
 ---
 
-Run the follow task in a subagent and let it report its findings back:
+Run the following task in a subagent and let it report its findings back:
+
+Analyze the `src/child_agent_manager.rs` functionality
+and write a 2-3 sentence summary of its implementation.
+
+---
+
+Run the following task in a subagent and let it report its findings back:
 
 Analyze the TUI functionality implemented in source code
 and list currently implemented features in a table with brief descriptions.

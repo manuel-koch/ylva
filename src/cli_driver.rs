@@ -535,7 +535,7 @@ pub async fn run_cli_to(
                 current_section = StreamSection::None;
                 writeln!(out, "[tool] auto-denied '{name}': {reason}")?;
             }
-            Some(UiUpdate::ToolKilled { id }) => {
+            Some(UiUpdate::ToolKilled { id, .. }) => {
                 writeln!(out, "[tool] killed")?;
                 if pending_spawn_call_ids.remove(&id) {
                     tracing::debug!(
@@ -586,6 +586,17 @@ pub async fn run_cli_to(
                 writeln!(out, "---[ Error ]---\n{error}")?;
                 response_finished = true;
             }
+            // Headless mode has no separate child transcript to render into
+            // (see drill-in conversation model, Phase 6.10, TUI-only): child
+            // tool events already arrive tagged with `run_id` and are
+            // rendered inline by the arms above, so only the child's own
+            // free-form text/thinking tokens and lifecycle markers are
+            // silently ignored here.
+            Some(
+                UiUpdate::ChildAgentStarted { .. }
+                | UiUpdate::ChildAgentToken(_)
+                | UiUpdate::ChildAgentDone { .. },
+            ) => {}
             None => response_finished = true,
         }
     }

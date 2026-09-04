@@ -124,7 +124,6 @@ pub struct ButtonAreas {
 ///
 /// `state` is taken mutably so the manual scroll offset can be clamped to the
 /// rendered content height (preventing silent over-scroll).
-#[allow(clippy::too_many_arguments)]
 pub fn draw(
     frame: &mut Frame,
     state: &mut TuiState,
@@ -132,7 +131,54 @@ pub fn draw(
     hint: Option<&str>,
     mouse_pos: Option<(u16, u16)>,
 ) -> Option<ButtonAreas> {
-    let area = frame.area();
+    let full_area = frame.area();
+    // Drill-in conversation model (Phase 6.10): while viewing a child
+    // conversation, reserve a header above the chat area that re-renders the
+    // real `spawn_subagent` tool bubble from the root conversation (same
+    // chrome, same collapsed/expanded state, same task/label/agent_type
+    // content) — so the drill-in view always shows exactly what the user
+    // clicked into, without a separately-maintained synthetic header text.
+    // Absent while viewing `Root`. A 1-char scrollbar column is reserved on
+    // the right (mirroring the chat area's own content/scrollbar split) and
+    // a separator row is rendered below it, mirroring the separator between
+    // the chat area and the input/footer panel — the header must not be
+    // visually mistaken for part of the scrollable conversation-list below.
+    let mut header_lines: Vec<Line<'static>> = Vec::new();
+    if let Some((bubble_id, name, bubble_state, collapsed)) = &state.child_view_bubble {
+        let header_row_width = full_area.width.saturating_sub(1) as usize;
+        let mut discarded_title_rows = Vec::new();
+        append_tool_bubble_lines(
+            &mut header_lines,
+            ToolBubbleArgs {
+                id: *bubble_id,
+                name,
+                state: bubble_state,
+                collapsed: *collapsed,
+                spinner_frame: state.spinner_frame,
+            },
+            &mut discarded_title_rows,
+            header_row_width.saturating_sub(4).max(1),
+            header_row_width,
+        );
+    }
+    let (header_area, area) = if header_lines.is_empty() {
+        (None, full_area)
+    } else {
+        // Cap the header at 40 % of the terminal, matching the clarify-banner
+        // convention, so an expanded bubble with a long result never crowds
+        // out the chat area entirely.
+        let max_header_height = (full_area.height * 40 / 100).max(1);
+        let header_height = (header_lines.len() as u16).min(max_header_height);
+        let [header_area, header_separator_area, rest] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(header_height),
+                Constraint::Length(1),
+                Constraint::Fill(1),
+            ])
+            .areas(full_area);
+        (Some((header_area, header_separator_area)), rest)
+    };
     // The input box grows to fit its (word-wrapped) content, capped at 1/3 of
     // the terminal height. Wrapped row count, not logical line count, drives
     // the height so long lines grow the box instead of scrolling it.
@@ -237,6 +283,57 @@ pub fn draw(
             )
         };
 
+    if let Some((header_area, header_separator_area)) = header_area {
+        let [header_content_area, header_scrollbar_area] = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Fill(1), Constraint::Length(1)])
+            .areas(header_area);
+        state.header_bubble_area = header_content_area;
+
+        let total_lines = header_lines.len();
+        let visible = header_content_area.height as usize;
+        let max_offset = total_lines.saturating_sub(visible);
+        // Clamp (rather than trust) the stored offset: the bubble's content
+        // height can shrink between frames (e.g. collapsing it, or a shorter
+        // subagent result replacing a longer in-progress one), which would
+        // otherwise leave the offset pointing past the end of the content.
+        let row_offset = state.header_bubble_scroll_offset.min(max_offset);
+        state.header_bubble_scroll_offset = row_offset;
+
+        let paragraph = Paragraph::new(header_lines).scroll((row_offset as u16, 0));
+        frame.render_widget(paragraph, header_content_area);
+
+        // Show the scroll indicators/scrollbar only when the bubble's full
+        // content overflows the clamped header height.
+        if total_lines > visible {
+            render_chat_scrollbar(
+                frame,
+                header_scrollbar_area,
+                row_offset,
+                max_offset,
+                total_lines,
+                visible,
+            );
+        }
+
+        // Separator between the header bubble and the chat area below it —
+        // mirrors the separator between the chat area and the input/footer
+        // panel, so the header never reads as part of the scrollable
+        // conversation-list.
+        let header_separator_line = "─".repeat(header_separator_area.width as usize);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                header_separator_line,
+                Style::default()
+                    .fg(SEPARATOR_LINE_COLOR)
+                    .add_modifier(Modifier::DIM),
+            ))),
+            header_separator_area,
+        );
+    } else {
+        state.header_bubble_area = Rect::default();
+    }
+
     draw_chat(frame, chat_area, state);
 
     // Thin solid line separating the conversation area from the lower panel.
@@ -273,6 +370,38 @@ pub fn draw(
             .style(Style::default().bg(USER_MESSAGE_BG_COLOR)),
     );
     frame.render_widget(&*textarea, input_area);
+
+    // Drill-in conversation model (Phase 6.10): while the tracked child is
+    // running (not paused for its own approval/clarify) and the user is
+    // looking at its transcript, overlay a muted hint over the textarea —
+    // submitting wouldn't reach the child anyway, since only one agent loop
+    // accepts input at a time. Only shown while the textarea is empty, so it
+    // behaves like a placeholder rather than hiding an in-progress draft (the
+    // user can still type — e.g. a future slash command — and see it). The
+    // overlay sits one column to the right of the `▌` border character,
+    // mirroring the tool-approval placeholder below — otherwise it paints
+    // over the border column and misaligns with the textarea's own cursor.
+    let textarea_is_empty = textarea.lines() == [""];
+    if textarea_is_empty && input_area.width > 1 && input_area.height > 0 {
+        if let Some(hint_text) = state.input_disabled_hint.clone() {
+            let hint_area = Rect {
+                x: input_area.x + 1,
+                y: input_area.y,
+                width: input_area.width - 1,
+                height: 1,
+            };
+            frame.render_widget(
+                Paragraph::new(Line::styled(
+                    hint_text,
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .bg(USER_MESSAGE_BG_COLOR)
+                        .add_modifier(Modifier::ITALIC),
+                )),
+                hint_area,
+            );
+        }
+    }
 
     // Mirror ratatui-textarea's next_scroll_top algorithm using the public
     // screen_cursor().row (wrapped screen row) to track which viewport window
@@ -366,10 +495,13 @@ pub fn draw(
             frame,
             footer_row_1,
             footer_row_2,
-            name,
-            input_is_empty,
-            mouse_pos,
-            hint,
+            ApprovalFooterParams {
+                tool_name: name,
+                is_subagent: state.pending_approval_is_subagent,
+                input_is_empty,
+                mouse_pos,
+                hint,
+            },
         )
     } else {
         let keybinding_hint = if state.pending_clarify.is_some() {
@@ -388,12 +520,23 @@ pub fn draw(
         } else {
             " enter: send  ctrl-c: quit  F1: help"
         };
+        // Drill-in conversation model (Phase 6.10): the back-navigation
+        // keybinding is shown in the footer just like every other
+        // keybinding hint, rather than baked into the (non-scrolling)
+        // child-view header — the header stays focused on naming the
+        // subagent, and the footer stays the single place users check for
+        // available keybindings regardless of which conversation is shown.
+        let keybinding_hint = if state.child_view_bubble.is_some() {
+            format!(" ctrl-b: back  {}", keybinding_hint.trim_start())
+        } else {
+            keybinding_hint.to_string()
+        };
         draw_normal_footer(
             frame,
             footer_row_1,
             footer_row_2,
             state,
-            keybinding_hint,
+            &keybinding_hint,
             hint,
         );
         None
@@ -444,9 +587,11 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
     // conflict between iterating state.chat_entries and mutating state).
     let mut bubble_title_rows_out: Vec<(usize, usize, uuid::Uuid)> = Vec::new();
     let mut thinking_title_rows_out: Vec<(usize, usize, usize)> = Vec::new();
-    // Show the logo wordmark only when the conversation is empty; once
-    // the user has submitted a message the logo is hidden.
-    if state.chat_entries.is_empty() {
+    // Show the logo wordmark only when the root conversation is empty at
+    // startup; never in the subagent drill-in view — an in-progress subagent
+    // with no tokens yet is not "a fresh session", it's mid-flight work, so
+    // the empty-state wordmark would be misleading there.
+    if state.chat_entries.is_empty() && state.child_view_bubble.is_none() {
         append_logo(&mut lines);
     } else {
         lines.push(Line::default());
@@ -1760,7 +1905,6 @@ fn append_tool_bubble_lines(
             }
         }
     }
-    #[allow(unused_variables)]
     let title_row_index = lines.len().saturating_sub(1);
 
     // Error/Denied second title line (shown even when collapsed).
@@ -2266,6 +2410,30 @@ fn draw_normal_footer(
         AgentMode::ClarifyPending => "Waiting for answer…",
         AgentMode::Aborting => "Aborting…",
     };
+    // While drilled into a subagent's transcript, `agent_mode` always
+    // reflects the *root* loop's `TuiMode` (see `AppState::agent_mode`), not
+    // the child's — so once the child bubble reaches a terminal state
+    // (Done/Error/Denied/Killed) but the root is still busy (e.g. producing
+    // its final reply from the child's result), the plain mode word would
+    // misleadingly read "Streaming…" as if the *subagent* were still
+    // running. Override with an explicit "done, but parent busy" message in
+    // that case; once the root also goes `Idle`, the plain `mode_word` above
+    // is already correct and unambiguous, so no override is needed then.
+    let mode_word = match &state.child_view_bubble {
+        Some((_, _, bubble_state, _))
+            if state.agent_mode != AgentMode::Idle
+                && matches!(
+                    bubble_state,
+                    ToolCallState::Done { .. }
+                        | ToolCallState::Error { .. }
+                        | ToolCallState::Denied { .. }
+                        | ToolCallState::Killed
+                ) =>
+        {
+            "Subagent done, parent working…"
+        }
+        _ => mode_word,
+    };
     let spinner_prefix = if state.agent_mode == AgentMode::ClarifyPending {
         let index = state.spinner_frame as usize % CLARIFY_FRAMES.len();
         format!("{} ", CLARIFY_FRAMES[index])
@@ -2514,18 +2682,40 @@ fn banner_line_with_selection(
     Line::from(spans)
 }
 
+/// Grouped parameters for [`draw_approval_footer`] (avoids an excessive
+/// positional-argument count; mirrors [`ClarifyBannerParams`]).
+struct ApprovalFooterParams<'a> {
+    tool_name: &'a str,
+    is_subagent: bool,
+    input_is_empty: bool,
+    mouse_pos: Option<(u16, u16)>,
+    hint: Option<&'a str>,
+}
+
 /// Returns the button `Rect`s for mouse hit-testing.
 fn draw_approval_footer(
     frame: &mut Frame,
     row_1: Rect,
     row_2: Rect,
-    tool_name: &str,
-    input_is_empty: bool,
-    mouse_pos: Option<(u16, u16)>,
-    hint: Option<&str>,
+    params: ApprovalFooterParams<'_>,
 ) -> Option<ButtonAreas> {
+    let ApprovalFooterParams {
+        tool_name,
+        is_subagent,
+        input_is_empty,
+        mouse_pos,
+        hint,
+    } = params;
     let row_1_text = if let Some(hint_text) = hint {
         hint_text.to_string()
+    } else if is_subagent {
+        // The pending tool call belongs to a subagent, not the root agent —
+        // this can be shown while viewing the root conversation (the user
+        // navigated back via Ctrl+B while the subagent's own tool call is
+        // still awaiting approval), where the pending call is otherwise
+        // invisible, so make the title unambiguous about which agent it's
+        // asking on behalf of.
+        format!(" Subagent tool '{tool_name}' requests your approval:")
     } else {
         format!(" Tool '{tool_name}' requests your approval:")
     };

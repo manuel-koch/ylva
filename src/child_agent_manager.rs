@@ -53,6 +53,9 @@ pub struct SpawnRequest {
     pub briefing: Option<String>,
     /// Name of the agent-type configuration the child should run as.
     pub agent_type: String,
+    /// Short (3-6 word) label summarising what the child agent is doing,
+    /// shown as the second line of the drill-in conversation header.
+    pub label: String,
 }
 
 /// Outcome of a completed, cancelled, or unstructured-fallback child run.
@@ -175,7 +178,7 @@ struct RunningChild {
     /// to route `AgentCommand::ForChild` verdicts to it. `None` when the
     /// child failed to construct (see `SpawnOutcome::command_sender`).
     command_sender: Option<mpsc::Sender<AgentCommand>>,
-    #[allow(dead_code)] // kept alive only so the task is not detached early
+    #[expect(dead_code)] // kept alive only so the task is not detached early
     handle: JoinHandle<()>,
 }
 
@@ -265,6 +268,7 @@ impl ChildAgentManager {
         task: String,
         briefing: Option<String>,
         agent_type: String,
+        label: String,
         call_id: Uuid,
     ) -> SpawnStatus {
         let run_id = Uuid::new_v4();
@@ -274,6 +278,7 @@ impl ChildAgentManager {
             task,
             briefing,
             agent_type,
+            label,
         };
         if self.is_running() {
             let _ = self.subagent_ui_tx.try_send(UiUpdate::ToolProgress {
@@ -291,6 +296,12 @@ impl ChildAgentManager {
     fn start(&mut self, request: SpawnRequest) {
         let run_id = request.run_id;
         let call_id = request.call_id;
+        let _ = self.subagent_ui_tx.try_send(UiUpdate::ChildAgentStarted {
+            run_id,
+            agent_type: request.agent_type.clone(),
+            task: request.task.clone(),
+            label: request.label.clone(),
+        });
         let _ = self.subagent_ui_tx.try_send(UiUpdate::ToolProgress {
             id: call_id,
             title_arguments: spawn_progress_title_arguments("running", run_id),
@@ -383,6 +394,7 @@ mod tests {
             "task".to_string(),
             None,
             "default".to_string(),
+            "label".to_string(),
             Uuid::new_v4(),
         );
         assert!(matches!(status, SpawnStatus::Started(_)));
@@ -397,12 +409,14 @@ mod tests {
             "first".to_string(),
             None,
             "default".to_string(),
+            "label".to_string(),
             Uuid::new_v4(),
         );
         let second = manager.spawn(
             "second".to_string(),
             None,
             "default".to_string(),
+            "label".to_string(),
             Uuid::new_v4(),
         );
         assert!(matches!(first, SpawnStatus::Started(_)));
@@ -419,6 +433,7 @@ mod tests {
             "first".to_string(),
             None,
             "default".to_string(),
+            "label".to_string(),
             Uuid::new_v4(),
         );
         let SpawnStatus::Started(first_run_id) = first else {
@@ -428,12 +443,14 @@ mod tests {
             "second".to_string(),
             None,
             "default".to_string(),
+            "label".to_string(),
             Uuid::new_v4(),
         );
         manager.spawn(
             "third".to_string(),
             None,
             "default".to_string(),
+            "label".to_string(),
             Uuid::new_v4(),
         );
         assert_eq!(manager.queue_len(), 2);
@@ -455,6 +472,7 @@ mod tests {
             "first".to_string(),
             None,
             "default".to_string(),
+            "label".to_string(),
             Uuid::new_v4(),
         );
         assert!(manager.is_running());
@@ -472,6 +490,7 @@ mod tests {
             "task".to_string(),
             None,
             "default".to_string(),
+            "label".to_string(),
             Uuid::new_v4(),
         ) else {
             panic!("expected the spawn to start immediately")
@@ -490,6 +509,7 @@ mod tests {
             "task".to_string(),
             None,
             "default".to_string(),
+            "label".to_string(),
             Uuid::new_v4(),
         );
 
@@ -509,11 +529,22 @@ mod tests {
         let mut manager = ChildAgentManager::new(subagent_ui_tx, spawn_fn);
         let call_id = Uuid::new_v4();
 
-        let status = manager.spawn("task".to_string(), None, "default".to_string(), call_id);
+        let status = manager.spawn(
+            "task".to_string(),
+            None,
+            "default".to_string(),
+            "label".to_string(),
+            call_id,
+        );
         let SpawnStatus::Started(run_id) = status else {
             panic!("expected the spawn to start immediately")
         };
 
+        assert!(matches!(
+            subagent_ui_rx.recv().await,
+            Some(UiUpdate::ChildAgentStarted { run_id: started_run_id, agent_type, task, .. })
+                if started_run_id == run_id && agent_type == "default" && task == "task"
+        ));
         match subagent_ui_rx.recv().await {
             Some(UiUpdate::ToolProgress {
                 id,
@@ -544,19 +575,26 @@ mod tests {
             "first".to_string(),
             None,
             "default".to_string(),
+            "label".to_string(),
             first_call_id,
         );
         let second_status = manager.spawn(
             "second".to_string(),
             None,
             "default".to_string(),
+            "label".to_string(),
             second_call_id,
         );
         let SpawnStatus::Queued(queued_run_id) = second_status else {
             panic!("expected the second spawn to be queued")
         };
 
-        // First progress update is for the immediately-started first child.
+        // First update is the immediately-started first child's lifecycle
+        // marker, followed by its "running" progress.
+        assert!(matches!(
+            subagent_ui_rx.recv().await,
+            Some(UiUpdate::ChildAgentStarted { .. })
+        ));
         assert!(matches!(
             subagent_ui_rx.recv().await,
             Some(UiUpdate::ToolProgress { id, .. }) if id == first_call_id
@@ -598,6 +636,7 @@ mod tests {
             "first".to_string(),
             None,
             "default".to_string(),
+            "label".to_string(),
             first_call_id,
         ) else {
             panic!("expected the first spawn to start immediately")
@@ -606,15 +645,23 @@ mod tests {
             "second".to_string(),
             None,
             "default".to_string(),
+            "label".to_string(),
             second_call_id,
         );
 
-        // Drain the two progress updates already emitted by the spawns above.
+        // Drain the three updates already emitted by the spawns above: the
+        // first child's `ChildAgentStarted` + "running" `ToolProgress`, and
+        // the second (queued) child's "queued" `ToolProgress`.
+        subagent_ui_rx.recv().await;
         subagent_ui_rx.recv().await;
         subagent_ui_rx.recv().await;
 
         manager.on_child_finished(first_run_id);
 
+        assert!(matches!(
+            subagent_ui_rx.recv().await,
+            Some(UiUpdate::ChildAgentStarted { .. })
+        ));
         match subagent_ui_rx.recv().await {
             Some(UiUpdate::ToolProgress { id, title_arguments }) => {
                 assert_eq!(id, second_call_id);
@@ -639,12 +686,14 @@ mod tests {
             "first".to_string(),
             None,
             "default".to_string(),
+            "label".to_string(),
             first_call_id,
         );
         manager.spawn(
             "second".to_string(),
             None,
             "default".to_string(),
+            "label".to_string(),
             second_call_id,
         );
         assert_eq!(manager.queue_len(), 1);

@@ -562,6 +562,170 @@ fn steer_sent_before_first_chunk_does_not_jump_above_stream() {
     );
 }
 
+/// The `input_disabled_hint` ("Subagent is working…") must behave like a
+/// placeholder — shown only while the input is empty — rather than being
+/// overlaid unconditionally, which would hide a draft the user is typing
+/// (regression test for the bug where the hint always covered the textarea).
+#[test]
+fn input_disabled_hint_does_not_hide_typed_draft() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::ui;
+
+    let backend = TestBackend::new(60, 20);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+
+    let mut state = ylva::TuiState {
+        input_disabled_hint: Some("Subagent is working…".to_string()),
+        ..ylva::TuiState::new()
+    };
+
+    // Empty textarea: the hint must be visible, must not overwrite the
+    // textarea's own `▌` left border, and must start in the exact column
+    // where typed text/the cursor would (border column + 1) — otherwise the
+    // hint looks shifted left of where the border/cursor actually are.
+    let mut empty_textarea = TextArea::default();
+    terminal
+        .draw(|frame| {
+            ui::draw(frame, &mut state, &mut empty_textarea, None, None);
+        })
+        .expect("draw with empty textarea");
+    let buf = terminal.backend().buffer().clone();
+    let rendered: String = (0..20u16)
+        .flat_map(|y| (0..60u16).map(move |x| (x, y)))
+        .map(|(x, y)| buf.cell((x, y)).unwrap().symbol().to_string())
+        .collect();
+    assert!(
+        rendered.contains("Subagent is working"),
+        "hint must show while the textarea is empty"
+    );
+    let empty_rows: Vec<String> = (0..20u16)
+        .map(|y| {
+            (0..60u16)
+                .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
+                .collect()
+        })
+        .collect();
+    let hint_row = empty_rows
+        .iter()
+        .position(|r| r.contains("Subagent is working"))
+        .expect("hint row found");
+    // Row strings are built by concatenating one symbol (possibly
+    // multi-byte) per column, so use char-index lookups, not `str::find`'s
+    // byte offsets, to get column numbers.
+    let row_chars: Vec<char> = empty_rows[hint_row].chars().collect();
+    let border_col = row_chars
+        .iter()
+        .position(|&c| c == '▌')
+        .expect("left border `▌` must still be rendered alongside the hint");
+    let hint_col = row_chars
+        .iter()
+        .position(|&c| c == 'S')
+        .expect("hint text found in row");
+    assert_eq!(
+        hint_col,
+        border_col + 1,
+        "hint must start one column right of the `▌` border, not overlay it"
+    );
+
+    // Non-empty textarea: the draft must be visible, hint must not hide it.
+    let mut draft_textarea = TextArea::from(vec!["draft steer text".to_string()]);
+    terminal
+        .draw(|frame| {
+            ui::draw(frame, &mut state, &mut draft_textarea, None, None);
+        })
+        .expect("draw with draft textarea");
+    let buf = terminal.backend().buffer().clone();
+    let rows: Vec<String> = (0..20u16)
+        .map(|y| {
+            (0..60u16)
+                .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
+                .collect()
+        })
+        .collect();
+    let draft_row = rows
+        .iter()
+        .position(|r| r.contains("draft steer text"))
+        .expect("typed draft must remain visible, not be hidden by the hint");
+    assert!(
+        !rows[draft_row].contains("Subagent is working"),
+        "hint must not overlay a row containing the typed draft"
+    );
+}
+
+/// While viewing a finished subagent's transcript, if the root loop is still
+/// busy (e.g. producing its final reply from the child's result), the
+/// footer must say so explicitly instead of the plain "Streaming…"/"Running
+/// tool…" word, which would misleadingly read as if the *subagent* — not
+/// the parent — were still working (regression test for the ambiguous
+/// footer text bug).
+#[test]
+fn footer_indicates_subagent_done_while_parent_still_busy() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::ui;
+    use ylva::{AgentMode, ToolCallState};
+
+    let backend = TestBackend::new(60, 20);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+
+    let mut state = ylva::TuiState {
+        agent_mode: AgentMode::Streaming,
+        child_view_bubble: Some((
+            uuid::Uuid::new_v4(),
+            "spawn_subagent".to_string(),
+            ToolCallState::Killed,
+            false,
+        )),
+        ..ylva::TuiState::new()
+    };
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            ui::draw(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("draw");
+
+    let buf = terminal.backend().buffer().clone();
+    let rendered: String = (0..20u16)
+        .flat_map(|y| (0..60u16).map(move |x| (x, y)))
+        .map(|(x, y)| buf.cell((x, y)).unwrap().symbol().to_string())
+        .collect();
+    assert!(
+        rendered.contains("Subagent done"),
+        "footer must call out that the subagent is done while the parent is still busy: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("Streaming…"),
+        "the ambiguous plain mode word must not also be shown: {rendered:?}"
+    );
+
+    // Once the root also goes idle, the plain "Idle" word is unambiguous —
+    // no special-casing needed (nothing is left "working" to disambiguate).
+    state.agent_mode = AgentMode::Idle;
+    terminal
+        .draw(|frame| {
+            ui::draw(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("draw after parent idle");
+    let buf = terminal.backend().buffer().clone();
+    let rendered: String = (0..20u16)
+        .flat_map(|y| (0..60u16).map(move |x| (x, y)))
+        .map(|(x, y)| buf.cell((x, y)).unwrap().symbol().to_string())
+        .collect();
+    assert!(
+        rendered.contains("Idle"),
+        "once the parent is also idle, the plain mode word must show: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("Subagent done"),
+        "the override must not linger once both sides are idle: {rendered:?}"
+    );
+}
+
 /// Trace the full steer lifecycle visually: stream-1 live → steer queued →
 /// stream-1 done → stream-2 live.  Shows what the screen looks like at each
 /// phase so we can confirm the expected ordering.

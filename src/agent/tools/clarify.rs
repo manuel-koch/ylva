@@ -23,7 +23,7 @@ use super::{
 use crate::sandbox::ApprovalCheck;
 
 #[derive(JsonSchema, Deserialize)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 struct ClarifyArgs {
     #[schemars(
         description = "The question to ask the user. Do not embed answer choices here; pass them via the `choices` field instead. Rendered as Markdown; use a real newline character for line breaks, not an escaped \\n sequence."

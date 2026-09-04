@@ -40,7 +40,7 @@ use tokio::select;
 use tokio::sync::mpsc;
 
 use crate::agent::tools::DEFAULT_TUI_TOOLS;
-use crate::agent::{AgentCommand, AgentLoop, Role, UiUpdate};
+use crate::agent::{AgentCommand, AgentLoop, AgentMode, Role, UiUpdate};
 use crate::agent_factory::AgentFactory;
 use crate::app::App;
 use crate::config::{AgentConfig, ProfileConfig};
@@ -183,25 +183,27 @@ fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
             arguments,
             content_sections,
             title_arguments,
-            run_id: _,
+            run_id,
         } => Some(DomainEvent::ToolPending {
             id: *id,
             name: name.clone(),
             arguments: arguments.clone(),
             content_sections: content_sections.clone(),
             title_arguments: title_arguments.clone(),
+            run_id: *run_id,
         }),
         UiUpdate::ClarifyPending {
             id,
             question,
             context,
             choices,
-            run_id: _,
+            run_id,
         } => Some(DomainEvent::ClarifyPending {
             id: *id,
             question: question.clone(),
             context: context.clone(),
             choices: choices.clone(),
+            run_id: *run_id,
         }),
         UiUpdate::ToolStart {
             id,
@@ -209,13 +211,14 @@ fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
             arguments,
             content_sections,
             title_arguments,
-            ..
+            run_id,
         } => Some(DomainEvent::ToolStart {
             id: *id,
             name: name.clone(),
             arguments: arguments.clone(),
             content_sections: content_sections.clone(),
             title_arguments: title_arguments.clone(),
+            run_id: *run_id,
         }),
         UiUpdate::ToolProgress {
             id,
@@ -231,6 +234,7 @@ fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
             summary,
             duration,
             content_sections,
+            run_id,
         } => Some(DomainEvent::ToolDone {
             id: *id,
             name: name.clone(),
@@ -238,9 +242,29 @@ fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
             summary: summary.clone(),
             duration: *duration,
             content_sections: content_sections.clone(),
+            run_id: *run_id,
         }),
-        UiUpdate::ToolKilled { id } => Some(DomainEvent::ToolKilled { id: *id }),
+        UiUpdate::ToolKilled { id, run_id } => Some(DomainEvent::ToolKilled {
+            id: *id,
+            run_id: *run_id,
+        }),
         UiUpdate::Error(message) => Some(DomainEvent::Error(message.clone())),
+        UiUpdate::ChildAgentStarted {
+            run_id,
+            agent_type,
+            task,
+            label,
+        } => Some(DomainEvent::ChildAgentStarted {
+            run_id: *run_id,
+            agent_type: agent_type.clone(),
+            task: task.clone(),
+            label: label.clone(),
+        }),
+        UiUpdate::ChildAgentToken(text) => Some(DomainEvent::ChildAgentToken(text.clone())),
+        UiUpdate::ChildAgentDone { status, result } => Some(DomainEvent::ChildAgentDone {
+            status: status.clone(),
+            result: result.clone(),
+        }),
         // ToolError and ToolAutoDenied are handled directly by the Driver via
         // AppState; no corresponding DomainEvent exists in the Presenter's surface.
         UiUpdate::ToolError { .. } | UiUpdate::ToolAutoDenied { .. } => None,
@@ -399,7 +423,7 @@ async fn execute_effects(
 
 /// Process one [`UiUpdate`]: convert to a [`DomainEvent`] (or handle directly
 /// for `ToolError`) and run the resulting effects.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 async fn process_one_update(
     state: &mut AppState,
     textarea: &mut TextArea<'_>,
@@ -415,10 +439,16 @@ async fn process_one_update(
         error,
         duration,
         content_sections,
-        ..
+        run_id,
     } = update
     {
-        state.apply_tool_error(*id, error.clone(), *duration, content_sections.clone());
+        state.apply_tool_error(
+            *id,
+            error.clone(),
+            *duration,
+            content_sections.clone(),
+            *run_id,
+        );
         return ActionOutcome::Continue;
     }
     if let UiUpdate::ToolAutoDenied {
@@ -427,6 +457,7 @@ async fn process_one_update(
         title_arguments,
         content_sections,
         reason,
+        run_id,
     } = update
     {
         state.apply_tool_auto_denied(
@@ -435,6 +466,7 @@ async fn process_one_update(
             title_arguments.clone(),
             content_sections.clone(),
             reason.clone(),
+            *run_id,
         );
         return ActionOutcome::Continue;
     }
@@ -502,6 +534,7 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
         scroll_locked: app.scroll_locked,
         chat_area_height: app.chat_area_height,
         pending_approval: None,
+        pending_approval_is_subagent: false,
         pending_clarify,
         pending_approval_input_snapshot: app.pending_approval_input_snapshot,
         input_history: app.input_history,
@@ -524,6 +557,10 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
         input_scroll_top: app.input_scroll_top,
         bubble_title_rows: app.bubble_title_rows,
         thinking_title_rows: app.thinking_title_rows,
+        child_view_bubble: None,
+        header_bubble_scroll_offset: 0,
+        header_bubble_area: ratatui::layout::Rect::default(),
+        input_disabled_hint: None,
     }
 }
 
@@ -697,8 +734,21 @@ where
                 .await;
             }
 
+            _ = bubble_click_timeout(&state) => {
+                let effects = presenter::update(
+                    &mut state,
+                    TuiEvent::Domain(DomainEvent::BubbleClickWindowExpired),
+                    &textarea_ctx,
+                );
+                execute_effects(
+                    &mut state, &mut textarea, &cmd_tx, effects, &mut mouse_drag, clipboard,
+                    &mut pending_run_ids,
+                )
+                .await;
+            }
+
             _ = spinner_tick.tick() => {
-                if !matches!(state.mode, TuiMode::Idle | TuiMode::DoublePressAbort { .. }) {
+                if spinner_should_tick(&state) {
                     state.spinner_frame = state.spinner_frame.wrapping_add(1);
                 }
             }
@@ -823,11 +873,41 @@ fn confirm_hint(state: &AppState) -> Option<String> {
     }
 }
 
+/// Whether the footer/header spinner glyph should advance this tick.
+///
+/// Gates on `agent_mode()`, not raw `TuiMode`, so the spinner keeps advancing
+/// whenever *anything* is animating a spinner glyph — including a
+/// `spawn_subagent` tool bubble (and its child-view header re-render) that's
+/// still `Running` while the root's own `TuiMode` has already gone `Idle`
+/// waiting on it, regardless of whether the subagent itself is currently
+/// paused for its own tool approval (that only affects the subagent's
+/// *inner* bubble, not the root `spawn_subagent` bubble's `Running` state).
+/// `DoublePressAbort` stays frozen regardless, matching its static
+/// confirm-prompt UI.
+fn spinner_should_tick(state: &AppState) -> bool {
+    !matches!(state.mode, TuiMode::DoublePressAbort { .. }) && state.agent_mode() != AgentMode::Idle
+}
+
 /// A future that resolves once the double-press confirm window elapses (or
 /// never, when no confirm is pending).
 async fn confirm_timeout(state: &AppState) {
     if let TuiMode::DoublePressAbort { pressed_at, .. } = &state.mode {
         let remaining = (*pressed_at + CONFIRM_TIMEOUT).saturating_duration_since(Instant::now());
+        tokio::time::sleep(remaining).await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// A future that resolves once a bubble's deferred single-click
+/// collapse/expand toggle window elapses (or never, when no click is
+/// currently armed). Armed by a first click on a `spawn_subagent` bubble's
+/// title — see `crate::tui_reducer_state::DOUBLE_CLICK_WINDOW` for why the
+/// toggle is deferred rather than applied immediately.
+async fn bubble_click_timeout(state: &AppState) {
+    if let Some((_, clicked_at)) = state.last_bubble_click {
+        let remaining = (clicked_at + crate::tui_reducer_state::DOUBLE_CLICK_WINDOW)
+            .saturating_duration_since(Instant::now());
         tokio::time::sleep(remaining).await;
     } else {
         std::future::pending::<()>().await;
@@ -990,6 +1070,7 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tokio::sync::mpsc;
+    use uuid::Uuid;
 
     fn key_event(code: KeyCode) -> crossterm::event::KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -1014,6 +1095,75 @@ mod tests {
         let mut textarea = TextArea::default();
         configure_textarea(&mut textarea);
         (AppState::new(), textarea, cmd_tx, cmd_rx)
+    }
+
+    #[test]
+    fn spinner_ticks_while_root_is_idle_but_a_spawned_child_is_still_running() {
+        // Regression: the root loop's own `TuiMode` can settle to `Idle` while
+        // a spawned subagent's `spawn_subagent` tool bubble stays `Running` —
+        // the spinner must keep advancing (driving both the footer and the
+        // child-view header bubble's spinner glyph) rather than freezing.
+        let mut state = AppState::new();
+        state.mode = TuiMode::Idle;
+        state
+            .chat_entries
+            .push(crate::tui_reducer_state::ChatEntry::ToolBubble {
+                id: Uuid::new_v4(),
+                name: "spawn_subagent".to_string(),
+                state: Box::new(crate::tui_reducer_state::ToolCallState::Running {
+                    arguments: serde_json::json!({}),
+                    content_sections: vec![],
+                    title_arguments: vec![],
+                    progress_arguments: vec![],
+                }),
+                collapsed: true,
+            });
+        assert!(spinner_should_tick(&state));
+    }
+
+    #[test]
+    fn spinner_keeps_ticking_while_the_spawned_child_itself_is_paused_for_approval() {
+        // The child's own inner tool-approval pause sets `Focus::ToolApproval`
+        // but does not touch the root `spawn_subagent` bubble's `Running`
+        // state or the root's `TuiMode` — the spinner must not stall just
+        // because *something* is paused.
+        let mut state = AppState::new();
+        state.mode = TuiMode::Idle;
+        state
+            .chat_entries
+            .push(crate::tui_reducer_state::ChatEntry::ToolBubble {
+                id: Uuid::new_v4(),
+                name: "spawn_subagent".to_string(),
+                state: Box::new(crate::tui_reducer_state::ToolCallState::Running {
+                    arguments: serde_json::json!({}),
+                    content_sections: vec![],
+                    title_arguments: vec![],
+                    progress_arguments: vec![],
+                }),
+                collapsed: true,
+            });
+        state.focus = crate::tui_reducer_state::Focus::ToolApproval {
+            tool_id: Uuid::new_v4(),
+            tool_name: "bash".to_string(),
+        };
+        assert!(spinner_should_tick(&state));
+    }
+
+    #[test]
+    fn spinner_does_not_tick_while_truly_idle() {
+        let state = AppState::new();
+        assert!(!spinner_should_tick(&state));
+    }
+
+    #[test]
+    fn spinner_does_not_tick_during_double_press_abort() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::DoublePressAbort {
+            pressed_at: Instant::now(),
+            return_to: Box::new(TuiMode::Streaming),
+            armed_by: ConfirmKey::CtrlC,
+        };
+        assert!(!spinner_should_tick(&state));
     }
 
     #[test]
@@ -1189,6 +1339,7 @@ mod tests {
                 content_sections: vec![],
 
                 title_arguments: vec![],
+                run_id: None,
             }),
             &textarea_ctx_from(&textarea),
         );
@@ -1242,6 +1393,7 @@ mod tests {
                 content_sections: vec![],
 
                 title_arguments: vec![],
+                run_id: None,
             }),
             &textarea_ctx_from(&textarea),
         );
@@ -1293,6 +1445,7 @@ mod tests {
                 content_sections: vec![],
 
                 title_arguments: vec![],
+                run_id: None,
             }),
             &textarea_ctx_from(&textarea),
         );
@@ -1347,6 +1500,7 @@ mod tests {
                 content_sections: vec![],
 
                 title_arguments: vec![],
+                run_id: None,
             }),
             &textarea_ctx_from(&textarea),
         );

@@ -327,7 +327,6 @@ fn wrap_words(words: &[Word], width: usize) -> Vec<Vec<Word>> {
 /// boundary) into `out` as one or more wrapped [`Line`]s, applying the
 /// current block-level decoration: heading prefix + bold, list bullet/number
 /// prefix, or blockquote `│` prefix. Leaves `buffer` empty afterwards.
-#[allow(clippy::too_many_arguments)]
 fn flush_buffer(
     out: &mut Vec<Line<'static>>,
     buffer: &mut Vec<Word>,

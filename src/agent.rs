@@ -132,6 +132,8 @@ pub enum UiUpdate {
         arguments: Value,
         content_sections: Vec<crate::agent::tools::Section>,
         title_arguments: Vec<(String, serde_json::Value)>,
+        /// See `UiUpdate::ToolPending::run_id`.
+        run_id: Option<Uuid>,
     },
     ToolPending {
         name: String,
@@ -171,12 +173,16 @@ pub enum UiUpdate {
         summary: Vec<(String, String)>,
         duration: std::time::Duration,
         content_sections: Vec<crate::agent::tools::Section>,
+        /// See `UiUpdate::ToolPending::run_id`.
+        run_id: Option<Uuid>,
     },
     ToolError {
         id: Uuid,
         error: String,
         duration: std::time::Duration,
         content_sections: Vec<crate::agent::tools::Section>,
+        /// See `UiUpdate::ToolPending::run_id`.
+        run_id: Option<Uuid>,
     },
     /// A tool call was denied automatically by the sandbox before it started.
     /// Creates a `Denied` bubble directly — no `ToolStart` is ever sent.
@@ -186,9 +192,13 @@ pub enum UiUpdate {
         title_arguments: Vec<(String, serde_json::Value)>,
         content_sections: Vec<crate::agent::tools::Section>,
         reason: String,
+        /// See `UiUpdate::ToolPending::run_id`.
+        run_id: Option<Uuid>,
     },
     ToolKilled {
         id: Uuid,
+        /// See `UiUpdate::ToolPending::run_id`.
+        run_id: Option<Uuid>,
     },
     /// A steer (user message while busy) was queued. No payload — the TUI
     /// driver creates the pending bubble itself before sending the command.
@@ -200,6 +210,34 @@ pub enum UiUpdate {
     /// accumulator; flushed into a `ChatEntry::ThinkingMessage` bubble ahead
     /// of the assistant bubble on `StreamDone`.
     AppendThinking(String),
+    /// A child agent actually started running (dequeued from
+    /// `ChildAgentManager`'s FIFO, or started immediately). Emitted by
+    /// `ChildAgentManager::start`. Drives the drill-in conversation model
+    /// (Phase 6.10): the driver creates/updates the spawn-bubble and tracks
+    /// `run_id` as the current child conversation, but does **not** switch
+    /// `active_view` — the user stays in the parent view until they
+    /// navigate manually or an interactive pause (`ToolPending`/
+    /// `ClarifyPending` carrying this same `run_id`) forces the switch.
+    ChildAgentStarted {
+        run_id: Uuid,
+        agent_type: String,
+        task: String,
+        label: String,
+    },
+    /// A fragment of the current child's own assistant text/thinking output,
+    /// forwarded from the child's `AppendText`/`AppendThinking` and rendered
+    /// into the child conversation transcript only — never mixed into the
+    /// parent's own `partial_assistant_text`.
+    ChildAgentToken(String),
+    /// The current child agent run has finished (successfully, with an
+    /// error, or via the "unstructured" fallback). `status`/`result` mirror
+    /// `crate::child_agent_manager::FinishResult`. If the driver had
+    /// auto-switched into the child view for an interactive pause, it
+    /// auto-returns to the parent view now.
+    ChildAgentDone {
+        status: String,
+        result: Option<String>,
+    },
 }
 
 /// A raw tool-call fragment emitted by a provider, to be assembled by the
@@ -958,6 +996,7 @@ impl AgentLoop {
                                         summary,
                                         duration,
                                         content_sections,
+                                        run_id: own_run_id,
                                     })
                                     .await;
                                 if is_finish {
@@ -992,6 +1031,7 @@ impl AgentLoop {
                                     error,
                                     duration,
                                     content_sections,
+                                    run_id: own_run_id,
                                 }).await;
                                 advance_tool_queue(
                                     &mut pending_tools,
@@ -1018,7 +1058,12 @@ impl AgentLoop {
                                 tracing::info!(%id, "tool killed; agent returning to idle");
                                 current_tool_cancel = None;
                                 pending_tools.clear();
-                                let _ = ui_tx.send(UiUpdate::ToolKilled { id }).await;
+                                let _ = ui_tx
+                                    .send(UiUpdate::ToolKilled {
+                                        id,
+                                        run_id: own_run_id,
+                                    })
+                                    .await;
                                 mode = AgentMode::Idle;
                             }
                         }
@@ -1075,6 +1120,16 @@ impl AgentLoop {
                             .as_ref()
                             .and_then(|manager| manager.running_duration(run_id))
                             .unwrap_or_default();
+                        // Emitted before the `spawn_subagent` bubble's own
+                        // `ToolDone` so the driver can auto-return from the
+                        // child conversation view (if it auto-switched into
+                        // it) ahead of the parent bubble settling.
+                        let _ = ui_tx
+                            .send(UiUpdate::ChildAgentDone {
+                                status: status.clone(),
+                                result: finish_result.result.clone(),
+                            })
+                            .await;
                         let _ = ui_tx
                             .send(UiUpdate::ToolDone {
                                 id: call_id,
@@ -1083,6 +1138,7 @@ impl AgentLoop {
                                 summary: vec![("status".to_string(), status)],
                                 duration,
                                 content_sections,
+                                run_id: None,
                             })
                             .await;
                         if let Some(manager) = child_agent_manager.as_mut() {
@@ -1114,10 +1170,32 @@ impl AgentLoop {
                         }
                     }
                     Some(update) = recv_subagent_ui(&mut subagent_ui_rx) => {
-                        // Phase 6.9 wiring only: forwarded as-is. Phase 6.10
-                        // adds the drill-in conversation model that actually
-                        // renders these as a spawn-bubble / child view.
-                        let _ = ui_tx.send(update).await;
+                        // Phase 6.10 drill-in conversation model: the
+                        // child's own text/thinking tokens must never leak
+                        // into the parent's own `partial_assistant_text`
+                        // (they render in the dedicated child transcript
+                        // instead), and the child's own stream lifecycle
+                        // (`StreamStarted`/`StreamDone`/`StreamCancelled`)
+                        // must never flip the parent's own `TuiMode` —
+                        // only `ChildAgentStarted`/`ChildAgentDone` (see
+                        // `ChildAgentManager::start` and this loop's
+                        // `finish_rx` arm) mark the child conversation's
+                        // lifecycle boundaries for the UI. Everything else
+                        // (tool approvals/progress/errors, already stamped
+                        // with the child's own `run_id`) is forwarded as-is.
+                        match update {
+                            UiUpdate::AppendText(text) | UiUpdate::AppendThinking(text) => {
+                                let _ = ui_tx.send(UiUpdate::ChildAgentToken(text)).await;
+                            }
+                            UiUpdate::StreamStarted
+                            | UiUpdate::StreamDone
+                            | UiUpdate::StreamCancelled => {
+                                // Intentionally swallowed — see comment above.
+                            }
+                            other => {
+                                let _ = ui_tx.send(other).await;
+                            }
+                        }
                     }
                     _ = cancelled_or_pending(&parent_cancel) => {
                         // The parent cancelled this child (e.g. it stopped
@@ -1226,6 +1304,7 @@ impl AgentLoop {
                                                 arguments: arguments.clone(),
                                                 content_sections,
                                                 title_arguments,
+                                                run_id: own_run_id,
                                             })
                                             .await;
                                     }
@@ -1267,6 +1346,7 @@ impl AgentLoop {
                                             error,
                                             duration: std::time::Duration::ZERO,
                                             content_sections: vec![],
+                                            run_id: own_run_id,
                                         })
                                         .await;
                                     advance_tool_queue(
@@ -1325,6 +1405,7 @@ impl AgentLoop {
                                             summary: vec![],
                                             duration,
                                             content_sections: choices_sections,
+                                            run_id: own_run_id,
                                         })
                                         .await;
                                     mode = AgentMode::ToolPending;
@@ -1373,6 +1454,7 @@ impl AgentLoop {
                                             error,
                                             duration: std::time::Duration::ZERO,
                                             content_sections: vec![],
+                                            run_id: own_run_id,
                                         })
                                         .await;
                                     mode = AgentMode::ToolPending;
@@ -1449,6 +1531,7 @@ impl AgentLoop {
                                                 summary: vec![("status".to_string(), "cancelled".to_string())],
                                                 duration: std::time::Duration::ZERO,
                                                 content_sections,
+                                                run_id: own_run_id,
                                             })
                                             .await;
                                     }
@@ -1479,6 +1562,7 @@ impl AgentLoop {
                                                 error,
                                                 duration: std::time::Duration::ZERO,
                                                 content_sections: vec![],
+                                                run_id: own_run_id,
                                             })
                                             .await;
                                     }
@@ -1520,6 +1604,7 @@ impl AgentLoop {
                                                     error,
                                                     duration: std::time::Duration::ZERO,
                                                     content_sections: vec![],
+                                                    run_id: own_run_id,
                                                 })
                                                 .await;
                                             first = false;
@@ -1615,6 +1700,7 @@ async fn resolve_spawn_subagent(
             arguments: arguments.clone(),
             content_sections: content_sections.clone(),
             title_arguments,
+            run_id: None,
         })
         .await;
 
@@ -1632,9 +1718,14 @@ async fn resolve_spawn_subagent(
         .and_then(|value| value.as_str())
         .unwrap_or(tools::spawn_subagent::DEFAULT_CHILD_AGENT_TYPE)
         .to_string();
+    let label = arguments
+        .get("label")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
 
     let (status_text, run_id) = match child_agent_manager.as_mut() {
-        Some(manager) => match manager.spawn(task, briefing, agent_type, call_id) {
+        Some(manager) => match manager.spawn(task, briefing, agent_type, label, call_id) {
             crate::child_agent_manager::SpawnStatus::Started(run_id) => ("running", run_id),
             crate::child_agent_manager::SpawnStatus::Queued(run_id) => ("queued", run_id),
         },
@@ -1652,6 +1743,7 @@ async fn resolve_spawn_subagent(
                     error,
                     duration: std::time::Duration::ZERO,
                     content_sections: vec![],
+                    run_id: None,
                 })
                 .await;
             return;
@@ -1691,7 +1783,7 @@ async fn resolve_spawn_subagent(
 /// already carries any deferred `spawn_subagent` child result (see
 /// `AgentLoop::run`'s `finish_rx` arm), so the flag's job is done and a later
 /// `StreamDone` must not force a redundant extra re-prompt for it.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 async fn advance_tool_queue(
     pending_tools: &mut VecDeque<PendingTool>,
     context: &mut Context,
@@ -1813,6 +1905,7 @@ async fn advance_tool_queue(
                                 arguments,
                                 content_sections,
                                 title_arguments,
+                                run_id: own_run_id,
                             })
                             .await;
                         return; // wait for ToolDone/ToolError
@@ -1832,6 +1925,7 @@ async fn advance_tool_queue(
                                 title_arguments,
                                 content_sections,
                                 reason,
+                                run_id: own_run_id,
                             })
                             .await;
                         // Continue loop to handle next tool in queue.
@@ -3025,11 +3119,17 @@ mod tests {
             Some(UiUpdate::ToolStart { name, .. }) if name == "spawn_subagent"
         ));
 
-        // `ChildAgentManager::start` reports the "running" status as a
-        // `ToolProgress` on the manager's own `subagent_ui_tx` (forwarded to
-        // the parent's `ui_tx` in production by `AgentLoop::run`'s
-        // `recv_subagent_ui` arm — bypassed here since this test calls
-        // `resolve_spawn_subagent` directly).
+        // `ChildAgentManager::start` first reports `ChildAgentStarted` (the
+        // child-lifecycle boundary for the drill-in view), then the
+        // "running" status as a `ToolProgress` on the manager's own
+        // `subagent_ui_tx` (forwarded to the parent's `ui_tx` in production
+        // by `AgentLoop::run`'s `recv_subagent_ui` arm — bypassed here since
+        // this test calls `resolve_spawn_subagent` directly).
+        assert!(matches!(
+            subagent_ui_rx.recv().await,
+            Some(UiUpdate::ChildAgentStarted { agent_type, task, .. })
+                if agent_type == "default" && task == "do the thing"
+        ));
         match subagent_ui_rx.recv().await {
             Some(UiUpdate::ToolProgress {
                 id,

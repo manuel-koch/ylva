@@ -39,6 +39,26 @@ or its command changes, update this section in the same commit (see
 Other documents that reference `make` targets must delegate here rather than
 re-list targets, otherwise the lists drift the next time the `Makefile` changes.
 
+## Rust linter
+
+Lint suppression (clippy or rustc, e.g. `dead_code`/`unused_variables`) is a
+case-by-case call by the user — never a blanket `#![allow(...)]` — applied to
+the specific item that triggers it:
+
+```rust
+#[expect(clippy::too_many_arguments)]
+fn some_fn(...) { ... }
+```
+
+Use `#[expect(...)]`, not `#[allow(...)]`: it only suppresses the lint while
+the lint actually fires. Once the code changes so it no longer fires, rustc
+warns `unfulfilled_lint_expectations` — remove the now-obsolete attribute (or
+replace it with a freshly justified one).
+
+`make lint` runs `--all-features`; also check default-features `cargo clippy`
+for suppressions near `#[cfg(feature = ...)]` code, since expectations can be
+fulfilled under one feature set and not the other.
+
 ## Logging
 
 Diagnostics are emitted through the `tracing` facade macros

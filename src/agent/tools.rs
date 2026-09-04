@@ -694,7 +694,7 @@ mod tests {
     use serde::Deserialize;
 
     #[derive(Debug, JsonSchema, Deserialize)]
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     struct TestArgs {
         field: String,
     }

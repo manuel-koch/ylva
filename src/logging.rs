@@ -57,7 +57,7 @@ pub enum LogFormat {
 #[must_use]
 #[derive(Debug)]
 pub struct LogGuards {
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     worker: WorkerGuard,
 }
 

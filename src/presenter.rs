@@ -29,8 +29,8 @@ use uuid::Uuid;
 use crate::agent::tools::clarify::ClarifyTool;
 use crate::markdown::render_markdown;
 use crate::tui_reducer_state::{
-    AppState, ChatEntry, ChatSelection, ConfirmKey, DomainEvent, Effect, Focus, HistoryDirection,
-    InputEvent, ToolCallState, TuiMode, UserMessageState,
+    AppState, ChatEntry, ChatSelection, ChildRunInfo, ConfirmKey, ConversationView, DomainEvent,
+    Effect, Focus, HistoryDirection, InputEvent, ToolCallState, TuiMode, UserMessageState,
 };
 
 // ─── Public surface ───────────────────────────────────────────────────────────
@@ -73,6 +73,22 @@ fn route_keyboard(
     event: InputEvent,
     textarea: &TextareaContext,
 ) -> Vec<Effect> {
+    // Ctrl+B (drill-in back/forward navigation) is handled ahead of the
+    // per-`Focus` dispatch below: it must work regardless of whether the
+    // main input, the help popup, or a tool-approval prompt currently has
+    // focus, and it never touches `Focus`/`TuiMode` itself — only
+    // `active_view`. A no-op when there's no currently-tracked child.
+    if let InputEvent::KeyInput(key_event) = &event {
+        if key_event.code == KeyCode::Char('b')
+            && key_event.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            match state.active_view {
+                ConversationView::Root => state.switch_to_child_view(),
+                ConversationView::Child { .. } => state.switch_to_root_view(),
+            }
+            return vec![];
+        }
+    }
     match &state.focus {
         Focus::HelpPopup => keyboard_help(state, event),
         Focus::ToolApproval { .. } => keyboard_approval(state, event, textarea),
@@ -559,6 +575,9 @@ fn route_mouse(
             let b = state.layout.clarify_banner;
             let in_clarify_banner =
                 column >= b.x && column < b.x + b.width && row >= b.y && row < b.y + b.height;
+            let hb = state.layout.header_bubble;
+            let in_header_bubble =
+                column >= hb.x && column < hb.x + hb.width && row >= hb.y && row < hb.y + hb.height;
             if matches!(state.focus, Focus::HelpPopup) {
                 if scroll_up {
                     state.help_scroll_up(1);
@@ -570,6 +589,12 @@ fn route_mouse(
                     state.clarify_scroll_up(1);
                 } else {
                     state.clarify_scroll_down(1);
+                }
+            } else if in_header_bubble {
+                if scroll_up {
+                    state.header_bubble_scroll_up(1);
+                } else {
+                    state.header_bubble_scroll_down(1);
                 }
             } else if state.layout.input_area.contains(column, row) {
                 // Input area scroll is driver-owned (textarea); emit a key effect.
@@ -597,6 +622,19 @@ fn route_mouse(
                     state.help_scroll_offset = 0;
                     state.help_scroll_x = 0;
                 }
+                return vec![];
+            }
+
+            // Click anywhere on the child-view header bubble toggles its
+            // collapsed state immediately — unlike a normal chat bubble,
+            // there's no drill-in/collapse ambiguity to debounce here (the
+            // user is already viewing the child; double-clicking a bubble's
+            // title to drill in only applies to the root transcript).
+            let hb = state.layout.header_bubble;
+            let in_header_bubble =
+                column >= hb.x && column < hb.x + hb.width && row >= hb.y && row < hb.y + hb.height;
+            if in_header_bubble {
+                state.toggle_header_bubble_collapsed();
                 return vec![];
             }
 
@@ -762,7 +800,52 @@ fn route_mouse(
                         })
                         .copied()
                     {
-                        state.toggle_tool_bubble_collapsed(bubble_id);
+                        // A double-click on a `spawn_subagent` bubble's title
+                        // drills into its conversation view instead of
+                        // toggling collapse — distinct from the single-click
+                        // collapse/expand every bubble (including spawn
+                        // bubbles) always supports. `last_child` survives
+                        // `ChildAgentDone`, so this still works once the
+                        // child has finished. Only one child conversation is
+                        // tracked at a time, so any `spawn_subagent` bubble
+                        // unambiguously refers to `last_child`.
+                        //
+                        // The first click on a spawn bubble does NOT toggle
+                        // collapse immediately — it only arms
+                        // `last_bubble_click`. Toggling immediately would
+                        // change the bubble's rendered height and could shift
+                        // a bottom-pinned auto-scroll before the second click
+                        // arrives, breaking the row lookup that correlates it
+                        // back to this bubble. Deferring the toggle until
+                        // `BubbleClickWindowExpired` fires (see
+                        // `bubble_click_timeout` in tui_driver.rs) keeps the
+                        // layout stable across both clicks of a double-click.
+                        let is_spawn_bubble = state.chat_entries.iter().any(|entry| {
+                            matches!(entry, ChatEntry::ToolBubble { id, name, .. }
+                                if *id == bubble_id && name == crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME)
+                        });
+                        if is_spawn_bubble {
+                            let now = std::time::Instant::now();
+                            let is_double_click = matches!(
+                                state.last_bubble_click,
+                                Some((last_id, clicked_at))
+                                    if last_id == bubble_id
+                                        && now.duration_since(clicked_at)
+                                            < crate::tui_reducer_state::DOUBLE_CLICK_WINDOW
+                            );
+                            if is_double_click {
+                                state.last_bubble_click = None;
+                                if state.current_child.is_some() || state.last_child.is_some() {
+                                    state.switch_to_child_view();
+                                } else {
+                                    state.toggle_tool_bubble_collapsed(bubble_id);
+                                }
+                            } else {
+                                state.last_bubble_click = Some((bubble_id, now));
+                            }
+                        } else {
+                            state.toggle_tool_bubble_collapsed(bubble_id);
+                        }
                     } else if let Some((_, _, entry_index)) = state
                         .thinking_title_rows
                         .iter()
@@ -798,18 +881,10 @@ fn route_domain(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
     let event_kind = event.kind();
     let correlation_id = event.correlation_id();
     let mode_before = state.mode.kind();
-    let effects = match state.mode.clone() {
-        TuiMode::Idle => domain_idle(state, event),
-        TuiMode::Pending => domain_pending(state, event),
-        TuiMode::Streaming => domain_streaming(state, event),
-        TuiMode::ClarifyPending { .. } => domain_clarify_pending(state, event),
-        TuiMode::Aborting => domain_aborting(state, event),
-        TuiMode::DoublePressAbort {
-            pressed_at,
-            return_to,
-            armed_by,
-        } => domain_double_press(state, event, pressed_at, return_to, armed_by),
-    };
+    // Child-lifecycle events never depend on / alter the parent's own
+    // `TuiMode` (that's driven exclusively by the root's own stream/tool
+    // state) — handle them uniformly ahead of the per-mode dispatch below.
+    let effects = domain_child_lifecycle(state, event);
     // Deliberately logs only the event's variant tag, its correlation `id`
     // (when it has one), and the mode transition — never chunk text, tool
     // arguments, or tool output — just enough to follow the state-transition
@@ -823,6 +898,161 @@ fn route_domain(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
         "domain event handled"
     );
     effects
+}
+
+/// Handles `ChildAgentStarted`/`ChildAgentToken`/`ChildAgentDone` ahead of the
+/// mode-specific dispatch; every other event falls through unchanged to the
+/// per-`TuiMode` handlers.
+fn domain_child_lifecycle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
+    match event {
+        DomainEvent::ChildAgentStarted {
+            run_id,
+            agent_type,
+            task,
+            label,
+        } => {
+            let child = ChildRunInfo {
+                run_id,
+                agent_type,
+                task,
+                label,
+            };
+            state.current_child = Some(child.clone());
+            state.last_child = Some(child);
+            state.child_messages.clear();
+            state.child_partial_text.clear();
+            state.header_bubble_scroll_offset = 0;
+            // No synthetic "task" message is seeded here: the child-view
+            // header re-renders the real root `spawn_subagent` bubble (see
+            // `render::project_for_draw`'s `child_view_bubble`), which
+            // already shows the task/label/agent_type — duplicating it as
+            // the transcript's first turn would just repeat the same text.
+            vec![]
+        }
+        DomainEvent::ChildAgentToken(text) => {
+            state.child_partial_text.push_str(&text);
+            vec![]
+        }
+        DomainEvent::ChildAgentDone { .. } => {
+            state.flush_child_partial_text();
+            if matches!(state.active_view, ConversationView::Child { .. })
+                && state.auto_switched_to_child
+            {
+                state.switch_to_root_view();
+            }
+            state.current_child = None;
+            vec![]
+        }
+        DomainEvent::BubbleClickWindowExpired => {
+            // Commit the deferred toggle from a single (non-double) click on
+            // a spawn bubble's title — see the click handler in `update()`.
+            // A no-op if a confirming second click already resolved (and
+            // cleared) the arm first.
+            if let Some((bubble_id, _)) = state.last_bubble_click.take() {
+                state.toggle_tool_bubble_collapsed(bubble_id);
+            }
+            vec![]
+        }
+        other => match state.mode.clone() {
+            TuiMode::Idle => domain_idle(state, other),
+            TuiMode::Pending => domain_pending(state, other),
+            TuiMode::Streaming => domain_streaming(state, other),
+            TuiMode::ClarifyPending { .. } => domain_clarify_pending(state, other),
+            TuiMode::Aborting => domain_aborting(state, other),
+            TuiMode::DoublePressAbort {
+                pressed_at,
+                return_to,
+                armed_by,
+            } => domain_double_press(state, other, pressed_at, return_to, armed_by),
+        },
+    }
+}
+
+/// Shared handling for `DomainEvent::ToolPending`, used identically by
+/// `domain_idle`, `domain_pending`, and `domain_streaming`: creates the
+/// `Pending` bubble in whichever transcript `run_id` targets (root or the
+/// current child), arms `Focus::ToolApproval`, and — when this pending call
+/// belongs to the tracked child — auto-switches the drill-in view to it.
+fn push_tool_pending_bubble(
+    state: &mut AppState,
+    id: Uuid,
+    name: String,
+    arguments: serde_json::Value,
+    content_sections: Vec<crate::agent::tools::Section>,
+    title_arguments: Vec<(String, serde_json::Value)>,
+    run_id: Option<Uuid>,
+) -> Vec<Effect> {
+    state.flush_target_partial_text(run_id);
+    state
+        .target_messages_mut(run_id)
+        .push(ChatEntry::ToolBubble {
+            id,
+            name: name.clone(),
+            state: Box::new(ToolCallState::Pending {
+                arguments,
+                content_sections,
+                title_arguments,
+            }),
+            collapsed: true,
+        });
+    state.focus = Focus::ToolApproval {
+        tool_id: id,
+        tool_name: name,
+    };
+    state.note_child_interactive_pause(run_id);
+    vec![Effect::SaveTextareaAndClear]
+}
+
+/// Shared handling for `DomainEvent::ClarifyPending`, used identically by
+/// `domain_idle`, `domain_pending`, and `domain_streaming`. See
+/// `push_tool_pending_bubble` for the `run_id` routing/auto-switch rationale.
+fn push_clarify_pending_bubble(
+    state: &mut AppState,
+    id: Uuid,
+    question: String,
+    context: Option<String>,
+    choices: Option<Vec<String>>,
+    run_id: Option<Uuid>,
+) -> Vec<Effect> {
+    let mut bubble_arguments = serde_json::json!({ "question": question });
+    if let Some(ref ctx) = context {
+        bubble_arguments["context"] = serde_json::Value::String(ctx.clone());
+    }
+    if let Some(ref choices_list) = choices {
+        bubble_arguments["choices"] = serde_json::json!(choices_list);
+    }
+    // Flush any thinking/assistant text accumulated before this clarify call
+    // so it lands ahead of the clarify bubble in chronological order (mirrors
+    // the ToolStart/ToolPending flush).
+    state.flush_target_partial_text(run_id);
+    state
+        .target_messages_mut(run_id)
+        .push(ChatEntry::ToolBubble {
+            id,
+            name: ClarifyTool::NAME.to_string(),
+            state: Box::new(ToolCallState::Running {
+                arguments: bubble_arguments,
+                content_sections: vec![],
+                title_arguments: vec![(
+                    "question".to_string(),
+                    serde_json::Value::String(question.clone()),
+                )],
+                progress_arguments: vec![],
+            }),
+            collapsed: false,
+        });
+    state.mode = TuiMode::ClarifyPending {
+        id,
+        question,
+        context,
+        choices,
+    };
+    // Scroll the clarify banner to the bottom so the question and choices
+    // are visible immediately; clamped to max_scroll on render.
+    state.clarify_scroll_offset = usize::MAX;
+    state.focus = Focus::MainInput;
+    state.note_child_interactive_pause(run_id);
+    vec![Effect::SaveTextareaAndClear]
 }
 
 fn domain_idle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
@@ -840,63 +1070,23 @@ fn domain_idle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             arguments,
             content_sections,
             title_arguments,
-        } => {
-            state.flush_partial_assistant_message(false);
-            state.chat_entries.push(ChatEntry::ToolBubble {
-                id,
-                name: name.clone(),
-                state: Box::new(ToolCallState::Pending {
-                    arguments: arguments.clone(),
-                    content_sections: content_sections.clone(),
-                    title_arguments: title_arguments.clone(),
-                }),
-                collapsed: true,
-            });
-            state.focus = Focus::ToolApproval {
-                tool_id: id,
-                tool_name: name,
-            };
-            vec![Effect::SaveTextareaAndClear]
-        }
+            run_id,
+        } => push_tool_pending_bubble(
+            state,
+            id,
+            name,
+            arguments,
+            content_sections,
+            title_arguments,
+            run_id,
+        ),
         DomainEvent::ClarifyPending {
             id,
             question,
             context,
             choices,
-        } => {
-            let mut bubble_arguments = serde_json::json!({ "question": question });
-            if let Some(ref ctx) = context {
-                bubble_arguments["context"] = serde_json::Value::String(ctx.clone());
-            }
-            if let Some(ref choices_list) = choices {
-                bubble_arguments["choices"] = serde_json::json!(choices_list);
-            }
-            state.chat_entries.push(ChatEntry::ToolBubble {
-                id,
-                name: ClarifyTool::NAME.to_string(),
-                state: Box::new(ToolCallState::Running {
-                    arguments: bubble_arguments,
-                    content_sections: vec![],
-                    title_arguments: vec![(
-                        "question".to_string(),
-                        serde_json::Value::String(question.clone()),
-                    )],
-                    progress_arguments: vec![],
-                }),
-                collapsed: false,
-            });
-            state.mode = TuiMode::ClarifyPending {
-                id,
-                question,
-                context,
-                choices,
-            };
-            // Scroll the clarify banner to the bottom so the question and
-            // choices are visible immediately; clamped to max_scroll on render.
-            state.clarify_scroll_offset = usize::MAX;
-            state.focus = Focus::MainInput;
-            vec![Effect::SaveTextareaAndClear]
-        }
+            run_id,
+        } => push_clarify_pending_bubble(state, id, question, context, choices, run_id),
         DomainEvent::Error(message) => {
             state.chat_entries.push(ChatEntry::ErrorLine { message });
             state.mode = TuiMode::Idle;
@@ -922,6 +1112,7 @@ fn domain_idle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             arguments,
             content_sections,
             title_arguments,
+            run_id,
         } => {
             update_tool_bubble_to_running(
                 state,
@@ -930,6 +1121,7 @@ fn domain_idle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
                 arguments,
                 content_sections,
                 title_arguments,
+                run_id,
             );
             vec![]
         }
@@ -947,20 +1139,24 @@ fn domain_idle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             summary,
             duration,
             content_sections,
+            run_id,
         } => {
             update_tool_bubble_to_done(
                 state,
-                id,
-                name,
-                result_section,
-                content_sections,
-                summary,
-                duration,
+                ToolDonePayload {
+                    id,
+                    name,
+                    result_section,
+                    content_sections,
+                    summary,
+                    duration,
+                    run_id,
+                },
             );
             vec![]
         }
-        DomainEvent::ToolKilled { id } => {
-            update_tool_bubble_to_killed(state, id);
+        DomainEvent::ToolKilled { id, run_id } => {
+            update_tool_bubble_to_killed(state, id, run_id);
             vec![]
         }
         DomainEvent::ToolDenied { id } => {
@@ -1011,63 +1207,23 @@ fn domain_pending(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             arguments,
             content_sections,
             title_arguments,
-        } => {
-            state.flush_partial_assistant_message(false);
-            state.chat_entries.push(ChatEntry::ToolBubble {
-                id,
-                name: name.clone(),
-                state: Box::new(ToolCallState::Pending {
-                    arguments: arguments.clone(),
-                    content_sections: content_sections.clone(),
-                    title_arguments: title_arguments.clone(),
-                }),
-                collapsed: true,
-            });
-            state.focus = Focus::ToolApproval {
-                tool_id: id,
-                tool_name: name,
-            };
-            vec![Effect::SaveTextareaAndClear]
-        }
+            run_id,
+        } => push_tool_pending_bubble(
+            state,
+            id,
+            name,
+            arguments,
+            content_sections,
+            title_arguments,
+            run_id,
+        ),
         DomainEvent::ClarifyPending {
             id,
             question,
             context,
             choices,
-        } => {
-            let mut bubble_arguments = serde_json::json!({ "question": question });
-            if let Some(ref ctx) = context {
-                bubble_arguments["context"] = serde_json::Value::String(ctx.clone());
-            }
-            if let Some(ref choices_list) = choices {
-                bubble_arguments["choices"] = serde_json::json!(choices_list);
-            }
-            state.chat_entries.push(ChatEntry::ToolBubble {
-                id,
-                name: ClarifyTool::NAME.to_string(),
-                state: Box::new(ToolCallState::Running {
-                    arguments: bubble_arguments,
-                    content_sections: vec![],
-                    title_arguments: vec![(
-                        "question".to_string(),
-                        serde_json::Value::String(question.clone()),
-                    )],
-                    progress_arguments: vec![],
-                }),
-                collapsed: false,
-            });
-            state.mode = TuiMode::ClarifyPending {
-                id,
-                question,
-                context,
-                choices,
-            };
-            // Scroll the clarify banner to the bottom so the question and
-            // choices are visible immediately; clamped to max_scroll on render.
-            state.clarify_scroll_offset = usize::MAX;
-            state.focus = Focus::MainInput;
-            vec![Effect::SaveTextareaAndClear]
-        }
+            run_id,
+        } => push_clarify_pending_bubble(state, id, question, context, choices, run_id),
         DomainEvent::SteerQueued => {
             state.steer_indicator = true;
             vec![]
@@ -1088,6 +1244,7 @@ fn domain_pending(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             arguments,
             content_sections,
             title_arguments,
+            run_id,
         } => {
             update_tool_bubble_to_running(
                 state,
@@ -1096,6 +1253,7 @@ fn domain_pending(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
                 arguments,
                 content_sections,
                 title_arguments,
+                run_id,
             );
             vec![]
         }
@@ -1113,20 +1271,24 @@ fn domain_pending(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             summary,
             duration,
             content_sections,
+            run_id,
         } => {
             update_tool_bubble_to_done(
                 state,
-                id,
-                name,
-                result_section,
-                content_sections,
-                summary,
-                duration,
+                ToolDonePayload {
+                    id,
+                    name,
+                    result_section,
+                    content_sections,
+                    summary,
+                    duration,
+                    run_id,
+                },
             );
             vec![]
         }
-        DomainEvent::ToolKilled { id } => {
-            update_tool_bubble_to_killed(state, id);
+        DomainEvent::ToolKilled { id, run_id } => {
+            update_tool_bubble_to_killed(state, id, run_id);
             vec![]
         }
         DomainEvent::ToolDenied { id } => {
@@ -1196,73 +1358,30 @@ fn domain_streaming(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             arguments,
             content_sections,
             title_arguments,
-        } => {
-            state.flush_partial_assistant_message(false);
-            state.chat_entries.push(ChatEntry::ToolBubble {
-                id,
-                name: name.clone(),
-                state: Box::new(ToolCallState::Pending {
-                    arguments: arguments.clone(),
-                    content_sections: content_sections.clone(),
-                    title_arguments: title_arguments.clone(),
-                }),
-                collapsed: true,
-            });
-            state.focus = Focus::ToolApproval {
-                tool_id: id,
-                tool_name: name,
-            };
-            vec![Effect::SaveTextareaAndClear]
-        }
+            run_id,
+        } => push_tool_pending_bubble(
+            state,
+            id,
+            name,
+            arguments,
+            content_sections,
+            title_arguments,
+            run_id,
+        ),
         DomainEvent::ClarifyPending {
             id,
             question,
             context,
             choices,
-        } => {
-            let mut bubble_arguments = serde_json::json!({ "question": question });
-            if let Some(ref ctx) = context {
-                bubble_arguments["context"] = serde_json::Value::String(ctx.clone());
-            }
-            if let Some(ref choices_list) = choices {
-                bubble_arguments["choices"] = serde_json::json!(choices_list);
-            }
-            // Flush any thinking/assistant text accumulated before this
-            // clarify call so it lands ahead of the clarify bubble in
-            // chronological order (mirrors the ToolStart/ToolPending flush).
-            state.flush_partial_assistant_message(false);
-            state.chat_entries.push(ChatEntry::ToolBubble {
-                id,
-                name: ClarifyTool::NAME.to_string(),
-                state: Box::new(ToolCallState::Running {
-                    arguments: bubble_arguments,
-                    content_sections: vec![],
-                    title_arguments: vec![(
-                        "question".to_string(),
-                        serde_json::Value::String(question.clone()),
-                    )],
-                    progress_arguments: vec![],
-                }),
-                collapsed: false,
-            });
-            state.mode = TuiMode::ClarifyPending {
-                id,
-                question,
-                context,
-                choices,
-            };
-            // Scroll the clarify banner to the bottom so the question and
-            // choices are visible immediately; clamped to max_scroll on render.
-            state.clarify_scroll_offset = usize::MAX;
-            state.focus = Focus::MainInput;
-            vec![Effect::SaveTextareaAndClear]
-        }
+            run_id,
+        } => push_clarify_pending_bubble(state, id, question, context, choices, run_id),
         DomainEvent::ToolStart {
             id,
             name,
             arguments,
             content_sections,
             title_arguments,
+            run_id,
         } => {
             update_tool_bubble_to_running(
                 state,
@@ -1271,6 +1390,7 @@ fn domain_streaming(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
                 arguments,
                 content_sections,
                 title_arguments,
+                run_id,
             );
             vec![]
         }
@@ -1288,20 +1408,24 @@ fn domain_streaming(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             summary,
             duration,
             content_sections,
+            run_id,
         } => {
             update_tool_bubble_to_done(
                 state,
-                id,
-                name,
-                result_section,
-                content_sections,
-                summary,
-                duration,
+                ToolDonePayload {
+                    id,
+                    name,
+                    result_section,
+                    content_sections,
+                    summary,
+                    duration,
+                    run_id,
+                },
             );
             vec![]
         }
-        DomainEvent::ToolKilled { id } => {
-            update_tool_bubble_to_killed(state, id);
+        DomainEvent::ToolKilled { id, run_id } => {
+            update_tool_bubble_to_killed(state, id, run_id);
             vec![]
         }
         DomainEvent::ToolDenied { id } => {
@@ -1391,6 +1515,7 @@ fn domain_aborting(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             arguments,
             content_sections,
             title_arguments,
+            run_id,
         } => {
             update_tool_bubble_to_running(
                 state,
@@ -1399,6 +1524,7 @@ fn domain_aborting(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
                 arguments,
                 content_sections,
                 title_arguments,
+                run_id,
             );
             vec![]
         }
@@ -1416,21 +1542,25 @@ fn domain_aborting(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             summary,
             duration,
             content_sections,
+            run_id,
         } => {
             update_tool_bubble_to_done(
                 state,
-                id,
-                name,
-                result_section,
-                content_sections,
-                summary,
-                duration,
+                ToolDonePayload {
+                    id,
+                    name,
+                    result_section,
+                    content_sections,
+                    summary,
+                    duration,
+                    run_id,
+                },
             );
             vec![]
         }
-        DomainEvent::ToolKilled { id } => {
+        DomainEvent::ToolKilled { id, run_id } => {
             tracing::info!(%id, aborting_exit = state.aborting_exit, "aborting: tool killed → idle");
-            update_tool_bubble_to_killed(state, id);
+            update_tool_bubble_to_killed(state, id, run_id);
             state.mode = TuiMode::Idle;
             state.focus = Focus::MainInput;
             if std::mem::replace(&mut state.aborting_exit, false) {
@@ -1517,6 +1647,7 @@ fn update_tool_bubble_to_running(
     arguments: serde_json::Value,
     content_sections: Vec<crate::agent::tools::Section>,
     title_arguments: Vec<(String, serde_json::Value)>,
+    run_id: Option<Uuid>,
 ) {
     if let Some(entry) = state.find_tool_bubble_mut(id) {
         if let ChatEntry::ToolBubble {
@@ -1539,23 +1670,29 @@ fn update_tool_bubble_to_running(
         // thinking that happens both before and after the tool call would
         // stay merged into one bubble and get flushed only at `StreamDone`,
         // making it look like the tool ran before the model ever "thought".
-        state.flush_partial_assistant_message(false);
-        state.chat_entries.push(ChatEntry::ToolBubble {
-            id,
-            name,
-            state: Box::new(ToolCallState::Running {
-                arguments,
-                content_sections,
-                title_arguments,
-                progress_arguments: vec![],
-            }),
-            collapsed: true,
-        });
+        state.flush_target_partial_text(run_id);
+        state
+            .target_messages_mut(run_id)
+            .push(ChatEntry::ToolBubble {
+                id,
+                name,
+                state: Box::new(ToolCallState::Running {
+                    arguments,
+                    content_sections,
+                    title_arguments,
+                    progress_arguments: vec![],
+                }),
+                collapsed: true,
+            });
     }
     // Clear ToolApproval focus if it was for this tool.
     if matches!(state.focus, Focus::ToolApproval { tool_id, .. } if tool_id == id) {
         state.focus = Focus::MainInput;
     }
+    // A tool moving from Pending to Running means its approval step (if any)
+    // is over — if this was the child's interactive pause we auto-switched
+    // for, auto-return to Root now that the child is unblocked again.
+    state.resolve_possible_child_pause(id);
 }
 
 /// Patches `progress_arguments` on an existing `Running` tool bubble without
@@ -1587,15 +1724,29 @@ fn update_tool_bubble_progress(
     }
 }
 
-fn update_tool_bubble_to_done(
-    state: &mut AppState,
+/// Payload for [`update_tool_bubble_to_done`], grouped into a struct to keep
+/// the function signature down to a reasonable arity (see
+/// `DomainEvent::ToolDone`, which this mirrors field-for-field plus `id`).
+struct ToolDonePayload {
     id: Uuid,
     name: String,
     result_section: crate::tui_reducer_state::ResultSection,
     content_sections: Vec<crate::agent::tools::Section>,
     summary: Vec<(String, String)>,
     duration: std::time::Duration,
-) {
+    run_id: Option<Uuid>,
+}
+
+fn update_tool_bubble_to_done(state: &mut AppState, payload: ToolDonePayload) {
+    let ToolDonePayload {
+        id,
+        name,
+        result_section,
+        content_sections,
+        summary,
+        duration,
+        run_id,
+    } = payload;
     let (previous_arguments, previous_title_arguments) = state
         .find_tool_bubble_mut(id)
         .and_then(|entry| {
@@ -1638,23 +1789,26 @@ fn update_tool_bubble_to_done(
             };
         }
     } else {
-        state.chat_entries.push(ChatEntry::ToolBubble {
-            id,
-            name,
-            state: Box::new(ToolCallState::Done {
-                arguments: serde_json::Value::Null,
-                result_section,
-                content_sections,
-                summary,
-                duration,
-                title_arguments: vec![],
-            }),
-            collapsed: true,
-        });
+        state
+            .target_messages_mut(run_id)
+            .push(ChatEntry::ToolBubble {
+                id,
+                name,
+                state: Box::new(ToolCallState::Done {
+                    arguments: serde_json::Value::Null,
+                    result_section,
+                    content_sections,
+                    summary,
+                    duration,
+                    title_arguments: vec![],
+                }),
+                collapsed: true,
+            });
     }
+    state.resolve_possible_child_pause(id);
 }
 
-fn update_tool_bubble_to_killed(state: &mut AppState, id: Uuid) {
+fn update_tool_bubble_to_killed(state: &mut AppState, id: Uuid, run_id: Option<Uuid>) {
     if let Some(entry) = state.find_tool_bubble_mut(id) {
         if let ChatEntry::ToolBubble {
             state: bubble_state,
@@ -1664,16 +1818,19 @@ fn update_tool_bubble_to_killed(state: &mut AppState, id: Uuid) {
             **bubble_state = ToolCallState::Killed;
         }
     } else {
-        state.chat_entries.push(ChatEntry::ToolBubble {
-            id,
-            name: String::new(),
-            state: Box::new(ToolCallState::Killed),
-            collapsed: true,
-        });
+        state
+            .target_messages_mut(run_id)
+            .push(ChatEntry::ToolBubble {
+                id,
+                name: String::new(),
+                state: Box::new(ToolCallState::Killed),
+                collapsed: true,
+            });
     }
     if matches!(state.focus, Focus::ToolApproval { tool_id, .. } if tool_id == id) {
         state.focus = Focus::MainInput;
     }
+    state.resolve_possible_child_pause(id);
 }
 
 fn update_tool_bubble_to_denied(state: &mut AppState, id: Uuid) {
@@ -1708,6 +1865,7 @@ fn update_tool_bubble_to_denied(state: &mut AppState, id: Uuid) {
             title_arguments: preserved_title_arguments,
         };
     }
+    state.resolve_possible_child_pause(id);
 }
 
 // ─── Dedent helper ────────────────────────────────────────────────────────────
@@ -1738,7 +1896,8 @@ mod tests {
 
     use super::*;
     use crate::tui_reducer_state::{
-        AppState, ChatEntry, Focus, InputEvent, ToolCallState, TuiMode,
+        AppState, ChatEntry, ConversationView, Focus, InputEvent, ResultSection, ToolCallState,
+        TuiMode,
     };
 
     fn empty_textarea() -> TextareaContext {
@@ -1804,6 +1963,7 @@ mod tests {
                     arguments: serde_json::json!({"path": "/secret/path"}),
                     content_sections: vec![],
                     title_arguments: vec![],
+                    run_id: None,
                 }),
                 &empty_textarea(),
             );
@@ -1820,6 +1980,182 @@ mod tests {
 
     fn key_event(code: KeyCode) -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    // ── Phase 6.10 drill-in view tests ─────────────────────────────────────────
+
+    fn tracked_child(state: &mut AppState) -> Uuid {
+        let run_id = Uuid::new_v4();
+        state.current_child = Some(crate::tui_reducer_state::ChildRunInfo {
+            run_id,
+            agent_type: "reviewer".to_string(),
+            task: "look into flaky test".to_string(),
+            label: "Investigate flaky test".to_string(),
+        });
+        run_id
+    }
+
+    #[test]
+    fn child_agent_started_does_not_auto_switch_the_active_view() {
+        // Spawning a child must not yank focus away from whatever the user
+        // was looking at — only an *interactive pause* (ToolPending /
+        // ClarifyPending) belonging to the child does that.
+        let mut state = AppState::new();
+        let run_id = Uuid::new_v4();
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ChildAgentStarted {
+                run_id,
+                agent_type: "reviewer".to_string(),
+                task: "look into flaky test".to_string(),
+                label: "Investigate flaky test".to_string(),
+            }),
+            &empty_textarea(),
+        );
+        assert_eq!(state.active_view, ConversationView::Root);
+        assert!(!state.auto_switched_to_child);
+    }
+
+    #[test]
+    fn child_agent_started_clears_transcript_without_seeding_a_synthetic_task_message() {
+        // The task is shown via the real root `spawn_subagent` bubble
+        // re-rendered as the child-view header (see
+        // `render::project_for_draw`'s `child_view_bubble`) — the transcript
+        // itself starts empty and only accumulates the child's own turns.
+        let mut state = AppState::new();
+        let run_id = Uuid::new_v4();
+        state.child_messages.push(ChatEntry::AssistantMessage {
+            text: "stale from a previous run".to_string(),
+            interrupted: false,
+        });
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ChildAgentStarted {
+                run_id,
+                agent_type: "reviewer".to_string(),
+                task: "look into flaky test".to_string(),
+                label: "Investigate flaky test".to_string(),
+            }),
+            &empty_textarea(),
+        );
+        assert!(state.child_messages.is_empty());
+    }
+
+    #[test]
+    fn child_tool_pending_auto_switches_view_and_arms_auto_return() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::Streaming;
+        let run_id = tracked_child(&mut state);
+        let id = Uuid::new_v4();
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolPending {
+                id,
+                name: "write".to_string(),
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                run_id: Some(run_id),
+            }),
+            &empty_textarea(),
+        );
+        assert!(
+            matches!(state.active_view, ConversationView::Child { run_id: r, .. } if r == run_id),
+            "expected auto-switch to the child's view, got {:?}",
+            state.active_view
+        );
+        assert!(state.auto_switched_to_child);
+
+        // Resolving the pause (denial) auto-returns since the switch was
+        // automatic, not a manual navigation.
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolDenied { id }),
+            &empty_textarea(),
+        );
+        assert_eq!(state.active_view, ConversationView::Root);
+        assert!(!state.auto_switched_to_child);
+    }
+
+    #[test]
+    fn manual_navigation_to_child_view_prevents_auto_return() {
+        // A user who already drilled in manually (e.g. clicked the spawn
+        // bubble) should not get yanked back to Root the moment the child's
+        // pending tool call resolves — only an *auto*-switch re-arms
+        // auto-return.
+        let mut state = AppState::new();
+        state.mode = TuiMode::Streaming;
+        let run_id = tracked_child(&mut state);
+        state.switch_to_child_view();
+        assert!(!state.auto_switched_to_child);
+
+        let id = Uuid::new_v4();
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolPending {
+                id,
+                name: "write".to_string(),
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                run_id: Some(run_id),
+            }),
+            &empty_textarea(),
+        );
+        assert!(matches!(state.active_view, ConversationView::Child { .. }));
+        assert!(!state.auto_switched_to_child);
+
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolDenied { id }),
+            &empty_textarea(),
+        );
+        assert!(
+            matches!(state.active_view, ConversationView::Child { .. }),
+            "manual navigation must not auto-return: {:?}",
+            state.active_view
+        );
+    }
+
+    #[test]
+    fn ctrl_b_toggles_between_root_and_child_view() {
+        let mut state = AppState::new();
+        tracked_child(&mut state);
+        assert_eq!(state.active_view, ConversationView::Root);
+
+        update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(crossterm::event::KeyEvent::new(
+                KeyCode::Char('b'),
+                KeyModifiers::CONTROL,
+            ))),
+            &empty_textarea(),
+        );
+        assert!(matches!(state.active_view, ConversationView::Child { .. }));
+
+        update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(crossterm::event::KeyEvent::new(
+                KeyCode::Char('b'),
+                KeyModifiers::CONTROL,
+            ))),
+            &empty_textarea(),
+        );
+        assert_eq!(state.active_view, ConversationView::Root);
+    }
+
+    #[test]
+    fn ctrl_b_is_a_no_op_without_a_tracked_child() {
+        let mut state = AppState::new();
+        update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(crossterm::event::KeyEvent::new(
+                KeyCode::Char('b'),
+                KeyModifiers::CONTROL,
+            ))),
+            &empty_textarea(),
+        );
+        assert_eq!(state.active_view, ConversationView::Root);
     }
 
     // ── Ctrl+C tests ──────────────────────────────────────────────────────────
@@ -2004,7 +2340,10 @@ mod tests {
         // ToolKilled arrives (no StreamCancelled because no HTTP stream was active).
         let effects = update(
             &mut state,
-            TuiEvent::Domain(DomainEvent::ToolKilled { id: Uuid::new_v4() }),
+            TuiEvent::Domain(DomainEvent::ToolKilled {
+                id: Uuid::new_v4(),
+                run_id: None,
+            }),
             &empty_textarea(),
         );
         assert!(
@@ -2195,6 +2534,7 @@ mod tests {
                 question: "Test?".to_string(),
                 context: None,
                 choices: None,
+                run_id: None,
             }),
             &empty_textarea(),
         );
@@ -2220,6 +2560,7 @@ mod tests {
                 question: "Test?".to_string(),
                 context: None,
                 choices: None,
+                run_id: None,
             }),
             &empty_textarea(),
         );
@@ -2239,6 +2580,7 @@ mod tests {
                 question: "Test?".to_string(),
                 context: None,
                 choices: None,
+                run_id: None,
             }),
             &empty_textarea(),
         );
@@ -2601,7 +2943,190 @@ mod tests {
         assert_eq!(state.scroll_offset, 4);
     }
 
-    // ── Mouse click closes modal ───────────────────────────────────────────────
+    #[test]
+    fn mouse_scroll_over_header_bubble_scrolls_the_header_not_the_chat_area() {
+        let mut state = AppState::new();
+        state.layout.header_bubble = ratatui::layout::Rect::new(0, 0, 40, 4);
+        state.header_bubble_scroll_offset = 2;
+        state.scroll_offset = 5;
+        state.scroll_locked = false;
+        let mouse = crossterm::event::MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 10,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        };
+        update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
+        assert_eq!(state.header_bubble_scroll_offset, 3);
+        assert_eq!(
+            state.scroll_offset, 5,
+            "scroll over the header must not also move the chat area"
+        );
+    }
+
+    #[test]
+    fn click_on_header_bubble_toggles_its_collapsed_state() {
+        use crate::tui_reducer_state::ToolCallState;
+
+        let mut state = AppState::new();
+        let bubble_id = Uuid::new_v4();
+        state.chat_entries.push(ChatEntry::ToolBubble {
+            id: bubble_id,
+            name: crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
+            state: Box::new(ToolCallState::Running {
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                progress_arguments: vec![],
+            }),
+            collapsed: false,
+        });
+        state.current_child = Some(ChildRunInfo {
+            run_id: Uuid::new_v4(),
+            agent_type: "reviewer".to_string(),
+            task: "look into flaky test".to_string(),
+            label: "Investigate flaky test".to_string(),
+        });
+        state.switch_to_child_view();
+        state.layout.header_bubble = ratatui::layout::Rect::new(0, 0, 40, 4);
+        let mouse_down = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 5,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        update(&mut state, TuiEvent::Mouse(mouse_down), &empty_textarea());
+
+        assert!(
+            matches!(&state.chat_entries[0], ChatEntry::ToolBubble { collapsed, .. } if *collapsed),
+            "click on the header bubble must toggle the real root bubble's collapsed state"
+        );
+    }
+
+    #[test]
+    fn click_outside_header_bubble_does_not_toggle_it() {
+        use crate::tui_reducer_state::ToolCallState;
+
+        let mut state = AppState::new();
+        let bubble_id = Uuid::new_v4();
+        state.chat_entries.push(ChatEntry::ToolBubble {
+            id: bubble_id,
+            name: crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
+            state: Box::new(ToolCallState::Running {
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                progress_arguments: vec![],
+            }),
+            collapsed: false,
+        });
+        state.current_child = Some(ChildRunInfo {
+            run_id: Uuid::new_v4(),
+            agent_type: "reviewer".to_string(),
+            task: "look into flaky test".to_string(),
+            label: "Investigate flaky test".to_string(),
+        });
+        state.switch_to_child_view();
+        state.layout.header_bubble = ratatui::layout::Rect::new(0, 0, 40, 4);
+        let mouse_down = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 5,
+            row: 10,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        update(&mut state, TuiEvent::Mouse(mouse_down), &empty_textarea());
+
+        assert!(
+            matches!(&state.chat_entries[0], ChatEntry::ToolBubble { collapsed, .. } if !*collapsed),
+            "click below the header bubble must not toggle it"
+        );
+    }
+
+    #[test]
+    fn header_bubble_stays_expanded_after_the_subagent_finishes() {
+        // Regression: a bubble the user manually expanded while the subagent
+        // was still running must stay expanded once it finishes — the user
+        // may still want to inspect the header (task/result) after the fact.
+        let bubble_id = Uuid::new_v4();
+        let run_id = Uuid::new_v4();
+        let mut state = AppState::new();
+
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ChildAgentStarted {
+                run_id,
+                agent_type: "reviewer".to_string(),
+                task: "look into flaky test".to_string(),
+                label: "Investigate flaky test".to_string(),
+            }),
+            &empty_textarea(),
+        );
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolStart {
+                id: bubble_id,
+                name: crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                run_id: None,
+            }),
+            &empty_textarea(),
+        );
+        assert!(
+            matches!(&state.chat_entries[0], ChatEntry::ToolBubble { collapsed, .. } if *collapsed),
+            "spawn_subagent bubbles start collapsed by default"
+        );
+
+        // User manually expands the header bubble while the subagent runs.
+        state.switch_to_child_view();
+        state.layout.header_bubble = ratatui::layout::Rect::new(0, 0, 40, 4);
+        update(
+            &mut state,
+            TuiEvent::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: 5,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &empty_textarea(),
+        );
+        assert!(
+            matches!(&state.chat_entries[0], ChatEntry::ToolBubble { collapsed, .. } if !*collapsed),
+            "click must have expanded the header bubble"
+        );
+
+        // The subagent finishes: its final `ToolDone` (the spawn_subagent
+        // call itself completing) and `ChildAgentDone` (bookkeeping) arrive.
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolDone {
+                id: bubble_id,
+                name: crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
+                result_section: ResultSection::plain(String::new()),
+                summary: vec![],
+                duration: std::time::Duration::from_secs(1),
+                content_sections: vec![],
+                run_id: None,
+            }),
+            &empty_textarea(),
+        );
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ChildAgentDone {
+                status: "done".to_string(),
+                result: None,
+            }),
+            &empty_textarea(),
+        );
+
+        assert!(
+            matches!(&state.chat_entries[0], ChatEntry::ToolBubble { collapsed, .. } if !*collapsed),
+            "the header bubble must still be expanded after the subagent finishes"
+        );
+    }
 
     #[test]
     fn mouse_click_outside_help_popup_closes_modal() {
@@ -2711,6 +3236,140 @@ mod tests {
         assert!(state.partial_thinking_collapsed);
     }
 
+    /// Sets up `state` with a single `spawn_subagent` `ToolBubble` at
+    /// `bubble_id`, plus the title-row/rendered-line bookkeeping needed for a
+    /// click at row 1 to resolve to it, and returns a `MouseEvent::Up` click
+    /// at that row.
+    fn spawn_bubble_click_fixture(
+        state: &mut AppState,
+        bubble_id: Uuid,
+    ) -> crossterm::event::MouseEvent {
+        state.chat_entries.push(ChatEntry::ToolBubble {
+            id: bubble_id,
+            name: crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
+            state: Box::new(ToolCallState::Running {
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                progress_arguments: vec![],
+            }),
+            collapsed: false,
+        });
+        // (start_row=0, end_row=2, bubble_id) — title row is start + 1 = 1.
+        state.bubble_title_rows = vec![(0, 2, bubble_id)];
+        state.chat_drag_active = true;
+        state.chat_rendered_lines = vec![String::new(), String::new(), String::new()];
+        // A zero-width selection at the title row is a plain click, not a drag.
+        state.chat_selection = Some(ChatSelection {
+            anchor_line: 1,
+            anchor_col: 3,
+            cursor_line: 1,
+            cursor_col: 3,
+        });
+        crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: 3,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn single_click_on_spawn_bubble_title_toggles_collapsed_not_drill_in() {
+        // A single click must behave exactly like every other bubble
+        // (collapse/expand) — drilling in requires a second, fast click. The
+        // toggle itself is deferred until the double-click window expires
+        // (see `BubbleClickWindowExpired`) so bubble layout stays stable
+        // while a confirming second click could still arrive.
+        let mut state = AppState::new();
+        let bubble_id = Uuid::new_v4();
+        let _run_id = tracked_child(&mut state);
+        let mouse = spawn_bubble_click_fixture(&mut state, bubble_id);
+
+        update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
+
+        assert_eq!(state.active_view, ConversationView::Root);
+        assert!(matches!(
+            &state.chat_entries[0],
+            ChatEntry::ToolBubble { collapsed, .. } if !*collapsed
+        ));
+        assert!(state.last_bubble_click.is_some());
+
+        // The window expires with no confirming second click — now the
+        // deferred toggle commits.
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::BubbleClickWindowExpired),
+            &empty_textarea(),
+        );
+
+        assert!(matches!(
+            &state.chat_entries[0],
+            ChatEntry::ToolBubble { collapsed, .. } if *collapsed
+        ));
+        assert!(state.last_bubble_click.is_none());
+    }
+
+    #[test]
+    fn double_click_on_spawn_bubble_title_drills_into_child_view() {
+        let mut state = AppState::new();
+        let bubble_id = Uuid::new_v4();
+        let run_id = tracked_child(&mut state);
+        let mouse = spawn_bubble_click_fixture(&mut state, bubble_id);
+
+        // First click: arms double-click detection, defers the toggle.
+        update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
+        // A zero-width selection at the title row is a plain click, not a drag.
+        state.chat_drag_active = true;
+        state.chat_selection = Some(ChatSelection {
+            anchor_line: 1,
+            anchor_col: 3,
+            cursor_line: 1,
+            cursor_col: 3,
+        });
+        // Second click, same bubble, well within the double-click window.
+        update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
+
+        assert!(matches!(
+            state.active_view,
+            ConversationView::Child { run_id: r, .. } if r == run_id
+        ));
+        // The deferred toggle from the first click must not have committed —
+        // the bubble was never collapsed, since the pair resolved as a
+        // drill-in instead.
+        assert!(matches!(
+            &state.chat_entries[0],
+            ChatEntry::ToolBubble { collapsed, .. } if !*collapsed
+        ));
+    }
+
+    #[test]
+    fn double_click_on_finished_spawn_bubble_still_drills_in_via_last_child() {
+        // Once the child finishes, `current_child` is cleared but
+        // `last_child` survives — the bubble must still be drillable.
+        let mut state = AppState::new();
+        let bubble_id = Uuid::new_v4();
+        let run_id = tracked_child(&mut state);
+        state.last_child = state.current_child.clone();
+        state.current_child = None;
+        let mouse = spawn_bubble_click_fixture(&mut state, bubble_id);
+
+        update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
+        state.chat_drag_active = true;
+        state.chat_selection = Some(ChatSelection {
+            anchor_line: 1,
+            anchor_col: 3,
+            cursor_line: 1,
+            cursor_col: 3,
+        });
+        update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
+
+        assert!(matches!(
+            state.active_view,
+            ConversationView::Child { run_id: r, .. } if r == run_id
+        ));
+    }
+
     // ── Domain events ─────────────────────────────────────────────────────────
 
     #[test]
@@ -2815,6 +3474,7 @@ mod tests {
                 arguments: serde_json::json!({}),
                 content_sections: vec![],
                 title_arguments: vec![],
+                run_id: None,
             }),
             &empty_textarea(),
         );
@@ -2859,6 +3519,7 @@ mod tests {
                     "label".to_string(),
                     serde_json::json!("Refactor auth token validation"),
                 )],
+                run_id: None,
             }),
             &empty_textarea(),
         );
@@ -2930,6 +3591,7 @@ mod tests {
                     "label".to_string(),
                     serde_json::json!("Refactor auth token validation"),
                 )],
+                run_id: None,
             }),
             &empty_textarea(),
         );
@@ -2953,6 +3615,7 @@ mod tests {
                 content_sections: vec![],
                 summary: vec![("status".to_string(), "unstructured".to_string())],
                 duration: std::time::Duration::from_millis(1500),
+                run_id: None,
             }),
             &empty_textarea(),
         );
@@ -3005,6 +3668,7 @@ mod tests {
                 arguments: serde_json::json!({}),
                 content_sections: vec![],
                 title_arguments: vec![],
+                run_id: None,
             }),
             &empty_textarea(),
         );
@@ -3017,6 +3681,7 @@ mod tests {
                 content_sections: vec![],
                 summary: vec![("status".to_string(), "success".to_string())],
                 duration: std::time::Duration::ZERO,
+                run_id: None,
             }),
             &empty_textarea(),
         );
@@ -3073,6 +3738,7 @@ mod tests {
                 arguments: serde_json::json!({}),
                 content_sections: vec![],
                 title_arguments: vec![],
+                run_id: None,
             }),
             &empty_textarea(),
         );
@@ -3106,6 +3772,7 @@ mod tests {
                 arguments: serde_json::json!({}),
                 content_sections: vec![],
                 title_arguments: vec![],
+                run_id: None,
             }),
             &empty_textarea(),
         );
@@ -3159,6 +3826,7 @@ mod tests {
                 content_sections: vec![],
 
                 title_arguments: vec![],
+                run_id: None,
             }),
             &empty_textarea(),
         );
@@ -3233,6 +3901,7 @@ mod tests {
                 content_sections: vec![],
 
                 title_arguments: vec![],
+                run_id: None,
             }),
             &empty_textarea(),
         );

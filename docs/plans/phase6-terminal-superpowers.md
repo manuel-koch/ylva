@@ -780,13 +780,19 @@ processing messages and tools while a child is active.
 **Goal:** Child conversation as a first-class full-screen view; spawn-bubble in parent
 chat; auto-switch only on child interactive pauses.
 
-- [ ] 72. Add `session_id` is already in `AgentLoop` after Phase 6.0 step 6. Add
+- [x] 72. Add `session_id` is already in `AgentLoop` after Phase 6.0 step 6. Add
   `UiUpdate` variants emitted from `ChildAgentManager` via `subagent_ui_tx`:
   `ChildAgentStarted { run_id, agent_type, task }`,
   `ChildAgentToken(String)`,
   `ChildAgentDone { status, result }` in `src/agent.rs`.
 
-- [ ] 73. Define `ConversationView` in `src/app_state.rs`:
+  > Note: `session_id` was **not** actually added to `AgentLoop` by Phase 6.0
+  > step 6 despite that step being checked off — a pre-existing doc/checkbox
+  > inaccuracy discovered while implementing this step, left unfixed as
+  > out-of-scope for Phase 6.10. The three `UiUpdate` variants themselves are
+  > implemented in `src/agent.rs` as specified.
+
+- [x] 73. Define `ConversationView` in `src/app_state.rs`:
 
     ```rust
     pub enum ConversationView {
@@ -800,7 +806,11 @@ chat; auto-switch only on child interactive pauses.
   - `child_messages: Vec<Message>`
   - `auto_switched_to_child: bool`
 
-- [ ] 74. Update `presenter.rs`:
+  > Note: implemented in `src/tui_reducer_state.rs`, not `src/app_state.rs` —
+  > the latter does not exist in this codebase; `tui_reducer_state.rs` is the
+  > actual home of `AppState`/`ChatEntry`/the reducer-model types.
+
+- [x] 74. Update `presenter.rs`:
   - On `ChildAgentStarted`: create a spawn-bubble entry in `root_messages` (distinct
     style: magenta, shows task + "running…"); initialize `child_messages = vec![]`.
     **Do not change `active_view`** — user stays in parent view until they click or
@@ -818,7 +828,16 @@ chat; auto-switch only on child interactive pauses.
   - Child interactive pauses take precedence over any simultaneous parent pending tool:
     auto-switch to child; resume parent pending state after child resolves.
 
-- [ ] 75. Update `render.rs`:
+  > Note: the last sub-bullet (concurrent root+child pause precedence) is
+  > **deferred, not implemented** — `TuiMode`/`Focus` remain a single global
+  > pause state (matches the existing "one active child, delegation depth 1"
+  > constraint), so a simultaneous root-pending-tool-approval and
+  > child-interactive-pause is an unhandled edge case. All other sub-bullets
+  > are implemented as specified (spawn-bubble uses the pre-existing
+  > `TOOL_BUBBLE_BORDER_COLOR = Color::Magenta`, which already applies
+  > uniformly to tool bubbles, so no separate color special-case was needed).
+
+- [x] 75. Update `render.rs`:
   - When `active_view == Child`: render `child_messages` in the main chat area.
     Add a **non-scrolling 1-row header**:
     `🔍 <agent_type>: "<task>" [← Back (Ctrl+B)]`.
@@ -831,16 +850,16 @@ chat; auto-switch only on child interactive pauses.
     - Child running (not paused): input disabled; show muted hint
       `"Waiting for child agent…"`. User input is not buffered.
 
-- [ ] 76. Add `Ctrl+B` keybinding for "back to parent" in `presenter.rs`. Document in
+- [x] 76. Add `Ctrl+B` keybinding for "back to parent" in `presenter.rs`. Document in
   `docs/keybindings.md`.
 
-- [ ] 77. Write presenter unit tests: spawn does not auto-switch view; interactive child pause
+- [x] 77. Write presenter unit tests: spawn does not auto-switch view; interactive child pause
   auto-switches; manual navigation prevents auto-return; back-to-parent keybinding works.
 
-- [ ] 78. Update `docs/features.md`: document drill-in model, spawn-bubble, back navigation,
+- [x] 78. Update `docs/features.md`: document drill-in model, spawn-bubble, back navigation,
   auto-switch rules. Update `docs/keybindings.md`.
 
-- [ ] 79. Run `make test` + `make test-coverage`.
+- [x] 79. Run `make test` + `make test-coverage`.
 
 ---
 

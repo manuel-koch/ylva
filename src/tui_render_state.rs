@@ -24,7 +24,9 @@
 use std::time::Instant;
 
 use crate::agent::AgentMode;
-use crate::tui_reducer_state::{BannerDragSelection, ChatEntry, ChatSelection, InputArea};
+use crate::tui_reducer_state::{
+    BannerDragSelection, ChatEntry, ChatSelection, InputArea, ToolCallState,
+};
 
 /// Render-projection snapshot consumed by [`crate::ui::draw`].
 ///
@@ -66,6 +68,14 @@ pub struct TuiState {
     /// Set by `UiUpdate::ToolPending`; cleared by `ToolStart`/`ToolKilled`/
     /// `StreamCancelled`. While `Some`, the TUI is in approval sub-mode.
     pub pending_approval: Option<(uuid::Uuid, String, serde_json::Value)>, // (tool_id, tool_name, arguments)
+    /// `true` when `pending_approval`'s tool call belongs to a subagent
+    /// (i.e. it lives in `AppState::child_messages`) rather than the root
+    /// agent — even while `active_view` is `Root` (the user manually
+    /// navigated back while the subagent's tool call is still awaiting
+    /// approval). Used by `ui::draw_approval_footer` to prefix the approval
+    /// title so it's unambiguous which agent's tool call is being approved.
+    /// Meaningless when `pending_approval` is `None`.
+    pub pending_approval_is_subagent: bool,
     /// Set by `UiUpdate::ClarifyPending`; cleared once the user answers or the
     /// stream returns to idle.
     pub pending_clarify: Option<(String, Option<Vec<String>>, Option<String>)>,
@@ -146,6 +156,31 @@ pub struct TuiState {
     /// `bubble_title_rows` but is index-keyed since `ChatEntry::ThinkingMessage`
     /// has no `Uuid`.
     pub thinking_title_rows: Vec<(usize, usize, usize)>,
+    /// Set when the drill-in view (`AppState::active_view ==
+    /// ConversationView::Child`) is showing a child conversation; carries the
+    /// real root `spawn_subagent` `ToolBubble`'s `(id, name, state,
+    /// collapsed)` so `ui::draw` can re-render it verbatim as the header —
+    /// same chrome, same collapsed/expanded state, same task/label/
+    /// agent_type content the user saw before drilling in. `None` while
+    /// viewing `Root`.
+    pub child_view_bubble: Option<(uuid::Uuid, String, ToolCallState, bool)>,
+    /// Current vertical scroll offset inside the child-view header bubble
+    /// (lines from the top of its content), used only when the bubble's full
+    /// content exceeds the header's clamped max height. Clamped to the valid
+    /// range by `ui::draw` each frame. Meaningless when `child_view_bubble`
+    /// is `None`.
+    pub header_bubble_scroll_offset: usize,
+    /// On-screen rect of the header bubble's content column (excluding its
+    /// scrollbar column), written each frame by `ui::draw` for mouse
+    /// hit-testing (routing scroll-wheel events to the header instead of the
+    /// chat area below it). Zero-sized while `child_view_bubble` is `None`.
+    pub header_bubble_area: ratatui::layout::Rect,
+    /// Set while viewing the drill-in child conversation and the child is
+    /// running but not currently paused for approval/clarify — the input box
+    /// is replaced with this muted hint and user keystrokes are not buffered.
+    /// `None` whenever input should behave normally (root view, or the child
+    /// view while paused for an interactive approval/clarify).
+    pub input_disabled_hint: Option<String>,
 }
 
 impl TuiState {
@@ -164,6 +199,7 @@ impl TuiState {
             scroll_locked: true,
             chat_area_height: 0,
             pending_approval: None,
+            pending_approval_is_subagent: false,
             pending_clarify: None,
             pending_approval_input_snapshot: None,
             input_history: Vec::new(),
@@ -186,6 +222,10 @@ impl TuiState {
             input_scroll_top: 0,
             bubble_title_rows: Vec::new(),
             thinking_title_rows: Vec::new(),
+            child_view_bubble: None,
+            header_bubble_scroll_offset: 0,
+            header_bubble_area: ratatui::layout::Rect::default(),
+            input_disabled_hint: None,
         }
     }
 

@@ -121,7 +121,7 @@ impl AgentFactory {
     /// as a free function (rather than requiring `Arc<Self>`) so the closure
     /// can capture cheap, owned clones of everything it needs instead of the
     /// whole factory.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn build(
         engines: &HashMap<String, Arc<dyn Engine>>,
         allowed_tools: &[String],
@@ -337,7 +337,7 @@ struct BuiltChildAgentManager {
 /// can run in the `spawn_fn` closure itself, ahead of `tokio::spawn`, letting
 /// the caller retain the child's `command_sender` (see
 /// `build_child_agent_manager`).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 async fn drive_child_to_completion(
     mut child_loop: AgentLoop,
     mut child_ui_rx: mpsc::Receiver<UiUpdate>,
@@ -701,6 +701,7 @@ mod tests {
             task: "do the child task".to_string(),
             briefing: None,
             agent_type: "default".to_string(),
+            label: "label".to_string(),
         };
         let cancel = CancellationToken::new();
 

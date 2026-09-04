@@ -121,3 +121,46 @@ tests.
       I saw rapid interchanged assistent reply/thinking bubbles in TUI that
       contained garbled/unrelated content as if reply/thinking of parent agent
       is mixed with events of subagent.
+
+- [x] Noticable lag when clicking the subagent bubble expand/collapse, due to
+      double-click detection.
+      Can we reduce the timeframe needed for a double-click, to reduce that lag ?
+
+- [x] While subagent conversation-list is open, the user-message draft input-field
+      shows "Subagent is working..." unconditionally, even when user starts typing some text into the input field.
+      Whats the purpose of that hint ? I can see that the input-field is still
+      a useful think in the subagent conversation-list, although user can't type any
+      steering message.
+      But user may call a slash command there too - future work though.
+
+- [x] While looking at the subagent conversation-list, the subagent becomes idle and
+      is done. But still the footer shows "Streaming..." likely because the parent
+      conversation is working on the result of the subagent.
+      Shouldn't the footer indicate that the subagent is done and that parent
+      is still busy ?
+
+- [ ] The keybinding hint for "ctrl-b: back" should maybe be rephrased, it's
+      not clear what "back" means.
+      Maybe ctrl-b is the wrong keybinding for "back" ?
+      What about esc ?
+      - input field has text -> clear input field
+      - input field is empty -> esc in subagent conversation-list should not
+        "cancel" the conversation, rather go back to parent and there user can
+        abort/steer the main conversation. 
+
+- [x] When drilling-in on a subagent conversation-list while it is running,
+      the list should scroll to the end of the conversation.
+
+- [ ] When doing a ctrl-b to jump back the parent agent conversation-list,
+      should the user land back at the end of current conversation-list
+      or instead at the subagent bubble he just returned from ?
+      IMO the latter is more intuitive when user just drilled-in from the list
+      and ctrl-b will him bring back to where he drilled-in.
+
+- [ ] When agent spawns multiple subagents, scrolling up to see the first
+      subagent bubble in main agent conversation-list.
+      As soon as there is an update to main agent, the conversation-list scrolls
+      down to the end - it should stay where user just scrolled to.
+
+- [ ] Sometimes TUI seems to be stuck on "Running tool..." with many
+      subagents runs.
