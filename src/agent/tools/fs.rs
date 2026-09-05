@@ -81,12 +81,11 @@ pub struct ReadFileArgs {
     pub path: String,
     #[serde(default)]
     pub mode: ReadMode,
-    /// 0-based index of the first unit (byte/line/char) to read; the first
-    /// line (or byte/char) is at `offset: 0`.
+    /// 0-based index of the first unit (byte/line/char) to read; line 1 is
+    /// `offset: 0`.
     #[serde(default)]
     pub offset: Option<usize>,
-    /// Maximum number of units (bytes/lines/chars) to read, counted from
-    /// `offset`. Omitted means "until the end".
+    /// Max units (bytes/lines/chars) to read from `offset`. Omit to read to EOF.
     #[serde(default)]
     pub limit: Option<usize>,
 }
@@ -103,39 +102,31 @@ pub struct WriteFileArgs {
 /// `glob` arguments: a glob pattern resolved against the current directory.
 #[derive(Debug, Clone, JsonSchema, Deserialize)]
 pub struct GlobInputArgs {
-    /// A single glob pattern to match against file-system paths (e.g. `**/*.rs`
-    /// or `src/**/mod.rs` — these are two separate examples, not a combinable
-    /// pair). `*` matches within one path segment; `**` crosses directory
-    /// boundaries; `?` matches a single character; `[abc]` matches a character
-    /// class. Comma-separated lists (`*.rs,*.toml`) and brace alternation
-    /// (`*.{rs,toml}`) are **not** supported — either is treated as one
-    /// literal pattern and silently matches nothing. To match several
-    /// patterns, call this tool once per pattern.
+    /// A single glob pattern (e.g. `**/*.rs`). `*` matches within one segment; `**`
+    /// crosses directories; `?` matches one char; `[abc]` matches a class.
+    /// Comma lists (`*.rs,*.toml`) and brace alternation (`*.{rs,toml}`) are
+    /// **not** supported — treated as one literal pattern, matching nothing.
+    /// Call once per pattern to match several.
     pub pattern: String,
-    /// When `true` (default), paths ignored by `.gitignore` rules are excluded.
-    /// Set to `false` to include gitignored paths.
+    /// Exclude `.gitignore`-matched paths (default `true`).
     #[serde(default = "default_true")]
     pub git_ignore: bool,
-    /// When `true`, return only the total match count in result metadata (`matches`)
-    /// without listing any paths. Useful for counting without fetching all paths.
+    /// Return only the total match count via `matches` metadata, no paths listed.
     #[serde(default)]
     pub only_count: bool,
-    /// When `true`, restrict results to regular files only (excludes directories and
-    /// symlinks). **Mutually exclusive with `only_dirs` — setting both to `true` is an
-    /// error.** Omit both flags (default) to include all path types.
+    /// Restrict to regular files (excludes dirs/symlinks). Mutually exclusive
+    /// with `only_dirs` — both `true` is an error. Omit both for all path types.
     #[serde(default)]
     pub only_files: bool,
-    /// When `true`, restrict results to directories only (excludes files and symlinks).
-    /// **Mutually exclusive with `only_files` — setting both to `true` is an error.**
-    /// Omit both flags (default) to include all path types.
+    /// Restrict to directories (excludes files/symlinks). Mutually exclusive
+    /// with `only_files` — both `true` is an error. Omit both for all path types.
     #[serde(default)]
     pub only_dirs: bool,
-    /// Maximum number of paths to return. When the cap is hit, excess paths are
-    /// excluded and `ignored_matches` in result metadata records the overflow count.
+    /// Max paths to return; excess is excluded and counted in `ignored_matches`.
     #[serde(default)]
     pub limit: Option<usize>,
-    /// When `true`, paths whose name starts with `.` are excluded.
-    /// Default `false` — hidden files are included, matching `find . -type f` behaviour.
+    /// Exclude dot-prefixed paths (default `false` — hidden files included,
+    /// matching `find . -type f` behaviour).
     #[serde(default)]
     pub dot_ignore: bool,
 }
@@ -574,7 +565,8 @@ impl Tool for ReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read a file's contents. `offset`/`limit` count the unit selected by `mode`: `bytes` (default, raw and binary-safe), `lines` (split on newline), or `chars` (UTF-8 code points). `offset` is 0-based: line 1 is `offset: 0`, line 2 is `offset: 1`, and so on."
+        "Read a file's contents. `offset`/`limit` count the unit chosen by `mode`: `bytes` \
+        (default, binary-safe), `lines`, or `chars` (UTF-8 code points). `offset` is 0-based."
     }
 
     fn input_schema(&self) -> RootSchema {
@@ -804,7 +796,11 @@ impl Tool for GlobTool {
     }
 
     fn description(&self) -> &str {
-        "List paths matching a single glob-wildcard pattern (`*`, `?`, `**`, `[...]`). Only one pattern per call — comma-separated lists and `{a,b}` brace alternation are not supported and silently match nothing; call this tool once per pattern instead. Patterns resolve relative to cwd; absolute patterns supported. Hidden files (dot-prefixed) are included by default — use `dot_ignore: true` to exclude them. `git_ignore` (default `true`) skips gitignored paths via `ignore::WalkBuilder`. Use `only_files: true` to list files only, or `only_dirs: true` to list directories only — these flags are mutually exclusive and setting both to `true` is an error; omit both to include all path types."
+        "List paths matching one glob pattern (`*`,`?`,`**`,`[...]`) — one pattern per call; \
+        comma lists and `{a,b}` alternation match nothing. Patterns resolve relative to cwd \
+        (absolute supported). `dot_ignore` (default `false`): exclude dot-files. `git_ignore` \
+        (default `true`): skip gitignored paths. `only_files`/`only_dirs`: mutually exclusive \
+        type filters, both `true` is an error."
     }
 
     fn input_schema(&self) -> RootSchema {

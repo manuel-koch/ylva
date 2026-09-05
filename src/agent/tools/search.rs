@@ -49,29 +49,24 @@ const BINARY_PROBE_BYTES: usize = 8 * 1024;
 pub struct SearchInputArgs {
     /// Regular expression pattern to search for.
     pub pattern: String,
-    /// Directory (or file) to search within. Defaults to the current working
-    /// directory when omitted.
+    /// Directory or file to search within (default: cwd).
     pub path: Option<String>,
-    /// Optional glob pattern (e.g. `**/*.rs`, `*.txt`) that restricts which
-    /// files are searched. Matched against each file's path relative to the
-    /// search root. When omitted, all non-binary files under `path` are
-    /// searched.
+    /// Glob restricting which files are searched (e.g. `**/*.rs`), matched against
+    /// each path relative to the search root. Omit to search all non-binary files.
     pub glob: Option<String>,
-    /// When `true`, the pattern is matched case-sensitively. Defaults to
-    /// `false` (case-insensitive search).
+    /// Case-sensitive match (default `false`).
     #[serde(default)]
     pub case_sensitive: bool,
-    /// Number of lines of context to include before and after each match.
-    /// Defaults to `0` (no context). Ignored when `only_matches` is `true`.
+    /// Lines of context before/after each match (default `0`). Ignored when
+    /// `only_matches` is `true`.
     #[serde(default)]
     pub context_lines: usize,
-    /// When `true`, return only the paths of files that contain at least one
-    /// match — no line content. Mutually exclusive with `only_matches`.
+    /// Return only paths of files with ≥1 match, no line content. Mutually
+    /// exclusive with `only_matches`.
     #[serde(default)]
     pub files_with_matches: bool,
-    /// When `true`, return only the substrings matched by the pattern (one
-    /// entry per match occurrence, like `grep -o`). Context lines are ignored.
-    /// Mutually exclusive with `files_with_matches`.
+    /// Return only matched substrings, one per occurrence (like `grep -o`);
+    /// context lines ignored. Mutually exclusive with `files_with_matches`.
     #[serde(default)]
     pub only_matches: bool,
 }
@@ -307,15 +302,12 @@ impl Tool for SearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search for a regular-expression pattern in files within a directory tree. \
-        Results are formatted in grep style: `filepath:lineno: content` for matches \
-        and `filepath-lineno- content` for context lines. Binary files are skipped \
-        automatically. Total output is capped at 100 KB. \
-        Optional `glob` (e.g. `**/*.rs`) restricts which files are searched. \
-        Set `files_with_matches: true` to return only file paths (no line content). \
-        Set `only_matches: true` to return only the matched substrings (one per \
-        occurrence, like `grep -o`). `files_with_matches` and `only_matches` are \
-        mutually exclusive."
+        "Search files under a directory tree for a regex `pattern` (grep-style: \
+        `filepath:lineno: content` matches, `filepath-lineno- content` context). Binary files \
+        skipped; output capped at 100 KB. `glob` (e.g. `**/*.rs`) restricts searched files. \
+        `files_with_matches: true` returns only file paths. `only_matches: true` returns only \
+        matched substrings, like `grep -o`. `files_with_matches`/`only_matches` are mutually \
+        exclusive."
     }
 
     fn input_schema(&self) -> schemars::schema::RootSchema {

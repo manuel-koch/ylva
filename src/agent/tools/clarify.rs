@@ -26,17 +26,17 @@ use crate::sandbox::ApprovalCheck;
 #[expect(dead_code)]
 struct ClarifyArgs {
     #[schemars(
-        description = "The question to ask the user. Do not embed answer choices here; pass them via the `choices` field instead. Rendered as Markdown; use a real newline character for line breaks, not an escaped \\n sequence."
+        description = "Question shown to the user. Do not embed choices here — use `choices`. Markdown rendered; use a real newline, never `\\n`."
     )]
     question: String,
     #[serde(default)]
     #[schemars(
-        description = "Optional context to provide alongside the question. Rendered as Markdown (headings, lists, code blocks, etc. are supported); use a real newline character for line breaks, not an escaped \\n sequence."
+        description = "Optional Markdown context shown with the question. Real newline, never `\\n`."
     )]
     context: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Optional list of up to 5 choices for the user to pick from. The user can always type a free-text answer regardless of whether choices are provided.",
+        description = "Up to 5 choices for the user to pick from (max 5). Free-text answers are still accepted.",
         length(max = 5)
     )]
     choices: Option<Vec<String>>,
@@ -99,7 +99,9 @@ impl Tool for ClarifyTool {
     }
 
     fn description(&self) -> &str {
-        "Ask the user a clarifying question. If offering choices, pass them via the `choices` field — do not embed them in the question string. The user can always type a free-text answer even when choices are given. The `question` and `context` fields are rendered as Markdown (headings, lists, code blocks, emphasis, etc.), so format them accordingly. Emit actual newline characters for line breaks in these JSON string values — never an escaped `\\n` sequence, which would render as literal backslash-n text."
+        "Ask the user a clarifying question. Pass options via `choices` — never embed them in \
+        `question`; free text is always accepted regardless. `question`/`context` render as \
+        Markdown; use real newlines, never `\\n`."
     }
 
     fn input_schema(&self) -> schemars::schema::RootSchema {

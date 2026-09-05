@@ -58,20 +58,8 @@ pub const BASH_OUTPUT_LIMIT_BYTES: usize = 100 * 1024;
 /// Arguments accepted by the `bash` tool.
 #[derive(Debug, Clone, JsonSchema, Deserialize)]
 pub struct BashInputArgs {
-    /// The bash command or script to execute (passed verbatim to `bash -c`).
-    ///
-    /// May be a single command, a pipeline, or a **multi-line script** —
-    /// newlines are preserved exactly as provided, so the full power of bash
-    /// scripting is available:
-    ///
-    /// ```bash
-    /// for f in *.txt; do
-    ///   echo "$f"
-    /// done
-    /// ```
-    ///
-    /// The command runs inside a new process group; stdout and stderr are
-    /// merged and returned together.
+    /// Command/script passed verbatim to `bash -c`; multi-line scripts preserve
+    /// newlines. Runs in a new process group; stdout+stderr merged into one stream.
     pub command: String,
 }
 
@@ -232,10 +220,9 @@ pub struct BashTool {
 /// Build the LLM-facing description string from the concrete timeout and output cap.
 fn build_description(timeout_secs: u64) -> String {
     format!(
-        "Execute a shell command via `bash -c`. stdout and stderr are merged \
-         in arrival order. Output is capped at {} KB; further output is \
-         silently discarded. Commands time out after {} s; the entire process \
-         group is killed on timeout or cancellation.",
+        "Execute a shell command via `bash -c`; stdout/stderr merged in arrival order. \
+         Output capped at {} KB (excess discarded). Times out after {} s, killing the \
+         whole process group.",
         BASH_OUTPUT_LIMIT_BYTES / 1024,
         timeout_secs,
     )

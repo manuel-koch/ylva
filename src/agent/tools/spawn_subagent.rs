@@ -49,21 +49,17 @@ fn default_agent_type() -> String {
 /// `spawn_subagent` arguments.
 #[derive(Debug, Clone, JsonSchema, Deserialize)]
 pub struct SpawnSubagentArgs {
-    /// A short (3-6 word) label summarising what the child agent is doing,
-    /// e.g. "Refactor auth token validation". Shown in the tool-call bubble's
-    /// title — including while collapsed — so it stays a useful at-a-glance
-    /// hint even before the child's `task`/`briefing` are expanded.
+    /// 3-6 word label for what the child is doing, e.g. "Refactor auth token validation".
+    /// Shown in the (possibly collapsed) tool-call bubble title.
     pub label: String,
-    /// The task for the child agent to complete. Written as a self-contained
-    /// instruction — the child starts with no knowledge of this
+    /// Self-contained instruction for the child — it has no knowledge of this
     /// conversation beyond `briefing`.
     pub task: String,
-    /// Optional context/background injected ahead of `task` in the child's
-    /// own conversation, so it need not be repeated inside `task` itself.
+    /// Optional context/background injected ahead of `task` in the child's own
+    /// conversation, so it need not be repeated in `task`.
     #[serde(default)]
     pub briefing: Option<String>,
-    /// Name of the agent-type configuration the child should run as.
-    /// Defaults to `"default"`.
+    /// Agent-type configuration name the child runs as (default: `"default"`).
     #[serde(default = "default_agent_type")]
     pub agent_type: String,
 }
@@ -91,15 +87,12 @@ impl Tool for SpawnSubagentTool {
     }
 
     fn description(&self) -> &str {
-        "Delegate a self-contained task to a child agent that runs concurrently with you. \
-         Returns immediately with the run's status (\"running\" or \"queued\" behind another \
-         active child) and a `run_id`. Do not poll, sleep, or otherwise wait for the child \
-         inline (e.g. no `bash sleep` loops) — you will be automatically re-prompted once its \
-         outcome is ready. Continue other work, or simply stop here if you have none. Later — \
-         once the child calls its own `agent_finish` tool, is cancelled, or otherwise goes idle \
-         — its final outcome arrives as a separate `system` message (not a further result for \
-         this tool call) referencing this call's tool_call_id; treat that system message as the \
-         authoritative, final report for this delegation."
+        "Delegate a self-contained task to a concurrent child agent. Returns immediately with \
+         status (`\"running\"`/`\"queued\"`) and `run_id` — never poll or sleep waiting for it \
+         (e.g. no `bash sleep` loops); you are re-prompted automatically once the child \
+         finishes. Continue other work meanwhile, or stop if none remains. The child's final \
+         outcome later arrives as a separate `system` message referencing this call's \
+         `tool_call_id` — treat that as the authoritative report."
     }
 
     fn input_schema(&self) -> schemars::schema::RootSchema {

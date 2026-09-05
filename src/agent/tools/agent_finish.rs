@@ -55,18 +55,15 @@ impl AgentFinishStatus {
 pub struct AgentFinishArgs {
     /// Whether the task succeeded or failed.
     pub status: AgentFinishStatus,
-    /// The final answer/output for the parent to consume, when `status` is
-    /// `"success"`. Must be self-contained: the parent never sees your prior
-    /// turns, tool outputs, or reasoning — only this string. Never write
-    /// something like "see the table above" or "as analyzed earlier"; inline
-    /// the actual table/content/findings here in full.
+    /// Final answer for the parent when `status` is `"success"`. Must be
+    /// self-contained — the parent never sees prior turns, tool output, or
+    /// reasoning; inline the actual findings/content here, never "see above".
     #[serde(default)]
     pub result: Option<String>,
-    /// A description of what went wrong, when `status` is `"failure"`.
+    /// What went wrong, when `status` is `"failure"`.
     #[serde(default)]
     pub error: Option<String>,
-    /// Paths, URLs, or other identifiers of sources consulted while
-    /// producing `result`.
+    /// Paths, URLs, or other identifiers consulted while producing `result`.
     #[serde(default)]
     pub sources: Option<Vec<String>>,
 }
@@ -114,12 +111,11 @@ impl Tool for AgentFinishTool {
     }
 
     fn description(&self) -> &str {
-        "Report the final outcome of your task back to the parent agent that spawned you. \
-         Call this exactly once, when — and only when — the task is complete (successfully or \
-         not); it ends your run immediately, so do not call any other tool afterwards. The \
-         parent only ever sees the `result`/`error` string you pass here — never your prior \
-         messages, tool calls, or reasoning — so `result` must fully restate every finding \
-         the parent needs, not merely refer back to earlier turns in this conversation."
+        "Report your final outcome to the parent agent that spawned you. Call exactly once, \
+         only when the task is complete (success or failure); ends your run immediately — \
+         call no other tool afterwards. Only `result`/`error` reach the parent, never prior \
+         messages or reasoning — `result` must fully restate every finding, not merely refer \
+         back to earlier turns."
     }
 
     fn input_schema(&self) -> schemars::schema::RootSchema {

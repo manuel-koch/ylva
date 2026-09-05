@@ -356,11 +356,10 @@ impl Tool for EditTool {
     }
 
     fn description(&self) -> &str {
-        "Edit an existing file by replacing text. Set `mode` to choose the strategy: \
-        `search_replace` — provide `old_string` and `new_string`; replaces the first occurrence \
-        by default, set `replace_all: true` to replace every occurrence. \
-        `line_range_replace` — provide `start_line`, `end_line` (1-based, inclusive), and \
-        `new_string`; replaces those lines. The file must already exist."
+        "Edit an existing file (must already exist) by replacing text. `mode: search_replace` — \
+        replace `old_string` with `new_string` (first occurrence only, unless `replace_all: true`). \
+        `mode: line_range_replace` — replace lines `start_line`..`end_line` (1-based, inclusive) \
+        with `new_string`."
     }
 
     fn input_schema(&self) -> RootSchema {

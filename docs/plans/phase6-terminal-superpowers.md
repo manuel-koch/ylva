@@ -966,15 +966,15 @@ Principles:
   imperative or declarative statements.
 - Remove all examples that duplicate information already in the type/constraint.
 - Cap total description length: aim for ≤120 tokens per tool, ≤30 tokens per argument.
-- [ ] 90. Audit every `fn description(&self) -> &str` implementation across all tools in
+- [x] 90. Audit every `fn description(&self) -> &str` implementation across all tools in
   `src/agent/tools/` and `src/agent/tools.rs`. Rewrite each to be minimal: one-liner
   summary, followed only by what cannot be inferred from the JSON schema alone
   (e.g. side-effects, error conditions, non-obvious defaults). Remove prose entirely.
-- [ ] 91. Audit every `#[schemars(description = "...")]` and `///` doc-comment on
+- [x] 91. Audit every `#[schemars(description = "...")]` and `///` doc-comment on
   `JsonSchema`-derived argument structs (`ReadFileArgs`, `WriteFileArgs`, `GlobArgs`,
   `BashArgs`, `SearchArgs`, `EditFileArgs`, `ClarifyArgs`, etc.). Rewrite to
   `"type — purpose; constraint"` format. Strip full sentences.
-- [ ] 92. Run `make lint` to confirm no compilation errors from description changes.
+- [x] 92. Run `make lint` to confirm no compilation errors from description changes.
 
 ---
 
