@@ -560,7 +560,6 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
         child_view_bubble: None,
         header_bubble_scroll_offset: 0,
         header_bubble_area: ratatui::layout::Rect::default(),
-        input_disabled_hint: None,
     }
 }
 

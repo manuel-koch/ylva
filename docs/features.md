@@ -308,17 +308,21 @@ running in the background:
   `agent_type`/`label`/`task` content the user saw before drilling in) rather than a
   separately-maintained header string — at most one subagent runs at a time, so the
   most recently started `spawn_subagent` bubble in `chat_entries` unambiguously
-  corresponds to whichever subagent is drilled into. `child_messages` is **not**
-  seeded with a synthetic task message — the header bubble already shows the task, so
-  duplicating it as the transcript's first turn would just repeat the same text. If
-  the child is paused for its own approval/clarify, the input box behaves normally
-  (`Enter` routes to the child's flow); if the child is merely running, submitting the
-  input box would not reach the child anyway (only one agent loop accepts input at a
-  time), so a muted `"Subagent is working…"` hint is overlaid on the input box — but
-  only while it's empty, so it behaves like a placeholder rather than hiding an
-  in-progress draft (keystrokes are still buffered normally; the hint just disappears
-  once the textarea is non-empty). The `Ctrl+B` back-navigation hint is shown in the
-  normal footer (like every other keybinding hint), not baked into the header.
+  corresponds to whichever subagent is drilled into. The header's title is shortened
+  to `"Subagent"` instead of the plain title-cased `"Spawn Subagent"` shown for the
+  same bubble in the root conversation (via `ToolBubbleArgs::display_title_override`
+  in `ui.rs`) — the header sits directly above the subagent's own transcript, so
+  "Spawn" is redundant context that only matters from the root conversation's point
+  of view. `child_messages` is **not** seeded with a synthetic task message — the
+  header bubble already shows the task, so duplicating it as the transcript's first
+  turn would just repeat the same text. If the child is paused for its own
+  approval/clarify, the input box behaves normally (`Enter` routes to the child's
+  flow); if the child is merely running, submitting the input box would not reach
+  the child anyway (only one agent loop accepts input at a time) — this is called
+  out in the footer (see below), not via a separate overlay on the input box, since
+  keystrokes are still buffered normally either way. The `Ctrl+B` back-navigation
+  hint is shown in the normal footer (like every other keybinding hint), not baked
+  into the header.
 - The spawn-bubble uses the same `Color::Magenta` border as every other tool bubble — no
   separate color styling was introduced for it.
 - The footer/header spinner glyph is driven by `AppState.spinner_frame`, incremented once
@@ -531,6 +535,14 @@ exit.
   case the footer overrides it with `"Subagent done, parent working…"`
   instead. Once the root also goes idle, the plain `"Idle"` word is already
   unambiguous, so the override doesn't apply then.
+- **Footer says "Subagent working…" instead of "Running tool…" while a live
+  child is merely streaming/thinking:** the root's `agent_mode` reports
+  `ToolRunning` (`"Running tool…"`) for as long as the `spawn_subagent`
+  bubble is `Running` — correct for the *root* footer, but misleading while
+  drilled into the child's own transcript, where it would imply the child
+  itself is executing a tool. The footer only keeps `"Running tool…"` there
+  when the child's own transcript shows one of *its own* tool bubbles still
+  `Running`; otherwise it shows `"Subagent working…"`.
 - **Queued subagent bubbles show a static glyph, not the spinner:** the
   animated Braille spinner (`ToolCallState::Running`) means "actively
   executing" for every other tool, but a `spawn_subagent` call queued behind

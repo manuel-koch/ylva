@@ -147,6 +147,12 @@ pub fn draw(
     if let Some((bubble_id, name, bubble_state, collapsed)) = &state.child_view_bubble {
         let header_row_width = full_area.width.saturating_sub(1) as usize;
         let mut discarded_title_rows = Vec::new();
+        // The header sits directly above the subagent's own transcript, so
+        // "Spawn" (relevant only from the root conversation's point of view)
+        // is dropped in favor of the shorter "Subagent".
+        let display_title_override = (name
+            == crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME)
+            .then_some("Subagent");
         append_tool_bubble_lines(
             &mut header_lines,
             ToolBubbleArgs {
@@ -155,6 +161,7 @@ pub fn draw(
                 state: bubble_state,
                 collapsed: *collapsed,
                 spinner_frame: state.spinner_frame,
+                display_title_override,
             },
             &mut discarded_title_rows,
             header_row_width.saturating_sub(4).max(1),
@@ -370,38 +377,6 @@ pub fn draw(
             .style(Style::default().bg(USER_MESSAGE_BG_COLOR)),
     );
     frame.render_widget(&*textarea, input_area);
-
-    // Drill-in conversation model (Phase 6.10): while the tracked child is
-    // running (not paused for its own approval/clarify) and the user is
-    // looking at its transcript, overlay a muted hint over the textarea —
-    // submitting wouldn't reach the child anyway, since only one agent loop
-    // accepts input at a time. Only shown while the textarea is empty, so it
-    // behaves like a placeholder rather than hiding an in-progress draft (the
-    // user can still type — e.g. a future slash command — and see it). The
-    // overlay sits one column to the right of the `▌` border character,
-    // mirroring the tool-approval placeholder below — otherwise it paints
-    // over the border column and misaligns with the textarea's own cursor.
-    let textarea_is_empty = textarea.lines() == [""];
-    if textarea_is_empty && input_area.width > 1 && input_area.height > 0 {
-        if let Some(hint_text) = state.input_disabled_hint.clone() {
-            let hint_area = Rect {
-                x: input_area.x + 1,
-                y: input_area.y,
-                width: input_area.width - 1,
-                height: 1,
-            };
-            frame.render_widget(
-                Paragraph::new(Line::styled(
-                    hint_text,
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .bg(USER_MESSAGE_BG_COLOR)
-                        .add_modifier(Modifier::ITALIC),
-                )),
-                hint_area,
-            );
-        }
-    }
 
     // Mirror ratatui-textarea's next_scroll_top algorithm using the public
     // screen_cursor().row (wrapped screen row) to track which viewport window
@@ -652,6 +627,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
                         state: bubble_state.as_ref(),
                         collapsed: *collapsed,
                         spinner_frame: state.spinner_frame,
+                        display_title_override: None,
                     },
                     &mut bubble_title_rows_out,
                     bubble_row_width.saturating_sub(4).max(1),
@@ -730,6 +706,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
                 state: bubble_state,
                 collapsed: *collapsed,
                 spinner_frame: state.spinner_frame,
+                display_title_override: None,
             },
             &mut bubble_title_rows_out,
             bubble_row_width.saturating_sub(4).max(1),
@@ -1376,6 +1353,15 @@ struct ToolBubbleArgs<'a> {
     state: &'a ToolCallState,
     collapsed: bool,
     spinner_frame: u8,
+    /// Overrides the title-cased tool name (e.g. `spawn_subagent` → `Spawn
+    /// Subagent`) with a custom display title. Used only by the drill-in
+    /// header bubble, which re-renders the *same* `spawn_subagent` bubble
+    /// shown in the root conversation but shortens its title to `"Subagent"`
+    /// there — the header already sits directly above the subagent's own
+    /// transcript, so "Spawn" is redundant context that only applies to the
+    /// root conversation's view of the call. `None` everywhere else, which
+    /// falls back to the plain title-cased tool name.
+    display_title_override: Option<&'a str>,
 }
 
 /// Returns the display title for a result section, derived from the tool name and section ID.
@@ -1457,6 +1443,7 @@ fn append_tool_bubble_lines(
         state,
         collapsed,
         spinner_frame,
+        display_title_override,
     } = bubble;
     let style = BubbleStyle::new(TOOL_BUBBLE_BORDER_COLOR, TOOL_BUBBLE_BG_COLOR, row_width);
     let bar = style.bar.clone();
@@ -1604,8 +1591,11 @@ fn append_tool_bubble_lines(
         " "
     };
 
-    // Title-case the tool name for display (e.g. `spawn_subagent` → `Spawn Subagent`).
-    let display_title: String = crate::agent::tools::title_case_tool_name(name);
+    // Title-case the tool name for display (e.g. `spawn_subagent` → `Spawn Subagent`),
+    // unless the caller supplied an override (see `ToolBubbleArgs::display_title_override`).
+    let display_title: String = display_title_override
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::agent::tools::title_case_tool_name(name));
 
     // Duration shown in the title for Done and Error states.
     let summary_text: String = match state {
@@ -2432,6 +2422,31 @@ fn draw_normal_footer(
         {
             "Subagent done, parent working…"
         }
+        // The child bubble is still `Running` (the subagent itself hasn't
+        // finished) — `state.agent_mode` reports `ToolRunning` for the whole
+        // lifetime of a live child (see `AppState::agent_mode`), which reads
+        // correctly on the *root* footer ("a tool — the subagent — is
+        // running") but is misleading here: while looking at the child's own
+        // transcript, "Running tool…" implies the *child itself* is
+        // executing a tool call, when most of the time it's just
+        // streaming/thinking. Only keep the plain "Running tool…" word when
+        // the child's own transcript (already projected into
+        // `state.chat_entries` while viewing it) shows one of *its own* tool
+        // bubbles still `Running`; otherwise say explicitly that the
+        // subagent is working.
+        Some((_, _, ToolCallState::Running { .. }, _)) => {
+            let child_running_own_tool = state.chat_entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    ChatEntry::ToolBubble { state, .. } if matches!(state.as_ref(), ToolCallState::Running { .. })
+                )
+            });
+            if child_running_own_tool {
+                "Running tool…"
+            } else {
+                "Subagent working…"
+            }
+        }
         _ => mode_word,
     };
     let spinner_prefix = if state.agent_mode == AgentMode::ClarifyPending {
@@ -3166,6 +3181,7 @@ mod tests {
                 state: &state,
                 collapsed: false,
                 spinner_frame: 0,
+                display_title_override: None,
             },
             &mut bubble_title_rows,
             80,
@@ -3218,6 +3234,7 @@ mod tests {
                 state: &state,
                 collapsed: false,
                 spinner_frame: 3,
+                display_title_override: None,
             },
             &mut bubble_title_rows,
             80,
@@ -3262,6 +3279,7 @@ mod tests {
                 state: &state,
                 collapsed: false,
                 spinner_frame: 0,
+                display_title_override: None,
             },
             &mut bubble_title_rows,
             80,
@@ -3280,6 +3298,55 @@ mod tests {
         assert!(
             !rendered.contains('≡'),
             "running bubble must not show the static queued glyph, got: {rendered:?}"
+        );
+    }
+
+    /// The child-view header shortens the `spawn_subagent` bubble's title to
+    /// `"Subagent"` via `ToolBubbleArgs::display_title_override`, dropping
+    /// the "Spawn" prefix that's only meaningful from the root
+    /// conversation's point of view (regression test for the header always
+    /// reading "Spawn Subagent ..." even though it sits directly above the
+    /// subagent's own transcript).
+    #[test]
+    fn display_title_override_replaces_title_cased_tool_name() {
+        use super::{append_tool_bubble_lines, ToolBubbleArgs};
+        use crate::tui_reducer_state::ToolCallState;
+
+        let state = ToolCallState::Running {
+            arguments: serde_json::json!({"task": "investigate"}),
+            content_sections: vec![],
+            title_arguments: vec![],
+            progress_arguments: vec![],
+        };
+        let mut lines: Vec<Line<'static>> = vec![];
+        let mut bubble_title_rows = vec![];
+        append_tool_bubble_lines(
+            &mut lines,
+            ToolBubbleArgs {
+                id: uuid::Uuid::new_v4(),
+                name: "spawn_subagent",
+                state: &state,
+                collapsed: false,
+                spinner_frame: 0,
+                display_title_override: Some("Subagent"),
+            },
+            &mut bubble_title_rows,
+            80,
+            100,
+        );
+
+        let rendered: String = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(
+            rendered.contains("Subagent"),
+            "expected the overridden title, got: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("Spawn Subagent"),
+            "the plain title-cased tool name must not also appear, got: {rendered:?}"
         );
     }
 }

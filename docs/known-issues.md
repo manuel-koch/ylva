@@ -118,10 +118,14 @@ tests.
       Maybe we can only address this in a later phase when drill-down
       on subagent conversion-list is implemented ?
 
-- [ ] Just noticed that the TUI shows "Running Tool.." in subagent conversation
-      is while the subagent is streaming/thinking and actually not running a tool.
+- [x] Just noticed that the TUI shows "Running Tool.." in subagent conversation
+      list while the subagent is streaming/thinking and actually not running a tool.
       Maybe we can remove the placeholder hint in the input-field and just
       update the footer to indicate that subagent is working/thinking ?
+
+- [ ] Tool bubble in subagent-conversation-list can't be expanded/collapsed on
+      click on title or the expand/collapse indicator.
+      It works in the main conversation-list though.
 
 - [ ] Regarding implementation before phase 6.10 ( intermediate WIP, no drill-down
       for subagent conversion-list yet avail ).

@@ -562,95 +562,145 @@ fn steer_sent_before_first_chunk_does_not_jump_above_stream() {
     );
 }
 
-/// The `input_disabled_hint` ("Subagent is working…") must behave like a
-/// placeholder — shown only while the input is empty — rather than being
-/// overlaid unconditionally, which would hide a draft the user is typing
-/// (regression test for the bug where the hint always covered the textarea).
+/// While viewing an *active* subagent's own transcript, the footer must not
+/// parrot the root's "Running tool…" word unless the child's own transcript
+/// shows one of its own tool bubbles running — otherwise it misleadingly
+/// implies the child itself is executing a tool when it's merely
+/// streaming/thinking (regression test for the bug where the root's
+/// `ToolRunning` mode — reported for the whole lifetime of a live child —
+/// bled into the child view's footer verbatim).
 #[test]
-fn input_disabled_hint_does_not_hide_typed_draft() {
+fn footer_says_subagent_working_while_child_is_only_streaming() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use ratatui_textarea::TextArea;
     use ylva::ui;
+    use ylva::{AgentMode, ChatEntry, ToolCallState};
 
     let backend = TestBackend::new(60, 20);
     let mut terminal = Terminal::new(backend).expect("terminal");
 
     let mut state = ylva::TuiState {
-        input_disabled_hint: Some("Subagent is working…".to_string()),
+        agent_mode: AgentMode::ToolRunning,
+        child_view_bubble: Some((
+            uuid::Uuid::new_v4(),
+            "spawn_subagent".to_string(),
+            ToolCallState::Running {
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                progress_arguments: vec![],
+            },
+            false,
+        )),
+        chat_entries: vec![ChatEntry::AssistantMessage {
+            text: "child is replying".to_string(),
+            interrupted: false,
+        }],
         ..ylva::TuiState::new()
     };
+    let mut textarea = TextArea::default();
 
-    // Empty textarea: the hint must be visible, must not overwrite the
-    // textarea's own `▌` left border, and must start in the exact column
-    // where typed text/the cursor would (border column + 1) — otherwise the
-    // hint looks shifted left of where the border/cursor actually are.
-    let mut empty_textarea = TextArea::default();
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut state, &mut empty_textarea, None, None);
+            ui::draw(frame, &mut state, &mut textarea, None, None);
         })
-        .expect("draw with empty textarea");
+        .expect("draw");
+
     let buf = terminal.backend().buffer().clone();
     let rendered: String = (0..20u16)
         .flat_map(|y| (0..60u16).map(move |x| (x, y)))
         .map(|(x, y)| buf.cell((x, y)).unwrap().symbol().to_string())
         .collect();
     assert!(
-        rendered.contains("Subagent is working"),
-        "hint must show while the textarea is empty"
+        rendered.contains("Subagent working"),
+        "footer must say the subagent is working, not that a tool is running: {rendered:?}"
     );
-    let empty_rows: Vec<String> = (0..20u16)
-        .map(|y| {
-            (0..60u16)
-                .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
-                .collect()
-        })
-        .collect();
-    let hint_row = empty_rows
-        .iter()
-        .position(|r| r.contains("Subagent is working"))
-        .expect("hint row found");
-    // Row strings are built by concatenating one symbol (possibly
-    // multi-byte) per column, so use char-index lookups, not `str::find`'s
-    // byte offsets, to get column numbers.
-    let row_chars: Vec<char> = empty_rows[hint_row].chars().collect();
-    let border_col = row_chars
-        .iter()
-        .position(|&c| c == '▌')
-        .expect("left border `▌` must still be rendered alongside the hint");
-    let hint_col = row_chars
-        .iter()
-        .position(|&c| c == 'S')
-        .expect("hint text found in row");
-    assert_eq!(
-        hint_col,
-        border_col + 1,
-        "hint must start one column right of the `▌` border, not overlay it"
+    assert!(
+        !rendered.contains("Running tool"),
+        "the misleading inherited root mode word must not leak into the child view: {rendered:?}"
     );
 
-    // Non-empty textarea: the draft must be visible, hint must not hide it.
-    let mut draft_textarea = TextArea::from(vec!["draft steer text".to_string()]);
+    // Once the child's own transcript shows one of *its own* tool bubbles
+    // running, "Running tool…" becomes accurate again and must be restored.
+    state.chat_entries.push(ChatEntry::ToolBubble {
+        id: uuid::Uuid::new_v4(),
+        name: "read".to_string(),
+        state: Box::new(ToolCallState::Running {
+            arguments: serde_json::json!({}),
+            content_sections: vec![],
+            title_arguments: vec![],
+            progress_arguments: vec![],
+        }),
+        collapsed: false,
+    });
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut state, &mut draft_textarea, None, None);
+            ui::draw(frame, &mut state, &mut textarea, None, None);
         })
-        .expect("draw with draft textarea");
+        .expect("draw with child running its own tool");
     let buf = terminal.backend().buffer().clone();
-    let rows: Vec<String> = (0..20u16)
-        .map(|y| {
-            (0..60u16)
-                .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
-                .collect()
-        })
+    let rendered: String = (0..20u16)
+        .flat_map(|y| (0..60u16).map(move |x| (x, y)))
+        .map(|(x, y)| buf.cell((x, y)).unwrap().symbol().to_string())
         .collect();
-    let draft_row = rows
-        .iter()
-        .position(|r| r.contains("draft steer text"))
-        .expect("typed draft must remain visible, not be hidden by the hint");
     assert!(
-        !rows[draft_row].contains("Subagent is working"),
-        "hint must not overlay a row containing the typed draft"
+        rendered.contains("Running tool"),
+        "once the child's own transcript shows a running tool bubble, the plain word is accurate again: {rendered:?}"
+    );
+}
+
+/// The child-view header re-renders the root `spawn_subagent` `ToolBubble`
+/// with a shortened `"Subagent"` title instead of the plain title-cased
+/// `"Spawn Subagent"` — the header sits directly above the subagent's own
+/// transcript, so "Spawn" only makes sense from the root conversation's
+/// point of view (regression test for the header always reading "Spawn
+/// Subagent ..." regardless of context).
+#[test]
+fn child_view_header_shortens_spawn_subagent_title() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::ui;
+    use ylva::ToolCallState;
+
+    let backend = TestBackend::new(60, 20);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+
+    let mut state = ylva::TuiState {
+        child_view_bubble: Some((
+            uuid::Uuid::new_v4(),
+            "spawn_subagent".to_string(),
+            ToolCallState::Running {
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                progress_arguments: vec![],
+            },
+            false,
+        )),
+        ..ylva::TuiState::new()
+    };
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            ui::draw(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("draw");
+
+    let buf = terminal.backend().buffer().clone();
+    let rendered: String = (0..20u16)
+        .flat_map(|y| (0..60u16).map(move |x| (x, y)))
+        .map(|(x, y)| buf.cell((x, y)).unwrap().symbol().to_string())
+        .collect();
+    assert!(
+        rendered.contains("Subagent"),
+        "header must show the shortened title: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("Spawn Subagent"),
+        "the plain title-cased tool name must not appear in the header: {rendered:?}"
     );
 }
 

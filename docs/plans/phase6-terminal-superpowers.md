@@ -885,8 +885,8 @@ internal restructuring only.
 
 - [ ] 82. Add a new ADR in `docs/architecture-design-records/` proposing the sub-struct
   grouping: `HelpPopupState` (`show_help`, `help_scroll_offset`, `help_scroll_x`),
-  `ChildViewState` (`header_bubble_scroll_offset`, `header_bubble` rect, `child_view_bubble`,
-  `input_disabled_hint`), `ClarifyBannerState` (`pending_clarify`, `clarify_scroll_offset`,
+  `ChildViewState` (`header_bubble_scroll_offset`, `header_bubble` rect,
+  `child_view_bubble`), `ClarifyBannerState` (`pending_clarify`, `clarify_scroll_offset`,
   `clarify_banner_drag`, `clarify_banner` rect), and `ConversationListState`
   (`scroll_offset`, `scroll_locked`, `chat_area_height`, `chat_area` rect,
   `chat_rendered_lines`, `chat_rendered_line_chrome_widths`, `chat_selection`,

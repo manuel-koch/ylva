@@ -175,12 +175,6 @@ pub struct TuiState {
     /// hit-testing (routing scroll-wheel events to the header instead of the
     /// chat area below it). Zero-sized while `child_view_bubble` is `None`.
     pub header_bubble_area: ratatui::layout::Rect,
-    /// Set while viewing the drill-in child conversation and the child is
-    /// running but not currently paused for approval/clarify — the input box
-    /// is replaced with this muted hint and user keystrokes are not buffered.
-    /// `None` whenever input should behave normally (root view, or the child
-    /// view while paused for an interactive approval/clarify).
-    pub input_disabled_hint: Option<String>,
 }
 
 impl TuiState {
@@ -225,7 +219,6 @@ impl TuiState {
             child_view_bubble: None,
             header_bubble_scroll_offset: 0,
             header_bubble_area: ratatui::layout::Rect::default(),
-            input_disabled_hint: None,
         }
     }
 

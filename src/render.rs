@@ -24,9 +24,7 @@
 use ratatui::Frame;
 use ratatui_textarea::TextArea;
 
-use crate::tui_reducer_state::{
-    AppState, BannerDragSelection, ChatEntry, ConversationView, Focus, TuiMode,
-};
+use crate::tui_reducer_state::{AppState, BannerDragSelection, ChatEntry, ConversationView, Focus};
 use crate::tui_render_state::TuiState;
 use crate::ui::{self, ButtonAreas};
 
@@ -118,18 +116,6 @@ fn project_for_draw(state: &AppState) -> TuiState {
             _ => None,
         })
     });
-    // Input is disabled only while looking at a subagent that is running but
-    // not currently paused for its own approval/clarify — a paused subagent
-    // routes `Enter` through the normal approval/clarify flow instead.
-    let input_disabled_hint = if showing_child
-        && state.current_child.is_some()
-        && !matches!(state.focus, Focus::ToolApproval { .. })
-        && !matches!(state.mode, TuiMode::ClarifyPending { .. })
-    {
-        Some("Subagent is working…".to_string())
-    } else {
-        None
-    };
     TuiState {
         agent_mode: state.agent_mode(),
         chat_entries,
@@ -198,7 +184,6 @@ fn project_for_draw(state: &AppState) -> TuiState {
         child_view_bubble,
         header_bubble_scroll_offset: state.header_bubble_scroll_offset,
         header_bubble_area: ratatui::layout::Rect::default(),
-        input_disabled_hint,
     }
 }
 
@@ -298,7 +283,6 @@ mod tests {
             matches!(&projected.chat_entries[0], ChatEntry::AssistantMessage { text, .. } if text == "root reply")
         );
         assert!(projected.child_view_bubble.is_none());
-        assert!(projected.input_disabled_hint.is_none());
     }
 
     #[test]
@@ -336,33 +320,6 @@ mod tests {
         assert!(
             !collapsed,
             "must mirror the root bubble's own collapsed state"
-        );
-        // The child is running (no pending approval/clarify) and tracked, so
-        // input must show the disabled hint rather than accepting keystrokes.
-        assert!(projected.input_disabled_hint.is_some());
-    }
-
-    #[test]
-    fn project_for_draw_does_not_disable_input_while_child_is_paused() {
-        let mut state = AppState::new();
-        let run_id = Uuid::new_v4();
-        state.current_child = Some(ChildRunInfo {
-            run_id,
-            agent_type: "reviewer".to_string(),
-            task: "look into flaky test".to_string(),
-            label: "Investigate flaky test".to_string(),
-        });
-        state.switch_to_child_view();
-        state.focus = Focus::ToolApproval {
-            tool_id: Uuid::new_v4(),
-            tool_name: "write".to_string(),
-        };
-
-        let projected = project_for_draw(&state);
-
-        assert!(
-            projected.input_disabled_hint.is_none(),
-            "input must accept the approval response while the child is paused"
         );
     }
 
