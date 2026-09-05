@@ -251,17 +251,27 @@ fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
         UiUpdate::Error(message) => Some(DomainEvent::Error(message.clone())),
         UiUpdate::ChildAgentStarted {
             run_id,
+            call_id,
             agent_type,
             task,
             label,
         } => Some(DomainEvent::ChildAgentStarted {
             run_id: *run_id,
+            call_id: *call_id,
             agent_type: agent_type.clone(),
             task: task.clone(),
             label: label.clone(),
         }),
-        UiUpdate::ChildAgentToken(text) => Some(DomainEvent::ChildAgentToken(text.clone())),
-        UiUpdate::ChildAgentDone { status, result } => Some(DomainEvent::ChildAgentDone {
+        UiUpdate::ChildAgentToken { run_id, text } => Some(DomainEvent::ChildAgentToken {
+            run_id: *run_id,
+            text: text.clone(),
+        }),
+        UiUpdate::ChildAgentDone {
+            run_id,
+            status,
+            result,
+        } => Some(DomainEvent::ChildAgentDone {
+            run_id: *run_id,
             status: status.clone(),
             result: result.clone(),
         }),

@@ -260,69 +260,99 @@ The TUI presents a spawned child's own conversation as a first-class, full-scree
 view — not just a summary bubble — while the parent keeps streaming/tool activity
 running in the background:
 
-- `ChildAgentManager::start` emits `UiUpdate::ChildAgentStarted { run_id, agent_type,
-  task, label }` immediately before its usual `ToolProgress`; the child's own streamed
-  text/thinking tokens are forwarded as `UiUpdate::ChildAgentToken(String)` (merged text
-  and thinking into one buffer — no separate thinking bubble for the child), and
-  `UiUpdate::ChildAgentDone { status, result }` marks the child conversation's end. The
-  child's own `StreamStarted`/`StreamDone`/`StreamCancelled` lifecycle events are
+- `ChildAgentManager::start` emits `UiUpdate::ChildAgentStarted { run_id, call_id, agent_type,
+  task, label }` immediately before its usual `ToolProgress`; `call_id` is the `spawn_subagent`
+  tool call's own id (the root `ToolBubble`'s `id`), threaded through purely to correlate a
+  `run_id` with its bubble — see `ChildRunInfo::bubble_id` below. The child's own streamed
+  text/thinking tokens are forwarded as `UiUpdate::ChildAgentToken { run_id, text }` (merged
+  text and thinking into one buffer — no separate thinking bubble for the child), and
+  `UiUpdate::ChildAgentDone { run_id, status, result }` marks that child's conversation as
+  finished. The child's own `StreamStarted`/`StreamDone`/`StreamCancelled` lifecycle events are
   swallowed, not forwarded — they would otherwise corrupt the parent's own `TuiMode`.
-- `AppState` tracks `active_view: ConversationView` (`Root` or `Child { run_id,
-  agent_type, task, label }`, default `Root`), `child_messages: Vec<ChatEntry>` (the
-  child's own transcript), `current_child: Option<ChildRunInfo>` (cleared on
-  `ChildAgentDone`), `last_child: Option<ChildRunInfo>` (same shape, but **not** cleared
-  on `ChildAgentDone` — always identifies whichever child's transcript currently
-  occupies `child_messages`, so a finished child's conversation can still be drilled
-  into), and `auto_switched_to_child: bool`.
+- `AppState` tracks `active_view: ConversationView` (`Root` or `Child { run_id, agent_type,
+  task, label }`, default `Root`), `child_conversations: HashMap<Uuid, ChildConversation>`
+  keyed by `run_id` (each entry holds `info: ChildRunInfo { run_id, bubble_id, agent_type,
+  task, label }`, `messages: Vec<ChatEntry>`, and `partial_text: String`), `running_child:
+  Option<ChildRunInfo>` (the child currently *executing* — cleared on `ChildAgentDone`, but its
+  `child_conversations` entry is never removed, so a finished child's transcript stays
+  drillable), and `auto_switched_to_child: bool`. A `run_id`'s entry is created once, on
+  `ChildAgentStarted`, and persists for the lifetime of the TUI session — this is the fix for
+  a bug where the entire drill-in model tracked only a single global child conversation,
+  which got silently overwritten by whichever child started most recently while the user was
+  still viewing an older one's transcript (including the "queued child starts while an active
+  one's view is open" case). `running_child` (*which child is executing*), `active_view`
+  (*which child the user is viewing*), and `child_conversations` (*every child ever seen*)
+  are deliberately three independent concerns — conflating "executing" with "viewable" was
+  the root cause. The model tracks each child by its own map entry rather than a single
+  shared slot specifically so it stays correct if child execution ever becomes truly
+  parallel (`ChildAgentManager` today still runs one child at a time — see "One child at a
+  time" — but nothing in the TUI's viewing/storage layer assumes that).
 - **Spawning a child never changes `active_view`** — the user stays on whatever they were
-  looking at. Only an *interactive pause belonging to the tracked child*
-  (`ToolPending`/`ClarifyPending` tagged with the child's `run_id`) auto-switches
-  `active_view` to `Child` and arms `auto_switched_to_child`; when that pause resolves,
-  the view auto-returns to `Root` **only if** the switch that got there was automatic — a
-  user who navigated to `Child` manually (double-clicking the spawn bubble, or `Ctrl+B`)
-  is never yanked back automatically.
+  looking at. Only an *interactive pause belonging to the currently-executing child*
+  (`ToolPending`/`ClarifyPending` tagged with that child's `run_id`) auto-switches
+  `active_view` to `Child` and arms `auto_switched_to_child` — unless the user is already
+  viewing that exact running child's view, in which case nothing needs to switch.
+  Crucially, this auto-switch fires regardless of what `active_view` was beforehand: `Root`,
+  *or* a different (e.g. already-finished) child's view the user had manually drilled into
+  — a background child pausing for approval must never be stranded behind whatever
+  transcript happens to be on screen. The view active immediately before the auto-switch
+  is snapshotted into `AppState.pre_pause_view` (`Root` or the other child's `Child { .. }`)
+  so it can be restored precisely, rather than always assuming `Root`. When that pause
+  resolves, the view auto-returns to `pre_pause_view` (falling back to `Root` if none was
+  recorded) **only if** the switch that got there was automatic — a user who navigated to
+  `Child` manually (double-clicking the spawn bubble) is never yanked back automatically.
   - Concurrent root-pending-approval and child-interactive-pause precedence is not
     implemented — `TuiMode`/`Focus` remain a single, global pause state (matching the
     "one active child at a time" delegation-depth-1 constraint), so this is a known,
     deferred edge case.
-- **Double-clicking** a `spawn_subagent` tool bubble's title switches to
-  `last_child`'s view (manual navigation) — deliberately distinct from the
-  single-click collapse/expand toggle every bubble (including spawn bubbles) always
-  supports, so the two gestures never collide. A first click never toggles
-  immediately: it only arms `last_bubble_click` (`(Uuid, Instant)`); the actual
-  collapse/expand toggle is deferred until `DomainEvent::BubbleClickWindowExpired`
+- **Double-clicking** a `spawn_subagent` tool bubble's title resolves the clicked bubble's
+  id to its owning `run_id` via `AppState::run_id_for_bubble` (a reverse lookup over
+  `child_conversations` matching `info.bubble_id`) and switches to that specific child's
+  view (`switch_to_child_view(run_id)`) — never "whichever child is currently running" or
+  "whichever child started most recently". This is what makes drilling into an *older*,
+  already-finished subagent's bubble correct even while a newer one is running or queued.
+  This is deliberately distinct from the single-click collapse/expand toggle every bubble
+  (including spawn bubbles) always supports, so the two gestures never collide. A first
+  click never toggles immediately: it only arms `last_bubble_click` (`(Uuid, Instant)`); the
+  actual collapse/expand toggle is deferred until `DomainEvent::BubbleClickWindowExpired`
   fires (a `tokio::time::sleep` future polled in `tui_driver`'s `select!`, mirroring
   the existing `confirm_timeout`/`ConfirmExpired` double-press-abort pattern) with no
   confirming second click having arrived within `DOUBLE_CLICK_WINDOW` (250 ms). This
   keeps the bubble's rendered height — and therefore any bottom-pinned auto-scroll —
   unchanged between the two clicks of a double-click, so the second click's row
   reliably resolves back to the same bubble; toggling immediately on the first click
-  was found to break this correlation in practice. Because `last_child` isn't cleared
-  on completion, drilling in still works after the subagent has finished — a lone
-  single click on a finished bubble only expands/collapses it once the window
-  expires. `Ctrl+B` toggles between `Root` and the tracked/last child's view from
-  anywhere (see `docs/keybindings.md`).
-- While viewing `Child`, the main chat area renders `child_messages` instead of
-  `chat_entries`. A non-scrolling header above it re-renders the *real* root
-  `spawn_subagent` `ToolBubble` (same chrome, same collapsed/expanded state, same
-  `agent_type`/`label`/`task` content the user saw before drilling in) rather than a
-  separately-maintained header string — at most one subagent runs at a time, so the
-  most recently started `spawn_subagent` bubble in `chat_entries` unambiguously
-  corresponds to whichever subagent is drilled into. The header's title is shortened
+  was found to break this correlation in practice. Because a child's `child_conversations`
+  entry isn't removed on completion, drilling in still works after the subagent has
+  finished — a lone single click on a finished bubble only expands/collapses it once the
+  window expires. `Esc` with an empty draft navigates back from `Child` to `Root` (see
+  `docs/keybindings.md`); there is no keybinding to enter `Child` other than the
+  double-click gesture above.
+- While viewing `Child { run_id, .. }`, the main chat area renders that specific
+  `child_conversations[run_id].messages` instead of `chat_entries`. A non-scrolling header
+  above it re-renders the *real* root `spawn_subagent` `ToolBubble` (same chrome, same
+  collapsed/expanded state, same `agent_type`/`label`/`task` content the user saw before
+  drilling in) rather than a separately-maintained header string — the bubble is found via
+  `ChildRunInfo::bubble_id`, an exact, permanent correlation captured at `ChildAgentStarted`
+  time (the spawn_subagent tool call's own id), not by guessing "the most recently started
+  spawn bubble". The header's title is shortened
   to `"Subagent"` instead of the plain title-cased `"Spawn Subagent"` shown for the
   same bubble in the root conversation (via `ToolBubbleArgs::display_title_override`
   in `tui_widgets.rs`) — the header sits directly above the subagent's own transcript, so
   "Spawn" is redundant context that only matters from the root conversation's point
-  of view. `child_messages` is **not** seeded with a synthetic task message — the
+  of view. A child's transcript is **not** seeded with a synthetic task message — the
   header bubble already shows the task, so duplicating it as the transcript's first
   turn would just repeat the same text. If the child is paused for its own
   approval/clarify, the input box behaves normally (`Enter` routes to the child's
-  flow); if the child is merely running, submitting the input box would not reach
-  the child anyway (only one agent loop accepts input at a time) — this is called
-  out in the footer (see below), not via a separate overlay on the input box, since
-  keystrokes are still buffered normally either way. The `Ctrl+B` back-navigation
-  hint is shown in the normal footer (like every other keybinding hint), not baked
-  into the header.
+  flow via `Focus::ToolApproval`/`ClarifyPending`, unaffected by `active_view`); if the
+  child is merely running, `Enter` with a non-empty draft is a no-op instead of
+  silently steering the *root* agent — the previous behavior queued a steer for
+  `Root` while the user was looking at the child's transcript, with no visual
+  indication of which conversation the message actually went to. This is called
+  out in the footer (`enter: send` is omitted entirely while viewing a running
+  child — see below), not via a separate overlay on the input box, since
+  keystrokes are still buffered normally either way. The `Esc: back to conversation`
+  hint is shown in the normal footer (like every other keybinding hint) whenever the
+  draft is empty, not baked into the header.
 - The spawn-bubble uses the same `Color::Magenta` border as every other tool bubble — no
   separate color styling was introduced for it.
 - The footer/header spinner glyph is driven by `AppState.spinner_frame`, incremented once
@@ -349,7 +379,7 @@ running in the background:
   instead of the chat area. The offset resets to `0` whenever a fresh child view is entered
   (`switch_to_child_view` / `ChildAgentStarted`), so a previous subagent's scroll position
   never leaks into the next one.
-- `switch_to_child_view` (manual drill-in via double-click or `Ctrl+B`) also re-pins the
+- `switch_to_child_view` (manual drill-in via double-click) also re-pins the
   main chat area's scroll to the bottom (`conversation.scroll_offset = 0`,
   `conversation.scroll_locked = true`) — `conversation.scroll_offset`/
   `conversation.scroll_locked` are shared fields between the root and child views (not
@@ -359,7 +389,8 @@ running in the background:
   conversation.scroll_locked)` into `AppState.saved_root_scroll` (an immediate best-effort fallback),
   and also captures the drilled-into `spawn_subagent` bubble's `Uuid` into
   `AppState.saved_root_scroll_bubble`. Manual "back to parent" navigation
-  (`switch_to_root_view`, `Ctrl+B`) restores `saved_root_scroll` for the current frame, and
+  (`switch_to_root_view`, triggered by `Esc` with an empty draft) restores
+  `saved_root_scroll` for the current frame, and
   moves `saved_root_scroll_bubble` into `AppState.pending_scroll_to_bubble` for precise
   resolution: once `active_view` has flipped back to `Root` and the next frame's
   `AppState.conversation.bubble_title_rows` reflects root's transcript again, `render::sync_from_draw`
@@ -373,12 +404,13 @@ running in the background:
   on scroll — the shared fields were never touched while auto-switched, so nothing needs
   restoring.
 - When a tool-approval is pending for the tracked subagent and the user is looking at
-  `Root` (having manually navigated back via `Ctrl+B` while the subagent's own tool call is
-  still awaiting approval), the approval footer's title is prefixed with `"Subagent tool
-  '<name>' requests your approval:"` instead of the plain `"Tool '<name>' requests your
+  `Root` (having manually navigated back via `Esc` — empty draft — while the subagent's
+  own tool call is still awaiting approval), the approval footer's title is prefixed with
+  `"Subagent tool '<name>' requests your approval:"` instead of the plain `"Tool '<name>' requests your
   approval:"` — otherwise the pending approval is invisible from the root transcript and it's
   unclear what the Approve/Deny buttons apply to. The distinction is derived from whether
-  `Focus::ToolApproval`'s `tool_id` lives in `child_messages` (subagent) or `chat_entries`
+  `Focus::ToolApproval`'s `tool_id` lives in any `child_conversations` entry's `messages`
+  (subagent) or `chat_entries`
   (root), independent of `active_view`.
 - Clicking anywhere on the child-view header bubble toggles its collapsed state — unlike a
   normal chat bubble, this needs no click-vs-double-click debounce, since the drill-in

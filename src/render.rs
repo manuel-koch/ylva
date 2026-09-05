@@ -62,29 +62,35 @@ fn project_for_draw(state: &AppState) -> TuiState {
     } else {
         None
     };
-    // A pending approval belongs to the subagent, not the root agent, when
-    // its `tool_id` lives in `child_messages` rather than `chat_entries` —
-    // this can be true even while `active_view == Root` (the user manually
-    // navigated back to the root conversation via Ctrl+B while the
-    // subagent's own tool call is still awaiting approval), in which case
-    // the approval footer needs to say so explicitly (see
-    // `tui_widgets::draw_approval_footer`), since the pending tool call is otherwise
-    // invisible from the root transcript.
+    // A pending approval belongs to a subagent, not the root agent, when
+    // its `tool_id` lives in any tracked child's own transcript rather than
+    // `chat_entries` — this can be true even while `active_view == Root`
+    // (the user manually navigated back to the root conversation via Esc
+    // (empty draft) while a subagent's own tool call is still awaiting
+    // approval), in which case the approval footer needs to say so
+    // explicitly (see `tui_widgets::draw_approval_footer`), since the
+    // pending tool call is otherwise invisible from the root transcript.
     let pending_approval_is_subagent = matches!(state.focus, Focus::ToolApproval { tool_id, .. }
-    if state.child_messages.iter().any(
+    if state.child_conversations.values().any(|conversation| conversation.messages.iter().any(
         |entry| matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == tool_id)
-    ));
-    // Drill-in conversation model (Phase 6.10): while viewing the child, the
-    // main chat area and in-flight stream text project from the child's own
+    )));
+    // Drill-in conversation model (Phase 6.10): while viewing a child, the
+    // main chat area and in-flight stream text project from that child's own
     // transcript/accumulator instead of the root's — the root's own
-    // stream/tool activity keeps running in the background but must not
-    // bleed into the child transcript the user is currently looking at.
-    let showing_child = matches!(state.active_view, ConversationView::Child { .. });
+    // stream/tool activity (and any other child's) keeps running in the
+    // background but must not bleed into the transcript the user is
+    // currently looking at.
+    let showing_child_run_id = match &state.active_view {
+        ConversationView::Child { run_id, .. } => Some(*run_id),
+        ConversationView::Root => None,
+    };
     let (chat_entries, partial_assistant_text, partial_thinking_text, thinking_started_at) =
-        if showing_child {
+        if let Some(conversation) =
+            showing_child_run_id.and_then(|run_id| state.child_conversations.get(&run_id))
+        {
             (
-                state.child_messages.clone(),
-                state.child_partial_text.clone(),
+                conversation.messages.clone(),
+                conversation.partial_text.clone(),
                 String::new(),
                 None,
             )
@@ -285,10 +291,23 @@ mod tests {
             text: "root reply".to_string(),
             interrupted: false,
         });
-        state.child_messages.push(ChatEntry::AssistantMessage {
-            text: "child reply".to_string(),
-            interrupted: false,
+        let run_id = Uuid::new_v4();
+        state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id: Uuid::new_v4(),
+            agent_type: "reviewer".to_string(),
+            task: "look into flaky test".to_string(),
+            label: "Investigate flaky test".to_string(),
         });
+        state
+            .child_conversations
+            .get_mut(&run_id)
+            .unwrap()
+            .messages
+            .push(ChatEntry::AssistantMessage {
+                text: "child reply".to_string(),
+                interrupted: false,
+            });
 
         let projected = project_for_draw(&state);
 
@@ -305,17 +324,23 @@ mod tests {
         let run_id = Uuid::new_v4();
         let bubble_id = Uuid::new_v4();
         push_spawn_bubble(&mut state, bubble_id, "reviewer", "look into flaky test");
-        state.current_child = Some(ChildRunInfo {
+        state.start_child_run(ChildRunInfo {
             run_id,
+            bubble_id,
             agent_type: "reviewer".to_string(),
             task: "look into flaky test".to_string(),
             label: "Investigate flaky test".to_string(),
         });
-        state.child_messages.push(ChatEntry::AssistantMessage {
-            text: "child reply".to_string(),
-            interrupted: false,
-        });
-        state.switch_to_child_view();
+        state
+            .child_conversations
+            .get_mut(&run_id)
+            .unwrap()
+            .messages
+            .push(ChatEntry::AssistantMessage {
+                text: "child reply".to_string(),
+                interrupted: false,
+            });
+        state.switch_to_child_view(run_id);
 
         let projected = project_for_draw(&state);
 
@@ -342,16 +367,29 @@ mod tests {
     fn project_for_draw_flags_pending_approval_belonging_to_a_subagent() {
         let mut state = AppState::new();
         let tool_id = Uuid::new_v4();
-        state.child_messages.push(ChatEntry::ToolBubble {
-            id: tool_id,
-            name: "bash".to_string(),
-            state: Box::new(ToolCallState::Pending {
-                arguments: serde_json::json!({}),
-                content_sections: vec![],
-                title_arguments: vec![],
-            }),
-            collapsed: true,
+        let run_id = Uuid::new_v4();
+        state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id: Uuid::new_v4(),
+            agent_type: "reviewer".to_string(),
+            task: "look into flaky test".to_string(),
+            label: "Investigate flaky test".to_string(),
         });
+        state
+            .child_conversations
+            .get_mut(&run_id)
+            .unwrap()
+            .messages
+            .push(ChatEntry::ToolBubble {
+                id: tool_id,
+                name: "bash".to_string(),
+                state: Box::new(ToolCallState::Pending {
+                    arguments: serde_json::json!({}),
+                    content_sections: vec![],
+                    title_arguments: vec![],
+                }),
+                collapsed: true,
+            });
         state.focus = Focus::ToolApproval {
             tool_id,
             tool_name: "bash".to_string(),
@@ -388,7 +426,7 @@ mod tests {
 
     #[test]
     fn sync_from_draw_resolves_pending_scroll_to_bubble_to_its_current_row() {
-        // Regression test: Ctrl+B must land on the drilled-in-from bubble's
+        // Regression test: Esc (empty draft) must land on the drilled-in-from bubble's
         // *current* row, not a raw offset saved before the root
         // conversation grew while the child view was open.
         let mut state = AppState::new();

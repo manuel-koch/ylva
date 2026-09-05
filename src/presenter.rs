@@ -73,22 +73,6 @@ fn route_keyboard(
     event: InputEvent,
     textarea: &TextareaContext,
 ) -> Vec<Effect> {
-    // Ctrl+B (drill-in back/forward navigation) is handled ahead of the
-    // per-`Focus` dispatch below: it must work regardless of whether the
-    // main input, the help popup, or a tool-approval prompt currently has
-    // focus, and it never touches `Focus`/`TuiMode` itself — only
-    // `active_view`. A no-op when there's no currently-tracked child.
-    if let InputEvent::KeyInput(key_event) = &event {
-        if key_event.code == KeyCode::Char('b')
-            && key_event.modifiers.contains(KeyModifiers::CONTROL)
-        {
-            match state.active_view {
-                ConversationView::Root => state.switch_to_child_view(),
-                ConversationView::Child { .. } => state.switch_to_root_view(),
-            }
-            return vec![];
-        }
-    }
     match &state.focus {
         Focus::HelpPopup => keyboard_help(state, event),
         Focus::ToolApproval { .. } => keyboard_approval(state, event, textarea),
@@ -197,6 +181,18 @@ fn keyboard_main(
         }
         InputEvent::SigInt => vec![Effect::StopAgent],
         InputEvent::CtrlC => handle_ctrl_c_generic(state, textarea.is_empty),
+        // Esc with an empty draft while viewing a subagent's drill-in
+        // transcript navigates back to the root conversation instead of
+        // acting on the (root) agent's `TuiMode` — the subagent's own
+        // transcript is read-only here, so there is nothing to "cancel". A
+        // non-empty draft still just clears via the normal Escape path
+        // below, same as in the root view.
+        InputEvent::Escape
+            if textarea.is_empty && matches!(state.active_view, ConversationView::Child { .. }) =>
+        {
+            state.switch_to_root_view();
+            vec![]
+        }
         InputEvent::Escape => handle_escape_main(state, textarea),
         InputEvent::Paste(text) => vec![Effect::Paste(text)],
         InputEvent::KeyInput(key_event) => handle_key_main(state, key_event, textarea),
@@ -497,6 +493,17 @@ fn handle_key_main(
         }
 
         KeyCode::Enter => {
+            // Viewing a subagent's drill-in transcript: the child
+            // conversation doesn't accept input (only one agent loop is
+            // driven at a time), and silently steering the *root* agent
+            // while a different (child) transcript is on screen would be
+            // misleading — the user would have no visual confirmation of
+            // which conversation their message actually went to. So Enter
+            // is a no-op here until per-subagent steering exists (see
+            // `docs/known-issues.md`).
+            if matches!(state.active_view, ConversationView::Child { .. }) {
+                return vec![];
+            }
             let raw_text = &textarea.text;
             if raw_text.trim().is_empty() {
                 return vec![];
@@ -810,14 +817,15 @@ fn route_mouse(
                         .copied()
                     {
                         // A double-click on a `spawn_subagent` bubble's title
-                        // drills into its conversation view instead of
-                        // toggling collapse — distinct from the single-click
-                        // collapse/expand every bubble (including spawn
-                        // bubbles) always supports. `last_child` survives
-                        // `ChildAgentDone`, so this still works once the
-                        // child has finished. Only one child conversation is
-                        // tracked at a time, so any `spawn_subagent` bubble
-                        // unambiguously refers to `last_child`.
+                        // drills into *that bubble's own* conversation view
+                        // instead of toggling collapse — distinct from the
+                        // single-click collapse/expand every bubble
+                        // (including spawn bubbles) always supports.
+                        // `run_id_for_bubble` still resolves a finished
+                        // child's bubble (entries in `child_conversations`
+                        // are kept indefinitely), and correctly disambiguates
+                        // between multiple concurrent/queued `spawn_subagent`
+                        // bubbles rather than assuming "the" single child.
                         //
                         // The first click on a spawn bubble does NOT toggle
                         // collapse immediately — it only arms
@@ -844,8 +852,8 @@ fn route_mouse(
                             );
                             if is_double_click {
                                 state.last_bubble_click = None;
-                                if state.current_child.is_some() || state.last_child.is_some() {
-                                    state.switch_to_child_view();
+                                if let Some(run_id) = state.run_id_for_bubble(bubble_id) {
+                                    state.switch_to_child_view(run_id);
                                 } else {
                                     state.toggle_tool_bubble_collapsed(bubble_id);
                                 }
@@ -917,20 +925,18 @@ fn domain_child_lifecycle(state: &mut AppState, event: DomainEvent) -> Vec<Effec
     match event {
         DomainEvent::ChildAgentStarted {
             run_id,
+            call_id,
             agent_type,
             task,
             label,
         } => {
-            let child = ChildRunInfo {
+            state.start_child_run(ChildRunInfo {
                 run_id,
+                bubble_id: call_id,
                 agent_type,
                 task,
                 label,
-            };
-            state.current_child = Some(child.clone());
-            state.last_child = Some(child);
-            state.child_messages.clear();
-            state.child_partial_text.clear();
+            });
             state.child_view.header_bubble_scroll_offset = 0;
             // No synthetic "task" message is seeded here: the child-view
             // header re-renders the real root `spawn_subagent` bubble (see
@@ -939,18 +945,33 @@ fn domain_child_lifecycle(state: &mut AppState, event: DomainEvent) -> Vec<Effec
             // the transcript's first turn would just repeat the same text.
             vec![]
         }
-        DomainEvent::ChildAgentToken(text) => {
-            state.child_partial_text.push_str(&text);
+        DomainEvent::ChildAgentToken { run_id, text } => {
+            if let Some(conversation) = state.child_conversations.get_mut(&run_id) {
+                conversation.partial_text.push_str(&text);
+            }
             vec![]
         }
-        DomainEvent::ChildAgentDone { .. } => {
-            state.flush_child_partial_text();
-            if matches!(state.active_view, ConversationView::Child { .. })
-                && state.auto_switched_to_child
-            {
+        DomainEvent::ChildAgentDone { run_id, .. } => {
+            state.flush_child_partial_text(run_id);
+            // Only auto-return if the user is currently viewing *this*
+            // finished child's transcript — a different child may still be
+            // running/queued, or the user may be looking at an unrelated
+            // (earlier-finished) child's transcript, in which case this
+            // event must not disturb `active_view`.
+            let is_viewing_this_child = matches!(
+                state.active_view,
+                ConversationView::Child { run_id: viewed_run_id, .. } if viewed_run_id == run_id
+            );
+            if is_viewing_this_child && state.auto_switched_to_child {
                 state.switch_to_root_view();
             }
-            state.current_child = None;
+            if state
+                .running_child
+                .as_ref()
+                .is_some_and(|child| child.run_id == run_id)
+            {
+                state.running_child = None;
+            }
             vec![]
         }
         DomainEvent::BubbleClickWindowExpired => {
@@ -1984,8 +2005,9 @@ mod tests {
 
     fn tracked_child(state: &mut AppState) -> Uuid {
         let run_id = Uuid::new_v4();
-        state.current_child = Some(crate::tui_reducer_state::ChildRunInfo {
+        state.start_child_run(crate::tui_reducer_state::ChildRunInfo {
             run_id,
+            bubble_id: Uuid::new_v4(),
             agent_type: "reviewer".to_string(),
             task: "look into flaky test".to_string(),
             label: "Investigate flaky test".to_string(),
@@ -2004,6 +2026,7 @@ mod tests {
             &mut state,
             TuiEvent::Domain(DomainEvent::ChildAgentStarted {
                 run_id,
+                call_id: Uuid::new_v4(),
                 agent_type: "reviewer".to_string(),
                 task: "look into flaky test".to_string(),
                 label: "Investigate flaky test".to_string(),
@@ -2022,21 +2045,18 @@ mod tests {
         // itself starts empty and only accumulates the child's own turns.
         let mut state = AppState::new();
         let run_id = Uuid::new_v4();
-        state.child_messages.push(ChatEntry::AssistantMessage {
-            text: "stale from a previous run".to_string(),
-            interrupted: false,
-        });
         update(
             &mut state,
             TuiEvent::Domain(DomainEvent::ChildAgentStarted {
                 run_id,
+                call_id: Uuid::new_v4(),
                 agent_type: "reviewer".to_string(),
                 task: "look into flaky test".to_string(),
                 label: "Investigate flaky test".to_string(),
             }),
             &empty_textarea(),
         );
-        assert!(state.child_messages.is_empty());
+        assert!(state.child_conversations[&run_id].messages.is_empty());
     }
 
     #[test]
@@ -2084,7 +2104,7 @@ mod tests {
         let mut state = AppState::new();
         state.mode = TuiMode::Streaming;
         let run_id = tracked_child(&mut state);
-        state.switch_to_child_view();
+        state.switch_to_child_view(run_id);
         assert!(!state.auto_switched_to_child);
 
         let id = Uuid::new_v4();
@@ -2116,44 +2136,110 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_b_toggles_between_root_and_child_view() {
+    fn child_tool_pending_for_a_different_running_child_auto_switches_away_from_a_finished_childs_view_and_restores_it_on_resolve(
+    ) {
+        // Regression: with two subagents spawned, one already finished (and
+        // the user manually drilled into its transcript) and a second still
+        // running, an approval belonging to the *second* (background) child
+        // must not be stranded behind the finished child's transcript — it
+        // has to switch to the child that actually needs the approval, then
+        // return to exactly the view the user was on before.
         let mut state = AppState::new();
-        tracked_child(&mut state);
-        assert_eq!(state.active_view, ConversationView::Root);
+        state.mode = TuiMode::Streaming;
 
+        // First child finishes; user manually drills into its (now static)
+        // transcript.
+        let finished_run_id = tracked_child(&mut state);
+        state.running_child = None;
+        state.switch_to_child_view(finished_run_id);
+        assert!(!state.auto_switched_to_child);
+
+        // Second child starts running in the background and hits a bash
+        // approval.
+        let running_run_id = Uuid::new_v4();
+        state.start_child_run(crate::tui_reducer_state::ChildRunInfo {
+            run_id: running_run_id,
+            bubble_id: Uuid::new_v4(),
+            agent_type: "reviewer".to_string(),
+            task: "run the test suite".to_string(),
+            label: "Run tests".to_string(),
+        });
+        let id = Uuid::new_v4();
         update(
             &mut state,
-            TuiEvent::Input(InputEvent::KeyInput(crossterm::event::KeyEvent::new(
-                KeyCode::Char('b'),
-                KeyModifiers::CONTROL,
-            ))),
+            TuiEvent::Domain(DomainEvent::ToolPending {
+                id,
+                name: "bash".to_string(),
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                run_id: Some(running_run_id),
+            }),
             &empty_textarea(),
         );
-        assert!(matches!(state.active_view, ConversationView::Child { .. }));
 
+        assert!(
+            matches!(state.active_view, ConversationView::Child { run_id: r, .. } if r == running_run_id),
+            "expected auto-switch to the child awaiting approval, got {:?}",
+            state.active_view
+        );
+        assert!(state.auto_switched_to_child);
+
+        // Resolving the approval must return to the finished child's view —
+        // not Root, since that's what the user was actually looking at.
         update(
             &mut state,
-            TuiEvent::Input(InputEvent::KeyInput(crossterm::event::KeyEvent::new(
-                KeyCode::Char('b'),
-                KeyModifiers::CONTROL,
-            ))),
+            TuiEvent::Domain(DomainEvent::ToolDenied { id }),
             &empty_textarea(),
         );
-        assert_eq!(state.active_view, ConversationView::Root);
+        assert!(
+            matches!(state.active_view, ConversationView::Child { run_id: r, .. } if r == finished_run_id),
+            "expected to return to the previously-viewed finished child, got {:?}",
+            state.active_view
+        );
+        assert!(!state.auto_switched_to_child);
     }
 
     #[test]
-    fn ctrl_b_is_a_no_op_without_a_tracked_child() {
+    fn esc_with_empty_draft_in_child_view_navigates_back_to_root() {
         let mut state = AppState::new();
-        update(
+        state.mode = TuiMode::Streaming;
+        let run_id = tracked_child(&mut state);
+        state.switch_to_child_view(run_id);
+        assert!(matches!(state.active_view, ConversationView::Child { .. }));
+
+        let effects = update(
             &mut state,
-            TuiEvent::Input(InputEvent::KeyInput(crossterm::event::KeyEvent::new(
-                KeyCode::Char('b'),
-                KeyModifiers::CONTROL,
-            ))),
+            TuiEvent::Input(InputEvent::Escape),
             &empty_textarea(),
         );
+
         assert_eq!(state.active_view, ConversationView::Root);
+        assert!(
+            effects.is_empty(),
+            "back-navigation must not touch TuiMode/Aborting effects: {effects:?}"
+        );
+        assert_eq!(
+            state.mode,
+            TuiMode::Streaming,
+            "the root agent's own busy state must be left untouched by back-navigation"
+        );
+    }
+
+    #[test]
+    fn esc_with_non_empty_draft_in_child_view_clears_draft_instead_of_navigating() {
+        let mut state = AppState::new();
+        let run_id = tracked_child(&mut state);
+        state.switch_to_child_view(run_id);
+
+        let effects = update(
+            &mut state,
+            TuiEvent::Input(InputEvent::Escape),
+            &textarea_with("some draft"),
+        );
+
+        assert!(matches!(state.active_view, ConversationView::Child { .. }));
+        assert!(matches!(effects.as_slice(), [Effect::ClearTextarea]));
     }
 
     // ── Ctrl+C tests ──────────────────────────────────────────────────────────
@@ -2482,6 +2568,36 @@ mod tests {
         );
         assert!(effects.contains(&Effect::SubmitPrompt { steer: false }));
         assert!(effects.contains(&Effect::ClearTextarea));
+    }
+
+    #[test]
+    fn enter_with_text_in_child_view_is_a_no_op() {
+        // Regression test: Enter must not silently steer the *root* agent
+        // while the user is looking at a subagent's drill-in transcript —
+        // there is no visual confirmation of which conversation the message
+        // would go to, and the child conversation itself does not accept
+        // input.
+        let mut state = AppState::new();
+        state.mode = TuiMode::Streaming;
+        let run_id = tracked_child(&mut state);
+        state.switch_to_child_view(run_id);
+
+        let effects = update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+            &textarea_with("hello"),
+        );
+
+        assert!(effects.is_empty(), "expected no effects, got {effects:?}");
+        assert!(
+            state.queued_steer_texts.is_empty(),
+            "must not queue a steer to the root agent"
+        );
+        assert_eq!(
+            state.mode,
+            TuiMode::Streaming,
+            "must not touch the root agent's TuiMode"
+        );
     }
 
     #[test]
@@ -2991,13 +3107,15 @@ mod tests {
             }),
             collapsed: false,
         });
-        state.current_child = Some(ChildRunInfo {
-            run_id: Uuid::new_v4(),
+        let run_id = Uuid::new_v4();
+        state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id,
             agent_type: "reviewer".to_string(),
             task: "look into flaky test".to_string(),
             label: "Investigate flaky test".to_string(),
         });
-        state.switch_to_child_view();
+        state.switch_to_child_view(run_id);
         state.layout.header_bubble = ratatui::layout::Rect::new(0, 0, 40, 4);
         let mouse_down = crossterm::event::MouseEvent {
             kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
@@ -3031,13 +3149,15 @@ mod tests {
             }),
             collapsed: false,
         });
-        state.current_child = Some(ChildRunInfo {
-            run_id: Uuid::new_v4(),
+        let run_id = Uuid::new_v4();
+        state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id,
             agent_type: "reviewer".to_string(),
             task: "look into flaky test".to_string(),
             label: "Investigate flaky test".to_string(),
         });
-        state.switch_to_child_view();
+        state.switch_to_child_view(run_id);
         state.layout.header_bubble = ratatui::layout::Rect::new(0, 0, 40, 4);
         let mouse_down = crossterm::event::MouseEvent {
             kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
@@ -3067,6 +3187,7 @@ mod tests {
             &mut state,
             TuiEvent::Domain(DomainEvent::ChildAgentStarted {
                 run_id,
+                call_id: bubble_id,
                 agent_type: "reviewer".to_string(),
                 task: "look into flaky test".to_string(),
                 label: "Investigate flaky test".to_string(),
@@ -3091,7 +3212,7 @@ mod tests {
         );
 
         // User manually expands the header bubble while the subagent runs.
-        state.switch_to_child_view();
+        state.switch_to_child_view(run_id);
         state.layout.header_bubble = ratatui::layout::Rect::new(0, 0, 40, 4);
         update(
             &mut state,
@@ -3126,6 +3247,7 @@ mod tests {
         update(
             &mut state,
             TuiEvent::Domain(DomainEvent::ChildAgentDone {
+                run_id,
                 status: "done".to_string(),
                 result: None,
             }),
@@ -3296,7 +3418,14 @@ mod tests {
         // while a confirming second click could still arrive.
         let mut state = AppState::new();
         let bubble_id = Uuid::new_v4();
-        let _run_id = tracked_child(&mut state);
+        let run_id = Uuid::new_v4();
+        state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id,
+            agent_type: "reviewer".to_string(),
+            task: "look into flaky test".to_string(),
+            label: "Investigate flaky test".to_string(),
+        });
         let mouse = spawn_bubble_click_fixture(&mut state, bubble_id);
 
         update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
@@ -3327,7 +3456,14 @@ mod tests {
     fn double_click_on_spawn_bubble_title_drills_into_child_view() {
         let mut state = AppState::new();
         let bubble_id = Uuid::new_v4();
-        let run_id = tracked_child(&mut state);
+        let run_id = Uuid::new_v4();
+        state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id,
+            agent_type: "reviewer".to_string(),
+            task: "look into flaky test".to_string(),
+            label: "Investigate flaky test".to_string(),
+        });
         let mouse = spawn_bubble_click_fixture(&mut state, bubble_id);
 
         // First click: arms double-click detection, defers the toggle.
@@ -3357,14 +3493,21 @@ mod tests {
     }
 
     #[test]
-    fn double_click_on_finished_spawn_bubble_still_drills_in_via_last_child() {
-        // Once the child finishes, `current_child` is cleared but
-        // `last_child` survives — the bubble must still be drillable.
+    fn double_click_on_finished_spawn_bubble_still_drills_in_via_child_conversations() {
+        // Once the child finishes, `running_child` is cleared but its entry
+        // in `child_conversations` survives — the bubble must still be
+        // drillable.
         let mut state = AppState::new();
         let bubble_id = Uuid::new_v4();
-        let run_id = tracked_child(&mut state);
-        state.last_child = state.current_child.clone();
-        state.current_child = None;
+        let run_id = Uuid::new_v4();
+        state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id,
+            agent_type: "reviewer".to_string(),
+            task: "look into flaky test".to_string(),
+            label: "Investigate flaky test".to_string(),
+        });
+        state.running_child = None;
         let mouse = spawn_bubble_click_fixture(&mut state, bubble_id);
 
         update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());

@@ -481,8 +481,29 @@ pub fn draw(
             },
         )
     } else {
+        let in_child_view = state.child_view.child_view_bubble.is_some();
         let keybinding_hint = if state.clarify_banner_state.pending_clarify.is_some() {
             " enter: answer  click choice  ctrl-c/esc: cancel  F1: help"
+        } else if in_child_view && !input_is_empty {
+            // Viewing a subagent's drill-in transcript: `enter: send` is
+            // omitted entirely — the child conversation doesn't accept
+            // input (only one agent loop is driven at a time), and Enter no
+            // longer steers the *root* agent from here either (see
+            // `presenter::handle_key_main`), since that would silently act
+            // on a conversation other than the one currently on screen.
+            " ctrl-c/esc: clear draft  F1: help"
+        } else if in_child_view {
+            // Esc with an empty draft while viewing a subagent's drill-in
+            // transcript navigates back to the root conversation instead of
+            // acting on the root agent's own busy/idle `TuiMode` (see
+            // `presenter::keyboard_main`) — the drilled-into transcript is
+            // read-only, so "cancel"/"quit" here would misleadingly suggest
+            // esc affects the *root* agent's turn.
+            if state.agent_mode != AgentMode::Idle {
+                " esc: back to conversation  ctrl-c: cancel & quit  F1: help"
+            } else {
+                " esc: back to conversation  ctrl-c: quit  F1: help"
+            }
         } else if state.agent_mode != AgentMode::Idle && !input_is_empty {
             " enter: send  ctrl-c/esc: clear draft  F1: help"
         } else if state.agent_mode != AgentMode::Idle {
@@ -497,23 +518,12 @@ pub fn draw(
         } else {
             " enter: send  ctrl-c: quit  F1: help"
         };
-        // Drill-in conversation model (Phase 6.10): the back-navigation
-        // keybinding is shown in the footer just like every other
-        // keybinding hint, rather than baked into the (non-scrolling)
-        // child-view header — the header stays focused on naming the
-        // subagent, and the footer stays the single place users check for
-        // available keybindings regardless of which conversation is shown.
-        let keybinding_hint = if state.child_view.child_view_bubble.is_some() {
-            format!(" ctrl-b: back  {}", keybinding_hint.trim_start())
-        } else {
-            keybinding_hint.to_string()
-        };
         draw_normal_footer(
             frame,
             footer_row_1,
             footer_row_2,
             state,
-            &keybinding_hint,
+            keybinding_hint,
             hint,
         );
         None
@@ -2728,7 +2738,7 @@ fn draw_approval_footer(
     } else if is_subagent {
         // The pending tool call belongs to a subagent, not the root agent —
         // this can be shown while viewing the root conversation (the user
-        // navigated back via Ctrl+B while the subagent's own tool call is
+        // navigated back via Esc (empty draft) while the subagent's own tool call is
         // still awaiting approval), where the pending call is otherwise
         // invisible, so make the title unambiguous about which agent it's
         // asking on behalf of.

@@ -244,6 +244,15 @@ impl ChildAgentManager {
         self.queue.len()
     }
 
+    /// `run_id` of the currently running child, if any. At most one child
+    /// runs at a time, so this unambiguously identifies whose
+    /// `AppendText`/`AppendThinking` fragments arriving on `subagent_ui_tx`
+    /// belong to it (see `AgentLoop::run`'s `recv_subagent_ui` arm, which
+    /// stamps `UiUpdate::ChildAgentToken` with it).
+    pub fn running_run_id(&self) -> Option<Uuid> {
+        self.running.as_ref().map(|running| running.run_id)
+    }
+
     /// The running child's own `AgentCommand` sender, if `run_id` matches the
     /// currently running child. Used by the root `AgentLoop` to route an
     /// `AgentCommand::ForChild { run_id, .. }` verdict to the correct child
@@ -298,6 +307,7 @@ impl ChildAgentManager {
         let call_id = request.call_id;
         let _ = self.subagent_ui_tx.try_send(UiUpdate::ChildAgentStarted {
             run_id,
+            call_id,
             agent_type: request.agent_type.clone(),
             task: request.task.clone(),
             label: request.label.clone(),

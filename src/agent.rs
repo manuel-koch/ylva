@@ -220,21 +220,33 @@ pub enum UiUpdate {
     /// `ClarifyPending` carrying this same `run_id`) forces the switch.
     ChildAgentStarted {
         run_id: Uuid,
+        /// The `spawn_subagent` tool-call id this run belongs to (== the
+        /// root `ToolBubble`'s `id`) — lets the TUI correlate this run to
+        /// its specific bubble even when multiple `spawn_subagent` bubbles
+        /// (active + queued, or already finished) coexist.
+        call_id: Uuid,
         agent_type: String,
         task: String,
         label: String,
     },
-    /// A fragment of the current child's own assistant text/thinking output,
-    /// forwarded from the child's `AppendText`/`AppendThinking` and rendered
-    /// into the child conversation transcript only — never mixed into the
-    /// parent's own `partial_assistant_text`.
-    ChildAgentToken(String),
-    /// The current child agent run has finished (successfully, with an
-    /// error, or via the "unstructured" fallback). `status`/`result` mirror
-    /// `crate::child_agent_manager::FinishResult`. If the driver had
-    /// auto-switched into the child view for an interactive pause, it
-    /// auto-returns to the parent view now.
+    /// A fragment of `run_id`'s own assistant text/thinking output,
+    /// forwarded from that child's `AppendText`/`AppendThinking` and
+    /// rendered into that child's own conversation transcript only — never
+    /// mixed into the parent's own `partial_assistant_text`, nor into a
+    /// different child's transcript (`run_id` disambiguates which one,
+    /// since a queued child can start streaming while an earlier child's
+    /// transcript is still being viewed).
+    ChildAgentToken {
+        run_id: Uuid,
+        text: String,
+    },
+    /// The child agent run identified by `run_id` has finished
+    /// (successfully, with an error, or via the "unstructured" fallback).
+    /// `status`/`result` mirror `crate::child_agent_manager::FinishResult`.
+    /// If the driver had auto-switched into `run_id`'s child view for an
+    /// interactive pause, it auto-returns to the parent view now.
     ChildAgentDone {
+        run_id: Uuid,
         status: String,
         result: Option<String>,
     },
@@ -1126,6 +1138,7 @@ impl AgentLoop {
                         // it) ahead of the parent bubble settling.
                         let _ = ui_tx
                             .send(UiUpdate::ChildAgentDone {
+                                run_id,
                                 status: status.clone(),
                                 result: finish_result.result.clone(),
                             })
@@ -1185,7 +1198,14 @@ impl AgentLoop {
                         // with the child's own `run_id`) is forwarded as-is.
                         match update {
                             UiUpdate::AppendText(text) | UiUpdate::AppendThinking(text) => {
-                                let _ = ui_tx.send(UiUpdate::ChildAgentToken(text)).await;
+                                if let Some(run_id) = child_agent_manager
+                                    .as_ref()
+                                    .and_then(|manager| manager.running_run_id())
+                                {
+                                    let _ = ui_tx
+                                        .send(UiUpdate::ChildAgentToken { run_id, text })
+                                        .await;
+                                }
                             }
                             UiUpdate::StreamStarted
                             | UiUpdate::StreamDone

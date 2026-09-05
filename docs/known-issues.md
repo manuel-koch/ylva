@@ -112,7 +112,7 @@ tests.
 - [x] "Phase 6.13 — Headless" seem obsolete now, AFAIK we already have a CLI flag to
       enable subagents.
 
-- [ ] When a tool approval arrives for a tool that was called from a subagent,
+- [x] When a tool approval arrives for a tool that was called from a subagent,
       the approval dialog doesn't indicate the "agent" scope. User doesn't
       see whether the tool wants to start in main-conversion or subagent.
       Maybe we can only address this in a later phase when drill-down
@@ -144,7 +144,7 @@ tests.
       Shouldn't the footer indicate that the subagent is done and that parent
       is still busy ?
 
-- [ ] The keybinding hint for "ctrl-b: back" should maybe be rephrased, it's
+- [x] The keybinding hint for "ctrl-b: back" should maybe be rephrased, it's
       not clear what "back" means.
       Maybe ctrl-b is the wrong keybinding for "back" ?
       What about esc ?
@@ -152,6 +152,22 @@ tests.
       - input field is empty -> esc in subagent conversation-list should not
       "cancel" the conversation, rather go back to parent and there user can
       abort/steer the main conversation.
+      Fixed: `ctrl-b` dropped entirely. Drilling into a subagent's view is
+      now only via the existing double-click gesture; `esc` with an empty
+      draft in the drill-in view navigates back to the root conversation
+      instead of acting on the root agent's busy/idle state (a non-empty
+      draft still just clears, same as everywhere else).
+
+- [x] The "enter: send" footer hint in the subagent drill-in view is
+      misleading — without any slash-command implementation, the user can't
+      do anything to the subagent from its own view (no steer, no cancel).
+      Turned out `Enter` with a non-empty draft wasn't a no-op there either:
+      it silently queued a steer for the *root* agent while the user was
+      looking at the child's transcript, with no visual indication of which
+      conversation the message actually went to.
+      Fixed: `Enter` is now a no-op while viewing a running subagent's
+      drill-in transcript (`presenter::handle_key_main`), and the footer
+      omits `enter: send` entirely in that view.
 
 - [x] When drilling-in on a subagent conversation-list while it is running,
       the list should scroll to the end of the conversation.
@@ -211,18 +227,35 @@ tests.
       I noticed that becasue the subagent conversation bubble header keeps rendering
       different run_id and the content of the conversation-list keeps changing
       while viewing it.
+      Similar issue when there is an active subagent and a queued one.
+      Double click on the active subagents opens a conversation-list
+      of the queued subagent, not the one user clicked.
 
-- [ ] Sometimes TUI (sometimes) seems to be stuck on "Running tool..." with many
-      subagents runs.
+- [x] llm spawned two subagents.
+      1st is done, User is looking at its conversation.
+      2nd subagent is started in the background, triggers a bash tool approval.
+      Now user sees "Subagent tool 'bash' requests your approval:" message in the
+      subagent view that renders the "done" subagent, not the active subagent.
+      A approval should immediately switch to that subagent view, handle the
+      approval, and afterwards return to the subagent the user was viewing before
+      the approval request arrived.
+
+- [ ] Subagent just renders "Subagent working..." regardless of whether it is
+      streaming or thinking. Can we apply the same for the main conversation-list,
+      using "Working..." ?
+
+- [ ] We should split `src/agent/tools/fs.rs` into one module per tool.
+      "edit" and "search" are filesystem related tools too, but they already
+      have a dedicated module.
 
 ## Code style smell
 
 Code fragments like the following seem to be written to avoid "too many args" linter
-warning. But it looks like the introduction of the "params" struct is just to
+issue. But it looks like the introduction of the "params" struct is just to
 silence the linter warning, the implementation just packs some args into
-a struct and immediately unpacks the struct into local vars.
+a struct and immediately unpacks the struct into local vars inside the method.
 If this is the way the linter issue should be fixed ( is this actually
-best practice ? ) then I would rather just suppress the linter issue
+best practice ? ), I would rather just suppress the linter issue
 instead of writing so much bogus code fragments with no benefit wrt readability.
 
 ```rust
@@ -252,3 +285,12 @@ fn draw_approval_footer(
     } = params;
     .....
 ```
+
+## Features document to verbose
+
+The `features.md` document contains many code-like references and detailed
+implementation details.
+This document should be a user-facing documentation of the features of Ylva.
+We should condense the documentation and get rid of any in-detail-implementation references and code-snippets.
+If this information is of any use, we should mayne move the implemenentation
+detail info into a dedicated file instead ?

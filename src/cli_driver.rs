@@ -594,7 +594,7 @@ pub async fn run_cli_to(
             // silently ignored here.
             Some(
                 UiUpdate::ChildAgentStarted { .. }
-                | UiUpdate::ChildAgentToken(_)
+                | UiUpdate::ChildAgentToken { .. }
                 | UiUpdate::ChildAgentDone { .. },
             ) => {}
             None => response_finished = true,

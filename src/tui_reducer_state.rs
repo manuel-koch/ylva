@@ -25,6 +25,7 @@
 //! **No `use ratatui::backend`**, no channel types, no `UiUpdate` imports.
 //! Only [`ratatui::layout::Rect`] is allowed from ratatui here.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crossterm::event::KeyEvent;
@@ -248,15 +249,45 @@ pub enum ChatEntry {
 
 // ─── Drill-in conversation model (Phase 6.10) ────────────────────────────────
 
-/// Identifies the currently-tracked child run, independent of which
-/// transcript is currently displayed (see [`ConversationView`]). Populated
-/// on `DomainEvent::ChildAgentStarted`, cleared on `DomainEvent::ChildAgentDone`.
+/// Identifies one child run's identity/metadata, keyed by `run_id` in
+/// `AppState::child_conversations`. Populated on `DomainEvent::ChildAgentStarted`
+/// and kept for the lifetime of the session (even after the child finishes)
+/// so its transcript/header bubble can still be drilled into afterwards.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChildRunInfo {
     pub run_id: Uuid,
+    /// The `id` of the real root `spawn_subagent` `ToolBubble` this run
+    /// belongs to (the tool-call id) — the single source of truth
+    /// correlating a specific bubble to a specific child conversation, used
+    /// by both `AppState::header_bubble_id` (view → bubble) and the
+    /// double-click handler (bubble → view), so multiple concurrent/queued
+    /// `spawn_subagent` bubbles are never confused with one another.
+    pub bubble_id: Uuid,
     pub agent_type: String,
     pub task: String,
     pub label: String,
+}
+
+/// One child run's own conversation transcript plus in-flight partial text,
+/// keyed by `run_id` in `AppState::child_conversations`. Kept indefinitely
+/// once created (mirrors `AppState::chat_entries`, which is also
+/// session-lifetime-unbounded) so a finished child's transcript remains
+/// drillable for as long as its root `spawn_subagent` bubble is visible.
+#[derive(Debug, Clone)]
+pub struct ChildConversation {
+    pub info: ChildRunInfo,
+    pub messages: Vec<ChatEntry>,
+    pub partial_text: String,
+}
+
+impl ChildConversation {
+    pub(crate) fn new(info: ChildRunInfo) -> Self {
+        ChildConversation {
+            info,
+            messages: Vec::new(),
+            partial_text: String::new(),
+        }
+    }
 }
 
 /// Which conversation transcript is currently rendered in the main chat area.
@@ -264,7 +295,7 @@ pub struct ChildRunInfo {
 pub enum ConversationView {
     /// The root/parent conversation (`AppState::chat_entries`).
     Root,
-    /// The currently-tracked child's conversation (`AppState::child_messages`).
+    /// The currently-tracked child's conversation (`AppState::child_conversations`).
     Child {
         run_id: Uuid,
         agent_type: String,
@@ -476,15 +507,20 @@ pub enum DomainEvent {
     /// A child agent actually started running. See `UiUpdate::ChildAgentStarted`.
     ChildAgentStarted {
         run_id: Uuid,
+        /// The `spawn_subagent` tool-call id (== the root `ToolBubble`'s
+        /// `id`) this run belongs to. See `ChildRunInfo::bubble_id`.
+        call_id: Uuid,
         agent_type: String,
         task: String,
         label: String,
     },
-    /// A fragment of the current child's own text/thinking output.
+    /// A fragment of `run_id`'s own text/thinking output.
     /// See `UiUpdate::ChildAgentToken`.
-    ChildAgentToken(String),
-    /// The current child agent run has finished. See `UiUpdate::ChildAgentDone`.
+    ChildAgentToken { run_id: Uuid, text: String },
+    /// The child agent run identified by `run_id` has finished.
+    /// See `UiUpdate::ChildAgentDone`.
     ChildAgentDone {
+        run_id: Uuid,
         status: String,
         result: Option<String>,
     },
@@ -520,7 +556,7 @@ impl DomainEvent {
             DomainEvent::SteerApplied => "SteerApplied",
             DomainEvent::StreamThinkingChunk(_) => "StreamThinkingChunk",
             DomainEvent::ChildAgentStarted { .. } => "ChildAgentStarted",
-            DomainEvent::ChildAgentToken(_) => "ChildAgentToken",
+            DomainEvent::ChildAgentToken { .. } => "ChildAgentToken",
             DomainEvent::ChildAgentDone { .. } => "ChildAgentDone",
             DomainEvent::BubbleClickWindowExpired => "BubbleClickWindowExpired",
         }
@@ -880,35 +916,42 @@ pub struct AppState {
 
     // ── drill-in conversation model (Phase 6.10) ─────────────────────────────
     /// Which transcript (root or child) is currently rendered in the main
-    /// chat area. Independent of `current_child`: the parent stays in
+    /// chat area. Independent of `running_child`: the parent stays in
     /// `Root` view while a child streams in the background, per
     /// `docs/plans/phase6-terminal-superpowers.md` Phase 6.10.
     pub active_view: ConversationView,
-    /// The currently-tracked child run's conversation transcript, populated
-    /// while a `spawn_subagent` child is active. Cleared (but not
-    /// necessarily emptied — kept for display until the next child starts)
-    /// when a new child starts.
-    pub child_messages: Vec<ChatEntry>,
-    /// Identifies the currently-tracked child run, independent of whether
-    /// `active_view` has switched to it yet. `None` when no child is
-    /// currently running.
-    pub current_child: Option<ChildRunInfo>,
-    /// The most recently started child run's identity, kept around after
-    /// `ChildAgentDone` (unlike `current_child`, which is cleared once the
-    /// child finishes) so its bubble can still be drilled into after
-    /// completion. Overwritten by the next `ChildAgentStarted`; since at
-    /// most one child runs at a time, this always identifies whichever
-    /// child's transcript currently occupies `child_messages`.
-    pub last_child: Option<ChildRunInfo>,
+    /// Every child run's own conversation transcript/partial-text
+    /// accumulator, keyed by `run_id` — one entry per `spawn_subagent`
+    /// child that has ever started, added on `ChildAgentStarted` and never
+    /// removed (mirrors `chat_entries`, which is also session-lifetime
+    /// unbounded), so any of them can still be drilled into later even
+    /// while another child is running/queued or has since finished. Fixes
+    /// the bug where a single shared transcript was silently overwritten
+    /// whenever the next queued child started, corrupting whichever
+    /// child's conversation the user was currently viewing.
+    pub child_conversations: HashMap<Uuid, ChildConversation>,
+    /// Identifies the currently *running* child (at most one at a time —
+    /// see `ChildAgentManager`), independent of whether `active_view` has
+    /// switched to it yet, and independent of which (if any) child the user
+    /// is currently viewing. `None` when no child is currently running
+    /// (though earlier children may still have entries in
+    /// `child_conversations`). Populated on `ChildAgentStarted`, cleared on
+    /// `ChildAgentDone`.
+    pub running_child: Option<ChildRunInfo>,
     /// `true` when `active_view` was switched to `Child` automatically (an
     /// interactive pause), rather than by explicit user navigation (click).
-    /// Gates whether the view auto-returns to `Root` once that pause
-    /// resolves or the child finishes.
+    /// Gates whether the view auto-returns to
+    /// `pre_pause_view`/`Root` once that pause resolves or the child
+    /// finishes.
     pub auto_switched_to_child: bool,
-    /// Accumulates the current child's own streamed text/thinking tokens
-    /// (`DomainEvent::ChildAgentToken`) ahead of being flushed into a
-    /// `ChatEntry::AssistantMessage` in `child_messages`.
-    pub child_partial_text: String,
+    /// Snapshot of `active_view` from immediately before an auto-switch
+    /// (`note_child_interactive_pause`), so `resolve_possible_child_pause`
+    /// can restore *that* view — which may be `Root` or a different,
+    /// already-finished child's view the user had manually drilled into —
+    /// instead of unconditionally landing back on `Root`. Populated only by
+    /// `note_child_interactive_pause`, consumed (taken) by
+    /// `resolve_possible_child_pause`.
+    pub pre_pause_view: Option<ConversationView>,
     /// `(bubble_id, clicked_at)` of the most recent plain click on a chat
     /// bubble's title row, used to detect a second click on the same
     /// `spawn_subagent` bubble within `DOUBLE_CLICK_WINDOW` as the
@@ -919,14 +962,14 @@ pub struct AppState {
     /// `(scroll_offset, scroll_locked)` of the root transcript, captured by
     /// `switch_to_child_view` right before it re-pins the shared scroll
     /// state to the bottom of the child's transcript. Restored by
-    /// `switch_to_root_view` (`Ctrl+B`) as an immediate best-effort
+    /// `switch_to_root_view` (Esc with an empty draft) as an immediate best-effort
     /// placeholder — the precise fix is `saved_root_scroll_bubble` below,
     /// resolved once root is rendered again. `None` before the first
     /// drill-in, or once restored.
     pub saved_root_scroll: Option<(usize, bool)>,
     /// `Uuid` of the `spawn_subagent` `ToolBubble` the user drilled in from,
-    /// captured by `switch_to_child_view` (via
-    /// `most_recent_spawn_subagent_bubble_id`). Consumed by
+    /// captured by `switch_to_child_view` (from the drilled-into run's
+    /// `ChildRunInfo::bubble_id`). Consumed by
     /// `switch_to_root_view`, which moves it into `pending_scroll_to_bubble`
     /// so `render::sync_from_draw` can scroll to that bubble's *current* row
     /// — robust against the root conversation having grown while the child
@@ -982,11 +1025,10 @@ impl AppState {
             aborting_exit: false,
 
             active_view: ConversationView::Root,
-            child_messages: Vec::new(),
-            current_child: None,
-            last_child: None,
+            child_conversations: HashMap::new(),
+            running_child: None,
             auto_switched_to_child: false,
-            child_partial_text: String::new(),
+            pre_pause_view: None,
             last_bubble_click: None,
             saved_root_scroll: None,
             saved_root_scroll_bubble: None,
@@ -1094,15 +1136,17 @@ impl AppState {
     }
 
     /// Find the most-recent `ToolBubble` with `id == target_id`, searching
-    /// both the root (`chat_entries`) and child (`child_messages`)
-    /// transcripts — a bubble's `id` (a `Uuid`) is unique regardless of
+    /// every child's own transcript (`child_conversations`) and the root
+    /// (`chat_entries`) — a bubble's `id` (a `Uuid`) is unique regardless of
     /// which transcript it was created in (see `target_messages_mut`), so
     /// updaters (`apply_tool_*`) can stay agnostic of which one it lives in.
     pub fn find_tool_bubble_mut(&mut self, target_id: Uuid) -> Option<&mut ChatEntry> {
-        if let Some(pos) = self.child_messages.iter().rposition(
-            |entry| matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == target_id),
-        ) {
-            return self.child_messages.get_mut(pos);
+        for conversation in self.child_conversations.values_mut() {
+            if let Some(pos) = conversation.messages.iter().rposition(
+                |entry| matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == target_id),
+            ) {
+                return conversation.messages.get_mut(pos);
+            }
         }
         self.chat_entries
             .iter_mut()
@@ -1111,121 +1155,155 @@ impl AppState {
     }
 
     /// Target transcript for a *new* tool/clarify bubble tagged with
-    /// `run_id`: the child transcript when `run_id` identifies the
-    /// currently-tracked child run, the root transcript otherwise (`run_id`
-    /// is `None`, or a stale id from an already-finished child).
+    /// `run_id`: that child's own transcript when `run_id` identifies any
+    /// tracked child run (running, queued, or already finished — see
+    /// `child_conversations`), the root transcript otherwise (`run_id` is
+    /// `None`, or an unrecognised id).
     pub(crate) fn target_messages_mut(&mut self, run_id: Option<Uuid>) -> &mut Vec<ChatEntry> {
-        let is_current_child =
-            run_id.is_some() && run_id == self.current_child.as_ref().map(|child| child.run_id);
-        if is_current_child {
-            &mut self.child_messages
-        } else {
-            &mut self.chat_entries
+        if let Some(run_id) = run_id {
+            if let Some(conversation) = self.child_conversations.get_mut(&run_id) {
+                return &mut conversation.messages;
+            }
         }
+        &mut self.chat_entries
     }
 
     /// Called whenever a `ToolPending`/`ClarifyPending` bubble tagged with
-    /// `run_id` is created. When it belongs to the currently-tracked child
-    /// and the user is still viewing `Root`, auto-switches `active_view` to
-    /// `Child` (armed for auto-return via `auto_switched_to_child`). If the
-    /// user has already manually navigated to `Child` (or it's the root's
-    /// own pending item), no auto-switch/re-arm happens — matches
+    /// `run_id` is created. When it belongs to the currently-*running*
+    /// child and the user isn't already looking at that exact child's view,
+    /// auto-switches `active_view` to it (armed for auto-return via
+    /// `auto_switched_to_child`), snapshotting whatever view was active
+    /// beforehand into `pre_pause_view` so `resolve_possible_child_pause`
+    /// can restore it — this may be `Root` *or* a different (e.g. already
+    /// finished) child's drill-in view the user had manually navigated to;
+    /// an approval belonging to a background child must never get stranded
+    /// behind whatever transcript happens to be on screen. If the user is
+    /// already viewing this exact running child (manually or via an earlier
+    /// auto-switch), no further switch/re-arm happens — matches
     /// `docs/plans/phase6-terminal-superpowers.md` Phase 6.10 step 74:
     /// "If `active_view` is already `Child`: set `auto_switched_to_child` to
     /// `false` (user navigated manually; no auto-return)."
     pub(crate) fn note_child_interactive_pause(&mut self, run_id: Option<Uuid>) {
-        let Some(child) = self.current_child.clone() else {
+        let Some(child) = self.running_child.clone() else {
             return;
         };
         if run_id != Some(child.run_id) {
             return;
         }
-        match self.active_view {
-            ConversationView::Root => {
-                self.active_view = ConversationView::Child {
-                    run_id: child.run_id,
-                    agent_type: child.agent_type,
-                    task: child.task,
-                    label: child.label,
-                };
-                self.auto_switched_to_child = true;
-            }
-            ConversationView::Child { .. } => {
-                self.auto_switched_to_child = false;
-            }
+        let already_viewing_this_child = matches!(
+            &self.active_view,
+            ConversationView::Child { run_id: r, .. } if *r == child.run_id
+        );
+        if already_viewing_this_child {
+            self.auto_switched_to_child = false;
+            return;
         }
+        self.pre_pause_view = Some(self.active_view.clone());
+        self.active_view = ConversationView::Child {
+            run_id: child.run_id,
+            agent_type: child.agent_type,
+            task: child.task,
+            label: child.label,
+        };
+        self.auto_switched_to_child = true;
     }
 
     /// Called whenever a tool/clarify bubble identified by `id` reaches a
-    /// terminal state (or is denied). If `id` lives in `child_messages` and
-    /// the drill-in view was auto-switched there for it, auto-returns to
-    /// `Root` — matches Phase 6.10 step 74: "When child interactive pause
-    /// resolves: auto-return to `Root` only if `auto_switched_to_child` is
-    /// `true`."
+    /// terminal state (or is denied). If `id` lives in the child transcript
+    /// currently being viewed and the drill-in view was auto-switched there
+    /// for it, auto-returns to whatever view was active before the
+    /// auto-switch (`pre_pause_view` — `Root` or a different child's view),
+    /// falling back to `Root` if none was recorded — matches Phase 6.10
+    /// step 74: "When child interactive pause resolves: auto-return to
+    /// `Root` only if `auto_switched_to_child` is `true`."
     pub(crate) fn resolve_possible_child_pause(&mut self, id: Uuid) {
         if !self.auto_switched_to_child {
             return;
         }
-        let was_child_pause = self.child_messages.iter().any(
-            |entry| matches!(entry, ChatEntry::ToolBubble { id: entry_id, .. } if *entry_id == id),
-        );
+        let ConversationView::Child { run_id, .. } = &self.active_view else {
+            return;
+        };
+        let run_id = *run_id;
+        let was_child_pause = self.child_conversations.get(&run_id).is_some_and(|conversation| {
+            conversation.messages.iter().any(
+                |entry| matches!(entry, ChatEntry::ToolBubble { id: entry_id, .. } if *entry_id == id),
+            )
+        });
         if was_child_pause {
-            self.active_view = ConversationView::Root;
+            self.active_view = self.pre_pause_view.take().unwrap_or(ConversationView::Root);
             self.auto_switched_to_child = false;
         }
     }
 
-    /// Flush `child_partial_text` (accumulated `ChildAgentToken` fragments)
-    /// into a new `ChatEntry::AssistantMessage` in `child_messages`. No-op
-    /// when there is no pending text.
-    pub fn flush_child_partial_text(&mut self) {
-        if self.child_partial_text.is_empty() {
+    /// Flush `run_id`'s own `partial_text` (accumulated `ChildAgentToken`
+    /// fragments) into a new `ChatEntry::AssistantMessage` in its own
+    /// transcript. No-op when there is no pending text, or `run_id` is not
+    /// a tracked child.
+    pub fn flush_child_partial_text(&mut self, run_id: Uuid) {
+        let Some(conversation) = self.child_conversations.get_mut(&run_id) else {
+            return;
+        };
+        if conversation.partial_text.is_empty() {
             return;
         }
-        let text = std::mem::take(&mut self.child_partial_text);
-        self.child_messages.push(ChatEntry::AssistantMessage {
+        let text = std::mem::take(&mut conversation.partial_text);
+        conversation.messages.push(ChatEntry::AssistantMessage {
             text,
             interrupted: false,
         });
     }
 
     /// Flushes whichever partial-text accumulator `run_id` targets before a
-    /// new tool/clarify bubble is created — `child_partial_text` when
-    /// `run_id` identifies the currently-tracked child, `partial_assistant_text`/
+    /// new tool/clarify bubble is created — that child's own `partial_text`
+    /// when `run_id` identifies any tracked child run, `partial_assistant_text`/
     /// `partial_thinking_text` (the root's own) otherwise. Without this, a
-    /// child's in-flight reply would stay stuck in `child_partial_text` until
+    /// child's in-flight reply would stay stuck in `partial_text` until
     /// `ChildAgentDone`, making a tool call it made appear to precede its own
-    /// explanatory text in `child_messages`.
+    /// explanatory text in its transcript.
     pub(crate) fn flush_target_partial_text(&mut self, run_id: Option<Uuid>) {
-        let is_current_child =
-            run_id.is_some() && run_id == self.current_child.as_ref().map(|child| child.run_id);
-        if is_current_child {
-            self.flush_child_partial_text();
-        } else {
-            self.flush_partial_assistant_message(false);
+        if let Some(run_id) = run_id {
+            if self.child_conversations.contains_key(&run_id) {
+                self.flush_child_partial_text(run_id);
+                return;
+            }
         }
+        self.flush_partial_assistant_message(false);
     }
 
-    /// Manual navigation into the child view (double-clicking a
-    /// `spawn_subagent` bubble's title, or `Ctrl+B`). Marks the switch as
-    /// *not* auto-switched, so the view never auto-returns to `Root` on its
-    /// own — the user must navigate back explicitly (`Ctrl+B`). Falls back
-    /// to `last_child` (which survives `ChildAgentDone`) when no child is
-    /// currently running, so a finished child's transcript can still be
-    /// drilled into. No-op when neither is set (no child has run yet).
-    pub fn switch_to_child_view(&mut self) {
-        let Some(child) = self
-            .current_child
-            .clone()
-            .or_else(|| self.last_child.clone())
+    /// Manual navigation into `run_id`'s child view (double-clicking a
+    /// `spawn_subagent` bubble's title). Marks the switch as *not*
+    /// auto-switched, so the view never auto-returns to `Root` on its own —
+    /// the user must navigate back explicitly (Esc with an empty draft).
+    /// Works for any tracked child (running, queued, or already finished —
+    /// see `child_conversations`), not just the currently-running one, so
+    /// each `spawn_subagent` bubble unambiguously drills into *its own*
+    /// conversation rather than whichever child happens to be running now.
+    /// No-op when `run_id` is not a tracked child.
+    /// Registers a new tracked child run (adding a fresh, empty entry to
+    /// `child_conversations`) and marks it as the currently *running*
+    /// child. Used by `presenter::domain_child_lifecycle` on
+    /// `DomainEvent::ChildAgentStarted`, and directly by tests that need to
+    /// simulate a child run's existence without driving the full event
+    /// pipeline.
+    pub(crate) fn start_child_run(&mut self, info: ChildRunInfo) {
+        self.running_child = Some(info.clone());
+        self.child_conversations
+            .insert(info.run_id, ChildConversation::new(info));
+    }
+
+    pub fn switch_to_child_view(&mut self, run_id: Uuid) {
+        let Some(info) = self
+            .child_conversations
+            .get(&run_id)
+            .map(|conversation| conversation.info.clone())
         else {
             return;
         };
         self.active_view = ConversationView::Child {
-            run_id: child.run_id,
-            agent_type: child.agent_type,
-            task: child.task,
-            label: child.label,
+            run_id: info.run_id,
+            agent_type: info.agent_type,
+            task: info.task,
+            label: info.label,
         };
         self.auto_switched_to_child = false;
         // Capture the root's current scroll position before it gets
@@ -1241,7 +1319,7 @@ impl AppState {
         // than a raw offset that would drift if the root conversation grows
         // while the user is away (new messages/tool bubbles shift row
         // indices below — sometimes even at — the saved offset).
-        self.saved_root_scroll_bubble = self.most_recent_spawn_subagent_bubble_id();
+        self.saved_root_scroll_bubble = Some(info.bubble_id);
         // Always start scrolled to the top of the header bubble on a fresh
         // navigation into the child view, regardless of where it was left
         // scrolled to on a previous visit.
@@ -1258,35 +1336,31 @@ impl AppState {
 
     /// Finds the `id` of the real root `spawn_subagent` `ToolBubble`
     /// currently re-rendered as the child-view header (see
-    /// `render::project_for_draw`'s `child_view_bubble`). `None` while
-    /// viewing `Root`. Delegates to `most_recent_spawn_subagent_bubble_id`
-    /// for the actual lookup.
+    /// `render::project_for_draw`'s `child_view_bubble`) — i.e. the bubble
+    /// that belongs to whichever child `active_view` currently identifies.
+    /// `None` while viewing `Root`, or if that child is somehow untracked.
     pub(crate) fn header_bubble_id(&self) -> Option<Uuid> {
-        if !matches!(self.active_view, ConversationView::Child { .. }) {
+        let ConversationView::Child { run_id, .. } = &self.active_view else {
             return None;
-        }
-        self.most_recent_spawn_subagent_bubble_id()
+        };
+        self.child_conversations
+            .get(run_id)
+            .map(|conversation| conversation.info.bubble_id)
     }
 
-    /// Finds the `id` of the most recently started `spawn_subagent`
-    /// `ToolBubble` in `chat_entries`, regardless of `active_view`. At most
-    /// one subagent runs at a time, so this unambiguously identifies
-    /// whichever subagent is currently tracked (`current_child`/
-    /// `last_child`) — used both by `header_bubble_id` (while viewing
-    /// `Child`) and by `switch_to_child_view` (to record which bubble the
-    /// user is drilling in from, while still viewing `Root`).
-    fn most_recent_spawn_subagent_bubble_id(&self) -> Option<Uuid> {
-        self.chat_entries
+    /// Finds the `run_id` of the tracked child (running, queued, or already
+    /// finished) whose root `spawn_subagent` `ToolBubble` is `bubble_id` —
+    /// the inverse of `header_bubble_id`/`ChildRunInfo::bubble_id`. Used by
+    /// the double-click handler to resolve *which* child a specific clicked
+    /// bubble belongs to, rather than assuming "the" (singular) child, since
+    /// multiple `spawn_subagent` bubbles (active + queued, or already
+    /// finished) can coexist in `chat_entries`. `None` if `bubble_id` isn't
+    /// (or is no longer) a tracked child's bubble.
+    pub(crate) fn run_id_for_bubble(&self, bubble_id: Uuid) -> Option<Uuid> {
+        self.child_conversations
             .iter()
-            .rev()
-            .find_map(|entry| match entry {
-                ChatEntry::ToolBubble { id, name, .. }
-                    if name == crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME =>
-                {
-                    Some(*id)
-                }
-                _ => None,
-            })
+            .find(|(_, conversation)| conversation.info.bubble_id == bubble_id)
+            .map(|(run_id, _)| *run_id)
     }
 
     /// Toggle the collapsed state of the child-view header bubble (see
@@ -1311,7 +1385,7 @@ impl AppState {
         }
     }
 
-    /// Manual "back to parent" navigation (`Ctrl+B`). Restores the root
+    /// Manual "back to parent" navigation (Esc with an empty draft). Restores the root
     /// scroll position saved by `switch_to_child_view` (when present) as an
     /// immediate best-effort placeholder — avoids a blank/wrong-looking frame
     /// before the precise fix below lands — and arms `pending_scroll_to_bubble`
@@ -1448,26 +1522,20 @@ impl AppState {
     /// title out of sight. Clamping `scroll_offset` to the bubble's own start
     /// row keeps that title row visible in the current viewport.
     ///
-    /// Searches both the root (`chat_entries`) and child (`child_messages`)
-    /// transcripts — mirroring `find_tool_bubble_mut` — since the click that
-    /// triggers this can target a bubble in either, depending on
-    /// `active_view` (e.g. a bubble in the subagent-conversation view lives
-    /// in `child_messages`, not `chat_entries`).
+    /// Delegates the actual lookup to `find_tool_bubble_mut`, which searches
+    /// both the root (`chat_entries`) and every tracked child's own
+    /// transcript (`child_conversations`) — the click that triggers this can
+    /// target a bubble in any of them, depending on `active_view`.
     pub fn toggle_tool_bubble_collapsed(&mut self, target_id: Uuid) {
-        let found = self
-            .chat_entries
-            .iter_mut()
-            .chain(self.child_messages.iter_mut())
-            .find_map(|entry| {
-                if let ChatEntry::ToolBubble { id, collapsed, .. } = entry {
-                    if *id == target_id {
-                        return Some(collapsed);
-                    }
-                }
-                None
-            });
-        if let Some(collapsed) = found {
+        let found = if let Some(ChatEntry::ToolBubble { collapsed, .. }) =
+            self.find_tool_bubble_mut(target_id)
+        {
             *collapsed = !*collapsed;
+            true
+        } else {
+            false
+        };
+        if found {
             self.conversation.scroll_locked = false;
             if let Some((start_row, _, _)) = self
                 .conversation
@@ -2360,24 +2428,39 @@ mod tests {
     }
 
     #[test]
-    fn toggle_tool_bubble_collapsed_toggles_bubble_in_child_messages() {
+    fn toggle_tool_bubble_collapsed_toggles_bubble_in_child_conversations() {
         let mut state = AppState::new();
         let id = Uuid::new_v4();
-        state.child_messages.push(ChatEntry::ToolBubble {
-            id,
-            name: "read".to_string(),
-            state: Box::new(ToolCallState::Running {
-                arguments: serde_json::json!({}),
-                content_sections: vec![],
-                title_arguments: vec![],
-                progress_arguments: vec![],
-            }),
-            collapsed: true,
+        let run_id = Uuid::new_v4();
+        state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id: Uuid::new_v4(),
+            agent_type: "reviewer".to_string(),
+            task: "look into flaky test".to_string(),
+            label: "Investigate flaky test".to_string(),
         });
+        state
+            .child_conversations
+            .get_mut(&run_id)
+            .unwrap()
+            .messages
+            .push(ChatEntry::ToolBubble {
+                id,
+                name: "read".to_string(),
+                state: Box::new(ToolCallState::Running {
+                    arguments: serde_json::json!({}),
+                    content_sections: vec![],
+                    title_arguments: vec![],
+                    progress_arguments: vec![],
+                }),
+                collapsed: true,
+            });
 
         state.toggle_tool_bubble_collapsed(id);
 
-        let ChatEntry::ToolBubble { collapsed, .. } = &state.child_messages[0] else {
+        let ChatEntry::ToolBubble { collapsed, .. } =
+            &state.child_conversations[&run_id].messages[0]
+        else {
             panic!("expected ToolBubble");
         };
         assert!(!collapsed);
@@ -2419,15 +2502,16 @@ mod tests {
     fn switch_to_child_view_resets_header_bubble_scroll_offset() {
         let mut state = AppState::new();
         let run_id = Uuid::new_v4();
-        state.current_child = Some(ChildRunInfo {
+        state.start_child_run(ChildRunInfo {
             run_id,
+            bubble_id: Uuid::new_v4(),
             agent_type: "reviewer".to_string(),
             task: "look into flaky test".to_string(),
             label: "Investigate flaky test".to_string(),
         });
         state.child_view.header_bubble_scroll_offset = 7;
 
-        state.switch_to_child_view();
+        state.switch_to_child_view(run_id);
 
         assert_eq!(state.child_view.header_bubble_scroll_offset, 0);
     }
@@ -2443,8 +2527,9 @@ mod tests {
         // list scrolled wherever `Root` had been left).
         let mut state = AppState::new();
         let run_id = Uuid::new_v4();
-        state.current_child = Some(ChildRunInfo {
+        state.start_child_run(ChildRunInfo {
             run_id,
+            bubble_id: Uuid::new_v4(),
             agent_type: "reviewer".to_string(),
             task: "look into flaky test".to_string(),
             label: "Investigate flaky test".to_string(),
@@ -2452,7 +2537,7 @@ mod tests {
         state.conversation.scroll_offset = 30;
         state.conversation.scroll_locked = false;
 
-        state.switch_to_child_view();
+        state.switch_to_child_view(run_id);
 
         assert_eq!(state.conversation.scroll_offset, 0);
         assert!(
@@ -2463,13 +2548,14 @@ mod tests {
 
     #[test]
     fn switch_to_root_view_restores_scroll_position_from_before_drill_in() {
-        // Regression test: Ctrl+B must land the user back where they
+        // Regression test: Esc (empty draft) must land the user back where they
         // drilled in from (e.g. a `spawn_subagent` bubble scrolled up to),
         // not always at the end of the root conversation.
         let mut state = AppState::new();
         let run_id = Uuid::new_v4();
-        state.current_child = Some(ChildRunInfo {
+        state.start_child_run(ChildRunInfo {
             run_id,
+            bubble_id: Uuid::new_v4(),
             agent_type: "reviewer".to_string(),
             task: "look into flaky test".to_string(),
             label: "Investigate flaky test".to_string(),
@@ -2477,7 +2563,7 @@ mod tests {
         state.conversation.scroll_offset = 30;
         state.conversation.scroll_locked = false;
 
-        state.switch_to_child_view();
+        state.switch_to_child_view(run_id);
         state.switch_to_root_view();
 
         assert_eq!(state.conversation.scroll_offset, 30);
@@ -2523,14 +2609,16 @@ mod tests {
             }),
             collapsed: false,
         });
-        state.current_child = Some(ChildRunInfo {
-            run_id: Uuid::new_v4(),
+        let run_id = Uuid::new_v4();
+        state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id,
             agent_type: "reviewer".to_string(),
             task: "look into flaky test".to_string(),
             label: "Investigate flaky test".to_string(),
         });
 
-        state.switch_to_child_view();
+        state.switch_to_child_view(run_id);
 
         assert_eq!(state.saved_root_scroll_bubble, Some(bubble_id));
     }
@@ -2555,13 +2643,15 @@ mod tests {
             }),
             collapsed: false,
         });
-        state.current_child = Some(ChildRunInfo {
-            run_id: Uuid::new_v4(),
+        let run_id = Uuid::new_v4();
+        state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id,
             agent_type: "reviewer".to_string(),
             task: "look into flaky test".to_string(),
             label: "Investigate flaky test".to_string(),
         });
-        state.switch_to_child_view();
+        state.switch_to_child_view(run_id);
         // Simulate the root conversation growing while the child view is
         // open — must not affect which bubble is targeted.
         state.chat_entries.push(ChatEntry::AssistantMessage {
@@ -2611,13 +2701,15 @@ mod tests {
             }),
             collapsed: false,
         });
-        state.current_child = Some(ChildRunInfo {
-            run_id: Uuid::new_v4(),
+        let run_id = Uuid::new_v4();
+        state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id,
             agent_type: "reviewer".to_string(),
             task: "look into flaky test".to_string(),
             label: "Investigate flaky test".to_string(),
         });
-        state.switch_to_child_view();
+        state.switch_to_child_view(run_id);
 
         assert_eq!(state.header_bubble_id(), Some(bubble_id));
     }
@@ -2637,13 +2729,15 @@ mod tests {
             }),
             collapsed: false,
         });
-        state.current_child = Some(ChildRunInfo {
-            run_id: Uuid::new_v4(),
+        let run_id = Uuid::new_v4();
+        state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id,
             agent_type: "reviewer".to_string(),
             task: "look into flaky test".to_string(),
             label: "Investigate flaky test".to_string(),
         });
-        state.switch_to_child_view();
+        state.switch_to_child_view(run_id);
         state.conversation.scroll_offset = 42;
         state.conversation.scroll_locked = true;
 
