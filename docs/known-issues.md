@@ -123,7 +123,7 @@ tests.
       Maybe we can remove the placeholder hint in the input-field and just
       update the footer to indicate that subagent is working/thinking ?
 
-- [ ] Tool bubble in subagent-conversation-list can't be expanded/collapsed on
+- [x] Tool bubble in subagent-conversation-list can't be expanded/collapsed on
       click on title or the expand/collapse indicator.
       It works in the main conversation-list though.
 

@@ -1393,21 +1393,34 @@ impl AppState {
     /// `max_offset` and re-lock the view to the bottom, scrolling the bubble's
     /// title out of sight. Clamping `scroll_offset` to the bubble's own start
     /// row keeps that title row visible in the current viewport.
+    ///
+    /// Searches both the root (`chat_entries`) and child (`child_messages`)
+    /// transcripts — mirroring `find_tool_bubble_mut` — since the click that
+    /// triggers this can target a bubble in either, depending on
+    /// `active_view` (e.g. a bubble in the subagent-conversation view lives
+    /// in `child_messages`, not `chat_entries`).
     pub fn toggle_tool_bubble_collapsed(&mut self, target_id: Uuid) {
-        for entry in &mut self.chat_entries {
-            if let ChatEntry::ToolBubble { id, collapsed, .. } = entry {
-                if *id == target_id {
-                    *collapsed = !*collapsed;
-                    self.scroll_locked = false;
-                    if let Some((start_row, _, _)) = self
-                        .bubble_title_rows
-                        .iter()
-                        .find(|(_, _, bubble_id)| *bubble_id == target_id)
-                    {
-                        self.scroll_offset = self.scroll_offset.min(*start_row);
+        let found = self
+            .chat_entries
+            .iter_mut()
+            .chain(self.child_messages.iter_mut())
+            .find_map(|entry| {
+                if let ChatEntry::ToolBubble { id, collapsed, .. } = entry {
+                    if *id == target_id {
+                        return Some(collapsed);
                     }
-                    return;
                 }
+                None
+            });
+        if let Some(collapsed) = found {
+            *collapsed = !*collapsed;
+            self.scroll_locked = false;
+            if let Some((start_row, _, _)) = self
+                .bubble_title_rows
+                .iter()
+                .find(|(_, _, bubble_id)| *bubble_id == target_id)
+            {
+                self.scroll_offset = self.scroll_offset.min(*start_row);
             }
         }
     }
@@ -2286,6 +2299,30 @@ mod tests {
         // The offset must not exceed the bubble's own start row, otherwise
         // the title scrolls out of the viewport once the body collapses.
         assert_eq!(state.scroll_offset, 5);
+    }
+
+    #[test]
+    fn toggle_tool_bubble_collapsed_toggles_bubble_in_child_messages() {
+        let mut state = AppState::new();
+        let id = Uuid::new_v4();
+        state.child_messages.push(ChatEntry::ToolBubble {
+            id,
+            name: "read".to_string(),
+            state: Box::new(ToolCallState::Running {
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                progress_arguments: vec![],
+            }),
+            collapsed: true,
+        });
+
+        state.toggle_tool_bubble_collapsed(id);
+
+        let ChatEntry::ToolBubble { collapsed, .. } = &state.child_messages[0] else {
+            panic!("expected ToolBubble");
+        };
+        assert!(!collapsed);
     }
 
     #[test]
