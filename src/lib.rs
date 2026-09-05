@@ -31,7 +31,7 @@ pub mod sandbox;
 pub mod tui_driver;
 pub mod tui_reducer_state;
 pub mod tui_render_state;
-pub mod ui;
+pub mod tui_widgets;
 
 #[cfg(test)]
 mod test_support;

@@ -337,7 +337,7 @@ works even if crossterm's event queue is momentarily stuck.
 src/
 ├── main.rs              # CLI args, mode dispatch (TUI vs headless), rt.block_on wrapper
 ├── app.rs               # App state (Mode, streaming_state, partial_msg)
-├── ui.rs                # All ratatui widgets and layout math
+├── tui_widgets.rs        # All ratatui widgets and layout math
 ├── events.rs            # Crossterm key → AppAction mapping (Ctrl+C, Enter)
 ├── config.rs            # Settings, API keys, model selection
 ├── store.rs             # JSONL persistence for chats (see §4H)
@@ -2550,10 +2550,10 @@ Decisions recorded during implementation:
 - **Scrollbar thumb reaches the track end.** The chat scrollbar uses `content_length =
   max_offset + 1` (not the raw line count), because ratatui's thumb proportion only reaches the
   very bottom/top when `content_length` is the number of scrollable positions.
-- **Scroll offset is clamped and direction-correct.** `scroll_offset` is a row offset from the
-  top: `PageUp`/wheel-up decrease it (toward earlier content), `PageDown`/wheel-down increase it,
-  and `ui::draw` clamps it to the rendered content height so over-scrolling cannot silently drift.
-  Scrolling back to the bottom re-enables auto-scroll.
+- **Scroll offset is clamped and direction-correct.** `conversation.scroll_offset` is a row
+  offset from the top: `PageUp`/wheel-up decrease it (toward earlier content), `PageDown`/
+  wheel-down increase it, and `tui_widgets::draw` clamps it to the rendered content height so
+  over-scrolling cannot silently drift. Scrolling back to the bottom re-enables auto-scroll.
 - **Wordmark.** The chat list always opens with a centered ASCII-art "Ylva" wordmark so the
   initial frame is not empty while the first response streams.
 - **`run_tui` returns the final `TuiState`** so integration tests (`tests/tui_render_state.rs`) can
@@ -2571,7 +2571,7 @@ See reducer-state-handling-plan.md.
       `route_mouse`, `route_domain`); no I/O. All state-machine logic lives here; fully unit-tested
       without a live terminal.
 - [x] **`src/render.rs` (View):** `render(frame, &mut AppState)` entry point extracted from
-      `src/ui.rs`; writes geometry back to `state.layout.*`; excluded from coverage.
+      `src/tui_widgets.rs`; writes geometry back to `state.layout.*`; excluded from coverage.
 - [x] **`src/tui_driver.rs` (Driver, renamed from `tui_runner.rs`):** thin async event loop;
       owns `TextArea` and channel handles; converts `AppAction → TuiEvent` and
       `UiUpdate → DomainEvent`; executes `Vec<Effect>` via `execute_effects()`.

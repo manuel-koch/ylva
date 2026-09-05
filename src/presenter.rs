@@ -100,8 +100,8 @@ fn keyboard_help(state: &mut AppState, event: InputEvent) -> Vec<Effect> {
     match event {
         InputEvent::ShowHelp | InputEvent::Escape => {
             state.focus = Focus::MainInput;
-            state.help_scroll_offset = 0;
-            state.help_scroll_x = 0;
+            state.help_popup.help_scroll_offset = 0;
+            state.help_popup.help_scroll_x = 0;
             vec![]
         }
         InputEvent::SigInt => vec![Effect::StopAgent],
@@ -250,10 +250,10 @@ fn extract_clarify_banner_text(
         (to_row, to_col, from_row, from_col)
     };
 
-    let min_row =
-        (start_row.saturating_sub(banner.y) as usize).saturating_add(state.clarify_scroll_offset);
+    let min_row = (start_row.saturating_sub(banner.y) as usize)
+        .saturating_add(state.clarify_banner_state.clarify_scroll_offset);
     let max_row = ((end_row.saturating_sub(banner.y) as usize)
-        .saturating_add(state.clarify_scroll_offset))
+        .saturating_add(state.clarify_banner_state.clarify_scroll_offset))
     .min(all_lines.len().saturating_sub(1));
     let start_col_offset = start_col.saturating_sub(banner.x) as usize;
     let end_col_offset = end_col.saturating_sub(banner.x) as usize;
@@ -619,8 +619,8 @@ fn route_mouse(
             if matches!(state.focus, Focus::HelpPopup) {
                 if !state.layout.help_popup.hit(column, row) {
                     state.focus = Focus::MainInput;
-                    state.help_scroll_offset = 0;
-                    state.help_scroll_x = 0;
+                    state.help_popup.help_scroll_offset = 0;
+                    state.help_popup.help_scroll_x = 0;
                 }
                 return vec![];
             }
@@ -680,24 +680,25 @@ fn route_mouse(
                     && row >= banner.y
                     && row < banner.y + banner.height
                 {
-                    state.clarify_choice_mousedown = Some((column, row));
-                    state.clarify_banner_drag_end = None;
+                    state.clarify_banner_state.clarify_choice_mousedown = Some((column, row));
+                    state.clarify_banner_state.clarify_banner_drag_end = None;
                     return vec![];
                 }
             }
 
             if in_chat {
                 let anchor_line = state
+                    .conversation
                     .scroll_offset
                     .saturating_add((row.saturating_sub(state.layout.chat_area.rect.y)) as usize);
                 let anchor_col = (column.saturating_sub(state.layout.chat_area.rect.x)) as usize;
-                state.chat_selection = Some(ChatSelection {
+                state.conversation.chat_selection = Some(ChatSelection {
                     anchor_line,
                     anchor_col,
                     cursor_line: anchor_line,
                     cursor_col: anchor_col,
                 });
-                state.chat_drag_active = true;
+                state.conversation.chat_drag_active = true;
                 vec![]
             } else if in_input {
                 vec![Effect::PlaceCursorAtMousePos { column, row }]
@@ -708,13 +709,17 @@ fn route_mouse(
 
         MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
             // Banner drag: update the highlight endpoint; suppress input selection.
-            if state.clarify_choice_mousedown.is_some() {
-                state.clarify_banner_drag_end = Some((column, row));
+            if state
+                .clarify_banner_state
+                .clarify_choice_mousedown
+                .is_some()
+            {
+                state.clarify_banner_state.clarify_banner_drag_end = Some((column, row));
                 return vec![];
             }
-            if state.chat_drag_active {
-                if let Some(sel) = state.chat_selection.as_mut() {
-                    sel.cursor_line = state.scroll_offset.saturating_add(
+            if state.conversation.chat_drag_active {
+                if let Some(sel) = state.conversation.chat_selection.as_mut() {
+                    sel.cursor_line = state.conversation.scroll_offset.saturating_add(
                         (row.saturating_sub(state.layout.chat_area.rect.y)) as usize,
                     );
                     sel.cursor_col =
@@ -728,8 +733,10 @@ fn route_mouse(
 
         MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
             // Clarify banner: click selects a choice; drag copies selected text.
-            if let Some((down_col, down_row)) = state.clarify_choice_mousedown.take() {
-                let drag_end = state.clarify_banner_drag_end.take();
+            if let Some((down_col, down_row)) =
+                state.clarify_banner_state.clarify_choice_mousedown.take()
+            {
+                let drag_end = state.clarify_banner_state.clarify_banner_drag_end.take();
                 if let Some((up_col, up_row)) =
                     drag_end.or(if column == down_col && row == down_row {
                         None
@@ -762,7 +769,8 @@ fn route_mouse(
                     let question_rows = render_markdown(question, wrap_width).len().max(1) as u16;
                     let choices_start_row = context_rows + context_spacer + question_rows;
                     let relative_row = row.saturating_sub(banner.y);
-                    let content_row = relative_row as usize + state.clarify_scroll_offset;
+                    let content_row =
+                        relative_row as usize + state.clarify_banner_state.clarify_scroll_offset;
                     if content_row >= choices_start_row as usize {
                         let choice_index = content_row - choices_start_row as usize;
                         if let Some(choice_text) = choices_list.get(choice_index) {
@@ -777,8 +785,8 @@ fn route_mouse(
                 return vec![];
             }
 
-            if state.chat_drag_active {
-                state.chat_drag_active = false;
+            if state.conversation.chat_drag_active {
+                state.conversation.chat_drag_active = false;
                 let selected_text = state.extract_chat_selection_text();
                 if let Some(text) = selected_text {
                     if !text.is_empty() {
@@ -786,10 +794,11 @@ fn route_mouse(
                     }
                 }
                 // Plain click — toggle bubble if clicked on title row.
-                if let Some(sel) = state.chat_selection {
+                if let Some(sel) = state.conversation.chat_selection {
                     let clicked_line = sel.anchor_line;
                     let clicked_col = sel.anchor_col;
                     if let Some((_, _, bubble_id)) = state
+                        .conversation
                         .bubble_title_rows
                         .iter()
                         .find(|(start, end, _)| {
@@ -847,6 +856,7 @@ fn route_mouse(
                             state.toggle_tool_bubble_collapsed(bubble_id);
                         }
                     } else if let Some((_, _, entry_index)) = state
+                        .conversation
                         .thinking_title_rows
                         .iter()
                         .find(|(start, end, _)| {
@@ -864,7 +874,7 @@ fn route_mouse(
                         }
                     }
                 }
-                state.chat_selection = None;
+                state.conversation.chat_selection = None;
                 vec![]
             } else {
                 vec![Effect::FinalizeInputSelection]
@@ -921,7 +931,7 @@ fn domain_child_lifecycle(state: &mut AppState, event: DomainEvent) -> Vec<Effec
             state.last_child = Some(child);
             state.child_messages.clear();
             state.child_partial_text.clear();
-            state.header_bubble_scroll_offset = 0;
+            state.child_view.header_bubble_scroll_offset = 0;
             // No synthetic "task" message is seeded here: the child-view
             // header re-renders the real root `spawn_subagent` bubble (see
             // `render::project_for_draw`'s `child_view_bubble`), which
@@ -1049,7 +1059,7 @@ fn push_clarify_pending_bubble(
     };
     // Scroll the clarify banner to the bottom so the question and choices
     // are visible immediately; clamped to max_scroll on render.
-    state.clarify_scroll_offset = usize::MAX;
+    state.clarify_banner_state.clarify_scroll_offset = usize::MAX;
     state.focus = Focus::MainInput;
     state.note_child_interactive_pause(run_id);
     vec![Effect::SaveTextareaAndClear]
@@ -1309,8 +1319,8 @@ fn domain_streaming(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             // same turn.
             state.flush_partial_thinking_message();
             state.partial_assistant_text.push_str(&text);
-            if state.scroll_locked {
-                state.scroll_offset = 0;
+            if state.conversation.scroll_locked {
+                state.conversation.scroll_offset = 0;
             }
             vec![]
         }
@@ -1324,8 +1334,8 @@ fn domain_streaming(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
                 state.partial_thinking_collapsed = false;
             }
             state.partial_thinking_text.push_str(&text);
-            if state.scroll_locked {
-                state.scroll_offset = 0;
+            if state.conversation.scroll_locked {
+                state.conversation.scroll_offset = 0;
             }
             vec![]
         }
@@ -2514,7 +2524,7 @@ mod tests {
     #[test]
     fn domain_clarify_pending_sets_tui_mode() {
         let mut state = AppState::new();
-        state.clarify_scroll_offset = 5; // stale value from a prior clarify banner
+        state.clarify_banner_state.clarify_scroll_offset = 5; // stale value from a prior clarify banner
         let effects = update(
             &mut state,
             TuiEvent::Domain(DomainEvent::ClarifyPending {
@@ -2533,14 +2543,14 @@ mod tests {
         ));
         // Scrolled to the bottom (clamped to max_scroll on render) so the
         // question and choices are visible immediately, not the stale offset.
-        assert_eq!(state.clarify_scroll_offset, usize::MAX);
+        assert_eq!(state.clarify_banner_state.clarify_scroll_offset, usize::MAX);
     }
 
     #[test]
     fn domain_pending_clarify_pending_resets_scroll_to_bottom() {
         let mut state = AppState::new();
         state.mode = TuiMode::Pending;
-        state.clarify_scroll_offset = 5; // stale value from a prior clarify banner
+        state.clarify_banner_state.clarify_scroll_offset = 5; // stale value from a prior clarify banner
         update(
             &mut state,
             TuiEvent::Domain(DomainEvent::ClarifyPending {
@@ -2553,14 +2563,14 @@ mod tests {
             &empty_textarea(),
         );
         assert!(matches!(state.mode, TuiMode::ClarifyPending { .. }));
-        assert_eq!(state.clarify_scroll_offset, usize::MAX);
+        assert_eq!(state.clarify_banner_state.clarify_scroll_offset, usize::MAX);
     }
 
     #[test]
     fn domain_streaming_clarify_pending_resets_scroll_to_bottom() {
         let mut state = AppState::new();
         state.mode = TuiMode::Streaming;
-        state.clarify_scroll_offset = 5; // stale value from a prior clarify banner
+        state.clarify_banner_state.clarify_scroll_offset = 5; // stale value from a prior clarify banner
         update(
             &mut state,
             TuiEvent::Domain(DomainEvent::ClarifyPending {
@@ -2573,7 +2583,7 @@ mod tests {
             &empty_textarea(),
         );
         assert!(matches!(state.mode, TuiMode::ClarifyPending { .. }));
-        assert_eq!(state.clarify_scroll_offset, usize::MAX);
+        assert_eq!(state.clarify_banner_state.clarify_scroll_offset, usize::MAX);
     }
 
     #[test]
@@ -2682,7 +2692,10 @@ mod tests {
         };
         let effects_down = update(&mut state, TuiEvent::Mouse(mouse_down), &empty_textarea());
         assert!(effects_down.is_empty(), "mousedown alone must not select");
-        assert_eq!(state.clarify_choice_mousedown, Some((5, 6)));
+        assert_eq!(
+            state.clarify_banner_state.clarify_choice_mousedown,
+            Some((5, 6))
+        );
 
         let mouse_up = crossterm::event::MouseEvent {
             kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
@@ -2696,7 +2709,10 @@ mod tests {
             vec![Effect::SetInputText("alpha".to_string())],
             "mouseup at same position must fill textarea with choice text"
         );
-        assert!(state.clarify_choice_mousedown.is_none());
+        assert!(state
+            .clarify_banner_state
+            .clarify_choice_mousedown
+            .is_none());
     }
 
     #[test]
@@ -2785,7 +2801,7 @@ mod tests {
             choices: Some(vec!["alpha".to_string(), "beta".to_string()]),
         };
         state.layout.clarify_banner = ratatui::layout::Rect::new(0, 5, 40, 2);
-        state.clarify_scroll_offset = 3; // scrolled so first choice is at visual top
+        state.clarify_banner_state.clarify_scroll_offset = 3; // scrolled so first choice is at visual top
 
         let click_row = 5u16; // banner.y — visually the first choice
         let mouse_down = crossterm::event::MouseEvent {
@@ -2838,7 +2854,10 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         };
         update(&mut state, TuiEvent::Mouse(mouse_drag), &empty_textarea());
-        assert_eq!(state.clarify_banner_drag_end, Some((15, 6)));
+        assert_eq!(
+            state.clarify_banner_state.clarify_banner_drag_end,
+            Some((15, 6))
+        );
 
         let mouse_up = crossterm::event::MouseEvent {
             kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
@@ -2851,8 +2870,11 @@ mod tests {
             effects_up.contains(&Effect::CopyToClipboard("pha".to_string())),
             "drag must copy selected banner text (trimmed to dragged column range) to clipboard"
         );
-        assert!(state.clarify_choice_mousedown.is_none());
-        assert!(state.clarify_banner_drag_end.is_none());
+        assert!(state
+            .clarify_banner_state
+            .clarify_choice_mousedown
+            .is_none());
+        assert!(state.clarify_banner_state.clarify_banner_drag_end.is_none());
     }
 
     #[test]
@@ -2905,13 +2927,13 @@ mod tests {
     fn keyboard_in_help_mode_scrolls_help() {
         let mut state = AppState::new();
         state.focus = Focus::HelpPopup;
-        state.help_scroll_offset = 5;
+        state.help_popup.help_scroll_offset = 5;
         update(
             &mut state,
             TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Down))),
             &empty_textarea(),
         );
-        assert_eq!(state.help_scroll_offset, 6);
+        assert_eq!(state.help_popup.help_scroll_offset, 6);
     }
 
     // ── Mouse scroll ──────────────────────────────────────────────────────────
@@ -2919,8 +2941,8 @@ mod tests {
     #[test]
     fn mouse_scroll_up_in_chat_area_decrements_scroll_offset() {
         let mut state = AppState::new();
-        state.scroll_offset = 5;
-        state.scroll_locked = false;
+        state.conversation.scroll_offset = 5;
+        state.conversation.scroll_locked = false;
         let mouse = crossterm::event::MouseEvent {
             kind: MouseEventKind::ScrollUp,
             column: 10,
@@ -2928,16 +2950,16 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         };
         update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
-        assert_eq!(state.scroll_offset, 4);
+        assert_eq!(state.conversation.scroll_offset, 4);
     }
 
     #[test]
     fn mouse_scroll_over_header_bubble_scrolls_the_header_not_the_chat_area() {
         let mut state = AppState::new();
         state.layout.header_bubble = ratatui::layout::Rect::new(0, 0, 40, 4);
-        state.header_bubble_scroll_offset = 2;
-        state.scroll_offset = 5;
-        state.scroll_locked = false;
+        state.child_view.header_bubble_scroll_offset = 2;
+        state.conversation.scroll_offset = 5;
+        state.conversation.scroll_locked = false;
         let mouse = crossterm::event::MouseEvent {
             kind: MouseEventKind::ScrollDown,
             column: 10,
@@ -2945,9 +2967,9 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         };
         update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
-        assert_eq!(state.header_bubble_scroll_offset, 3);
+        assert_eq!(state.child_view.header_bubble_scroll_offset, 3);
         assert_eq!(
-            state.scroll_offset, 5,
+            state.conversation.scroll_offset, 5,
             "scroll over the header must not also move the chat area"
         );
     }
@@ -3136,9 +3158,9 @@ mod tests {
         // The Presenter must emit CopyToClipboard so the Driver can handle the
         // I/O without the test touching the OS clipboard.
         let mut state = AppState::new();
-        state.chat_drag_active = true;
-        state.chat_rendered_lines = vec!["hello world".to_string()];
-        state.chat_selection = Some(ChatSelection {
+        state.conversation.chat_drag_active = true;
+        state.conversation.chat_rendered_lines = vec!["hello world".to_string()];
+        state.conversation.chat_selection = Some(ChatSelection {
             anchor_line: 0,
             anchor_col: 0,
             cursor_line: 0,
@@ -3157,7 +3179,10 @@ mod tests {
                 .any(|e| matches!(e, Effect::CopyToClipboard(t) if t == "hello")),
             "expected CopyToClipboard(\"hello\"), got {effects:?}"
         );
-        assert!(!state.chat_drag_active, "drag should be cleared");
+        assert!(
+            !state.conversation.chat_drag_active,
+            "drag should be cleared"
+        );
     }
 
     #[test]
@@ -3169,11 +3194,11 @@ mod tests {
             duration: std::time::Duration::from_secs(1),
         });
         // (start_row=0, end_row=2, entry_index=0) — title row is start + 1 = 1.
-        state.thinking_title_rows = vec![(0, 2, 0)];
-        state.chat_drag_active = true;
-        state.chat_rendered_lines = vec![String::new(), String::new(), String::new()];
+        state.conversation.thinking_title_rows = vec![(0, 2, 0)];
+        state.conversation.chat_drag_active = true;
+        state.conversation.chat_rendered_lines = vec![String::new(), String::new(), String::new()];
         // A zero-width selection at the title row is a plain click, not a drag.
-        state.chat_selection = Some(ChatSelection {
+        state.conversation.chat_selection = Some(ChatSelection {
             anchor_line: 1,
             anchor_col: 3,
             cursor_line: 1,
@@ -3199,15 +3224,15 @@ mod tests {
         state.partial_thinking_text = "pondering...".to_string();
         state.partial_thinking_collapsed = false;
         // (start_row=0, end_row=2, sentinel index) — title row is start + 1 = 1.
-        state.thinking_title_rows = vec![(
+        state.conversation.thinking_title_rows = vec![(
             0,
             2,
             crate::tui_reducer_state::STREAMING_THINKING_ENTRY_INDEX,
         )];
-        state.chat_drag_active = true;
-        state.chat_rendered_lines = vec![String::new(), String::new(), String::new()];
+        state.conversation.chat_drag_active = true;
+        state.conversation.chat_rendered_lines = vec![String::new(), String::new(), String::new()];
         // A zero-width selection at the title row is a plain click, not a drag.
-        state.chat_selection = Some(ChatSelection {
+        state.conversation.chat_selection = Some(ChatSelection {
             anchor_line: 1,
             anchor_col: 3,
             cursor_line: 1,
@@ -3244,11 +3269,11 @@ mod tests {
             collapsed: false,
         });
         // (start_row=0, end_row=2, bubble_id) — title row is start + 1 = 1.
-        state.bubble_title_rows = vec![(0, 2, bubble_id)];
-        state.chat_drag_active = true;
-        state.chat_rendered_lines = vec![String::new(), String::new(), String::new()];
+        state.conversation.bubble_title_rows = vec![(0, 2, bubble_id)];
+        state.conversation.chat_drag_active = true;
+        state.conversation.chat_rendered_lines = vec![String::new(), String::new(), String::new()];
         // A zero-width selection at the title row is a plain click, not a drag.
-        state.chat_selection = Some(ChatSelection {
+        state.conversation.chat_selection = Some(ChatSelection {
             anchor_line: 1,
             anchor_col: 3,
             cursor_line: 1,
@@ -3308,8 +3333,8 @@ mod tests {
         // First click: arms double-click detection, defers the toggle.
         update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
         // A zero-width selection at the title row is a plain click, not a drag.
-        state.chat_drag_active = true;
-        state.chat_selection = Some(ChatSelection {
+        state.conversation.chat_drag_active = true;
+        state.conversation.chat_selection = Some(ChatSelection {
             anchor_line: 1,
             anchor_col: 3,
             cursor_line: 1,
@@ -3343,8 +3368,8 @@ mod tests {
         let mouse = spawn_bubble_click_fixture(&mut state, bubble_id);
 
         update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
-        state.chat_drag_active = true;
-        state.chat_selection = Some(ChatSelection {
+        state.conversation.chat_drag_active = true;
+        state.conversation.chat_selection = Some(ChatSelection {
             anchor_line: 1,
             anchor_col: 3,
             cursor_line: 1,
@@ -3379,38 +3404,38 @@ mod tests {
         // force-snapping the chat back to the bottom.
         let mut state = AppState::new();
         state.mode = TuiMode::Streaming;
-        state.scroll_locked = false;
-        state.scroll_offset = 12;
+        state.conversation.scroll_locked = false;
+        state.conversation.scroll_offset = 12;
         update(
             &mut state,
             TuiEvent::Domain(DomainEvent::StreamDone),
             &empty_textarea(),
         );
-        assert!(!state.scroll_locked);
-        assert_eq!(state.scroll_offset, 12);
+        assert!(!state.conversation.scroll_locked);
+        assert_eq!(state.conversation.scroll_offset, 12);
     }
 
     #[test]
     fn domain_stream_cancelled_preserves_manual_scroll_position() {
         let mut state = AppState::new();
         state.mode = TuiMode::Streaming;
-        state.scroll_locked = false;
-        state.scroll_offset = 12;
+        state.conversation.scroll_locked = false;
+        state.conversation.scroll_offset = 12;
         update(
             &mut state,
             TuiEvent::Domain(DomainEvent::StreamCancelled),
             &empty_textarea(),
         );
-        assert!(!state.scroll_locked);
-        assert_eq!(state.scroll_offset, 12);
+        assert!(!state.conversation.scroll_locked);
+        assert_eq!(state.conversation.scroll_offset, 12);
     }
 
     #[test]
     fn domain_stream_thinking_chunk_appends_to_partial_thinking_text_while_streaming() {
         let mut state = AppState::new();
         state.mode = TuiMode::Streaming;
-        state.scroll_locked = true;
-        state.scroll_offset = 7;
+        state.conversation.scroll_locked = true;
+        state.conversation.scroll_offset = 7;
         update(
             &mut state,
             TuiEvent::Domain(DomainEvent::StreamThinkingChunk("pondering...".to_string())),
@@ -3421,7 +3446,10 @@ mod tests {
             state.partial_assistant_text.is_empty(),
             "thinking must not contaminate the assistant text accumulator"
         );
-        assert_eq!(state.scroll_offset, 0, "scroll-locked must snap to bottom");
+        assert_eq!(
+            state.conversation.scroll_offset, 0,
+            "scroll-locked must snap to bottom"
+        );
     }
 
     #[test]

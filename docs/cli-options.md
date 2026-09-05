@@ -12,6 +12,9 @@ Reference for Ylva's command-line interface.
 | `--log-file <path>` | path | any writable file path | *none* | Write logs to this file. The file is opened in truncate/overwrite mode on each start, so logs never accumulate across runs. |
 | `--log-level <level>` | enum | `trace`, `debug`, `info`, `warn`, `error` | `info` | Minimum severity written. Selecting a level includes it and all higher-severity levels (`trace < debug < info < warn < error`). |
 | `--log-format <format>` | enum | `text`, `json` | `text` | Output format. `text` is human-readable; `json` produces JSONL (one JSON object per line). |
+| `--auto-approve-edit` | none | — | — | Skip the human-approval prompt for `edit` tool calls. |
+| `--auto-approve-write` | none | — | — | Skip the human-approval prompt for `write` tool calls. |
+| `--auto-approve-spawn` | none | — | — | Skip the human-approval prompt for `spawn_subagent` tool calls. See `can_spawn` in `docs/configuration.md` and "Child-agent delegation" in `docs/features.md`. |
 
 An invalid `--log-level` or `--log-format` value, a flag missing its required
 value, or a `--log-file` that cannot be opened (for example, its containing

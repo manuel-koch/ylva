@@ -204,5 +204,51 @@ tests.
       blank/wrong-looking frame) for the rare case the bubble can no longer
       be found.
 
+- [ ] When llm spawned many subagents and user drills-into a specific subagent
+      conversation-list, that list constantly re-renders whenever a new subagent
+      starts. Seems like the drill-in just works on the last active subagent
+      and not on a particular subagent.
+      I noticed that becasue the subagent conversation bubble header keeps rendering
+      different run_id and the content of the conversation-list keeps changing
+      while viewing it.
+
 - [ ] Sometimes TUI (sometimes) seems to be stuck on "Running tool..." with many
       subagents runs.
+
+## Code style smell
+
+Code fragments like the following seem to be written to avoid "too many args" linter
+warning. But it looks like the introduction of the "params" struct is just to
+silence the linter warning, the implementation just packs some args into
+a struct and immediately unpacks the struct into local vars.
+If this is the way the linter issue should be fixed ( is this actually
+best practice ? ) then I would rather just suppress the linter issue
+instead of writing so much bogus code fragments with no benefit wrt readability.
+
+```rust
+/// Grouped parameters for [`draw_approval_footer`] (avoids an excessive
+/// positional-argument count; mirrors [`ClarifyBannerParams`]).
+struct ApprovalFooterParams<'a> {
+    tool_name: &'a str,
+    is_subagent: bool,
+    input_is_empty: bool,
+    mouse_pos: Option<(u16, u16)>,
+    hint: Option<&'a str>,
+}
+
+/// Returns the button `Rect`s for mouse hit-testing.
+fn draw_approval_footer(
+    frame: &mut Frame,
+    row_1: Rect,
+    row_2: Rect,
+    params: ApprovalFooterParams<'_>,
+) -> Option<ButtonAreas> {
+    let ApprovalFooterParams {
+        tool_name,
+        is_subagent,
+        input_is_empty,
+        mouse_pos,
+        hint,
+    } = params;
+    .....
+```

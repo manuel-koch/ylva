@@ -106,7 +106,7 @@ fn char_range(s: &str, start: usize, end: usize) -> String {
         .collect()
 }
 
-/// The on-screen rect of the input box, written by `ui::draw` every frame and
+/// The on-screen rect of the input box, written by `tui_widgets::draw` every frame and
 /// read by the event loop for mouse click/drag cursor placement. Ephemeral
 /// view state, reset to an empty rect between frames.
 pub type InputArea = ratatui::layout::Rect;
@@ -677,13 +677,109 @@ pub struct AppLayout {
     /// area when the pointer is hovering over it.
     pub header_bubble: ratatui::layout::Rect,
     /// Rect of the Approve button rendered in the tool-approval footer.
-    /// Written by the Driver after each `ui::draw` call; zero-sized when
+    /// Written by the Driver after each `tui_widgets::draw` call; zero-sized when
     /// no approval footer is visible.
     pub approve_button: Rect,
     /// Rect of the Deny button rendered in the tool-approval footer.
-    /// Written by the Driver after each `ui::draw` call; zero-sized when
+    /// Written by the Driver after each `tui_widgets::draw` call; zero-sized when
     /// no approval footer is visible.
     pub deny_button: Rect,
+}
+
+// ─── Per-area sub-structs ──────────────────────────────────────────────────────
+//
+// Groups related `AppState` fields by the user-facing area they belong to
+// (help popup, drill-in child view, clarify banner, conversation list),
+// mirroring the `AppLayout` precedent above. On-screen rects for these same
+// areas stay in `AppLayout` (written once per frame by the Driver) rather
+// than living here — these sub-structs are data-only. `TuiState`
+// (`src/tui_render_state.rs`) defines its own, differently-shaped sub-structs
+// with the same names: it has no separate layout type, so its versions carry
+// their area's rect field(s) alongside the data. The two are intentionally
+// distinct types, analogous per area rather than identical.
+
+/// Help popup (`?` overlay) scroll state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HelpPopupState {
+    pub help_scroll_offset: usize,
+    pub help_scroll_x: usize,
+}
+
+/// Drill-in child-view header bubble state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ChildViewState {
+    /// Current vertical scroll offset inside the child-view header bubble
+    /// (lines from the top of its content), used only when the bubble's full
+    /// content exceeds the header's clamped max height. Clamped to the valid
+    /// range by `tui_widgets::draw` each frame; reset to 0 whenever the header bubble
+    /// it applies to changes (see `presenter::domain_child_lifecycle`).
+    pub header_bubble_scroll_offset: usize,
+}
+
+/// Clarify-tool banner scroll/drag state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ClarifyBannerState {
+    /// Current vertical scroll offset inside the clarify banner (lines from
+    /// the top of the content). Clamped to the valid range by
+    /// `draw_clarify_banner` each frame.
+    pub clarify_scroll_offset: usize,
+    /// Terminal position where the left button was pressed inside a clarify
+    /// choice row. Cleared on mouse-up. A mouse-up at the same position is a
+    /// click (→ fill textarea); a mouse-up at a different position is a drag
+    /// (→ no action, allows text selection).
+    pub clarify_choice_mousedown: Option<(u16, u16)>,
+    /// Updated on every `MouseDrag` event while `clarify_choice_mousedown` is
+    /// set. Together with the down position this defines the highlighted row
+    /// range in the banner. Cleared on mouse-up. Combined with
+    /// `clarify_choice_mousedown` into a single `BannerDragSelection` by
+    /// `render::project_for_draw` for `TuiState::clarify_banner_state`.
+    pub clarify_banner_drag_end: Option<(u16, u16)>,
+}
+
+/// Root-or-child scrollable conversation-list state (Phase 6.10 drill-in
+/// model: shared by both `active_view` cases, not duplicated per view).
+#[derive(Debug, Clone)]
+pub struct ConversationListState {
+    pub scroll_offset: usize,
+    /// `true` = auto-scroll to bottom on new content.
+    pub scroll_locked: bool,
+    /// Updated on every resize event.
+    pub chat_area_height: u16,
+    /// Plain text of every rendered line from the most recent draw call.
+    pub chat_rendered_lines: Vec<String>,
+    /// Number of leading chrome characters stripped per line (see
+    /// `TuiState::chat_rendered_line_chrome_widths`).
+    pub chat_rendered_line_chrome_widths: Vec<usize>,
+    /// Active or committed chat selection.
+    pub chat_selection: Option<ChatSelection>,
+    /// `true` while the left mouse button is held down in the chat area.
+    pub chat_drag_active: bool,
+    /// Maps each rendered tool bubble to its absolute line-index range
+    /// `(start_row, end_row, id)` (inclusive, before scroll offset).
+    pub bubble_title_rows: Vec<(usize, usize, Uuid)>,
+    /// Maps each rendered thinking bubble to its absolute line-index range
+    /// `(start_row, end_row, chat_entries index)` (inclusive, before scroll
+    /// offset). Mirrors `bubble_title_rows` but is index-keyed since
+    /// `ChatEntry::ThinkingMessage` has no `Uuid`.
+    pub thinking_title_rows: Vec<(usize, usize, usize)>,
+}
+
+impl Default for ConversationListState {
+    /// `scroll_locked` defaults to `true` (auto-scroll to bottom) — every
+    /// other field defaults to empty/zero.
+    fn default() -> Self {
+        ConversationListState {
+            scroll_offset: 0,
+            scroll_locked: true,
+            chat_area_height: 0,
+            chat_rendered_lines: Vec::new(),
+            chat_rendered_line_chrome_widths: Vec::new(),
+            chat_selection: None,
+            chat_drag_active: false,
+            bubble_title_rows: Vec::new(),
+            thinking_title_rows: Vec::new(),
+        }
+    }
 }
 
 // ─── AppState ────────────────────────────────────────────────────────────────
@@ -693,8 +789,8 @@ pub struct AppLayout {
 /// This is the single source of truth: `presenter::update` mutates it in
 /// response to [`DomainEvent`]s, and every frame `render::project_for_draw`
 /// derives a fresh [`crate::tui_render_state::TuiState`] snapshot from it for
-/// `ui::draw` to render. `TuiState` is never the source of truth and is not fed back into
-/// `AppState` except for the handful of view-geometry fields `ui::draw`
+/// `tui_widgets::draw` to render. `TuiState` is never the source of truth and is not fed back into
+/// `AppState` except for the handful of view-geometry fields `tui_widgets::draw`
 /// itself writes (see `render::sync_from_draw`).
 ///
 /// Fields that require `TextArea` to interpret (e.g. `mouse_drag`, used by
@@ -730,12 +826,8 @@ pub struct AppState {
     /// See `queue_steer_message` / `commit_queued_steer_messages`.
     pub queued_steer_texts: Vec<String>,
 
-    // ── scroll state ────────────────────────────────────────────────────────
-    pub scroll_offset: usize,
-    /// `true` = auto-scroll to bottom on new content.
-    pub scroll_locked: bool,
-    /// Updated on every resize event.
-    pub chat_area_height: u16,
+    // ── scroll state / chat selection / bubble hit-testing ─────────────────
+    pub conversation: ConversationListState,
 
     // ── tool-approval ───────────────────────────────────────────────────────
     /// Textarea lines saved when a `ToolPending` approval sub-mode starts so
@@ -755,15 +847,6 @@ pub struct AppState {
     /// `true` while ≥1 steer is queued.
     pub steer_indicator: bool,
 
-    // ── chat selection / rendered lines ─────────────────────────────────────
-    /// Plain text of every rendered line from the most recent draw call.
-    pub chat_rendered_lines: Vec<String>,
-    /// Number of leading chrome characters stripped per line (see
-    /// `TuiState::chat_rendered_line_chrome_widths`).
-    pub chat_rendered_line_chrome_widths: Vec<usize>,
-    /// Active or committed chat selection.
-    pub chat_selection: Option<ChatSelection>,
-
     // ── transient UI ────────────────────────────────────────────────────────
     /// Floating notification, auto-dismissed after [`TOAST_DURATION`].
     pub toast: Option<(String, Instant)>,
@@ -771,56 +854,22 @@ pub struct AppState {
     pub spinner_frame: u8,
 
     // ── help popup ──────────────────────────────────────────────────────────
-    pub help_scroll_offset: usize,
-    pub help_scroll_x: usize,
+    pub help_popup: HelpPopupState,
 
     // ── clarify banner ───────────────────────────────────────────────────────
-    /// Current vertical scroll offset inside the clarify banner (lines from
-    /// the top of the content). Clamped to the valid range by
-    /// `draw_clarify_banner` each frame.
-    pub clarify_scroll_offset: usize,
+    pub clarify_banner_state: ClarifyBannerState,
 
     // ── child-view header bubble ────────────────────────────────────────────
-    /// Current vertical scroll offset inside the child-view header bubble
-    /// (lines from the top of its content), used only when the bubble's full
-    /// content exceeds the header's clamped max height. Clamped to the valid
-    /// range by `ui::draw` each frame; reset to 0 whenever the header bubble
-    /// it applies to changes (see `presenter::domain_child_lifecycle`).
-    pub header_bubble_scroll_offset: usize,
+    pub child_view: ChildViewState,
 
     // ── input field ─────────────────────────────────────────────────────────
     /// Mirrors ratatui-textarea's internal scroll-top so scroll indicators
     /// reflect the actual rendered viewport position.
     pub input_scroll_top: usize,
 
-    // ── bubble hit-testing ──────────────────────────────────────────────────
-    /// Maps each rendered tool bubble to its absolute line-index range
-    /// `(start_row, end_row, id)` (inclusive, before scroll offset).
-    pub bubble_title_rows: Vec<(usize, usize, Uuid)>,
-    /// Maps each rendered thinking bubble to its absolute line-index range
-    /// `(start_row, end_row, chat_entries index)` (inclusive, before scroll
-    /// offset). Mirrors `bubble_title_rows` but is index-keyed since
-    /// `ChatEntry::ThinkingMessage` has no `Uuid`.
-    pub thinking_title_rows: Vec<(usize, usize, usize)>,
-
     // ── history navigation helper ────────────────────────────────────────────
     /// Exposes history navigation for use by the presenter.
     pub _history_direction: Option<HistoryDirection>,
-
-    // ── chat drag selection ──────────────────────────────────────────────────
-    /// `true` while the left mouse button is held down in the chat area.
-    pub chat_drag_active: bool,
-
-    // ── clarify choice click tracking ────────────────────────────────────────
-    /// Terminal position where the left button was pressed inside a clarify
-    /// choice row. Cleared on mouse-up. A mouse-up at the same position is a
-    /// click (→ fill textarea); a mouse-up at a different position is a drag
-    /// (→ no action, allows text selection).
-    pub clarify_choice_mousedown: Option<(u16, u16)>,
-    /// Updated on every `MouseDrag` event while `clarify_choice_mousedown` is
-    /// set. Together with the down position this defines the highlighted row
-    /// range in the banner. Cleared on mouse-up.
-    pub clarify_banner_drag_end: Option<(u16, u16)>,
 
     // ── abort-exit flag ──────────────────────────────────────────────────────
     /// `true` when `TuiMode::Aborting` was entered via Ctrl+C double-press,
@@ -907,9 +956,7 @@ impl AppState {
             partial_thinking_collapsed: false,
             queued_steer_texts: Vec::new(),
 
-            scroll_offset: 0,
-            scroll_locked: true,
-            chat_area_height: 0,
+            conversation: ConversationListState::default(),
 
             pending_approval_input_snapshot: None,
 
@@ -919,29 +966,19 @@ impl AppState {
 
             steer_indicator: false,
 
-            chat_rendered_lines: Vec::new(),
-            chat_rendered_line_chrome_widths: Vec::new(),
-            chat_selection: None,
-
             toast: None,
             spinner_frame: 0,
 
-            help_scroll_offset: 0,
-            help_scroll_x: 0,
+            help_popup: HelpPopupState::default(),
 
-            clarify_scroll_offset: 0,
-            header_bubble_scroll_offset: 0,
+            clarify_banner_state: ClarifyBannerState::default(),
+
+            child_view: ChildViewState::default(),
 
             input_scroll_top: 0,
 
-            bubble_title_rows: Vec::new(),
-            thinking_title_rows: Vec::new(),
-
             _history_direction: None,
 
-            chat_drag_active: false,
-            clarify_choice_mousedown: None,
-            clarify_banner_drag_end: None,
             aborting_exit: false,
 
             active_view: ConversationView::Root,
@@ -1195,7 +1232,10 @@ impl AppState {
         // overwritten below, so `switch_to_root_view` can restore it as a
         // best-effort fallback (see `saved_root_scroll_bubble` below for the
         // primary, content-shift-proof resolution).
-        self.saved_root_scroll = Some((self.scroll_offset, self.scroll_locked));
+        self.saved_root_scroll = Some((
+            self.conversation.scroll_offset,
+            self.conversation.scroll_locked,
+        ));
         // Record the actual `spawn_subagent` bubble being drilled into, so
         // `switch_to_root_view` can scroll back to *its* current row rather
         // than a raw offset that would drift if the root conversation grows
@@ -1205,7 +1245,7 @@ impl AppState {
         // Always start scrolled to the top of the header bubble on a fresh
         // navigation into the child view, regardless of where it was left
         // scrolled to on a previous visit.
-        self.header_bubble_scroll_offset = 0;
+        self.child_view.header_bubble_scroll_offset = 0;
         // The main chat area's `scroll_offset`/`scroll_locked` are shared
         // between the root and child views (single fields, not per-view) —
         // if the user had scrolled away from the bottom while viewing
@@ -1255,7 +1295,7 @@ impl AppState {
     /// describe the currently-visible chat area (the child's own
     /// transcript), which the header bubble is not part of; any resulting
     /// change in the header's own content height is instead clamped by
-    /// `ui::draw` against `header_bubble_scroll_offset` each frame. No-op
+    /// `tui_widgets::draw` against `header_bubble_scroll_offset` each frame. No-op
     /// while viewing `Root` (no header bubble is shown).
     pub fn toggle_header_bubble_collapsed(&mut self) {
         let Some(target_id) = self.header_bubble_id() else {
@@ -1290,8 +1330,8 @@ impl AppState {
         self.active_view = ConversationView::Root;
         self.auto_switched_to_child = false;
         if let Some((scroll_offset, scroll_locked)) = self.saved_root_scroll.take() {
-            self.scroll_offset = scroll_offset;
-            self.scroll_locked = scroll_locked;
+            self.conversation.scroll_offset = scroll_offset;
+            self.conversation.scroll_locked = scroll_locked;
         }
         self.pending_scroll_to_bubble = self.saved_root_scroll_bubble.take();
     }
@@ -1327,63 +1367,77 @@ impl AppState {
 
     /// Scroll chat up (toward earlier content); disables auto-scroll.
     pub fn scroll_up(&mut self, lines: usize) {
-        self.scroll_locked = false;
-        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+        self.conversation.scroll_locked = false;
+        self.conversation.scroll_offset = self.conversation.scroll_offset.saturating_sub(lines);
     }
 
     /// Scroll chat down (toward later content); disables auto-scroll.
     pub fn scroll_down(&mut self, lines: usize) {
-        self.scroll_locked = false;
-        self.scroll_offset = self.scroll_offset.saturating_add(lines);
+        self.conversation.scroll_locked = false;
+        self.conversation.scroll_offset = self.conversation.scroll_offset.saturating_add(lines);
     }
 
     /// Re-enable auto-scroll (jump to bottom).
     pub fn scroll_to_bottom(&mut self) {
-        self.scroll_locked = true;
-        self.scroll_offset = 0;
+        self.conversation.scroll_locked = true;
+        self.conversation.scroll_offset = 0;
     }
 
     /// Scroll the help popup up.
     pub fn help_scroll_up(&mut self, lines: usize) {
-        self.help_scroll_offset = self.help_scroll_offset.saturating_sub(lines);
+        self.help_popup.help_scroll_offset =
+            self.help_popup.help_scroll_offset.saturating_sub(lines);
     }
 
     /// Scroll the help popup down.
     pub fn help_scroll_down(&mut self, lines: usize) {
-        self.help_scroll_offset = self.help_scroll_offset.saturating_add(lines);
+        self.help_popup.help_scroll_offset =
+            self.help_popup.help_scroll_offset.saturating_add(lines);
     }
 
     /// Scroll the help popup left.
     pub fn help_scroll_left(&mut self, columns: usize) {
-        self.help_scroll_x = self.help_scroll_x.saturating_sub(columns);
+        self.help_popup.help_scroll_x = self.help_popup.help_scroll_x.saturating_sub(columns);
     }
 
     /// Scroll the help popup right.
     pub fn help_scroll_right(&mut self, columns: usize) {
-        self.help_scroll_x = self.help_scroll_x.saturating_add(columns);
+        self.help_popup.help_scroll_x = self.help_popup.help_scroll_x.saturating_add(columns);
     }
 
     /// Scroll the clarify banner up (toward earlier content).
     pub fn clarify_scroll_up(&mut self, lines: usize) {
-        self.clarify_scroll_offset = self.clarify_scroll_offset.saturating_sub(lines);
+        self.clarify_banner_state.clarify_scroll_offset = self
+            .clarify_banner_state
+            .clarify_scroll_offset
+            .saturating_sub(lines);
     }
 
     /// Scroll the clarify banner down (toward later content). The upper bound
     /// is applied in `draw_clarify_banner`, which knows the total content height.
     pub fn clarify_scroll_down(&mut self, lines: usize) {
-        self.clarify_scroll_offset = self.clarify_scroll_offset.saturating_add(lines);
+        self.clarify_banner_state.clarify_scroll_offset = self
+            .clarify_banner_state
+            .clarify_scroll_offset
+            .saturating_add(lines);
     }
 
     /// Scroll the child-view header bubble up (toward earlier content).
     pub fn header_bubble_scroll_up(&mut self, lines: usize) {
-        self.header_bubble_scroll_offset = self.header_bubble_scroll_offset.saturating_sub(lines);
+        self.child_view.header_bubble_scroll_offset = self
+            .child_view
+            .header_bubble_scroll_offset
+            .saturating_sub(lines);
     }
 
     /// Scroll the child-view header bubble down (toward later content). The
-    /// upper bound is applied in `ui::draw`, which knows the total content
+    /// upper bound is applied in `tui_widgets::draw`, which knows the total content
     /// height.
     pub fn header_bubble_scroll_down(&mut self, lines: usize) {
-        self.header_bubble_scroll_offset = self.header_bubble_scroll_offset.saturating_add(lines);
+        self.child_view.header_bubble_scroll_offset = self
+            .child_view
+            .header_bubble_scroll_offset
+            .saturating_add(lines);
     }
 
     /// Toggle the collapsed/expanded state of the tool bubble with the given id.
@@ -1414,13 +1468,14 @@ impl AppState {
             });
         if let Some(collapsed) = found {
             *collapsed = !*collapsed;
-            self.scroll_locked = false;
+            self.conversation.scroll_locked = false;
             if let Some((start_row, _, _)) = self
+                .conversation
                 .bubble_title_rows
                 .iter()
                 .find(|(_, _, bubble_id)| *bubble_id == target_id)
             {
-                self.scroll_offset = self.scroll_offset.min(*start_row);
+                self.conversation.scroll_offset = self.conversation.scroll_offset.min(*start_row);
             }
         }
     }
@@ -1433,13 +1488,14 @@ impl AppState {
             self.chat_entries.get_mut(target_index)
         {
             *collapsed = !*collapsed;
-            self.scroll_locked = false;
+            self.conversation.scroll_locked = false;
             if let Some((start_row, _, _)) = self
+                .conversation
                 .thinking_title_rows
                 .iter()
                 .find(|(_, _, entry_index)| *entry_index == target_index)
             {
-                self.scroll_offset = self.scroll_offset.min(*start_row);
+                self.conversation.scroll_offset = self.conversation.scroll_offset.min(*start_row);
             }
         }
     }
@@ -1452,31 +1508,33 @@ impl AppState {
     /// stream ends (see `flush_partial_thinking_message`).
     pub fn toggle_partial_thinking_collapsed(&mut self) {
         self.partial_thinking_collapsed = !self.partial_thinking_collapsed;
-        self.scroll_locked = false;
+        self.conversation.scroll_locked = false;
         if let Some((start_row, _, _)) = self
+            .conversation
             .thinking_title_rows
             .iter()
             .find(|(_, _, entry_index)| *entry_index == STREAMING_THINKING_ENTRY_INDEX)
         {
-            self.scroll_offset = self.scroll_offset.min(*start_row);
+            self.conversation.scroll_offset = self.conversation.scroll_offset.min(*start_row);
         }
     }
 
     /// Extract the text covered by the current `chat_selection`.
     pub fn extract_chat_selection_text(&self) -> Option<String> {
-        let sel = self.chat_selection.as_ref()?;
+        let sel = self.conversation.chat_selection.as_ref()?;
         if sel.is_empty() {
             return None;
         }
         let (start_line, start_col, end_line, end_col) = sel.normalized();
-        let lines = &self.chat_rendered_lines;
+        let lines = &self.conversation.chat_rendered_lines;
         let start_line = start_line.min(lines.len().saturating_sub(1));
         let end_line = end_line.min(lines.len().saturating_sub(1));
         if start_line > end_line || lines.is_empty() {
             return None;
         }
         let chrome = |index: usize| -> usize {
-            self.chat_rendered_line_chrome_widths
+            self.conversation
+                .chat_rendered_line_chrome_widths
                 .get(index)
                 .copied()
                 .unwrap_or(0)
@@ -1567,7 +1625,7 @@ impl AppState {
     // ── View-layer helpers ────────────────────────────────────────────────────
 
     /// Convert the current [`TuiMode`] (and [`Focus`]) to the legacy
-    /// [`AgentMode`] used by `ui.rs` for footer and spinner rendering.
+    /// [`AgentMode`] used by `tui_widgets.rs` for footer and spinner rendering.
     pub fn agent_mode(&self) -> AgentMode {
         match &self.mode {
             // A spawned subagent keeps its `spawn_subagent` tool bubble in
@@ -2207,7 +2265,7 @@ mod tests {
             collapsed: true,
             duration: std::time::Duration::from_secs(3),
         });
-        state.scroll_locked = true;
+        state.conversation.scroll_locked = true;
 
         state.toggle_thinking_collapsed(0);
 
@@ -2215,7 +2273,7 @@ mod tests {
             &state.chat_entries[0],
             ChatEntry::ThinkingMessage { collapsed, .. } if !*collapsed
         ));
-        assert!(!state.scroll_locked);
+        assert!(!state.conversation.scroll_locked);
     }
 
     #[test]
@@ -2223,12 +2281,12 @@ mod tests {
         let mut state = AppState::new();
         state.partial_thinking_text = "pondering...".to_string();
         state.partial_thinking_collapsed = false;
-        state.scroll_locked = true;
+        state.conversation.scroll_locked = true;
 
         state.toggle_partial_thinking_collapsed();
 
         assert!(state.partial_thinking_collapsed);
-        assert!(!state.scroll_locked);
+        assert!(!state.conversation.scroll_locked);
 
         state.toggle_partial_thinking_collapsed();
 
@@ -2241,13 +2299,13 @@ mod tests {
         state.partial_thinking_text = "pondering...".to_string();
         // Simulate a previous render pass recording the in-flight bubble's
         // title row under the streaming sentinel index.
-        state.thinking_title_rows = vec![(5, 40, STREAMING_THINKING_ENTRY_INDEX)];
-        state.scroll_offset = 30;
-        state.scroll_locked = false;
+        state.conversation.thinking_title_rows = vec![(5, 40, STREAMING_THINKING_ENTRY_INDEX)];
+        state.conversation.scroll_offset = 30;
+        state.conversation.scroll_locked = false;
 
         state.toggle_partial_thinking_collapsed();
 
-        assert_eq!(state.scroll_offset, 5);
+        assert_eq!(state.conversation.scroll_offset, 5);
     }
 
     #[test]
@@ -2261,15 +2319,15 @@ mod tests {
         // Simulate a previous render pass recording this bubble's title row
         // and a viewport scrolled well below it (e.g. the long expanded body
         // pushed the view down).
-        state.thinking_title_rows = vec![(5, 40, 0)];
-        state.scroll_offset = 30;
-        state.scroll_locked = false;
+        state.conversation.thinking_title_rows = vec![(5, 40, 0)];
+        state.conversation.scroll_offset = 30;
+        state.conversation.scroll_locked = false;
 
         state.toggle_thinking_collapsed(0);
 
         // The offset must not exceed the bubble's own start row, otherwise
         // the title scrolls out of the viewport once the body collapses.
-        assert_eq!(state.scroll_offset, 5);
+        assert_eq!(state.conversation.scroll_offset, 5);
     }
 
     #[test]
@@ -2290,15 +2348,15 @@ mod tests {
         // Simulate a previous render pass recording this bubble's title row
         // and a viewport scrolled well below it (e.g. the long expanded body
         // pushed the view down).
-        state.bubble_title_rows = vec![(5, 40, id)];
-        state.scroll_offset = 30;
-        state.scroll_locked = false;
+        state.conversation.bubble_title_rows = vec![(5, 40, id)];
+        state.conversation.scroll_offset = 30;
+        state.conversation.scroll_locked = false;
 
         state.toggle_tool_bubble_collapsed(id);
 
         // The offset must not exceed the bubble's own start row, otherwise
         // the title scrolls out of the viewport once the body collapses.
-        assert_eq!(state.scroll_offset, 5);
+        assert_eq!(state.conversation.scroll_offset, 5);
     }
 
     #[test]
@@ -2348,13 +2406,13 @@ mod tests {
         let mut state = AppState::new();
         state.header_bubble_scroll_up(3);
         assert_eq!(
-            state.header_bubble_scroll_offset, 0,
+            state.child_view.header_bubble_scroll_offset, 0,
             "must not underflow below zero"
         );
         state.header_bubble_scroll_down(5);
-        assert_eq!(state.header_bubble_scroll_offset, 5);
+        assert_eq!(state.child_view.header_bubble_scroll_offset, 5);
         state.header_bubble_scroll_up(2);
-        assert_eq!(state.header_bubble_scroll_offset, 3);
+        assert_eq!(state.child_view.header_bubble_scroll_offset, 3);
     }
 
     #[test]
@@ -2367,11 +2425,11 @@ mod tests {
             task: "look into flaky test".to_string(),
             label: "Investigate flaky test".to_string(),
         });
-        state.header_bubble_scroll_offset = 7;
+        state.child_view.header_bubble_scroll_offset = 7;
 
         state.switch_to_child_view();
 
-        assert_eq!(state.header_bubble_scroll_offset, 0);
+        assert_eq!(state.child_view.header_bubble_scroll_offset, 0);
     }
 
     #[test]
@@ -2391,14 +2449,14 @@ mod tests {
             task: "look into flaky test".to_string(),
             label: "Investigate flaky test".to_string(),
         });
-        state.scroll_offset = 30;
-        state.scroll_locked = false;
+        state.conversation.scroll_offset = 30;
+        state.conversation.scroll_locked = false;
 
         state.switch_to_child_view();
 
-        assert_eq!(state.scroll_offset, 0);
+        assert_eq!(state.conversation.scroll_offset, 0);
         assert!(
-            state.scroll_locked,
+            state.conversation.scroll_locked,
             "child view must open auto-scrolled (pinned) to the bottom"
         );
     }
@@ -2416,14 +2474,14 @@ mod tests {
             task: "look into flaky test".to_string(),
             label: "Investigate flaky test".to_string(),
         });
-        state.scroll_offset = 30;
-        state.scroll_locked = false;
+        state.conversation.scroll_offset = 30;
+        state.conversation.scroll_locked = false;
 
         state.switch_to_child_view();
         state.switch_to_root_view();
 
-        assert_eq!(state.scroll_offset, 30);
-        assert!(!state.scroll_locked);
+        assert_eq!(state.conversation.scroll_offset, 30);
+        assert!(!state.conversation.scroll_locked);
         assert!(state.saved_root_scroll.is_none());
     }
 
@@ -2435,8 +2493,8 @@ mod tests {
         // belong to whatever was on screen while viewing `Root` and must be
         // left untouched on auto-return.
         let mut state = AppState::new();
-        state.scroll_offset = 12;
-        state.scroll_locked = false;
+        state.conversation.scroll_offset = 12;
+        state.conversation.scroll_locked = false;
         state.active_view = ConversationView::Child {
             run_id: Uuid::new_v4(),
             agent_type: "reviewer".to_string(),
@@ -2446,8 +2504,8 @@ mod tests {
 
         state.switch_to_root_view();
 
-        assert_eq!(state.scroll_offset, 12);
-        assert!(!state.scroll_locked);
+        assert_eq!(state.conversation.scroll_offset, 12);
+        assert!(!state.conversation.scroll_locked);
     }
 
     #[test]
@@ -2586,8 +2644,8 @@ mod tests {
             label: "Investigate flaky test".to_string(),
         });
         state.switch_to_child_view();
-        state.scroll_offset = 42;
-        state.scroll_locked = true;
+        state.conversation.scroll_offset = 42;
+        state.conversation.scroll_locked = true;
 
         state.toggle_header_bubble_collapsed();
 
@@ -2595,11 +2653,11 @@ mod tests {
             matches!(&state.chat_entries[0], ChatEntry::ToolBubble { collapsed, .. } if *collapsed)
         );
         assert_eq!(
-            state.scroll_offset, 42,
+            state.conversation.scroll_offset, 42,
             "must not touch the child transcript's own scroll"
         );
         assert!(
-            state.scroll_locked,
+            state.conversation.scroll_locked,
             "must not touch the child transcript's own scroll lock"
         );
     }

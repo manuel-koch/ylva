@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Syntax-highlighting helpers shared by the TUI renderer (`ui.rs`) and the
+//! Syntax-highlighting helpers shared by the TUI renderer (`tui_widgets.rs`) and the
 //! Markdown renderer (`markdown.rs`).
 //!
 //! All syntect state is held in process-wide statics so the grammar/theme

@@ -89,7 +89,7 @@ impl FinishResult {
     /// unstructured fallback captures the child's last assistant text into
     /// the same field — see `AgentFactory::run_child`); a non-empty
     /// `sources` list is always appended as its own `"Sources"` section.
-    /// Every section is marked `file_extension: "md"` so `ui.rs` renders it
+    /// Every section is marked `file_extension: "md"` so `tui_widgets.rs` renders it
     /// through the project's Markdown renderer instead of raw JSON/syntect
     /// highlighting. Empty/absent fields produce no section.
     pub fn content_sections(&self) -> Vec<crate::agent::tools::Section> {

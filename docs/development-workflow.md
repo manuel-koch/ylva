@@ -11,7 +11,7 @@ don't postpone fixing (pre-existing) flaky tests!
 
 Coverage threshold: **≥80% line coverage** is enforced on testable files
 by `make test-coverage` (below the threshold the command fails).
-`ui.rs`, `render.rs`, and `main.rs` are excluded because they require a live terminal.
+`tui_widgets.rs`, `render.rs`, and `main.rs` are excluded because they require a live terminal.
 
 The following `make` targets are available:
 

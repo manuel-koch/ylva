@@ -311,7 +311,7 @@ running in the background:
   corresponds to whichever subagent is drilled into. The header's title is shortened
   to `"Subagent"` instead of the plain title-cased `"Spawn Subagent"` shown for the
   same bubble in the root conversation (via `ToolBubbleArgs::display_title_override`
-  in `ui.rs`) — the header sits directly above the subagent's own transcript, so
+  in `tui_widgets.rs`) — the header sits directly above the subagent's own transcript, so
   "Spawn" is redundant context that only matters from the root conversation's point
   of view. `child_messages` is **not** seeded with a synthetic task message — the
   header bubble already shows the task, so duplicating it as the transcript's first
@@ -340,8 +340,8 @@ running in the background:
   input/footer panel) is rendered directly below the child-view header bubble, so it never
   reads as part of the scrollable conversation-list beneath it.
 - The header bubble scrolls independently of the chat area when its rendered content
-  exceeds the clamped max height (40 % of the terminal): `AppState.header_bubble_scroll_offset`
-  drives a `Paragraph::scroll` offset, clamped each frame in `ui::draw` to the header's
+  exceeds the clamped max height (40 % of the terminal): `AppState.child_view.header_bubble_scroll_offset`
+  drives a `Paragraph::scroll` offset, clamped each frame in `tui_widgets::draw` to the header's
   actual overflow, and a scrollbar (reusing the same `render_chat_scrollbar` used for the
   chat area) appears in a 1-column gutter to its right only when the content overflows.
   Mouse-wheel events over the header's rect (`AppState.layout.header_bubble`, hit-tested in
@@ -350,18 +350,19 @@ running in the background:
   (`switch_to_child_view` / `ChildAgentStarted`), so a previous subagent's scroll position
   never leaks into the next one.
 - `switch_to_child_view` (manual drill-in via double-click or `Ctrl+B`) also re-pins the
-  main chat area's scroll to the bottom (`scroll_offset = 0`, `scroll_locked = true`) —
-  `scroll_offset`/`scroll_locked` are shared fields between the root and child views (not
+  main chat area's scroll to the bottom (`conversation.scroll_offset = 0`,
+  `conversation.scroll_locked = true`) — `conversation.scroll_offset`/
+  `conversation.scroll_locked` are shared fields between the root and child views (not
   per-view state), so a non-bottom position left over from scrolling up while viewing
   `Root` would otherwise carry straight into the child transcript instead of showing its
-  latest activity. Before doing so, it saves the root's own `(scroll_offset,
-  scroll_locked)` into `AppState.saved_root_scroll` (an immediate best-effort fallback),
+  latest activity. Before doing so, it saves the root's own `(conversation.scroll_offset,
+  conversation.scroll_locked)` into `AppState.saved_root_scroll` (an immediate best-effort fallback),
   and also captures the drilled-into `spawn_subagent` bubble's `Uuid` into
   `AppState.saved_root_scroll_bubble`. Manual "back to parent" navigation
   (`switch_to_root_view`, `Ctrl+B`) restores `saved_root_scroll` for the current frame, and
   moves `saved_root_scroll_bubble` into `AppState.pending_scroll_to_bubble` for precise
   resolution: once `active_view` has flipped back to `Root` and the next frame's
-  `AppState.bubble_title_rows` reflects root's transcript again, `render::sync_from_draw`
+  `AppState.conversation.bubble_title_rows` reflects root's transcript again, `render::sync_from_draw`
   looks up that bubble's *current* row and scrolls there, unlocking scroll — this stays
   correct even if the root conversation grew while the child view was open (new
   messages/tool bubbles would otherwise shift row indices past a stale saved offset). The
@@ -386,7 +387,8 @@ running in the background:
   `chat_entries` bubble the header re-renders (used by both `render::project_for_draw` and
   `presenter::route_mouse`), and `AppState::toggle_header_bubble_collapsed()` flips that
   bubble's `collapsed` flag directly — deliberately not reusing `toggle_tool_bubble_collapsed`,
-  which also clamps `scroll_offset`/`scroll_locked` against `bubble_title_rows`; those fields
+  which also clamps `conversation.scroll_offset`/`conversation.scroll_locked` against
+  `conversation.bubble_title_rows`; those fields
   describe the currently-visible chat area (the child's own transcript), not the header, so
   touching them here would be a side effect on the wrong view's scroll state.
 - The `collapsed` flag toggled above lives on the same `chat_entries` `ToolBubble` entry that
@@ -429,9 +431,9 @@ log lines, without risking sensitive payloads in the log file.
 
 #### View
 
-`src/render.rs` + `src/ui.rs` — `render(frame, state)` entry point. Writes
+`src/render.rs` + `src/tui_widgets.rs` — `render(frame, state)` entry point. Writes
 computed geometry back to `state.layout`; delegates widget rendering to helpers
-in `ui.rs`.
+in `tui_widgets.rs`.
 
 #### Driver
 

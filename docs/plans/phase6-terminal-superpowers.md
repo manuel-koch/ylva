@@ -874,14 +874,14 @@ banner, conversation-list/chat) so ownership is explicit, mirroring the existing
 `AppLayout` precedent. Public API, rendered behaviour, and keybindings are unchanged —
 internal restructuring only.
 
-- [ ] 80. Rename `src/ui.rs` to `src/tui_widgets.rs`. Update `src/lib.rs`
+- [x] 80. Rename `src/ui.rs` to `src/tui_widgets.rs`. Update `src/lib.rs`
   (`pub mod ui;` → `pub mod tui_widgets;`). Update every `crate::ui::` / `ui::` reference
   across `src/render.rs`, `src/tui_reducer_state.rs`, `src/tui_render_state.rs`,
   `tests/tui_render_state.rs`, and the module's own `//!` doc comment. Public function
   names (`draw`, `draw_chat`, `draw_help_popup`, `draw_approval_footer`, `ButtonAreas`,
   etc.) are unchanged — module-path rename only.
 
-- [ ] 81. Run `make test` + `make lint` to confirm the rename didn't break anything before
+- [x] 81. Run `make test` + `make lint` to confirm the rename didn't break anything before
   starting the state-grouping work below.
 
 - [ ] 82. Add a new ADR in `docs/architecture-design-records/` proposing the sub-struct
@@ -899,37 +899,37 @@ internal restructuring only.
   type on the render-projection side) — so the two sub-struct definitions are analogous
   per area, not identical types.
 
-- [ ] 83. Define the four new sub-structs in `src/tui_reducer_state.rs` next to
+- [x] 83. Define the four new sub-structs in `src/tui_reducer_state.rs` next to
   `AppLayout` (data-only, no rects — those stay in `AppLayout` per the ADR). Add them as
   fields on `AppState` (e.g. `pub help_popup: HelpPopupState`, `pub child_view:
   ChildViewState`, `pub clarify_banner_state: ClarifyBannerState` — named to avoid
   clashing with the existing `layout.clarify_banner` rect field —, `pub conversation:
   ConversationListState`), replacing the flat fields they absorb. Update `AppState::new()`.
 
-- [ ] 84. Update every read/write site of the absorbed fields across `src/presenter.rs`
+- [x] 84. Update every read/write site of the absorbed fields across `src/presenter.rs`
   and `src/tui_reducer_state.rs`'s own methods (e.g. `switch_to_child_view`,
   `switch_to_root_view`, `header_bubble_scroll_up`/`_down`, `clarify_scroll_up`/`_down`,
   `scroll_up`/`_down`, `scroll_to_bottom`) and `src/render.rs`
   (`project_for_draw`/`sync_from_draw`). Field access becomes e.g.
   `state.conversation.scroll_offset` instead of `state.scroll_offset`.
 
-- [ ] 85. Mirror the same four sub-structs (this time including their rect fields, per
+- [x] 85. Mirror the same four sub-structs (this time including their rect fields, per
   the asymmetry recorded in the ADR) on `TuiState` in `src/tui_render_state.rs`,
   replacing its flat fields. Update `TuiState::new()` and `clear_expired_toast`.
 
-- [ ] 86. Update every read/write site of the absorbed fields in `src/tui_widgets.rs`
+- [x] 86. Update every read/write site of the absorbed fields in `src/tui_widgets.rs`
   (formerly `ui.rs`) and `src/render.rs`'s `project_for_draw`/`sync_from_draw` to match
   the new `TuiState` shape.
 
-- [ ] 87. Update all existing unit tests in `src/tui_reducer_state.rs`, `src/render.rs`,
+- [x] 87. Update all existing unit tests in `src/tui_reducer_state.rs`, `src/render.rs`,
   and `src/presenter.rs`, and integration tests in `tests/tui_render_state.rs` (wherever
   they construct or assert on the absorbed fields directly) to use the new grouped field
   paths. No test behaviour changes — field-path updates only.
 
-- [ ] 88. Update `docs/features.md` (and any other doc referencing the absorbed field
+- [x] 88. Update `docs/features.md` (and any other doc referencing the absorbed field
   names or `src/ui.rs`) to the new module path and struct shapes.
 
-- [ ] 89. Run `make test` + `make test-coverage` + `make lint` — full suite must pass, no
+- [x] 89. Run `make test` + `make test-coverage` + `make lint` — full suite must pass, no
   coverage regression.
 
 ---
@@ -983,16 +983,16 @@ Principles:
 **Goal:** Finalise all documentation for Phase 6; ensure every feature, flag, and
 ADR is recorded.
 
-- [ ] 93. Update `docs/features.md`: finalise all WIP notes from sub-phases; verify every
+- [x] 93. Update `docs/features.md`: finalise all WIP notes from sub-phases; verify every
   Phase 6 feature is described.
 
-- [ ] 94. Update `docs/configuration.md`: `--auto-approve-spawn` flag; `can_spawn`
+- [x] 94. Update `docs/configuration.md`: `--auto-approve-spawn` flag; `can_spawn`
   agent-type key; `Sandbox` Phase 6 defaults (TOML config Phase 7).
 
-- [ ] 95. Run `rumdl fmt docs/features.md docs/keybindings.md docs/configuration.md
+- [x] 95. Run `rumdl fmt docs/features.md docs/keybindings.md docs/configuration.md
   docs/plans/phase6-terminal-superpowers.md` and fix any findings.
 
-- [ ] 96. Run `make test` + `make test-coverage` — full suite must pass, all new modules ≥80%.
+- [x] 96. Run `make test` + `make test-coverage` — full suite must pass, all new modules ≥80%.
 
 ## Implementation Hints
 

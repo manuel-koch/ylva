@@ -18,21 +18,21 @@
 //! visual correctness is verified manually.
 //!
 //! `render` owns the projection from [`AppState`] to the legacy [`TuiState`]
-//! snapshot consumed by [`crate::ui::draw`], and syncs the view-geometry
-//! fields written back by `ui::draw` into `AppState` after each frame.
+//! snapshot consumed by [`crate::tui_widgets::draw`], and syncs the view-geometry
+//! fields written back by `tui_widgets::draw` into `AppState` after each frame.
 
 use ratatui::Frame;
 use ratatui_textarea::TextArea;
 
 use crate::tui_reducer_state::{AppState, BannerDragSelection, ChatEntry, ConversationView, Focus};
 use crate::tui_render_state::TuiState;
-use crate::ui::{self, ButtonAreas};
+use crate::tui_widgets::{self, ButtonAreas};
 
 /// Draw one TUI frame.
 ///
 /// Projects `state` into a [`TuiState`] snapshot, delegates all rendering to
-/// [`crate::ui::draw`], then syncs the view-geometry fields written by
-/// `ui::draw` back into `state.layout` and the scroll/render-cache fields.
+/// [`crate::tui_widgets::draw`], then syncs the view-geometry fields written by
+/// `tui_widgets::draw` back into `state.layout` and the scroll/render-cache fields.
 ///
 /// Called inside `terminal.draw(|frame| { render::render(frame, …); })`.
 pub fn render(
@@ -43,12 +43,12 @@ pub fn render(
     mouse_pos: Option<(u16, u16)>,
 ) {
     let mut render_state = project_for_draw(state);
-    let button_areas = ui::draw(frame, &mut render_state, textarea, hint, mouse_pos);
+    let button_areas = tui_widgets::draw(frame, &mut render_state, textarea, hint, mouse_pos);
     sync_from_draw(state, render_state, button_areas);
 }
 
 /// Project the canonical [`AppState`] to the legacy [`TuiState`] snapshot
-/// required by [`crate::ui::draw`].
+/// required by [`crate::tui_widgets::draw`].
 ///
 /// The projection is a shallow clone of all view-model fields. Driver-owned
 /// types (`TextArea`, channel handles) are not part of this snapshot.
@@ -68,7 +68,7 @@ fn project_for_draw(state: &AppState) -> TuiState {
     // navigated back to the root conversation via Ctrl+B while the
     // subagent's own tool call is still awaiting approval), in which case
     // the approval footer needs to say so explicitly (see
-    // `ui::draw_approval_footer`), since the pending tool call is otherwise
+    // `tui_widgets::draw_approval_footer`), since the pending tool call is otherwise
     // invisible from the root transcript.
     let pending_approval_is_subagent = matches!(state.focus, Focus::ToolApproval { tool_id, .. }
     if state.child_messages.iter().any(
@@ -124,78 +124,89 @@ fn project_for_draw(state: &AppState) -> TuiState {
         thinking_started_at,
         partial_thinking_collapsed: state.partial_thinking_collapsed,
         queued_steer_texts: state.queued_steer_texts.clone(),
-        show_help: state.show_help(),
         steer_indicator: state.steer_indicator,
-        scroll_offset: state.scroll_offset,
-        scroll_locked: state.scroll_locked,
-        chat_area_height: state.chat_area_height,
         pending_approval,
         pending_approval_is_subagent,
-        pending_clarify: if let crate::tui_reducer_state::TuiMode::ClarifyPending {
-            question,
-            context,
-            choices,
-            ..
-        } = &state.mode
-        {
-            Some((question.clone(), choices.clone(), context.clone()))
-        } else {
-            None
-        },
         pending_approval_input_snapshot: state.pending_approval_input_snapshot.clone(),
         input_history: state.input_history.clone(),
         history_index: state.history_index,
         draft: state.draft.clone(),
         input_area: state.layout.input_area.rect,
-        chat_area: state.layout.chat_area.rect,
-        clarify_banner: ratatui::layout::Rect::default(),
-        help_popup_rect: state.layout.help_popup.rect,
-        chat_rendered_lines: state.chat_rendered_lines.clone(),
-        chat_rendered_line_chrome_widths: state.chat_rendered_line_chrome_widths.clone(),
-        chat_selection: state.chat_selection,
-        chat_drag_active: state.chat_drag_active,
-        clarify_banner_drag: match (
-            state.clarify_choice_mousedown,
-            state.clarify_banner_drag_end,
-        ) {
-            (Some((c1, r1)), Some((c2, r2))) => {
-                let ((start_row, start_col), (end_row, end_col)) = if (r1, c1) <= (r2, c2) {
-                    ((r1, c1), (r2, c2))
-                } else {
-                    ((r2, c2), (r1, c1))
-                };
-                Some(BannerDragSelection {
-                    start_row,
-                    start_col,
-                    end_row,
-                    end_col,
-                })
-            }
-            _ => None,
-        },
         toast: state.toast.clone(),
         spinner_frame: state.spinner_frame,
-        help_scroll_offset: state.help_scroll_offset,
-        help_scroll_x: state.help_scroll_x,
-        clarify_scroll_offset: state.clarify_scroll_offset,
         input_scroll_top: state.input_scroll_top,
-        bubble_title_rows: state.bubble_title_rows.clone(),
-        thinking_title_rows: state.thinking_title_rows.clone(),
-        child_view_bubble,
-        header_bubble_scroll_offset: state.header_bubble_scroll_offset,
-        header_bubble_area: ratatui::layout::Rect::default(),
+        help_popup: crate::tui_render_state::HelpPopupState {
+            show_help: state.show_help(),
+            help_scroll_offset: state.help_popup.help_scroll_offset,
+            help_scroll_x: state.help_popup.help_scroll_x,
+            help_popup_rect: state.layout.help_popup.rect,
+        },
+        clarify_banner_state: crate::tui_render_state::ClarifyBannerState {
+            pending_clarify: if let crate::tui_reducer_state::TuiMode::ClarifyPending {
+                question,
+                context,
+                choices,
+                ..
+            } = &state.mode
+            {
+                Some((question.clone(), choices.clone(), context.clone()))
+            } else {
+                None
+            },
+            clarify_scroll_offset: state.clarify_banner_state.clarify_scroll_offset,
+            clarify_banner_drag: match (
+                state.clarify_banner_state.clarify_choice_mousedown,
+                state.clarify_banner_state.clarify_banner_drag_end,
+            ) {
+                (Some((c1, r1)), Some((c2, r2))) => {
+                    let ((start_row, start_col), (end_row, end_col)) = if (r1, c1) <= (r2, c2) {
+                        ((r1, c1), (r2, c2))
+                    } else {
+                        ((r2, c2), (r1, c1))
+                    };
+                    Some(BannerDragSelection {
+                        start_row,
+                        start_col,
+                        end_row,
+                        end_col,
+                    })
+                }
+                _ => None,
+            },
+            clarify_banner: ratatui::layout::Rect::default(),
+        },
+        child_view: crate::tui_render_state::ChildViewState {
+            child_view_bubble,
+            header_bubble_scroll_offset: state.child_view.header_bubble_scroll_offset,
+            header_bubble_area: ratatui::layout::Rect::default(),
+        },
+        conversation: crate::tui_render_state::ConversationListState {
+            scroll_offset: state.conversation.scroll_offset,
+            scroll_locked: state.conversation.scroll_locked,
+            chat_area_height: state.conversation.chat_area_height,
+            chat_area: state.layout.chat_area.rect,
+            chat_rendered_lines: state.conversation.chat_rendered_lines.clone(),
+            chat_rendered_line_chrome_widths: state
+                .conversation
+                .chat_rendered_line_chrome_widths
+                .clone(),
+            chat_selection: state.conversation.chat_selection,
+            chat_drag_active: state.conversation.chat_drag_active,
+            bubble_title_rows: state.conversation.bubble_title_rows.clone(),
+            thinking_title_rows: state.conversation.thinking_title_rows.clone(),
+        },
     }
 }
 
-/// Sync the view-geometry fields that [`crate::ui::draw`] writes back into
+/// Sync the view-geometry fields that [`crate::tui_widgets::draw`] writes back into
 /// the canonical [`AppState`] after each frame.
 fn sync_from_draw(state: &mut AppState, rendered: TuiState, button_areas: Option<ButtonAreas>) {
     state.layout.input_area.rect = rendered.input_area;
-    state.layout.chat_area.rect = rendered.chat_area;
-    state.layout.clarify_banner = rendered.clarify_banner;
-    state.layout.header_bubble = rendered.header_bubble_area;
-    state.header_bubble_scroll_offset = rendered.header_bubble_scroll_offset;
-    state.layout.help_popup.rect = rendered.help_popup_rect;
+    state.layout.chat_area.rect = rendered.conversation.chat_area;
+    state.layout.clarify_banner = rendered.clarify_banner_state.clarify_banner;
+    state.layout.header_bubble = rendered.child_view.header_bubble_area;
+    state.child_view.header_bubble_scroll_offset = rendered.child_view.header_bubble_scroll_offset;
+    state.layout.help_popup.rect = rendered.help_popup.help_popup_rect;
     if let Some(buttons) = button_areas {
         state.layout.approve_button = buttons.approve;
         state.layout.deny_button = buttons.deny;
@@ -204,10 +215,10 @@ fn sync_from_draw(state: &mut AppState, rendered: TuiState, button_areas: Option
         state.layout.deny_button = ratatui::layout::Rect::default();
     }
     state.input_scroll_top = rendered.input_scroll_top;
-    state.scroll_offset = rendered.scroll_offset;
-    state.scroll_locked = rendered.scroll_locked;
-    state.bubble_title_rows = rendered.bubble_title_rows;
-    state.thinking_title_rows = rendered.thinking_title_rows;
+    state.conversation.scroll_offset = rendered.conversation.scroll_offset;
+    state.conversation.scroll_locked = rendered.conversation.scroll_locked;
+    state.conversation.bubble_title_rows = rendered.conversation.bubble_title_rows;
+    state.conversation.thinking_title_rows = rendered.conversation.thinking_title_rows;
     // Resolve a pending "scroll back to the drilled-in-from bubble"
     // navigation (armed by `AppState::switch_to_root_view`) now that
     // `bubble_title_rows` reflects this frame's *root* transcript (the very
@@ -220,19 +231,22 @@ fn sync_from_draw(state: &mut AppState, rendered: TuiState, button_areas: Option
     // placeholder was already restored.
     if let Some(target_id) = state.pending_scroll_to_bubble.take() {
         if let Some((start_row, ..)) = state
+            .conversation
             .bubble_title_rows
             .iter()
             .find(|(_, _, id)| *id == target_id)
         {
-            state.scroll_offset = *start_row;
-            state.scroll_locked = false;
+            state.conversation.scroll_offset = *start_row;
+            state.conversation.scroll_locked = false;
         }
     }
-    state.chat_rendered_lines = rendered.chat_rendered_lines;
-    state.chat_rendered_line_chrome_widths = rendered.chat_rendered_line_chrome_widths;
-    state.help_scroll_offset = rendered.help_scroll_offset;
-    state.help_scroll_x = rendered.help_scroll_x;
-    state.clarify_scroll_offset = rendered.clarify_scroll_offset;
+    state.conversation.chat_rendered_lines = rendered.conversation.chat_rendered_lines;
+    state.conversation.chat_rendered_line_chrome_widths =
+        rendered.conversation.chat_rendered_line_chrome_widths;
+    state.help_popup.help_scroll_offset = rendered.help_popup.help_scroll_offset;
+    state.help_popup.help_scroll_x = rendered.help_popup.help_scroll_x;
+    state.clarify_banner_state.clarify_scroll_offset =
+        rendered.clarify_banner_state.clarify_scroll_offset;
     state.toast = rendered.toast;
 }
 
@@ -282,7 +296,7 @@ mod tests {
         assert!(
             matches!(&projected.chat_entries[0], ChatEntry::AssistantMessage { text, .. } if text == "root reply")
         );
-        assert!(projected.child_view_bubble.is_none());
+        assert!(projected.child_view.child_view_bubble.is_none());
     }
 
     #[test]
@@ -310,6 +324,7 @@ mod tests {
             matches!(&projected.chat_entries[0], ChatEntry::AssistantMessage { text, .. } if text == "child reply")
         );
         let (header_bubble_id, header_name, _state, collapsed) = projected
+            .child_view
             .child_view_bubble
             .expect("header bubble must be set while viewing the child");
         assert_eq!(header_bubble_id, bubble_id);
@@ -379,18 +394,18 @@ mod tests {
         let mut state = AppState::new();
         let bubble_id = Uuid::new_v4();
         state.pending_scroll_to_bubble = Some(bubble_id);
-        state.scroll_offset = 3; // stale fallback, must be overridden below
-        state.scroll_locked = true;
+        state.conversation.scroll_offset = 3; // stale fallback, must be overridden below
+        state.conversation.scroll_locked = true;
 
         let mut rendered = TuiState::new();
-        rendered.bubble_title_rows = vec![(0, 4, Uuid::new_v4()), (5, 9, bubble_id)];
-        rendered.scroll_offset = 3;
-        rendered.scroll_locked = true;
+        rendered.conversation.bubble_title_rows = vec![(0, 4, Uuid::new_v4()), (5, 9, bubble_id)];
+        rendered.conversation.scroll_offset = 3;
+        rendered.conversation.scroll_locked = true;
 
         sync_from_draw(&mut state, rendered, None);
 
-        assert_eq!(state.scroll_offset, 5);
-        assert!(!state.scroll_locked);
+        assert_eq!(state.conversation.scroll_offset, 5);
+        assert!(!state.conversation.scroll_locked);
         assert!(state.pending_scroll_to_bubble.is_none());
     }
 
@@ -401,18 +416,18 @@ mod tests {
         // gracefully rather than panic or silently jump elsewhere).
         let mut state = AppState::new();
         state.pending_scroll_to_bubble = Some(Uuid::new_v4());
-        state.scroll_offset = 7;
-        state.scroll_locked = false;
+        state.conversation.scroll_offset = 7;
+        state.conversation.scroll_locked = false;
 
         let mut rendered = TuiState::new();
-        rendered.bubble_title_rows = vec![(0, 4, Uuid::new_v4())];
-        rendered.scroll_offset = 7;
-        rendered.scroll_locked = false;
+        rendered.conversation.bubble_title_rows = vec![(0, 4, Uuid::new_v4())];
+        rendered.conversation.scroll_offset = 7;
+        rendered.conversation.scroll_locked = false;
 
         sync_from_draw(&mut state, rendered, None);
 
-        assert_eq!(state.scroll_offset, 7);
-        assert!(!state.scroll_locked);
+        assert_eq!(state.conversation.scroll_offset, 7);
+        assert!(!state.conversation.scroll_locked);
         assert!(state.pending_scroll_to_bubble.is_none());
     }
 }

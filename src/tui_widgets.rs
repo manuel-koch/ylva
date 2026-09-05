@@ -144,7 +144,7 @@ pub fn draw(
     // the chat area and the input/footer panel — the header must not be
     // visually mistaken for part of the scrollable conversation-list below.
     let mut header_lines: Vec<Line<'static>> = Vec::new();
-    if let Some((bubble_id, name, bubble_state, collapsed)) = &state.child_view_bubble {
+    if let Some((bubble_id, name, bubble_state, collapsed)) = &state.child_view.child_view_bubble {
         let header_row_width = full_area.width.saturating_sub(1) as usize;
         let mut discarded_title_rows = Vec::new();
         // The header sits directly above the subagent's own transcript, so
@@ -212,6 +212,7 @@ pub fn draw(
     //   slot_c → input_area       │  slot_c → footer_row_2
     let approval_pending = state.pending_approval.is_some();
     let clarify_banner_content_height = state
+        .clarify_banner_state
         .pending_clarify
         .as_ref()
         .map(|(question, choices, context)| {
@@ -295,7 +296,7 @@ pub fn draw(
             .direction(Direction::Horizontal)
             .constraints([Constraint::Fill(1), Constraint::Length(1)])
             .areas(header_area);
-        state.header_bubble_area = header_content_area;
+        state.child_view.header_bubble_area = header_content_area;
 
         let total_lines = header_lines.len();
         let visible = header_content_area.height as usize;
@@ -304,8 +305,8 @@ pub fn draw(
         // height can shrink between frames (e.g. collapsing it, or a shorter
         // subagent result replacing a longer in-progress one), which would
         // otherwise leave the offset pointing past the end of the content.
-        let row_offset = state.header_bubble_scroll_offset.min(max_offset);
-        state.header_bubble_scroll_offset = row_offset;
+        let row_offset = state.child_view.header_bubble_scroll_offset.min(max_offset);
+        state.child_view.header_bubble_scroll_offset = row_offset;
 
         let paragraph = Paragraph::new(header_lines).scroll((row_offset as u16, 0));
         frame.render_widget(paragraph, header_content_area);
@@ -338,7 +339,7 @@ pub fn draw(
             header_separator_area,
         );
     } else {
-        state.header_bubble_area = Rect::default();
+        state.child_view.header_bubble_area = Rect::default();
     }
 
     draw_chat(frame, chat_area, state);
@@ -446,11 +447,12 @@ pub fn draw(
     // Store the input rect for mouse click/drag handling in the event loop.
     state.input_area = input_area;
     // Store the clarify banner rect for mouse click-to-choose handling.
-    state.clarify_banner = clarify_area.unwrap_or_default();
+    state.clarify_banner_state.clarify_banner = clarify_area.unwrap_or_default();
 
-    if let (Some(clarify_area), Some((question, choices, context))) =
-        (clarify_area, state.pending_clarify.as_ref())
-    {
+    if let (Some(clarify_area), Some((question, choices, context))) = (
+        clarify_area,
+        state.clarify_banner_state.pending_clarify.as_ref(),
+    ) {
         draw_clarify_banner(
             frame,
             clarify_area,
@@ -458,8 +460,8 @@ pub fn draw(
                 question,
                 choices: choices.as_ref(),
                 context: context.as_deref(),
-                drag: state.clarify_banner_drag,
-                scroll_offset: &mut state.clarify_scroll_offset,
+                drag: state.clarify_banner_state.clarify_banner_drag,
+                scroll_offset: &mut state.clarify_banner_state.clarify_scroll_offset,
                 content_height: clarify_banner_content_height as usize,
             },
         );
@@ -479,7 +481,7 @@ pub fn draw(
             },
         )
     } else {
-        let keybinding_hint = if state.pending_clarify.is_some() {
+        let keybinding_hint = if state.clarify_banner_state.pending_clarify.is_some() {
             " enter: answer  click choice  ctrl-c/esc: cancel  F1: help"
         } else if state.agent_mode != AgentMode::Idle && !input_is_empty {
             " enter: send  ctrl-c/esc: clear draft  F1: help"
@@ -501,7 +503,7 @@ pub fn draw(
         // child-view header — the header stays focused on naming the
         // subagent, and the footer stays the single place users check for
         // available keybindings regardless of which conversation is shown.
-        let keybinding_hint = if state.child_view_bubble.is_some() {
+        let keybinding_hint = if state.child_view.child_view_bubble.is_some() {
             format!(" ctrl-b: back  {}", keybinding_hint.trim_start())
         } else {
             keybinding_hint.to_string()
@@ -517,7 +519,7 @@ pub fn draw(
         None
     };
 
-    if state.show_help {
+    if state.help_popup.show_help {
         draw_help_popup(frame, state);
     }
 
@@ -540,7 +542,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
         .areas(area);
 
     // Save the content rect so the event loop can hit-test mouse events.
-    state.chat_area = content_area;
+    state.conversation.chat_area = content_area;
 
     // row_width is the full column count of content_area; bubble helpers pad
     // lines to this width so the background fills every cell on each row.
@@ -566,7 +568,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
     // startup; never in the subagent drill-in view — an in-progress subagent
     // with no tokens yet is not "a fresh session", it's mid-flight work, so
     // the empty-state wordmark would be misleading there.
-    if state.chat_entries.is_empty() && state.child_view_bubble.is_none() {
+    if state.chat_entries.is_empty() && state.child_view.child_view_bubble.is_none() {
         append_logo(&mut lines);
     } else {
         lines.push(Line::default());
@@ -715,8 +717,8 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
         lines.push(Line::default());
     }
 
-    state.bubble_title_rows = bubble_title_rows_out;
-    state.thinking_title_rows = thinking_title_rows_out;
+    state.conversation.bubble_title_rows = bubble_title_rows_out;
+    state.conversation.thinking_title_rows = thinking_title_rows_out;
 
     // Extract plain text of every line for selection/copy support.
     // Tool bubble lines are prefixed with the `▌  ` chrome (border + margin);
@@ -746,12 +748,12 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
         rendered_lines.push(clean);
         chrome_widths.push(chrome);
     }
-    state.chat_rendered_lines = rendered_lines;
-    state.chat_rendered_line_chrome_widths = chrome_widths;
+    state.conversation.chat_rendered_lines = rendered_lines;
+    state.conversation.chat_rendered_line_chrome_widths = chrome_widths;
 
     // Apply selection highlight to lines in the selected range.
     const CHAT_SELECTION_BG: Color = Color::Rgb(60, 80, 120);
-    if let Some(sel) = state.chat_selection {
+    if let Some(sel) = state.conversation.chat_selection {
         if !sel.is_empty() {
             let (start_line, start_col, end_line, end_col) = sel.normalized();
             for (index, line) in lines.iter_mut().enumerate() {
@@ -784,22 +786,22 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
     let visible = area.height as usize;
     // Upper scroll bound: how far the viewport can be offset from the top.
     let max_offset = total_lines.saturating_sub(visible);
-    let row_offset = if state.scroll_locked {
+    let row_offset = if state.conversation.scroll_locked {
         // Keep scroll_offset in sync with the rendered bottom so that the
         // first scroll_up(1) call starts from the actual bottom position
         // rather than 0, which would otherwise cause the view to jump to
         // the top on the very first mouse-wheel or PageUp event.
-        state.scroll_offset = max_offset;
+        state.conversation.scroll_offset = max_offset;
         max_offset
     } else {
         // Clamp the manual offset to the content height so scrolling past the
         // end (or up past the top) cannot leave the offset silently drifting.
-        state.scroll_offset = state.scroll_offset.min(max_offset);
+        state.conversation.scroll_offset = state.conversation.scroll_offset.min(max_offset);
         // Scrolling back down to the very bottom re-enables auto-scroll.
-        if state.scroll_offset >= max_offset {
-            state.scroll_locked = true;
+        if state.conversation.scroll_offset >= max_offset {
+            state.conversation.scroll_locked = true;
         }
-        state.scroll_offset
+        state.conversation.scroll_offset
     };
 
     let paragraph = Paragraph::new(lines.clone()).scroll((row_offset as u16, 0));
@@ -2409,7 +2411,7 @@ fn draw_normal_footer(
     // running. Override with an explicit "done, but parent busy" message in
     // that case; once the root also goes `Idle`, the plain `mode_word` above
     // is already correct and unambiguous, so no override is needed then.
-    let mode_word = match &state.child_view_bubble {
+    let mode_word = match &state.child_view.child_view_bubble {
         Some((_, _, bubble_state, _))
             if state.agent_mode != AgentMode::Idle
                 && matches!(
@@ -2847,7 +2849,7 @@ fn draw_help_popup(frame: &mut Frame, state: &mut TuiState) {
     let popup = Rect::new(x, y, popup_width, popup_height);
     // Store the popup rect so mouse-click handling can tell inside from
     // outside clicks (dismiss-on-outside-click; clicks inside must not close).
-    state.help_popup_rect = popup;
+    state.help_popup.help_popup_rect = popup;
 
     frame.render_widget(Clear, popup);
     let block = Block::default()
@@ -2959,10 +2961,10 @@ fn draw_help_popup(frame: &mut Frame, state: &mut TuiState) {
     // Clamp offsets so we never display empty space.
     let max_scroll_y = total_lines.saturating_sub(viewport_height);
     let max_scroll_x = max_line_width.saturating_sub(viewport_width);
-    state.help_scroll_offset = state.help_scroll_offset.min(max_scroll_y);
-    state.help_scroll_x = state.help_scroll_x.min(max_scroll_x);
-    let scroll_y = state.help_scroll_offset;
-    let scroll_x = state.help_scroll_x;
+    state.help_popup.help_scroll_offset = state.help_popup.help_scroll_offset.min(max_scroll_y);
+    state.help_popup.help_scroll_x = state.help_popup.help_scroll_x.min(max_scroll_x);
+    let scroll_y = state.help_popup.help_scroll_offset;
+    let scroll_x = state.help_popup.help_scroll_x;
 
     frame.render_widget(
         Paragraph::new(all_lines).scroll((scroll_y as u16, scroll_x as u16)),

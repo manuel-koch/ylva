@@ -409,6 +409,7 @@ async fn drag_in_chat_area_selects_text() {
     let state = run_handle.await.expect("task joined");
     // The selection should be set and non-empty.
     let sel = state
+        .conversation
         .chat_selection
         .expect("chat_selection should be Some after drag");
     assert!(
@@ -423,7 +424,7 @@ fn steer_bubble_renders_below_streaming_not_above() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use ratatui_textarea::TextArea;
-    use ylva::ui;
+    use ylva::tui_widgets;
     use ylva::AgentMode;
 
     let backend = TestBackend::new(60, 20);
@@ -432,7 +433,7 @@ fn steer_bubble_renders_below_streaming_not_above() {
     // Equivalent to: push_user_bubble("hello", Sent) → StreamStarted →
     // AppendText("world") → queue_steer_message("steer me"). Built directly
     // (rather than through a reducer) since this test targets
-    // `ui::draw_chat`'s deferred-rendering order, not state transitions.
+    // `tui_widgets::draw_chat`'s deferred-rendering order, not state transitions.
     // Queued steers are staged in `queued_steer_texts`, not `chat_entries`
     // (see `AppState::queue_steer_message`).
     let mut state = ylva::TuiState {
@@ -449,7 +450,7 @@ fn steer_bubble_renders_below_streaming_not_above() {
 
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
         })
         .expect("draw");
 
@@ -484,7 +485,7 @@ fn steer_sent_before_first_chunk_does_not_jump_above_stream() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use ratatui_textarea::TextArea;
-    use ylva::ui;
+    use ylva::tui_widgets;
     use ylva::AgentMode;
 
     let backend = TestBackend::new(60, 20);
@@ -504,7 +505,7 @@ fn steer_sent_before_first_chunk_does_not_jump_above_stream() {
 
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
         })
         .expect("draw");
 
@@ -535,7 +536,7 @@ fn steer_sent_before_first_chunk_does_not_jump_above_stream() {
     state.partial_assistant_text.push_str("world");
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
         })
         .expect("draw after chunk");
 
@@ -574,7 +575,7 @@ fn footer_says_subagent_working_while_child_is_only_streaming() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use ratatui_textarea::TextArea;
-    use ylva::ui;
+    use ylva::tui_widgets;
     use ylva::{AgentMode, ChatEntry, ToolCallState};
 
     let backend = TestBackend::new(60, 20);
@@ -582,17 +583,20 @@ fn footer_says_subagent_working_while_child_is_only_streaming() {
 
     let mut state = ylva::TuiState {
         agent_mode: AgentMode::ToolRunning,
-        child_view_bubble: Some((
-            uuid::Uuid::new_v4(),
-            "spawn_subagent".to_string(),
-            ToolCallState::Running {
-                arguments: serde_json::json!({}),
-                content_sections: vec![],
-                title_arguments: vec![],
-                progress_arguments: vec![],
-            },
-            false,
-        )),
+        child_view: ylva::tui_render_state::ChildViewState {
+            child_view_bubble: Some((
+                uuid::Uuid::new_v4(),
+                "spawn_subagent".to_string(),
+                ToolCallState::Running {
+                    arguments: serde_json::json!({}),
+                    content_sections: vec![],
+                    title_arguments: vec![],
+                    progress_arguments: vec![],
+                },
+                false,
+            )),
+            ..ylva::TuiState::new().child_view
+        },
         chat_entries: vec![ChatEntry::AssistantMessage {
             text: "child is replying".to_string(),
             interrupted: false,
@@ -603,7 +607,7 @@ fn footer_says_subagent_working_while_child_is_only_streaming() {
 
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
         })
         .expect("draw");
 
@@ -636,7 +640,7 @@ fn footer_says_subagent_working_while_child_is_only_streaming() {
     });
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
         })
         .expect("draw with child running its own tool");
     let buf = terminal.backend().buffer().clone();
@@ -661,31 +665,34 @@ fn child_view_header_shortens_spawn_subagent_title() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use ratatui_textarea::TextArea;
-    use ylva::ui;
+    use ylva::tui_widgets;
     use ylva::ToolCallState;
 
     let backend = TestBackend::new(60, 20);
     let mut terminal = Terminal::new(backend).expect("terminal");
 
     let mut state = ylva::TuiState {
-        child_view_bubble: Some((
-            uuid::Uuid::new_v4(),
-            "spawn_subagent".to_string(),
-            ToolCallState::Running {
-                arguments: serde_json::json!({}),
-                content_sections: vec![],
-                title_arguments: vec![],
-                progress_arguments: vec![],
-            },
-            false,
-        )),
+        child_view: ylva::tui_render_state::ChildViewState {
+            child_view_bubble: Some((
+                uuid::Uuid::new_v4(),
+                "spawn_subagent".to_string(),
+                ToolCallState::Running {
+                    arguments: serde_json::json!({}),
+                    content_sections: vec![],
+                    title_arguments: vec![],
+                    progress_arguments: vec![],
+                },
+                false,
+            )),
+            ..ylva::TuiState::new().child_view
+        },
         ..ylva::TuiState::new()
     };
     let mut textarea = TextArea::default();
 
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
         })
         .expect("draw");
 
@@ -715,7 +722,7 @@ fn footer_indicates_subagent_done_while_parent_still_busy() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use ratatui_textarea::TextArea;
-    use ylva::ui;
+    use ylva::tui_widgets;
     use ylva::{AgentMode, ToolCallState};
 
     let backend = TestBackend::new(60, 20);
@@ -723,19 +730,22 @@ fn footer_indicates_subagent_done_while_parent_still_busy() {
 
     let mut state = ylva::TuiState {
         agent_mode: AgentMode::Streaming,
-        child_view_bubble: Some((
-            uuid::Uuid::new_v4(),
-            "spawn_subagent".to_string(),
-            ToolCallState::Killed,
-            false,
-        )),
+        child_view: ylva::tui_render_state::ChildViewState {
+            child_view_bubble: Some((
+                uuid::Uuid::new_v4(),
+                "spawn_subagent".to_string(),
+                ToolCallState::Killed,
+                false,
+            )),
+            ..ylva::TuiState::new().child_view
+        },
         ..ylva::TuiState::new()
     };
     let mut textarea = TextArea::default();
 
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
         })
         .expect("draw");
 
@@ -758,7 +768,7 @@ fn footer_indicates_subagent_done_while_parent_still_busy() {
     state.agent_mode = AgentMode::Idle;
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
         })
         .expect("draw after parent idle");
     let buf = terminal.backend().buffer().clone();
@@ -782,14 +792,14 @@ fn footer_indicates_subagent_done_while_parent_still_busy() {
 ///
 /// Each phase's `TuiState` is built directly (the exact result a reducer
 /// would have produced) rather than driven through one, since this test
-/// targets `ui::draw_chat`'s rendering order, not state-transition logic
+/// targets `tui_widgets::draw_chat`'s rendering order, not state-transition logic
 /// (which is covered by `AppState`/`presenter.rs` tests).
 #[test]
 fn steer_render_order_across_full_steer_cycle() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use ratatui_textarea::TextArea;
-    use ylva::ui;
+    use ylva::tui_widgets;
     use ylva::AgentMode;
 
     let render = |state: &mut ylva::TuiState| -> Vec<String> {
@@ -798,7 +808,7 @@ fn steer_render_order_across_full_steer_cycle() {
         let mut textarea = TextArea::default();
         terminal
             .draw(|frame| {
-                ui::draw(frame, state, &mut textarea, None, None);
+                tui_widgets::draw(frame, state, &mut textarea, None, None);
             })
             .expect("draw");
         let buf = terminal.backend().buffer().clone();
@@ -975,7 +985,7 @@ fn pending_tool_bubble_renders_after_completed_entries() {
     // rendered conversation so it sits close to the approve/deny footer,
     // even when there are earlier completed entries above it.
     use ratatui_textarea::TextArea;
-    use ylva::ui;
+    use ylva::tui_widgets;
     use ylva::ToolCallState;
 
     let backend = TestBackend::new(60, 30);
@@ -1018,7 +1028,7 @@ fn pending_tool_bubble_renders_after_completed_entries() {
 
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
         })
         .expect("draw");
 
@@ -1070,7 +1080,7 @@ fn expanded_tool_bubble_with_multiline_title_argument_stays_single_line_and_gets
     // placeholder-sanitized single line, with the full text available as its
     // own expandable content section.
     use ratatui_textarea::TextArea;
-    use ylva::ui;
+    use ylva::tui_widgets;
     use ylva::ToolCallState;
 
     let backend = TestBackend::new(80, 30);
@@ -1113,7 +1123,7 @@ fn expanded_tool_bubble_with_multiline_title_argument_stays_single_line_and_gets
 
     terminal
         .draw(|frame| {
-            ui::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
         })
         .expect("draw");
 
@@ -1249,7 +1259,7 @@ async fn click_inside_help_popup_keeps_it_open() {
 
     let state = run_handle.await.expect("task joined");
     assert!(
-        state.show_help,
+        state.help_popup.show_help,
         "click inside the help popup must not close it"
     );
 }
@@ -1302,7 +1312,7 @@ async fn click_outside_help_popup_closes_it() {
 
     let state = run_handle.await.expect("task joined");
     assert!(
-        !state.show_help,
+        !state.help_popup.show_help,
         "click outside the help popup must close it"
     );
 }

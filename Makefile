@@ -6,7 +6,7 @@ export CARGO_TARGET_DIR := $(REPO_ROOT)/target
 endif
 
 # Minimum line coverage for testable files; enforced by `make test-coverage`
-# and `make test-coverage-missing`. `ui.rs`, `render.rs`, and `main.rs` are
+# and `make test-coverage-missing`. `tui_widgets.rs`, `render.rs`, and `main.rs` are
 # excluded because they require a live terminal and cannot be unit-tested
 # without a full terminal emulator harness.
 COVERAGE_THRESHOLD := 80
@@ -72,14 +72,14 @@ test:
 
 # Run all tests and print a per-file coverage summary.
 # Fails if total line coverage of testable files drops below $(COVERAGE_THRESHOLD).
-# ui.rs, render.rs and main.rs are excluded: they require a live terminal (ratatui/crossterm)
+# tui_widgets.rs, render.rs and main.rs are excluded: they require a live terminal (ratatui/crossterm)
 # and cannot be unit-tested without a full terminal emulator harness.
 # Requires: cargo install cargo-llvm-cov
 #           rustup component add llvm-tools-preview
 test-coverage:
 	cargo llvm-cov \
 	    $(if $(filter true,$(strip $(VERBOSE))),,--quiet) \
-	    --ignore-filename-regex "(ui|render|main)\.rs" \
+	    --ignore-filename-regex "(tui_widgets|render|main)\.rs" \
 	    --fail-under-lines $(COVERAGE_THRESHOLD)
 
 # Same as test-coverage but also prints uncovered line numbers per file.
@@ -89,7 +89,7 @@ test-coverage:
 test-coverage-missing:
 	cargo llvm-cov \
 	    $(if $(filter true,$(strip $(VERBOSE))),,--quiet) \
-	    --ignore-filename-regex "(ui|render|main)\.rs" \
+	    --ignore-filename-regex "(tui_widgets|render|main)\.rs" \
 	    --fail-under-lines $(COVERAGE_THRESHOLD) \
 	    --show-missing-lines
 
