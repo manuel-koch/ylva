@@ -223,6 +223,26 @@ fn sync_from_draw(state: &mut AppState, rendered: TuiState, button_areas: Option
     state.scroll_locked = rendered.scroll_locked;
     state.bubble_title_rows = rendered.bubble_title_rows;
     state.thinking_title_rows = rendered.thinking_title_rows;
+    // Resolve a pending "scroll back to the drilled-in-from bubble"
+    // navigation (armed by `AppState::switch_to_root_view`) now that
+    // `bubble_title_rows` reflects this frame's *root* transcript (the very
+    // frame after the switch, since `active_view` already flipped to `Root`
+    // before this draw call ran) rather than the child's. Resolving by the
+    // bubble's current row — instead of trusting the raw offset saved at
+    // drill-in time — stays correct even if the root conversation grew while
+    // the child view was open. Left unresolved (and silently dropped) if the
+    // bubble is no longer present, leaving whatever `saved_root_scroll`
+    // placeholder was already restored.
+    if let Some(target_id) = state.pending_scroll_to_bubble.take() {
+        if let Some((start_row, ..)) = state
+            .bubble_title_rows
+            .iter()
+            .find(|(_, _, id)| *id == target_id)
+        {
+            state.scroll_offset = *start_row;
+            state.scroll_locked = false;
+        }
+    }
     state.chat_rendered_lines = rendered.chat_rendered_lines;
     state.chat_rendered_line_chrome_widths = rendered.chat_rendered_line_chrome_widths;
     state.help_scroll_offset = rendered.help_scroll_offset;
@@ -392,5 +412,50 @@ mod tests {
         let projected = project_for_draw(&state);
 
         assert!(!projected.pending_approval_is_subagent);
+    }
+
+    #[test]
+    fn sync_from_draw_resolves_pending_scroll_to_bubble_to_its_current_row() {
+        // Regression test: Ctrl+B must land on the drilled-in-from bubble's
+        // *current* row, not a raw offset saved before the root
+        // conversation grew while the child view was open.
+        let mut state = AppState::new();
+        let bubble_id = Uuid::new_v4();
+        state.pending_scroll_to_bubble = Some(bubble_id);
+        state.scroll_offset = 3; // stale fallback, must be overridden below
+        state.scroll_locked = true;
+
+        let mut rendered = TuiState::new();
+        rendered.bubble_title_rows = vec![(0, 4, Uuid::new_v4()), (5, 9, bubble_id)];
+        rendered.scroll_offset = 3;
+        rendered.scroll_locked = true;
+
+        sync_from_draw(&mut state, rendered, None);
+
+        assert_eq!(state.scroll_offset, 5);
+        assert!(!state.scroll_locked);
+        assert!(state.pending_scroll_to_bubble.is_none());
+    }
+
+    #[test]
+    fn sync_from_draw_leaves_fallback_scroll_when_pending_bubble_is_no_longer_present() {
+        // E.g. the drilled-into bubble scrolled out of `chat_entries`
+        // entirely (should not happen in practice, but must degrade
+        // gracefully rather than panic or silently jump elsewhere).
+        let mut state = AppState::new();
+        state.pending_scroll_to_bubble = Some(Uuid::new_v4());
+        state.scroll_offset = 7;
+        state.scroll_locked = false;
+
+        let mut rendered = TuiState::new();
+        rendered.bubble_title_rows = vec![(0, 4, Uuid::new_v4())];
+        rendered.scroll_offset = 7;
+        rendered.scroll_locked = false;
+
+        sync_from_draw(&mut state, rendered, None);
+
+        assert_eq!(state.scroll_offset, 7);
+        assert!(!state.scroll_locked);
+        assert!(state.pending_scroll_to_bubble.is_none());
     }
 }

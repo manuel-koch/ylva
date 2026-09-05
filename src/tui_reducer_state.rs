@@ -867,6 +867,30 @@ pub struct AppState {
     /// collapse/expand toggle every bubble (including spawn bubbles) always
     /// supports.
     pub last_bubble_click: Option<(uuid::Uuid, std::time::Instant)>,
+    /// `(scroll_offset, scroll_locked)` of the root transcript, captured by
+    /// `switch_to_child_view` right before it re-pins the shared scroll
+    /// state to the bottom of the child's transcript. Restored by
+    /// `switch_to_root_view` (`Ctrl+B`) as an immediate best-effort
+    /// placeholder — the precise fix is `saved_root_scroll_bubble` below,
+    /// resolved once root is rendered again. `None` before the first
+    /// drill-in, or once restored.
+    pub saved_root_scroll: Option<(usize, bool)>,
+    /// `Uuid` of the `spawn_subagent` `ToolBubble` the user drilled in from,
+    /// captured by `switch_to_child_view` (via
+    /// `most_recent_spawn_subagent_bubble_id`). Consumed by
+    /// `switch_to_root_view`, which moves it into `pending_scroll_to_bubble`
+    /// so `render::sync_from_draw` can scroll to that bubble's *current* row
+    /// — robust against the root conversation having grown while the child
+    /// view was open, unlike a raw saved offset which would drift. `None`
+    /// before the first drill-in, or once consumed.
+    pub saved_root_scroll_bubble: Option<uuid::Uuid>,
+    /// Armed by `switch_to_root_view` with the `Uuid` from
+    /// `saved_root_scroll_bubble`; consumed by `render::sync_from_draw`
+    /// immediately after the first root frame following the switch is drawn
+    /// (so `AppState::bubble_title_rows` reflects root's, not the child's,
+    /// bubbles), which scrolls to that bubble's row and clears this field.
+    /// `None` when there is nothing pending.
+    pub pending_scroll_to_bubble: Option<uuid::Uuid>,
 }
 
 impl AppState {
@@ -927,6 +951,9 @@ impl AppState {
             auto_switched_to_child: false,
             child_partial_text: String::new(),
             last_bubble_click: None,
+            saved_root_scroll: None,
+            saved_root_scroll_bubble: None,
+            pending_scroll_to_bubble: None,
         }
     }
 
@@ -1164,6 +1191,17 @@ impl AppState {
             label: child.label,
         };
         self.auto_switched_to_child = false;
+        // Capture the root's current scroll position before it gets
+        // overwritten below, so `switch_to_root_view` can restore it as a
+        // best-effort fallback (see `saved_root_scroll_bubble` below for the
+        // primary, content-shift-proof resolution).
+        self.saved_root_scroll = Some((self.scroll_offset, self.scroll_locked));
+        // Record the actual `spawn_subagent` bubble being drilled into, so
+        // `switch_to_root_view` can scroll back to *its* current row rather
+        // than a raw offset that would drift if the root conversation grows
+        // while the user is away (new messages/tool bubbles shift row
+        // indices below — sometimes even at — the saved offset).
+        self.saved_root_scroll_bubble = self.most_recent_spawn_subagent_bubble_id();
         // Always start scrolled to the top of the header bubble on a fresh
         // navigation into the child view, regardless of where it was left
         // scrolled to on a previous visit.
@@ -1181,13 +1219,23 @@ impl AppState {
     /// Finds the `id` of the real root `spawn_subagent` `ToolBubble`
     /// currently re-rendered as the child-view header (see
     /// `render::project_for_draw`'s `child_view_bubble`). `None` while
-    /// viewing `Root`. At most one subagent runs at a time, so the most
-    /// recently started `spawn_subagent` bubble in `chat_entries`
-    /// unambiguously corresponds to whichever subagent is drilled into.
+    /// viewing `Root`. Delegates to `most_recent_spawn_subagent_bubble_id`
+    /// for the actual lookup.
     pub(crate) fn header_bubble_id(&self) -> Option<Uuid> {
         if !matches!(self.active_view, ConversationView::Child { .. }) {
             return None;
         }
+        self.most_recent_spawn_subagent_bubble_id()
+    }
+
+    /// Finds the `id` of the most recently started `spawn_subagent`
+    /// `ToolBubble` in `chat_entries`, regardless of `active_view`. At most
+    /// one subagent runs at a time, so this unambiguously identifies
+    /// whichever subagent is currently tracked (`current_child`/
+    /// `last_child`) — used both by `header_bubble_id` (while viewing
+    /// `Child`) and by `switch_to_child_view` (to record which bubble the
+    /// user is drilling in from, while still viewing `Root`).
+    fn most_recent_spawn_subagent_bubble_id(&self) -> Option<Uuid> {
         self.chat_entries
             .iter()
             .rev()
@@ -1223,10 +1271,29 @@ impl AppState {
         }
     }
 
-    /// Manual "back to parent" navigation (`Ctrl+B`).
+    /// Manual "back to parent" navigation (`Ctrl+B`). Restores the root
+    /// scroll position saved by `switch_to_child_view` (when present) as an
+    /// immediate best-effort placeholder — avoids a blank/wrong-looking frame
+    /// before the precise fix below lands — and arms `pending_scroll_to_bubble`
+    /// with the drilled-into `spawn_subagent` bubble's id so `render.rs`'s
+    /// `sync_from_draw` can scroll to that bubble's *current* row once root
+    /// is rendered again this same frame. Resolving by bubble id (rather than
+    /// trusting the raw saved offset) is what makes this correct even though
+    /// the root conversation may have grown while the user was viewing the
+    /// child — new messages/tool bubbles can shift row indices at or below
+    /// the saved offset, landing it past the target bubble otherwise.
+    /// `saved_root_scroll`/`saved_root_scroll_bubble` are `None` when the
+    /// child view was entered via auto-switch (`note_child_interactive_pause`)
+    /// rather than manual navigation; in that case the shared scroll fields
+    /// were never touched, so there is nothing to restore.
     pub fn switch_to_root_view(&mut self) {
         self.active_view = ConversationView::Root;
         self.auto_switched_to_child = false;
+        if let Some((scroll_offset, scroll_locked)) = self.saved_root_scroll.take() {
+            self.scroll_offset = scroll_offset;
+            self.scroll_locked = scroll_locked;
+        }
+        self.pending_scroll_to_bubble = self.saved_root_scroll_bubble.take();
     }
 
     /// Append a user message bubble and record the text in input history.
@@ -2296,6 +2363,123 @@ mod tests {
         assert!(
             state.scroll_locked,
             "child view must open auto-scrolled (pinned) to the bottom"
+        );
+    }
+
+    #[test]
+    fn switch_to_root_view_restores_scroll_position_from_before_drill_in() {
+        // Regression test: Ctrl+B must land the user back where they
+        // drilled in from (e.g. a `spawn_subagent` bubble scrolled up to),
+        // not always at the end of the root conversation.
+        let mut state = AppState::new();
+        let run_id = Uuid::new_v4();
+        state.current_child = Some(ChildRunInfo {
+            run_id,
+            agent_type: "reviewer".to_string(),
+            task: "look into flaky test".to_string(),
+            label: "Investigate flaky test".to_string(),
+        });
+        state.scroll_offset = 30;
+        state.scroll_locked = false;
+
+        state.switch_to_child_view();
+        state.switch_to_root_view();
+
+        assert_eq!(state.scroll_offset, 30);
+        assert!(!state.scroll_locked);
+        assert!(state.saved_root_scroll.is_none());
+    }
+
+    #[test]
+    fn switch_to_root_view_is_a_no_op_on_scroll_when_child_was_auto_switched() {
+        // `note_child_interactive_pause` auto-switches into the child view
+        // without going through `switch_to_child_view`, so it never
+        // populates `saved_root_scroll`. The scroll fields it leaves behind
+        // belong to whatever was on screen while viewing `Root` and must be
+        // left untouched on auto-return.
+        let mut state = AppState::new();
+        state.scroll_offset = 12;
+        state.scroll_locked = false;
+        state.active_view = ConversationView::Child {
+            run_id: Uuid::new_v4(),
+            agent_type: "reviewer".to_string(),
+            task: "look into flaky test".to_string(),
+            label: "Investigate flaky test".to_string(),
+        };
+
+        state.switch_to_root_view();
+
+        assert_eq!(state.scroll_offset, 12);
+        assert!(!state.scroll_locked);
+    }
+
+    #[test]
+    fn switch_to_child_view_captures_the_drilled_into_spawn_bubble_id() {
+        let mut state = AppState::new();
+        let bubble_id = Uuid::new_v4();
+        state.chat_entries.push(ChatEntry::ToolBubble {
+            id: bubble_id,
+            name: crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
+            state: Box::new(ToolCallState::Running {
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                progress_arguments: vec![],
+            }),
+            collapsed: false,
+        });
+        state.current_child = Some(ChildRunInfo {
+            run_id: Uuid::new_v4(),
+            agent_type: "reviewer".to_string(),
+            task: "look into flaky test".to_string(),
+            label: "Investigate flaky test".to_string(),
+        });
+
+        state.switch_to_child_view();
+
+        assert_eq!(state.saved_root_scroll_bubble, Some(bubble_id));
+    }
+
+    #[test]
+    fn switch_to_root_view_arms_pending_scroll_to_bubble_from_the_saved_bubble_id() {
+        // Regression test: the raw offset saved by `switch_to_child_view`
+        // drifts if the root conversation grows while the child view is
+        // open (new messages/tool bubbles shift row indices). Resolving by
+        // the drilled-into bubble's own id, once root is rendered again,
+        // stays correct regardless.
+        let mut state = AppState::new();
+        let bubble_id = Uuid::new_v4();
+        state.chat_entries.push(ChatEntry::ToolBubble {
+            id: bubble_id,
+            name: crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
+            state: Box::new(ToolCallState::Running {
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                progress_arguments: vec![],
+            }),
+            collapsed: false,
+        });
+        state.current_child = Some(ChildRunInfo {
+            run_id: Uuid::new_v4(),
+            agent_type: "reviewer".to_string(),
+            task: "look into flaky test".to_string(),
+            label: "Investigate flaky test".to_string(),
+        });
+        state.switch_to_child_view();
+        // Simulate the root conversation growing while the child view is
+        // open — must not affect which bubble is targeted.
+        state.chat_entries.push(ChatEntry::AssistantMessage {
+            text: "a concurrent root reply".to_string(),
+            interrupted: false,
+        });
+
+        state.switch_to_root_view();
+
+        assert_eq!(state.pending_scroll_to_bubble, Some(bubble_id));
+        assert!(
+            state.saved_root_scroll_bubble.is_none(),
+            "must be consumed (taken), not just copied"
         );
     }
 

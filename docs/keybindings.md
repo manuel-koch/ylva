@@ -45,7 +45,7 @@ Reference for Ylva's TUI keybindings.
 | Left-drag | Input focused | Select text; click (no drag) just places the cursor |
 | Left-click on tool bubble title / border | Any | Toggle tool bubble expand (`▼`) / collapse (`▶`) |
 | Double-click on a `spawn_subagent` tool bubble's title | Any | Drill in to the subagent's conversation view (manual navigation; does not auto-return; still works after the subagent has finished) |
-| `ctrl-b` | Any | Toggle between the root conversation and the currently-tracked/last subagent's drill-in view |
+| `ctrl-b` | Any | Toggle between the root conversation and the currently-tracked/last subagent's drill-in view; returning to root restores the scroll position from before drilling in |
 
 Only a second press of the *same* key confirms a pending double-press action.
 Pressing the other key instead starts that key's own fresh confirm window

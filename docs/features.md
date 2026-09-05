@@ -350,7 +350,23 @@ running in the background:
   `scroll_offset`/`scroll_locked` are shared fields between the root and child views (not
   per-view state), so a non-bottom position left over from scrolling up while viewing
   `Root` would otherwise carry straight into the child transcript instead of showing its
-  latest activity.
+  latest activity. Before doing so, it saves the root's own `(scroll_offset,
+  scroll_locked)` into `AppState.saved_root_scroll` (an immediate best-effort fallback),
+  and also captures the drilled-into `spawn_subagent` bubble's `Uuid` into
+  `AppState.saved_root_scroll_bubble`. Manual "back to parent" navigation
+  (`switch_to_root_view`, `Ctrl+B`) restores `saved_root_scroll` for the current frame, and
+  moves `saved_root_scroll_bubble` into `AppState.pending_scroll_to_bubble` for precise
+  resolution: once `active_view` has flipped back to `Root` and the next frame's
+  `AppState.bubble_title_rows` reflects root's transcript again, `render::sync_from_draw`
+  looks up that bubble's *current* row and scrolls there, unlocking scroll — this stays
+  correct even if the root conversation grew while the child view was open (new
+  messages/tool bubbles would otherwise shift row indices past a stale saved offset). The
+  net effect: the user lands back exactly at the root `spawn_subagent` bubble they drilled
+  in from, not just near it. `note_child_interactive_pause`'s auto-switch into `Child` (an
+  interactive pause, not manual navigation) never populates `saved_root_scroll` or
+  `saved_root_scroll_bubble`, so its later auto-return via `switch_to_root_view` is a no-op
+  on scroll — the shared fields were never touched while auto-switched, so nothing needs
+  restoring.
 - When a tool-approval is pending for the tracked subagent and the user is looking at
   `Root` (having manually navigated back via `Ctrl+B` while the subagent's own tool call is
   still awaiting approval), the approval footer's title is prefixed with `"Subagent tool
@@ -470,7 +486,13 @@ exit.
   focus needed, so the wheel works anywhere over the TUI). Scrolling up
   disables auto-scroll; scrolling back down to the bottom (or pressing `End`)
   re-enables it. The scroll offset is clamped to the content height, so
-  scrolling past either end never silently drifts.
+  scrolling past either end never silently drifts. `DomainEvent::StreamDone`/
+  `StreamCancelled` do **not** force auto-scroll back on — a completed
+  response respects whatever scroll-lock state the user left it in, the same
+  way in-flight `StreamChunk`/`StreamThinkingChunk` updates already did;
+  otherwise scrolling up to view an earlier subagent bubble (or a plain
+  scroll-back in a long conversation) would get yanked back to the bottom the
+  moment the current response finished.
 - **Wordmark:** while the conversation is empty (no messages submitted yet), a
   horizontally centered ASCII-art "Ylva" wordmark is displayed with the version
   and git commit shown below it in DarkGray. Once the first message is sent,

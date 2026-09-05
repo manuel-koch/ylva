@@ -104,14 +104,24 @@ tests.
 
 ## Backlog of issues discovered while testing
 
+- [ ] "Phase 6.12 Child-Agent Persistence" seems misplaced. Its topic is the
+      persistence of subagent conversation. But currently we have no persitence
+      at all. The plan doesn't explain why we need this ( without main persistence
+      in the first place ).
+
+- [ ] "Phase 6.13 — Headless" seem obsolete now, AFAIK we already have a CLI flag to
+      enable subagents.
+
 - [ ] When a tool approval arrives for a tool that was called from a subagent,
       the approval dialog doesn't indicate the "agent" scope. User doesn't
       see whether the tool wants to start in main-conversion or subagent.
       Maybe we can only address this in a later phase when drill-down
       on subagent conversion-list is implemented ?
 
-- [ ] Just noticed that the TUI may show "Running Tool.." while main conversation is
-      idle (waiting for spawned subagent to finish)
+- [ ] Just noticed that the TUI shows "Running Tool.." in subagent conversation
+      is while the subagent is streaming/thinking and actually not running a tool.
+      Maybe we can remove the placeholder hint in the input-field and just
+      update the footer to indicate that subagent is working/thinking ?
 
 - [ ] Regarding implementation before phase 6.10 ( intermediate WIP, no drill-down
       for subagent conversion-list yet avail ).
@@ -145,22 +155,59 @@ tests.
       What about esc ?
       - input field has text -> clear input field
       - input field is empty -> esc in subagent conversation-list should not
-        "cancel" the conversation, rather go back to parent and there user can
-        abort/steer the main conversation. 
+      "cancel" the conversation, rather go back to parent and there user can
+      abort/steer the main conversation.
 
 - [x] When drilling-in on a subagent conversation-list while it is running,
       the list should scroll to the end of the conversation.
 
-- [ ] When doing a ctrl-b to jump back the parent agent conversation-list,
+- [x] When doing a ctrl-b to jump back the parent agent conversation-list,
       should the user land back at the end of current conversation-list
       or instead at the subagent bubble he just returned from ?
       IMO the latter is more intuitive when user just drilled-in from the list
       and ctrl-b will him bring back to where he drilled-in.
+      Fixed: `switch_to_child_view` now saves the root's scroll position into
+      `AppState.saved_root_scroll` before pinning to the bottom; manual
+      `switch_to_root_view` (Ctrl+B) restores it.
 
-- [ ] When agent spawns multiple subagents, scrolling up to see the first
+- [x] When agent spawns (multiple) subagents, scrolling up to see the first
       subagent bubble in main agent conversation-list.
-      As soon as there is an update to main agent, the conversation-list scrolls
-      down to the end - it should stay where user just scrolled to.
+      As soon as there is an update (response, not thinking) in main agent,
+      the conversation-list scrolls down to the end - it should stay where
+      user just scrolled to.
+      This affects going back from a subagent conversation-list to the main
+      conversation-list too, instead of landing on the subagent where user
+      drilled-in, the user lands on the final response of llm in the main
+      conversation-list.
+      Fixed: `DomainEvent::StreamDone`/`StreamCancelled` handlers in
+      `presenter.rs` (5 occurrences across `domain_pending`, `domain_streaming`,
+      `domain_aborting`, and the clarify/tool-approval mode handlers)
+      unconditionally forced `scroll_locked = true; scroll_offset = 0;` whenever
+      a response finished, overriding any manual scroll-up. Removed the forced
+      reset so a completed response respects the existing scroll-lock state,
+      matching how `StreamChunk`/`StreamThinkingChunk` already behave. This
+      was also the root cause of the drill-in/back symptom — the
+      `saved_root_scroll` restore (previous entry) was being immediately
+      overridden by the next `StreamDone`.
 
-- [ ] Sometimes TUI seems to be stuck on "Running tool..." with many
+- [x] The scroll index is not preserved fully when returning from a subagent
+      conversation to the main conversation while the main conversation got
+      more messages while away. The user lands below/after the bubble they
+      drilled in from instead of at that very same bubble.
+      Fixed: `saved_root_scroll` (a raw absolute row number captured once at
+      drill-in time) drifts if the root conversation grows while the child
+      view is open, since new messages/tool bubbles shift row indices at or
+      below the saved offset. `switch_to_child_view` now also captures the
+      drilled-into `spawn_subagent` bubble's own `Uuid` into
+      `AppState.saved_root_scroll_bubble`. `switch_to_root_view` moves it into
+      `AppState.pending_scroll_to_bubble`, and `render::sync_from_draw`
+      resolves it against that frame's freshly-recomputed
+      `AppState.bubble_title_rows` (available once `active_view` has flipped
+      back to `Root`), scrolling to the bubble's *current* row regardless of
+      how much the root conversation grew while away. `saved_root_scroll`'s
+      raw-offset restore remains as an immediate one-frame fallback (avoids a
+      blank/wrong-looking frame) for the rare case the bubble can no longer
+      be found.
+
+- [ ] Sometimes TUI (sometimes) seems to be stuck on "Running tool..." with many
       subagents runs.

@@ -1183,8 +1183,6 @@ fn domain_pending(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
         DomainEvent::StreamDone => {
             state.flush_partial_assistant_message(false);
             state.mode = TuiMode::Idle;
-            state.scroll_locked = true;
-            state.scroll_offset = 0;
             vec![]
         }
         DomainEvent::StreamCancelled => {
@@ -1192,8 +1190,6 @@ fn domain_pending(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             state.commit_queued_steer_messages(UserMessageState::Cancelled);
             state.steer_indicator = false;
             state.mode = TuiMode::Idle;
-            state.scroll_locked = true;
-            state.scroll_offset = 0;
             vec![]
         }
         DomainEvent::Error(message) => {
@@ -1336,8 +1332,6 @@ fn domain_streaming(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
         DomainEvent::StreamDone => {
             state.flush_partial_assistant_message(false);
             state.mode = TuiMode::Idle;
-            state.scroll_locked = true;
-            state.scroll_offset = 0;
             vec![]
         }
         DomainEvent::StreamCancelled => {
@@ -1348,8 +1342,6 @@ fn domain_streaming(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
                 state.focus = Focus::MainInput;
             }
             state.mode = TuiMode::Idle;
-            state.scroll_locked = true;
-            state.scroll_offset = 0;
             vec![]
         }
         DomainEvent::ToolPending {
@@ -1485,8 +1477,6 @@ fn domain_aborting(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
                 state.focus = Focus::MainInput;
             }
             state.mode = TuiMode::Idle;
-            state.scroll_locked = true;
-            state.scroll_offset = 0;
             if std::mem::replace(&mut state.aborting_exit, false) {
                 vec![Effect::Quit]
             } else {
@@ -1581,8 +1571,6 @@ fn domain_aborting(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
         DomainEvent::StreamDone => {
             state.flush_partial_assistant_message(false);
             state.mode = TuiMode::Idle;
-            state.scroll_locked = true;
-            state.scroll_offset = 0;
             vec![]
         }
         DomainEvent::StreamChunk(text) => {
@@ -3382,6 +3370,39 @@ mod tests {
             &empty_textarea(),
         );
         assert_eq!(state.mode, TuiMode::Idle);
+    }
+
+    #[test]
+    fn domain_stream_done_preserves_manual_scroll_position() {
+        // Regression test: a response completing must not override a
+        // manual scroll-up (e.g. to view an earlier subagent bubble) by
+        // force-snapping the chat back to the bottom.
+        let mut state = AppState::new();
+        state.mode = TuiMode::Streaming;
+        state.scroll_locked = false;
+        state.scroll_offset = 12;
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::StreamDone),
+            &empty_textarea(),
+        );
+        assert!(!state.scroll_locked);
+        assert_eq!(state.scroll_offset, 12);
+    }
+
+    #[test]
+    fn domain_stream_cancelled_preserves_manual_scroll_position() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::Streaming;
+        state.scroll_locked = false;
+        state.scroll_offset = 12;
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::StreamCancelled),
+            &empty_textarea(),
+        );
+        assert!(!state.scroll_locked);
+        assert_eq!(state.scroll_offset, 12);
     }
 
     #[test]

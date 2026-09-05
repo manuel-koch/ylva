@@ -735,9 +735,9 @@ processing messages and tools while a child is active.
     no suspension of the parent ReAct loop while a child is active.
 
   > Implementation note: the `child_result` JSONL write on `AgentCommand::Stop`
-  > requires `Store` (Phase 6.11, not yet implemented as of Phase 6.9); the
+  > requires `Store` (Phase 6.12, not yet implemented as of Phase 6.9); the
   > cancelled-child case is logged via `tracing::info!` for now and will gain
-  > durable persistence when Phase 6.11 lands.
+  > durable persistence when Phase 6.12 lands.
 
 - [x] 69. Write unit tests: `spawn` returns `Queued` when a child is already running; multiple
   queued spawns are drained in FIFO order after each child finishes; `cancel_all` fires
@@ -746,7 +746,7 @@ processing messages and tools while a child is active.
   unstructured fallback when `agent_finish` never called.
 
   > `cancelled child writes child_result with status: "cancelled"` is deferred to
-  > Phase 6.11 alongside the `Store`-backed persistence it depends on; all other
+  > Phase 6.12 alongside the `Store`-backed persistence it depends on; all other
   > listed cases are covered (`src/child_agent_manager.rs`, `src/agent.rs`,
   > `src/agent_factory.rs` test modules).
 
@@ -863,11 +863,81 @@ chat; auto-switch only on child interactive pauses.
 
 ---
 
-### Phase 6.11 — Child-Agent Persistence
+### Phase 6.11 — TUI Module Rename & State Grouping
+
+**Goal:** Align `src/ui.rs`'s filename with its actual scope (ratatui widget drawing only —
+it is not the state-projection layer, that's `render.rs`, nor the render snapshot struct,
+that's `tui_render_state.rs`). Group `AppState` / `TuiState`'s flat, related fields into
+cohesive per-area sub-structs (help popup, child/header-bubble drill-in view, clarify
+banner, conversation-list/chat) so ownership is explicit, mirroring the existing
+`AppLayout` precedent. Public API, rendered behaviour, and keybindings are unchanged —
+internal restructuring only.
+
+- [ ] 80. Rename `src/ui.rs` to `src/tui_widgets.rs`. Update `src/lib.rs`
+  (`pub mod ui;` → `pub mod tui_widgets;`). Update every `crate::ui::` / `ui::` reference
+  across `src/render.rs`, `src/tui_reducer_state.rs`, `src/tui_render_state.rs`,
+  `tests/tui_render_state.rs`, and the module's own `//!` doc comment. Public function
+  names (`draw`, `draw_chat`, `draw_help_popup`, `draw_approval_footer`, `ButtonAreas`,
+  etc.) are unchanged — module-path rename only.
+
+- [ ] 81. Run `make test` + `make lint` to confirm the rename didn't break anything before
+  starting the state-grouping work below.
+
+- [ ] 82. Add a new ADR in `docs/architecture-design-records/` proposing the sub-struct
+  grouping: `HelpPopupState` (`show_help`, `help_scroll_offset`, `help_scroll_x`),
+  `ChildViewState` (`header_bubble_scroll_offset`, `header_bubble` rect, `child_view_bubble`,
+  `input_disabled_hint`), `ClarifyBannerState` (`pending_clarify`, `clarify_scroll_offset`,
+  `clarify_banner_drag`, `clarify_banner` rect), and `ConversationListState`
+  (`scroll_offset`, `scroll_locked`, `chat_area_height`, `chat_area` rect,
+  `chat_rendered_lines`, `chat_rendered_line_chrome_widths`, `chat_selection`,
+  `chat_drag_active`, `bubble_title_rows`, `thinking_title_rows`) shared by root and child
+  views. Record: which fields move, why (functional cohesion, matches user-facing area),
+  and the accepted asymmetry that `AppState` keeps on-screen rects in `AppLayout`
+  (hit-testing geometry, written once per frame by the Driver) while `TuiState` keeps its
+  rect fields alongside the data fields in the same per-area struct (no separate layout
+  type on the render-projection side) — so the two sub-struct definitions are analogous
+  per area, not identical types.
+
+- [ ] 83. Define the four new sub-structs in `src/tui_reducer_state.rs` next to
+  `AppLayout` (data-only, no rects — those stay in `AppLayout` per the ADR). Add them as
+  fields on `AppState` (e.g. `pub help_popup: HelpPopupState`, `pub child_view:
+  ChildViewState`, `pub clarify_banner_state: ClarifyBannerState` — named to avoid
+  clashing with the existing `layout.clarify_banner` rect field —, `pub conversation:
+  ConversationListState`), replacing the flat fields they absorb. Update `AppState::new()`.
+
+- [ ] 84. Update every read/write site of the absorbed fields across `src/presenter.rs`
+  and `src/tui_reducer_state.rs`'s own methods (e.g. `switch_to_child_view`,
+  `switch_to_root_view`, `header_bubble_scroll_up`/`_down`, `clarify_scroll_up`/`_down`,
+  `scroll_up`/`_down`, `scroll_to_bottom`) and `src/render.rs`
+  (`project_for_draw`/`sync_from_draw`). Field access becomes e.g.
+  `state.conversation.scroll_offset` instead of `state.scroll_offset`.
+
+- [ ] 85. Mirror the same four sub-structs (this time including their rect fields, per
+  the asymmetry recorded in the ADR) on `TuiState` in `src/tui_render_state.rs`,
+  replacing its flat fields. Update `TuiState::new()` and `clear_expired_toast`.
+
+- [ ] 86. Update every read/write site of the absorbed fields in `src/tui_widgets.rs`
+  (formerly `ui.rs`) and `src/render.rs`'s `project_for_draw`/`sync_from_draw` to match
+  the new `TuiState` shape.
+
+- [ ] 87. Update all existing unit tests in `src/tui_reducer_state.rs`, `src/render.rs`,
+  and `src/presenter.rs`, and integration tests in `tests/tui_render_state.rs` (wherever
+  they construct or assert on the absorbed fields directly) to use the new grouped field
+  paths. No test behaviour changes — field-path updates only.
+
+- [ ] 88. Update `docs/features.md` (and any other doc referencing the absorbed field
+  names or `src/ui.rs`) to the new module path and struct shapes.
+
+- [ ] 89. Run `make test` + `make test-coverage` + `make lint` — full suite must pass, no
+  coverage regression.
+
+---
+
+### Phase 6.12 — Child-Agent Persistence
 
 **Goal:** Durable `child_start` / `child_result` records in the parent session file.
 
-- [ ] 80. Create `src/store.rs` (Phase 6 minimal subset; full JSONL session store is Phase 7).
+- [ ] 90. Create `src/store.rs` (Phase 6 minimal subset; full JSONL session store is Phase 7).
   Define:
 
     ```rust
@@ -892,42 +962,42 @@ chat; auto-switch only on child interactive pauses.
     {"type":"child_result","v":1,"id":"<run-uuid>","parent_session":"<uuid>","status":"...","result":"...","sources":[...],"completed_at":"..."}
     ```
 
-- [ ] 81. Pass a `Arc<Store>` into `AgentLoop`. Call `append_child_start` from
+- [ ] 91. Pass a `Arc<Store>` into `AgentLoop`. Call `append_child_start` from
   `ChildAgentManager::spawn` and `append_child_result` from the `finish_rx` handler.
   Persistence errors are logged (non-fatal); they must not crash the agent.
 
-- [ ] 82. Write unit tests using `tempfile::tempdir()`: correct JSON shapes; two sequential calls
+- [ ] 92. Write unit tests using `tempfile::tempdir()`: correct JSON shapes; two sequential calls
   produce two valid JSONL lines; single-writer correctness confirmed by re-parsing lines.
 
-- [ ] 83. Update `docs/features.md`: document persistence records.
+- [ ] 93. Update `docs/features.md`: document persistence records.
 
-- [ ] 84. Run `make test` + `make test-coverage`.
+- [ ] 94. Run `make test` + `make test-coverage`.
 
 ---
 
-### Phase 6.12 — Headless `--allow-child-agents`
+### Phase 6.13 — Headless `--allow-child-agents`
 
 **Goal:** Enable child spawning in headless mode with safety-flag inheritance.
 
-- [ ] 85. Add `--allow-child-agents` boolean CLI flag in `src/main.rs` (via `clap`, default
+- [ ] 95. Add `--allow-child-agents` boolean CLI flag in `src/main.rs` (via `clap`, default
   `false`). Add `--auto-approve-spawn` boolean flag (default `false`). Pass both through
   to `ConsoleApp` / `cli_driver`. When `--allow-child-agents` is `false`, `ChildAgentManager`
   is `None` in `AgentLoop`; `spawn_subagent` is absent from the active tool registry.
   When `--auto-approve-spawn` is `true`, `spawn_subagent::needs_approval` returns
   `AutoApproved`; children inherit this flag alongside `--auto-approve-write`.
 
-- [ ] 86. When `--allow-child-agents` is active in headless mode, emit to stderr:
+- [ ] 96. When `--allow-child-agents` is active in headless mode, emit to stderr:
   - `Spawned child agent '<type>' for task '<task>'\n` on spawn.
   - `Queued child agent '<type>' for task '<task>'\n` when enqueued.
   - `Child agent '<type>' completed: <status>\n` on finish.
   - Safety inheritance: child agents inherit parent `--auto-approve-write` and
     `--auto-approve-spawn` flags.
 
-- [ ] 87. Run `make test` + `make test-coverage`.
+- [ ] 97. Run `make test` + `make test-coverage`.
 
 ---
 
-### Phase 6.13 — Token-Efficient Tool Schemas
+### Phase 6.14 — Token-Efficient Tool Schemas
 
 **Goal:** Minimise the token cost of every tool description and argument schema sent to
 the LLM. Descriptions must convey the full API contract (what the tool does, every
@@ -944,33 +1014,33 @@ Principles:
   imperative or declarative statements.
 - Remove all examples that duplicate information already in the type/constraint.
 - Cap total description length: aim for ≤120 tokens per tool, ≤30 tokens per argument.
-- [ ] 88. Audit every `fn description(&self) -> &str` implementation across all tools in
+- [ ] 98. Audit every `fn description(&self) -> &str` implementation across all tools in
   `src/agent/tools/` and `src/agent/tools.rs`. Rewrite each to be minimal: one-liner
   summary, followed only by what cannot be inferred from the JSON schema alone
   (e.g. side-effects, error conditions, non-obvious defaults). Remove prose entirely.
-- [ ] 89. Audit every `#[schemars(description = "...")]` and `///` doc-comment on
+- [ ] 99. Audit every `#[schemars(description = "...")]` and `///` doc-comment on
   `JsonSchema`-derived argument structs (`ReadFileArgs`, `WriteFileArgs`, `GlobArgs`,
   `BashArgs`, `SearchArgs`, `EditFileArgs`, `ClarifyArgs`, etc.). Rewrite to
   `"type — purpose; constraint"` format. Strip full sentences.
-- [ ] 90. Run `make lint` to confirm no compilation errors from description changes.
+- [ ] 100. Run `make lint` to confirm no compilation errors from description changes.
 
 ---
 
-### Phase 6.14 — Final Documentation
+### Phase 6.15 — Final Documentation
 
 **Goal:** Finalise all documentation for Phase 6; ensure every feature, flag, and
 ADR is recorded.
 
-- [ ] 91. Update `docs/features.md`: finalise all WIP notes from sub-phases; add
+- [ ] 101. Update `docs/features.md`: finalise all WIP notes from sub-phases; add
   `--allow-child-agents` documentation; verify every Phase 6 feature is described.
 
-- [ ] 92. Update `docs/configuration.md`: `--allow-child-agents` flag; `--auto-approve-spawn`
+- [ ] 102. Update `docs/configuration.md`: `--allow-child-agents` flag; `--auto-approve-spawn`
   flag; `can_spawn` agent-type key; `Sandbox` Phase 6 defaults (TOML config Phase 7).
 
-- [ ] 93. Run `rumdl fmt docs/features.md docs/keybindings.md docs/configuration.md
+- [ ] 103. Run `rumdl fmt docs/features.md docs/keybindings.md docs/configuration.md
   docs/plans/phase6-terminal-superpowers.md` and fix any findings.
 
-- [ ] 94. Run `make test` + `make test-coverage` — full suite must pass, all new modules ≥80%.
+- [ ] 104. Run `make test` + `make test-coverage` — full suite must pass, all new modules ≥80%.
 
 ## Implementation Hints
 
@@ -1025,7 +1095,7 @@ ADR is recorded.
 - **`Store` concurrency:** `Mutex<HashMap<Uuid, BufWriter<File>>>` — one entry per session
   file; serialize all writes to the same file through the mutex.
 - **`session_id: Uuid`:** added to `AgentLoop` in Phase 6.0 step 6 (`Uuid::new_v4()` in
-  `new()`); used by `Store` in Phase 6.11.
+  `new()`); used by `Store` in Phase 6.12.
 - **Drill-in auto-switch rule:** TUI stays in parent view on child spawn; parent remains
   active (processes messages and tools concurrently with child); auto-switches to child
   view only when the child needs user input (approval / clarify); auto-returns to parent
@@ -1033,7 +1103,7 @@ ADR is recorded.
 - **`AgentCommand::AnswerClarify(String)`:** new variant; `ApproveTool` match arms unchanged.
 - **Coverage gate:** `make test-coverage` fails below 80% — run after each sub-phase.
 - **ADR directory:** `docs/architecture-design-records/` is currently empty. Record two
-  new ADRs in Phase 6.14: one for pure-Rust `search` (no external binary dependency),
+  new ADRs in Phase 6.15: one for pure-Rust `search` (no external binary dependency),
   one for `SandboxContext` design (last-match-wins, normalization without filesystem hit,
   Phase 6 hardcoded defaults). UX decisions (drill-in model, `Section` enum, `clarify`
   choices) do not warrant ADRs.
