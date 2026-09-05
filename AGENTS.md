@@ -45,6 +45,7 @@ A Rust-based terminal UI that implements an agent-harness.
     "can we refactor Y", "what if Z" (and equivalent-intent phrases).
   - Imperatives — DO edit: "apply it", "do it", "go ahead", "fix it", "fix the bug",
     "implement it" (and equivalent-intent phrases)
+- Don't git branch/commit/stage anything without explicit user consent
 
 When consent applies to a multi-step task, complete all the steps the user asked
 for before reporting back; partial completion is not the same as completion.
