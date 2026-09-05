@@ -2675,6 +2675,15 @@ See reducer-state-handling-plan.md.
 
 - [ ] JSONL persistence for conversations, child agents, and schema-version handling (§4H)
 
+- [ ] Implement the `Store` (`src/store.rs`, §4H) as the single persistence path for
+      **both** main-conversation messages and child-agent records — do not build a
+      child-only persistence layer. Append `child_start` / `child_result` JSONL
+      records (shapes in §4G *Persistence* / §4H) to the parent session file via the
+      same writer used for conversation messages, keyed by `parent_session` +
+      `run_id`. This supersedes the child-persistence task originally planned as
+      Phase 6.12 in `docs/plans/phase6-terminal-superpowers.md`, dropped because it
+      had no main-session persistence to attach to.
+
 - [ ] Resume an existing session via explicit `--conversation-id` (no auto-resume, no picker)
 
 - [ ] Config hierarchy (`~/.ylva/profiles/default/config.toml`) for

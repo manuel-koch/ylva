@@ -104,12 +104,12 @@ tests.
 
 ## Backlog of issues discovered while testing
 
-- [ ] "Phase 6.12 Child-Agent Persistence" seems misplaced. Its topic is the
+- [x] "Phase 6.12 Child-Agent Persistence" seems misplaced. Its topic is the
       persistence of subagent conversation. But currently we have no persitence
       at all. The plan doesn't explain why we need this ( without main persistence
       in the first place ).
 
-- [ ] "Phase 6.13 — Headless" seem obsolete now, AFAIK we already have a CLI flag to
+- [x] "Phase 6.13 — Headless" seem obsolete now, AFAIK we already have a CLI flag to
       enable subagents.
 
 - [ ] When a tool approval arrives for a tool that was called from a subagent,
@@ -126,15 +126,6 @@ tests.
 - [x] Tool bubble in subagent-conversation-list can't be expanded/collapsed on
       click on title or the expand/collapse indicator.
       It works in the main conversation-list though.
-
-- [ ] Regarding implementation before phase 6.10 ( intermediate WIP, no drill-down
-      for subagent conversion-list yet avail ).
-      It looks like main agent and subagent replies/thinking are mixed up in TUI,
-      depending on timing within the llm responses ( more on strong/fast llm,
-      less on weaker/slow llm ).
-      I saw rapid interchanged assistent reply/thinking bubbles in TUI that
-      contained garbled/unrelated content as if reply/thinking of parent agent
-      is mixed with events of subagent.
 
 - [x] Noticable lag when clicking the subagent bubble expand/collapse, due to
       double-click detection.

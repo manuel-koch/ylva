@@ -28,13 +28,11 @@ After Phase 5 the agent has named engines, `AgentFactory`, `Engine`/`EngineImpl`
 8. `spawn_subagent` tool + `ChildAgentManager` (unbounded FIFO queue; one child active at
    a time; no nesting)
 9. `agent_finish` tool (child-only; unstructured fallback if never called)
-10. Child-agent persistence records (`child_start` / `child_result` JSONL) in parent session
-11. Drill-in TUI conversation model: child agent replaces main view with breadcrumb header
+10. Drill-in TUI conversation model: child agent replaces main view with breadcrumb header
     and "back" button; parent chat shows a clickable spawn-bubble; auto-switch on interactive
     child pauses (approval / `clarify`); parent continues running concurrently while a child
     is active; `spawn_subagent` returns immediately and child `agent_finish` arrives as an async
     observation
-12. `--allow-child-agents` headless flag; stderr status lines for child lifecycle
 
 **Motivation:** Phase 5 delivered the interface seams (`AgentFactory`, `Engine`, `Role`
 stubs). Phase 6 fills in the tool implementations, safety machinery, and delegation
@@ -75,9 +73,11 @@ mechanics, making Ylva capable of editing code autonomously while remaining huma
   and `--auto-approve-write` flags. No blanket `--auto-approve-all` flag exists.
 - `agent_finish` terminates the child's ReAct loop (uses same max-iterations limit as parent);
   unstructured fallback activates on timeout or max iterations.
-- `child_start` / `child_result` JSONL records are appended to the parent session file.
-  Cancelled children (parent stopped, or queue drained) write a `child_result` record
-  with `status: "cancelled"`.
+- Child-agent persistence (`child_start` / `child_result` JSONL records, including a
+  `status: "cancelled"` record for children cancelled by parent stop or queue drain) is
+  deferred to Phase 7, where it lands together with main-session persistence under the
+  unified `Store` (§4H, `docs/blueprint.md` Phase 7) — Phase 6 has no main-session
+  persistence to attach child records to.
 - Viewing a child's conversation: full-screen drill-in with non-scrolling breadcrumb header
   and "← Back (Ctrl+B)" button; parent continues processing messages and tools while a
   child is active.
@@ -88,7 +88,6 @@ mechanics, making Ylva capable of editing code autonomously while remaining huma
 - TUI auto-switches to child view when the child needs user input; auto-returns to the
   previous view only if the switch was automatic (manual navigation stays).
 - Child interactive pauses take precedence over parent interactive pauses.
-- `--allow-child-agents` enables child spawning in headless mode (disabled by default).
 - `--auto-approve-spawn` bypasses approval for `spawn_subagent`; children inherit it.
 - All existing tests pass; new modules meet ≥80% line-coverage threshold.
 - `docs/features.md`, `docs/configuration.md`, and `docs/keybindings.md` are updated
@@ -735,9 +734,10 @@ processing messages and tools while a child is active.
     no suspension of the parent ReAct loop while a child is active.
 
   > Implementation note: the `child_result` JSONL write on `AgentCommand::Stop`
-  > requires `Store` (Phase 6.12, not yet implemented as of Phase 6.9); the
-  > cancelled-child case is logged via `tracing::info!` for now and will gain
-  > durable persistence when Phase 6.12 lands.
+  > requires the unified `Store` (§4H), which does not exist in Phase 6 — there is
+  > no main-session persistence yet either. The cancelled-child case is logged via
+  > `tracing::info!` for now; durable persistence for both main-conversation and
+  > child-agent records lands together in Phase 7 (see `docs/blueprint.md` Phase 7).
 
 - [x] 69. Write unit tests: `spawn` returns `Queued` when a child is already running; multiple
   queued spawns are drained in FIFO order after each child finishes; `cancel_all` fires
@@ -746,8 +746,9 @@ processing messages and tools while a child is active.
   unstructured fallback when `agent_finish` never called.
 
   > `cancelled child writes child_result with status: "cancelled"` is deferred to
-  > Phase 6.12 alongside the `Store`-backed persistence it depends on; all other
-  > listed cases are covered (`src/child_agent_manager.rs`, `src/agent.rs`,
+  > Phase 7 alongside the unified `Store`-backed persistence it depends on (no
+  > main-session persistence exists in Phase 6 to attach child records to); all
+  > other listed cases are covered (`src/child_agent_manager.rs`, `src/agent.rs`,
   > `src/agent_factory.rs` test modules).
 
 - [x] 70. Update `docs/features.md`: add child-agent delegation section.
@@ -933,71 +934,22 @@ internal restructuring only.
 
 ---
 
-### Phase 6.12 — Child-Agent Persistence
+> **Dropped: Child-Agent Persistence / Headless `--allow-child-agents`.** Two
+> sub-phases previously planned here were removed:
+>
+> - *Child-Agent Persistence* would have added a child-only `Store` writing
+>   `child_start` / `child_result` JSONL records, but Phase 6 has **no main-session
+>   persistence** to attach those records to, and the plan never justified
+>   persisting child records in isolation. Durable persistence for **both**
+>   main-conversation and child-agent records is now tracked together under the
+>   unified `Store` (§4H) in `docs/blueprint.md` Phase 7.
+> - *Headless `--allow-child-agents`* is obsolete: headless mode
+>   (`ConsoleApp`/`cli_driver.rs`) already wires `ChildAgentManager` and
+>   `spawn_subagent` unconditionally (`can_spawn: true`, no gating flag), and
+>   `--auto-approve-spawn` is already implemented (`src/main.rs`,
+>   `src/agent_factory.rs`). No new flag was needed.
 
-**Goal:** Durable `child_start` / `child_result` records in the parent session file.
-
-- [ ] 90. Create `src/store.rs` (Phase 6 minimal subset; full JSONL session store is Phase 7).
-  Define:
-
-    ```rust
-    pub struct Store {
-        /// One entry per session file, serialized via Mutex<BufWriter<File>>.
-        files: Mutex<HashMap<Uuid, BufWriter<File>>>,
-    }
-    impl Store {
-        pub fn append_child_start(&self, session_id, run_id, agent_type, task)
-            -> anyhow::Result<()>
-        pub fn append_child_result(&self, session_id, run_id, status, result, sources)
-            -> anyhow::Result<()>
-    }
-    ```
-
-  Both methods: acquire the `Mutex`; open or reuse a `BufWriter<File>` for
-  `~/.ylva/sessions/<session_id>.jsonl` (create dirs if absent); append one JSONL line;
-  flush. Follow blueprint §4H shapes:
-
-    ```json
-    {"type":"child_start","v":1,"id":"<run-uuid>","parent_session":"<uuid>","agent_type":"...","task":"...","created_at":"..."}
-    {"type":"child_result","v":1,"id":"<run-uuid>","parent_session":"<uuid>","status":"...","result":"...","sources":[...],"completed_at":"..."}
-    ```
-
-- [ ] 91. Pass a `Arc<Store>` into `AgentLoop`. Call `append_child_start` from
-  `ChildAgentManager::spawn` and `append_child_result` from the `finish_rx` handler.
-  Persistence errors are logged (non-fatal); they must not crash the agent.
-
-- [ ] 92. Write unit tests using `tempfile::tempdir()`: correct JSON shapes; two sequential calls
-  produce two valid JSONL lines; single-writer correctness confirmed by re-parsing lines.
-
-- [ ] 93. Update `docs/features.md`: document persistence records.
-
-- [ ] 94. Run `make test` + `make test-coverage`.
-
----
-
-### Phase 6.13 — Headless `--allow-child-agents`
-
-**Goal:** Enable child spawning in headless mode with safety-flag inheritance.
-
-- [ ] 95. Add `--allow-child-agents` boolean CLI flag in `src/main.rs` (via `clap`, default
-  `false`). Add `--auto-approve-spawn` boolean flag (default `false`). Pass both through
-  to `ConsoleApp` / `cli_driver`. When `--allow-child-agents` is `false`, `ChildAgentManager`
-  is `None` in `AgentLoop`; `spawn_subagent` is absent from the active tool registry.
-  When `--auto-approve-spawn` is `true`, `spawn_subagent::needs_approval` returns
-  `AutoApproved`; children inherit this flag alongside `--auto-approve-write`.
-
-- [ ] 96. When `--allow-child-agents` is active in headless mode, emit to stderr:
-  - `Spawned child agent '<type>' for task '<task>'\n` on spawn.
-  - `Queued child agent '<type>' for task '<task>'\n` when enqueued.
-  - `Child agent '<type>' completed: <status>\n` on finish.
-  - Safety inheritance: child agents inherit parent `--auto-approve-write` and
-    `--auto-approve-spawn` flags.
-
-- [ ] 97. Run `make test` + `make test-coverage`.
-
----
-
-### Phase 6.14 — Token-Efficient Tool Schemas
+### Phase 6.12 — Token-Efficient Tool Schemas
 
 **Goal:** Minimise the token cost of every tool description and argument schema sent to
 the LLM. Descriptions must convey the full API contract (what the tool does, every
@@ -1014,33 +966,33 @@ Principles:
   imperative or declarative statements.
 - Remove all examples that duplicate information already in the type/constraint.
 - Cap total description length: aim for ≤120 tokens per tool, ≤30 tokens per argument.
-- [ ] 98. Audit every `fn description(&self) -> &str` implementation across all tools in
+- [ ] 90. Audit every `fn description(&self) -> &str` implementation across all tools in
   `src/agent/tools/` and `src/agent/tools.rs`. Rewrite each to be minimal: one-liner
   summary, followed only by what cannot be inferred from the JSON schema alone
   (e.g. side-effects, error conditions, non-obvious defaults). Remove prose entirely.
-- [ ] 99. Audit every `#[schemars(description = "...")]` and `///` doc-comment on
+- [ ] 91. Audit every `#[schemars(description = "...")]` and `///` doc-comment on
   `JsonSchema`-derived argument structs (`ReadFileArgs`, `WriteFileArgs`, `GlobArgs`,
   `BashArgs`, `SearchArgs`, `EditFileArgs`, `ClarifyArgs`, etc.). Rewrite to
   `"type — purpose; constraint"` format. Strip full sentences.
-- [ ] 100. Run `make lint` to confirm no compilation errors from description changes.
+- [ ] 92. Run `make lint` to confirm no compilation errors from description changes.
 
 ---
 
-### Phase 6.15 — Final Documentation
+### Phase 6.13 — Final Documentation
 
 **Goal:** Finalise all documentation for Phase 6; ensure every feature, flag, and
 ADR is recorded.
 
-- [ ] 101. Update `docs/features.md`: finalise all WIP notes from sub-phases; add
-  `--allow-child-agents` documentation; verify every Phase 6 feature is described.
+- [ ] 93. Update `docs/features.md`: finalise all WIP notes from sub-phases; verify every
+  Phase 6 feature is described.
 
-- [ ] 102. Update `docs/configuration.md`: `--allow-child-agents` flag; `--auto-approve-spawn`
-  flag; `can_spawn` agent-type key; `Sandbox` Phase 6 defaults (TOML config Phase 7).
+- [ ] 94. Update `docs/configuration.md`: `--auto-approve-spawn` flag; `can_spawn`
+  agent-type key; `Sandbox` Phase 6 defaults (TOML config Phase 7).
 
-- [ ] 103. Run `rumdl fmt docs/features.md docs/keybindings.md docs/configuration.md
+- [ ] 95. Run `rumdl fmt docs/features.md docs/keybindings.md docs/configuration.md
   docs/plans/phase6-terminal-superpowers.md` and fix any findings.
 
-- [ ] 104. Run `make test` + `make test-coverage` — full suite must pass, all new modules ≥80%.
+- [ ] 96. Run `make test` + `make test-coverage` — full suite must pass, all new modules ≥80%.
 
 ## Implementation Hints
 
@@ -1092,10 +1044,9 @@ ADR is recorded.
   at startup; passes `Sender<FinishResult>` to `ChildAgentManager::new`; keeps
   `Receiver<FinishResult>` in its own `select!` loop. This design is forward-compatible
   with child-in-child (future phases).
-- **`Store` concurrency:** `Mutex<HashMap<Uuid, BufWriter<File>>>` — one entry per session
-  file; serialize all writes to the same file through the mutex.
 - **`session_id: Uuid`:** added to `AgentLoop` in Phase 6.0 step 6 (`Uuid::new_v4()` in
-  `new()`); used by `Store` in Phase 6.12.
+  `new()`); the unified `Store` (§4H) that will use it for both main-session and
+  child-agent persistence is deferred to Phase 7 (see `docs/blueprint.md`).
 - **Drill-in auto-switch rule:** TUI stays in parent view on child spawn; parent remains
   active (processes messages and tools concurrently with child); auto-switches to child
   view only when the child needs user input (approval / clarify); auto-returns to parent
@@ -1103,7 +1054,7 @@ ADR is recorded.
 - **`AgentCommand::AnswerClarify(String)`:** new variant; `ApproveTool` match arms unchanged.
 - **Coverage gate:** `make test-coverage` fails below 80% — run after each sub-phase.
 - **ADR directory:** `docs/architecture-design-records/` is currently empty. Record two
-  new ADRs in Phase 6.15: one for pure-Rust `search` (no external binary dependency),
+  new ADRs in Phase 6.13: one for pure-Rust `search` (no external binary dependency),
   one for `SandboxContext` design (last-match-wins, normalization without filesystem hit,
   Phase 6 hardcoded defaults). UX decisions (drill-in model, `Section` enum, `clarify`
   choices) do not warrant ADRs.
