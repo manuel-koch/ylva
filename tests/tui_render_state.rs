@@ -654,6 +654,113 @@ fn footer_says_subagent_working_while_child_is_only_streaming() {
     );
 }
 
+/// While viewing a child that is streaming extended-thinking/reasoning text
+/// (no visible reply yet), the footer must say "Subagent thinking…" rather
+/// than the generic "Subagent working…" — mirrors the root's own
+/// "Thinking…"/"Streaming…" distinction, now that the child's own
+/// `partial_thinking_text` is projected separately from its
+/// `partial_assistant_text` (see `render::project_for_draw`).
+#[test]
+fn footer_says_subagent_thinking_while_child_streams_thinking_text() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_widgets;
+    use ylva::{AgentMode, ToolCallState};
+
+    let backend = TestBackend::new(60, 20);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+
+    let mut state = ylva::TuiState {
+        agent_mode: AgentMode::ToolRunning,
+        child_view: ylva::tui_render_state::ChildViewState {
+            child_view_bubble: Some((
+                uuid::Uuid::new_v4(),
+                "spawn_subagent".to_string(),
+                ToolCallState::Running {
+                    arguments: serde_json::json!({}),
+                    content_sections: vec![],
+                    title_arguments: vec![],
+                    progress_arguments: vec![],
+                },
+                false,
+            )),
+            ..ylva::TuiState::new().child_view
+        },
+        partial_thinking_text: "pondering the flaky test...".to_string(),
+        ..ylva::TuiState::new()
+    };
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("draw");
+
+    let buf = terminal.backend().buffer().clone();
+    let rendered: String = (0..20u16)
+        .flat_map(|y| (0..60u16).map(move |x| (x, y)))
+        .map(|(x, y)| buf.cell((x, y)).unwrap().symbol().to_string())
+        .collect();
+    assert!(
+        rendered.contains("Subagent thinking"),
+        "footer must say the subagent is thinking, not generically working: {rendered:?}"
+    );
+}
+
+/// While viewing a child that is streaming its visible reply text, the
+/// footer must say "Subagent streaming…" rather than the generic "Subagent
+/// working…" — mirrors the root's own wording for the same case.
+#[test]
+fn footer_says_subagent_streaming_while_child_streams_response_text() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_widgets;
+    use ylva::{AgentMode, ToolCallState};
+
+    let backend = TestBackend::new(60, 20);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+
+    let mut state = ylva::TuiState {
+        agent_mode: AgentMode::ToolRunning,
+        child_view: ylva::tui_render_state::ChildViewState {
+            child_view_bubble: Some((
+                uuid::Uuid::new_v4(),
+                "spawn_subagent".to_string(),
+                ToolCallState::Running {
+                    arguments: serde_json::json!({}),
+                    content_sections: vec![],
+                    title_arguments: vec![],
+                    progress_arguments: vec![],
+                },
+                false,
+            )),
+            ..ylva::TuiState::new().child_view
+        },
+        partial_assistant_text: "here is what I found so far".to_string(),
+        ..ylva::TuiState::new()
+    };
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("draw");
+
+    let buf = terminal.backend().buffer().clone();
+    let rendered: String = (0..20u16)
+        .flat_map(|y| (0..60u16).map(move |x| (x, y)))
+        .map(|(x, y)| buf.cell((x, y)).unwrap().symbol().to_string())
+        .collect();
+    assert!(
+        rendered.contains("Subagent streaming"),
+        "footer must say the subagent is streaming, not generically working: {rendered:?}"
+    );
+}
+
 /// The child-view header re-renders the root `spawn_subagent` `ToolBubble`
 /// with a shortened `"Subagent"` title instead of the plain title-cased
 /// `"Spawn Subagent"` — the header sits directly above the subagent's own

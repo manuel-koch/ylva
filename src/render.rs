@@ -84,24 +84,31 @@ fn project_for_draw(state: &AppState) -> TuiState {
         ConversationView::Child { run_id, .. } => Some(*run_id),
         ConversationView::Root => None,
     };
-    let (chat_entries, partial_assistant_text, partial_thinking_text, thinking_started_at) =
-        if let Some(conversation) =
-            showing_child_run_id.and_then(|run_id| state.child_conversations.get(&run_id))
-        {
-            (
-                conversation.messages.clone(),
-                conversation.partial_text.clone(),
-                String::new(),
-                None,
-            )
-        } else {
-            (
-                state.chat_entries.clone(),
-                state.partial_assistant_text.clone(),
-                state.partial_thinking_text.clone(),
-                state.thinking_started_at,
-            )
-        };
+    let (
+        chat_entries,
+        partial_assistant_text,
+        partial_thinking_text,
+        thinking_started_at,
+        partial_thinking_collapsed,
+    ) = if let Some(conversation) =
+        showing_child_run_id.and_then(|run_id| state.child_conversations.get(&run_id))
+    {
+        (
+            conversation.messages.clone(),
+            conversation.turn_buffer.partial_assistant_text.clone(),
+            conversation.turn_buffer.partial_thinking_text.clone(),
+            conversation.turn_buffer.thinking_started_at,
+            conversation.turn_buffer.partial_thinking_collapsed,
+        )
+    } else {
+        (
+            state.chat_entries.clone(),
+            state.turn_buffer.partial_assistant_text.clone(),
+            state.turn_buffer.partial_thinking_text.clone(),
+            state.turn_buffer.thinking_started_at,
+            state.turn_buffer.partial_thinking_collapsed,
+        )
+    };
     // Drill-in conversation model (Phase 6.10): the child-view header
     // re-renders the *real* `spawn_subagent` `ToolBubble` from the root
     // conversation — same chrome, same collapsed state, same task/label/
@@ -128,7 +135,7 @@ fn project_for_draw(state: &AppState) -> TuiState {
         partial_assistant_text,
         partial_thinking_text,
         thinking_started_at,
-        partial_thinking_collapsed: state.partial_thinking_collapsed,
+        partial_thinking_collapsed,
         queued_steer_texts: state.queued_steer_texts.clone(),
         steer_indicator: state.steer_indicator,
         pending_approval,

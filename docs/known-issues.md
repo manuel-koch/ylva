@@ -240,12 +240,20 @@ tests.
       approval, and afterwards return to the subagent the user was viewing before
       the approval request arrived.
 
-- [ ] Subagent just renders "Subagent working..." regardless of whether it is
+- [x] Subagent just renders "Subagent working..." regardless of whether it is
       streaming or thinking. Can we apply the same for the main conversation-list,
       using "Working..." ?
+      Resolved by giving each child conversation its own `TurnBuffer`
+      (shared with the root conversation) so it tracks thinking vs. response
+      text separately instead of merging both into one blob. The footer now
+      says "Subagent thinking…" / "Subagent streaming…" while drilled into a
+      child's transcript, falling back to "Subagent working…" only before its
+      first token arrives. The root's own "Thinking…"/"Streaming…" wording was
+      left as-is (kept, not replaced with a generic "Working…") since it was
+      already correct and more informative.
 
 - [ ] We should split `src/agent/tools/fs.rs` into one module per tool.
-      "edit" and "search" are filesystem related tools too, but they already
+      "edit" and "search" are filesystem related tools too and they already
       have a dedicated module.
 
 ## Code style smell

@@ -239,6 +239,12 @@ pub enum UiUpdate {
     ChildAgentToken {
         run_id: Uuid,
         text: String,
+        /// `true` when this fragment came from `AppendThinking` (extended
+        /// reasoning), `false` for `AppendText` (visible reply text) — lets
+        /// the child's own `TurnBuffer` route it to the right accumulator,
+        /// mirroring how the root distinguishes `StreamChunk` from
+        /// `StreamThinkingChunk`.
+        is_thinking: bool,
     },
     /// The child agent run identified by `run_id` has finished
     /// (successfully, with an error, or via the "unstructured" fallback).
@@ -1197,13 +1203,31 @@ impl AgentLoop {
                         // (tool approvals/progress/errors, already stamped
                         // with the child's own `run_id`) is forwarded as-is.
                         match update {
-                            UiUpdate::AppendText(text) | UiUpdate::AppendThinking(text) => {
+                            UiUpdate::AppendText(text) => {
                                 if let Some(run_id) = child_agent_manager
                                     .as_ref()
                                     .and_then(|manager| manager.running_run_id())
                                 {
                                     let _ = ui_tx
-                                        .send(UiUpdate::ChildAgentToken { run_id, text })
+                                        .send(UiUpdate::ChildAgentToken {
+                                            run_id,
+                                            text,
+                                            is_thinking: false,
+                                        })
+                                        .await;
+                                }
+                            }
+                            UiUpdate::AppendThinking(text) => {
+                                if let Some(run_id) = child_agent_manager
+                                    .as_ref()
+                                    .and_then(|manager| manager.running_run_id())
+                                {
+                                    let _ = ui_tx
+                                        .send(UiUpdate::ChildAgentToken {
+                                            run_id,
+                                            text,
+                                            is_thinking: true,
+                                        })
                                         .await;
                                 }
                             }

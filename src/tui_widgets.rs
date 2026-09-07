@@ -2444,8 +2444,12 @@ fn draw_normal_footer(
         // streaming/thinking. Only keep the plain "Running tool…" word when
         // the child's own transcript (already projected into
         // `state.chat_entries` while viewing it) shows one of *its own* tool
-        // bubbles still `Running`; otherwise say explicitly that the
-        // subagent is working.
+        // bubbles still `Running`; otherwise say explicitly whether the
+        // subagent is thinking, streaming, or (before its first token
+        // arrives) just generically working — `state.partial_thinking_text`/
+        // `state.partial_assistant_text` are the *child's own* accumulators
+        // here (see `render::project_for_draw`'s child projection), not the
+        // root's.
         Some((_, _, ToolCallState::Running { .. }, _)) => {
             let child_running_own_tool = state.chat_entries.iter().any(|entry| {
                 matches!(
@@ -2455,6 +2459,12 @@ fn draw_normal_footer(
             });
             if child_running_own_tool {
                 "Running tool…"
+            } else if !state.partial_thinking_text.is_empty()
+                && state.partial_assistant_text.is_empty()
+            {
+                "Subagent thinking…"
+            } else if !state.partial_assistant_text.is_empty() {
+                "Subagent streaming…"
             } else {
                 "Subagent working…"
             }

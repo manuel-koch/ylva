@@ -945,9 +945,21 @@ fn domain_child_lifecycle(state: &mut AppState, event: DomainEvent) -> Vec<Effec
             // the transcript's first turn would just repeat the same text.
             vec![]
         }
-        DomainEvent::ChildAgentToken { run_id, text } => {
+        DomainEvent::ChildAgentToken {
+            run_id,
+            text,
+            is_thinking,
+        } => {
             if let Some(conversation) = state.child_conversations.get_mut(&run_id) {
-                conversation.partial_text.push_str(&text);
+                if is_thinking {
+                    conversation
+                        .turn_buffer
+                        .push_thinking_chunk(&text, &mut conversation.messages);
+                } else {
+                    conversation
+                        .turn_buffer
+                        .push_response_chunk(&text, &mut conversation.messages);
+                }
             }
             vec![]
         }
@@ -1091,8 +1103,8 @@ fn domain_idle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
         DomainEvent::StreamStarted => {
             state.flush_partial_assistant_message(false);
             state.mode = TuiMode::Streaming;
-            state.partial_assistant_text.clear();
-            state.partial_thinking_text.clear();
+            state.turn_buffer.partial_assistant_text.clear();
+            state.turn_buffer.partial_thinking_text.clear();
             vec![]
         }
         DomainEvent::ToolPending {
@@ -1207,8 +1219,8 @@ fn domain_pending(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
         DomainEvent::StreamStarted => {
             state.flush_partial_assistant_message(false);
             state.mode = TuiMode::Streaming;
-            state.partial_assistant_text.clear();
-            state.partial_thinking_text.clear();
+            state.turn_buffer.partial_assistant_text.clear();
+            state.turn_buffer.partial_thinking_text.clear();
             vec![]
         }
         DomainEvent::StreamDone => {
@@ -1335,26 +1347,24 @@ fn domain_streaming(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
         DomainEvent::StreamChunk(text) => {
             // A response chunk following pending thinking text means the
             // model just finished a thinking segment and switched to reply
-            // text — flush that segment into its own bubble now, rather than
-            // merging it with whatever thinking segment follows later in the
-            // same turn.
-            state.flush_partial_thinking_message();
-            state.partial_assistant_text.push_str(&text);
+            // text — `push_response_chunk` flushes that segment into its own
+            // bubble first, rather than merging it with whatever thinking
+            // segment follows later in the same turn.
+            state
+                .turn_buffer
+                .push_response_chunk(&text, &mut state.chat_entries);
             if state.conversation.scroll_locked {
                 state.conversation.scroll_offset = 0;
             }
             vec![]
         }
         DomainEvent::StreamThinkingChunk(text) => {
-            // Mirrors the flush above: a thinking chunk following pending
-            // response text means the model switched back to thinking, so
-            // flush the reply segment so far into its own bubble.
-            state.flush_partial_response_message();
-            if state.partial_thinking_text.is_empty() {
-                state.thinking_started_at = Some(std::time::Instant::now());
-                state.partial_thinking_collapsed = false;
-            }
-            state.partial_thinking_text.push_str(&text);
+            // Mirrors the flush above: `push_thinking_chunk` flushes any
+            // pending reply segment so far into its own bubble when the
+            // model switches back to thinking.
+            state
+                .turn_buffer
+                .push_thinking_chunk(&text, &mut state.chat_entries);
             if state.conversation.scroll_locked {
                 state.conversation.scroll_offset = 0;
             }
@@ -1605,17 +1615,15 @@ fn domain_aborting(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             vec![]
         }
         DomainEvent::StreamChunk(text) => {
-            state.flush_partial_thinking_message();
-            state.partial_assistant_text.push_str(&text);
+            state
+                .turn_buffer
+                .push_response_chunk(&text, &mut state.chat_entries);
             vec![]
         }
         DomainEvent::StreamThinkingChunk(text) => {
-            state.flush_partial_response_message();
-            if state.partial_thinking_text.is_empty() {
-                state.thinking_started_at = Some(std::time::Instant::now());
-                state.partial_thinking_collapsed = false;
-            }
-            state.partial_thinking_text.push_str(&text);
+            state
+                .turn_buffer
+                .push_thinking_chunk(&text, &mut state.chat_entries);
             vec![]
         }
         DomainEvent::ConfirmExpired => vec![],
@@ -3343,8 +3351,8 @@ mod tests {
     #[test]
     fn click_on_streaming_thinking_bubble_title_row_toggles_partial_collapsed() {
         let mut state = AppState::new();
-        state.partial_thinking_text = "pondering...".to_string();
-        state.partial_thinking_collapsed = false;
+        state.turn_buffer.partial_thinking_text = "pondering...".to_string();
+        state.turn_buffer.partial_thinking_collapsed = false;
         // (start_row=0, end_row=2, sentinel index) — title row is start + 1 = 1.
         state.conversation.thinking_title_rows = vec![(
             0,
@@ -3368,7 +3376,7 @@ mod tests {
         };
         update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
 
-        assert!(state.partial_thinking_collapsed);
+        assert!(state.turn_buffer.partial_thinking_collapsed);
     }
 
     /// Sets up `state` with a single `spawn_subagent` `ToolBubble` at
@@ -3584,9 +3592,9 @@ mod tests {
             TuiEvent::Domain(DomainEvent::StreamThinkingChunk("pondering...".to_string())),
             &empty_textarea(),
         );
-        assert_eq!(state.partial_thinking_text, "pondering...");
+        assert_eq!(state.turn_buffer.partial_thinking_text, "pondering...");
         assert!(
-            state.partial_assistant_text.is_empty(),
+            state.turn_buffer.partial_assistant_text.is_empty(),
             "thinking must not contaminate the assistant text accumulator"
         );
         assert_eq!(
@@ -3633,16 +3641,79 @@ mod tests {
     }
 
     #[test]
+    fn child_agent_token_interleaved_thinking_and_response_flush_into_separate_bubbles_in_order() {
+        // Mirrors `domain_streaming_interleaved_thinking_and_response_flush_into_separate_bubbles_in_order`
+        // for a child conversation: `ChildAgentToken`'s `is_thinking` flag must
+        // route each fragment to the child's own `TurnBuffer` the same way the
+        // root's `StreamThinkingChunk`/`StreamChunk` do, rather than merging
+        // thinking and response text into a single blob (the bug this test
+        // guards against).
+        let mut state = AppState::new();
+        let run_id = Uuid::new_v4();
+        state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id: Uuid::new_v4(),
+            agent_type: "reviewer".to_string(),
+            task: "look into flaky test".to_string(),
+            label: "Investigate flaky test".to_string(),
+        });
+        for (text, is_thinking) in [
+            ("first thought", true),
+            ("first reply", false),
+            ("second thought", true),
+            ("second reply", false),
+        ] {
+            update(
+                &mut state,
+                TuiEvent::Domain(DomainEvent::ChildAgentToken {
+                    run_id,
+                    text: text.to_string(),
+                    is_thinking,
+                }),
+                &empty_textarea(),
+            );
+        }
+        state.flush_child_partial_text(run_id);
+
+        let conversation = state
+            .child_conversations
+            .get(&run_id)
+            .expect("conversation");
+        assert_eq!(
+            conversation.messages.len(),
+            4,
+            "{:?}",
+            conversation.messages
+        );
+        assert!(matches!(
+            &conversation.messages[0],
+            ChatEntry::ThinkingMessage { text, .. } if text == "first thought"
+        ));
+        assert!(matches!(
+            &conversation.messages[1],
+            ChatEntry::AssistantMessage { text, .. } if text == "first reply"
+        ));
+        assert!(matches!(
+            &conversation.messages[2],
+            ChatEntry::ThinkingMessage { text, .. } if text == "second thought"
+        ));
+        assert!(matches!(
+            &conversation.messages[3],
+            ChatEntry::AssistantMessage { text, .. } if text == "second reply"
+        ));
+    }
+
+    #[test]
     fn domain_stream_started_clears_partial_thinking_text() {
         let mut state = AppState::new();
         state.mode = TuiMode::Pending;
-        state.partial_thinking_text = "stale thinking".to_string();
+        state.turn_buffer.partial_thinking_text = "stale thinking".to_string();
         update(
             &mut state,
             TuiEvent::Domain(DomainEvent::StreamStarted),
             &empty_textarea(),
         );
-        assert!(state.partial_thinking_text.is_empty());
+        assert!(state.turn_buffer.partial_thinking_text.is_empty());
     }
 
     #[test]
@@ -3655,8 +3726,8 @@ mod tests {
         // StreamDone, at the very end of the whole tool-using turn).
         let mut state = AppState::new();
         state.mode = TuiMode::Streaming;
-        state.partial_thinking_text = "deciding to read the file".to_string();
-        state.thinking_started_at = Some(std::time::Instant::now());
+        state.turn_buffer.partial_thinking_text = "deciding to read the file".to_string();
+        state.turn_buffer.thinking_started_at = Some(std::time::Instant::now());
         let tool_id = Uuid::new_v4();
         update(
             &mut state,
@@ -3672,7 +3743,7 @@ mod tests {
         );
 
         assert!(
-            state.partial_thinking_text.is_empty(),
+            state.turn_buffer.partial_thinking_text.is_empty(),
             "thinking must be flushed, not left dangling"
         );
         assert_eq!(
@@ -4073,7 +4144,7 @@ mod tests {
             "DoublePressAbort must survive a StreamChunk"
         );
         assert_eq!(
-            state.partial_assistant_text, "hello",
+            state.turn_buffer.partial_assistant_text, "hello",
             "chunk must still be appended"
         );
     }

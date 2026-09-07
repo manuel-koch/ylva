@@ -262,9 +262,14 @@ fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
             task: task.clone(),
             label: label.clone(),
         }),
-        UiUpdate::ChildAgentToken { run_id, text } => Some(DomainEvent::ChildAgentToken {
+        UiUpdate::ChildAgentToken {
+            run_id,
+            text,
+            is_thinking,
+        } => Some(DomainEvent::ChildAgentToken {
             run_id: *run_id,
             text: text.clone(),
+            is_thinking: *is_thinking,
         }),
         UiUpdate::ChildAgentDone {
             run_id,
@@ -533,10 +538,10 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
     TuiState {
         agent_mode,
         chat_entries: app.chat_entries,
-        partial_assistant_text: app.partial_assistant_text,
-        partial_thinking_text: app.partial_thinking_text,
-        thinking_started_at: app.thinking_started_at,
-        partial_thinking_collapsed: app.partial_thinking_collapsed,
+        partial_assistant_text: app.turn_buffer.partial_assistant_text,
+        partial_thinking_text: app.turn_buffer.partial_thinking_text,
+        thinking_started_at: app.turn_buffer.thinking_started_at,
+        partial_thinking_collapsed: app.turn_buffer.partial_thinking_collapsed,
         queued_steer_texts: app.queued_steer_texts,
         steer_indicator: app.steer_indicator,
         pending_approval: None,

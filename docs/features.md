@@ -569,14 +569,19 @@ exit.
   case the footer overrides it with `"Subagent done, parent working…"`
   instead. Once the root also goes idle, the plain `"Idle"` word is already
   unambiguous, so the override doesn't apply then.
-- **Footer says "Subagent working…" instead of "Running tool…" while a live
-  child is merely streaming/thinking:** the root's `agent_mode` reports
-  `ToolRunning` (`"Running tool…"`) for as long as the `spawn_subagent`
-  bubble is `Running` — correct for the *root* footer, but misleading while
-  drilled into the child's own transcript, where it would imply the child
-  itself is executing a tool. The footer only keeps `"Running tool…"` there
-  when the child's own transcript shows one of *its own* tool bubbles still
-  `Running`; otherwise it shows `"Subagent working…"`.
+- **Footer says "Subagent thinking…"/"Subagent streaming…" instead of
+  "Running tool…" while a live child is merely streaming/thinking:** the
+  root's `agent_mode` reports `ToolRunning` (`"Running tool…"`) for as long
+  as the `spawn_subagent` bubble is `Running` — correct for the *root*
+  footer, but misleading while drilled into the child's own transcript,
+  where it would imply the child itself is executing a tool. The footer
+  only keeps `"Running tool…"` there when the child's own transcript shows
+  one of *its own* tool bubbles still `Running`; otherwise it inspects the
+  child's own `TurnBuffer` (the same accumulator type the root conversation
+  uses, projected per-child — see `render::project_for_draw`) and shows
+  `"Subagent thinking…"` while thinking text is in flight with no reply
+  text yet, `"Subagent streaming…"` once reply text is flowing, or
+  `"Subagent working…"` before the child's first token arrives.
 - **Queued subagent bubbles show a static glyph, not the spinner:** the
   animated Braille spinner (`ToolCallState::Running`) means "actively
   executing" for every other tool, but a `spawn_subagent` call queued behind

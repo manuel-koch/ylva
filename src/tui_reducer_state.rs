@@ -247,6 +247,112 @@ pub enum ChatEntry {
     },
 }
 
+/// A single in-flight turn's accumulated stream text, shared by the root
+/// conversation (`AppState::turn_buffer`) and every child conversation
+/// (`ChildConversation::turn_buffer`) — the single place that knows how to
+/// buffer/segment a live token stream into ordered `ChatEntry::ThinkingMessage`/
+/// `ChatEntry::AssistantMessage` bubbles, so root and child transcripts can
+/// never drift apart in how they handle thinking-vs-response text.
+#[derive(Debug, Clone, Default)]
+pub struct TurnBuffer {
+    /// In-flight assistant reply text, appended by `push_response_chunk`
+    /// (root: `StreamChunk`; child: `ChildAgentToken { is_thinking: false, .. }`).
+    pub partial_assistant_text: String,
+    /// In-flight extended-thinking/reasoning text, accumulated separately
+    /// from `partial_assistant_text` so it never contaminates the assistant
+    /// reply. Appended by `push_thinking_chunk` (root: `StreamThinkingChunk`;
+    /// child: `ChildAgentToken { is_thinking: true, .. }`). Flushed into a
+    /// `ChatEntry::ThinkingMessage` ahead of the assistant bubble.
+    pub partial_thinking_text: String,
+    /// Set when the first fragment of a new `partial_thinking_text` segment
+    /// arrives; cleared on flush. Used to compute the
+    /// `ChatEntry::ThinkingMessage::duration` shown in the collapsed summary.
+    pub thinking_started_at: Option<Instant>,
+    /// Collapse state for the thinking bubble that will be produced when
+    /// `partial_thinking_text` is flushed. Set to `false` (expanded)
+    /// alongside `thinking_started_at` when a new thinking segment starts,
+    /// then carried unchanged into the flushed `ChatEntry::ThinkingMessage`.
+    pub partial_thinking_collapsed: bool,
+}
+
+impl TurnBuffer {
+    /// Flush only the in-flight thinking buffer into a `ChatEntry::ThinkingMessage`
+    /// appended to `messages`, leaving `partial_assistant_text` untouched.
+    /// No-op when there is no pending thinking text.
+    pub fn flush_thinking_message(&mut self, messages: &mut Vec<ChatEntry>) {
+        if self.partial_thinking_text.is_empty() {
+            return;
+        }
+        let text = std::mem::take(&mut self.partial_thinking_text);
+        let collapsed = self.partial_thinking_collapsed;
+        let duration = self
+            .thinking_started_at
+            .take()
+            .map(|started_at| started_at.elapsed())
+            .unwrap_or_default();
+        messages.push(ChatEntry::ThinkingMessage {
+            text,
+            collapsed,
+            duration,
+        });
+    }
+
+    /// Flush only the in-flight assistant reply buffer into a
+    /// `ChatEntry::AssistantMessage` appended to `messages`, leaving
+    /// `partial_thinking_text` untouched. No-op when there is no pending
+    /// assistant text.
+    pub fn flush_response_message(&mut self, messages: &mut Vec<ChatEntry>) {
+        if self.partial_assistant_text.is_empty() {
+            return;
+        }
+        messages.push(ChatEntry::AssistantMessage {
+            text: std::mem::take(&mut self.partial_assistant_text),
+            interrupted: false,
+        });
+    }
+
+    /// Commit the in-flight partial assistant text into a full
+    /// `ChatEntry::AssistantMessage` appended to `messages`, clearing the
+    /// partial buffer. If `partial_thinking_text` is non-empty, a
+    /// `ChatEntry::ThinkingMessage` is pushed immediately before it — even
+    /// when `partial_assistant_text` itself is empty (a thinking-only turn,
+    /// e.g. the model reasons and then immediately calls a tool with no
+    /// visible prose).
+    pub fn flush_assistant_message(&mut self, messages: &mut Vec<ChatEntry>, interrupted: bool) {
+        self.flush_thinking_message(messages);
+        if !self.partial_assistant_text.is_empty() {
+            messages.push(ChatEntry::AssistantMessage {
+                text: std::mem::take(&mut self.partial_assistant_text),
+                interrupted,
+            });
+        } else {
+            self.partial_assistant_text.clear();
+        }
+    }
+
+    /// Append a fragment of assistant reply text, flushing any pending
+    /// thinking segment into its own bubble first — mirrors a
+    /// thinking-to-response mid-turn switch, so each segment renders as its
+    /// own bubble in chronological order rather than merging.
+    pub fn push_response_chunk(&mut self, text: &str, messages: &mut Vec<ChatEntry>) {
+        self.flush_thinking_message(messages);
+        self.partial_assistant_text.push_str(text);
+    }
+
+    /// Append a fragment of extended-thinking text, flushing any pending
+    /// response segment first (mirrors `push_response_chunk`), and starting
+    /// a fresh thinking-duration timer/expanded collapse state when this is
+    /// the first fragment of a new segment.
+    pub fn push_thinking_chunk(&mut self, text: &str, messages: &mut Vec<ChatEntry>) {
+        self.flush_response_message(messages);
+        if self.partial_thinking_text.is_empty() {
+            self.thinking_started_at = Some(Instant::now());
+            self.partial_thinking_collapsed = false;
+        }
+        self.partial_thinking_text.push_str(text);
+    }
+}
+
 // ─── Drill-in conversation model (Phase 6.10) ────────────────────────────────
 
 /// Identifies one child run's identity/metadata, keyed by `run_id` in
@@ -268,7 +374,7 @@ pub struct ChildRunInfo {
     pub label: String,
 }
 
-/// One child run's own conversation transcript plus in-flight partial text,
+/// One child run's own conversation transcript plus in-flight `TurnBuffer`,
 /// keyed by `run_id` in `AppState::child_conversations`. Kept indefinitely
 /// once created (mirrors `AppState::chat_entries`, which is also
 /// session-lifetime-unbounded) so a finished child's transcript remains
@@ -277,7 +383,7 @@ pub struct ChildRunInfo {
 pub struct ChildConversation {
     pub info: ChildRunInfo,
     pub messages: Vec<ChatEntry>,
-    pub partial_text: String,
+    pub turn_buffer: TurnBuffer,
 }
 
 impl ChildConversation {
@@ -285,7 +391,7 @@ impl ChildConversation {
         ChildConversation {
             info,
             messages: Vec::new(),
-            partial_text: String::new(),
+            turn_buffer: TurnBuffer::default(),
         }
     }
 }
@@ -516,7 +622,11 @@ pub enum DomainEvent {
     },
     /// A fragment of `run_id`'s own text/thinking output.
     /// See `UiUpdate::ChildAgentToken`.
-    ChildAgentToken { run_id: Uuid, text: String },
+    ChildAgentToken {
+        run_id: Uuid,
+        text: String,
+        is_thinking: bool,
+    },
     /// The child agent run identified by `run_id` has finished.
     /// See `UiUpdate::ChildAgentDone`.
     ChildAgentDone {
@@ -839,24 +949,10 @@ pub struct AppState {
 
     // ── chat view-model ─────────────────────────────────────────────────────
     pub chat_entries: Vec<ChatEntry>,
-    pub partial_assistant_text: String,
-    /// In-flight extended-thinking/reasoning fragments, accumulated separately
-    /// from `partial_assistant_text` so they never contaminate the assistant
-    /// reply. Flushed into a `ChatEntry::ThinkingMessage` on `StreamDone`.
-    pub partial_thinking_text: String,
-    /// Set when the first fragment of `partial_thinking_text` arrives;
-    /// cleared on flush and on `StreamStarted`. Used to compute the
-    /// `ChatEntry::ThinkingMessage::duration` shown in the collapsed summary.
-    /// Not part of `TuiState`: rendering only needs the final `duration` once
-    /// baked into a flushed `ChatEntry`, not the live start instant.
-    pub thinking_started_at: Option<Instant>,
-    /// Collapse state for the thinking bubble that will be produced when
-    /// `partial_thinking_text` is flushed. Set to `false` (expanded) alongside
-    /// `thinking_started_at` when a new thinking stream starts, then carried
-    /// unchanged into the flushed `ChatEntry::ThinkingMessage` — flushing never
-    /// overrides it, so a manual collapse/expand made while the bubble was
-    /// still in-flight (if ever supported) would survive the flush.
-    pub partial_thinking_collapsed: bool,
+    /// Root conversation's in-flight stream-text accumulator. See
+    /// `TurnBuffer`; every child conversation has its own instance
+    /// (`ChildConversation::turn_buffer`).
+    pub turn_buffer: TurnBuffer,
     /// Steers (user messages sent while the agent is busy) staged for live
     /// rendering as `Queued` bubbles, not yet committed to `chat_entries`.
     /// See `queue_steer_message` / `commit_queued_steer_messages`.
@@ -993,10 +1089,7 @@ impl AppState {
             layout: AppLayout::default(),
 
             chat_entries: Vec::new(),
-            partial_assistant_text: String::new(),
-            partial_thinking_text: String::new(),
-            thinking_started_at: None,
-            partial_thinking_collapsed: false,
+            turn_buffer: TurnBuffer::default(),
             queued_steer_texts: Vec::new(),
 
             conversation: ConversationListState::default(),
@@ -1049,42 +1142,24 @@ impl AppState {
     /// from thinking to response text (or hits a tool call) mid-turn, so each
     /// segment renders as its own bubble in chronological order rather than
     /// merging every thinking fragment of the turn into a single bubble.
-    /// No-op when there is no pending thinking text.
+    /// No-op when there is no pending thinking text. Delegates to
+    /// `TurnBuffer::flush_thinking_message` — see there for the shared
+    /// root/child implementation.
     pub fn flush_partial_thinking_message(&mut self) {
-        if self.partial_thinking_text.is_empty() {
-            return;
-        }
-        let text = std::mem::take(&mut self.partial_thinking_text);
-        let collapsed = self.partial_thinking_collapsed;
-        let duration = self
-            .thinking_started_at
-            .take()
-            .map(|started_at| started_at.elapsed())
-            .unwrap_or_default();
-        self.chat_entries.push(ChatEntry::ThinkingMessage {
-            text,
-            collapsed,
-            duration,
-        });
+        self.turn_buffer
+            .flush_thinking_message(&mut self.chat_entries);
     }
 
     /// Flush only the in-flight assistant reply buffer into a
     /// `ChatEntry::AssistantMessage`, leaving `partial_thinking_text` untouched.
     /// Used when a stream switches from response text back to thinking mid-turn
-    /// (mirrors `flush_partial_thinking_message`). Unlike
-    /// `flush_partial_assistant_message`, this never relocates queued steers —
-    /// those only need to move once, at the true end of the turn — and never
-    /// marks the bubble interrupted, since a mid-turn segment switch is not
-    /// an interruption. No-op when there is no pending assistant text.
+    /// (mirrors `flush_partial_thinking_message`). Never relocates queued
+    /// steers — those only need to move once, at the true end of the turn.
+    /// No-op when there is no pending assistant text. Delegates to
+    /// `TurnBuffer::flush_response_message`.
     pub fn flush_partial_response_message(&mut self) {
-        if self.partial_assistant_text.is_empty() {
-            return;
-        }
-        let text = std::mem::take(&mut self.partial_assistant_text);
-        self.chat_entries.push(ChatEntry::AssistantMessage {
-            text,
-            interrupted: false,
-        });
+        self.turn_buffer
+            .flush_response_message(&mut self.chat_entries);
     }
 
     /// Commit the in-flight partial assistant text into a full `AssistantMessage`
@@ -1094,30 +1169,10 @@ impl AppState {
     /// pushed immediately before the assistant bubble — even when
     /// `partial_assistant_text` itself is empty (a thinking-only turn, e.g. the
     /// model reasons and then immediately calls a tool with no visible prose).
+    /// Delegates to `TurnBuffer::flush_assistant_message`.
     pub fn flush_partial_assistant_message(&mut self, interrupted: bool) {
-        let thinking_text = (!self.partial_thinking_text.is_empty())
-            .then(|| std::mem::take(&mut self.partial_thinking_text));
-        let thinking_collapsed = self.partial_thinking_collapsed;
-        let thinking_duration = self
-            .thinking_started_at
-            .take()
-            .map(|started_at| started_at.elapsed())
-            .unwrap_or_default();
-        if let Some(text) = thinking_text {
-            self.chat_entries.push(ChatEntry::ThinkingMessage {
-                text,
-                collapsed: thinking_collapsed,
-                duration: thinking_duration,
-            });
-        }
-        if !self.partial_assistant_text.is_empty() {
-            self.chat_entries.push(ChatEntry::AssistantMessage {
-                text: std::mem::take(&mut self.partial_assistant_text),
-                interrupted,
-            });
-        } else {
-            self.partial_assistant_text.clear();
-        }
+        self.turn_buffer
+            .flush_assistant_message(&mut self.chat_entries, interrupted);
     }
 
     /// Commit every staged queued-steer text (see `queue_steer_message`) into
@@ -1235,31 +1290,27 @@ impl AppState {
         }
     }
 
-    /// Flush `run_id`'s own `partial_text` (accumulated `ChildAgentToken`
-    /// fragments) into a new `ChatEntry::AssistantMessage` in its own
-    /// transcript. No-op when there is no pending text, or `run_id` is not
-    /// a tracked child.
+    /// Flush `run_id`'s own `TurnBuffer` (accumulated `ChildAgentToken`
+    /// fragments, thinking and assistant text alike) into new
+    /// `ChatEntry::ThinkingMessage`/`ChatEntry::AssistantMessage` entries in
+    /// its own transcript. No-op when there is no pending text, or `run_id`
+    /// is not a tracked child. Delegates to `TurnBuffer::flush_assistant_message`
+    /// — the same shared logic the root conversation uses.
     pub fn flush_child_partial_text(&mut self, run_id: Uuid) {
         let Some(conversation) = self.child_conversations.get_mut(&run_id) else {
             return;
         };
-        if conversation.partial_text.is_empty() {
-            return;
-        }
-        let text = std::mem::take(&mut conversation.partial_text);
-        conversation.messages.push(ChatEntry::AssistantMessage {
-            text,
-            interrupted: false,
-        });
+        conversation
+            .turn_buffer
+            .flush_assistant_message(&mut conversation.messages, false);
     }
 
     /// Flushes whichever partial-text accumulator `run_id` targets before a
-    /// new tool/clarify bubble is created — that child's own `partial_text`
-    /// when `run_id` identifies any tracked child run, `partial_assistant_text`/
-    /// `partial_thinking_text` (the root's own) otherwise. Without this, a
-    /// child's in-flight reply would stay stuck in `partial_text` until
-    /// `ChildAgentDone`, making a tool call it made appear to precede its own
-    /// explanatory text in its transcript.
+    /// new tool/clarify bubble is created — that child's own `TurnBuffer`
+    /// when `run_id` identifies any tracked child run, the root's own
+    /// `turn_buffer` otherwise. Without this, a child's in-flight reply would
+    /// stay stuck in its buffer until `ChildAgentDone`, making a tool call it
+    /// made appear to precede its own explanatory text in its transcript.
     pub(crate) fn flush_target_partial_text(&mut self, run_id: Option<Uuid>) {
         if let Some(run_id) = run_id {
             if self.child_conversations.contains_key(&run_id) {
@@ -1575,7 +1626,7 @@ impl AppState {
     /// unchanged into the flushed `ChatEntry::ThinkingMessage` once the
     /// stream ends (see `flush_partial_thinking_message`).
     pub fn toggle_partial_thinking_collapsed(&mut self) {
-        self.partial_thinking_collapsed = !self.partial_thinking_collapsed;
+        self.turn_buffer.partial_thinking_collapsed = !self.turn_buffer.partial_thinking_collapsed;
         self.conversation.scroll_locked = false;
         if let Some((start_row, _, _)) = self
             .conversation
@@ -2205,12 +2256,12 @@ mod tests {
     #[test]
     fn flush_partial_assistant_message_pushes_thinking_before_assistant_bubble() {
         let mut state = AppState::new();
-        state.partial_thinking_text = "pondering...".to_string();
-        state.partial_assistant_text = "the answer".to_string();
+        state.turn_buffer.partial_thinking_text = "pondering...".to_string();
+        state.turn_buffer.partial_assistant_text = "the answer".to_string();
         state.flush_partial_assistant_message(false);
 
-        assert!(state.partial_thinking_text.is_empty());
-        assert!(state.partial_assistant_text.is_empty());
+        assert!(state.turn_buffer.partial_thinking_text.is_empty());
+        assert!(state.turn_buffer.partial_assistant_text.is_empty());
         assert_eq!(state.chat_entries.len(), 2);
         assert!(matches!(
             &state.chat_entries[0],
@@ -2225,12 +2276,12 @@ mod tests {
     #[test]
     fn flush_partial_assistant_message_computes_thinking_duration_from_started_at() {
         let mut state = AppState::new();
-        state.partial_thinking_text = "pondering...".to_string();
-        state.thinking_started_at =
+        state.turn_buffer.partial_thinking_text = "pondering...".to_string();
+        state.turn_buffer.thinking_started_at =
             Some(std::time::Instant::now() - std::time::Duration::from_millis(50));
         state.flush_partial_assistant_message(false);
 
-        assert!(state.thinking_started_at.is_none());
+        assert!(state.turn_buffer.thinking_started_at.is_none());
         assert!(matches!(
             &state.chat_entries[0],
             ChatEntry::ThinkingMessage { duration, .. } if *duration >= std::time::Duration::from_millis(50)
@@ -2240,7 +2291,7 @@ mod tests {
     #[test]
     fn flush_partial_assistant_message_defaults_thinking_duration_when_not_started() {
         let mut state = AppState::new();
-        state.partial_thinking_text = "pondering...".to_string();
+        state.turn_buffer.partial_thinking_text = "pondering...".to_string();
         state.flush_partial_assistant_message(false);
 
         assert!(matches!(
@@ -2255,10 +2306,10 @@ mod tests {
         // visible prose. Must still flush the thinking bubble, without an
         // empty AssistantMessage.
         let mut state = AppState::new();
-        state.partial_thinking_text = "considering options...".to_string();
+        state.turn_buffer.partial_thinking_text = "considering options...".to_string();
         state.flush_partial_assistant_message(false);
 
-        assert!(state.partial_thinking_text.is_empty());
+        assert!(state.turn_buffer.partial_thinking_text.is_empty());
         assert_eq!(state.chat_entries.len(), 1);
         assert!(matches!(
             &state.chat_entries[0],
@@ -2276,13 +2327,13 @@ mod tests {
     #[test]
     fn flush_partial_thinking_message_pushes_thinking_bubble_and_leaves_assistant_text_untouched() {
         let mut state = AppState::new();
-        state.partial_thinking_text = "pondering...".to_string();
-        state.partial_assistant_text = "so far so good".to_string();
+        state.turn_buffer.partial_thinking_text = "pondering...".to_string();
+        state.turn_buffer.partial_assistant_text = "so far so good".to_string();
         state.flush_partial_thinking_message();
 
-        assert!(state.partial_thinking_text.is_empty());
+        assert!(state.turn_buffer.partial_thinking_text.is_empty());
         assert_eq!(
-            state.partial_assistant_text, "so far so good",
+            state.turn_buffer.partial_assistant_text, "so far so good",
             "must not touch the assistant buffer"
         );
         assert_eq!(state.chat_entries.len(), 1);
@@ -2302,13 +2353,13 @@ mod tests {
     #[test]
     fn flush_partial_response_message_pushes_assistant_bubble_and_leaves_thinking_text_untouched() {
         let mut state = AppState::new();
-        state.partial_assistant_text = "the answer".to_string();
-        state.partial_thinking_text = "still pondering...".to_string();
+        state.turn_buffer.partial_assistant_text = "the answer".to_string();
+        state.turn_buffer.partial_thinking_text = "still pondering...".to_string();
         state.flush_partial_response_message();
 
-        assert!(state.partial_assistant_text.is_empty());
+        assert!(state.turn_buffer.partial_assistant_text.is_empty());
         assert_eq!(
-            state.partial_thinking_text, "still pondering...",
+            state.turn_buffer.partial_thinking_text, "still pondering...",
             "must not touch the thinking buffer"
         );
         assert_eq!(state.chat_entries.len(), 1);
@@ -2347,24 +2398,24 @@ mod tests {
     #[test]
     fn toggle_partial_thinking_collapsed_flips_state_while_streaming() {
         let mut state = AppState::new();
-        state.partial_thinking_text = "pondering...".to_string();
-        state.partial_thinking_collapsed = false;
+        state.turn_buffer.partial_thinking_text = "pondering...".to_string();
+        state.turn_buffer.partial_thinking_collapsed = false;
         state.conversation.scroll_locked = true;
 
         state.toggle_partial_thinking_collapsed();
 
-        assert!(state.partial_thinking_collapsed);
+        assert!(state.turn_buffer.partial_thinking_collapsed);
         assert!(!state.conversation.scroll_locked);
 
         state.toggle_partial_thinking_collapsed();
 
-        assert!(!state.partial_thinking_collapsed);
+        assert!(!state.turn_buffer.partial_thinking_collapsed);
     }
 
     #[test]
     fn toggle_partial_thinking_collapsed_clamps_scroll_offset_to_bubble_start_row() {
         let mut state = AppState::new();
-        state.partial_thinking_text = "pondering...".to_string();
+        state.turn_buffer.partial_thinking_text = "pondering...".to_string();
         // Simulate a previous render pass recording the in-flight bubble's
         // title row under the streaming sentinel index.
         state.conversation.thinking_title_rows = vec![(5, 40, STREAMING_THINKING_ENTRY_INDEX)];
