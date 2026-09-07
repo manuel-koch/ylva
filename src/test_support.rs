@@ -17,7 +17,7 @@
 //! This module is compiled only into unit-test builds (it is wired from
 //! `src/lib.rs` behind `#[cfg(test)]`) and hosts helpers used by more than one
 //! `#[cfg(test)]` module, e.g. the `tracing` capture helpers that
-//! `src/agent.rs` and `src/agent/tools/fs.rs` use to assert on log events.
+//! `src/agent.rs` and the split filesystem-tool modules (`src/agent/tools/read.rs`, `src/agent/tools/write.rs`, and `src/agent/tools/glob.rs`) use to assert on log events.
 //! SSOT: shared helpers live here instead of being copied per module.
 
 use std::sync::Arc;

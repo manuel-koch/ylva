@@ -252,9 +252,20 @@ tests.
       left as-is (kept, not replaced with a generic "Working…") since it was
       already correct and more informative.
 
-- [ ] We should split `src/agent/tools/fs.rs` into one module per tool.
-      "edit" and "search" are filesystem related tools too and they already
-      have a dedicated module.
+- [x] Split the former merged filesystem-tools module into
+      `src/agent/tools/read.rs`, `src/agent/tools/write.rs`, and
+      `src/agent/tools/glob.rs`, matching the existing one-tool-per-module
+      layout used by `edit.rs` and `search.rs`.
+
+- [ ] I can't see progress when subagent is thinking, i.e. there is no
+      corresponding bubble for in-progress-thinking. Looks like there
+      is only a bubble once thinking is done.
+      Same seems to be the case for response of llm (after thinking), it seems to
+      pop into the conversation without any streaming-progress within the bubble.
+
+- [ ] Main agent becomes idle after subagent(s) are done, looks like the final
+      subagent(s) result is not fed back into main agent and it doesn't iterate
+      on it in a follow-up conversation-turn.
 
 ## Code style smell
 

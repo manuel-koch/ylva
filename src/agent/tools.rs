@@ -32,9 +32,11 @@ pub mod agent_finish;
 pub mod bash;
 pub mod clarify;
 pub mod edit;
-pub mod fs;
+pub mod glob;
+pub mod read;
 pub mod search;
 pub mod spawn_subagent;
+pub mod write;
 
 /// Default execution timeout for file-system tools.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 5;
@@ -510,9 +512,9 @@ pub(super) fn validate_args_with_schema(
 
 /// Names of the tools available in a CLI (headless) context.
 pub const DEFAULT_CLI_TOOLS: &[&str] = &[
-    fs::ReadTool::NAME,
-    fs::WriteTool::NAME,
-    fs::GlobTool::NAME,
+    read::ReadTool::NAME,
+    write::WriteTool::NAME,
+    glob::GlobTool::NAME,
     bash::BashTool::NAME,
     search::SearchTool::NAME,
     edit::EditTool::NAME,
@@ -521,9 +523,9 @@ pub const DEFAULT_CLI_TOOLS: &[&str] = &[
 /// Names of the tools available in a TUI (interactive) context.
 /// Superset of [`DEFAULT_CLI_TOOLS`]; adds tools that require a live terminal.
 pub const DEFAULT_TUI_TOOLS: &[&str] = &[
-    fs::ReadTool::NAME,
-    fs::WriteTool::NAME,
-    fs::GlobTool::NAME,
+    read::ReadTool::NAME,
+    write::WriteTool::NAME,
+    glob::GlobTool::NAME,
     bash::BashTool::NAME,
     search::SearchTool::NAME,
     edit::EditTool::NAME,
@@ -588,25 +590,25 @@ pub fn default_registry(
     let allowed = &config.allowed_tools;
     let mut registry = ToolRegistry::new();
 
-    if allowed.iter().any(|name| name == fs::ReadTool::NAME) {
-        registry.register(Arc::new(fs::ReadTool::new(SandboxContext::new(
+    if allowed.iter().any(|name| name == read::ReadTool::NAME) {
+        registry.register(Arc::new(read::ReadTool::new(SandboxContext::new(
             Arc::clone(&sandbox),
         ))));
     }
-    if allowed.iter().any(|name| name == fs::WriteTool::NAME) {
-        registry.register(Arc::new(fs::WriteTool::new({
+    if allowed.iter().any(|name| name == write::WriteTool::NAME) {
+        registry.register(Arc::new(write::WriteTool::new({
             let mut context = SandboxContext::new(Arc::clone(&sandbox));
             if config.auto_approve_write {
                 context = context.with_rule(crate::sandbox::SandboxRule {
                     verdict: crate::sandbox::ApprovalCheck::AutoApproved,
-                    pattern: glob::Pattern::new("**").expect("** is a valid glob"),
+                    pattern: ::glob::Pattern::new("**").expect("** is a valid glob"),
                 });
             }
             context
         })));
     }
-    if allowed.iter().any(|name| name == fs::GlobTool::NAME) {
-        registry.register(Arc::new(fs::GlobTool::new(SandboxContext::new(
+    if allowed.iter().any(|name| name == glob::GlobTool::NAME) {
+        registry.register(Arc::new(glob::GlobTool::new(SandboxContext::new(
             Arc::clone(&sandbox),
         ))));
     }
@@ -626,7 +628,7 @@ pub fn default_registry(
             if config.auto_approve_edit {
                 context = context.with_rule(crate::sandbox::SandboxRule {
                     verdict: crate::sandbox::ApprovalCheck::AutoApproved,
-                    pattern: glob::Pattern::new("**").expect("** is a valid glob"),
+                    pattern: ::glob::Pattern::new("**").expect("** is a valid glob"),
                 });
             }
             edit::EditTool::new(context)
@@ -814,9 +816,9 @@ mod tests {
         let sandbox = std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new()));
         let registry = default_registry(sandbox, ToolRegistryConfig::default());
         assert_eq!(registry.names().len(), 6);
-        assert!(registry.get(fs::ReadTool::NAME).is_some());
-        assert!(registry.get(fs::WriteTool::NAME).is_some());
-        assert!(registry.get(fs::GlobTool::NAME).is_some());
+        assert!(registry.get(read::ReadTool::NAME).is_some());
+        assert!(registry.get(write::WriteTool::NAME).is_some());
+        assert!(registry.get(glob::GlobTool::NAME).is_some());
         assert!(registry.get(bash::BashTool::NAME).is_some());
         assert!(registry.get(search::SearchTool::NAME).is_some());
         assert!(registry.get(edit::EditTool::NAME).is_some());
@@ -845,14 +847,14 @@ mod tests {
             ToolRegistryConfig {
                 allowed_tools: vec![
                     bash::BashTool::NAME.to_string(),
-                    fs::ReadTool::NAME.to_string(),
+                    read::ReadTool::NAME.to_string(),
                 ],
                 ..ToolRegistryConfig::default()
             },
         );
         assert_eq!(registry.names().len(), 2);
         assert!(registry.get(bash::BashTool::NAME).is_some());
-        assert!(registry.get(fs::ReadTool::NAME).is_some());
+        assert!(registry.get(read::ReadTool::NAME).is_some());
         assert!(registry.get(edit::EditTool::NAME).is_none());
     }
 
@@ -926,7 +928,7 @@ mod tests {
 
     #[test]
     fn write_tool_always_needs_user_approval() {
-        let write_tool = fs::WriteTool::default();
+        let write_tool = write::WriteTool::default();
         let args = serde_json::json!({ "path": "src/main.rs", "content": "hello" });
         assert!(matches!(
             write_tool.needs_approval(&args),

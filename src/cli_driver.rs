@@ -680,7 +680,7 @@ fn render_arg_value(value: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::tools::fs::ReadTool;
+    use crate::agent::tools::read::ReadTool;
 
     fn read_tool() -> Arc<dyn Tool> {
         Arc::new(ReadTool::default())
@@ -720,7 +720,7 @@ mod tests {
 
     #[test]
     fn render_shows_glob_pattern_inline_via_title() {
-        let tool: Arc<dyn Tool> = Arc::new(crate::agent::tools::fs::GlobTool::default());
+        let tool: Arc<dyn Tool> = Arc::new(crate::agent::tools::glob::GlobTool::default());
         let rendered = render_tool_invocation(
             tool.as_ref(),
             &serde_json::json!({ "pattern": "src/**/*.rs" }),
@@ -730,7 +730,7 @@ mod tests {
 
     #[test]
     fn render_elides_long_string_values() {
-        let tool: Arc<dyn Tool> = Arc::new(crate::agent::tools::fs::WriteTool::default());
+        let tool: Arc<dyn Tool> = Arc::new(crate::agent::tools::write::WriteTool::default());
         let rendered = render_tool_invocation(
             tool.as_ref(),
             &serde_json::json!({

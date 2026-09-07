@@ -212,7 +212,7 @@ No user-visible behavior. Must be fully green before any tool work begins.
 
 - [x] 5. Update the `Tool` trait: replace `fn needs_approval(&self) -> bool` with
   `fn needs_approval(&self, args: &Value) -> ApprovalCheck`. Update every existing
-  implementor (`ReadTool`, `WriteTool`, `GlobTool` in `src/agent/tools/fs.rs`; `TestTool`
+  implementor (`ReadTool` in `src/agent/tools/read.rs`, `WriteTool` in `src/agent/tools/write.rs`, `GlobTool` in `src/agent/tools/glob.rs`; `TestTool`
   in the unit-test module). Each concrete tool struct gains `sandbox_context: SandboxContext`.
 
   Each tool calls `sandbox_context.check_path()` which returns `Option<ApprovalCheck>`:
@@ -346,7 +346,7 @@ No user-visible behavior. Must be fully green before any tool work begins.
 
 **Goal:** Filtering flags and structured result metadata per `docs/ideas/glob-tool-filtering.md`.
 
-- [x] 20. Extend `GlobArgs` in `src/agent/tools/fs.rs`:
+- [x] 20. Extend `GlobArgs` in `src/agent/tools/glob.rs`:
 
     ```rust
     #[serde(default = "default_true")] git_ignore: bool,  // default: true
@@ -1007,7 +1007,7 @@ ADR is recorded.
   resolves ≥ 1.53 — no `pre_exec` fallback needed.
 - **New crates (not yet in `Cargo.toml`):** `nix` (Unix target only), `ignore`, `regex`,
   `similar`. `which` and `walkdir` are **not** needed.
-- **`write` tool:** already fully implemented in `src/agent/tools/fs.rs` with
+- **`write` tool:** already fully implemented in `src/agent/tools/write.rs` with
   `needs_approval() -> true`; not a stub. Phase 6.0 updates it to the new
   `needs_approval(&self, args) -> ApprovalCheck` signature, returning
   `UserApprovalRequired` unconditionally (writes are always destructive).

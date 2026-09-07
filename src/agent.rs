@@ -32,7 +32,7 @@ use tools::{ToolCall, ToolRegistry};
 /// Maximum number of LLM requests the tool-use loop starts within a single user
 /// turn before the guard stops re-prompting. Per-engine configurability is a
 /// later (Phase 5) concern; this module-level default is the Phase 3 SSOT.
-pub const MAX_TOOL_USE_ITERATIONS: usize = 15;
+pub const MAX_TOOL_USE_ITERATIONS: usize = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentMode {
@@ -2220,7 +2220,7 @@ mod tests {
 
     use crate::test_support::capture_logs;
     use crate::{
-        agent::tools::{clarify::ClarifyTool, fs::WriteTool},
+        agent::tools::{clarify::ClarifyTool, write::WriteTool},
         engine::{Engine, EngineConfig, EngineImpl, DEFAULT_CONTEXT_LENGTH},
         llm::{MockEvent, MockProvider},
         sandbox::{Sandbox, SandboxContext},
