@@ -263,9 +263,45 @@ tests.
       Same seems to be the case for response of llm (after thinking), it seems to
       pop into the conversation without any streaming-progress within the bubble.
 
-- [ ] Main agent becomes idle after subagent(s) are done, looks like the final
-      subagent(s) result is not fed back into main agent and it doesn't iterate
+- [x] Main agent becomes idle after subagents are done, looks like the final
+      subagents result is not fed back into main agent and it doesn't iterate
       on it in a follow-up conversation-turn.
+      This happened on a "fast" llm with two spawned subagents.
+
+- [x] After main agent has spawned multiple subagents, it looks like it
+      doing something (footer shows "Running tool..."), but suddenly a
+      thinking bubble pops up in the conversation without any previous
+      thinking-progress within the bubble.
+      Root cause: while a `spawn_subagent` tool bubble is still `Running`
+      (the child hasn't finished), `AppState::agent_mode()` reports
+      `ToolRunning` for the *whole* root conversation — even while the root
+      loop is itself mid-stream on its own next iteration (deciding what to
+      do once the child finishes) and actively accumulating
+      `partial_thinking_text`/`partial_assistant_text`. `tui_widgets::draw`
+      only rendered those in-flight buffers as a live bubble when
+      `agent_mode == AgentMode::Streaming`, so that text stayed completely
+      invisible until flushed into a fully-committed bubble — i.e. it
+      "popped in" with no visible streaming progress. Fixed by gating the
+      two streaming-bubble blocks in `draw_chat` on the buffers' own
+      non-emptiness instead of on `agent_mode`; both buffers are always
+      cleared by `flush_partial_*` before any non-streaming mode is
+      entered, so non-empty reliably means a stream is actually in
+      progress. Regression test:
+      `root_view_shows_live_thinking_progress_while_a_tool_bubble_is_running`
+      in `tests/tui_render_state.rs`.
+
+- [ ] Looks like hitting max-iterations-per-turn within a subagent is not handled
+      properly. The subagent just stops working and doesn't communicate back
+      its (current) result.
+      Main agent still waiting for subagent result, which will never arrive.
+      Should this result in an error within subagent or should we allow subagent to
+      one more turn without any tools to wrap up the current state and
+      send atleast something to parent agent as result ?
+
+- [ ] Inconsistency worth noting: the module header references
+      DEFAULT_TOOL_TIMEOUT_SECS , but the constant that actually exists is
+      DEFAULT_TIMEOUT_SECS (5s) in tools.rs , which is what
+      WriteTool::timeout_secs() uses.
 
 ## Code style smell
 

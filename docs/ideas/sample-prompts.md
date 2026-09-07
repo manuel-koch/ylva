@@ -171,13 +171,14 @@ and write a brief summary of its implementation.
 
 ---
 
-Run the following task in subagent(s) and let them report their findings back:
+Run the following task(s) in subagent(s) and let them report their findings back:
 
-Analyze the TUI functionality implemented in source code
-and list currently implemented features in a table with brief descriptions.
+- Analyze the read tool functionality implemented in source code
+  and list currently implemented features in a table with brief descriptions.
 
-Analyze the read/write tool functionality implemented in source code
-and list currently implemented features in a brief markdown descriptions.
+- Analyze the write tool functionality implemented in source code
+  and list currently implemented features in a brief markdown descriptions.
+
 ONLY use "bash" tool to search for relevant files!
 
 ---

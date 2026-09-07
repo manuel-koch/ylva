@@ -1124,13 +1124,38 @@ impl AgentLoop {
                             .unwrap_or_default();
                         content_sections.extend(finish_result.content_sections());
                         tracing::info!(%run_id, tool_call_id = %call_id, %status, "child agent finished");
+                        // Computed before `on_child_finished` pops the queue: how many
+                        // more subagents will still run after this one. This tells the
+                        // model definitively whether to keep waiting or finalize now,
+                        // rather than leaving it to guess — a headless session gets no
+                        // follow-up user message to nudge a stalled "I'll report back
+                        // later" turn, so the model must never rely on one arriving.
+                        let remaining_after_this = child_agent_manager
+                            .as_ref()
+                            .map(|manager| manager.queue_len())
+                            .unwrap_or(0);
+                        let next_step_note = if remaining_after_this > 0 {
+                            format!(
+                                "{remaining_after_this} more subagent(s) are still running or \
+                                 queued. No user message is coming to nudge you — you will be \
+                                 automatically re-prompted the instant each one finishes, with its \
+                                 result appended the same way this one was. Do not tell the user \
+                                 you'll report back later; either use this result for useful work \
+                                 now, or simply end this turn with no new user-facing text and wait \
+                                 for the next automatic re-prompt."
+                            )
+                        } else {
+                            "This was the last outstanding subagent — no more results are coming. \
+                             Combine it with any earlier subagent results already in this \
+                             conversation and produce your final answer for the user now."
+                                .to_string()
+                        };
                         context.push_system(format!(
                             "The subagent spawned via `{tool_name}` (tool_call_id={call_id}) has finished. \
                              Its final result:\n{result_text}\n\
                              This result is already shown to the user verbatim (as the tool result's \
-                             Result/Error/Sources sections) — do not repeat or quote it back. Use it to \
-                             continue your own work, and only mention it if you're adding new analysis, \
-                             a decision, or a next step.",
+                             Result/Error/Sources sections) — do not repeat or quote it back. \
+                             {next_step_note}",
                             tool_name = tools::spawn_subagent::SpawnSubagentTool::NAME,
                         ));
                         // Computed before `on_child_finished` clears the running slot.

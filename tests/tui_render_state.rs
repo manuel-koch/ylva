@@ -761,6 +761,82 @@ fn footer_says_subagent_streaming_while_child_streams_response_text() {
     );
 }
 
+/// While viewing the *root* transcript, a still-running `spawn_subagent`
+/// tool bubble makes `agent_mode()` report `ToolRunning` for the whole
+/// lifetime of the live child (see `AppState::agent_mode`) — even while the
+/// root loop itself is mid-stream on its own next iteration (e.g. deciding
+/// what to do once the child finishes). Before this fix, the in-flight
+/// thinking/response bubble was gated on `agent_mode == AgentMode::Streaming`
+/// and stayed completely invisible in that window, only appearing once
+/// flushed into a fully-committed bubble — i.e. it "popped in" with no
+/// visible streaming progress (regression test for
+/// docs/known-issues.md: "After main agent has spawned multiple subagents
+/// ... a thinking bubble pops up in the conversation without any previous
+/// thinking-progress").
+#[test]
+fn root_view_shows_live_thinking_progress_while_a_tool_bubble_is_running() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_widgets;
+    use ylva::{AgentMode, ChatEntry, ToolCallState};
+
+    let backend = TestBackend::new(60, 20);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+
+    let mut state = ylva::TuiState {
+        agent_mode: AgentMode::ToolRunning,
+        chat_entries: vec![ChatEntry::ToolBubble {
+            id: uuid::Uuid::new_v4(),
+            name: "spawn_subagent".to_string(),
+            state: Box::new(ToolCallState::Running {
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                progress_arguments: vec![],
+            }),
+            collapsed: false,
+        }],
+        partial_thinking_text: "pondering while the subagent runs...".to_string(),
+        ..ylva::TuiState::new()
+    };
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("draw");
+
+    let buf = terminal.backend().buffer().clone();
+    let rendered: String = (0..20u16)
+        .flat_map(|y| (0..60u16).map(move |x| (x, y)))
+        .map(|(x, y)| buf.cell((x, y)).unwrap().symbol().to_string())
+        .collect();
+    assert!(
+        rendered.contains("pondering while the subagent runs"),
+        "in-flight thinking text must render live, not only once flushed: {rendered:?}"
+    );
+
+    // Same for in-flight assistant reply text.
+    state.partial_thinking_text.clear();
+    state.partial_assistant_text = "here is my plan while waiting...".to_string();
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("draw with in-flight response text");
+    let buf = terminal.backend().buffer().clone();
+    let rendered: String = (0..20u16)
+        .flat_map(|y| (0..60u16).map(move |x| (x, y)))
+        .map(|(x, y)| buf.cell((x, y)).unwrap().symbol().to_string())
+        .collect();
+    assert!(
+        rendered.contains("here is my plan while waiting"),
+        "in-flight assistant text must render live, not only once flushed: {rendered:?}"
+    );
+}
+
 /// The child-view header re-renders the root `spawn_subagent` `ToolBubble`
 /// with a shortened `"Subagent"` title instead of the plain title-cased
 /// `"Spawn Subagent"` — the header sits directly above the subagent's own

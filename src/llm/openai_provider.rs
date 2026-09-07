@@ -110,12 +110,28 @@ impl Provider for OpenAiProvider {
             // Only the URL and model are logged — never the request headers
             // (which carry the `Authorization`/API-key value) or the body.
             tracing::debug!(url = %completions_url, model = %model, "chat request started");
+            // Computed once (rather than inside `build_request_dump_path`/
+            // `build_response_dump_path`) so the request and its paired
+            // response dump share the exact same `<epoch>_<millis>` timestamp
+            // component.
+            let dump_timestamp = super::http::current_dump_timestamp();
+            let request_dump_path = super::http::build_request_dump_path(&dump_timestamp);
+            let response_dump_path = super::http::build_response_dump_path(&dump_timestamp);
+            // Logged once, upfront, alongside the request dump's own
+            // "dumped request body" log line (emitted inside
+            // `post_with_retry`) — together they let a request/response pair
+            // be found from a log timestamp without guessing the paired
+            // filename from the request dump path alone.
+            if let Some(path) = &response_dump_path {
+                tracing::debug!(path = %path.display(), "response dump path resolved");
+            }
             let response = super::http::post_with_retry(
                 &client,
                 &completions_url,
                 &headers,
                 &request_body,
                 &cancel,
+                request_dump_path.as_deref(),
             )
             .await?;
 
@@ -129,6 +145,12 @@ impl Provider for OpenAiProvider {
                     tokio::select! {
                         biased;
                         _ = cancel.cancelled() => {
+                            if let Some(dump_path) = &response_dump_path {
+                                super::http::append_response_dump_line(
+                                    "[transport] cancelled",
+                                    dump_path,
+                                );
+                            }
                             // Dropping `stream` (which owns the byte stream and
                             // the `Response`) kills the underlying TCP socket.
                             let _ = tx.send(StreamEvent::Cancelled).await;
@@ -136,12 +158,21 @@ impl Provider for OpenAiProvider {
                         }
                         event = stream.next() => {
                             let Some(event) = event else {
+                                if let Some(dump_path) = &response_dump_path {
+                                    super::http::append_response_dump_line(
+                                        "[transport] stream ended without [DONE]",
+                                        dump_path,
+                                    );
+                                }
                                 // Stream ended without a [DONE] sentinel.
                                 let _ = tx.send(StreamEvent::Done).await;
                                 break;
                             };
                             match event {
                                 Ok(event) => {
+                                    if let Some(dump_path) = &response_dump_path {
+                                        super::http::append_response_dump_line(&event.data, dump_path);
+                                    }
                                     match parse_sse_payload(&event.data) {
                                         Some(StreamEvent::Done) => {
                                             tracing::debug!("stream ended with [DONE]");
@@ -157,6 +188,12 @@ impl Provider for OpenAiProvider {
                                     }
                                 }
                                 Err(error) => {
+                                    if let Some(dump_path) = &response_dump_path {
+                                        super::http::append_response_dump_line(
+                                            &format!("[transport] SSE error: {error}"),
+                                            dump_path,
+                                        );
+                                    }
                                     let _ = tx
                                         .send(StreamEvent::Error(anyhow::anyhow!(
                                             "SSE transport error: {error}"

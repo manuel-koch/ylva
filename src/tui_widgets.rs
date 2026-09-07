@@ -664,7 +664,18 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
         lines.push(Line::default());
     }
 
-    if state.agent_mode == AgentMode::Streaming && !state.partial_thinking_text.is_empty() {
+    // Gated on the presence of pending text, not on `agent_mode == Streaming`:
+    // a running tool bubble (e.g. a still-in-flight `spawn_subagent` child)
+    // makes `agent_mode()` report `ToolRunning` even while the same root
+    // loop is mid-stream on its *next* iteration (see `AppState::agent_mode`
+    // and `AppState::has_running_tool_bubble`). Gating strictly on
+    // `Streaming` left that in-flight text invisible until it was flushed
+    // into a fully-committed bubble — it "popped in" with no visible
+    // streaming progress. `partial_thinking_text`/`partial_assistant_text`
+    // are always cleared by the relevant `flush_partial_*` call before any
+    // non-streaming mode (Idle/ToolPending/ClarifyPending) is entered, so
+    // non-empty here reliably means a stream is actually in progress.
+    if !state.partial_thinking_text.is_empty() {
         let stream_width = bubble_row_width.saturating_sub(4).max(1);
         append_streaming_thinking_lines(
             &mut lines,
@@ -678,7 +689,10 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
         lines.push(Line::default());
     }
 
-    if state.agent_mode == AgentMode::Streaming && !state.partial_assistant_text.is_empty() {
+    // Same reasoning as the thinking-bubble gate above: presence of pending
+    // text, not the footer-facing `agent_mode`, is what tells us a stream is
+    // actually in progress.
+    if !state.partial_assistant_text.is_empty() {
         let stream_width = bubble_row_width.saturating_sub(4).max(1);
         append_streaming_lines(
             &mut lines,

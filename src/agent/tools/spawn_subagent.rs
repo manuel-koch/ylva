@@ -88,9 +88,12 @@ impl Tool for SpawnSubagentTool {
 
     fn description(&self) -> &str {
         "Delegate a self-contained task to a concurrent child agent. Returns immediately with \
-         status (`\"running\"`/`\"queued\"`) and `run_id` — never poll or sleep waiting for it \
-         (e.g. no `bash sleep` loops); you are re-prompted automatically once the child \
-         finishes. Continue other work meanwhile, or stop if none remains. The child's final \
+         status (`\"running\"`/`\"queued\"`) and `run_id` — never invent a tool call just to \
+         pass time while it runs (no `bash sleep`, no `echo`/status-only commands, no polling \
+         of any kind): you are re-prompted automatically the instant the child finishes, so \
+         there is nothing to gain by calling any tool merely to wait. If there's genuinely \
+         other work to do, do it now; otherwise end your turn with a short text update and no \
+         tool call at all — that is a normal, complete turn, not a stall. The child's final \
          outcome later arrives as a separate `system` message referencing this call's \
          `tool_call_id` — treat that as the authoritative report."
     }
