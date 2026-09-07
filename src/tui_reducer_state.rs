@@ -1802,12 +1802,60 @@ impl AppState {
     /// detect a still-running `spawn_subagent` bubble whose child hasn't
     /// finished yet even though the root loop's own turn already has.
     fn has_running_tool_bubble(&self) -> bool {
-        self.chat_entries.iter().any(|entry| {
+        Self::entries_have_running_tool_bubble(&self.chat_entries)
+    }
+
+    /// Shared by `has_running_tool_bubble` (root) and `agent_mode_for_child`
+    /// (a drilled-into child's own transcript) — same "is a tool call still
+    /// executing" check, just parameterized over which entry list to scan.
+    fn entries_have_running_tool_bubble(entries: &[ChatEntry]) -> bool {
+        entries.iter().any(|entry| {
             matches!(
                 entry,
                 ChatEntry::ToolBubble { state, .. } if matches!(state.as_ref(), ToolCallState::Running { .. })
             )
         })
+    }
+
+    /// [`AgentMode`] for a drilled-into child conversation (`run_id`), used
+    /// by `render::project_for_draw` in place of `agent_mode()` whenever
+    /// `active_view` is `ConversationView::Child` — `agent_mode()` alone
+    /// reflects only the *root* loop's `TuiMode`, which stays whatever it
+    /// was when the root issued `spawn_subagent` (typically `Idle`, mapped
+    /// to `ToolRunning` via `has_running_tool_bubble` because the root's own
+    /// `spawn_subagent` `ToolBubble` is still `Running`) regardless of
+    /// whether the child itself is currently thinking/streaming, running one
+    /// of its own tools, or already finished. Without this, the child's own
+    /// in-flight `partial_thinking_text`/`partial_assistant_text` (correctly
+    /// projected in `project_for_draw`) never renders as a streaming bubble,
+    /// because `tui_widgets::draw` only shows it when `agent_mode ==
+    /// AgentMode::Streaming` — text popped straight from "invisible" to a
+    /// fully-committed bubble once flushed (see docs/known-issues.md).
+    pub fn agent_mode_for_child(&self, run_id: uuid::Uuid) -> AgentMode {
+        let is_pending_approval_for_this_child = matches!(self.focus, Focus::ToolApproval { tool_id, .. }
+        if self.child_conversations.get(&run_id).is_some_and(|conversation| {
+            conversation.messages.iter().any(|entry| matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == tool_id))
+        }));
+        if is_pending_approval_for_this_child {
+            return AgentMode::ToolPending;
+        }
+        let has_running_tool_bubble =
+            self.child_conversations
+                .get(&run_id)
+                .is_some_and(|conversation| {
+                    Self::entries_have_running_tool_bubble(&conversation.messages)
+                });
+        if has_running_tool_bubble {
+            AgentMode::ToolRunning
+        } else if self
+            .running_child
+            .as_ref()
+            .is_some_and(|child| child.run_id == run_id)
+        {
+            AgentMode::Streaming
+        } else {
+            AgentMode::Idle
+        }
     }
 
     /// Returns `true` when the help popup is currently displayed.

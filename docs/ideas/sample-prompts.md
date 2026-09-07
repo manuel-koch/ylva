@@ -167,7 +167,7 @@ Run `tests/e2e/heavy-output.bash`.
 Run the following task in a subagent and let it report its findings back:
 
 Analyze the `src/child_agent_manager.rs` functionality
-and write a 2-3 sentence summary of its implementation.
+and write a brief summary of its implementation.
 
 ---
 

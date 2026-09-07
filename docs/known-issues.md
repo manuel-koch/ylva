@@ -257,7 +257,7 @@ tests.
       `src/agent/tools/glob.rs`, matching the existing one-tool-per-module
       layout used by `edit.rs` and `search.rs`.
 
-- [ ] I can't see progress when subagent is thinking, i.e. there is no
+- [x] I can't see progress when subagent is thinking, i.e. there is no
       corresponding bubble for in-progress-thinking. Looks like there
       is only a bubble once thinking is done.
       Same seems to be the case for response of llm (after thinking), it seems to

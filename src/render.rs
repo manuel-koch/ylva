@@ -129,8 +129,16 @@ fn project_for_draw(state: &AppState) -> TuiState {
             _ => None,
         })
     });
+    // The drilled-into child's own streaming/tool-running/idle status, not
+    // the root's — see `AppState::agent_mode_for_child` for why `agent_mode()`
+    // alone is wrong here (it would gate the child's in-flight thinking/
+    // response bubble on the root's `TuiMode` instead of the child's).
+    let agent_mode = match &state.active_view {
+        ConversationView::Child { run_id, .. } => state.agent_mode_for_child(*run_id),
+        ConversationView::Root => state.agent_mode(),
+    };
     TuiState {
-        agent_mode: state.agent_mode(),
+        agent_mode,
         chat_entries,
         partial_assistant_text,
         partial_thinking_text,
@@ -429,6 +437,72 @@ mod tests {
         let projected = project_for_draw(&state);
 
         assert!(!projected.pending_approval_is_subagent);
+    }
+
+    #[test]
+    fn project_for_draw_reports_streaming_agent_mode_while_viewing_an_actively_running_child() {
+        // Regression test: while a `spawn_subagent` bubble is `Running` in
+        // the root transcript, the root's own `agent_mode()` maps to
+        // `ToolRunning` (its `TuiMode` is `Idle`/`Streaming` but a root
+        // `ToolBubble` is `Running`). Before this fix, `project_for_draw`
+        // used that *root* `agent_mode()` unconditionally, so a drilled-into
+        // child's own in-flight thinking/response text never rendered as a
+        // streaming bubble (`tui_widgets::draw` only shows it when
+        // `agent_mode == AgentMode::Streaming`) — it only appeared once
+        // flushed into a committed `ChatEntry`, i.e. no visible
+        // in-progress-thinking bubble for subagents (see
+        // docs/known-issues.md).
+        let mut state = AppState::new();
+        let run_id = Uuid::new_v4();
+        let bubble_id = Uuid::new_v4();
+        push_spawn_bubble(&mut state, bubble_id, "reviewer", "look into flaky test");
+        state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id,
+            agent_type: "reviewer".to_string(),
+            task: "look into flaky test".to_string(),
+            label: "Investigate flaky test".to_string(),
+        });
+        state.switch_to_child_view(run_id);
+        state
+            .child_conversations
+            .get_mut(&run_id)
+            .unwrap()
+            .turn_buffer
+            .partial_thinking_text = "pondering...".to_string();
+
+        // Sanity check on the premise: the root's own agent_mode is
+        // `ToolRunning`, not `Streaming`, because of the still-running
+        // `spawn_subagent` bubble.
+        assert_eq!(state.agent_mode(), crate::agent::AgentMode::ToolRunning);
+
+        let projected = project_for_draw(&state);
+
+        assert_eq!(projected.agent_mode, crate::agent::AgentMode::Streaming);
+        assert_eq!(projected.partial_thinking_text, "pondering...");
+    }
+
+    #[test]
+    fn project_for_draw_reports_idle_agent_mode_while_viewing_a_finished_child() {
+        let mut state = AppState::new();
+        let run_id = Uuid::new_v4();
+        let bubble_id = Uuid::new_v4();
+        push_spawn_bubble(&mut state, bubble_id, "reviewer", "look into flaky test");
+        state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id,
+            agent_type: "reviewer".to_string(),
+            task: "look into flaky test".to_string(),
+            label: "Investigate flaky test".to_string(),
+        });
+        state.switch_to_child_view(run_id);
+        // The child finished: `running_child` is cleared (mirrors
+        // `ChildAgentDone` handling), but the transcript/view stays around.
+        state.running_child = None;
+
+        let projected = project_for_draw(&state);
+
+        assert_eq!(projected.agent_mode, crate::agent::AgentMode::Idle);
     }
 
     #[test]
