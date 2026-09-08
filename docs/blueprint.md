@@ -648,7 +648,7 @@ enum AgentCommand {
     Stop,                    // Interrupt current generation
     // The following variants are deferred to Phase 3 (tools):
     // ApproveTool { id: Uuid },
-    // SwitchModel(String),   // wired via /model slash command in Phase 7
+    // SwitchModel(String),   // wired via /models slash command in Phase 7
 }
 
 enum AgentEvent {
@@ -1032,7 +1032,7 @@ enum MessageTier {
 }
 
 struct Context {
-    messages: Vec<Message>,  // Phase 1: simple Vec.  Phase 7 adds TieredMessage + token_count.
+    messages: Vec<Message>,  // Phase 1: simple Vec.  Phase 9 adds TieredMessage + token_count.
 }
 
 impl Context {
@@ -1052,7 +1052,7 @@ impl Context {
         &self.messages
     }
     // Phase 3 adds: push_tool_result, push_tool_error, descope_pending_tools
-    // Phase 7 adds: push_system, push_initial_context, maybe_compact, token counting
+    // Phase 9 adds: push_system, push_initial_context, maybe_compact, token counting
 }
 ```
 
@@ -1060,23 +1060,23 @@ impl Context {
 
 - `Context::new()` seeds the initial system message `Message::System { content:
   "You are Ylva, a helpful agent with tool capabilities." }` (SSOT constant for
-  Phase 1; a future config phase sources this from a customizable **SOUL.md**,
+  Phase 1; Phase 8 sources this from a customizable **SOUL.md**,
   see §4G).
 - `push_user(text)` → `Message::User { content: text }`
 - `push_assistant(content, status, tool_calls)` →
   `Message::Assistant { content, status, tool_calls }`
 
-**Phase 7 (future):** Replace `Vec<Message>` with `Vec<TieredMessage>`, add
+**Phase 9 (future):** Replace `Vec<Message>` with `Vec<TieredMessage>`, add
 `push_system`, `push_initial_context`, `push_compacted`, `maybe_compact`,
 `find_oldest_droppable`, and `find_oversized_result`.
 
 **Context ownership rule (HARD):** The outer agent loop is the **sole writer** to `Context`.
 
-**Compaction (Phase 7 future):**
+**Compaction (Phase 9 future):**
 
 Phase 1 does not implement compaction or token counting. The full algorithm
 (`maybe_compact`, `find_oldest_droppable`, `find_oversized_result`) is deferred
-until Phase 7 when `TieredMessage` and `tiktoken-rs` are introduced.
+until Phase 9 when `TieredMessage` and `tiktoken-rs` are introduced.
 
 **Compaction trigger and target:** `maybe_compact` uses a **hysteresis** model
 with a single control, `compact_target_ratio` (fraction of `context_length`):
@@ -1097,7 +1097,7 @@ with a single control, `compact_target_ratio` (fraction of `context_length`):
   in practice over-discards, add `max_drop_ratio` ("never drop more than X% of
   current in one pass") then.
 
-**Tool-result truncation (Phase 7 future):** Tool results are **truncated at
+**Tool-result truncation (Phase 9 future):** Tool results are **truncated at
 insertion** to a configurable cap (default ~8–16 KB / engine-tunable), with a
 clear marker such as `… [truncated M of K chars]`. Combined with
 `maybe_compact` preferring oversized results, a large result neither swallows
@@ -1105,7 +1105,7 @@ the window nor forces many older turns to be dropped. If the model needs more
 of a file, it re-calls `read`/`edit` with `offset`/`limit` — the
 existing tool contract.
 
-**Phase 7 (future):** Replace `find_oldest_droppable` + `remove` with a
+**Phase 9 (future):** Replace `find_oldest_droppable` + `remove` with a
 summarization pass: collect K oldest `Recent` messages, spawn a background
 summarizer model, and replace them with one `Compacted` system message.
 
@@ -1155,7 +1155,7 @@ generation is reserved for the explicit interrupt (`Ctrl+C` / `Esc`).
 **Token counting:** Use `tiktoken-rs` for OpenAI-compatible models and a byte-length
 heuristic (4 chars ≈ 1 token) for Ollama as a cheap fallback. Maintain a rolling
 window that trims the oldest user/assistant pairs (never the system prompt) when
-the total exceeds the model limit. For a more advanced solution (Phase 7), summarise
+the total exceeds the model limit. For a more advanced solution (Phase 9), summarise
 dropped messages via a cheap summariser model call and prepend a system message
 with the summary.
 
@@ -1388,16 +1388,25 @@ Parse the markdown stream with `pulldown-cmark` and render distinctly:
 Use `ratatui::widgets::Paragraph` with `Line`/`Span` composition.
 Cache highlighted lines to avoid re-tokenizing every frame.
 
-**Streaming markdown strategy:** Do not run `pulldown-cmark` on the raw partial
-buffer every frame. Instead, render the entire partial assistant message as plain
-text while streaming. Only apply `pulldown-cmark` + `syntect` **after** the stream
-is `Done`. The user sees raw markdown during generation, which is acceptable for a
-terminal agent and avoids re-parsing on every 16ms frame. Maintain a `Vec<RenderedBlock>`
-in the UI state; when a complete code fence is detected, parse only that fence
-with `syntect` and convert it to a `CodeBlock`.
+**Streaming markdown strategy:** Render the partial assistant message live,
+the same way a completed message is rendered — `pulldown-cmark` re-parses the
+growing buffer every frame, and `syntect` highlighting for code fences is
+served from the content-addressed cache (`src/highlight.rs`'s
+`highlighted_lines_cached`, keyed by content + file extension), so a fence
+whose content hasn't changed since the last frame is never re-tokenized.
+Shipped and measured to work at normal token-streaming rates without
+dropped frames; deferring parsing until the stream is `Done` (rendering raw
+markdown syntax while streaming) was considered as a precaution against
+per-frame parsing cost, but that cost was never actually measured as a
+problem (Spike 1 §0 only measured raw token throughput, not
+`pulldown-cmark`/`syntect` cost) and the tradeoff — visible `**`/`` ``` ``
+syntax mid-stream — is a worse experience for no confirmed benefit. Revisit
+only if a real, measured frame-time regression appears during streaming
+(see `docs/ideas/` for a fallback note).
 
-**Syntect themes:** Ship three built-in themes — dark, light, and monokai — selectable
-via config.
+**Syntect themes:** Ship two built-in themes — dark and light — selectable
+via config. A third ("monokai") theme is not bundled by `syntect` and is
+tracked separately as a future idea, not part of this phase.
 
 ### G. Agent Types & Delegation
 
@@ -1541,7 +1550,7 @@ a chat (the root agent's persona) follows the same scopes, expressed as a
 built-in default. It resolves through the same three-layer fallback chain
 below. Phase 1 hard-codes the default message (`"You are Ylva, a helpful agent
 with tool capabilities."`) as an SSOT constant; the SOUL.md loader replaces
-that constant's source in the config phase (§4C, §7 Phase 7).
+that constant's source in the config phase (§4C, §7 Phase 8).
 
 **Three-layer fallback chain**, resolved per-file with **whole-layer replace**
 (highest layer that defines a file wins; lower layers ignored for that file):
@@ -1704,7 +1713,7 @@ explicit `<role>_engine` → `default_engine` → hard error.
 
 ```toml
 # Future roles, added when the corresponding feature is implemented:
-compact_engine = "openrouter_small"   # context compaction summarizer (Phase 7)
+compact_engine = "openrouter_small"   # context compaction summarizer (Phase 9)
 # curator_engine = "openrouter_small" # reserved for a future curator child agent
 ```
 
@@ -1896,10 +1905,16 @@ stored.
    ```
 
    - `<project_key>` = a stable content-hash (e.g. SHA-256, hex) of the
-     **exact CWD** at session start. Hashed (not path-encoded) so it is opaque
-     but collision-free and robust to any characters; keying on CWD (rather
-     than the plan's git-root/`.ylva` discovery) means **non-git projects are
-     first-class** — a plain directory still gets its own history.
+     **canonicalized CWD** at session start — symlinks resolved and `..`
+     collapsed via the same canonicalization `Sandbox` already applies to its
+     workspace root (§4E, `SandboxContext::canonicalize_best_effort`), reused
+     rather than re-implemented, so the same physical directory always maps
+     to one `project_key` regardless of which symlink or OS path quirk (e.g.
+     macOS's `/var` → `/private/var`) it was reached through. Hashed (not
+     path-encoded) so it is opaque but collision-free and robust to any
+     characters; keying on CWD (rather than the plan's git-root/`.ylva`
+     discovery) means **non-git projects are first-class** — a plain
+     directory still gets its own history.
    - `<session_id>` = a UUID per conversation.
    - A project directory holds **many** session files; there is **no
      per-session subdirectory**.
@@ -2250,7 +2265,7 @@ exit code `4` and a descriptive error to stderr.
 with `--provider` + `--model` flags (e.g., `--provider openrouter --model anthropic/claude-3.5-haiku`)
 for one-off scripts. No hidden defaults.
 
-**Commands:** Slash commands (`/model`, `/tools`, `/clear`, `/save`) are only recognised at the start
+**Commands:** Slash commands (`/models`, `/tools`, `/clear`, `/save`) are only recognised at the start
 of a line to avoid triggering inside pasted code.
 
 **Conversation titles:** The `meta` header carries an auto-generated title —
@@ -2635,41 +2650,41 @@ See reducer-state-handling-plan.md.
 
 ### Phase 6: Terminal Superpowers
 
-- [ ] **Goal:** Make it a true coding agent.
+- [x] **Goal:** Make it a true coding agent.
 
-- [ ] `bash` tool wrapping `tokio::process::Command` with `tokio::time::timeout` (default 30s)
+- [x] `bash` tool wrapping `tokio::process::Command` with `tokio::time::timeout` (default 30s)
 
-- [ ] Launch `bash` with `process_group(0)` and kill the process **group** on timeout/`Stop`
+- [x] Launch `bash` with `process_group(0)` and kill the process **group** on timeout/`Stop`
       (prevents orphaned grandchildren)
 
-- [ ] Confirmation modal for `bash` and `write` (human-in-the-loop)
+- [x] Confirmation modal for `bash` and `write` (human-in-the-loop)
 
-- [ ] `search` tool wrapping `ripgrep` via `std::process` with lazy binary check and graceful fallback
+- [x] `search` tool wrapping `ripgrep` via `std::process` with lazy binary check and graceful fallback
 
-- [ ] `clarify` tool for interactive open-ended questions; render question banner in TUI, user answers
+- [x] `clarify` tool for interactive open-ended questions; render question banner in TUI, user answers
       via input box; not available in headless mode
 
-- [ ] File tree sidebar using `ignore` + `walkdir`
+- [-] File tree sidebar using `ignore` + `walkdir`
 
-- [ ] **Diff view:** When `write` is proposed, render a side-by-side or unified diff in chat
+- [x] **Diff view:** When `write` is proposed, render a side-by-side or unified diff in chat
       before approval
 
-- [ ] Add `edit` tool (line-based or search-and-replace) to reduce full-file rewrite tokens
+- [x] Add `edit` tool (line-based or search-and-replace) to reduce full-file rewrite tokens
 
-- [ ] `spawn_subagent` tool in `ToolRegistry` with config-driven types and tool whitelists
+- [x] `spawn_subagent` tool in `ToolRegistry` with config-driven types and tool whitelists
 
-- [ ] `ChildAgentManager` that owns child-agent lifecycle (spawn, timeout, cancel via `CancellationToken`)
+- [x] `ChildAgentManager` that owns child-agent lifecycle (spawn, timeout, cancel via `CancellationToken`)
 
-- [ ] `agent_finish` tool available only inside child-agent runs; fallback to unstructured
+- [x] `agent_finish` tool available only inside child-agent runs; fallback to unstructured
       text if never called
 
-- [ ] Child-agent persistence records (`child_start` / `child_result`) with parent session linkage (§4H)
+- [-] Child-agent persistence records (`child_start` / `child_result`) with parent session linkage (§4H)
 
-- [ ] Child agent inherits parent safety settings (`--auto-approve-*` in headless)
+- [x] Child agent inherits parent safety settings (`--auto-approve-*` in headless)
 
-- [ ] TUI sidebar panel for active/past child-agent runs (collapsible, shows runtime & status)
+- [x] TUI sidebar panel for active/past child-agent runs (collapsible, shows runtime & status)
 
-- [ ] Headless: `--allow-child-agents` flag (disabled by default) + stderr status lines
+- [x] Headless: `--allow-child-agents` flag (disabled by default) + stderr status lines
 
 **Key crates:** `which`, `ignore`, `tempfile`
 
@@ -2677,13 +2692,19 @@ See reducer-state-handling-plan.md.
 
 - [ ] **Goal:** Usable daily driver.
 
-- [ ] `syntect` highlighting for all Markdown code fences; render raw text while streaming,
-      parse markdown only after `Done`
+- [ ] `syntect` highlighting for all Markdown code fences (already shipped in
+      Phase 6, §4F); live rendering during streaming/thinking already matches
+      the completed-message rendering path — no separate "raw text while
+      streaming" behavior is planned (see §4F "Streaming markdown strategy")
 
-- [ ] Three built-in themes: dark, light, monokai
+- [ ] Two built-in themes: dark, light (a third "monokai" theme is deferred — no
+      bundled `syntect` default theme is named "monokai"; sourcing/embedding a
+      third theme asset is tracked as a standalone future idea, not a phase task —
+      see `docs/ideas/monokai-theme.md`)
 
 - [ ] JSONL persistence for conversations, child agents, and schema-version handling (§4H)
 
+<<<<<<< Updated upstream
 - [ ] Implement the `Store` (`src/store.rs`, §4H) as the single persistence path for
       **both** main-conversation messages and child-agent records — do not build a
       child-only persistence layer. Append `child_start` / `child_result` JSONL
@@ -2693,29 +2714,117 @@ See reducer-state-handling-plan.md.
       Phase 6.12 in `docs/plans/phase6-terminal-superpowers.md`, dropped because it
       had no main-session persistence to attach to.
 
+=======
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
 - [ ] Resume an existing session via explicit `--conversation-id` (no auto-resume, no picker)
+=======
+- [ ] Implement the `Store` (`src/store.rs`, §4H) as the single persistence path for
+      **both** main-conversation messages and child-agent records — do not build a
+      child-only persistence layer. Append `child_start` / `child_result` JSONL
+      records (shapes in §4G *Persistence* / §4H) to the parent session file via the
+      same writer used for conversation messages, keyed by `parent_session` +
+      `run_id`. This supersedes the child-persistence task originally planned as
+      Phase 6.12 in `docs/plans/phase6-terminal-superpowers.md`, dropped because it
+      had no main-session persistence to attach to.
 
-- [ ] Config hierarchy (`~/.ylva/profiles/default/config.toml`) for
-      default model, theme, keybindings, and agent-type engine assignments
+- [ ] Resume an existing session via explicit `--conversation-id` (no auto-resume, no
+      picker); an id that does not match an existing session file is a hard error,
+      never a silent new-session fallback
+>>>>>>> Stashed changes
 
-- [ ] Tiered context management: System (never drop), InitialContext (never drop initially),
-      Recent (drop oldest first), Compacted (summarization placeholder)
+- [ ] Config hierarchy — **narrow scope**: load a single flat
+      `~/.ylva/profiles/<name>/config.toml` (default profile at
+      `~/.ylva/profiles/default/config.toml`) into the existing
+      `ProfileConfig`/`AgentConfig`/`EngineConfig` structs for default model,
+      theme, keybindings, and agent-type engine assignments. The full `§4G`
+      three-layer fallback chain (project `.ylva/` → home `~/.ylva/` → embedded
+      `config/`), `ylva init`/`ylva init --project` distribution, `SOUL.md`
+      persona loading, global `agents/*.md` type files, and `.env` auto-loading
+      are **out of scope for Phase 7** — see Phase 8 below.
 
-- [ ] Token counting with cached counts per `TieredMessage` (re-count on insertion, not every request)
+- [ ] `/commands` in input box, recognised only when `/` is the first character
+      of the draft message (never mid-paste): `/models` (list available models
+      from the active provider via `Provider::list_models()`, §4A, and switch
+      the active engine on selection — supersedes the standalone `SwitchModel`
+      placeholder), `/tools` (show the active agent's allowed tool list),
+      `/clear`/`/reset` (aliases; reset `Context` and start a fresh `Store`
+      session). `/save` is dropped — it had no behavior distinct from the
+      `Store`'s existing automatic per-line flush, §4H decision 10. A
+      recognised command may open a small overlay above the conversation list
+      while typing (e.g. `/models`' candidate list) and always produces a
+      result bubble in the conversation on confirm. `/agent` (overlay listing
+      (sub-)agent runs and switching the view to one) is **not** in Phase 7
+      scope — see `docs/ideas/slash-commands.md`.
+
+**Key crates:** `serde_json`, `sha2`, `toml`, `chrono`
+
+### Phase 8: Full Configuration & Persona System
+
+- [ ] **Goal:** Replace Phase 7's single flat config file with the complete `§4G`
+      config-driven-types system, so behavior (agent types, persona) and
+      infrastructure (engines/profiles) are both fully file-driven and
+      shareable across projects/users.
+
+- [ ] Three-layer fallback chain: project `.ylva/` (cwd/git-root scope) → home
+      `~/.ylva/` (per-user) → embedded `config/` (built-in floor), resolved
+      per-file with whole-layer replace; missing everywhere is never a hard
+      error
+
+- [ ] `ylva init` (seeds the full standard set into `~/.ylva/`) and
+      `ylva init --project` (seeds a minimal `.ylva/profiles/default/config.toml`
+      into the project root); both write-if-missing by default, `--force` reseeds
+
+- [ ] `SOUL.md` persona / initial system message loader (project `.ylva/` and
+      home `~/.ylva/`, built-in default), replacing the Phase 1 SSOT constant's
+      source per §4C/§4G
+
+- [ ] Global agent-type definitions (`~/.ylva/agents/*.md` with `+++`
+      frontmatter, e.g. `research.md`, `code_edit.md`), shared across profiles
+      and usable as root or child agent types
+
+- [ ] `.env` auto-loading per scope (e.g. `~/.ylva/profiles/default/.env`,
+      `.ylva/profiles/default/.env`), with an already-exported environment
+      variable taking precedence; `ylva init --project` also deploys a
+      `.gitignore` inside the project's `.ylva/` ignoring `.env`
+
+- [ ] Per-tool sandbox rule configuration: load configurable `[tool.*]` rule
+      lists (including `outside_workspace`/`dot_path` overrides, §4E) from the
+      layered config, replacing Phase 6's hardcoded two-rule default
+
+**Key crates:** `toml` (already added in Phase 7); evaluate `dirs`/`directories`
+for home-directory resolution when this phase starts.
+
+### Phase 9: Context Compaction & Token Budgeting
+
+- [ ] **Goal:** Keep the context window bounded for long-running conversations
+      without losing the most valuable context (§4C).
+
+- [ ] Tiered context management: replace `Context`'s `Vec<Message>` with
+      `Vec<TieredMessage>` tagged `System` (never drop), `InitialContext` (never
+      drop initially), `Recent` (drop oldest first), `Compacted` (drop before
+      `Recent`)
+
+- [ ] Token counting with cached counts per `TieredMessage` (re-count on
+      insertion, not every request); `tiktoken-rs` for OpenAI-compatible
+      engines, a byte-length heuristic (4 chars ≈ 1 token) for Ollama
 
 - [ ] Context window compaction: when total > `context_length × 0.9`, compact to
-  ≤ `context_length × compact_target_ratio` (default 0.5, per `EngineConfig`);
-  minimal intervention, drops/summarizes oldest `Recent`/`Compacted` messages
-  (`maybe_compact`)
+      ≤ `context_length × compact_target_ratio` (default 0.5, per `EngineConfig`);
+      minimal intervention, drops/summarizes oldest `Recent`/`Compacted` messages
+      (`maybe_compact`), preferring an oversized tool result
+      (`find_oversized_result`) over dropping whole turns
 
-- [ ] Phase 7 extension: replace "drop" with on-the-fly summarization via a cheap local model
-  (engine = `compact_engine`, §4G)
+- [ ] Tool-result truncation at insertion (default ~8–16 KB, engine-tunable),
+      with a `"… [truncated M of K chars]"` marker
 
-- [ ] `/commands` in input box (e.g., `/model`, `/tools`, `/clear`, `/save`)
+- [ ] Phase 9 extension: replace "drop" with on-the-fly summarization via a
+      cheap local model (engine = `compact_engine`, §4G/§4G config, wired in
+      Phase 8)
 
-**Key crates:** `serde_json`, `sha2`, `config`, `toml`, `chrono`, `tiktoken-rs`
+**Key crates:** `tiktoken-rs`
 
-### Phase 8: CLI Surface
+### Phase 10: CLI Surface
 
 **Decision:** Headless mode already works from Phase 1. This phase adds the full `clap` CLI interface
 for scripting and automation.
@@ -2908,7 +3017,7 @@ where they are documented in the body of this document.
 | **TUI event loop**             | `spawn_blocking` for crossterm + `select!` on `ui_rx` + `subagent_ui_rx` + `event_rx`                                                                                                          | §4B ReAct Loop                               |
 | **TUI async context**          | `main.rs` uses `rt.block_on` for the TUI loop                                                                                                                                                  | §4B ReAct Loop                               |
 | **Token counting**             | `tiktoken-rs` for OpenAI; byte heuristic for Ollama; cached per `TieredMessage`. Counts are **approximate/advisory** (encoding is model-family dependent); rely on `context_length × 0.9` margin | §4C Context State Machine                    |
-| **Context tiers**              | `System` (never drop), `InitialContext` (never drop), `Recent` (drop oldest), `Compacted` (summarize in Phase 7)                                                                               | §4C Context State Machine                    |
+| **Context tiers**              | `System` (never drop), `InitialContext` (never drop), `Recent` (drop oldest), `Compacted` (summarize in Phase 9)                                                                               | §4C Context State Machine                    |
 | **Ollama tools**               | Unified OpenAI-compatible provider using raw `reqwest` to `/v1/chat/completions`; no separate `ollama-rs` crate                                                                                | §2 Crate Ecosystem, §5 OpenRouter vs Ollama  |
 | **OS signals**                 | `ctrlc` handler mapped to `AgentCommand::Stop`                                                                                                                                                 | §1 Vision, §2 Crate Ecosystem                |
 | **Tool binary checks**         | Lazy check at invocation with graceful fallback                                                                                                                                                | §4D Tool Registry                            |
@@ -2918,7 +3027,7 @@ where they are documented in the body of this document.
 | **Output streams**             | Split stdout (content) / stderr (status); `--quiet` flag; buffer and emit at end                                                                                                               | §7 CLI Surface                               |
 | **Headless safety**            | Mutating tools require `--auto-approve-*`; exit code `4` if denied                                                                                                                             | §4E Safety, §7 CLI Surface                   |
 | **Conversation titles**        | Auto-generated from first user message, truncated single-line in the `meta` header (§4H decision 8)                                                                                                     | §7 CLI Surface, §4H decision 8               |
-| **Model switching**            | Supported mid-conversation; `SwitchModel` is a documented placeholder, not yet wired — arrives via `/model` in the slash-command phase                                                         | §4B ReAct Loop, §7 CLI Surface               |
+| **Model switching**            | Supported mid-conversation; `SwitchModel` is a documented placeholder, not yet wired — arrives via `/models` in the slash-command phase                                                        | §4B ReAct Loop, §7 CLI Surface               |
 | **App state**                  | Dumb view model; agent loop owns state machine                                                                                                                                                 | §4B ReAct Loop                               |
 | **Config format**              | TOML for all config files; YAML explicitly rejected                                                                                                                                            | §2 Crate Ecosystem, §4G Agent Types & Delegation |
 | **Engine vs Provider mapping** | `Engine` = config data (static, named); `Provider` = runtime trait object built from Engine at startup                                                                                         | §4A Provider Trait, §4G Engine Definitions   |

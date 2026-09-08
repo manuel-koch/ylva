@@ -40,7 +40,7 @@ pub struct ProfileConfig {
     /// `AgentConfig::engine`.
     pub default_engine: String,
     /// Name of the engine used for compact/summarisation tasks. When `None`,
-    /// falls back to `default_engine`. Phase 7 wires this at runtime.
+    /// falls back to `default_engine`. Phase 9 wires this at runtime.
     pub compact_engine: Option<String>,
     /// Map of agent-type name to its configuration.
     pub agents: HashMap<String, AgentConfig>,

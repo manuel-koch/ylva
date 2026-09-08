@@ -26,7 +26,7 @@ A profile groups engine selection and per-agent settings for a runtime session.
 | Field | Type | Description |
 |---|---|---|
 | `default_engine` | `String` | Name of the engine used when no agent-level override is present (required). |
-| `compact_engine` | `Option<String>` | Engine used for summarisation tasks. Resolves to `default_engine` when absent. Phase 7 wires this at runtime. |
+| `compact_engine` | `Option<String>` | Engine used for summarisation tasks. Resolves to `default_engine` when absent. Phase 9 wires this at runtime. |
 | `agents` | `HashMap<String, AgentConfig>` | Per-agent-type settings, keyed by agent-type name. |
 
 ### Per-agent configuration (`AgentConfig`)
@@ -57,9 +57,15 @@ named glob rule (last match wins):
 | `outside_workspace` | `AutoDenied` | Any path that normalizes outside the workspace root. |
 | `dot_path` | `AutoDenied` | Any path whose relative-to-root form has a component starting with `.` (dot-files/dot-directories). |
 
+<<<<<<< Updated upstream
 These two rules are not yet configurable — Phase 7 is expected to load
 per-tool `[tool.*]` rule lists (including `outside_workspace`/`dot_path`
 overrides) from a TOML config file; until then the defaults above apply to
+=======
+These two rules are not yet configurable — Phase 8 is expected to load
+per-tool `[tool.*]` rule lists (including `outside_workspace`/`dot_path`
+overrides) from the layered TOML config; until then the defaults above apply to
+>>>>>>> Stashed changes
 every tool uniformly. `search`'s `path: None` (cwd, never leaves the
 workspace by construction) skips the sandbox check entirely and is
 auto-approved; when a `path` is given, it goes through the same
