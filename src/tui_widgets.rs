@@ -456,14 +456,12 @@ pub fn draw(
         draw_clarify_banner(
             frame,
             clarify_area,
-            ClarifyBannerParams {
-                question,
-                choices: choices.as_ref(),
-                context: context.as_deref(),
-                drag: state.clarify_banner_state.clarify_banner_drag,
-                scroll_offset: &mut state.clarify_banner_state.clarify_scroll_offset,
-                content_height: clarify_banner_content_height as usize,
-            },
+            question,
+            choices.as_ref(),
+            context.as_deref(),
+            state.clarify_banner_state.clarify_banner_drag,
+            &mut state.clarify_banner_state.clarify_scroll_offset,
+            clarify_banner_content_height as usize,
         );
     }
 
@@ -472,13 +470,11 @@ pub fn draw(
             frame,
             footer_row_1,
             footer_row_2,
-            ApprovalFooterParams {
-                tool_name: name,
-                is_subagent: state.pending_approval_is_subagent,
-                input_is_empty,
-                mouse_pos,
-                hint,
-            },
+            name,
+            state.pending_approval_is_subagent,
+            input_is_empty,
+            mouse_pos,
+            hint,
         )
     } else {
         let in_child_view = state.child_view.child_view_bubble.is_some();
@@ -603,12 +599,10 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
                 let msg_width = bubble_row_width.saturating_sub(4).max(1);
                 append_thinking_lines(
                     &mut lines,
-                    ThinkingBubbleArgs {
-                        text,
-                        collapsed: *collapsed,
-                        duration: *duration,
-                        entry_index,
-                    },
+                    text,
+                    *collapsed,
+                    *duration,
+                    entry_index,
                     &mut thinking_title_rows_out,
                     msg_width,
                     bubble_row_width,
@@ -1184,13 +1178,6 @@ fn append_streaming_lines(
     style.push_padding_line(lines, Style::default());
 }
 
-struct ThinkingBubbleArgs<'a> {
-    text: &'a str,
-    collapsed: bool,
-    duration: std::time::Duration,
-    entry_index: usize,
-}
-
 /// Render a committed thinking bubble (extended-thinking/reasoning output),
 /// distinct from the assistant reply. When `collapsed`, renders only a single
 /// summary line `▶ Thought for {duration}`; when expanded, the content is
@@ -1200,19 +1187,17 @@ struct ThinkingBubbleArgs<'a> {
 /// Records the bubble's absolute row range in `thinking_title_rows` (keyed by
 /// `entry_index`, since `ChatEntry::ThinkingMessage` carries no `Uuid`) so
 /// mouse clicks can route to `AppState::toggle_thinking_collapsed`.
+#[expect(clippy::too_many_arguments)]
 fn append_thinking_lines(
     lines: &mut Vec<Line<'static>>,
-    bubble: ThinkingBubbleArgs<'_>,
+    text: &str,
+    collapsed: bool,
+    duration: std::time::Duration,
+    entry_index: usize,
     thinking_title_rows: &mut Vec<(usize, usize, usize)>,
     width: usize,
     row_width: usize,
 ) {
-    let ThinkingBubbleArgs {
-        text,
-        collapsed,
-        duration,
-        entry_index,
-    } = bubble;
     let style = BubbleStyle::new(THINKING_BORDER_COLOR, THINKING_BG_COLOR, row_width);
     let dim = Style::default().add_modifier(Modifier::DIM);
     let title_text = format!("Thought for {:.3}s", duration.as_secs_f64());
@@ -2523,24 +2508,17 @@ fn draw_normal_footer(
     );
 }
 
-struct ClarifyBannerParams<'a> {
-    question: &'a str,
-    choices: Option<&'a Vec<String>>,
-    context: Option<&'a str>,
+#[expect(clippy::too_many_arguments)]
+fn draw_clarify_banner(
+    frame: &mut Frame,
+    area: Rect,
+    question: &str,
+    choices: Option<&Vec<String>>,
+    context: Option<&str>,
     drag: Option<BannerDragSelection>,
-    scroll_offset: &'a mut usize,
+    scroll_offset: &mut usize,
     content_height: usize,
-}
-
-fn draw_clarify_banner(frame: &mut Frame, area: Rect, params: ClarifyBannerParams<'_>) {
-    let ClarifyBannerParams {
-        question,
-        choices,
-        context,
-        drag,
-        scroll_offset,
-        content_height,
-    } = params;
+) {
     let wrap_width = area.width as usize;
     let mut lines: Vec<Line> = vec![];
     let mut content_row: usize = 0;
@@ -2733,30 +2711,18 @@ fn banner_line_with_selection(
     Line::from(spans)
 }
 
-/// Grouped parameters for [`draw_approval_footer`] (avoids an excessive
-/// positional-argument count; mirrors [`ClarifyBannerParams`]).
-struct ApprovalFooterParams<'a> {
-    tool_name: &'a str,
-    is_subagent: bool,
-    input_is_empty: bool,
-    mouse_pos: Option<(u16, u16)>,
-    hint: Option<&'a str>,
-}
-
 /// Returns the button `Rect`s for mouse hit-testing.
+#[expect(clippy::too_many_arguments)]
 fn draw_approval_footer(
     frame: &mut Frame,
     row_1: Rect,
     row_2: Rect,
-    params: ApprovalFooterParams<'_>,
+    tool_name: &str,
+    is_subagent: bool,
+    input_is_empty: bool,
+    mouse_pos: Option<(u16, u16)>,
+    hint: Option<&str>,
 ) -> Option<ButtonAreas> {
-    let ApprovalFooterParams {
-        tool_name,
-        is_subagent,
-        input_is_empty,
-        mouse_pos,
-        hint,
-    } = params;
     let row_1_text = if let Some(hint_text) = hint {
         hint_text.to_string()
     } else if is_subagent {

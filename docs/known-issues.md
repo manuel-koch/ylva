@@ -106,44 +106,6 @@ tests.
 
 - [ ]  
 
-## Code style smell
-
-Code fragments like the following seem to be written to avoid "too many args" linter
-issue. But it looks like the introduction of the "params" struct is just to
-silence the linter warning, the implementation just packs some args into
-a struct and immediately unpacks the struct into local vars inside the method.
-If this is the way the linter issue should be fixed ( is this actually
-best practice ? ), I would rather just suppress the linter issue
-instead of writing so much bogus code fragments with no benefit wrt readability.
-
-```rust
-/// Grouped parameters for [`draw_approval_footer`] (avoids an excessive
-/// positional-argument count; mirrors [`ClarifyBannerParams`]).
-struct ApprovalFooterParams<'a> {
-    tool_name: &'a str,
-    is_subagent: bool,
-    input_is_empty: bool,
-    mouse_pos: Option<(u16, u16)>,
-    hint: Option<&'a str>,
-}
-
-/// Returns the button `Rect`s for mouse hit-testing.
-fn draw_approval_footer(
-    frame: &mut Frame,
-    row_1: Rect,
-    row_2: Rect,
-    params: ApprovalFooterParams<'_>,
-) -> Option<ButtonAreas> {
-    let ApprovalFooterParams {
-        tool_name,
-        is_subagent,
-        input_is_empty,
-        mouse_pos,
-        hint,
-    } = params;
-    .....
-```
-
 ## Features document to verbose
 
 The `features.md` document contains many code-like references and detailed

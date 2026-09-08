@@ -59,6 +59,49 @@ replace it with a freshly justified one).
 for suppressions near `#[cfg(feature = ...)]` code, since expectations can be
 fulfilled under one feature set and not the other.
 
+### Anti-pattern: "params struct" to silence `too_many_arguments`
+
+Do not introduce a single-use struct whose only job is to pack a function's
+arguments together so the function itself takes one struct parameter instead
+of many — especially when the body immediately destructures it back into the
+same local names, e.g.:
+
+```rust
+// Don't do this just to dodge the lint:
+struct FooParams<'a> {
+    a: &'a str,
+    b: bool,
+    c: Option<u16>,
+}
+
+fn foo(params: FooParams<'_>) {
+    let FooParams { a, b, c } = params; // immediately unpacked, no benefit
+    ...
+}
+```
+
+This adds a type and a destructuring block with no readability or reuse
+benefit over the plain argument list it replaces. Before reaching for
+`#[expect(...)]`, work through these in order:
+
+1. **Extract a real struct** if the arguments are only ever used together as
+   one meaningful, reusable value across multiple call sites (a real cohesive
+   concept, not a lint dodge) — see `ToolBubbleArgs`/`ToolDonePayload` for
+   examples of this being justified.
+2. **Split the function** if it is doing more than one job (Fowler's "Long
+   Parameter List"/"Long Method" smells) — each half then takes fewer args.
+3. **Drop derivable args** — an argument computable from another argument
+   already in the list (or from `self`/existing state) doesn't need to be
+   passed in separately; compute it inside the function instead.
+4. **Move the function onto the type it operates on** (`impl` method) if
+   several args are really just that type's own fields — `&self`/`&mut self`
+   then replaces those positional args.
+
+Only once none of these genuinely fits — the arguments are unrelated,
+single-use, and the function's responsibility is already minimal — suppress
+the lint with `#[expect(clippy::too_many_arguments)]` as shown above, rather
+than inventing a throwaway struct.
+
 ## Logging
 
 Diagnostics are emitted through the `tracing` facade macros

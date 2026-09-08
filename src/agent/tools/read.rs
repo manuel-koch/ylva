@@ -433,7 +433,10 @@ mod tests {
 
     #[test]
     fn undeclared_tool_timeout_uses_default() {
-        assert_eq!(ReadTool::default().timeout_secs(), DEFAULT_TOOL_TIMEOUT_SECS);
+        assert_eq!(
+            ReadTool::default().timeout_secs(),
+            DEFAULT_TOOL_TIMEOUT_SECS
+        );
     }
 
     #[test]
