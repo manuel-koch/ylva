@@ -220,7 +220,7 @@ tests.
       blank/wrong-looking frame) for the rare case the bubble can no longer
       be found.
 
-- [ ] When llm spawned many subagents and user drills-into a specific subagent
+- [x] When llm spawned many subagents and user drills-into a specific subagent
       conversation-list, that list constantly re-renders whenever a new subagent
       starts. Seems like the drill-in just works on the last active subagent
       and not on a particular subagent.
@@ -312,11 +312,14 @@ tests.
       model can pace itself and call `agent_finish` before running out. See
       `docs/features.md`/`docs/blueprint.md`.
 
-- [ ] If a subagent conversation encounters an upstream error from llm provider
+- [-] If a subagent conversation encounters an upstream error from llm provider
       ( e.g. recoverable error like out-of-credits ) then there is no way to continue/retry the current subagent conversation. It is just stuck.
       And parent agent is stuck too in waiting for subagent result that will never
       happen.
       Should we allow steering a subagent via the input-draft message?
+      REMARK: This known/expected behavoir, we won't do anything about it. User
+      can still steer parent agent to trigger a retry of the subagent ( or llm
+      will do it anyway when parent conversation is manually continued ).
 
 - [x] ~~Inconsistency worth noting: the module header references
       DEFAULT_TOOL_TIMEOUT_SECS , but the constant that actually exists is
