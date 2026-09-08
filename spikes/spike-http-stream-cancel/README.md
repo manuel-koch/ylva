@@ -2,19 +2,19 @@
 
 A standalone proof-of-concept (spike) crate that validates the cancellation
 claim behind the Ylva design: a raw `reqwest` + `eventsource-stream` SSE stream
-can be aborted **cooperatively** such that the underlying TCP connection closes
+can be aborted cooperatively such that the underlying TCP connection closes
 immediately (no `CLOSE_WAIT` / `ESTABLISHED` linger) and the tokio runtime leaks
-**zero** tasks. This is what lets a user hit `Ctrl+C` or steer mid-stream
-without leaking sockets or background tasks in the real agent.
+zero tasks. This is what lets a user hit `Ctrl+C` or steer mid-stream
+without leaking sockets or background tasks.
 
 This is a **spike, not production code**. It lives in the dedicated `spikes/`
-directory, is a separate crate, and is **not** wired into any future `src/`
+directory, is a separate crate, and is not wired into any future `src/`
 tree (see `docs/blueprint.md` §Phase 0 / §Spike 2). The full intent and the
 acceptance criteria are recorded in [plan.md](./plan.md).
 
 Unlike Spike 1 this experiment is **headless** (a plain binary, no TUI):
 cancellation and connection state are verified programmatically and via OS
-socket inspection, so no live terminal is required.
+socket inspection, so no live terminal is needed.
 
 ## What it proves
 

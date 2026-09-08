@@ -75,12 +75,11 @@ impl BuildInfo {
 }
 
 /// Returns the names of non-default Cargo features enabled in this build.
-#[allow(clippy::vec_init_then_push)]
 pub fn enabled_features() -> Vec<&'static str> {
-    #[allow(unused_mut)]
     let mut features: Vec<&'static str> = Vec::new();
-    #[cfg(feature = "artificial-tool-delay")]
-    features.push("artificial-tool-delay");
+    if cfg!(feature = "artificial-tool-delay") {
+        features.push("artificial-tool-delay");
+    }
     features
 }
 

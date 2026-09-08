@@ -337,7 +337,7 @@ works even if crossterm's event queue is momentarily stuck.
 src/
 ├── main.rs              # CLI args, mode dispatch (TUI vs headless), rt.block_on wrapper
 ├── app.rs               # App state (Mode, streaming_state, partial_msg)
-├── ui.rs                # All ratatui widgets and layout math
+├── tui_widgets.rs        # All ratatui widgets and layout math
 ├── events.rs            # Crossterm key → AppAction mapping (Ctrl+C, Enter)
 ├── config.rs            # Settings, API keys, model selection
 ├── store.rs             # JSONL persistence for chats (see §4H)
@@ -1318,14 +1318,43 @@ A terminal agent that can run `rm -rf` or `curl | sh` must ask for approval.
 | `bash`, `git push`        | `Strict` (modal confirmation)                                           |
 | `clarify`                 | `Interactive` (rendered as question banner; user answers via input box) |
 
-**Interim vs. path-based approval (Q5):** the `Auto` level for `read`/`glob` is an
-**interim/fake** marker for Phase 3 — the loop protocol is uniform (every tool
-pauses at `ToolPending` and receives `ApproveTool`/`DenyTool`/`Stop`; the driver
-just auto-approves `read`/`glob`). This is **not** the final policy: once the
-Phase 6 sandbox defines a workspace root, approval becomes **path-dependent** —
-an out-of-workspace `read`/`glob` will require approval, so those tools can
-report `needs_approval() == true` per-path. Phase 3 marks them `false` only as a
-read-only convenience, never a permanent exemption.
+**Path-based approval via sandbox:** `read` and `glob` are auto-approved by
+default, but approval is **path-dependent** — each tool queries
+`SandboxContext::check_path`, which returns `None` (sandbox abstains; tool
+applies its own default) or `Some(verdict)` (explicit rule; tool honours it
+unconditionally). All rule evaluation runs against the **canonical** (symlink-
+resolved) path so symlinks cannot hide their real location, name, or extension.
+For non-existent paths (e.g. a write target), lexical normalization is the
+fallback.
+
+**Tool approval rules (planned TOML config):** each tool's path-based policy is
+configurable via a `[tool.<name>]` block. Named rules act as early defaults;
+glob rules (last-match-wins) can override them:
+
+```toml
+[tool.read]
+path_outside_workspace = deny   # default: deny
+dot_path               = deny   # default: deny
+# cross_filesystem not set — sandbox abstains; configure to deny|user when needed
+globs = [
+    "allow:**/.*",              # re-allow dot-files inside workspace
+    "user:/**/.env",            # escalate .env files to user approval
+]
+
+[tool.write]
+path_outside_workspace = deny   # default: deny
+dot_path               = deny   # default: deny
+# cross_filesystem not set — sandbox abstains; configure to deny|user when needed
+```
+
+Named rules:
+
+- `path_outside_workspace` — canonicalized path is not under the workspace root
+- `dot_path` — any component of the workspace-relative path starts with `.`
+- `cross_filesystem` — canonicalized path is on a different filesystem (device)
+  than the workspace root; catches writes into mounted shares or volumes.
+  **Not configured by default** (sandbox abstains). Set to `deny` or `user`
+  to restrict cross-device access.
 
 **Flow:**
 
@@ -1455,7 +1484,7 @@ The child is a fully independent ReAct agent with:
 - Its own `CancellationToken` (linked to the parent's tool cancel)
 - Its own `subagent_ui_tx` channel for live updates to the TUI sidebar
 
-When the child finishes (via `finish` tool, timeout, or user cancellation),
+When the child finishes (via `agent_finish` tool, timeout, or user cancellation),
 it sends `AgentEvent::ToolDone` back to the root agent loop via `agent_rx`.
 The root loop appends the result to its own `Context` and re-prompts.
 
@@ -1754,12 +1783,12 @@ child agents as well.
    process `Prompt` (steering) and `Stop` commands from the user. The child
    and root run concurrently. If the root LLM produces new tokens while the
    child is working, both appear in the TUI (main chat + sidebar panel).
-4. **Finish:** the child must call a special `finish` tool to return its
-   result. The `finish` schema is:
+4. **Finish:** the child must call a special `agent_finish` tool to return its
+   result. The `agent_finish` schema is:
 
    ```rust
    #[derive(JsonSchema, Deserialize)]
-   struct FinishArgs {
+   struct AgentFinishArgs {
        status: String, // "success" | "error"
        result: String,
        #[serde(default)]
@@ -1769,11 +1798,20 @@ child agents as well.
    }
    ```
 
-   The `finish` call is **exempt** from the iteration cap; it is the natural
-   termination state. If the child never calls `finish` (timeout, max
-   iterations, or user abort), the system extracts the last assistant message as
-   raw text, wraps it in a synthetic `{"status": "unstructured", "result": "..."}`
-   object, and returns that to the parent.
+   The `agent_finish` call is **exempt** from the iteration cap; it is the natural
+   termination state. If the child goes idle without ever calling `agent_finish`
+   (final assistant text with no tool call, or a killed tool), the system extracts
+   the last assistant message as raw text, wraps it in a synthetic
+   `{"status": "unstructured", "result": "..."}` object, and returns that to the
+   parent. If the child instead hits the max-tool-iterations cap before ever
+   calling `agent_finish`, there is no genuine final answer to salvage — the
+   child loop returns an `Err` instead of its `Context`, and the parent receives
+   a `{"status": "failure", "error": "...", "result": null}` object explaining
+   the cap was hit, rather than mistaking the cap's boilerplate message for the
+   child's own conclusion. Ahead of its briefing, a child also receives a
+   heads-up system message stating its tool-use iteration budget, so a
+   capable model can pace its tool calls and call `agent_finish` before it
+   runs out.
 5. **Re-integration:** the `result` field of the structured output is injected
    into the root conversation as a `Message::System` (or a dedicated
    `Message::ChildResult`) so the root LLM can use it on its next turn.
@@ -2001,7 +2039,7 @@ stored.
      own `<sub-session>.jsonl` (same `project_key`, own `meta` header with an
      auto-title = child-agent `task`). Not streamed live.
    - Rationale: child agents are short and loss-tolerant (their result is already
-     summarized into the parent context by `finish`); avoiding a second live
+     summarized into the parent context by `agent_finish`); avoiding a second live
      flocked append stream per child agent keeps the machinery simple. A
      mid-run killed child agent loses only its reasoning transcript; its start
      line still marks that a run occurred.
@@ -2345,8 +2383,11 @@ top of a proven agent loop.
       base 1 s, max 30 s, jitter, honoring `Retry-After`; never retry mid-stream (§4A).
 
 - [x] **Demo wiring (Phase 2, no CLI/config):** `main.rs` selects the provider from env vars with
-      **Ollama-first** precedence — `OLLAMA_BASE_URL`/`OLLAMA_MODEL`/`OLLAMA_API_KEY`, then
-      `OPENROUTER_BASE_URL`/`OPENROUTER_MODEL`/`OPENROUTER_API_KEY`, else fall back to `MockProvider`.
+      **Ollama-first** precedence — a non-empty `OLLAMA_BASE_URL` (+ optional `OLLAMA_MODEL`/
+      `OLLAMA_API_KEY`) selects Ollama; otherwise any of `OPENROUTER_BASE_URL`/`OPENROUTER_MODEL`/
+      `OPENROUTER_API_KEY` being set selects OpenRouter, defaulting `OPENROUTER_BASE_URL` to
+      `https://openrouter.ai/api/v1` when unset (OpenRouter is a single hosted service, unlike
+      Ollama's arbitrary host); else fall back to `MockProvider`.
 
 - [x] No TUI yet. Still stdout/stderr only.
 
@@ -2518,13 +2559,13 @@ Decisions recorded during implementation:
 - **Scrollbar thumb reaches the track end.** The chat scrollbar uses `content_length =
   max_offset + 1` (not the raw line count), because ratatui's thumb proportion only reaches the
   very bottom/top when `content_length` is the number of scrollable positions.
-- **Scroll offset is clamped and direction-correct.** `scroll_offset` is a row offset from the
-  top: `PageUp`/wheel-up decrease it (toward earlier content), `PageDown`/wheel-down increase it,
-  and `ui::draw` clamps it to the rendered content height so over-scrolling cannot silently drift.
-  Scrolling back to the bottom re-enables auto-scroll.
+- **Scroll offset is clamped and direction-correct.** `conversation.scroll_offset` is a row
+  offset from the top: `PageUp`/wheel-up decrease it (toward earlier content), `PageDown`/
+  wheel-down increase it, and `tui_widgets::draw` clamps it to the rendered content height so
+  over-scrolling cannot silently drift. Scrolling back to the bottom re-enables auto-scroll.
 - **Wordmark.** The chat list always opens with a centered ASCII-art "Ylva" wordmark so the
   initial frame is not empty while the first response streams.
-- **`run_tui` returns the final `TuiState`** so integration tests (`tests/tui_state.rs`) can
+- **`run_tui` returns the final `TuiState`** so integration tests (`tests/tui_render_state.rs`) can
   assert on the resulting view state; the production entry point discards it.
 
 ### Phase 4 Reducer Refactor (TUI state handling)
@@ -2533,13 +2574,13 @@ Decisions recorded during implementation:
 pure reducer pattern (`update(state, event) → Vec<Effect>`) and a clean MVP module split.
 See reducer-state-handling-plan.md.
 
-- [x] **`src/app_state.rs` (Model):** pure view-model; defines `AppState`, `TuiMode`, `Focus`,
+- [x] **`src/tui_reducer_state.rs` (Model):** pure view-model; defines `AppState`, `TuiMode`, `Focus`,
       `AppLayout`, `Effect`, `InputEvent`, `DomainEvent`. No ratatui backend, no channel types.
 - [x] **`src/presenter.rs` (Presenter):** `update()` + routing helpers (`route_keyboard`,
       `route_mouse`, `route_domain`); no I/O. All state-machine logic lives here; fully unit-tested
       without a live terminal.
 - [x] **`src/render.rs` (View):** `render(frame, &mut AppState)` entry point extracted from
-      `src/ui.rs`; writes geometry back to `state.layout.*`; excluded from coverage.
+      `src/tui_widgets.rs`; writes geometry back to `state.layout.*`; excluded from coverage.
 - [x] **`src/tui_driver.rs` (Driver, renamed from `tui_runner.rs`):** thin async event loop;
       owns `TextArea` and channel handles; converts `AppAction → TuiEvent` and
       `UiUpdate → DomainEvent`; executes `Vec<Effect>` via `execute_effects()`.
@@ -2556,8 +2597,9 @@ See reducer-state-handling-plan.md.
   clippy catches violations.
 - **Unit tests without a terminal.** Each handler in `presenter.rs` is tested by setting
   `state.mode`/`state.focus` and asserting `Vec<Effect>` — no channel, no crossterm needed.
-- **Integration tests unchanged.** `tests/tui_state.rs` exercises the full Driver + Presenter +
-  View composition; type imports updated to new names (`AppState`, `TuiMode`, `Focus`).
+- **Integration tests unchanged.** `tests/tui_render_state.rs` exercises the full Driver +
+  Presenter + View composition; type imports updated to new names (`AppState`, `TuiMode`,
+  `Focus`).
 
 ### Phase 5: Interface Seams
 
@@ -2618,7 +2660,8 @@ See reducer-state-handling-plan.md.
 
 - [ ] `ChildAgentManager` that owns child-agent lifecycle (spawn, timeout, cancel via `CancellationToken`)
 
-- [ ] `finish` tool available only inside child-agent runs; fallback to unstructured text if never called
+- [ ] `agent_finish` tool available only inside child-agent runs; fallback to unstructured
+      text if never called
 
 - [ ] Child-agent persistence records (`child_start` / `child_result`) with parent session linkage (§4H)
 
@@ -2640,6 +2683,15 @@ See reducer-state-handling-plan.md.
 - [ ] Three built-in themes: dark, light, monokai
 
 - [ ] JSONL persistence for conversations, child agents, and schema-version handling (§4H)
+
+- [ ] Implement the `Store` (`src/store.rs`, §4H) as the single persistence path for
+      **both** main-conversation messages and child-agent records — do not build a
+      child-only persistence layer. Append `child_start` / `child_result` JSONL
+      records (shapes in §4G *Persistence* / §4H) to the parent session file via the
+      same writer used for conversation messages, keyed by `parent_session` +
+      `run_id`. This supersedes the child-persistence task originally planned as
+      Phase 6.12 in `docs/plans/phase6-terminal-superpowers.md`, dropped because it
+      had no main-session persistence to attach to.
 
 - [ ] Resume an existing session via explicit `--conversation-id` (no auto-resume, no picker)
 
@@ -2883,7 +2935,7 @@ where they are documented in the body of this document.
 | **Child-agent nesting**         | Forbidden; one level only (structural: `Child` role strips `spawn_subagent`)                                                                                                                   | §4G Agent Types & Delegation                  |
 | **Child-agent execution**       | One child at a time; runs **in parallel** with the root agent, which never blocks                                                                                                               | §4G Agent Types & Delegation                  |
 | **Child-agent steering**        | Root steer queues and injects at the next natural point; child finishes naturally in the background                                                                                            | §4G Agent Types & Delegation                  |
-| **Child-agent result**          | Tool-based `finish` with unstructured fallback                                                                                                                                                | §4G Child-Agent Lifecycle                    |
+| **Child-agent result**          | Tool-based `agent_finish` with unstructured fallback                                                                                                                                                | §4G Child-Agent Lifecycle                    |
 | **Agent-type tools**            | Global agent files define whitelist; profiles can override                                                                                                                                      | §4G Agent-Type File Formats                  |
 | **Agent-type config format**    | `.toml` flat or `.md` with TOML frontmatter (body = system_prompt)                                                                                                                              | §4G Agent-Type File Formats                   |
 | **Child-agent safety**          | Inherits parent safety settings                                                                                                                                                                | §4G Safety Inheritance                        |

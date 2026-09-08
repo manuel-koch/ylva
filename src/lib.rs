@@ -15,43 +15,53 @@
 pub mod agent;
 pub mod agent_factory;
 pub mod app;
-pub mod app_state;
 pub mod build_info;
+pub mod child_agent_manager;
 pub mod cli_driver;
 pub mod config;
 pub mod engine;
 pub mod events;
+pub mod highlight;
 pub mod llm;
 pub mod logging;
+pub mod markdown;
 pub mod presenter;
 pub mod render;
+pub mod sandbox;
 pub mod tui_driver;
-pub mod ui;
+pub mod tui_reducer_state;
+pub mod tui_render_state;
+pub mod tui_widgets;
 
 #[cfg(test)]
 mod test_support;
 
 pub use logging::{init_logging, LogConfig, LogFormat, LogGuards};
 
-pub use agent::tools::{default_registry, Tool, ToolCall, ToolCallResult, ToolError, ToolRegistry};
+pub use agent::tools::{
+    default_registry, Tool, ToolCall, ToolCallResult, ToolError, ToolRegistry, ToolRegistryConfig,
+    DEFAULT_CLI_TOOLS, DEFAULT_TUI_TOOLS,
+};
 pub use agent::{
-    AgentCommand, AgentEvent, AgentLoop, AgentMode, AssembledToolCall, AssistantStatus, Context,
-    DeltaChunk, Message, PendingTool, Role, StreamEvent, ToolCallRequest, UiUpdate,
-    UserMessageKind, DEFAULT_SYSTEM_PROMPT, DEFAULT_TOOL_TIMEOUT_SECS, MAX_TOOL_USE_ITERATIONS,
-    TOOL_PROTOCOL_SYSTEM_PROMPT,
+    AgentCommand, AgentEvent, AgentLoop, AgentMode, AssembledToolCall, AssistantStatus,
+    ChildRoleConfig, Context, DeltaChunk, Message, PendingTool, Role, StreamEvent, ToolCallRequest,
+    UiUpdate, UserMessageKind, DEFAULT_SYSTEM_PROMPT, DEFAULT_TOOL_TIMEOUT_SECS,
+    MAX_TOOL_USE_ITERATIONS, TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
 pub use agent_factory::AgentFactory;
 pub use app::App;
-pub use app_state::{
-    AppLayout, AppState, ChatArea, ChatEntry, ChatSelection, DomainEvent, Effect, Focus,
-    HelpPopupLayout, InputAreaLayout, InputEvent, ToolCallState, TuiMode, TuiState,
-    UserMessageState,
-};
 pub use build_info::{BuildInfo, BUILD_INFO};
+pub use child_agent_manager::{ChildAgentManager, FinishResult, SpawnRequest, SpawnStatus};
 pub use cli_driver::{run_cli, run_cli_to, ConsoleApp};
 pub use config::{AgentConfig, ProfileConfig};
 pub use engine::{Engine, EngineConfig, EngineImpl, DEFAULT_CONTEXT_LENGTH};
 pub use events::AppAction;
 pub use llm::{MockEvent, MockProvider, ModelInfo, OpenAiProvider, Provider, ToolSchema};
 pub use presenter::{TextareaContext, TuiEvent};
+pub use sandbox::{ApprovalCheck, Sandbox, SandboxContext};
 pub use tui_driver::TuiApp;
+pub use tui_reducer_state::{
+    AppLayout, AppState, ChatArea, ChatEntry, ChatSelection, DomainEvent, Effect, Focus,
+    HelpPopupLayout, InputAreaLayout, InputEvent, ToolCallState, TuiMode, UserMessageState,
+};
+pub use tui_render_state::TuiState;

@@ -30,9 +30,15 @@ pub mod tools;
 use tools::{ToolCall, ToolRegistry};
 
 /// Maximum number of LLM requests the tool-use loop starts within a single user
-/// turn before the guard stops re-prompting. Per-engine configurability is a
-/// later (Phase 5) concern; this module-level default is the Phase 3 SSOT.
-pub const MAX_TOOL_USE_ITERATIONS: usize = 15;
+/// turn before the guard stops re-prompting. Applies identically to the root
+/// loop and to every child `AgentLoop` spawned via `spawn_subagent` — each
+/// loop tracks its own `iterations` counter independently, so a child
+/// tripping this guard neither counts against nor is masked by the root's own
+/// counter. See `UiUpdate::Error::run_id` for how the resulting error is
+/// attributed back to whichever loop (root or child) actually exceeded it.
+/// Per-engine configurability is a later (Phase 5) concern; this
+/// module-level default is the Phase 3 SSOT.
+pub const MAX_TOOL_USE_ITERATIONS: usize = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentMode {
@@ -42,6 +48,9 @@ pub enum AgentMode {
     Pending,
     Streaming,
     ToolPending,
+    /// A tool has been approved and is actively executing.
+    ToolRunning,
+    ClarifyPending,
     /// User requested abort (double Ctrl+C); `AgentCommand::Stop` has been
     /// sent. The TUI waits for the resulting `StreamCancelled` / `Idle`
     /// transition before quitting.
@@ -51,9 +60,33 @@ pub enum AgentMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentCommand {
     Prompt(String),
-    Stop { reason: String },
-    ApproveTool { id: Uuid },
-    DenyTool { id: Uuid, reason: String },
+    Stop {
+        reason: String,
+    },
+    ApproveTool {
+        id: Uuid,
+    },
+    DenyTool {
+        id: Uuid,
+        reason: String,
+    },
+    AnswerClarify(String),
+    /// Abort the pending clarify call without an answer.
+    /// The agent records a tool error and continues, so the LLM can react.
+    AbortClarify,
+    /// Routes `command` to the child agent identified by `run_id` instead of
+    /// the receiving loop's own state. Only a `Role::Root` loop's dispatch
+    /// handles this variant: it looks up `run_id` in its
+    /// `ChildAgentManager` and forwards `*command` verbatim into that
+    /// child's own command channel — the child's own loop logic never sees
+    /// `ForChild` itself, only the plain, unwrapped `command`. If `run_id`
+    /// is stale (the child already finished/was cancelled), the command is
+    /// dropped and a warning is logged; this can't cause a hang, since a
+    /// child that's already gone isn't waiting on anything.
+    ForChild {
+        run_id: Uuid,
+        command: Box<AgentCommand>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,14 +105,19 @@ pub enum AgentEvent {
         id: Uuid,
         name: String,
         result: String,
+        result_metadata: Option<serde_json::Value>,
+        result_metadata_schema: Option<serde_json::Value>,
         summary: Vec<(String, String)>,
         duration: std::time::Duration,
-        content_sections: Vec<crate::agent::tools::ContentSection>,
+        content_sections: Vec<crate::agent::tools::Section>,
     },
     ToolError {
         id: Uuid,
         name: String,
         error: String,
+        partial_output: Option<String>,
+        duration: std::time::Duration,
+        content_sections: Vec<crate::agent::tools::Section>,
     },
     ToolKilled {
         id: Uuid,
@@ -93,41 +131,155 @@ pub enum UiUpdate {
     StreamStarted,
     StreamDone,
     StreamCancelled,
-    Error(String),
+    Error {
+        message: String,
+        /// `None` when this error originates in the root's own loop;
+        /// `Some(run_id)` identifies which child raised it (see
+        /// `AgentLoop::own_run_id`). See `UiUpdate::ToolPending::run_id`.
+        run_id: Option<Uuid>,
+    },
     ToolStart {
         name: String,
         id: Uuid,
         arguments: Value,
-        content_sections: Vec<crate::agent::tools::ContentSection>,
+        content_sections: Vec<crate::agent::tools::Section>,
         title_arguments: Vec<(String, serde_json::Value)>,
+        /// See `UiUpdate::ToolPending::run_id`.
+        run_id: Option<Uuid>,
     },
     ToolPending {
         name: String,
         id: Uuid,
         arguments: serde_json::Value,
-        content_sections: Vec<crate::agent::tools::ContentSection>,
+        content_sections: Vec<crate::agent::tools::Section>,
         title_arguments: Vec<(String, serde_json::Value)>,
+        /// `None` when this is the root's own pending tool call; `Some(run_id)`
+        /// identifies which child raised it (see `AgentLoop::own_run_id`).
+        /// Drivers use this to route the resulting `ApproveTool`/`DenyTool`
+        /// command back to the correct agent loop via `AgentCommand::ForChild`.
+        run_id: Option<Uuid>,
+    },
+    /// A still-running call reports an interim status update without
+    /// transitioning to a terminal state — the bubble stays `Running`
+    /// (spinner keeps going). Used by `spawn_subagent`: the call is not
+    /// "done" merely because the child was accepted/queued, only once the
+    /// child's `agent_finish` result (or cancellation) actually arrives does a
+    /// `ToolDone` follow. Patches `title_arguments` on the existing
+    /// `Running` bubble state; a no-op if the bubble isn't `Running`.
+    ToolProgress {
+        id: Uuid,
+        title_arguments: Vec<(String, serde_json::Value)>,
+    },
+    ClarifyPending {
+        id: Uuid,
+        question: String,
+        context: Option<String>,
+        choices: Option<Vec<String>>,
+        /// See `UiUpdate::ToolPending::run_id`.
+        run_id: Option<Uuid>,
     },
     ToolDone {
         id: Uuid,
         name: String,
-        result: String,
+        result_section: crate::tui_reducer_state::ResultSection,
         summary: Vec<(String, String)>,
         duration: std::time::Duration,
-        content_sections: Vec<crate::agent::tools::ContentSection>,
+        content_sections: Vec<crate::agent::tools::Section>,
+        /// See `UiUpdate::ToolPending::run_id`.
+        run_id: Option<Uuid>,
     },
     ToolError {
         id: Uuid,
         error: String,
+        duration: std::time::Duration,
+        content_sections: Vec<crate::agent::tools::Section>,
+        /// See `UiUpdate::ToolPending::run_id`.
+        run_id: Option<Uuid>,
+    },
+    /// A tool call was denied automatically by the sandbox before it started.
+    /// Creates a `Denied` bubble directly — no `ToolStart` is ever sent.
+    ToolAutoDenied {
+        id: Uuid,
+        name: String,
+        title_arguments: Vec<(String, serde_json::Value)>,
+        content_sections: Vec<crate::agent::tools::Section>,
+        reason: String,
+        /// See `UiUpdate::ToolPending::run_id`.
+        run_id: Option<Uuid>,
     },
     ToolKilled {
         id: Uuid,
+        /// See `UiUpdate::ToolPending::run_id`.
+        run_id: Option<Uuid>,
     },
-    /// A steer (user message while busy) was queued. No payload — the TUI
-    /// driver creates the pending bubble itself before sending the command.
-    SteerQueued,
+    /// A steer (user message while busy) was queued. The TUI driver creates
+    /// the pending bubble itself before sending the command.
+    SteerQueued {
+        /// `None` when this loop's own root steer queue changed; `Some(run_id)`
+        /// identifies which child raised it (see `AgentLoop::own_run_id`).
+        /// Today no driver ever routes a `Prompt` to a child (only
+        /// `ApproveTool`/`DenyTool`/`AnswerClarify`/`AbortClarify` cross
+        /// `AgentCommand::ForChild`), so `Some` is unreachable in practice —
+        /// carried anyway so this can never silently misattribute to the
+        /// root if that changes. See `UiUpdate::ToolPending::run_id`.
+        run_id: Option<Uuid>,
+    },
     /// All previously queued steers have been injected into the LLM context.
-    SteerApplied,
+    SteerApplied {
+        /// See `UiUpdate::SteerQueued::run_id`.
+        run_id: Option<Uuid>,
+    },
+    /// A fragment of extended-thinking / reasoning-token output arrived.
+    /// Appended to `partial_thinking_text`, never to the assistant-text
+    /// accumulator; flushed into a `ChatEntry::ThinkingMessage` bubble ahead
+    /// of the assistant bubble on `StreamDone`.
+    AppendThinking(String),
+    /// A child agent actually started running (dequeued from
+    /// `ChildAgentManager`'s FIFO, or started immediately). Emitted by
+    /// `ChildAgentManager::start`. Drives the drill-in conversation model
+    /// (Phase 6.10): the driver creates/updates the spawn-bubble and tracks
+    /// `run_id` as the current child conversation, but does **not** switch
+    /// `active_view` — the user stays in the parent view until they
+    /// navigate manually or an interactive pause (`ToolPending`/
+    /// `ClarifyPending` carrying this same `run_id`) forces the switch.
+    ChildAgentStarted {
+        run_id: Uuid,
+        /// The `spawn_subagent` tool-call id this run belongs to (== the
+        /// root `ToolBubble`'s `id`) — lets the TUI correlate this run to
+        /// its specific bubble even when multiple `spawn_subagent` bubbles
+        /// (active + queued, or already finished) coexist.
+        call_id: Uuid,
+        agent_type: String,
+        task: String,
+        label: String,
+    },
+    /// A fragment of `run_id`'s own assistant text/thinking output,
+    /// forwarded from that child's `AppendText`/`AppendThinking` and
+    /// rendered into that child's own conversation transcript only — never
+    /// mixed into the parent's own `partial_assistant_text`, nor into a
+    /// different child's transcript (`run_id` disambiguates which one,
+    /// since a queued child can start streaming while an earlier child's
+    /// transcript is still being viewed).
+    ChildAgentToken {
+        run_id: Uuid,
+        text: String,
+        /// `true` when this fragment came from `AppendThinking` (extended
+        /// reasoning), `false` for `AppendText` (visible reply text) — lets
+        /// the child's own `TurnBuffer` route it to the right accumulator,
+        /// mirroring how the root distinguishes `StreamChunk` from
+        /// `StreamThinkingChunk`.
+        is_thinking: bool,
+    },
+    /// The child agent run identified by `run_id` has finished
+    /// (successfully, with an error, or via the "unstructured" fallback).
+    /// `status`/`result` mirror `crate::child_agent_manager::FinishResult`.
+    /// If the driver had auto-switched into `run_id`'s child view for an
+    /// interactive pause, it auto-returns to the parent view now.
+    ChildAgentDone {
+        run_id: Uuid,
+        status: String,
+        result: Option<String>,
+    },
 }
 
 /// A raw tool-call fragment emitted by a provider, to be assembled by the
@@ -143,6 +295,11 @@ pub struct DeltaChunk {
 #[derive(Debug)]
 pub enum StreamEvent {
     Text(String),
+    /// A fragment of extended-thinking / reasoning-token output. Distinct
+    /// from `Text` so it never contaminates the assistant text accumulator;
+    /// it is purely a model capability (models must have extended-thinking
+    /// / reasoning enabled to produce it) and is provider-agnostic.
+    Thinking(String),
     Delta(DeltaChunk),
     Done,
     Cancelled,
@@ -194,18 +351,35 @@ pub enum Message {
         id: Uuid,
         name: String,
         result: String,
+        /// Structured metadata emitted by the tool for this specific result.
+        result_metadata: Option<serde_json::Value>,
+        /// JSON Schema for the fields present in `result_metadata`.
+        result_metadata_schema: Option<serde_json::Value>,
     },
     ToolError {
         id: Uuid,
         name: String,
         error: String,
+        duration: std::time::Duration,
     },
 }
 
-/// Single source of truth for the default system prompt in Phase 1. A later
 /// config phase (Phase 7 §4G layering) may source this from a SOUL.md file
 /// without changing call sites.
 pub const DEFAULT_SYSTEM_PROMPT: &str = "You are Ylva, a helpful agent with tool capabilities.";
+
+/// Prefix marking an asynchronous, out-of-band harness notice (e.g. "a
+/// spawned subagent finished") sent via `Context::push_async_harness_notice`
+/// as a `role:"user"` message rather than `role:"system"`. Not every
+/// provider/model tolerates a `system`-role message appearing after the
+/// conversation's leading system-prompt block — many open-weight chat
+/// templates (Mistral-family included) only support `system` as the very
+/// first message and reject/mis-render one injected mid-conversation (seen
+/// in practice as an HTTP 400 "Invalid request" from `mistralai/mistral-nemo`
+/// via OpenRouter's "Io Net" backend). `role:"user"` is safe everywhere, so
+/// this marker lets the model tell the harness's own notice apart from
+/// something the human actually typed.
+pub const HARNESS_NOTICE_MARKER: &str = "[harness notice — not from the user]";
 
 /// System-prompt snippet, injected immediately after the persona/initial
 /// system prompt, that documents the uniform tool-response envelope a model
@@ -258,6 +432,13 @@ impl Context {
         });
     }
 
+    /// Push an additional system message. Used to inject a `Role::Child`
+    /// agent's `briefing` ahead of its task, after the standard system
+    /// prompts `Context::new` already installed.
+    pub fn push_system(&mut self, text: String) {
+        self.messages.push(Message::System { content: text });
+    }
+
     /// Push a model hint injected by the agent harness. The message is sent
     /// to the model as a regular `role: "user"` turn but is never rendered in
     /// any UI (TUI conversation list or headless CLI output).
@@ -266,6 +447,17 @@ impl Context {
             content: text,
             kind: UserMessageKind::ImplicitToolNote,
         });
+    }
+
+    /// Push an asynchronous, out-of-band harness notice (e.g. "a spawned
+    /// subagent finished/was cancelled") that arrives mid-conversation, well
+    /// after the leading system-prompt block. Sent as `push_implicit_user`
+    /// (`role:"user"`, hidden from the UI) rather than `push_system`, and
+    /// prefixed with `HARNESS_NOTICE_MARKER` so the model can tell it apart
+    /// from a real user message — see that constant's doc comment for why
+    /// `role:"system"` is unsafe here.
+    pub fn push_async_harness_notice(&mut self, text: String) {
+        self.push_implicit_user(format!("{HARNESS_NOTICE_MARKER}\n{text}"));
     }
 
     pub fn push_assistant(&mut self, content: String, status: AssistantStatus) {
@@ -289,12 +481,43 @@ impl Context {
         });
     }
 
-    pub fn push_tool_result(&mut self, id: Uuid, name: String, result: String) {
-        self.messages.push(Message::ToolResult { id, name, result });
+    pub fn push_tool_result(
+        &mut self,
+        id: Uuid,
+        name: String,
+        result: String,
+        result_metadata: Option<serde_json::Value>,
+        result_metadata_schema: Option<serde_json::Value>,
+    ) {
+        self.messages.push(Message::ToolResult {
+            id,
+            name,
+            result,
+            result_metadata,
+            result_metadata_schema,
+        });
     }
 
-    pub fn push_tool_error(&mut self, id: Uuid, name: String, error: String) {
-        self.messages.push(Message::ToolError { id, name, error });
+    pub fn push_tool_error(
+        &mut self,
+        id: Uuid,
+        name: String,
+        error: String,
+        partial_output: Option<&str>,
+    ) {
+        let llm_error = match partial_output.filter(|s| !s.is_empty()) {
+            Some(output) => format!(
+                "{error}\n\nThe tool produced the following output before being terminated:\n\
+                 {output}"
+            ),
+            None => error,
+        };
+        self.messages.push(Message::ToolError {
+            id,
+            name,
+            error: llm_error,
+            duration: std::time::Duration::ZERO,
+        });
     }
 
     pub fn messages(&self) -> &[Message] {
@@ -378,40 +601,94 @@ impl PendingTool {
                 };
                 match outcome {
                     Ok((Ok(tool_output), duration)) => {
-                        let result = tool_output.text().to_string();
-                        let summary = tool_output
-                            .properties()
-                            .into_iter()
-                            .map(|(key, value)| (key.to_string(), value))
-                            .collect::<Vec<_>>();
+                        let result_metadata = tool_output.metadata().and_then(|m| {
+                            if m.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+                                None
+                            } else {
+                                Some(m)
+                            }
+                        });
+                        let result_metadata_schema = result_metadata.as_ref().and_then(|_| {
+                            tool_output
+                                .metadata_schema()
+                                .and_then(|schema| serde_json::to_value(schema).ok())
+                        });
+                        let result = tool_output.text();
+                        // All metadata keys become the UI summary (key=value).
+                        let summary: Vec<(String, String)> = result_metadata
+                            .as_ref()
+                            .and_then(|m| {
+                                if let serde_json::Value::Object(obj) = m {
+                                    Some(obj)
+                                } else {
+                                    None
+                                }
+                            })
+                            .map(|obj| {
+                                obj.iter()
+                                    .map(|(k, v)| {
+                                        let display = match v {
+                                            serde_json::Value::String(s) => s.clone(),
+                                            other => other.to_string(),
+                                        };
+                                        (k.clone(), display)
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
                         let content_sections = tool_output.content_sections();
                         let _ = agent_tx
                             .send(AgentEvent::ToolDone {
                                 id,
                                 name,
                                 result,
+                                result_metadata,
+                                result_metadata_schema,
                                 summary,
                                 duration,
                                 content_sections,
                             })
                             .await;
                     }
-                    Ok((Err(error), _)) => {
+                    Ok((Err(error), duration)) => {
+                        let partial_output = error
+                            .partial_output()
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string);
+                        let content_sections: Vec<crate::agent::tools::Section> =
+                            if let Some(output) = &partial_output {
+                                vec![crate::agent::tools::Section::Content(
+                                    crate::agent::tools::ContentSection {
+                                        label: Some("partial output".to_string()),
+                                        content: output.clone(),
+                                        file_extension: None,
+                                        line_number_offset: Some(0),
+                                    },
+                                )]
+                            } else {
+                                vec![]
+                            };
                         let _ = agent_tx
                             .send(AgentEvent::ToolError {
                                 id,
                                 name,
                                 error: error.to_string(),
+                                partial_output,
+                                duration,
+                                content_sections,
                             })
                             .await;
                     }
                     Err(_elapsed) => {
-                        let message = format!("tool '{name}' timed out after {timeout_secs}s");
+                        let message = format!("Tool '{name}' timed out after {timeout_secs}s");
                         let _ = agent_tx
                             .send(AgentEvent::ToolError {
                                 id,
                                 name,
                                 error: message,
+                                partial_output: None,
+                                duration: Duration::from_secs(timeout_secs),
+                                content_sections: vec![],
                             })
                             .await;
                     }
@@ -439,15 +716,35 @@ impl PendingTool {
 ///
 /// Indicates whether an `AgentLoop` is acting as the root (top-level) agent
 /// or as a child agent spawned by a root agent.
-///
-/// `Child` is a placeholder in Phase 5; `AgentFactory::create` returns `Err`
-/// when asked to create a `Child` agent. Full implementation comes in Phase 6.
 pub enum Role {
     /// The top-level agent for a session.
     Root,
-    /// A child agent spawned by a root agent. Not yet constructable via
-    /// `AgentFactory::create`; will be implemented in Phase 6.
-    Child,
+    /// A child agent spawned by a root agent, with the wiring back to its
+    /// parent: an optional briefing, the parent-side cancellation token that
+    /// cascades a parent stop into this child, the channel for forwarding
+    /// live tokens up to the parent, and the channel the `agent_finish` tool (the
+    /// only tool a child is guaranteed to have) uses to report its outcome.
+    Child(ChildRoleConfig),
+}
+
+/// Fields carried by [`Role::Child`]; consumed by `AgentFactory::create` to
+/// wire the child's `AgentLoop` and its `agent_finish` tool.
+pub struct ChildRoleConfig {
+    /// Identifies this child run to the parent's `ChildAgentManager`.
+    pub run_id: Uuid,
+    /// The parent's `spawn_subagent` tool-call id this run is tied to.
+    pub call_id: Uuid,
+    /// Optional context/background injected as an additional system message
+    /// ahead of the child's task.
+    pub briefing: Option<String>,
+    /// Cancelled by the parent's `ChildAgentManager::cancel_all` (e.g. on
+    /// `AgentCommand::Stop`); cascades into this child's own cancellation.
+    pub parent_cancel: CancellationToken,
+    /// Forwards this child's `UiUpdate`s up to the parent, for live-token
+    /// display (blueprint §4G; rendering itself is Phase 6.10).
+    pub subagent_ui_tx: mpsc::Sender<UiUpdate>,
+    /// Sent to by this child's `agent_finish` tool when called.
+    pub finish_tx: mpsc::Sender<crate::child_agent_manager::FinishResult>,
 }
 
 /// The outer loop task is the sole writer of `Context` (`single-writer`
@@ -463,6 +760,54 @@ pub struct AgentLoop {
     ui_tx: mpsc::Sender<UiUpdate>,
     agent_tx: mpsc::Sender<AgentEvent>,
     agent_rx: Option<mpsc::Receiver<AgentEvent>>,
+    /// Set via [`AgentLoop::with_child_role`] for a `Role::Child` agent;
+    /// firing it cascades a parent stop into this loop.
+    parent_cancel: Option<CancellationToken>,
+    /// Set via [`AgentLoop::with_child_role`]; injected as an extra system
+    /// message ahead of the child's task.
+    briefing: Option<String>,
+    /// Set via [`AgentLoop::with_child_role`] from `config.run_id` for a
+    /// `Role::Child` agent; `None` for `Role::Root`. Stamped onto every
+    /// `UiUpdate::ToolPending`/`ClarifyPending` this loop emits so the root
+    /// (which forwards a child's `UiUpdate`s up to its own driver) and the
+    /// driver can tell which agent a pending approval belongs to and route
+    /// the verdict back via `AgentCommand::ForChild`.
+    own_run_id: Option<Uuid>,
+    /// Set via [`AgentLoop::with_child_agent_manager`] for a `Role::Root`
+    /// agent whose `AgentConfig::can_spawn` is `true`.
+    child_agent_manager: Option<crate::child_agent_manager::ChildAgentManager>,
+    finish_rx: Option<mpsc::Receiver<crate::child_agent_manager::FinishResult>>,
+    subagent_ui_rx: Option<mpsc::Receiver<UiUpdate>>,
+}
+
+/// Awaits the next `FinishResult` when `rx` is `Some`, else never resolves.
+/// Lets `AgentLoop::run`'s `select!` treat "no `ChildAgentManager` wired" the
+/// same as "channel open but empty" without an `Option`-shaped branch.
+async fn recv_finish(
+    rx: &mut Option<mpsc::Receiver<crate::child_agent_manager::FinishResult>>,
+) -> Option<crate::child_agent_manager::FinishResult> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Awaits the next forwarded child `UiUpdate` when `rx` is `Some`, else
+/// never resolves. See [`recv_finish`].
+async fn recv_subagent_ui(rx: &mut Option<mpsc::Receiver<UiUpdate>>) -> Option<UiUpdate> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Awaits cancellation of `token` when `token` is `Some`, else never
+/// resolves. See [`recv_finish`].
+async fn cancelled_or_pending(token: &Option<CancellationToken>) {
+    match token {
+        Some(token) => token.cancelled().await,
+        None => std::future::pending().await,
+    }
 }
 
 impl AgentLoop {
@@ -481,8 +826,54 @@ impl AgentLoop {
             ui_tx,
             agent_tx,
             agent_rx: Some(agent_rx),
+            parent_cancel: None,
+            briefing: None,
+            own_run_id: None,
+            child_agent_manager: None,
+            finish_rx: None,
+            subagent_ui_rx: None,
         };
         (agent, ui_rx)
+    }
+
+    /// Wires this loop as a `Role::Child` agent: `config.parent_cancel`
+    /// cascades a parent stop into this loop, and `config.briefing` (if any)
+    /// is injected as an extra system message ahead of the child's task.
+    /// `config.run_id` is retained as `own_run_id`, stamped onto this loop's
+    /// `ToolPending`/`ClarifyPending` updates (see `own_run_id`).
+    /// `call_id`/`subagent_ui_tx`/`finish_tx` are consumed by the
+    /// caller to build the child's `agent_finish` tool and are not otherwise held
+    /// on the loop itself.
+    pub fn with_child_role(mut self, config: ChildRoleConfig) -> Self {
+        self.parent_cancel = Some(config.parent_cancel);
+        self.briefing = config.briefing;
+        self.own_run_id = Some(config.run_id);
+        self
+    }
+
+    /// This loop's tool registry, as resolved by `AgentFactory::build` (per-
+    /// `agent_type` `allowed_tools`, `include_spawn_subagent`, etc.).
+    /// `pub(crate)` since only same-crate tests need to inspect which tools
+    /// ended up registered; production code never needs to reach into an
+    /// `AgentLoop`'s registry from outside `agent.rs`/`agent_factory.rs`.
+    #[cfg(test)]
+    pub(crate) fn registry(&self) -> &Arc<ToolRegistry> {
+        &self.registry
+    }
+
+    /// Wires this loop as a `Role::Root` agent that can spawn children.
+    /// `finish_rx`/`subagent_ui_rx` are the receiving ends of the channels
+    /// whose sending ends `manager` hands to each child it spawns.
+    pub fn with_child_agent_manager(
+        mut self,
+        manager: crate::child_agent_manager::ChildAgentManager,
+        finish_rx: mpsc::Receiver<crate::child_agent_manager::FinishResult>,
+        subagent_ui_rx: mpsc::Receiver<UiUpdate>,
+    ) -> Self {
+        self.child_agent_manager = Some(manager);
+        self.finish_rx = Some(finish_rx);
+        self.subagent_ui_rx = Some(subagent_ui_rx);
+        self
     }
 
     pub async fn send_command(&self, cmd: AgentCommand) {
@@ -508,15 +899,72 @@ impl AgentLoop {
             .agent_rx
             .take()
             .expect("AgentLoop run() must not be called more than once");
+        let parent_cancel = self.parent_cancel.take();
+        let briefing = self.briefing.take();
+        let own_run_id = self.own_run_id.take();
+        let mut child_agent_manager = self.child_agent_manager.take();
+        let mut finish_rx = self.finish_rx.take();
+        let mut subagent_ui_rx = self.subagent_ui_rx.take();
+        // Stashes each in-flight `spawn_subagent` call's task/briefing content
+        // sections (shown while pending/running) keyed by call id, so they
+        // can be carried forward into the eventual real `ToolDone` — sent
+        // once the child actually finishes or is cancelled — alongside its
+        // result. Entries are removed as soon as that terminal `ToolDone` is
+        // sent; see `resolve_spawn_subagent`, the `finish_rx` arm below, and
+        // the `AgentCommand::Stop` handler's cancellation cleanup.
+        let mut spawn_content_sections: HashMap<Uuid, Vec<crate::agent::tools::Section>> =
+            HashMap::new();
+        // Only a `Role::Child` loop has `parent_cancel` set; such a loop must
+        // return as soon as it goes idle instead of waiting forever for
+        // commands nobody will send (see the end of the loop body below).
+        let is_child = parent_cancel.is_some();
 
         tokio::spawn(async move {
             let mut context = Context::new();
+            if let Some(briefing) = briefing {
+                context.push_system(briefing);
+            }
+            if is_child {
+                // Give the child a chance to budget its own tool calls: it
+                // has no visibility into `advance_tool_queue`'s guard (it
+                // cannot tell "was cut off" from "chose to stop"), so a smart
+                // model can only avoid the cap by knowing about it up front
+                // and wrapping up (calling `agent_finish`) well before it
+                // hits.
+                context.push_system(format!(
+                    "You have a budget of at most {MAX_TOOL_USE_ITERATIONS} tool-use \
+                     round(s) to complete this task. Work efficiently — batch related \
+                     tool calls where possible — and call `agent_finish` with your \
+                     result as soon as you have an answer, well before you run out of \
+                     rounds. If you exhaust this budget without calling `agent_finish`, \
+                     your work will be reported as failed and none of your findings will \
+                     reach the caller."
+                ));
+            }
             let mut mode = AgentMode::Idle;
             let mut current_cancel: Option<CancellationToken> = None;
             let mut current_tool_cancel: Option<CancellationToken> = None;
             let mut pending_steers: VecDeque<String> = VecDeque::new();
             let mut pending_tools: VecDeque<PendingTool> = VecDeque::new();
             let mut iterations = 0usize;
+            let mut clarify_started_at: Option<std::time::Instant> = None;
+            // Set by the `finish_rx` arm when a child's result lands while the
+            // root is mid-stream (`mode != Idle`): the result is already in
+            // `context` (see the `finish_rx` arm's comment), but the root
+            // can't react to it until its *own* in-flight turn completes.
+            // `StreamDone` below is that turn's completion point, so it must
+            // check this flag and force a re-prompt — otherwise the root goes
+            // Idle believing its just-streamed text is the final answer, the
+            // driver (which tracks the same child via `pending_spawn_call_ids`)
+            // sees zero pending children and ends the conversation, and the
+            // child's result silently never reaches the model.
+            let mut pending_child_finish_reprompt = false;
+            // Set (only for a child loop) when `advance_tool_queue`'s
+            // max-tool-use-iterations guard trips — see that function's doc
+            // comment. Checked below at the `is_child && mode == Idle` tail
+            // to report a clear `Err` (→ `status: "failure"`) instead of the
+            // generic "unstructured" `Ok(context)` fallback.
+            let mut iteration_cap_exceeded: Option<String> = None;
 
             loop {
                 tokio::select! {
@@ -525,8 +973,14 @@ impl AgentLoop {
                         match event {
                             AgentEvent::StreamDone { partial } => {
                                 context.push_assistant(partial, AssistantStatus::Complete);
-                                if inject_pending_steers(&mut pending_steers, &mut context) {
-                                    let _ = ui_tx.send(UiUpdate::SteerApplied).await;
+                                let steers_injected = inject_pending_steers(&mut pending_steers, &mut context);
+                                if steers_injected {
+                                    pending_child_finish_reprompt = false;
+                                    let _ = ui_tx
+                                        .send(UiUpdate::SteerApplied {
+                                            run_id: own_run_id,
+                                        })
+                                        .await;
                                     mode = AgentMode::Streaming;
                                     current_cancel = Some(start_request(
                                         &context,
@@ -534,7 +988,40 @@ impl AgentLoop {
                                         registry.schemas(),
                                         ui_tx.clone(),
                                         agent_tx.clone(),
+                                        own_run_id,
                                     ));
+                                } else if pending_child_finish_reprompt {
+                                    pending_child_finish_reprompt = false;
+                                    // Same iteration budget as any other
+                                    // re-prompt — without this guard a model
+                                    // whose replies never contain a tool call
+                                    // (so this branch, not `advance_tool_queue`'s
+                                    // queue-empty branch, is the one that
+                                    // clears a finish notice deferred while it
+                                    // was still streaming) could reprompt
+                                    // forever, bypassing the cap entirely; see
+                                    // `bump_and_check_iteration_cap`'s doc
+                                    // comment.
+                                    if !bump_and_check_iteration_cap(
+                                        &mut iterations,
+                                        &mut context,
+                                        &mut mode,
+                                        &ui_tx,
+                                        own_run_id,
+                                        &mut iteration_cap_exceeded,
+                                    )
+                                    .await
+                                    {
+                                        mode = AgentMode::Streaming;
+                                        current_cancel = Some(start_request(
+                                            &context,
+                                            engine.clone(),
+                                            registry.schemas(),
+                                            ui_tx.clone(),
+                                            agent_tx.clone(),
+                                            own_run_id,
+                                        ));
+                                    }
                                 } else {
                                     mode = AgentMode::Idle;
                                 }
@@ -552,7 +1039,12 @@ impl AgentLoop {
                                 pending_steers.clear();
                                 mode = AgentMode::Idle;
                                 tracing::error!(message = %error, "agent stream error");
-                                let _ = ui_tx.send(UiUpdate::Error(error)).await;
+                                let _ = ui_tx
+                                    .send(UiUpdate::Error {
+                                        message: error,
+                                        run_id: own_run_id,
+                                    })
+                                    .await;
                             }
                             AgentEvent::ToolCall { calls } => {
                                 let requests = calls
@@ -579,71 +1071,117 @@ impl AgentLoop {
                                         }
                                         None => {
                                             let error =
-                                                format!("unknown tool '{}'", assembled.name);
+                                                format!("Unknown tool '{}'", assembled.name);
                                             let _ = agent_tx
                                                 .send(AgentEvent::ToolError {
                                                     id: assembled.id,
                                                     name: assembled.name.clone(),
                                                     error,
+                                                    partial_output: None,
+                                                    duration: std::time::Duration::ZERO,
+                                                    content_sections: vec![],
                                                 })
                                                 .await;
                                         }
                                     }
                                 }
                                 mode = AgentMode::ToolPending;
-                                if let Some(first) = pending_tools.front() {
-                                    log_tool_approval_request(first.call.as_ref());
-                                    let _ = ui_tx
-                                        .send(UiUpdate::ToolPending {
-                                            name: first.call.name().to_string(),
-                                            id: first.call.id(),
-                                            arguments: first.call.arguments().clone(),
-                                            content_sections: first.call.pending_content_sections(),
-                                            title_arguments: first.call.title_arguments(),
-                                        })
-                                        .await;
-                                }
+                                advance_tool_queue(
+                                    &mut pending_tools,
+                                    &mut context,
+                                    &mut mode,
+                                    &mut current_cancel,
+                                    &mut current_tool_cancel,
+                                    &mut iterations,
+                                    false,
+                                    engine.clone(),
+                                    Arc::clone(&registry),
+                                    ui_tx.clone(),
+                                    agent_tx.clone(),
+                                    &mut clarify_started_at,
+                                    &mut pending_steers,
+                                    &mut child_agent_manager,
+                                    &mut spawn_content_sections,
+                                    own_run_id,
+                                    &mut pending_child_finish_reprompt,
+                                    &mut iteration_cap_exceeded,
+                                )
+                                .await;
                             }
-                            AgentEvent::ToolDone { id, name, result, summary, duration, content_sections } => {
+                            AgentEvent::ToolDone { id, name, result, result_metadata, result_metadata_schema, summary, duration, content_sections } => {
                                 current_tool_cancel = None;
-                                context.push_tool_result(id, name.clone(), result.clone());
+                                // `agent_finish` is only ever registered on a `Role::Child`
+                                // registry; once it completes the child's ReAct loop
+                                // exits unconditionally (exempt from the iteration
+                                // cap) — the tool itself already reported the
+                                // outcome to the parent via `finish_tx`.
+                                let is_finish = name == tools::agent_finish::AgentFinishTool::NAME;
+                                context.push_tool_result(id, name.clone(), result.clone(), result_metadata, result_metadata_schema);
                                 let _ = ui_tx
                                     .send(UiUpdate::ToolDone {
                                         id,
                                         name,
-                                        result,
+                                        result_section: crate::tui_reducer_state::ResultSection::plain(result),
                                         summary,
                                         duration,
                                         content_sections,
+                                        run_id: own_run_id,
                                     })
                                     .await;
+                                if is_finish {
+                                    return Ok(context);
+                                }
                                 advance_tool_queue(
                                     &mut pending_tools,
                                     &mut context,
                                     &mut mode,
                                     &mut current_cancel,
+                                    &mut current_tool_cancel,
                                     &mut iterations,
+                                    true,
                                     engine.clone(),
                                     Arc::clone(&registry),
                                     ui_tx.clone(),
                                     agent_tx.clone(),
+                                    &mut clarify_started_at,
+                                    &mut pending_steers,
+                                    &mut child_agent_manager,
+                                    &mut spawn_content_sections,
+                                    own_run_id,
+                                    &mut pending_child_finish_reprompt,
+                                    &mut iteration_cap_exceeded,
                                 )
                                 .await;
                             }
-                            AgentEvent::ToolError { id, name, error } => {
+                            AgentEvent::ToolError { id, name, error, partial_output, duration, content_sections } => {
                                 current_tool_cancel = None;
-                                context.push_tool_error(id, name, error.clone());
-                                let _ = ui_tx.send(UiUpdate::ToolError { id, error }).await;
+                                context.push_tool_error(id, name, error.clone(), partial_output.as_deref());
+                                let _ = ui_tx.send(UiUpdate::ToolError {
+                                    id,
+                                    error,
+                                    duration,
+                                    content_sections,
+                                    run_id: own_run_id,
+                                }).await;
                                 advance_tool_queue(
                                     &mut pending_tools,
                                     &mut context,
                                     &mut mode,
                                     &mut current_cancel,
+                                    &mut current_tool_cancel,
                                     &mut iterations,
+                                    true,
                                     engine.clone(),
                                     Arc::clone(&registry),
                                     ui_tx.clone(),
                                     agent_tx.clone(),
+                                    &mut clarify_started_at,
+                                    &mut pending_steers,
+                                    &mut child_agent_manager,
+                                    &mut spawn_content_sections,
+                                    own_run_id,
+                                    &mut pending_child_finish_reprompt,
+                                    &mut iteration_cap_exceeded,
                                 )
                                 .await;
                             }
@@ -651,10 +1189,236 @@ impl AgentLoop {
                                 tracing::info!(%id, "tool killed; agent returning to idle");
                                 current_tool_cancel = None;
                                 pending_tools.clear();
-                                let _ = ui_tx.send(UiUpdate::ToolKilled { id }).await;
+                                let _ = ui_tx
+                                    .send(UiUpdate::ToolKilled {
+                                        id,
+                                        run_id: own_run_id,
+                                    })
+                                    .await;
                                 mode = AgentMode::Idle;
                             }
                         }
+                    }
+                    Some(finish_result) = recv_finish(&mut finish_rx) => {
+                        // The tool-calling wire protocol allows exactly one
+                        // `role:"tool"` response per `tool_call_id`; that slot
+                        // was already spent on `spawn_subagent`'s immediate
+                        // `{"status":"running"/"queued"}` result (see
+                        // `resolve_spawn_subagent`). So the child's *real*
+                        // outcome, arriving asynchronously and possibly after
+                        // further assistant turns, is appended as a brand-new
+                        // `system` message instead of rewriting/duplicating
+                        // that earlier tool result — this keeps history
+                        // append-only (an honest record of what was known
+                        // when) and avoids the duplicate-`tool_call_id`
+                        // protocol violation entirely, rather than papering
+                        // over it by mutating a past message in place. If the
+                        // root is otherwise idle (no stream/tool in flight),
+                        // this is the "next iteration" the ReAct loop picks it
+                        // up on (blueprint §4G) — reprompt immediately so the
+                        // root LLM actually reacts to the child's result
+                        // instead of leaving the conversation stalled until a
+                        // new user prompt arrives (headless CLI sessions
+                        // never get one). If the root is mid-stream/mid-tool
+                        // for unrelated work, the result still lands in
+                        // context and is picked up naturally once that work's
+                        // own queue-drain/`StreamDone` re-prompt happens.
+                        let run_id = finish_result.run_id;
+                        let call_id = finish_result.call_id;
+                        let status = finish_result.status.clone();
+                        // The LLM-facing notice stays structured JSON (the model
+                        // reads `status`/`result`/`error`/`sources` as fields); only the
+                        // TUI bubble renders `result`/`error`/`sources` as Markdown
+                        // content sections instead, via `FinishResult::content_sections`.
+                        let result_text =
+                            serde_json::to_string(&finish_result.to_json()).unwrap_or_default();
+                        let mut content_sections = spawn_content_sections
+                            .remove(&call_id)
+                            .unwrap_or_default();
+                        content_sections.extend(finish_result.content_sections());
+                        tracing::info!(%run_id, tool_call_id = %call_id, %status, "child agent finished");
+                        // Computed before `on_child_finished` pops the queue: how many
+                        // more subagents will still run after this one. This tells the
+                        // model definitively whether to keep waiting or finalize now,
+                        // rather than leaving it to guess — a headless session gets no
+                        // follow-up user message to nudge a stalled "I'll report back
+                        // later" turn, so the model must never rely on one arriving.
+                        let remaining_after_this = child_agent_manager
+                            .as_ref()
+                            .map(|manager| manager.queue_len())
+                            .unwrap_or(0);
+                        let next_step_note = if remaining_after_this > 0 {
+                            format!(
+                                "{remaining_after_this} more subagent(s) are still running or \
+                                 queued. No user message is coming to nudge you — you will be \
+                                 automatically re-prompted the instant each one finishes, with its \
+                                 result appended the same way this one was. Do not tell the user \
+                                 you'll report back later; either use this result for useful work \
+                                 now, or simply end this turn with no new user-facing text and wait \
+                                 for the next automatic re-prompt."
+                            )
+                        } else {
+                            "This was the last outstanding subagent — no more results are coming. \
+                             Combine it with any earlier subagent results already in this \
+                             conversation and produce your final answer for the user now."
+                                .to_string()
+                        };
+                        context.push_async_harness_notice(format!(
+                            "The subagent spawned via `{tool_name}` (tool_call_id={call_id}) has finished. \
+                             Its final result:\n{result_text}\n\
+                             This result is already shown to the user verbatim (as the tool result's \
+                             Result/Error/Sources sections) — do not repeat or quote it back. \
+                             {next_step_note}",
+                            tool_name = tools::spawn_subagent::SpawnSubagentTool::NAME,
+                        ));
+                        // Computed before `on_child_finished` clears the running slot.
+                        let duration = child_agent_manager
+                            .as_ref()
+                            .and_then(|manager| manager.running_duration(run_id))
+                            .unwrap_or_default();
+                        // Emitted before the `spawn_subagent` bubble's own
+                        // `ToolDone` so the driver can auto-return from the
+                        // child conversation view (if it auto-switched into
+                        // it) ahead of the parent bubble settling.
+                        let _ = ui_tx
+                            .send(UiUpdate::ChildAgentDone {
+                                run_id,
+                                status: status.clone(),
+                                result: finish_result.result.clone(),
+                            })
+                            .await;
+                        let _ = ui_tx
+                            .send(UiUpdate::ToolDone {
+                                id: call_id,
+                                name: tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
+                                result_section: crate::tui_reducer_state::ResultSection::plain(String::new()),
+                                summary: vec![("status".to_string(), status)],
+                                duration,
+                                content_sections,
+                                run_id: None,
+                            })
+                            .await;
+                        if let Some(manager) = child_agent_manager.as_mut() {
+                            manager.on_child_finished(run_id);
+                        }
+                        tracing::debug!(
+                            tool_call_id = %call_id,
+                            mode = ?mode,
+                            "finish_rx: deciding whether to reprompt root after child result"
+                        );
+                        if mode == AgentMode::Idle {
+                            // Same iteration budget as any other re-prompt
+                            // (`advance_tool_queue`'s queue-empty branch) —
+                            // without this guard a model that just keeps
+                            // calling `spawn_subagent` again on every finish
+                            // notice, instead of ever answering, loops here
+                            // forever: this branch used to call
+                            // `start_request` unconditionally, bypassing the
+                            // cap entirely (see `bump_and_check_iteration_cap`'s
+                            // doc comment).
+                            if bump_and_check_iteration_cap(
+                                &mut iterations,
+                                &mut context,
+                                &mut mode,
+                                &ui_tx,
+                                own_run_id,
+                                &mut iteration_cap_exceeded,
+                            )
+                            .await
+                            {
+                                tracing::info!(
+                                    tool_call_id = %call_id,
+                                    "finish_rx: root was idle but iteration cap already exceeded; not reprompting"
+                                );
+                            } else {
+                                tracing::info!(tool_call_id = %call_id, "finish_rx: root was idle, forcing reprompt");
+                                mode = AgentMode::Streaming;
+                                current_cancel = Some(start_request(
+                                    &context,
+                                    engine.clone(),
+                                    registry.schemas(),
+                                    ui_tx.clone(),
+                                    agent_tx.clone(),
+                                    own_run_id,
+                                ));
+                            }
+                        } else {
+                            pending_child_finish_reprompt = true;
+                            tracing::debug!(
+                                tool_call_id = %call_id,
+                                mode = ?mode,
+                                "finish_rx: root not idle, deferring to its own queue-drain re-prompt"
+                            );
+                        }
+                    }
+                    Some(update) = recv_subagent_ui(&mut subagent_ui_rx) => {
+                        // Phase 6.10 drill-in conversation model: the
+                        // child's own text/thinking tokens must never leak
+                        // into the parent's own `partial_assistant_text`
+                        // (they render in the dedicated child transcript
+                        // instead), and the child's own stream lifecycle
+                        // (`StreamStarted`/`StreamDone`/`StreamCancelled`)
+                        // must never flip the parent's own `TuiMode` —
+                        // only `ChildAgentStarted`/`ChildAgentDone` (see
+                        // `ChildAgentManager::start` and this loop's
+                        // `finish_rx` arm) mark the child conversation's
+                        // lifecycle boundaries for the UI. Everything else
+                        // (tool approvals/progress/errors, already stamped
+                        // with the child's own `run_id`) is forwarded as-is.
+                        match update {
+                            UiUpdate::AppendText(text) => {
+                                if let Some(run_id) = child_agent_manager
+                                    .as_ref()
+                                    .and_then(|manager| manager.running_run_id())
+                                {
+                                    let _ = ui_tx
+                                        .send(UiUpdate::ChildAgentToken {
+                                            run_id,
+                                            text,
+                                            is_thinking: false,
+                                        })
+                                        .await;
+                                }
+                            }
+                            UiUpdate::AppendThinking(text) => {
+                                if let Some(run_id) = child_agent_manager
+                                    .as_ref()
+                                    .and_then(|manager| manager.running_run_id())
+                                {
+                                    let _ = ui_tx
+                                        .send(UiUpdate::ChildAgentToken {
+                                            run_id,
+                                            text,
+                                            is_thinking: true,
+                                        })
+                                        .await;
+                                }
+                            }
+                            UiUpdate::StreamStarted
+                            | UiUpdate::StreamDone
+                            | UiUpdate::StreamCancelled => {
+                                // Intentionally swallowed — see comment above.
+                            }
+                            other => {
+                                let _ = ui_tx.send(other).await;
+                            }
+                        }
+                    }
+                    _ = cancelled_or_pending(&parent_cancel) => {
+                        // The parent cancelled this child (e.g. it stopped
+                        // or was torn down). Abort whatever is in flight and
+                        // return immediately — nobody will drive this loop
+                        // with further commands.
+                        tracing::info!("child agent cancelled by parent");
+                        if let Some(cancel_token) = current_cancel.take() {
+                            cancel_token.cancel();
+                        }
+                        if let Some(tool_cancel) = current_tool_cancel.take() {
+                            tool_cancel.cancel();
+                        }
+                        pending_tools.clear();
+                        pending_steers.clear();
+                        return Ok(context);
                     }
                     cmd = cmd_rx.recv() => {
                         let Some(cmd) = cmd else {
@@ -678,13 +1442,18 @@ impl AgentLoop {
                                         registry.schemas(),
                                         ui_tx.clone(),
                                         agent_tx.clone(),
+                                        own_run_id,
                                     ));
                                 } else {
                                     // Cooperative steering: never cancel the live
                                     // stream. Queued from ToolPending too; injection
                                     // is deferred (Phase 4 adds descope_pending_tools).
                                     pending_steers.push_back(text);
-                                    let _ = ui_tx.send(UiUpdate::SteerQueued).await;
+                                    let _ = ui_tx
+                                        .send(UiUpdate::SteerQueued {
+                                            run_id: own_run_id,
+                                        })
+                                        .await;
                                 }
                             }
                             AgentCommand::ApproveTool { id } => {
@@ -696,25 +1465,61 @@ impl AgentLoop {
                                 if is_front {
                                     let pending =
                                         pending_tools.pop_front().expect("checked front");
-                                    let name = pending.call.name().to_string();
-                                    let call_id = pending.call.id();
-                                    let arguments = pending.call.arguments().clone();
-                                    let content_sections = pending.call.pending_content_sections();
-                                    let title_arguments = pending.call.title_arguments();
-                                    tracing::info!(tool = %name, tool_call_id = %call_id, "tool approved");
-                                    current_tool_cancel = Some(PendingTool::execute(
-                                        pending,
-                                        agent_tx.clone(),
-                                    ));
-                                    let _ = ui_tx
-                                        .send(UiUpdate::ToolStart {
-                                            name: name.clone(),
-                                            id: call_id,
-                                            arguments: arguments.clone(),
-                                            content_sections,
-                                            title_arguments,
-                                        })
+                                    if pending.call.name()
+                                        == tools::spawn_subagent::SpawnSubagentTool::NAME
+                                    {
+                                        resolve_spawn_subagent(
+                                            pending,
+                                            &mut child_agent_manager,
+                                            &mut context,
+                                            &ui_tx,
+                                            &mut spawn_content_sections,
+                                        )
                                         .await;
+                                        advance_tool_queue(
+                                            &mut pending_tools,
+                                            &mut context,
+                                            &mut mode,
+                                            &mut current_cancel,
+                                            &mut current_tool_cancel,
+                                            &mut iterations,
+                                            true,
+                                            engine.clone(),
+                                            Arc::clone(&registry),
+                                            ui_tx.clone(),
+                                            agent_tx.clone(),
+                                            &mut clarify_started_at,
+                                            &mut pending_steers,
+                                            &mut child_agent_manager,
+                                            &mut spawn_content_sections,
+                                            own_run_id,
+                                            &mut pending_child_finish_reprompt,
+                                            &mut iteration_cap_exceeded,
+                                        )
+                                        .await;
+                                    } else {
+                                        let name = pending.call.name().to_string();
+                                        let call_id = pending.call.id();
+                                        let arguments = pending.call.arguments().clone();
+                                        let content_sections =
+                                            pending.call.pending_content_sections();
+                                        let title_arguments = pending.call.title_arguments();
+                                        tracing::info!(tool = %name, tool_call_id = %call_id, "tool approved");
+                                        current_tool_cancel = Some(PendingTool::execute(
+                                            pending,
+                                            agent_tx.clone(),
+                                        ));
+                                        let _ = ui_tx
+                                            .send(UiUpdate::ToolStart {
+                                                name: name.clone(),
+                                                id: call_id,
+                                                arguments: arguments.clone(),
+                                                content_sections,
+                                                title_arguments,
+                                                run_id: own_run_id,
+                                            })
+                                            .await;
+                                    }
                                 }
                             }
                             AgentCommand::DenyTool { id, reason } => {
@@ -729,11 +1534,13 @@ impl AgentLoop {
                                     let name = denied.call.name().to_string();
                                     let call_id = denied.call.id();
                                     tracing::info!(tool = %name, tool_call_id = %call_id, "tool denied");
-                                    let mut error = format!("tool '{name}' was denied");
+                                    let mut error = format!("Tool '{name}' was denied by the user");
                                     if !reason.is_empty() {
-                                        error.push_str(&format!(": {reason}"));
+                                        error.push_str(&format!(
+                                            ". Here is their reason for the denial:\n\n{reason}"
+                                        ));
                                     }
-                                    context.push_tool_error(call_id, name.clone(), error.clone());
+                                    context.push_tool_error(call_id, name.clone(), error.clone(), None);
                                     // When the user supplied a reason, also push a
                                     // `user` role message so the model reads the
                                     // correction through the authoritative instruction
@@ -746,18 +1553,144 @@ impl AgentLoop {
                                         ));
                                     }
                                     let _ = ui_tx
-                                        .send(UiUpdate::ToolError { id: call_id, error })
+                                        .send(UiUpdate::ToolError {
+                                            id: call_id,
+                                            error,
+                                            duration: std::time::Duration::ZERO,
+                                            content_sections: vec![],
+                                            run_id: own_run_id,
+                                        })
                                         .await;
                                     advance_tool_queue(
                                         &mut pending_tools,
                                         &mut context,
                                         &mut mode,
                                         &mut current_cancel,
+                                        &mut current_tool_cancel,
                                         &mut iterations,
+                                        true,
                                         engine.clone(),
                                         Arc::clone(&registry),
                                         ui_tx.clone(),
                                         agent_tx.clone(),
+                                        &mut clarify_started_at,
+                                        &mut pending_steers,
+                                        &mut child_agent_manager,
+                                        &mut spawn_content_sections,
+                                        own_run_id,
+                                        &mut pending_child_finish_reprompt,
+                                        &mut iteration_cap_exceeded,
+                                    )
+                                    .await;
+                                }
+                            }
+                            AgentCommand::AnswerClarify(answer) => {
+                                let is_front = mode == AgentMode::ClarifyPending
+                                    && pending_tools
+                                        .front()
+                                        .is_some_and(|pending| pending.call.name() == "clarify");
+                                if is_front {
+                                    let pending = pending_tools.pop_front().expect("checked front");
+                                    let call_id = pending.call.id();
+                                    let choices_sections =
+                                        tools::clarify::ClarifyTool::answer_display_sections(
+                                            pending.call.arguments(),
+                                        );
+                                    context.push_tool_result(
+                                        call_id,
+                                        tools::clarify::ClarifyTool::NAME.to_string(),
+                                        answer.clone(),
+                                        None,
+                                        None,
+                                    );
+                                    let duration = clarify_started_at
+                                        .take()
+                                        .map(|started| started.elapsed())
+                                        .unwrap_or(std::time::Duration::ZERO);
+                                    let _ = ui_tx
+                                        .send(UiUpdate::ToolDone {
+                                            id: call_id,
+                                            name: tools::clarify::ClarifyTool::NAME.to_string(),
+                                            result_section: crate::tui_reducer_state::ResultSection {
+                                                id: crate::tui_reducer_state::result_section_ids::USER_ANSWER.to_string(),
+                                                content: answer,
+                                            },
+                                            summary: vec![],
+                                            duration,
+                                            content_sections: choices_sections,
+                                            run_id: own_run_id,
+                                        })
+                                        .await;
+                                    mode = AgentMode::ToolPending;
+                                    advance_tool_queue(
+                                        &mut pending_tools,
+                                        &mut context,
+                                        &mut mode,
+                                        &mut current_cancel,
+                                        &mut current_tool_cancel,
+                                        &mut iterations,
+                                        true,
+                                        engine.clone(),
+                                        Arc::clone(&registry),
+                                        ui_tx.clone(),
+                                        agent_tx.clone(),
+                                        &mut clarify_started_at,
+                                        &mut pending_steers,
+                                        &mut child_agent_manager,
+                                        &mut spawn_content_sections,
+                                        own_run_id,
+                                        &mut pending_child_finish_reprompt,
+                                        &mut iteration_cap_exceeded,
+                                    )
+                                    .await;
+                                }
+                            }
+                            AgentCommand::AbortClarify => {
+                                let is_front = mode == AgentMode::ClarifyPending
+                                    && pending_tools
+                                        .front()
+                                        .is_some_and(|pending| pending.call.name() == "clarify");
+                                if is_front {
+                                    let pending = pending_tools.pop_front().expect("checked front");
+                                    let call_id = pending.call.id();
+                                    let error =
+                                        "User aborted the clarify question without answering."
+                                            .to_string();
+                                    context.push_tool_error(
+                                        call_id,
+                                        tools::clarify::ClarifyTool::NAME.to_string(),
+                                        error.clone(),
+                                        None,
+                                    );
+                                    let _ = ui_tx
+                                        .send(UiUpdate::ToolError {
+                                            id: call_id,
+                                            error,
+                                            duration: std::time::Duration::ZERO,
+                                            content_sections: vec![],
+                                            run_id: own_run_id,
+                                        })
+                                        .await;
+                                    mode = AgentMode::ToolPending;
+                                    advance_tool_queue(
+                                        &mut pending_tools,
+                                        &mut context,
+                                        &mut mode,
+                                        &mut current_cancel,
+                                        &mut current_tool_cancel,
+                                        &mut iterations,
+                                        true,
+                                        engine.clone(),
+                                        Arc::clone(&registry),
+                                        ui_tx.clone(),
+                                        agent_tx.clone(),
+                                        &mut clarify_started_at,
+                                        &mut pending_steers,
+                                        &mut child_agent_manager,
+                                        &mut spawn_content_sections,
+                                        own_run_id,
+                                        &mut pending_child_finish_reprompt,
+                                        &mut iteration_cap_exceeded,
                                     )
                                     .await;
                                 }
@@ -770,6 +1703,54 @@ impl AgentLoop {
                                     ?mode,
                                     "stop command received"
                                 );
+                                if let Some(manager) = child_agent_manager.as_mut() {
+                                    for cancelled in manager.cancel_all() {
+                                        // Store integration (child_result JSONL
+                                        // record) lands in Phase 6.11; for now
+                                        // the cancellation is only logged, but
+                                        // the tool bubble/context still get a
+                                        // proper terminal state below instead
+                                        // of being left stuck mid-flight.
+                                        tracing::info!(
+                                            run_id = %cancelled.run_id,
+                                            tool_call_id = %cancelled.call_id,
+                                            "child agent cancelled on parent stop"
+                                        );
+                                        let mut content_sections = spawn_content_sections
+                                            .remove(&cancelled.call_id)
+                                            .unwrap_or_default();
+                                        content_sections.push(tools::Section::Content(
+                                            tools::ContentSection {
+                                                label: Some("Result".to_string()),
+                                                content: "Cancelled: the parent agent stopped before the child finished.".to_string(),
+                                                file_extension: Some("md".to_string()),
+                                                line_number_offset: None,
+                                            },
+                                        ));
+                                        let result_text = serde_json::to_string(&serde_json::json!({
+                                            "status": "cancelled",
+                                            "run_id": cancelled.run_id.to_string(),
+                                        }))
+                                        .unwrap_or_default();
+                                        context.push_async_harness_notice(format!(
+                                            "The subagent spawned via `{tool_name}` (tool_call_id={call_id}) was cancelled \
+                                             before finishing. Its terminal status:\n{result_text}",
+                                            tool_name = tools::spawn_subagent::SpawnSubagentTool::NAME,
+                                            call_id = cancelled.call_id,
+                                        ));
+                                        let _ = ui_tx
+                                            .send(UiUpdate::ToolDone {
+                                                id: cancelled.call_id,
+                                                name: tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
+                                                result_section: crate::tui_reducer_state::ResultSection::plain(String::new()),
+                                                summary: vec![("status".to_string(), "cancelled".to_string())],
+                                                duration: std::time::Duration::ZERO,
+                                                content_sections,
+                                                run_id: own_run_id,
+                                            })
+                                            .await;
+                                    }
+                                }
                                 // Interrupt: hard-abort the current round.
                                 pending_steers.clear();
                                 if let Some(cancel_token) = current_cancel.take() {
@@ -778,7 +1759,43 @@ impl AgentLoop {
                                 if let Some(tool_cancel) = current_tool_cancel.take() {
                                     tool_cancel.cancel();
                                 }
-                                if mode == AgentMode::ToolPending {
+                                if mode == AgentMode::ClarifyPending {
+                                    if let Some(pending) = pending_tools.pop_front() {
+                                        let name = pending.call.name().to_string();
+                                        let id = pending.call.id();
+                                        let mut error =
+                                            format!("Tool '{name}' was denied by the user");
+                                        if !reason.is_empty() {
+                                            error.push_str(&format!(
+                                                ". Here is their reason for the denial:\n\n{reason}"
+                                            ));
+                                        }
+                                        context.push_tool_error(id, name, error.clone(), None);
+                                        let _ = ui_tx
+                                            .send(UiUpdate::ToolError {
+                                                id,
+                                                error,
+                                                duration: std::time::Duration::ZERO,
+                                                content_sections: vec![],
+                                                run_id: own_run_id,
+                                            })
+                                            .await;
+                                    }
+                                    for pending in pending_tools.iter() {
+                                        let name = pending.call.name().to_string();
+                                        let id = pending.call.id();
+                                        let mut error =
+                                            format!("Tool '{name}' was denied by the user");
+                                        if !reason.is_empty() {
+                                            error.push_str(&format!(
+                                                ". Here is their reason for the denial:\n\n{reason}"
+                                            ));
+                                        }
+                                        context.push_tool_error(id, name, error, None);
+                                    }
+                                    pending_tools.clear();
+                                    mode = AgentMode::Idle;
+                                } else if mode == AgentMode::ToolPending {
                                     // Record a denial result for every pending
                                     // tool so the model history stays consistent
                                     // (every tool call must have a result).
@@ -788,14 +1805,22 @@ impl AgentLoop {
                                     for pending in pending_tools.iter() {
                                         let name = pending.call.name().to_string();
                                         let id = pending.call.id();
-                                        let mut error = format!("tool '{name}' was denied");
+                                        let mut error = format!("Tool '{name}' was denied by the user");
                                         if !reason.is_empty() {
-                                            error.push_str(&format!(": {reason}"));
+                                            error.push_str(&format!(
+                                                ". Here is their reason for the denial:\n\n{reason}"
+                                            ));
                                         }
-                                        context.push_tool_error(id, name, error.clone());
+                                        context.push_tool_error(id, name, error.clone(), None);
                                         if first {
                                             let _ = ui_tx
-                                                .send(UiUpdate::ToolError { id, error })
+                                                .send(UiUpdate::ToolError {
+                                                    id,
+                                                    error,
+                                                    duration: std::time::Duration::ZERO,
+                                                    content_sections: vec![],
+                                                    run_id: own_run_id,
+                                                })
                                                 .await;
                                             first = false;
                                         }
@@ -804,8 +1829,54 @@ impl AgentLoop {
                                     mode = AgentMode::Idle;
                                 }
                             }
+                            AgentCommand::ForChild { run_id, command } => {
+                                // Only a root loop's `child_agent_manager` can
+                                // resolve `run_id` to a live child command
+                                // channel; forward the inner command verbatim
+                                // — the child's own loop never sees `ForChild`
+                                // itself, only plain `ApproveTool`/`DenyTool`/
+                                // `AnswerClarify`/`AbortClarify` on its own
+                                // channel, exactly as if sent directly.
+                                let sender = child_agent_manager
+                                    .as_ref()
+                                    .and_then(|manager| manager.running_command_sender(run_id));
+                                match sender {
+                                    Some(sender) => {
+                                        let _ = sender.send(*command).await;
+                                    }
+                                    None => {
+                                        tracing::warn!(
+                                            %run_id,
+                                            "AgentCommand::ForChild targets a run_id with no \
+                                             running child (already finished/cancelled); dropping"
+                                        );
+                                    }
+                                }
+                            }
                         }
                     }
+                }
+
+                // A `Role::Child` loop has nobody left to drive it once it
+                // goes idle (no user, no more steers) — the "unstructured
+                // fallback" case (the model stopped calling tools without
+                // ever calling `agent_finish`). Returning here lets the caller
+                // (the spawn wrapper) harvest the final `Context` and report
+                // an "unstructured" outcome.
+                //
+                // The iteration-cap case is different and reported as a hard
+                // `Err` instead: `iteration_cap_exceeded` (set only for a
+                // child, see `advance_tool_queue`'s doc comment) means the
+                // model never got a chance to conclude naturally, so there is
+                // no "final answer" to salvage — `drive_child_to_completion`'s
+                // existing `Ok(Err(error))` arm already reports exactly the
+                // right shape (`status: "failure"`, explicit `error`, no
+                // fabricated `result`) with zero changes needed there.
+                if is_child && mode == AgentMode::Idle {
+                    if let Some(message) = iteration_cap_exceeded.take() {
+                        return Err(anyhow::anyhow!(message));
+                    }
+                    return Ok(context);
                 }
             }
         })
@@ -826,55 +1897,413 @@ fn log_tool_approval_request(call: &dyn ToolCall) {
     );
 }
 
-/// Advance the pending-tool queue after one call completes (executed, errored,
-/// or denied). If a call remains, stay in `ToolPending` and surface the next
-/// approval request; otherwise re-prompt the model — the internal deferred
-/// re-prompt (blueprint §7 Phase 3 Q26) — unless the iteration guard trips.
-#[allow(clippy::too_many_arguments)]
+/// Resolve an approved `spawn_subagent` call immediately against
+/// `child_agent_manager`: unlike ordinary tools, spawning never executes the
+/// call's own `ToolCall::run` (which has no access to the manager) — it
+/// starts (or enqueues) the child directly and pushes the `"running"`/
+/// `"queued"` status as the call's tool result right away. This is *not*
+/// the call finishing: `ChildAgentManager::spawn` reports that status as a
+/// `UiUpdate::ToolProgress` (bubble stays `Running`), and `content_sections`
+/// (the task/briefing shown to the user) are stashed in
+/// `spawn_content_sections` so the eventual real `ToolDone` — sent only
+/// once the child actually finishes, see `AgentLoop::run`'s `finish_rx`
+/// handling — can still show them alongside the child's result.
+async fn resolve_spawn_subagent(
+    pending: PendingTool,
+    child_agent_manager: &mut Option<crate::child_agent_manager::ChildAgentManager>,
+    context: &mut Context,
+    ui_tx: &mpsc::Sender<UiUpdate>,
+    spawn_content_sections: &mut HashMap<Uuid, Vec<crate::agent::tools::Section>>,
+) {
+    let call_id = pending.call.id();
+    let name = pending.call.name().to_string();
+    let arguments = pending.call.arguments().clone();
+    let content_sections = pending.call.pending_content_sections();
+    let title_arguments = pending.call.title_arguments();
+    let _ = ui_tx
+        .send(UiUpdate::ToolStart {
+            name: name.clone(),
+            id: call_id,
+            arguments: arguments.clone(),
+            content_sections: content_sections.clone(),
+            title_arguments,
+            run_id: None,
+        })
+        .await;
+
+    let task = arguments
+        .get("task")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let briefing = arguments
+        .get("briefing")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let agent_type = arguments
+        .get("agent_type")
+        .and_then(|value| value.as_str())
+        .unwrap_or(tools::spawn_subagent::DEFAULT_CHILD_AGENT_TYPE)
+        .to_string();
+    let label = arguments
+        .get("label")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+
+    let (status_text, run_id) = match child_agent_manager.as_mut() {
+        Some(manager) => match manager.spawn(task, briefing, agent_type, label, call_id) {
+            crate::child_agent_manager::SpawnStatus::Started(run_id) => ("running", run_id),
+            crate::child_agent_manager::SpawnStatus::Queued(run_id) => ("queued", run_id),
+        },
+        None => {
+            // Structurally unreachable: `spawn_subagent` is only ever
+            // registered when a `ChildAgentManager` is wired. Fail safe
+            // rather than panic.
+            let error =
+                "spawn_subagent is unavailable: this agent cannot spawn children".to_string();
+            tracing::error!(tool_call_id = %call_id, "spawn_subagent resolved with no ChildAgentManager wired");
+            context.push_tool_error(call_id, name.clone(), error.clone(), None);
+            let _ = ui_tx
+                .send(UiUpdate::ToolError {
+                    id: call_id,
+                    error,
+                    duration: std::time::Duration::ZERO,
+                    content_sections: vec![],
+                    run_id: None,
+                })
+                .await;
+            return;
+        }
+    };
+
+    spawn_content_sections.insert(call_id, content_sections);
+    tracing::info!(tool_call_id = %call_id, status = status_text, %run_id, "spawn_subagent resolved");
+    let result_value = serde_json::json!({ "status": status_text, "run_id": run_id.to_string() });
+    let result_text = serde_json::to_string(&result_value).unwrap_or_default();
+    context.push_tool_result(call_id, name, result_text, None, None);
+    // No `ToolDone` here: `ChildAgentManager::spawn` already reported the
+    // "running"/"queued" status via `UiUpdate::ToolProgress`. The bubble
+    // stays `Running` until the child truly finishes.
+}
+
+/// Advance the pending-tool queue. Processes auto-approved and auto-denied
+/// tools immediately in a loop; stops at the first `UserApprovalRequired`
+/// tool (sends `ToolPending`) or re-prompts the model when the queue is
+/// empty.
+///
+/// `increment_iterations` is `false` when called immediately after a new
+/// `ToolCall` batch arrives (the iteration counter was already set) and
+/// `true` after a tool finishes executing (each completed tool round counts).
+/// `own_run_id` is the calling loop's own `AgentLoop::own_run_id` (`None` for
+/// the root, `Some(run_id)` for a child); it is stamped onto the
+/// `UiUpdate::ToolPending`/`ClarifyPending` this function may emit so the
+/// root (which forwards a child's `UiUpdate`s up to its own driver) and the
+/// driver can route the resulting `ApproveTool`/`DenyTool`/`AnswerClarify`/
+/// `AbortClarify` verdict back to the correct agent loop via
+/// `AgentCommand::ForChild`. This has no effect on how the tool queue itself
+/// is processed — children pause and wait exactly like the root; there is no
+/// auto-deny special case.
+///
+/// `pending_child_finish_reprompt` is cleared whenever this function
+/// re-prompts the model (the queue-empty branch): that re-prompt's `context`
+/// already carries any deferred `spawn_subagent` child result (see
+/// `AgentLoop::run`'s `finish_rx` arm), so the flag's job is done and a later
+/// `StreamDone` must not force a redundant extra re-prompt for it.
+///
+/// `iteration_cap_exceeded` is set (to the guard's explanation message) when
+/// `MAX_TOOL_USE_ITERATIONS` is exceeded — but only for a child loop
+/// (`own_run_id.is_some()`); a root loop's own hit is reported to the human
+/// directly (an `Interrupted` assistant bubble) and never sets this. The
+/// caller (`AgentLoop::run`'s `is_child && mode == AgentMode::Idle` tail)
+/// checks it to return `Err` instead of `Ok(context)` — so
+/// `drive_child_to_completion` reports a clear `status: "failure"` instead of
+/// folding this into the generic "unstructured" fallback used when a child
+/// simply goes idle without ever calling `agent_finish`. See docs/features.md
+/// → *spawn_subagent*/*agent_finish* for the distinction.
+/// Increments `*iterations` and, if that now exceeds `MAX_TOOL_USE_ITERATIONS`,
+/// reports the guard tripping and forces `*mode = AgentMode::Idle`: for the
+/// root (`own_run_id: None`) a human reads the transcript directly, so a real
+/// `Interrupted` assistant bubble is pushed; for a child, the explanation is
+/// instead handed back via `*iteration_cap_exceeded` (never pushed as an
+/// assistant message — `extract_last_assistant_text` in `agent_factory.rs`
+/// would otherwise mistake this guard boilerplate for the child's own final
+/// answer) for `AgentLoop::run`'s `is_child && mode == AgentMode::Idle` tail
+/// to turn into an `Err`, producing an honest `status: "failure"` instead of
+/// folding this into the generic "unstructured" fallback (see
+/// `advance_tool_queue`'s doc comment and docs/features.md →
+/// *spawn_subagent*/*agent_finish*).
+///
+/// Returns `true` when the cap was exceeded (the caller must not start a new
+/// request this round) and `false` otherwise (still under budget, proceed as
+/// normal). Shared by `advance_tool_queue`'s queue-empty branch and
+/// `AgentLoop::run`'s `finish_rx` idle-reprompt branch — both are re-prompt
+/// call sites, and both must enforce the same budget. Without this, a child
+/// finishing while the root is idle re-prompts it directly via `start_request`,
+/// bypassing `advance_tool_queue`'s iteration counter entirely; a model that
+/// just keeps calling `spawn_subagent` again on every finish notice (rather
+/// than ever answering) can then loop forever — one HTTP request every few
+/// seconds, with no cap at all — instead of tripping the same guard as any
+/// other tool-use round.
+async fn bump_and_check_iteration_cap(
+    iterations: &mut usize,
+    context: &mut Context,
+    mode: &mut AgentMode,
+    ui_tx: &mpsc::Sender<UiUpdate>,
+    own_run_id: Option<Uuid>,
+    iteration_cap_exceeded: &mut Option<String>,
+) -> bool {
+    *iterations += 1;
+    tracing::debug!(iterations = *iterations, "advancing tool queue");
+    if *iterations <= MAX_TOOL_USE_ITERATIONS {
+        return false;
+    }
+    tracing::warn!(
+        iterations = *iterations,
+        run_id = ?own_run_id,
+        "max tool-use iterations exceeded"
+    );
+    let message = format!(
+        "Max tool-use iterations ({}) exceeded.",
+        MAX_TOOL_USE_ITERATIONS
+    );
+    match own_run_id {
+        None => {
+            context.push_assistant(message.clone(), AssistantStatus::Interrupted);
+        }
+        Some(_) => {
+            *iteration_cap_exceeded = Some(message.clone());
+        }
+    }
+    let _ = ui_tx
+        .send(UiUpdate::Error {
+            message,
+            run_id: own_run_id,
+        })
+        .await;
+    *mode = AgentMode::Idle;
+    true
+}
+
+#[expect(clippy::too_many_arguments)]
 async fn advance_tool_queue(
     pending_tools: &mut VecDeque<PendingTool>,
     context: &mut Context,
     mode: &mut AgentMode,
     current_cancel: &mut Option<CancellationToken>,
+    current_tool_cancel: &mut Option<CancellationToken>,
     iterations: &mut usize,
+    increment_iterations: bool,
     engine: Arc<dyn Engine>,
     registry: Arc<ToolRegistry>,
     ui_tx: mpsc::Sender<UiUpdate>,
     agent_tx: mpsc::Sender<AgentEvent>,
+    clarify_started_at: &mut Option<std::time::Instant>,
+    pending_steers: &mut VecDeque<String>,
+    child_agent_manager: &mut Option<crate::child_agent_manager::ChildAgentManager>,
+    spawn_content_sections: &mut HashMap<Uuid, Vec<crate::agent::tools::Section>>,
+    own_run_id: Option<Uuid>,
+    pending_child_finish_reprompt: &mut bool,
+    iteration_cap_exceeded: &mut Option<String>,
 ) {
-    if let Some(next) = pending_tools.front() {
-        log_tool_approval_request(next.call.as_ref());
-        let _ = ui_tx
-            .send(UiUpdate::ToolPending {
-                name: next.call.name().to_string(),
-                id: next.call.id(),
-                arguments: next.call.arguments().clone(),
-                content_sections: next.call.pending_content_sections(),
-                title_arguments: next.call.title_arguments(),
-            })
-            .await;
-        return;
+    // `spawn_subagent` and auto-denied tools resolve synchronously within
+    // this same loop (unlike a normally-executing auto-approved tool, which
+    // `return`s here and waits for a later `ToolDone`/`ToolError` event to
+    // re-invoke this function with `increment_iterations: true`). Without
+    // this, a round made up entirely of such synchronously-resolved tools
+    // could reach the queue-empty re-prompt below still carrying whatever
+    // `increment_iterations` this call was originally invoked with (`false`,
+    // since the `ToolCall` handler always calls this function that way) —
+    // silently completing a full tool-use round without ever counting
+    // against `MAX_TOOL_USE_ITERATIONS`. Shadow the parameter as mutable so
+    // resolving any such tool below can flip it to `true` for the rest of
+    // this call.
+    let mut increment_iterations = increment_iterations;
+    loop {
+        match pending_tools.front() {
+            None => {
+                // Queue empty: optionally increment and re-prompt.
+                if increment_iterations
+                    && bump_and_check_iteration_cap(
+                        iterations,
+                        context,
+                        mode,
+                        &ui_tx,
+                        own_run_id,
+                        iteration_cap_exceeded,
+                    )
+                    .await
+                {
+                    return;
+                }
+                // All tool results for this round are now in context — this is
+                // the earliest safe point to inject queued steers (pending user
+                // messages typed while tools were running), so they reach the
+                // model on the very next request rather than waiting for a full
+                // tool-free turn to complete via StreamDone.
+                if inject_pending_steers(pending_steers, context) {
+                    let _ = ui_tx
+                        .send(UiUpdate::SteerApplied { run_id: own_run_id })
+                        .await;
+                }
+                // This re-prompt's `context` already carries any child result
+                // that arrived (and was deferred) while the root was mid-turn
+                // — clear the flag so a later, unrelated `StreamDone` doesn't
+                // force a redundant re-prompt for a result already handled.
+                *pending_child_finish_reprompt = false;
+                *mode = AgentMode::Streaming;
+                *current_cancel = Some(start_request(
+                    context,
+                    engine,
+                    registry.schemas(),
+                    ui_tx,
+                    agent_tx,
+                    own_run_id,
+                ));
+                return;
+            }
+            Some(front) => {
+                let approval = {
+                    let _span = tracing::debug_span!(
+                        "needs_approval",
+                        tool = %front.call.name(),
+                        tool_call_id = %front.call.id(),
+                    )
+                    .entered();
+                    // Validate arguments against the tool's input schema first.
+                    // Structurally invalid calls are denied immediately without an approval
+                    // prompt, for all tools uniformly.
+                    let validation = registry
+                        .get(front.call.name())
+                        .map(|tool| tool.validate_args(front.call.arguments()));
+                    match validation {
+                        Some(Err(reason)) => crate::sandbox::ApprovalCheck::AutoDenied { reason },
+                        _ => registry
+                            .get(front.call.name())
+                            .map(|tool| tool.needs_approval(front.call.arguments()))
+                            .unwrap_or(crate::sandbox::ApprovalCheck::UserApprovalRequired),
+                    }
+                };
+                match approval {
+                    crate::sandbox::ApprovalCheck::AutoApproved
+                        if front.call.name() == tools::spawn_subagent::SpawnSubagentTool::NAME =>
+                    {
+                        let pending = pending_tools.pop_front().expect("checked front");
+                        resolve_spawn_subagent(
+                            pending,
+                            child_agent_manager,
+                            context,
+                            &ui_tx,
+                            spawn_content_sections,
+                        )
+                        .await;
+                        // Resolves synchronously (unlike a normally-executing
+                        // tool); continue the loop to process the next
+                        // pending tool or re-prompt. This still counts as a
+                        // completed tool-use round against the iteration cap.
+                        increment_iterations = true;
+                    }
+                    crate::sandbox::ApprovalCheck::AutoApproved => {
+                        let pending = pending_tools.pop_front().expect("checked front");
+                        let name = pending.call.name().to_string();
+                        let call_id = pending.call.id();
+                        let arguments = pending.call.arguments().clone();
+                        let content_sections = pending.call.pending_content_sections();
+                        let title_arguments = pending.call.title_arguments();
+                        tracing::info!(tool = %name, tool_call_id = %call_id, "tool auto-approved");
+                        *current_tool_cancel =
+                            Some(PendingTool::execute(pending, agent_tx.clone()));
+                        let _ = ui_tx
+                            .send(UiUpdate::ToolStart {
+                                name,
+                                id: call_id,
+                                arguments,
+                                content_sections,
+                                title_arguments,
+                                run_id: own_run_id,
+                            })
+                            .await;
+                        return; // wait for ToolDone/ToolError
+                    }
+                    crate::sandbox::ApprovalCheck::AutoDenied { reason } => {
+                        let pending = pending_tools.pop_front().expect("checked front");
+                        let name = pending.call.name().to_string();
+                        let call_id = pending.call.id();
+                        let title_arguments = pending.call.title_arguments();
+                        let content_sections = pending.call.pending_content_sections();
+                        tracing::info!(tool = %name, tool_call_id = %call_id, %reason, "tool auto-denied");
+                        context.push_tool_error(call_id, name.clone(), reason.clone(), None);
+                        let _ = ui_tx
+                            .send(UiUpdate::ToolAutoDenied {
+                                id: call_id,
+                                name,
+                                title_arguments,
+                                content_sections,
+                                reason,
+                                run_id: own_run_id,
+                            })
+                            .await;
+                        // Continue loop to handle next tool in queue. This
+                        // still counts as a completed tool-use round against
+                        // the iteration cap (see comment on
+                        // `increment_iterations` above).
+                        increment_iterations = true;
+                    }
+                    crate::sandbox::ApprovalCheck::UserApprovalRequired
+                        if front.call.name() == tools::clarify::ClarifyTool::NAME =>
+                    {
+                        let args = front.call.arguments();
+                        let question = args
+                            .get("question")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let context = args
+                            .get("context")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string);
+                        let choices =
+                            args.get("choices")
+                                .and_then(|value| value.as_array())
+                                .map(|values| {
+                                    values
+                                        .iter()
+                                        .filter_map(|value| value.as_str().map(str::to_string))
+                                        .collect()
+                                });
+                        let call_id = front.call.id();
+                        *mode = AgentMode::ClarifyPending;
+                        *clarify_started_at = Some(std::time::Instant::now());
+                        let _ = ui_tx
+                            .send(UiUpdate::ClarifyPending {
+                                id: call_id,
+                                question,
+                                context,
+                                choices,
+                                run_id: own_run_id,
+                            })
+                            .await;
+                        return;
+                    }
+                    crate::sandbox::ApprovalCheck::UserApprovalRequired => {
+                        log_tool_approval_request(front.call.as_ref());
+                        *mode = AgentMode::ToolPending;
+                        let _ = ui_tx
+                            .send(UiUpdate::ToolPending {
+                                name: front.call.name().to_string(),
+                                id: front.call.id(),
+                                arguments: front.call.arguments().clone(),
+                                content_sections: front.call.pending_content_sections(),
+                                title_arguments: front.call.title_arguments(),
+                                run_id: own_run_id,
+                            })
+                            .await;
+                        return;
+                    }
+                }
+            }
+        }
     }
-    *iterations += 1;
-    tracing::debug!(iterations = *iterations, "advancing tool queue");
-    if *iterations > MAX_TOOL_USE_ITERATIONS {
-        tracing::warn!(iterations = *iterations, "max tool-use iterations exceeded");
-        let _ = ui_tx
-            .send(UiUpdate::Error(
-                "max tool-use iterations exceeded".to_string(),
-            ))
-            .await;
-        *mode = AgentMode::Idle;
-        return;
-    }
-    *mode = AgentMode::Streaming;
-    *current_cancel = Some(start_request(
-        context,
-        engine,
-        registry.schemas(),
-        ui_tx,
-        agent_tx,
-    ));
 }
 
 /// Spawns the inner streaming task for one request, built from an immutable
@@ -891,91 +2320,138 @@ fn start_request(
     tools: Vec<ToolSchema>,
     ui_tx: mpsc::Sender<UiUpdate>,
     agent_tx: mpsc::Sender<AgentEvent>,
+    own_run_id: Option<Uuid>,
 ) -> CancellationToken {
     let cancel = CancellationToken::new();
     let messages = context.messages().to_vec();
     let inner_cancel = cancel.clone();
-    tokio::spawn(async move {
-        let mut stream = match engine.chat(messages, tools, inner_cancel).await {
-            Ok(stream) => stream,
-            Err(error) => {
-                let message = format!("{error}");
-                tracing::error!(message = %message, "engine chat failed");
-                let _ = ui_tx.send(UiUpdate::Error(message.clone())).await;
-                let _ = agent_tx.send(AgentEvent::StreamError(message)).await;
-                return;
-            }
-        };
-        let _ = ui_tx.send(UiUpdate::StreamStarted).await;
-        let mut partial = String::new();
-        let mut accumulators: HashMap<usize, ToolCallAccumulator> = HashMap::new();
-        while let Some(event) = stream.recv().await {
-            match event {
-                StreamEvent::Text(text) => {
-                    partial.push_str(&text);
-                    let _ = ui_tx.send(UiUpdate::AppendText(text)).await;
-                }
-                StreamEvent::Delta(delta) => {
-                    let accumulator =
-                        accumulators
-                            .entry(delta.tool_call_index)
-                            .or_insert_with(|| ToolCallAccumulator {
-                                id: Uuid::new_v4(),
-                                name: None,
-                                arguments: String::new(),
-                            });
-                    if let Some(name) = delta.function_name {
-                        if accumulator.name.is_none() {
-                            accumulator.name = Some(name);
-                        }
-                    }
-                    if let Some(fragment) = delta.arguments_fragment {
-                        accumulator.arguments.push_str(&fragment);
-                    }
-                }
-                StreamEvent::Done => {
-                    if accumulators.is_empty() {
-                        let _ = ui_tx.send(UiUpdate::StreamDone).await;
-                        let _ = agent_tx.send(AgentEvent::StreamDone { partial }).await;
+    // `run_id` is `None` for the root loop and `Some(...)` for a child loop
+    // (see `AgentLoop::own_run_id`); attaching it to this span lets every
+    // nested log emitted while this request is in flight — including the
+    // provider-level "chat request started"/"stream ended with [DONE]"
+    // lines in `llm::openai_provider` — identify which agent loop it
+    // belongs to, without threading `run_id` through the provider itself.
+    let span = tracing::info_span!("agent_stream", run_id = ?own_run_id);
+    tokio::spawn(
+        async move {
+            let mut stream = match engine.chat(messages, tools, inner_cancel.clone()).await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    // If the cancel token was already fired (e.g. user aborted
+                    // while the server was still thinking), treat the resulting
+                    // error as a cancellation rather than a hard error so
+                    // domain_aborting receives StreamCancelled and exits cleanly.
+                    if inner_cancel.is_cancelled() {
+                        tracing::debug!(
+                            "engine chat failed after cancel; treating as StreamCancelled"
+                        );
+                        let _ = ui_tx.send(UiUpdate::StreamCancelled).await;
+                        let _ = agent_tx
+                            .send(AgentEvent::StreamCancelled {
+                                partial: String::new(),
+                            })
+                            .await;
                     } else {
-                        let mut calls = Vec::new();
-                        let mut error: Option<String> = None;
-                        for (_, accumulator) in accumulators {
-                            match accumulator.into_tool_call_checked() {
-                                Ok(call) => calls.push(call),
-                                Err(raw) => {
-                                    error = Some(format!(
-                                        "stream ended with incomplete tool-call JSON: {raw}"
-                                    ));
-                                    break;
-                                }
+                        let message = format!("{error}");
+                        tracing::error!(message = %message, "engine chat failed");
+                        let _ = ui_tx
+                            .send(UiUpdate::Error {
+                                message: message.clone(),
+                                run_id: own_run_id,
+                            })
+                            .await;
+                        let _ = agent_tx.send(AgentEvent::StreamError(message)).await;
+                    }
+                    return;
+                }
+            };
+            let _ = ui_tx.send(UiUpdate::StreamStarted).await;
+            let mut partial = String::new();
+            let mut accumulators: HashMap<usize, ToolCallAccumulator> = HashMap::new();
+            while let Some(event) = stream.recv().await {
+                match event {
+                    StreamEvent::Text(text) => {
+                        partial.push_str(&text);
+                        let _ = ui_tx.send(UiUpdate::AppendText(text)).await;
+                    }
+                    StreamEvent::Thinking(text) => {
+                        // Never appended to `partial` — thinking content must
+                        // not affect the assistant text or tool-call logic.
+                        let _ = ui_tx.send(UiUpdate::AppendThinking(text)).await;
+                    }
+                    StreamEvent::Delta(delta) => {
+                        let accumulator =
+                            accumulators
+                                .entry(delta.tool_call_index)
+                                .or_insert_with(|| ToolCallAccumulator {
+                                    id: Uuid::new_v4(),
+                                    name: None,
+                                    arguments: String::new(),
+                                });
+                        if let Some(name) = delta.function_name {
+                            if accumulator.name.is_none() {
+                                accumulator.name = Some(name);
                             }
                         }
-                        if let Some(error) = error {
-                            let _ = ui_tx.send(UiUpdate::Error(error.clone())).await;
-                            let _ = agent_tx.send(AgentEvent::StreamError(error)).await;
-                        } else {
-                            let _ = agent_tx.send(AgentEvent::ToolCall { calls }).await;
+                        if let Some(fragment) = delta.arguments_fragment {
+                            accumulator.arguments.push_str(&fragment);
                         }
                     }
-                    break;
-                }
-                StreamEvent::Cancelled => {
-                    if accumulators.is_empty() {
-                        let _ = ui_tx.send(UiUpdate::StreamCancelled).await;
+                    StreamEvent::Done => {
+                        if accumulators.is_empty() {
+                            let _ = ui_tx.send(UiUpdate::StreamDone).await;
+                            let _ = agent_tx.send(AgentEvent::StreamDone { partial }).await;
+                        } else {
+                            let mut calls = Vec::new();
+                            let mut error: Option<String> = None;
+                            for (_, accumulator) in accumulators {
+                                match accumulator.into_tool_call_checked() {
+                                    Ok(call) => calls.push(call),
+                                    Err(raw) => {
+                                        error = Some(format!(
+                                            "stream ended with incomplete tool-call JSON: {raw}"
+                                        ));
+                                        break;
+                                    }
+                                }
+                            }
+                            if let Some(error) = error {
+                                let _ = ui_tx
+                                    .send(UiUpdate::Error {
+                                        message: error.clone(),
+                                        run_id: own_run_id,
+                                    })
+                                    .await;
+                                let _ = agent_tx.send(AgentEvent::StreamError(error)).await;
+                            } else {
+                                let _ = agent_tx.send(AgentEvent::ToolCall { calls }).await;
+                            }
+                        }
+                        break;
                     }
-                    let _ = agent_tx.send(AgentEvent::StreamCancelled { partial }).await;
-                    break;
-                }
-                StreamEvent::Error(error) => {
-                    let message = format!("{error}");
-                    let _ = ui_tx.send(UiUpdate::Error(message.clone())).await;
-                    let _ = agent_tx.send(AgentEvent::StreamError(message)).await;
-                    break;
+                    StreamEvent::Cancelled => {
+                        if accumulators.is_empty() {
+                            let _ = ui_tx.send(UiUpdate::StreamCancelled).await;
+                        }
+                        let _ = agent_tx.send(AgentEvent::StreamCancelled { partial }).await;
+                        break;
+                    }
+                    StreamEvent::Error(error) => {
+                        let message = format!("{error}");
+                        let _ = ui_tx
+                            .send(UiUpdate::Error {
+                                message: message.clone(),
+                                run_id: own_run_id,
+                            })
+                            .await;
+                        let _ = agent_tx.send(AgentEvent::StreamError(message)).await;
+                        break;
+                    }
                 }
             }
         }
-    });
+        .instrument(span),
+    );
     cancel
 }
 
@@ -1030,8 +2506,35 @@ fn inject_pending_steers(pending_steers: &mut VecDeque<String>, context: &mut Co
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     use crate::test_support::capture_logs;
+    use crate::{
+        agent::tools::{clarify::ClarifyTool, write::WriteTool},
+        engine::{Engine, EngineConfig, EngineImpl, DEFAULT_CONTEXT_LENGTH},
+        llm::{MockEvent, MockProvider},
+        sandbox::{Sandbox, SandboxContext},
+    };
+
+    fn test_engine() -> Arc<dyn Engine> {
+        Arc::new(EngineImpl::new(
+            Arc::new(MockProvider::new(vec![], Duration::from_millis(0))),
+            EngineConfig {
+                provider: "mock".to_string(),
+                model: "test-model".to_string(),
+                temperature: None,
+                context_length: DEFAULT_CONTEXT_LENGTH,
+                api_base_url: None,
+                api_key: None,
+            },
+        ))
+    }
+
+    fn test_sandbox() -> std::sync::Arc<std::sync::RwLock<Sandbox>> {
+        std::sync::Arc::new(std::sync::RwLock::new(Sandbox::with_root(PathBuf::from(
+            env!("CARGO_MANIFEST_DIR"),
+        ))))
+    }
 
     #[test]
     fn constructs_message_variants() {
@@ -1051,11 +2554,14 @@ mod tests {
             id: Uuid::new_v4(),
             name: "tool".into(),
             result: "ok".into(),
+            result_metadata: None,
+            result_metadata_schema: None,
         };
         let tool_error = Message::ToolError {
             id: Uuid::new_v4(),
             name: "tool".into(),
             error: "err".into(),
+            duration: std::time::Duration::ZERO,
         };
         assert!(matches!(system, Message::System { .. }));
         assert!(matches!(user, Message::User { .. }));
@@ -1169,14 +2675,16 @@ mod tests {
     fn push_tool_result_and_error_append_messages() {
         let mut context = Context::new();
         let id = Uuid::new_v4();
-        context.push_tool_result(id, "read".into(), "contents".into());
-        context.push_tool_error(id, "write".into(), "denied".into());
+        context.push_tool_result(id, "read".into(), "contents".into(), None, None);
+        context.push_tool_error(id, "write".into(), "denied".into(), None);
         assert_eq!(
             context.messages()[2],
             Message::ToolResult {
                 id,
                 name: "read".into(),
                 result: "contents".into(),
+                result_metadata: None,
+                result_metadata_schema: None,
             }
         );
         assert_eq!(
@@ -1185,7 +2693,73 @@ mod tests {
                 id,
                 name: "write".into(),
                 error: "denied".into(),
+                duration: std::time::Duration::ZERO,
             }
+        );
+    }
+
+    #[test]
+    fn child_finish_notice_is_appended_as_implicit_user_message_not_a_second_tool_result() {
+        // Regression test: `spawn_subagent`'s two-stage protocol (an
+        // immediate "running"/"queued" `ToolResult`, later finalized once
+        // the child actually finishes) must never leave two `role:"tool"`
+        // messages tied to the same `tool_call_id` in the wire history —
+        // that violates the one-call/one-response tool-calling protocol and
+        // visibly confuses models. The fix is to never touch the original
+        // `ToolResult` again; the child's real outcome is appended as a
+        // brand-new implicit `user` message instead (see
+        // `push_async_harness_notice` — not `role:"system"`, which some
+        // providers/models reject mid-conversation), even with an assistant
+        // message (the root's "running" reply) already in between.
+        let mut context = Context::new();
+        let id = Uuid::new_v4();
+        context.push_tool_result(
+            id,
+            "spawn_subagent".into(),
+            "{\"status\":\"spawned\"}".into(),
+            None,
+            None,
+        );
+        context.push_assistant(
+            "I have spawned the child, standing by.".into(),
+            AssistantStatus::Complete,
+        );
+        context.push_async_harness_notice(format!(
+            "The subagent spawned via `spawn_subagent` (tool_call_id={id}) has finished. \
+             Its final result:\n{{\"status\":\"success\",\"result\":\"done\"}}"
+        ));
+
+        let tool_result_count = context
+            .messages()
+            .iter()
+            .filter(|message| matches!(message, Message::ToolResult { id: message_id, .. } if *message_id == id))
+            .count();
+        assert_eq!(
+            tool_result_count,
+            1,
+            "the original provisional ToolResult must remain untouched, got: {:?}",
+            context.messages()
+        );
+        assert_eq!(
+            context.messages()[2],
+            Message::ToolResult {
+                id,
+                name: "spawn_subagent".into(),
+                result: "{\"status\":\"spawned\"}".into(),
+                result_metadata: None,
+                result_metadata_schema: None,
+            },
+            "the provisional result must never be rewritten"
+        );
+        assert!(
+            matches!(
+                context.messages().last(),
+                Some(Message::User { content, kind: UserMessageKind::ImplicitToolNote })
+                    if content.contains(HARNESS_NOTICE_MARKER) && content.contains("has finished")
+            ),
+            "the child's real outcome must be appended as a trailing implicit user message \
+             carrying the harness-notice marker, got: {:?}",
+            context.messages()
         );
     }
 
@@ -1227,6 +2801,10 @@ mod tests {
             AgentCommand::DenyTool { id, reason: "r".into() },
             AgentCommand::DenyTool { id: got, .. } if got == id
         ));
+        assert!(matches!(
+            AgentCommand::AnswerClarify("answer".into()),
+            AgentCommand::AnswerClarify(answer) if answer == "answer"
+        ));
 
         assert!(matches!(
             AgentEvent::StreamDone { partial: "done".into() },
@@ -1244,19 +2822,47 @@ mod tests {
         assert!(
             matches!(UiUpdate::AppendText("tok".into()), UiUpdate::AppendText(text) if text == "tok")
         );
+        assert!(matches!(
+            UiUpdate::AppendThinking("hmm".into()),
+            UiUpdate::AppendThinking(text) if text == "hmm"
+        ));
         assert!(matches!(UiUpdate::StreamStarted, UiUpdate::StreamStarted));
         assert!(matches!(UiUpdate::StreamDone, UiUpdate::StreamDone));
         assert!(matches!(
             UiUpdate::StreamCancelled,
             UiUpdate::StreamCancelled
         ));
-        assert!(
-            matches!(UiUpdate::Error("oops".into()), UiUpdate::Error(message) if message == "oops")
-        );
+        assert!(matches!(
+            UiUpdate::ClarifyPending {
+                id,
+                question: "question".into(),
+                context: None,
+                choices: None,
+                run_id: None,
+            },
+            UiUpdate::ClarifyPending {
+                id: got,
+                question: got_question,
+                context: _,
+                choices: None,
+                run_id: _,
+            } if got == id && got_question == "question"
+        ));
+        assert!(matches!(
+            UiUpdate::Error {
+                message: "oops".into(),
+                run_id: None,
+            },
+            UiUpdate::Error { message, run_id: None } if message == "oops"
+        ));
 
         assert!(
             matches!(StreamEvent::Text("tok".into()), StreamEvent::Text(text) if text == "tok")
         );
+        assert!(matches!(
+            StreamEvent::Thinking("hmm".into()),
+            StreamEvent::Thinking(text) if text == "hmm"
+        ));
         assert!(matches!(StreamEvent::Done, StreamEvent::Done));
         assert!(matches!(StreamEvent::Cancelled, StreamEvent::Cancelled));
         assert!(matches!(
@@ -1276,6 +2882,7 @@ mod tests {
         assert_eq!(AgentMode::Idle, AgentMode::Idle);
         assert_eq!(AgentMode::Streaming, AgentMode::Streaming);
         assert_eq!(AgentMode::ToolPending, AgentMode::ToolPending);
+        assert_eq!(AgentMode::ClarifyPending, AgentMode::ClarifyPending);
     }
 
     #[test]
@@ -1343,7 +2950,10 @@ mod tests {
         let log = capture_logs(async {
             let id = Uuid::new_v4();
             let (agent_tx, mut agent_rx) = mpsc::channel(8);
-            let registry = tools::default_registry();
+            let registry = tools::default_registry(
+                std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new())),
+                tools::ToolRegistryConfig::default(),
+            );
             let pending = PendingTool {
                 call: registry
                     .create_call(
@@ -1351,7 +2961,13 @@ mod tests {
                         id,
                         serde_json::json!({
                             "path": write_path.display().to_string(),
-                            "content": "abc",
+                            // Deliberately not lowercase-hex-only: a `Uuid::new_v4()`
+                            // (used below as `tool_call_id`) is rendered into the log
+                            // and consists solely of lowercase hex digits and hyphens,
+                            // so a hex-only content literal (e.g. "abc") can rarely but
+                            // genuinely collide with a random id substring and false-
+                            // positive the "must not log content" assertion below.
+                            "content": "XYZ",
                         }),
                     )
                     .expect("write tool registered"),
@@ -1381,10 +2997,667 @@ mod tests {
             "the write tool's log event must be inside the tool span: {contents}"
         );
         assert!(
-            !contents.contains("abc"),
+            !contents.contains("XYZ"),
             "the write tool must not log the written content: {contents}"
         );
         let written = std::fs::read_to_string(&write_path).expect("read written file");
-        assert_eq!(written, "abc");
+        assert_eq!(written, "XYZ");
+    }
+
+    #[tokio::test]
+    async fn advance_tool_queue_emits_clarify_pending_for_clarify_tool() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(ClarifyTool));
+        let registry = Arc::new(registry);
+        let call_id = Uuid::new_v4();
+        let mut pending_tools = VecDeque::from([PendingTool {
+            call: registry
+                .create_call(
+                    "clarify",
+                    call_id,
+                    serde_json::json!({
+                        "question": "Pick one",
+                        "choices": ["a", "b"],
+                    }),
+                )
+                .expect("clarify tool registered"),
+        }]);
+        let (ui_tx, mut ui_rx) = mpsc::channel(4);
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+        let mut context = Context::new();
+        let mut mode = AgentMode::ToolPending;
+        let mut current_cancel = None;
+        let mut current_tool_cancel = None;
+        let mut iterations = 1usize;
+        let mut clarify_started_at = None;
+        let mut pending_steers = VecDeque::new();
+
+        advance_tool_queue(
+            &mut pending_tools,
+            &mut context,
+            &mut mode,
+            &mut current_cancel,
+            &mut current_tool_cancel,
+            &mut iterations,
+            false,
+            test_engine(),
+            registry,
+            ui_tx,
+            agent_tx,
+            &mut clarify_started_at,
+            &mut pending_steers,
+            &mut None,
+            &mut HashMap::new(),
+            None,
+            &mut false,
+            &mut None,
+        )
+        .await;
+
+        assert_eq!(mode, AgentMode::ClarifyPending);
+        assert!(matches!(
+            ui_rx.recv().await,
+            Some(UiUpdate::ClarifyPending {
+                id,
+                question,
+                context: _,
+                choices: Some(choices),
+                run_id: _,
+            }) if id == call_id && question == "Pick one" && choices == vec!["a".to_string(), "b".to_string()]
+        ));
+    }
+
+    #[tokio::test]
+    async fn advance_tool_queue_emits_tool_pending_for_non_clarify_tool() {
+        let sandbox = test_sandbox();
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(WriteTool::new(SandboxContext::new(sandbox))));
+        let registry = Arc::new(registry);
+        let call_id = Uuid::new_v4();
+        let mut pending_tools = VecDeque::from([PendingTool {
+            call: registry
+                .create_call(
+                    "write",
+                    call_id,
+                    serde_json::json!({
+                        "path": "Cargo.toml",
+                        "content": "ignored",
+                    }),
+                )
+                .expect("write tool registered"),
+        }]);
+        let (ui_tx, mut ui_rx) = mpsc::channel(4);
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+        let mut context = Context::new();
+        let mut mode = AgentMode::ToolPending;
+        let mut current_cancel = None;
+        let mut current_tool_cancel = None;
+        let mut iterations = 1usize;
+        let mut clarify_started_at = None;
+        let mut pending_steers = VecDeque::new();
+
+        advance_tool_queue(
+            &mut pending_tools,
+            &mut context,
+            &mut mode,
+            &mut current_cancel,
+            &mut current_tool_cancel,
+            &mut iterations,
+            false,
+            test_engine(),
+            registry,
+            ui_tx,
+            agent_tx,
+            &mut clarify_started_at,
+            &mut pending_steers,
+            &mut None,
+            &mut HashMap::new(),
+            None,
+            &mut false,
+            &mut None,
+        )
+        .await;
+
+        assert_eq!(mode, AgentMode::ToolPending);
+        assert!(matches!(
+            ui_rx.recv().await,
+            Some(UiUpdate::ToolPending { id, name, .. }) if id == call_id && name == "write"
+        ));
+    }
+
+    #[tokio::test]
+    async fn advance_tool_queue_injects_pending_steers_before_starting_next_request() {
+        // Regression test: queued steers (pending user messages typed while
+        // tools were running) must reach the model on the very next request
+        // once all tool results for this round are in context, rather than
+        // waiting for a full tool-free turn to complete via StreamDone.
+        let registry = Arc::new(ToolRegistry::new());
+        let mut pending_tools: VecDeque<PendingTool> = VecDeque::new();
+        let (ui_tx, mut ui_rx) = mpsc::channel(4);
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+        let mut context = Context::new();
+        context.push_tool_result(
+            Uuid::new_v4(),
+            "write".to_string(),
+            "ok".to_string(),
+            None,
+            None,
+        );
+        let mut mode = AgentMode::ToolPending;
+        let mut current_cancel = None;
+        let mut current_tool_cancel = None;
+        let mut iterations = 1usize;
+        let mut clarify_started_at = None;
+        let mut pending_steers = VecDeque::from(["steered while tool ran".to_string()]);
+
+        advance_tool_queue(
+            &mut pending_tools,
+            &mut context,
+            &mut mode,
+            &mut current_cancel,
+            &mut current_tool_cancel,
+            &mut iterations,
+            true,
+            test_engine(),
+            registry,
+            ui_tx,
+            agent_tx,
+            &mut clarify_started_at,
+            &mut pending_steers,
+            &mut None,
+            &mut HashMap::new(),
+            None,
+            &mut false,
+            &mut None,
+        )
+        .await;
+
+        assert_eq!(mode, AgentMode::Streaming);
+        assert!(pending_steers.is_empty(), "steer must be drained");
+        assert_eq!(
+            context.messages().last(),
+            Some(&Message::User {
+                content: "steered while tool ran".to_string(),
+                kind: UserMessageKind::Explicit,
+            })
+        );
+        assert!(matches!(
+            ui_rx.recv().await,
+            Some(UiUpdate::SteerApplied { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn root_reprompts_after_child_finish_arrives_mid_stream() {
+        // Regression test: a `spawn_subagent` child's `FinishResult` landing
+        // while the root is mid-`Streaming` (not `Idle`) must force a
+        // re-prompt once the root's current tool-free stream completes,
+        // instead of silently going `Idle` and stranding the child's result
+        // in `context` unseen by the model. Without the
+        // `pending_child_finish_reprompt` flag this reproduces the bug where
+        // the root's last streamed text claims it's "waiting for subagents"
+        // and the conversation ends right there.
+        use crate::agent::tools::{default_registry, ToolRegistryConfig};
+        use crate::child_agent_manager::{ChildAgentManager, FinishResult};
+
+        // Two text tokens with a real gap between them so there is a window
+        // to inject the `FinishResult` while `mode == Streaming`, i.e. before
+        // this turn's `StreamDone`.
+        let script = vec![
+            MockEvent::Text("Pending: waiting for subagents".to_string()),
+            MockEvent::Text(" ...".to_string()),
+        ];
+        let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+            Arc::new(MockProvider::with_script(script, Duration::from_millis(80))),
+            EngineConfig {
+                provider: "mock".to_string(),
+                model: "test-model".to_string(),
+                temperature: None,
+                context_length: DEFAULT_CONTEXT_LENGTH,
+                api_base_url: None,
+                api_key: None,
+            },
+        ));
+
+        let registry = Arc::new(default_registry(
+            test_sandbox(),
+            ToolRegistryConfig::default(),
+        ));
+
+        let (subagent_ui_tx, _subagent_ui_rx) = mpsc::channel(8);
+        let manager = ChildAgentManager::new(
+            subagent_ui_tx,
+            Box::new(
+                |_request, _cancel, _ui_tx| crate::child_agent_manager::SpawnOutcome {
+                    command_sender: None,
+                    handle: tokio::spawn(async {}),
+                },
+            ),
+        );
+        let (finish_tx, finish_rx) = mpsc::channel(1);
+        let (parent_subagent_ui_tx, parent_subagent_ui_rx) = mpsc::channel(8);
+        let _ = parent_subagent_ui_tx; // kept alive only to avoid closing the channel early
+
+        let (mut agent_loop, mut ui_rx) = AgentLoop::new(engine, registry);
+        agent_loop = agent_loop.with_child_agent_manager(manager, finish_rx, parent_subagent_ui_rx);
+
+        let handle = agent_loop.run();
+        agent_loop
+            .send_command(AgentCommand::Prompt("do the task".into()))
+            .await;
+
+        // Let the first stream start (mode -> Streaming) before injecting.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        finish_tx
+            .send(FinishResult {
+                run_id: Uuid::new_v4(),
+                call_id: Uuid::new_v4(),
+                status: "success".to_string(),
+                result: Some("child done".to_string()),
+                error: None,
+                sources: vec![],
+            })
+            .await
+            .expect("finish_rx must still be open");
+
+        // Give the loop time to finish the first stream, observe the
+        // deferred finish while not idle, and (if fixed) start a second,
+        // tool-free re-prompt.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Dropping the loop closes `cmd_tx`, which is how `run()` returns the
+        // final committed history (see `cli_driver.rs`'s identical pattern).
+        drop(agent_loop);
+
+        let context = tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("run() should return promptly after being dropped")
+            .expect("run() task should not panic")
+            .expect("run() should not return an error");
+
+        let assistant_turns = context
+            .messages()
+            .iter()
+            .filter(|message| matches!(message, Message::Assistant { .. }))
+            .count();
+        assert!(
+            assistant_turns >= 2,
+            "root must be re-prompted after the child's result arrives mid-stream \
+             instead of going idle after a single turn; got {assistant_turns} assistant turn(s)"
+        );
+        assert!(
+            context.messages().iter().any(
+                |message| matches!(message, Message::User { content, kind: UserMessageKind::ImplicitToolNote } if content.contains("has finished"))
+            ),
+            "the child's finish result must be recorded in context as an implicit user message"
+        );
+
+        // Drain the ui updates; just ensure the channel didn't panic/drop.
+        while ui_rx.try_recv().is_ok() {}
+    }
+
+    #[tokio::test]
+    async fn child_role_run_returns_immediately_after_finish_tool_is_called() {
+        // Regression/integration test for Phase 6.9: a `Role::Child` agent
+        // whose model calls `agent_finish` must have its context carry the tool
+        // result, must send the `FinishResult` through `finish_tx`, and must
+        // return from `run()` without waiting for a tool-free `StreamDone`.
+        use crate::agent::tools::{
+            agent_finish::AgentFinishToolConfig, default_registry, ToolRegistryConfig,
+        };
+
+        let script = vec![MockEvent::Delta(DeltaChunk {
+            tool_call_index: 0,
+            tool_call_id: Some("call_1".into()),
+            function_name: Some(tools::agent_finish::AgentFinishTool::NAME.to_string()),
+            arguments_fragment: Some("{\"status\":\"success\",\"result\":\"done\"}".to_string()),
+        })];
+        let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+            Arc::new(MockProvider::with_script(script, Duration::from_millis(0))),
+            EngineConfig {
+                provider: "mock".to_string(),
+                model: "test-model".to_string(),
+                temperature: None,
+                context_length: DEFAULT_CONTEXT_LENGTH,
+                api_base_url: None,
+                api_key: None,
+            },
+        ));
+
+        let (finish_tx, mut finish_rx) = mpsc::channel(1);
+        let (subagent_ui_tx, _subagent_ui_rx) = mpsc::channel(8);
+        let run_id = Uuid::new_v4();
+        let call_id = Uuid::new_v4();
+
+        let registry = Arc::new(default_registry(
+            test_sandbox(),
+            ToolRegistryConfig {
+                allowed_tools: vec![],
+                agent_finish: Some(AgentFinishToolConfig {
+                    finish_tx: finish_tx.clone(),
+                    run_id,
+                    call_id,
+                }),
+                ..Default::default()
+            },
+        ));
+
+        let (mut agent_loop, mut ui_rx) = AgentLoop::new(engine, registry);
+        agent_loop = agent_loop.with_child_role(ChildRoleConfig {
+            run_id,
+            call_id,
+            briefing: Some("do the task".to_string()),
+            parent_cancel: CancellationToken::new(),
+            subagent_ui_tx,
+            finish_tx,
+        });
+
+        let handle = agent_loop.run();
+        agent_loop
+            .send_command(AgentCommand::Prompt("child task".into()))
+            .await;
+
+        let context = tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("child run() should return promptly after finish")
+            .expect("run() task should not panic")
+            .expect("run() should not return an error");
+
+        assert!(
+            context.messages().iter().any(
+                |message| matches!(message, Message::ToolResult { name, .. } if name == tools::agent_finish::AgentFinishTool::NAME)
+            ),
+            "context should carry the finish tool's result"
+        );
+        assert!(
+            context.messages().iter().any(|message| matches!(
+                message,
+                Message::System { content } if content.contains("tool-use") && content.contains(&MAX_TOOL_USE_ITERATIONS.to_string())
+            )),
+            "a child must receive a heads-up system message stating its \
+             tool-use iteration budget, so it can wrap up before hitting it"
+        );
+
+        let finish_result = tokio::time::timeout(Duration::from_secs(1), finish_rx.recv())
+            .await
+            .expect("finish_rx should receive promptly")
+            .expect("finish_tx should not be dropped without sending");
+        assert_eq!(finish_result.run_id, run_id);
+        assert_eq!(finish_result.call_id, call_id);
+        assert_eq!(finish_result.status, "success");
+        assert_eq!(finish_result.result.as_deref(), Some("done"));
+
+        // Drain the ui updates emitted along the way; we only assert that a
+        // ToolDone for "agent_finish" was sent among them.
+        let mut saw_finish_tool_done = false;
+        while let Ok(Some(update)) =
+            tokio::time::timeout(Duration::from_millis(50), ui_rx.recv()).await
+        {
+            if matches!(update, UiUpdate::ToolDone { ref name, .. } if name == tools::agent_finish::AgentFinishTool::NAME)
+            {
+                saw_finish_tool_done = true;
+            }
+        }
+        assert!(
+            saw_finish_tool_done,
+            "expected a ToolDone update for finish"
+        );
+    }
+
+    #[tokio::test]
+    async fn root_role_does_not_receive_the_child_iteration_budget_heads_up() {
+        // The heads-up message is only meaningful for a `Role::Child` loop
+        // (only it can be silently cut off with no one to explain things to);
+        // a root loop's `Interrupted` assistant bubble already tells a human
+        // what happened, so it must not get this extra system message too.
+        let registry = Arc::new(tools::default_registry(
+            test_sandbox(),
+            tools::ToolRegistryConfig::default(),
+        ));
+        let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+            Arc::new(MockProvider::new(
+                vec!["answer".to_string()],
+                Duration::from_millis(0),
+            )),
+            EngineConfig {
+                provider: "mock".to_string(),
+                model: "test-model".to_string(),
+                temperature: None,
+                context_length: DEFAULT_CONTEXT_LENGTH,
+                api_base_url: None,
+                api_key: None,
+            },
+        ));
+
+        let (mut agent_loop, _ui_rx) = AgentLoop::new(engine, registry);
+        let handle = agent_loop.run();
+        agent_loop
+            .send_command(AgentCommand::Prompt("hi".into()))
+            .await;
+        drop(agent_loop);
+
+        let context = tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("root run() should return promptly after being dropped")
+            .expect("run() task should not panic")
+            .expect("run() should not return an error");
+
+        assert!(
+            !context
+                .messages()
+                .iter()
+                .any(|message| matches!(message, Message::System { content } if content.contains("tool-use"))),
+            "a root loop must not receive the child-only iteration-budget heads-up"
+        );
+    }
+
+    #[tokio::test]
+    async fn child_role_iteration_cap_exceeded_returns_err_not_unstructured_ok() {
+        // Regression test: a `Role::Child` loop whose model keeps calling
+        // tools without ever calling `agent_finish` must, once the iteration
+        // cap trips, report a clear `Err` (→ `drive_child_to_completion`'s
+        // `Ok(Err(error))` arm, `status: "failure"`) rather than the
+        // "unstructured" `Ok(context)` fallback that would otherwise mistake
+        // the guard's boilerplate message for a genuine final answer.
+        // The mock replays this single scripted tool call on every fresh
+        // request, so the child keeps calling "read" (auto-approved inside
+        // the sandbox root, so no approval round-trip is needed) forever
+        // without ever calling `agent_finish`, tripping the iteration guard.
+        let script = vec![MockEvent::Delta(DeltaChunk {
+            tool_call_index: 0,
+            tool_call_id: Some("call_1".into()),
+            function_name: Some("read".to_string()),
+            arguments_fragment: Some(
+                serde_json::json!({
+                    "path": "Cargo.toml",
+                })
+                .to_string(),
+            ),
+        })];
+        let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+            Arc::new(MockProvider::with_script(script, Duration::from_millis(0))),
+            EngineConfig {
+                provider: "mock".to_string(),
+                model: "test-model".to_string(),
+                temperature: None,
+                context_length: DEFAULT_CONTEXT_LENGTH,
+                api_base_url: None,
+                api_key: None,
+            },
+        ));
+
+        let registry = Arc::new(tools::default_registry(
+            test_sandbox(),
+            tools::ToolRegistryConfig::default(),
+        ));
+
+        let (finish_tx, _finish_rx) = mpsc::channel(1);
+        let (subagent_ui_tx, mut subagent_ui_rx) = mpsc::channel(16);
+        let run_id = Uuid::new_v4();
+        let call_id = Uuid::new_v4();
+
+        let (mut agent_loop, mut ui_rx) = AgentLoop::new(engine, registry);
+        agent_loop = agent_loop.with_child_role(ChildRoleConfig {
+            run_id,
+            call_id,
+            briefing: Some("do the task".to_string()),
+            parent_cancel: CancellationToken::new(),
+            subagent_ui_tx,
+            finish_tx,
+        });
+
+        let handle = agent_loop.run();
+        agent_loop
+            .send_command(AgentCommand::Prompt("child task".into()))
+            .await;
+
+        let result = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("child run() should return promptly once the iteration cap trips")
+            .expect("run() task should not panic");
+
+        let error = result.expect_err(
+            "a child hitting the iteration cap must return Err, not Ok(context) \
+             (which would be mistaken for an 'unstructured' final answer)",
+        );
+        assert!(
+            error.to_string().contains("iterations"),
+            "error should explain the iteration cap was hit; got: {error}"
+        );
+
+        // No boilerplate assistant bubble should have been pushed to the
+        // child's own context (that message is reserved for a human reading
+        // the root's transcript directly).
+        while let Ok(update) = ui_rx.try_recv() {
+            if let UiUpdate::Error {
+                message,
+                run_id: got_run_id,
+            } = update
+            {
+                assert_eq!(got_run_id, Some(run_id));
+                assert!(message.contains("iterations"));
+            }
+        }
+        // Drain the subagent ui channel too; just ensure nothing panics.
+        while subagent_ui_rx.try_recv().is_ok() {}
+    }
+
+    #[tokio::test]
+    async fn resolve_spawn_subagent_pushes_spawned_status_and_starts_child() {
+        use crate::agent::tools::spawn_subagent::SpawnSubagentTool;
+        use crate::agent::tools::Tool;
+        use crate::child_agent_manager::ChildAgentManager;
+        use std::sync::Mutex;
+
+        let call_id = Uuid::new_v4();
+        let tool = SpawnSubagentTool::new(true);
+        let call = tool.create_call(
+            call_id,
+            serde_json::json!({ "task": "do the thing", "briefing": "context" }),
+        );
+        let pending = PendingTool { call };
+
+        let started: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let started_clone = started.clone();
+        let (subagent_ui_tx, mut subagent_ui_rx) = mpsc::channel(8);
+        let manager = ChildAgentManager::new(
+            subagent_ui_tx,
+            Box::new(move |request, _cancel, _ui_tx| {
+                started_clone.lock().unwrap().push(request.task.clone());
+                crate::child_agent_manager::SpawnOutcome {
+                    command_sender: None,
+                    handle: tokio::spawn(async {}),
+                }
+            }),
+        );
+        let mut child_agent_manager = Some(manager);
+
+        let (ui_tx, mut ui_rx) = mpsc::channel(8);
+        let mut context = Context::new();
+        let mut spawn_content_sections: HashMap<Uuid, Vec<crate::agent::tools::Section>> =
+            HashMap::new();
+
+        resolve_spawn_subagent(
+            pending,
+            &mut child_agent_manager,
+            &mut context,
+            &ui_tx,
+            &mut spawn_content_sections,
+        )
+        .await;
+
+        assert_eq!(
+            started.lock().unwrap().as_slice(),
+            &["do the thing".to_string()],
+            "the stub spawn_fn should have been invoked with the task"
+        );
+        assert!(
+            child_agent_manager.as_ref().unwrap().is_running(),
+            "manager should report a running child"
+        );
+
+        let tool_result = context
+            .messages()
+            .iter()
+            .find_map(|message| match message {
+                Message::ToolResult {
+                    id, name, result, ..
+                } if *id == call_id && name == "spawn_subagent" => Some(result.clone()),
+                _ => None,
+            })
+            .expect("spawn_subagent tool result should be pushed into context");
+        let parsed: serde_json::Value = serde_json::from_str(&tool_result).unwrap();
+        assert_eq!(parsed["status"], "running");
+
+        // Only `ToolStart` comes back on the caller's own `ui_tx` — resolving
+        // the spawn is not the call finishing, so no `ToolDone` is sent here.
+        assert!(matches!(
+            ui_rx.recv().await,
+            Some(UiUpdate::ToolStart { name, .. }) if name == "spawn_subagent"
+        ));
+
+        // `ChildAgentManager::start` first reports `ChildAgentStarted` (the
+        // child-lifecycle boundary for the drill-in view), then the
+        // "running" status as a `ToolProgress` on the manager's own
+        // `subagent_ui_tx` (forwarded to the parent's `ui_tx` in production
+        // by `AgentLoop::run`'s `recv_subagent_ui` arm — bypassed here since
+        // this test calls `resolve_spawn_subagent` directly).
+        assert!(matches!(
+            subagent_ui_rx.recv().await,
+            Some(UiUpdate::ChildAgentStarted { agent_type, task, .. })
+                if agent_type == "default" && task == "do the thing"
+        ));
+        match subagent_ui_rx.recv().await {
+            Some(UiUpdate::ToolProgress {
+                id,
+                title_arguments,
+            }) => {
+                assert_eq!(id, call_id);
+                let status = title_arguments
+                    .iter()
+                    .find(|(key, _)| key == "status")
+                    .map(|(_, value)| value.clone());
+                assert_eq!(status, Some(serde_json::json!("running")));
+            }
+            other => panic!("expected a ToolProgress update, got: {other:?}"),
+        }
+
+        // The task/briefing content sections shown while pending approval
+        // must be stashed so the eventual real `ToolDone` (sent once the
+        // child actually finishes) can still show them alongside the result.
+        let stashed = spawn_content_sections
+            .get(&call_id)
+            .expect("task/briefing sections should be stashed for this call id");
+        let labels: Vec<Option<String>> = stashed
+            .iter()
+            .map(|section| match section {
+                crate::agent::tools::Section::Content(content) => content.label.clone(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            vec![Some("Task".to_string()), Some("Briefing".to_string())]
+        );
     }
 }

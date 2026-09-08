@@ -1,0 +1,41 @@
+#!/bin/zsh
+YLVA=${CARGO_TARGET_DIR:-./target}/debug/ylva
+ROOT_DIR=$(git rev-parse --show-toplevel)
+LOG_DIR=${ROOT_DIR}/logs
+LOG_FORMAT=text
+PREFIX=$(basename $0 .zsh)
+
+cd ${ROOT_DIR}
+
+make build-debug
+
+test -d "${LOG_DIR}" || mkdir -p "${LOG_DIR}"
+echo "**" > "${LOG_DIR}/.gitignore"
+
+function ylva() {
+    PREFIX_TIMESTAMPED="${LOG_DIR}/${PREFIX}_$(date +%Y%m%d%H%M%S)"
+    LOG_PATH="${PREFIX_TIMESTAMPED}.log"
+    OUT_PATH="${PREFIX_TIMESTAMPED}.txt"
+    export YLVA_REQUEST_DUMP_PATH=${PREFIX_TIMESTAMPED}.json
+    ${YLVA} --no-tui \
+            --log-file ${LOG_PATH} \
+            --log-level TRACE --log-format ${LOG_FORMAT} \
+            | tee ${OUT_PATH}
+}
+
+echo "----------------------------------------------------------"
+ylva << '__EOT__'
+Run `python3` to find out which version it is and where the python interpreter
+is located.
+__EOT__
+
+echo "----------------------------------------------------------"
+ylva << '__EOT__'
+Run the following command exactly like given (as-is, don't re-write/collapse linebreaks ) in bash:
+```shell
+for n in seq 1 5 ; do
+  echo "$(date) lorem ipsum"
+  sleep 3
+done
+```
+__EOT__

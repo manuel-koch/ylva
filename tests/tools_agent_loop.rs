@@ -25,8 +25,9 @@ use tempfile::TempDir;
 use tokio::sync::mpsc;
 
 use ylva::{
-    default_registry, AgentCommand, AgentLoop, DeltaChunk, EngineImpl, Message, MockEvent,
-    MockProvider, Tool, ToolCall, ToolCallResult, ToolError, ToolRegistry, UiUpdate,
+    default_registry, AgentCommand, AgentLoop, ApprovalCheck, AssistantStatus, DeltaChunk,
+    EngineImpl, Message, MockEvent, MockProvider, Sandbox, Tool, ToolCall, ToolCallResult,
+    ToolError, ToolRegistry, ToolRegistryConfig, UiUpdate, UserMessageKind,
     MAX_TOOL_USE_ITERATIONS,
 };
 
@@ -82,15 +83,24 @@ where
     let mut collected = Vec::new();
     loop {
         if let Ok(update) = ui_rx.try_recv() {
-            if let UiUpdate::ToolPending { id, name, .. } = &update {
-                let needs_approval = registry.get(name).is_some_and(|tool| tool.needs_approval());
-                let command = if needs_approval {
+            if let UiUpdate::ToolPending {
+                id,
+                name,
+                arguments,
+                ..
+            } = &update
+            {
+                let approval_check = registry
+                    .get(name)
+                    .map(|tool| tool.needs_approval(arguments))
+                    .unwrap_or(ApprovalCheck::UserApprovalRequired);
+                let command = if matches!(approval_check, ApprovalCheck::AutoApproved) {
+                    AgentCommand::ApproveTool { id: *id }
+                } else {
                     AgentCommand::DenyTool {
                         id: *id,
                         reason: "denied in test".into(),
                     }
-                } else {
-                    AgentCommand::ApproveTool { id: *id }
                 };
                 agent.send_command(command).await;
             }
@@ -124,14 +134,28 @@ fn scratch_file(dir: &TempDir, name: &str, content: &str) -> String {
     path.display().to_string()
 }
 
+fn make_sandbox() -> std::sync::Arc<std::sync::RwLock<Sandbox>> {
+    std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new()))
+}
+
 #[tokio::test(start_paused = true)]
 async fn tool_call_pauses_for_approval_then_reprompts_after_result() {
+    // Phase 6.0: reads are auto-approved for in-workspace files and auto-denied for
+    // files outside the workspace. Writes always require explicit user approval
+    // (UserApprovalRequired). This test uses `write` to exercise the ToolPending flow.
     let dir = TempDir::new().expect("tempdir");
-    let file = scratch_file(&dir, "a.txt", "hello tool");
-    let registry = Arc::new(default_registry());
+    let output_path = dir.path().join("out.txt").to_string_lossy().to_string();
+    let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox {
+        workspace_root: dir.path().to_path_buf(),
+    }));
+    let registry = Arc::new(default_registry(sandbox, ToolRegistryConfig::default()));
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(
-        vec![call("read", 0, serde_json::json!({ "path": file }))],
+        vec![call(
+            "write",
+            0,
+            serde_json::json!({ "path": output_path, "content": "hello tool" }),
+        )],
         interval,
     );
     let (mut agent, mut ui_rx) = AgentLoop::new(
@@ -143,15 +167,15 @@ async fn tool_call_pauses_for_approval_then_reprompts_after_result() {
     );
 
     agent
-        .send_command(AgentCommand::Prompt("read it".into()))
+        .send_command(AgentCommand::Prompt("write it".into()))
         .await;
     let handle = agent.run();
     let _ = collect_until_advancing(&mut ui_rx, interval, is_stream_started).await;
 
-    // The deltas + Done assemble into a tool call; the loop pauses at
-    // ToolPending and must NOT re-prompt without approval.
+    // The write tool requires user approval (UserApprovalRequired); the loop pauses
+    // at ToolPending and must NOT re-prompt without approval.
     let pending = collect_until_advancing(&mut ui_rx, interval, is_tool_pending).await;
-    assert!(matches!(pending.last(), Some(UiUpdate::ToolPending { name, .. }) if name == "read"));
+    assert!(matches!(pending.last(), Some(UiUpdate::ToolPending { name, .. }) if name == "write"));
     assert_quiescent(&mut ui_rx, interval).await;
 
     // Approve, then a fresh re-prompt stream follows a ToolStart + ToolDone.
@@ -163,18 +187,18 @@ async fn tool_call_pauses_for_approval_then_reprompts_after_result() {
     let after = collect_until_advancing(&mut ui_rx, interval, is_stream_started).await;
     assert!(matches!(
         after.first(),
-        Some(UiUpdate::ToolStart { name, .. }) if name == "read"
+        Some(UiUpdate::ToolStart { name, .. }) if name == "write"
     ));
     assert!(matches!(
         after.iter().find(|u| matches!(u, UiUpdate::ToolDone { .. })),
-        Some(UiUpdate::ToolDone { result, .. }) if result.contains("hello tool")
+        Some(UiUpdate::ToolDone { result_section, .. }) if result_section.content.contains("wrote")
     ));
 
     drop(agent);
     let context = handle.await.expect("loop ok").expect("context");
     assert!(matches!(
         context.messages().iter().find(|m| matches!(m, Message::ToolResult { .. })),
-        Some(Message::ToolResult { name, result, .. }) if name == "read" && result.contains("hello tool")
+        Some(Message::ToolResult { name, result, .. }) if name == "write" && result.contains("wrote")
     ));
 }
 
@@ -183,7 +207,12 @@ async fn two_tool_calls_drain_serially_with_single_reprompt() {
     let dir = TempDir::new().expect("tempdir");
     let a = scratch_file(&dir, "a.txt", "AAAA");
     let b = scratch_file(&dir, "b.txt", "BBBB");
-    let registry = Arc::new(default_registry());
+    // Phase 6.0: reads inside the workspace are auto-approved. Use the tmpdir as
+    // the workspace root so both scratch files are within the sandbox.
+    let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox {
+        workspace_root: dir.path().to_path_buf(),
+    }));
+    let registry = Arc::new(default_registry(sandbox, ToolRegistryConfig::default()));
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(
         vec![
@@ -237,8 +266,10 @@ async fn two_tool_calls_drain_serially_with_single_reprompt() {
 
     drop(agent);
     let context = handle.await.expect("loop ok").expect("context");
-    let mut results: Vec<&str> = context
-        .messages()
+    let messages = context.messages();
+
+    // Tool results carry only the raw text now.
+    let mut results: Vec<&str> = messages
         .iter()
         .filter_map(|m| match m {
             Message::ToolResult { result, .. } => Some(result.as_str()),
@@ -246,18 +277,40 @@ async fn two_tool_calls_drain_serially_with_single_reprompt() {
         })
         .collect();
     results.sort();
-    assert_eq!(results, ["AAAA", "BBBB"]);
+    assert_eq!(results, vec!["AAAA", "BBBB"]);
+
+    // Metadata is now embedded in the ToolResult envelope, not separate messages.
+    let results: Vec<&Message> = messages
+        .iter()
+        .filter(|m| matches!(m, Message::ToolResult { .. }))
+        .collect();
+    assert_eq!(results.len(), 2);
+    for message in results {
+        if let Message::ToolResult {
+            result_metadata, ..
+        } = message
+        {
+            let metadata = result_metadata
+                .as_ref()
+                .expect("read result must have metadata");
+            assert_eq!(metadata["read_bytes"], 4);
+            assert_eq!(metadata["read_lines"], 1);
+        }
+    }
 }
 
 #[tokio::test(start_paused = true)]
 async fn failing_tool_emits_tool_error_and_still_reprompts() {
-    let registry = Arc::new(default_registry());
+    let registry = Arc::new(default_registry(
+        make_sandbox(),
+        ToolRegistryConfig::default(),
+    ));
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(
         vec![call(
             "read",
             0,
-            serde_json::json!({ "path": "/nonexistent/never.txt" }),
+            serde_json::json!({ "path": "nonexistent_file_that_does_not_exist.txt" }),
         )],
         interval,
     );
@@ -307,7 +360,10 @@ async fn failing_tool_emits_tool_error_and_still_reprompts() {
 async fn denied_write_is_fed_back_and_triggers_a_new_request() {
     let dir = TempDir::new().expect("tempdir");
     let file = scratch_file(&dir, "a.txt", "content");
-    let registry = Arc::new(default_registry());
+    let registry = Arc::new(default_registry(
+        make_sandbox(),
+        ToolRegistryConfig::default(),
+    ));
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(
         vec![
@@ -367,14 +423,20 @@ async fn denied_write_is_fed_back_and_triggers_a_new_request() {
 #[tokio::test(start_paused = true)]
 async fn stop_while_awaiting_approval_clears_pending_tools() {
     let dir = TempDir::new().expect("tempdir");
-    let a = scratch_file(&dir, "a.txt", "A");
-    let b = scratch_file(&dir, "b.txt", "B");
-    let registry = Arc::new(default_registry());
+    let a = dir.path().join("a.txt").to_string_lossy().to_string();
+    let b = dir.path().join("b.txt").to_string_lossy().to_string();
+    // Phase 6.0: writes always require user approval (UserApprovalRequired), so
+    // both calls will produce ToolPending.  Use tmpdir as workspace root so
+    // the sandbox does not auto-deny the paths.
+    let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox {
+        workspace_root: dir.path().to_path_buf(),
+    }));
+    let registry = Arc::new(default_registry(sandbox, ToolRegistryConfig::default()));
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(
         vec![
-            call("read", 0, serde_json::json!({ "path": a })),
-            call("read", 1, serde_json::json!({ "path": b })),
+            call("write", 0, serde_json::json!({ "path": a, "content": "A" })),
+            call("write", 1, serde_json::json!({ "path": b, "content": "B" })),
         ],
         interval,
     );
@@ -443,8 +505,8 @@ struct SleepArgs {}
 struct SimpleStringOutput(String);
 
 impl ToolCallResult for SimpleStringOutput {
-    fn text(&self) -> &str {
-        &self.0
+    fn text(&self) -> String {
+        self.0.clone()
     }
 }
 
@@ -469,6 +531,9 @@ impl ToolCall for SleepToolCall {
     fn non_default_redacted_arguments(&self) -> Vec<(String, serde_json::Value)> {
         vec![]
     }
+    fn argument_order(&self, _key: &str) -> usize {
+        usize::MAX
+    }
     fn run(
         self: Box<Self>,
     ) -> futures::future::BoxFuture<'static, Result<Box<dyn ToolCallResult>, ToolError>> {
@@ -490,11 +555,11 @@ impl Tool for SleepTool {
     fn description(&self) -> &str {
         "sleeps almost forever"
     }
-    fn schema(&self) -> RootSchema {
+    fn input_schema(&self) -> RootSchema {
         schema_for!(SleepArgs)
     }
-    fn needs_approval(&self) -> bool {
-        false
+    fn needs_approval(&self, _args: &serde_json::Value) -> ApprovalCheck {
+        ApprovalCheck::AutoApproved
     }
     fn timeout_secs(&self) -> u64 {
         600
@@ -512,7 +577,7 @@ impl Tool for SleepTool {
 
 #[tokio::test(start_paused = true)]
 async fn stop_mid_tool_kills_tool_and_returns_to_idle() {
-    let mut registry = default_registry();
+    let mut registry = default_registry(make_sandbox(), ToolRegistryConfig::default());
     registry.register(Arc::new(SleepTool));
     let registry = Arc::new(registry);
     let interval = Duration::from_millis(5);
@@ -529,13 +594,8 @@ async fn stop_mid_tool_kills_tool_and_returns_to_idle() {
     agent.send_command(AgentCommand::Prompt("nap".into())).await;
     let handle = agent.run();
     let _ = collect_until_advancing(&mut ui_rx, interval, is_stream_started).await;
-    let pending = collect_until_advancing(&mut ui_rx, interval, is_tool_pending).await;
-    let id = match pending.last().unwrap() {
-        UiUpdate::ToolPending { id, .. } => *id,
-        _ => unreachable!(),
-    };
-
-    agent.send_command(AgentCommand::ApproveTool { id }).await;
+    // Phase 6.0: SleepTool is AutoApproved — the loop starts it directly without
+    // ToolPending. Collect until ToolStart arrives.
     let started = collect_until_advancing(&mut ui_rx, interval, |u| {
         matches!(u, UiUpdate::ToolStart { .. })
     })
@@ -567,7 +627,10 @@ async fn stop_mid_tool_kills_tool_and_returns_to_idle() {
 
 #[tokio::test(start_paused = true)]
 async fn iteration_guard_stops_after_max_reprompts() {
-    let registry = Arc::new(default_registry());
+    let registry = Arc::new(default_registry(
+        make_sandbox(),
+        ToolRegistryConfig::default(),
+    ));
     let interval = Duration::from_millis(5);
     let provider = MockProvider::with_script(
         vec![call(
@@ -591,14 +654,14 @@ async fn iteration_guard_stops_after_max_reprompts() {
     let handle = agent.run();
 
     let done = drive_until(&agent, &mut ui_rx, registry.as_ref(), interval, |u| {
-        matches!(u, UiUpdate::Error(_))
+        matches!(u, UiUpdate::Error { .. })
     })
     .await;
 
     assert!(
         done.iter()
-            .any(|u| matches!(u, UiUpdate::Error(e) if e.contains("iterations"))),
-        "guard must emit an explanation error"
+            .any(|u| matches!(u, UiUpdate::Error { message, run_id: None } if message.contains("iterations"))),
+        "guard must emit an explanation error attributed to the root loop (run_id: None)"
     );
     let starts = done
         .iter()
@@ -614,6 +677,286 @@ async fn iteration_guard_stops_after_max_reprompts() {
         .any(|m| matches!(m, Message::ToolError { name, .. } if name == "write")));
 }
 
+#[tokio::test(start_paused = true)]
+async fn iteration_guard_also_stops_a_runaway_spawn_subagent_finish_reprompt_loop() {
+    // Regression test: a child that resolves near-instantly (finishes via
+    // `finish_tx` essentially as soon as it's spawned) drives the root
+    // through the `finish_rx` "root was idle, forcing reprompt" branch
+    // instead of `advance_tool_queue`'s queue-empty branch. That branch used
+    // to call `start_request` directly with no iteration bookkeeping at all
+    // — so a model that just keeps calling `spawn_subagent` again on every
+    // finish notice (rather than ever answering) could reprompt forever,
+    // one HTTP request per "finish", completely bypassing
+    // `MAX_TOOL_USE_ITERATIONS`. The guard must trip here exactly like it
+    // does for the plain `write`-in-a-loop case above.
+    use tokio_util::sync::CancellationToken;
+    use ylva::child_agent_manager::{ChildAgentManager, FinishResult, SpawnFn};
+
+    let registry = Arc::new(default_registry(
+        make_sandbox(),
+        ToolRegistryConfig {
+            include_spawn_subagent: true,
+            auto_approve_spawn: true,
+            ..ToolRegistryConfig::default()
+        },
+    ));
+    let interval = Duration::from_millis(5);
+    let provider = MockProvider::with_script(
+        vec![call(
+            "spawn_subagent",
+            0,
+            serde_json::json!({ "label": "Do it again", "task": "do it again" }),
+        )],
+        interval,
+    );
+    let (mut agent, mut ui_rx) = AgentLoop::new(
+        Arc::new(EngineImpl::new(
+            Arc::new(provider),
+            common::test_engine_config(),
+        )),
+        Arc::clone(&registry),
+    );
+
+    let (finish_tx, finish_rx) = mpsc::channel(64);
+    let (subagent_ui_tx, subagent_ui_rx) = mpsc::channel(64);
+    // Resolves immediately: reports success via `finish_tx` right away and
+    // never actually does any work, simulating a child that finishes near-
+    // instantly relative to the root's own request/response cycle.
+    let spawn_fn: SpawnFn = Box::new(move |request, _cancel: CancellationToken, _ui_tx| {
+        let finish_tx = finish_tx.clone();
+        let handle = tokio::spawn(async move {
+            let _ = finish_tx
+                .send(FinishResult {
+                    run_id: request.run_id,
+                    call_id: request.call_id,
+                    status: "success".to_string(),
+                    result: Some("done".to_string()),
+                    error: None,
+                    sources: vec![],
+                })
+                .await;
+        });
+        ylva::child_agent_manager::SpawnOutcome {
+            command_sender: None,
+            handle,
+        }
+    });
+    let manager = ChildAgentManager::new(subagent_ui_tx, spawn_fn);
+    agent = agent.with_child_agent_manager(manager, finish_rx, subagent_ui_rx);
+
+    agent
+        .send_command(AgentCommand::Prompt("delegate forever".into()))
+        .await;
+    let handle = agent.run();
+
+    let done = drive_until(&agent, &mut ui_rx, registry.as_ref(), interval, |u| {
+        matches!(u, UiUpdate::Error { .. })
+    })
+    .await;
+
+    assert!(
+        done.iter()
+            .any(|u| matches!(u, UiUpdate::Error { message, run_id: None } if message.contains("iterations"))),
+        "guard must trip and emit an explanation error attributed to the root loop \
+         (run_id: None), got: {done:?}"
+    );
+
+    drop(agent);
+    let context = handle.await.expect("loop ok").expect("context");
+    assert!(
+        matches!(
+            context.messages().last(),
+            Some(Message::Assistant {
+                status: AssistantStatus::Interrupted,
+                ..
+            })
+        ),
+        "the guard tripping must be reported as an Interrupted assistant bubble, got: {:?}",
+        context.messages()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn thinking_deltas_surface_separately_from_assistant_text() {
+    // Thinking/reasoning fragments must never contaminate the assistant text
+    // accumulator: they arrive via `UiUpdate::AppendThinking` and are absent
+    // from the final `Message::Assistant` content.
+    let registry = Arc::new(default_registry(
+        make_sandbox(),
+        ToolRegistryConfig::default(),
+    ));
+    let interval = Duration::from_millis(5);
+    let provider = MockProvider::with_script(
+        vec![
+            MockEvent::Thinking("pondering...".into()),
+            MockEvent::Thinking(" still pondering...".into()),
+            MockEvent::Text("answer".into()),
+        ],
+        interval,
+    );
+    let (mut agent, mut ui_rx) = AgentLoop::new(
+        Arc::new(EngineImpl::new(
+            Arc::new(provider),
+            common::test_engine_config(),
+        )),
+        Arc::clone(&registry),
+    );
+
+    agent
+        .send_command(AgentCommand::Prompt("think it through".into()))
+        .await;
+    let handle = agent.run();
+    let updates =
+        collect_until_advancing(&mut ui_rx, interval, |u| matches!(u, UiUpdate::StreamDone)).await;
+
+    let thinking_texts: Vec<&str> = updates
+        .iter()
+        .filter_map(|u| match u {
+            UiUpdate::AppendThinking(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(thinking_texts, vec!["pondering...", " still pondering..."]);
+
+    let assistant_texts: Vec<&str> = updates
+        .iter()
+        .filter_map(|u| match u {
+            UiUpdate::AppendText(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(assistant_texts, vec!["answer"]);
+
+    drop(agent);
+    let context = handle.await.expect("loop ok").expect("context");
+    assert!(matches!(
+        context.messages().last(),
+        Some(Message::Assistant { content, .. }) if content == "answer"
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn stop_while_spawn_subagent_is_running_resolves_it_to_cancelled_tool_done() {
+    // Regression test for the ToolProgress redesign: `spawn_subagent`'s
+    // "running" acknowledgment is now a non-terminal `ToolProgress`, so a
+    // `Stop` command must still resolve the bubble to a real, terminal
+    // `ToolDone` (status=cancelled) instead of leaving it stuck mid-flight.
+    use tokio_util::sync::CancellationToken;
+    use ylva::child_agent_manager::{ChildAgentManager, SpawnFn};
+
+    let registry = Arc::new(default_registry(
+        make_sandbox(),
+        ToolRegistryConfig {
+            include_spawn_subagent: true,
+            auto_approve_spawn: true,
+            ..ToolRegistryConfig::default()
+        },
+    ));
+    let interval = Duration::from_millis(5);
+    let provider = MockProvider::with_script(
+        vec![call(
+            "spawn_subagent",
+            0,
+            serde_json::json!({ "label": "Do the thing", "task": "do the thing", "briefing": "context" }),
+        )],
+        interval,
+    );
+    let (mut agent, mut ui_rx) = AgentLoop::new(
+        Arc::new(EngineImpl::new(
+            Arc::new(provider),
+            common::test_engine_config(),
+        )),
+        Arc::clone(&registry),
+    );
+
+    let (finish_tx, finish_rx) = mpsc::channel(1);
+    let (subagent_ui_tx, subagent_ui_rx) = mpsc::channel(8);
+    // Never actually finishes on its own — only cancellation ends it, so the
+    // test can observe `Stop` resolving the bubble rather than a real finish.
+    let spawn_fn: SpawnFn = Box::new(move |_request, cancel: CancellationToken, _ui_tx| {
+        let handle = tokio::spawn(async move {
+            cancel.cancelled().await;
+        });
+        ylva::child_agent_manager::SpawnOutcome {
+            command_sender: None,
+            handle,
+        }
+    });
+    let manager = ChildAgentManager::new(subagent_ui_tx, spawn_fn);
+    agent = agent.with_child_agent_manager(manager, finish_rx, subagent_ui_rx);
+    drop(finish_tx);
+
+    agent
+        .send_command(AgentCommand::Prompt("delegate it".into()))
+        .await;
+    let handle = agent.run();
+    let _ = collect_until_advancing(&mut ui_rx, interval, is_stream_started).await;
+    let started = collect_until_advancing(&mut ui_rx, interval, |u| {
+        matches!(u, UiUpdate::ToolStart { .. })
+    })
+    .await;
+    assert!(
+        matches!(started.last(), Some(UiUpdate::ToolStart { name, .. }) if name == "spawn_subagent")
+    );
+
+    // The "running" acknowledgment now arrives as a non-terminal ToolProgress.
+    let progressed = collect_until_advancing(&mut ui_rx, interval, |u| {
+        matches!(u, UiUpdate::ToolProgress { .. })
+    })
+    .await;
+    assert!(progressed
+        .iter()
+        .any(|u| matches!(u, UiUpdate::ToolProgress { .. })));
+
+    agent
+        .send_command(AgentCommand::Stop {
+            reason: "aborted by user".into(),
+        })
+        .await;
+    let done = collect_until_advancing(
+        &mut ui_rx,
+        interval,
+        |u| matches!(u, UiUpdate::ToolDone { name, .. } if name == "spawn_subagent"),
+    )
+    .await;
+    let tool_done = done
+        .iter()
+        .find(|u| matches!(u, UiUpdate::ToolDone { name, .. } if name == "spawn_subagent"))
+        .expect("expected a spawn_subagent ToolDone after Stop");
+    match tool_done {
+        UiUpdate::ToolDone { summary, .. } => {
+            assert!(
+                summary
+                    .iter()
+                    .any(|(key, value)| key == "status" && value == "cancelled"),
+                "expected status=cancelled in the ToolDone summary, got: {summary:?}"
+            );
+        }
+        _ => unreachable!(),
+    }
+
+    // `spawn_subagent` resolves synchronously (unlike a real running tool
+    // task), so the loop may already be reprompting again by the time Stop
+    // lands — the mock provider script is deterministic and would keep
+    // re-issuing the same call forever. Force termination here rather than
+    // asserting quiescence.
+    drop(agent);
+    let context = handle.await.expect("loop ok").expect("context");
+    let saw_cancelled_notice = context.messages().iter().any(|message| {
+        matches!(
+            message,
+            Message::User { content, kind: UserMessageKind::ImplicitToolNote }
+                if content.contains("spawn_subagent") && content.contains("cancelled")
+        )
+    });
+    assert!(
+        saw_cancelled_notice,
+        "expected a trailing implicit user message announcing the cancelled spawn_subagent \
+         child, got: {:?}",
+        context.messages()
+    );
+}
+
 fn is_stream_started(update: &UiUpdate) -> bool {
     matches!(update, UiUpdate::StreamStarted)
 }
@@ -624,4 +967,62 @@ fn is_tool_pending(update: &UiUpdate) -> bool {
 
 fn is_tool_error(update: &UiUpdate) -> bool {
     matches!(update, UiUpdate::ToolError { .. })
+}
+
+#[tokio::test(start_paused = true)]
+async fn for_child_targeting_an_unknown_run_id_is_dropped_without_hanging_the_root() {
+    // Regression test for `AgentCommand::ForChild`'s "stale target" case: a
+    // command addressed to a `run_id` the root's `ChildAgentManager` doesn't
+    // recognize (already finished, or never existed) must be logged and
+    // dropped, not panic or silently wedge the root loop's `select!` — the
+    // root must stay fully responsive to its own, unrelated commands
+    // afterwards.
+    let registry = Arc::new(default_registry(
+        make_sandbox(),
+        ToolRegistryConfig::default(),
+    ));
+    let interval = Duration::from_millis(5);
+    let provider = MockProvider::with_script(vec![MockEvent::Text("hi there".into())], interval);
+    let (mut agent, mut ui_rx) = AgentLoop::new(
+        Arc::new(EngineImpl::new(
+            Arc::new(provider),
+            common::test_engine_config(),
+        )),
+        Arc::clone(&registry),
+    );
+
+    // No `ChildAgentManager` is wired at all, so this is the strongest form
+    // of "no live child recognizes this run_id".
+    let stray_run_id = uuid::Uuid::new_v4();
+    agent
+        .send_command(AgentCommand::ForChild {
+            run_id: stray_run_id,
+            command: Box::new(AgentCommand::ApproveTool { id: stray_run_id }),
+        })
+        .await;
+
+    let handle = agent.run();
+
+    // The root must still be able to run a completely ordinary prompt
+    // afterwards — if the stray `ForChild` had wedged the `select!` loop,
+    // this would hang forever instead of completing.
+    agent
+        .send_command(AgentCommand::Prompt("hello".into()))
+        .await;
+    let updates = collect_until_advancing(
+        &mut ui_rx,
+        interval,
+        |u| matches!(u, UiUpdate::AppendText(text) if text == "hi there"),
+    )
+    .await;
+    assert!(
+        updates
+            .iter()
+            .any(|u| matches!(u, UiUpdate::AppendText(text) if text == "hi there")),
+        "expected the root to still process an ordinary prompt after a stale \
+         ForChild, got: {updates:?}"
+    );
+
+    drop(agent);
+    handle.await.expect("loop ok").expect("context");
 }

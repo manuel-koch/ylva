@@ -11,7 +11,7 @@ don't postpone fixing (pre-existing) flaky tests!
 
 Coverage threshold: **≥80% line coverage** is enforced on testable files
 by `make test-coverage` (below the threshold the command fails).
-`ui.rs` and `main.rs` are excluded because they require a live terminal.
+`tui_widgets.rs`, `render.rs`, and `main.rs` are excluded because they require a live terminal.
 
 The following `make` targets are available:
 
@@ -23,6 +23,7 @@ make test-coverage-missing           # same as test-coverage but also prints unc
 make test                            # cargo test — all tests must pass
 make build-debug                     # cargo build (debug)
 make build-debug-and-run             # build debug binary and launch it
+make build-debug-and-run-with-logs   # build debug binary and launch it with tracing logs enabled
 make build-release                   # cargo build (release)
 make build-release-and-run           # build release binary and launch it
 make install                         # cargo install --path . → ~/.cargo/bin/ylva
@@ -38,9 +39,72 @@ or its command changes, update this section in the same commit (see
 Other documents that reference `make` targets must delegate here rather than
 re-list targets, otherwise the lists drift the next time the `Makefile` changes.
 
+## Rust linter
+
+Lint suppression (clippy or rustc, e.g. `dead_code`/`unused_variables`) is a
+case-by-case call by the user — never a blanket `#![allow(...)]` — applied to
+the specific item that triggers it:
+
+```rust
+#[expect(clippy::too_many_arguments)]
+fn some_fn(...) { ... }
+```
+
+Use `#[expect(...)]`, not `#[allow(...)]`: it only suppresses the lint while
+the lint actually fires. Once the code changes so it no longer fires, rustc
+warns `unfulfilled_lint_expectations` — remove the now-obsolete attribute (or
+replace it with a freshly justified one).
+
+`make lint` runs `--all-features`; also check default-features `cargo clippy`
+for suppressions near `#[cfg(feature = ...)]` code, since expectations can be
+fulfilled under one feature set and not the other.
+
+### Anti-pattern: "params struct" to silence `too_many_arguments`
+
+Do not introduce a single-use struct whose only job is to pack a function's
+arguments together so the function itself takes one struct parameter instead
+of many — especially when the body immediately destructures it back into the
+same local names, e.g.:
+
+```rust
+// Don't do this just to dodge the lint:
+struct FooParams<'a> {
+    a: &'a str,
+    b: bool,
+    c: Option<u16>,
+}
+
+fn foo(params: FooParams<'_>) {
+    let FooParams { a, b, c } = params; // immediately unpacked, no benefit
+    ...
+}
+```
+
+This adds a type and a destructuring block with no readability or reuse
+benefit over the plain argument list it replaces. Before reaching for
+`#[expect(...)]`, work through these in order:
+
+1. **Extract a real struct** if the arguments are only ever used together as
+   one meaningful, reusable value across multiple call sites (a real cohesive
+   concept, not a lint dodge) — see `ToolBubbleArgs`/`ToolDonePayload` for
+   examples of this being justified.
+2. **Split the function** if it is doing more than one job (Fowler's "Long
+   Parameter List"/"Long Method" smells) — each half then takes fewer args.
+3. **Drop derivable args** — an argument computable from another argument
+   already in the list (or from `self`/existing state) doesn't need to be
+   passed in separately; compute it inside the function instead.
+4. **Move the function onto the type it operates on** (`impl` method) if
+   several args are really just that type's own fields — `&self`/`&mut self`
+   then replaces those positional args.
+
+Only once none of these genuinely fits — the arguments are unrelated,
+single-use, and the function's responsibility is already minimal — suppress
+the lint with `#[expect(clippy::too_many_arguments)]` as shown above, rather
+than inventing a throwaway struct.
+
 ## Logging
 
-Diagnostics are emitted exclusively through the `tracing` facade macros
+Diagnostics are emitted through the `tracing` facade macros
 (`trace!`/`debug!`/`info!`/`warn!`/`error!`) with structured fields — never
 `println!`/`eprintln!` (console output is user-facing) and never a subscriber
 call; `src/logging.rs` owns the subscriber (level filter, a single file in the
@@ -59,53 +123,13 @@ them to a `tracing` macro.
 
 ### Tracing subscriber isolation in tests
 
-Any unit test that calls `tracing::subscriber::with_default(...)` or
-`init_logging(...)` **must** acquire `SUBSCRIBER_LOCK` for the entire duration:
+See [known-test-issues.md — Tracing subscriber isolation](known-test-issues.md#tracing-subscriber-isolation-in-tests)
+for the root cause, required lock acquisition rules, and `run_locked` usage.
 
-```rust
-let _lock = crate::test_support::SUBSCRIBER_LOCK
-    .lock()
-    .expect("subscriber mutex poisoned");
-```
+### Process-global cwd mutation in tests
 
-Any test that calls a function exercised by `capture_logs` tests (such as
-`read_file`, `write_file`, or `glob_files`) **must** use `run_locked` instead
-of `#[tokio::test]`:
-
-```rust
-#[test]
-fn my_test() {
-    crate::test_support::run_locked(async {
-        // async test body
-    });
-}
-```
-
-**Why:** `with_default(subscriber, ...)` calls `Dispatch::new(subscriber)`
-internally, which adds the dispatcher to a process-global `LOCKED_DISPATCHERS`
-list and then rebuilds every callsite's interest by ANDing together all live
-dispatchers (`Interest::and`). When two tests run `with_default` concurrently,
-an INFO-only dispatcher from one test can AND with the DEBUG dispatcher from
-`capture_logs`, yielding `Interest::never()` for DEBUG callsites — causing those
-events to be silently dropped even though the capturing subscriber is interested.
-The same applies to `init_logging`, which calls `set_global_default` →
-`rebuild_interest_cache` and can reset callsite interests globally.
-
-A subtler variant of the same bug: a callsite is only registered on its
-**first** access. `capture_logs` calls `rebuild_interest_cache()` before
-running the body, which updates all *already-registered* callsites. But if a
-concurrent test (without the lock) first accesses a callsite from a thread with
-no subscriber, the callsite is registered with `Dispatch::none()` →
-`Interest::never()`. Later, when `capture_logs`'s body hits that callsite, the
-cached "never" causes the event to be dropped — `rebuild_interest_cache()` never
-saw it because it wasn't registered yet when that was called. Tests that call
-tracing-instrumented functions (`read_file`, `write_file`, `glob_files`) must
-therefore use `run_locked` to ensure they cannot run concurrently with
-`capture_logs`.
-
-Holding `SUBSCRIBER_LOCK` for the full duration of the `with_default` closure
-(and the surrounding `Dispatch` lifetime) serialises subscriber registration
-across tests and prevents this class of flaky failure.
+See [known-test-issues.md — cwd mutation](known-test-issues.md#process-global-cwd-mutation-in-tests)
+for why tests that read `current_dir()` must also hold `SUBSCRIBER_LOCK`.
 
 ## Planned implementations
 
@@ -178,14 +202,5 @@ SSOT applies here as well.
 
 ## `cfg(test)` does not reach library code from integration tests
 
-The Rust compiler sets `cfg(test)` only for the crate being compiled as a test
-harness. For integration tests (`tests/*.rs`) the `ylva` library is compiled as
-a normal dependency — **`cfg(test)` is NOT set** for library source files when
-the caller is an integration test.
-
-Practical consequence: `#[cfg(not(test))]` guards inside `src/` do **not**
-prevent execution when called from `tests/*.rs`. Any side-effect that must be
-suppressed in tests (OS clipboard writes, network calls, file I/O, …) must be
-abstracted via a trait or closure that is injected by the caller, so integration
-tests can pass a no-op implementation and unit tests can continue using
-`#[cfg(test)]` guards for their own call sites.
+See [known-test-issues.md — cfg(test) does not reach library code](known-test-issues.md#cfgtest-does-not-reach-library-code-from-integration-tests)
+for the explanation and the required abstraction pattern.

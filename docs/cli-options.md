@@ -12,6 +12,9 @@ Reference for Ylva's command-line interface.
 | `--log-file <path>` | path | any writable file path | *none* | Write logs to this file. The file is opened in truncate/overwrite mode on each start, so logs never accumulate across runs. |
 | `--log-level <level>` | enum | `trace`, `debug`, `info`, `warn`, `error` | `info` | Minimum severity written. Selecting a level includes it and all higher-severity levels (`trace < debug < info < warn < error`). |
 | `--log-format <format>` | enum | `text`, `json` | `text` | Output format. `text` is human-readable; `json` produces JSONL (one JSON object per line). |
+| `--auto-approve-edit` | none | — | — | Skip the human-approval prompt for `edit` tool calls. |
+| `--auto-approve-write` | none | — | — | Skip the human-approval prompt for `write` tool calls. |
+| `--auto-approve-spawn` | none | — | — | Skip the human-approval prompt for `spawn_subagent` tool calls. See `can_spawn` in `docs/configuration.md` and "Child-agent delegation" in `docs/features.md`. |
 
 An invalid `--log-level` or `--log-format` value, a flag missing its required
 value, or a `--log-file` that cannot be opened (for example, its containing
@@ -40,6 +43,12 @@ against.
 | `OLLAMA_BASE_URL` | — | Base URL of the Ollama server. A non-empty value selects the Ollama backend. |
 | `OLLAMA_MODEL` | `gemma4:e4b-mlx` | Ollama model. |
 | `OLLAMA_API_KEY` | — | Optional Ollama API key. |
-| `OPENROUTER_BASE_URL` | — | OpenRouter base URL. Used only when no `OLLAMA_BASE_URL` is set. |
+| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | OpenRouter base URL. Used only when no `OLLAMA_BASE_URL` is set. Unlike Ollama, OpenRouter is a single hosted service, so this has a working default and never has to be set manually. |
 | `OPENROUTER_MODEL` | `deepseek/deepseek-v4-flash-0731` | OpenRouter model. |
-| `OPENROUTER_API_KEY` | — | OpenRouter API key. |
+| `OPENROUTER_API_KEY` | — | OpenRouter API key. Setting `OPENROUTER_API_KEY` (or `OPENROUTER_MODEL`) alone, with no `OLLAMA_BASE_URL` set, is enough to select the OpenRouter backend — `OPENROUTER_BASE_URL` does not need to be exported. |
+
+### Debug
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `YLVA_REQUEST_DUMP_PATH` | — | When set, each outgoing HTTP request body is written to a timestamped JSON file, and the paired streamed response is written alongside it as a raw SSE transcript. The value is a path template: the directory and filename stem are extracted and the request is written as `<stem>_<timestamp>_request.json`; the response is written as `<stem>_<timestamp>_response.jsonl` (one line per SSE `data:` payload, or a `[transport] ...` marker for non-payload events such as cancellation or a transport error), sharing the exact same `<unix_seconds>_<millis>` `<timestamp>` as its request so the pair can be found together. A relative directory is resolved against the process working directory. Used by `make build-debug-and-run-with-logs`. |

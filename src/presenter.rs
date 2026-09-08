@@ -26,9 +26,11 @@ use std::time::Instant;
 use crossterm::event::{KeyCode, KeyModifiers, MouseEventKind};
 use uuid::Uuid;
 
-use crate::app_state::{
-    AppState, ChatEntry, ChatSelection, DomainEvent, Effect, Focus, HistoryDirection, InputEvent,
-    ToolCallState, TuiMode, UserMessageState,
+use crate::agent::tools::clarify::ClarifyTool;
+use crate::markdown::render_markdown;
+use crate::tui_reducer_state::{
+    AppState, ChatEntry, ChatSelection, ChildRunInfo, ConfirmKey, ConversationView, DomainEvent,
+    Effect, Focus, HistoryDirection, InputEvent, ToolCallState, TuiMode, UserMessageState,
 };
 
 // ─── Public surface ───────────────────────────────────────────────────────────
@@ -82,8 +84,8 @@ fn keyboard_help(state: &mut AppState, event: InputEvent) -> Vec<Effect> {
     match event {
         InputEvent::ShowHelp | InputEvent::Escape => {
             state.focus = Focus::MainInput;
-            state.help_scroll_offset = 0;
-            state.help_scroll_x = 0;
+            state.help_popup.help_scroll_offset = 0;
+            state.help_popup.help_scroll_x = 0;
             vec![]
         }
         InputEvent::SigInt => vec![Effect::StopAgent],
@@ -128,7 +130,14 @@ fn keyboard_approval(
     match event {
         InputEvent::CtrlC | InputEvent::Escape => {
             state.focus = Focus::MainInput;
-            vec![Effect::DenyTool { id: tool_id }, Effect::RestoreTextarea]
+            // No reason given — deny silently without an implicit user message.
+            vec![
+                Effect::DenyTool {
+                    id: tool_id,
+                    reason: String::new(),
+                },
+                Effect::RestoreTextarea,
+            ]
         }
         InputEvent::SigInt => vec![Effect::StopAgent],
         InputEvent::KeyInput(key_event) if key_event.code == KeyCode::Enter => {
@@ -136,7 +145,16 @@ fn keyboard_approval(
             if textarea.is_empty {
                 vec![Effect::ApproveTool { id: tool_id }, Effect::RestoreTextarea]
             } else {
-                vec![Effect::DenyTool { id: tool_id }, Effect::RestoreTextarea]
+                // User typed a denial reason — pass it to the agent so it can
+                // be forwarded to the model as an implicit user message.
+                let reason = textarea.text.clone();
+                vec![
+                    Effect::DenyTool {
+                        id: tool_id,
+                        reason,
+                    },
+                    Effect::RestoreTextarea,
+                ]
             }
         }
         InputEvent::KeyInput(key_event) => vec![Effect::TextareaKey(key_event)],
@@ -153,6 +171,9 @@ fn keyboard_main(
     event: InputEvent,
     textarea: &TextareaContext,
 ) -> Vec<Effect> {
+    if matches!(state.mode, TuiMode::ClarifyPending { .. }) {
+        return keyboard_clarify(state, event, textarea);
+    }
     match event {
         InputEvent::ShowHelp => {
             state.focus = Focus::HelpPopup;
@@ -160,15 +181,173 @@ fn keyboard_main(
         }
         InputEvent::SigInt => vec![Effect::StopAgent],
         InputEvent::CtrlC => handle_ctrl_c_generic(state, textarea.is_empty),
+        // Esc with an empty draft while viewing a subagent's drill-in
+        // transcript navigates back to the root conversation instead of
+        // acting on the (root) agent's `TuiMode` — the subagent's own
+        // transcript is read-only here, so there is nothing to "cancel". A
+        // non-empty draft still just clears via the normal Escape path
+        // below, same as in the root view.
+        InputEvent::Escape
+            if textarea.is_empty && matches!(state.active_view, ConversationView::Child { .. }) =>
+        {
+            state.switch_to_root_view();
+            vec![]
+        }
         InputEvent::Escape => handle_escape_main(state, textarea),
         InputEvent::Paste(text) => vec![Effect::Paste(text)],
         InputEvent::KeyInput(key_event) => handle_key_main(state, key_event, textarea),
     }
 }
 
+/// Extracts the plain text from the clarify banner rows between `from_row` and
+/// `to_row` (absolute screen rows, inclusive). Used when the user drags to
+/// select text in the banner.
+fn extract_clarify_banner_text(
+    state: &AppState,
+    from_row: u16,
+    from_col: u16,
+    to_row: u16,
+    to_col: u16,
+) -> String {
+    let TuiMode::ClarifyPending {
+        ref question,
+        ref choices,
+        ref context,
+        ..
+    } = state.mode
+    else {
+        return String::new();
+    };
+    let banner = state.layout.clarify_banner;
+    if banner.width == 0 {
+        return String::new();
+    }
+    let wrap_width = banner.width as usize;
+    let mut all_lines: Vec<String> = Vec::new();
+    if let Some(ctx) = context.as_deref() {
+        for md_line in render_markdown(ctx, wrap_width) {
+            all_lines.push(md_line.spans.iter().map(|s| s.content.as_ref()).collect());
+        }
+        all_lines.push(String::new()); // spacer between context and question
+    }
+    for md_line in render_markdown(question, wrap_width) {
+        all_lines.push(md_line.spans.iter().map(|s| s.content.as_ref()).collect());
+    }
+    if let Some(ref choices_list) = choices {
+        for (i, c) in choices_list.iter().enumerate() {
+            all_lines.push(format!("{}. {}", i + 1, c));
+        }
+    }
+
+    // Normalise drag direction so (start, start_col) is always before (end, end_col).
+    let (start_row, start_col, end_row, end_col) = if (from_row, from_col) <= (to_row, to_col) {
+        (from_row, from_col, to_row, to_col)
+    } else {
+        (to_row, to_col, from_row, from_col)
+    };
+
+    let min_row = (start_row.saturating_sub(banner.y) as usize)
+        .saturating_add(state.clarify_banner_state.clarify_scroll_offset);
+    let max_row = ((end_row.saturating_sub(banner.y) as usize)
+        .saturating_add(state.clarify_banner_state.clarify_scroll_offset))
+    .min(all_lines.len().saturating_sub(1));
+    let start_col_offset = start_col.saturating_sub(banner.x) as usize;
+    let end_col_offset = end_col.saturating_sub(banner.x) as usize;
+
+    if min_row >= all_lines.len() {
+        return String::new();
+    }
+
+    let selected: Vec<String> = all_lines[min_row..=max_row]
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let chars: Vec<char> = line.chars().collect();
+            let line_len = chars.len();
+            let (col_start, col_end) = if min_row == max_row {
+                // Single-row drag: apply both column offsets.
+                (start_col_offset.min(line_len), end_col_offset.min(line_len))
+            } else if index == 0 {
+                // First line of a multi-row drag: trim from start column.
+                (start_col_offset.min(line_len), line_len)
+            } else if index == max_row - min_row {
+                // Last line of a multi-row drag: trim to end column.
+                (0, end_col_offset.min(line_len))
+            } else {
+                // Middle lines: include in full.
+                (0, line_len)
+            };
+            chars[col_start..col_end].iter().collect()
+        })
+        .collect();
+
+    selected.join("\n")
+}
+
+fn keyboard_clarify(
+    state: &mut AppState,
+    event: InputEvent,
+    textarea: &TextareaContext,
+) -> Vec<Effect> {
+    match event {
+        InputEvent::ShowHelp => {
+            state.focus = Focus::HelpPopup;
+            vec![]
+        }
+        InputEvent::SigInt => vec![Effect::StopAgent],
+        InputEvent::CtrlC => {
+            state.mode = TuiMode::Pending;
+            vec![Effect::AbortClarify, Effect::RestoreTextarea]
+        }
+        InputEvent::Escape => {
+            if textarea.is_empty {
+                state.mode = TuiMode::Pending;
+                vec![Effect::AbortClarify, Effect::RestoreTextarea]
+            } else {
+                vec![Effect::ClearTextarea]
+            }
+        }
+        InputEvent::Paste(text) => vec![Effect::Paste(text)],
+        InputEvent::KeyInput(key_event) if key_event.code == KeyCode::Enter => {
+            state.mode = TuiMode::Pending;
+            vec![
+                Effect::AnswerClarify(textarea.text.clone()),
+                Effect::RestoreTextarea,
+            ]
+        }
+        InputEvent::KeyInput(key_event) if key_event.code == KeyCode::Up => {
+            state.clarify_scroll_up(1);
+            vec![]
+        }
+        InputEvent::KeyInput(key_event) if key_event.code == KeyCode::Down => {
+            state.clarify_scroll_down(1);
+            vec![]
+        }
+        InputEvent::KeyInput(key_event) if key_event.code == KeyCode::PageUp => {
+            state.clarify_scroll_up(5);
+            vec![]
+        }
+        InputEvent::KeyInput(key_event) if key_event.code == KeyCode::PageDown => {
+            state.clarify_scroll_down(5);
+            vec![]
+        }
+        InputEvent::KeyInput(key_event) => vec![Effect::TextareaKey(key_event)],
+    }
+}
+
+/// Returns the mode a `DoublePressAbort` wraps, or `mode` itself when it
+/// isn't one. Used to detect the *real* underlying state (e.g. truly Idle)
+/// even while a confirm window armed by the other key is pending.
+fn effective_mode(mode: &TuiMode) -> &TuiMode {
+    match mode {
+        TuiMode::DoublePressAbort { return_to, .. } => return_to,
+        other => other,
+    }
+}
+
 /// Ctrl+C logic for non-approval contexts.
 fn handle_ctrl_c_generic(state: &mut AppState, textarea_is_empty: bool) -> Vec<Effect> {
-    let mode_is_idle = matches!(state.mode, TuiMode::Idle);
+    let mode_is_idle = matches!(effective_mode(&state.mode), TuiMode::Idle);
 
     // Busy with non-empty input: clear the textarea first.
     if !mode_is_idle && !textarea_is_empty {
@@ -186,7 +365,11 @@ fn handle_ctrl_c_generic(state: &mut AppState, textarea_is_empty: bool) -> Vec<E
     let current_mode = std::mem::replace(&mut state.mode, TuiMode::Idle);
 
     match current_mode {
-        TuiMode::DoublePressAbort { return_to, .. } => {
+        TuiMode::DoublePressAbort {
+            return_to,
+            armed_by: ConfirmKey::CtrlC,
+            ..
+        } => {
             if matches!(*return_to, TuiMode::Idle) {
                 // Idle double-press → quit.
                 state.mode = TuiMode::Idle;
@@ -199,11 +382,27 @@ fn handle_ctrl_c_generic(state: &mut AppState, textarea_is_empty: bool) -> Vec<E
                 vec![Effect::StopAgent]
             }
         }
+        TuiMode::DoublePressAbort {
+            return_to,
+            armed_by: ConfirmKey::Escape,
+            ..
+        } => {
+            // Esc armed the pending confirm, not Ctrl-C: this Ctrl-C press
+            // does not confirm Esc's action. Start Ctrl-C's own fresh
+            // confirm window against the real underlying mode instead.
+            state.mode = TuiMode::DoublePressAbort {
+                pressed_at: Instant::now(),
+                return_to,
+                armed_by: ConfirmKey::CtrlC,
+            };
+            vec![]
+        }
         mode => {
             // First press: enter double-press abort mode.
             state.mode = TuiMode::DoublePressAbort {
                 pressed_at: Instant::now(),
                 return_to: Box::new(mode),
+                armed_by: ConfirmKey::CtrlC,
             };
             vec![]
         }
@@ -211,12 +410,16 @@ fn handle_ctrl_c_generic(state: &mut AppState, textarea_is_empty: bool) -> Vec<E
 }
 
 fn handle_escape_main(state: &mut AppState, textarea: &TextareaContext) -> Vec<Effect> {
-    let mode_is_idle = matches!(state.mode, TuiMode::Idle);
+    let mode_is_idle = matches!(effective_mode(&state.mode), TuiMode::Idle);
 
     if mode_is_idle {
-        // Idle: clear textarea and reset history.
+        // Idle: clear textarea and reset history. This always executes
+        // immediately (single press, never quits) even when a Ctrl-C
+        // confirm window is pending — Esc dismisses that pending quit
+        // rather than confirming it.
         state.history_index = None;
         state.draft = String::new();
+        state.mode = TuiMode::Idle;
         return vec![Effect::ClearTextarea];
     }
 
@@ -238,17 +441,37 @@ fn handle_escape_main(state: &mut AppState, textarea: &TextareaContext) -> Vec<E
     // when StreamCancelled transitions mode to Idle.
     let current_mode = std::mem::replace(&mut state.mode, TuiMode::Idle);
     match current_mode {
-        TuiMode::DoublePressAbort { return_to, .. } => {
+        TuiMode::DoublePressAbort {
+            return_to,
+            armed_by: ConfirmKey::Escape,
+            ..
+        } => {
             // Enter Aborting for visual feedback ("Aborting…" in footer +
             // spinner) but leave aborting_exit = false so the Driver stays open.
             state.mode = TuiMode::Aborting;
             let _ = return_to;
             vec![Effect::StopAgent]
         }
+        TuiMode::DoublePressAbort {
+            return_to,
+            armed_by: ConfirmKey::CtrlC,
+            ..
+        } => {
+            // Ctrl-C armed the pending confirm, not Esc: this Esc press
+            // does not confirm Ctrl-C's quit. Start Esc's own fresh
+            // confirm window against the real underlying mode instead.
+            state.mode = TuiMode::DoublePressAbort {
+                pressed_at: Instant::now(),
+                return_to,
+                armed_by: ConfirmKey::Escape,
+            };
+            vec![]
+        }
         mode => {
             state.mode = TuiMode::DoublePressAbort {
                 pressed_at: Instant::now(),
                 return_to: Box::new(mode),
+                armed_by: ConfirmKey::Escape,
             };
             vec![]
         }
@@ -270,20 +493,31 @@ fn handle_key_main(
         }
 
         KeyCode::Enter => {
+            // Viewing a subagent's drill-in transcript: the child
+            // conversation doesn't accept input (only one agent loop is
+            // driven at a time), and silently steering the *root* agent
+            // while a different (child) transcript is on screen would be
+            // misleading — the user would have no visual confirmation of
+            // which conversation their message actually went to. So Enter
+            // is a no-op here until per-subagent steering exists (see
+            // `docs/known-test-issues.md`).
+            if matches!(state.active_view, ConversationView::Child { .. }) {
+                return vec![];
+            }
             let raw_text = &textarea.text;
             if raw_text.trim().is_empty() {
                 return vec![];
             }
             let text = dedent(raw_text);
             let mode_is_idle = matches!(state.mode, TuiMode::Idle);
-            let bubble_state = if mode_is_idle {
-                UserMessageState::Sent
-            } else {
-                UserMessageState::Queued
-            };
-            state.push_user_bubble(text.clone(), bubble_state);
             if mode_is_idle {
+                state.push_user_bubble(text.clone(), UserMessageState::Sent);
                 state.mode = TuiMode::Pending;
+            } else {
+                // Stage rather than commit: chronologically-earlier
+                // thinking/tool-call content for the in-flight round may not
+                // be in `chat_entries` yet (see `queue_steer_message`).
+                state.queue_steer_message(text.clone());
             }
             vec![
                 Effect::SubmitPrompt {
@@ -345,11 +579,29 @@ fn route_mouse(
     match event.kind {
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
             let scroll_up = matches!(event.kind, MouseEventKind::ScrollUp);
+            let b = state.layout.clarify_banner;
+            let in_clarify_banner =
+                column >= b.x && column < b.x + b.width && row >= b.y && row < b.y + b.height;
+            let hb = state.layout.header_bubble;
+            let in_header_bubble =
+                column >= hb.x && column < hb.x + hb.width && row >= hb.y && row < hb.y + hb.height;
             if matches!(state.focus, Focus::HelpPopup) {
                 if scroll_up {
                     state.help_scroll_up(1);
                 } else {
                     state.help_scroll_down(1);
+                }
+            } else if in_clarify_banner {
+                if scroll_up {
+                    state.clarify_scroll_up(1);
+                } else {
+                    state.clarify_scroll_down(1);
+                }
+            } else if in_header_bubble {
+                if scroll_up {
+                    state.header_bubble_scroll_up(1);
+                } else {
+                    state.header_bubble_scroll_down(1);
                 }
             } else if state.layout.input_area.contains(column, row) {
                 // Input area scroll is driver-owned (textarea); emit a key effect.
@@ -374,9 +626,22 @@ fn route_mouse(
             if matches!(state.focus, Focus::HelpPopup) {
                 if !state.layout.help_popup.hit(column, row) {
                     state.focus = Focus::MainInput;
-                    state.help_scroll_offset = 0;
-                    state.help_scroll_x = 0;
+                    state.help_popup.help_scroll_offset = 0;
+                    state.help_popup.help_scroll_x = 0;
                 }
+                return vec![];
+            }
+
+            // Click anywhere on the child-view header bubble toggles its
+            // collapsed state immediately — unlike a normal chat bubble,
+            // there's no drill-in/collapse ambiguity to debounce here (the
+            // user is already viewing the child; double-clicking a bubble's
+            // title to drill in only applies to the root transcript).
+            let hb = state.layout.header_bubble;
+            let in_header_bubble =
+                column >= hb.x && column < hb.x + hb.width && row >= hb.y && row < hb.y + hb.height;
+            if in_header_bubble {
+                state.toggle_header_bubble_collapsed();
                 return vec![];
             }
 
@@ -398,25 +663,49 @@ fn route_mouse(
                 }
                 if in_deny {
                     state.focus = Focus::MainInput;
-                    return vec![Effect::DenyTool { id: tool_id }, Effect::RestoreTextarea];
+                    return vec![
+                        Effect::DenyTool {
+                            id: tool_id,
+                            reason: String::new(),
+                        },
+                        Effect::RestoreTextarea,
+                    ];
                 }
             }
 
             let in_chat = state.layout.chat_area.contains(column, row);
             let in_input = state.layout.input_area.contains(column, row);
 
+            // Clarify banner: record mousedown for the whole banner area so the
+            // user can drag-select any text (question or choices). The choice is
+            // filled on mouseup only when the position matches (click, not drag).
+            if matches!(state.mode, TuiMode::ClarifyPending { .. }) {
+                let banner = state.layout.clarify_banner;
+                if !banner.is_empty()
+                    && column >= banner.x
+                    && column < banner.x + banner.width
+                    && row >= banner.y
+                    && row < banner.y + banner.height
+                {
+                    state.clarify_banner_state.clarify_choice_mousedown = Some((column, row));
+                    state.clarify_banner_state.clarify_banner_drag_end = None;
+                    return vec![];
+                }
+            }
+
             if in_chat {
                 let anchor_line = state
+                    .conversation
                     .scroll_offset
                     .saturating_add((row.saturating_sub(state.layout.chat_area.rect.y)) as usize);
                 let anchor_col = (column.saturating_sub(state.layout.chat_area.rect.x)) as usize;
-                state.chat_selection = Some(ChatSelection {
+                state.conversation.chat_selection = Some(ChatSelection {
                     anchor_line,
                     anchor_col,
                     cursor_line: anchor_line,
                     cursor_col: anchor_col,
                 });
-                state.chat_drag_active = true;
+                state.conversation.chat_drag_active = true;
                 vec![]
             } else if in_input {
                 vec![Effect::PlaceCursorAtMousePos { column, row }]
@@ -426,9 +715,18 @@ fn route_mouse(
         }
 
         MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
-            if state.chat_drag_active {
-                if let Some(sel) = state.chat_selection.as_mut() {
-                    sel.cursor_line = state.scroll_offset.saturating_add(
+            // Banner drag: update the highlight endpoint; suppress input selection.
+            if state
+                .clarify_banner_state
+                .clarify_choice_mousedown
+                .is_some()
+            {
+                state.clarify_banner_state.clarify_banner_drag_end = Some((column, row));
+                return vec![];
+            }
+            if state.conversation.chat_drag_active {
+                if let Some(sel) = state.conversation.chat_selection.as_mut() {
+                    sel.cursor_line = state.conversation.scroll_offset.saturating_add(
                         (row.saturating_sub(state.layout.chat_area.rect.y)) as usize,
                     );
                     sel.cursor_col =
@@ -441,8 +739,61 @@ fn route_mouse(
         }
 
         MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
-            if state.chat_drag_active {
-                state.chat_drag_active = false;
+            // Clarify banner: click selects a choice; drag copies selected text.
+            if let Some((down_col, down_row)) =
+                state.clarify_banner_state.clarify_choice_mousedown.take()
+            {
+                let drag_end = state.clarify_banner_state.clarify_banner_drag_end.take();
+                if let Some((up_col, up_row)) =
+                    drag_end.or(if column == down_col && row == down_row {
+                        None
+                    } else {
+                        Some((column, row))
+                    })
+                {
+                    // Drag — extract the text of selected banner rows and copy.
+                    let text =
+                        extract_clarify_banner_text(state, down_row, down_col, up_row, up_col);
+                    if !text.is_empty() {
+                        return vec![Effect::CopyToClipboard(text)];
+                    }
+                    return vec![];
+                }
+                // Click — fill textarea with choice text if on a choice row.
+                if let TuiMode::ClarifyPending {
+                    ref question,
+                    ref context,
+                    choices: Some(ref choices_list),
+                    ..
+                } = state.mode.clone()
+                {
+                    let banner = state.layout.clarify_banner;
+                    let wrap_width = banner.width as usize;
+                    let context_rows = context
+                        .as_deref()
+                        .map_or(0, |ctx| render_markdown(ctx, wrap_width).len() as u16);
+                    let context_spacer = u16::from(context.is_some());
+                    let question_rows = render_markdown(question, wrap_width).len().max(1) as u16;
+                    let choices_start_row = context_rows + context_spacer + question_rows;
+                    let relative_row = row.saturating_sub(banner.y);
+                    let content_row =
+                        relative_row as usize + state.clarify_banner_state.clarify_scroll_offset;
+                    if content_row >= choices_start_row as usize {
+                        let choice_index = content_row - choices_start_row as usize;
+                        if let Some(choice_text) = choices_list.get(choice_index) {
+                            let rendered = format!("{}. {}", choice_index + 1, choice_text);
+                            let text_end_col = banner.x + rendered.chars().count() as u16;
+                            if column < text_end_col {
+                                return vec![Effect::SetInputText(choice_text.clone())];
+                            }
+                        }
+                    }
+                }
+                return vec![];
+            }
+
+            if state.conversation.chat_drag_active {
+                state.conversation.chat_drag_active = false;
                 let selected_text = state.extract_chat_selection_text();
                 if let Some(text) = selected_text {
                     if !text.is_empty() {
@@ -450,10 +801,11 @@ fn route_mouse(
                     }
                 }
                 // Plain click — toggle bubble if clicked on title row.
-                if let Some(sel) = state.chat_selection {
+                if let Some(sel) = state.conversation.chat_selection {
                     let clicked_line = sel.anchor_line;
                     let clicked_col = sel.anchor_col;
                     if let Some((_, _, bubble_id)) = state
+                        .conversation
                         .bubble_title_rows
                         .iter()
                         .find(|(start, end, _)| {
@@ -464,10 +816,73 @@ fn route_mouse(
                         })
                         .copied()
                     {
-                        state.toggle_tool_bubble_collapsed(bubble_id);
+                        // A double-click on a `spawn_subagent` bubble's title
+                        // drills into *that bubble's own* conversation view
+                        // instead of toggling collapse — distinct from the
+                        // single-click collapse/expand every bubble
+                        // (including spawn bubbles) always supports.
+                        // `run_id_for_bubble` still resolves a finished
+                        // child's bubble (entries in `child_conversations`
+                        // are kept indefinitely), and correctly disambiguates
+                        // between multiple concurrent/queued `spawn_subagent`
+                        // bubbles rather than assuming "the" single child.
+                        //
+                        // The first click on a spawn bubble does NOT toggle
+                        // collapse immediately — it only arms
+                        // `last_bubble_click`. Toggling immediately would
+                        // change the bubble's rendered height and could shift
+                        // a bottom-pinned auto-scroll before the second click
+                        // arrives, breaking the row lookup that correlates it
+                        // back to this bubble. Deferring the toggle until
+                        // `BubbleClickWindowExpired` fires (see
+                        // `bubble_click_timeout` in tui_driver.rs) keeps the
+                        // layout stable across both clicks of a double-click.
+                        let is_spawn_bubble = state.chat_entries.iter().any(|entry| {
+                            matches!(entry, ChatEntry::ToolBubble { id, name, .. }
+                                if *id == bubble_id && name == crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME)
+                        });
+                        if is_spawn_bubble {
+                            let now = std::time::Instant::now();
+                            let is_double_click = matches!(
+                                state.last_bubble_click,
+                                Some((last_id, clicked_at))
+                                    if last_id == bubble_id
+                                        && now.duration_since(clicked_at)
+                                            < crate::tui_reducer_state::DOUBLE_CLICK_WINDOW
+                            );
+                            if is_double_click {
+                                state.last_bubble_click = None;
+                                if let Some(run_id) = state.run_id_for_bubble(bubble_id) {
+                                    state.switch_to_child_view(run_id);
+                                } else {
+                                    state.toggle_tool_bubble_collapsed(bubble_id);
+                                }
+                            } else {
+                                state.last_bubble_click = Some((bubble_id, now));
+                            }
+                        } else {
+                            state.toggle_tool_bubble_collapsed(bubble_id);
+                        }
+                    } else if let Some((_, _, entry_index)) = state
+                        .conversation
+                        .thinking_title_rows
+                        .iter()
+                        .find(|(start, end, _)| {
+                            clicked_line == start + 1
+                                || (clicked_col == 0
+                                    && clicked_line >= *start
+                                    && clicked_line <= *end)
+                        })
+                        .copied()
+                    {
+                        if entry_index == crate::tui_reducer_state::STREAMING_THINKING_ENTRY_INDEX {
+                            state.toggle_partial_thinking_collapsed();
+                        } else {
+                            state.toggle_thinking_collapsed(entry_index);
+                        }
                     }
                 }
-                state.chat_selection = None;
+                state.conversation.chat_selection = None;
                 vec![]
             } else {
                 vec![Effect::FinalizeInputSelection]
@@ -481,16 +896,206 @@ fn route_mouse(
 // ─── Domain routing ───────────────────────────────────────────────────────────
 
 fn route_domain(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
-    match state.mode.clone() {
-        TuiMode::Idle => domain_idle(state, event),
-        TuiMode::Pending => domain_pending(state, event),
-        TuiMode::Streaming => domain_streaming(state, event),
-        TuiMode::Aborting => domain_aborting(state, event),
-        TuiMode::DoublePressAbort {
-            pressed_at,
-            return_to,
-        } => domain_double_press(state, event, pressed_at, return_to),
+    let event_kind = event.kind();
+    let correlation_id = event.correlation_id();
+    let mode_before = state.mode.kind();
+    // Child-lifecycle events never depend on / alter the parent's own
+    // `TuiMode` (that's driven exclusively by the root's own stream/tool
+    // state) — handle them uniformly ahead of the per-mode dispatch below.
+    let effects = domain_child_lifecycle(state, event);
+    // Deliberately logs only the event's variant tag, its correlation `id`
+    // (when it has one), and the mode transition — never chunk text, tool
+    // arguments, or tool output — just enough to follow the state-transition
+    // flow and match up a call's `ToolStart`/`ToolProgress`/`ToolDone` (or
+    // `ClarifyPending`) sequence across log lines.
+    tracing::debug!(
+        event = event_kind,
+        correlation_id = ?correlation_id,
+        mode_before,
+        mode_after = state.mode.kind(),
+        "domain event handled"
+    );
+    effects
+}
+
+/// Handles `ChildAgentStarted`/`ChildAgentToken`/`ChildAgentDone` ahead of the
+/// mode-specific dispatch; every other event falls through unchanged to the
+/// per-`TuiMode` handlers.
+fn domain_child_lifecycle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
+    match event {
+        DomainEvent::ChildAgentStarted {
+            run_id,
+            call_id,
+            agent_type,
+            task,
+            label,
+        } => {
+            state.start_child_run(ChildRunInfo {
+                run_id,
+                bubble_id: call_id,
+                agent_type,
+                task,
+                label,
+            });
+            state.child_view.header_bubble_scroll_offset = 0;
+            // No synthetic "task" message is seeded here: the child-view
+            // header re-renders the real root `spawn_subagent` bubble (see
+            // `render::project_for_draw`'s `child_view_bubble`), which
+            // already shows the task/label/agent_type — duplicating it as
+            // the transcript's first turn would just repeat the same text.
+            vec![]
+        }
+        DomainEvent::ChildAgentToken {
+            run_id,
+            text,
+            is_thinking,
+        } => {
+            if let Some(conversation) = state.child_conversations.get_mut(&run_id) {
+                if is_thinking {
+                    conversation
+                        .turn_buffer
+                        .push_thinking_chunk(&text, &mut conversation.messages);
+                } else {
+                    conversation
+                        .turn_buffer
+                        .push_response_chunk(&text, &mut conversation.messages);
+                }
+            }
+            vec![]
+        }
+        DomainEvent::ChildAgentDone { run_id, .. } => {
+            state.flush_child_partial_text(run_id);
+            // Only auto-return if the user is currently viewing *this*
+            // finished child's transcript — a different child may still be
+            // running/queued, or the user may be looking at an unrelated
+            // (earlier-finished) child's transcript, in which case this
+            // event must not disturb `active_view`.
+            let is_viewing_this_child = matches!(
+                state.active_view,
+                ConversationView::Child { run_id: viewed_run_id, .. } if viewed_run_id == run_id
+            );
+            if is_viewing_this_child && state.auto_switched_to_child {
+                state.switch_to_root_view();
+            }
+            if state
+                .running_child
+                .as_ref()
+                .is_some_and(|child| child.run_id == run_id)
+            {
+                state.running_child = None;
+            }
+            vec![]
+        }
+        DomainEvent::BubbleClickWindowExpired => {
+            // Commit the deferred toggle from a single (non-double) click on
+            // a spawn bubble's title — see the click handler in `update()`.
+            // A no-op if a confirming second click already resolved (and
+            // cleared) the arm first.
+            if let Some((bubble_id, _)) = state.last_bubble_click.take() {
+                state.toggle_tool_bubble_collapsed(bubble_id);
+            }
+            vec![]
+        }
+        other => match state.mode.clone() {
+            TuiMode::Idle => domain_idle(state, other),
+            TuiMode::Pending => domain_pending(state, other),
+            TuiMode::Streaming => domain_streaming(state, other),
+            TuiMode::ClarifyPending { .. } => domain_clarify_pending(state, other),
+            TuiMode::Aborting => domain_aborting(state, other),
+            TuiMode::DoublePressAbort {
+                pressed_at,
+                return_to,
+                armed_by,
+            } => domain_double_press(state, other, pressed_at, return_to, armed_by),
+        },
     }
+}
+
+/// Shared handling for `DomainEvent::ToolPending`, used identically by
+/// `domain_idle`, `domain_pending`, and `domain_streaming`: creates the
+/// `Pending` bubble in whichever transcript `run_id` targets (root or the
+/// current child), arms `Focus::ToolApproval`, and — when this pending call
+/// belongs to the tracked child — auto-switches the drill-in view to it.
+fn push_tool_pending_bubble(
+    state: &mut AppState,
+    id: Uuid,
+    name: String,
+    arguments: serde_json::Value,
+    content_sections: Vec<crate::agent::tools::Section>,
+    title_arguments: Vec<(String, serde_json::Value)>,
+    run_id: Option<Uuid>,
+) -> Vec<Effect> {
+    state.flush_target_partial_text(run_id);
+    state
+        .target_messages_mut(run_id)
+        .push(ChatEntry::ToolBubble {
+            id,
+            name: name.clone(),
+            state: Box::new(ToolCallState::Pending {
+                arguments,
+                content_sections,
+                title_arguments,
+            }),
+            collapsed: true,
+        });
+    state.focus = Focus::ToolApproval {
+        tool_id: id,
+        tool_name: name,
+    };
+    state.note_child_interactive_pause(run_id);
+    vec![Effect::SaveTextareaAndClear]
+}
+
+/// Shared handling for `DomainEvent::ClarifyPending`, used identically by
+/// `domain_idle`, `domain_pending`, and `domain_streaming`. See
+/// `push_tool_pending_bubble` for the `run_id` routing/auto-switch rationale.
+fn push_clarify_pending_bubble(
+    state: &mut AppState,
+    id: Uuid,
+    question: String,
+    context: Option<String>,
+    choices: Option<Vec<String>>,
+    run_id: Option<Uuid>,
+) -> Vec<Effect> {
+    let mut bubble_arguments = serde_json::json!({ "question": question });
+    if let Some(ref ctx) = context {
+        bubble_arguments["context"] = serde_json::Value::String(ctx.clone());
+    }
+    if let Some(ref choices_list) = choices {
+        bubble_arguments["choices"] = serde_json::json!(choices_list);
+    }
+    // Flush any thinking/assistant text accumulated before this clarify call
+    // so it lands ahead of the clarify bubble in chronological order (mirrors
+    // the ToolStart/ToolPending flush).
+    state.flush_target_partial_text(run_id);
+    state
+        .target_messages_mut(run_id)
+        .push(ChatEntry::ToolBubble {
+            id,
+            name: ClarifyTool::NAME.to_string(),
+            state: Box::new(ToolCallState::Running {
+                arguments: bubble_arguments,
+                content_sections: vec![],
+                title_arguments: vec![(
+                    "question".to_string(),
+                    serde_json::Value::String(question.clone()),
+                )],
+                progress_arguments: vec![],
+            }),
+            collapsed: false,
+        });
+    state.mode = TuiMode::ClarifyPending {
+        id,
+        question,
+        context,
+        choices,
+    };
+    // Scroll the clarify banner to the bottom so the question and choices
+    // are visible immediately; clamped to max_scroll on render.
+    state.clarify_banner_state.clarify_scroll_offset = usize::MAX;
+    state.focus = Focus::MainInput;
+    state.note_child_interactive_pause(run_id);
+    vec![Effect::SaveTextareaAndClear]
 }
 
 fn domain_idle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
@@ -498,7 +1103,8 @@ fn domain_idle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
         DomainEvent::StreamStarted => {
             state.flush_partial_assistant_message(false);
             state.mode = TuiMode::Streaming;
-            state.partial_assistant_text.clear();
+            state.turn_buffer.partial_assistant_text.clear();
+            state.turn_buffer.partial_thinking_text.clear();
             vec![]
         }
         DomainEvent::ToolPending {
@@ -507,36 +1113,49 @@ fn domain_idle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             arguments,
             content_sections,
             title_arguments,
-        } => {
-            state.flush_partial_assistant_message(false);
-            state.chat_entries.push(ChatEntry::ToolBubble {
-                id,
-                name: name.clone(),
-                state: ToolCallState::Pending {
-                    arguments: arguments.clone(),
-                    content_sections: content_sections.clone(),
-                    title_arguments: title_arguments.clone(),
-                },
-                collapsed: true,
-            });
-            state.focus = Focus::ToolApproval {
-                tool_id: id,
-                tool_name: name,
-            };
-            vec![Effect::SaveTextareaAndClear]
-        }
-        DomainEvent::Error(message) => {
-            state.chat_entries.push(ChatEntry::ErrorLine { message });
-            state.mode = TuiMode::Idle;
+            run_id,
+        } => push_tool_pending_bubble(
+            state,
+            id,
+            name,
+            arguments,
+            content_sections,
+            title_arguments,
+            run_id,
+        ),
+        DomainEvent::ClarifyPending {
+            id,
+            question,
+            context,
+            choices,
+            run_id,
+        } => push_clarify_pending_bubble(state, id, question, context, choices, run_id),
+        DomainEvent::Error { message, run_id } => {
+            if run_id.is_none() {
+                state.mode = TuiMode::Idle;
+            }
+            state
+                .target_messages_mut(run_id)
+                .push(ChatEntry::ErrorLine { message });
             vec![]
         }
-        DomainEvent::SteerQueued => {
-            state.steer_indicator = true;
+        DomainEvent::SteerQueued { run_id } => {
+            // No driver routes `Prompt` to a child today (see
+            // `UiUpdate::SteerQueued::run_id`), so `run_id: Some(_)` is
+            // unreachable in practice; guard anyway rather than silently
+            // flipping the root's own indicator for a child steer.
+            if run_id.is_none() {
+                state.steer_indicator = true;
+            }
             vec![]
         }
-        DomainEvent::SteerApplied => {
-            state.transition_queued_messages_to(UserMessageState::Steered);
-            state.steer_indicator = false;
+        DomainEvent::SteerApplied { run_id } => {
+            // See `DomainEvent::SteerQueued` above: only the root's own
+            // steer queue/indicator is meaningful today.
+            if run_id.is_none() {
+                state.commit_queued_steer_messages(UserMessageState::Steered);
+                state.steer_indicator = false;
+            }
             vec![]
         }
         DomainEvent::AgentIdle => {
@@ -550,6 +1169,7 @@ fn domain_idle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             arguments,
             content_sections,
             title_arguments,
+            run_id,
         } => {
             update_tool_bubble_to_running(
                 state,
@@ -558,30 +1178,42 @@ fn domain_idle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
                 arguments,
                 content_sections,
                 title_arguments,
+                run_id,
             );
+            vec![]
+        }
+        DomainEvent::ToolProgress {
+            id,
+            title_arguments,
+        } => {
+            update_tool_bubble_progress(state, id, title_arguments);
             vec![]
         }
         DomainEvent::ToolDone {
             id,
             name,
-            result,
+            result_section,
             summary,
             duration,
             content_sections,
+            run_id,
         } => {
             update_tool_bubble_to_done(
                 state,
-                id,
-                name,
-                result,
-                content_sections,
-                summary,
-                duration,
+                ToolDonePayload {
+                    id,
+                    name,
+                    result_section,
+                    content_sections,
+                    summary,
+                    duration,
+                    run_id,
+                },
             );
             vec![]
         }
-        DomainEvent::ToolKilled { id } => {
-            update_tool_bubble_to_killed(state, id);
+        DomainEvent::ToolKilled { id, run_id } => {
+            update_tool_bubble_to_killed(state, id, run_id);
             vec![]
         }
         DomainEvent::ToolDenied { id } => {
@@ -601,28 +1233,29 @@ fn domain_pending(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
         DomainEvent::StreamStarted => {
             state.flush_partial_assistant_message(false);
             state.mode = TuiMode::Streaming;
-            state.partial_assistant_text.clear();
+            state.turn_buffer.partial_assistant_text.clear();
+            state.turn_buffer.partial_thinking_text.clear();
             vec![]
         }
         DomainEvent::StreamDone => {
             state.flush_partial_assistant_message(false);
             state.mode = TuiMode::Idle;
-            state.scroll_locked = true;
-            state.scroll_offset = 0;
             vec![]
         }
         DomainEvent::StreamCancelled => {
             state.flush_partial_assistant_message(true);
-            state.transition_queued_messages_to(UserMessageState::Cancelled);
+            state.commit_queued_steer_messages(UserMessageState::Cancelled);
             state.steer_indicator = false;
             state.mode = TuiMode::Idle;
-            state.scroll_locked = true;
-            state.scroll_offset = 0;
             vec![]
         }
-        DomainEvent::Error(message) => {
-            state.chat_entries.push(ChatEntry::ErrorLine { message });
-            state.mode = TuiMode::Idle;
+        DomainEvent::Error { message, run_id } => {
+            if run_id.is_none() {
+                state.mode = TuiMode::Idle;
+            }
+            state
+                .target_messages_mut(run_id)
+                .push(ChatEntry::ErrorLine { message });
             vec![]
         }
         DomainEvent::ToolPending {
@@ -631,31 +1264,40 @@ fn domain_pending(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             arguments,
             content_sections,
             title_arguments,
-        } => {
-            state.flush_partial_assistant_message(false);
-            state.chat_entries.push(ChatEntry::ToolBubble {
-                id,
-                name: name.clone(),
-                state: ToolCallState::Pending {
-                    arguments: arguments.clone(),
-                    content_sections: content_sections.clone(),
-                    title_arguments: title_arguments.clone(),
-                },
-                collapsed: true,
-            });
-            state.focus = Focus::ToolApproval {
-                tool_id: id,
-                tool_name: name,
-            };
-            vec![Effect::SaveTextareaAndClear]
-        }
-        DomainEvent::SteerQueued => {
-            state.steer_indicator = true;
+            run_id,
+        } => push_tool_pending_bubble(
+            state,
+            id,
+            name,
+            arguments,
+            content_sections,
+            title_arguments,
+            run_id,
+        ),
+        DomainEvent::ClarifyPending {
+            id,
+            question,
+            context,
+            choices,
+            run_id,
+        } => push_clarify_pending_bubble(state, id, question, context, choices, run_id),
+        DomainEvent::SteerQueued { run_id } => {
+            // No driver routes `Prompt` to a child today (see
+            // `UiUpdate::SteerQueued::run_id`), so `run_id: Some(_)` is
+            // unreachable in practice; guard anyway rather than silently
+            // flipping the root's own indicator for a child steer.
+            if run_id.is_none() {
+                state.steer_indicator = true;
+            }
             vec![]
         }
-        DomainEvent::SteerApplied => {
-            state.transition_queued_messages_to(UserMessageState::Steered);
-            state.steer_indicator = false;
+        DomainEvent::SteerApplied { run_id } => {
+            // See `DomainEvent::SteerQueued` above: only the root's own
+            // steer queue/indicator is meaningful today.
+            if run_id.is_none() {
+                state.commit_queued_steer_messages(UserMessageState::Steered);
+                state.steer_indicator = false;
+            }
             vec![]
         }
         DomainEvent::AgentIdle => {
@@ -669,6 +1311,7 @@ fn domain_pending(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             arguments,
             content_sections,
             title_arguments,
+            run_id,
         } => {
             update_tool_bubble_to_running(
                 state,
@@ -677,30 +1320,42 @@ fn domain_pending(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
                 arguments,
                 content_sections,
                 title_arguments,
+                run_id,
             );
+            vec![]
+        }
+        DomainEvent::ToolProgress {
+            id,
+            title_arguments,
+        } => {
+            update_tool_bubble_progress(state, id, title_arguments);
             vec![]
         }
         DomainEvent::ToolDone {
             id,
             name,
-            result,
+            result_section,
             summary,
             duration,
             content_sections,
+            run_id,
         } => {
             update_tool_bubble_to_done(
                 state,
-                id,
-                name,
-                result,
-                content_sections,
-                summary,
-                duration,
+                ToolDonePayload {
+                    id,
+                    name,
+                    result_section,
+                    content_sections,
+                    summary,
+                    duration,
+                    run_id,
+                },
             );
             vec![]
         }
-        DomainEvent::ToolKilled { id } => {
-            update_tool_bubble_to_killed(state, id);
+        DomainEvent::ToolKilled { id, run_id } => {
+            update_tool_bubble_to_killed(state, id, run_id);
             vec![]
         }
         DomainEvent::ToolDenied { id } => {
@@ -718,29 +1373,44 @@ fn domain_pending(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
 fn domain_streaming(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
     match event {
         DomainEvent::StreamChunk(text) => {
-            state.partial_assistant_text.push_str(&text);
-            if state.scroll_locked {
-                state.scroll_offset = 0;
+            // A response chunk following pending thinking text means the
+            // model just finished a thinking segment and switched to reply
+            // text — `push_response_chunk` flushes that segment into its own
+            // bubble first, rather than merging it with whatever thinking
+            // segment follows later in the same turn.
+            state
+                .turn_buffer
+                .push_response_chunk(&text, &mut state.chat_entries);
+            if state.conversation.scroll_locked {
+                state.conversation.scroll_offset = 0;
+            }
+            vec![]
+        }
+        DomainEvent::StreamThinkingChunk(text) => {
+            // Mirrors the flush above: `push_thinking_chunk` flushes any
+            // pending reply segment so far into its own bubble when the
+            // model switches back to thinking.
+            state
+                .turn_buffer
+                .push_thinking_chunk(&text, &mut state.chat_entries);
+            if state.conversation.scroll_locked {
+                state.conversation.scroll_offset = 0;
             }
             vec![]
         }
         DomainEvent::StreamDone => {
             state.flush_partial_assistant_message(false);
             state.mode = TuiMode::Idle;
-            state.scroll_locked = true;
-            state.scroll_offset = 0;
             vec![]
         }
         DomainEvent::StreamCancelled => {
             state.flush_partial_assistant_message(true);
-            state.transition_queued_messages_to(UserMessageState::Cancelled);
+            state.commit_queued_steer_messages(UserMessageState::Cancelled);
             state.steer_indicator = false;
             if matches!(state.focus, Focus::ToolApproval { .. }) {
                 state.focus = Focus::MainInput;
             }
             state.mode = TuiMode::Idle;
-            state.scroll_locked = true;
-            state.scroll_offset = 0;
             vec![]
         }
         DomainEvent::ToolPending {
@@ -749,30 +1419,30 @@ fn domain_streaming(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             arguments,
             content_sections,
             title_arguments,
-        } => {
-            state.flush_partial_assistant_message(false);
-            state.chat_entries.push(ChatEntry::ToolBubble {
-                id,
-                name: name.clone(),
-                state: ToolCallState::Pending {
-                    arguments: arguments.clone(),
-                    content_sections: content_sections.clone(),
-                    title_arguments: title_arguments.clone(),
-                },
-                collapsed: true,
-            });
-            state.focus = Focus::ToolApproval {
-                tool_id: id,
-                tool_name: name,
-            };
-            vec![Effect::SaveTextareaAndClear]
-        }
+            run_id,
+        } => push_tool_pending_bubble(
+            state,
+            id,
+            name,
+            arguments,
+            content_sections,
+            title_arguments,
+            run_id,
+        ),
+        DomainEvent::ClarifyPending {
+            id,
+            question,
+            context,
+            choices,
+            run_id,
+        } => push_clarify_pending_bubble(state, id, question, context, choices, run_id),
         DomainEvent::ToolStart {
             id,
             name,
             arguments,
             content_sections,
             title_arguments,
+            run_id,
         } => {
             update_tool_bubble_to_running(
                 state,
@@ -781,30 +1451,42 @@ fn domain_streaming(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
                 arguments,
                 content_sections,
                 title_arguments,
+                run_id,
             );
+            vec![]
+        }
+        DomainEvent::ToolProgress {
+            id,
+            title_arguments,
+        } => {
+            update_tool_bubble_progress(state, id, title_arguments);
             vec![]
         }
         DomainEvent::ToolDone {
             id,
             name,
-            result,
+            result_section,
             summary,
             duration,
             content_sections,
+            run_id,
         } => {
             update_tool_bubble_to_done(
                 state,
-                id,
-                name,
-                result,
-                content_sections,
-                summary,
-                duration,
+                ToolDonePayload {
+                    id,
+                    name,
+                    result_section,
+                    content_sections,
+                    summary,
+                    duration,
+                    run_id,
+                },
             );
             vec![]
         }
-        DomainEvent::ToolKilled { id } => {
-            update_tool_bubble_to_killed(state, id);
+        DomainEvent::ToolKilled { id, run_id } => {
+            update_tool_bubble_to_killed(state, id, run_id);
             vec![]
         }
         DomainEvent::ToolDenied { id } => {
@@ -814,18 +1496,32 @@ fn domain_streaming(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             }
             vec![]
         }
-        DomainEvent::Error(message) => {
-            state.chat_entries.push(ChatEntry::ErrorLine { message });
-            state.mode = TuiMode::Idle;
+        DomainEvent::Error { message, run_id } => {
+            if run_id.is_none() {
+                state.mode = TuiMode::Idle;
+            }
+            state
+                .target_messages_mut(run_id)
+                .push(ChatEntry::ErrorLine { message });
             vec![]
         }
-        DomainEvent::SteerQueued => {
-            state.steer_indicator = true;
+        DomainEvent::SteerQueued { run_id } => {
+            // No driver routes `Prompt` to a child today (see
+            // `UiUpdate::SteerQueued::run_id`), so `run_id: Some(_)` is
+            // unreachable in practice; guard anyway rather than silently
+            // flipping the root's own indicator for a child steer.
+            if run_id.is_none() {
+                state.steer_indicator = true;
+            }
             vec![]
         }
-        DomainEvent::SteerApplied => {
-            state.transition_queued_messages_to(UserMessageState::Steered);
-            state.steer_indicator = false;
+        DomainEvent::SteerApplied { run_id } => {
+            // See `DomainEvent::SteerQueued` above: only the root's own
+            // steer queue/indicator is meaningful today.
+            if run_id.is_none() {
+                state.commit_queued_steer_messages(UserMessageState::Steered);
+                state.steer_indicator = false;
+            }
             vec![]
         }
         DomainEvent::AgentIdle => {
@@ -834,6 +1530,17 @@ fn domain_streaming(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             vec![]
         }
         DomainEvent::ConfirmExpired => vec![],
+        _ => vec![],
+    }
+}
+
+fn domain_clarify_pending(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
+    match event {
+        DomainEvent::AgentIdle | DomainEvent::StreamCancelled => {
+            state.mode = TuiMode::Idle;
+            state.focus = Focus::MainInput;
+            vec![]
+        }
         _ => vec![],
     }
 }
@@ -847,14 +1554,12 @@ fn domain_aborting(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
                 "aborting: stream cancelled → idle"
             );
             state.flush_partial_assistant_message(true);
-            state.transition_queued_messages_to(UserMessageState::Cancelled);
+            state.commit_queued_steer_messages(UserMessageState::Cancelled);
             state.steer_indicator = false;
             if matches!(state.focus, Focus::ToolApproval { .. }) {
                 state.focus = Focus::MainInput;
             }
             state.mode = TuiMode::Idle;
-            state.scroll_locked = true;
-            state.scroll_offset = 0;
             if std::mem::replace(&mut state.aborting_exit, false) {
                 vec![Effect::Quit]
             } else {
@@ -872,7 +1577,10 @@ fn domain_aborting(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
         }
         DomainEvent::ToolPending { id, .. } => {
             // While aborting, deny immediately without entering approval sub-mode.
-            vec![Effect::DenyTool { id }]
+            vec![Effect::DenyTool {
+                id,
+                reason: String::new(),
+            }]
         }
         DomainEvent::ToolStart {
             id,
@@ -880,6 +1588,7 @@ fn domain_aborting(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             arguments,
             content_sections,
             title_arguments,
+            run_id,
         } => {
             update_tool_bubble_to_running(
                 state,
@@ -888,31 +1597,43 @@ fn domain_aborting(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
                 arguments,
                 content_sections,
                 title_arguments,
+                run_id,
             );
+            vec![]
+        }
+        DomainEvent::ToolProgress {
+            id,
+            title_arguments,
+        } => {
+            update_tool_bubble_progress(state, id, title_arguments);
             vec![]
         }
         DomainEvent::ToolDone {
             id,
             name,
-            result,
+            result_section,
             summary,
             duration,
             content_sections,
+            run_id,
         } => {
             update_tool_bubble_to_done(
                 state,
-                id,
-                name,
-                result,
-                content_sections,
-                summary,
-                duration,
+                ToolDonePayload {
+                    id,
+                    name,
+                    result_section,
+                    content_sections,
+                    summary,
+                    duration,
+                    run_id,
+                },
             );
             vec![]
         }
-        DomainEvent::ToolKilled { id } => {
+        DomainEvent::ToolKilled { id, run_id } => {
             tracing::info!(%id, aborting_exit = state.aborting_exit, "aborting: tool killed → idle");
-            update_tool_bubble_to_killed(state, id);
+            update_tool_bubble_to_killed(state, id, run_id);
             state.mode = TuiMode::Idle;
             state.focus = Focus::MainInput;
             if std::mem::replace(&mut state.aborting_exit, false) {
@@ -925,20 +1646,30 @@ fn domain_aborting(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             update_tool_bubble_to_denied(state, id);
             vec![]
         }
-        DomainEvent::Error(message) => {
-            state.chat_entries.push(ChatEntry::ErrorLine { message });
-            state.mode = TuiMode::Idle;
+        DomainEvent::Error { message, run_id } => {
+            if run_id.is_none() {
+                state.mode = TuiMode::Idle;
+            }
+            state
+                .target_messages_mut(run_id)
+                .push(ChatEntry::ErrorLine { message });
             vec![]
         }
         DomainEvent::StreamDone => {
             state.flush_partial_assistant_message(false);
             state.mode = TuiMode::Idle;
-            state.scroll_locked = true;
-            state.scroll_offset = 0;
             vec![]
         }
         DomainEvent::StreamChunk(text) => {
-            state.partial_assistant_text.push_str(&text);
+            state
+                .turn_buffer
+                .push_response_chunk(&text, &mut state.chat_entries);
+            vec![]
+        }
+        DomainEvent::StreamThinkingChunk(text) => {
+            state
+                .turn_buffer
+                .push_thinking_chunk(&text, &mut state.chat_entries);
             vec![]
         }
         DomainEvent::ConfirmExpired => vec![],
@@ -951,6 +1682,7 @@ fn domain_double_press(
     event: DomainEvent,
     pressed_at: Instant,
     return_to: Box<TuiMode>,
+    armed_by: ConfirmKey,
 ) -> Vec<Effect> {
     match event {
         DomainEvent::ConfirmExpired => {
@@ -971,6 +1703,7 @@ fn domain_double_press(
                 state.mode = TuiMode::DoublePressAbort {
                     pressed_at,
                     return_to,
+                    armed_by,
                 };
             }
             effects
@@ -985,8 +1718,9 @@ fn update_tool_bubble_to_running(
     id: Uuid,
     name: String,
     arguments: serde_json::Value,
-    content_sections: Vec<crate::agent::tools::ContentSection>,
+    content_sections: Vec<crate::agent::tools::Section>,
     title_arguments: Vec<(String, serde_json::Value)>,
+    run_id: Option<Uuid>,
 ) {
     if let Some(entry) = state.find_tool_bubble_mut(id) {
         if let ChatEntry::ToolBubble {
@@ -994,39 +1728,98 @@ fn update_tool_bubble_to_running(
             ..
         } = entry
         {
-            *bubble_state = ToolCallState::Running {
+            **bubble_state = ToolCallState::Running {
                 arguments: arguments.clone(),
                 content_sections: content_sections.clone(),
                 title_arguments: title_arguments.clone(),
+                progress_arguments: vec![],
             };
         }
     } else {
-        state.chat_entries.push(ChatEntry::ToolBubble {
-            id,
-            name,
-            state: ToolCallState::Running {
-                arguments,
-                content_sections,
-                title_arguments,
-            },
-            collapsed: true,
-        });
+        // First appearance of this tool call (auto-run tool with no approval
+        // step): flush any thinking/assistant text accumulated *before* this
+        // call so it lands as its own bubble ahead of the tool bubble in
+        // `chat_entries`, matching actual chronological order. Without this,
+        // thinking that happens both before and after the tool call would
+        // stay merged into one bubble and get flushed only at `StreamDone`,
+        // making it look like the tool ran before the model ever "thought".
+        state.flush_target_partial_text(run_id);
+        state
+            .target_messages_mut(run_id)
+            .push(ChatEntry::ToolBubble {
+                id,
+                name,
+                state: Box::new(ToolCallState::Running {
+                    arguments,
+                    content_sections,
+                    title_arguments,
+                    progress_arguments: vec![],
+                }),
+                collapsed: true,
+            });
     }
     // Clear ToolApproval focus if it was for this tool.
     if matches!(state.focus, Focus::ToolApproval { tool_id, .. } if tool_id == id) {
         state.focus = Focus::MainInput;
     }
+    // A tool moving from Pending to Running means its approval step (if any)
+    // is over — if this was the child's interactive pause we auto-switched
+    // for, auto-return to Root now that the child is unblocked again.
+    state.resolve_possible_child_pause(id);
 }
 
-fn update_tool_bubble_to_done(
+/// Patches `progress_arguments` on an existing `Running` tool bubble without
+/// otherwise changing its state — used for interim status updates (e.g.
+/// `spawn_subagent` reporting `status=spawned`/`queued` + `run_id`) that
+/// don't mean the call itself is done. Deliberately separate from
+/// `title_arguments` (the call's real, static arguments): `Done` has no
+/// `progress_arguments` field, so these interim values are naturally
+/// dropped once the call truly finishes instead of lingering stale on the
+/// terminal bubble (see `ToolCallState::Running::progress_arguments`). A
+/// no-op if the bubble isn't found or isn't currently `Running` (e.g. it
+/// already reached a terminal state).
+fn update_tool_bubble_progress(
     state: &mut AppState,
     id: Uuid,
+    title_arguments: Vec<(String, serde_json::Value)>,
+) {
+    if let Some(ChatEntry::ToolBubble {
+        state: bubble_state,
+        ..
+    }) = state.find_tool_bubble_mut(id)
+    {
+        if let ToolCallState::Running {
+            progress_arguments, ..
+        } = bubble_state.as_mut()
+        {
+            *progress_arguments = title_arguments;
+        }
+    }
+}
+
+/// Payload for [`update_tool_bubble_to_done`], grouped into a struct to keep
+/// the function signature down to a reasonable arity (see
+/// `DomainEvent::ToolDone`, which this mirrors field-for-field plus `id`).
+struct ToolDonePayload {
+    id: Uuid,
     name: String,
-    result: String,
-    content_sections: Vec<crate::agent::tools::ContentSection>,
+    result_section: crate::tui_reducer_state::ResultSection,
+    content_sections: Vec<crate::agent::tools::Section>,
     summary: Vec<(String, String)>,
     duration: std::time::Duration,
-) {
+    run_id: Option<Uuid>,
+}
+
+fn update_tool_bubble_to_done(state: &mut AppState, payload: ToolDonePayload) {
+    let ToolDonePayload {
+        id,
+        name,
+        result_section,
+        content_sections,
+        summary,
+        duration,
+        run_id,
+    } = payload;
     let (previous_arguments, previous_title_arguments) = state
         .find_tool_bubble_mut(id)
         .and_then(|entry| {
@@ -1035,7 +1828,7 @@ fn update_tool_bubble_to_done(
                 ..
             } = entry
             {
-                match bubble_state {
+                match bubble_state.as_ref() {
                     ToolCallState::Running {
                         arguments,
                         title_arguments,
@@ -1059,9 +1852,9 @@ fn update_tool_bubble_to_done(
             ..
         } = entry
         {
-            *bubble_state = ToolCallState::Done {
+            **bubble_state = ToolCallState::Done {
                 arguments: previous_arguments,
-                result,
+                result_section,
                 content_sections,
                 summary,
                 duration,
@@ -1069,42 +1862,48 @@ fn update_tool_bubble_to_done(
             };
         }
     } else {
-        state.chat_entries.push(ChatEntry::ToolBubble {
-            id,
-            name,
-            state: ToolCallState::Done {
-                arguments: serde_json::Value::Null,
-                result,
-                content_sections,
-                summary,
-                duration,
-                title_arguments: vec![],
-            },
-            collapsed: true,
-        });
+        state
+            .target_messages_mut(run_id)
+            .push(ChatEntry::ToolBubble {
+                id,
+                name,
+                state: Box::new(ToolCallState::Done {
+                    arguments: serde_json::Value::Null,
+                    result_section,
+                    content_sections,
+                    summary,
+                    duration,
+                    title_arguments: vec![],
+                }),
+                collapsed: true,
+            });
     }
+    state.resolve_possible_child_pause(id);
 }
 
-fn update_tool_bubble_to_killed(state: &mut AppState, id: Uuid) {
+fn update_tool_bubble_to_killed(state: &mut AppState, id: Uuid, run_id: Option<Uuid>) {
     if let Some(entry) = state.find_tool_bubble_mut(id) {
         if let ChatEntry::ToolBubble {
             state: bubble_state,
             ..
         } = entry
         {
-            *bubble_state = ToolCallState::Killed;
+            **bubble_state = ToolCallState::Killed;
         }
     } else {
-        state.chat_entries.push(ChatEntry::ToolBubble {
-            id,
-            name: String::new(),
-            state: ToolCallState::Killed,
-            collapsed: true,
-        });
+        state
+            .target_messages_mut(run_id)
+            .push(ChatEntry::ToolBubble {
+                id,
+                name: String::new(),
+                state: Box::new(ToolCallState::Killed),
+                collapsed: true,
+            });
     }
     if matches!(state.focus, Focus::ToolApproval { tool_id, .. } if tool_id == id) {
         state.focus = Focus::MainInput;
     }
+    state.resolve_possible_child_pause(id);
 }
 
 fn update_tool_bubble_to_denied(state: &mut AppState, id: Uuid) {
@@ -1114,7 +1913,7 @@ fn update_tool_bubble_to_denied(state: &mut AppState, id: Uuid) {
     }) = state.find_tool_bubble_mut(id)
     {
         let (preserved_arguments, preserved_content_sections, preserved_title_arguments) =
-            match bubble_state {
+            match bubble_state.as_ref() {
                 ToolCallState::Pending {
                     arguments,
                     content_sections,
@@ -1124,6 +1923,7 @@ fn update_tool_bubble_to_denied(state: &mut AppState, id: Uuid) {
                     arguments,
                     content_sections,
                     title_arguments,
+                    ..
                 } => (
                     arguments.clone(),
                     content_sections.clone(),
@@ -1131,13 +1931,14 @@ fn update_tool_bubble_to_denied(state: &mut AppState, id: Uuid) {
                 ),
                 _ => (serde_json::Value::Null, vec![], vec![]),
             };
-        *bubble_state = ToolCallState::Denied {
+        **bubble_state = ToolCallState::Denied {
             arguments: preserved_arguments,
             error: "Denied by user".to_string(),
             content_sections: preserved_content_sections,
             title_arguments: preserved_title_arguments,
         };
     }
+    state.resolve_possible_child_pause(id);
 }
 
 // ─── Dedent helper ────────────────────────────────────────────────────────────
@@ -1167,7 +1968,10 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::app_state::{AppState, ChatEntry, Focus, InputEvent, ToolCallState, TuiMode};
+    use crate::tui_reducer_state::{
+        AppState, ChatEntry, ConversationView, Focus, InputEvent, ResultSection, ToolCallState,
+        TuiMode,
+    };
 
     fn empty_textarea() -> TextareaContext {
         TextareaContext {
@@ -1187,8 +1991,309 @@ mod tests {
         }
     }
 
+    #[test]
+    fn route_domain_logs_event_kind_and_mode_transition_without_chunk_text() {
+        let log = crate::test_support::capture_logs(async {
+            let mut state = AppState::new();
+            state.mode = TuiMode::Streaming;
+            update(
+                &mut state,
+                TuiEvent::Domain(DomainEvent::StreamChunk(
+                    "super-secret-assistant-text".to_string(),
+                )),
+                &empty_textarea(),
+            );
+        });
+        assert!(
+            log.contains("domain event handled"),
+            "route_domain must log a state-transition event: {log}"
+        );
+        assert!(
+            log.contains("event=\"StreamChunk\""),
+            "the event's variant tag must be logged: {log}"
+        );
+        assert!(
+            log.contains("mode_before=\"Streaming\"") && log.contains("mode_after=\"Streaming\""),
+            "the mode transition must be logged: {log}"
+        );
+        assert!(
+            !log.contains("super-secret-assistant-text"),
+            "chunk payload text must never be logged: {log}"
+        );
+    }
+
+    #[test]
+    fn route_domain_logs_correlation_id_for_tool_events() {
+        let id = Uuid::new_v4();
+        let log = crate::test_support::capture_logs(async {
+            let mut state = AppState::new();
+            state.mode = TuiMode::Streaming;
+            update(
+                &mut state,
+                TuiEvent::Domain(DomainEvent::ToolStart {
+                    id,
+                    name: "read".to_string(),
+                    arguments: serde_json::json!({"path": "/secret/path"}),
+                    content_sections: vec![],
+                    title_arguments: vec![],
+                    run_id: None,
+                }),
+                &empty_textarea(),
+            );
+        });
+        assert!(
+            log.contains(&format!("correlation_id=Some({id})")),
+            "the tool call's id must be logged for correlation: {log}"
+        );
+        assert!(
+            !log.contains("/secret/path"),
+            "tool arguments must never be logged: {log}"
+        );
+    }
+
     fn key_event(code: KeyCode) -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    // ── Phase 6.10 drill-in view tests ─────────────────────────────────────────
+
+    fn tracked_child(state: &mut AppState) -> Uuid {
+        let run_id = Uuid::new_v4();
+        state.start_child_run(crate::tui_reducer_state::ChildRunInfo {
+            run_id,
+            bubble_id: Uuid::new_v4(),
+            agent_type: "reviewer".to_string(),
+            task: "look into flaky test".to_string(),
+            label: "Investigate flaky test".to_string(),
+        });
+        run_id
+    }
+
+    #[test]
+    fn child_agent_started_does_not_auto_switch_the_active_view() {
+        // Spawning a child must not yank focus away from whatever the user
+        // was looking at — only an *interactive pause* (ToolPending /
+        // ClarifyPending) belonging to the child does that.
+        let mut state = AppState::new();
+        let run_id = Uuid::new_v4();
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ChildAgentStarted {
+                run_id,
+                call_id: Uuid::new_v4(),
+                agent_type: "reviewer".to_string(),
+                task: "look into flaky test".to_string(),
+                label: "Investigate flaky test".to_string(),
+            }),
+            &empty_textarea(),
+        );
+        assert_eq!(state.active_view, ConversationView::Root);
+        assert!(!state.auto_switched_to_child);
+    }
+
+    #[test]
+    fn child_agent_started_clears_transcript_without_seeding_a_synthetic_task_message() {
+        // The task is shown via the real root `spawn_subagent` bubble
+        // re-rendered as the child-view header (see
+        // `render::project_for_draw`'s `child_view_bubble`) — the transcript
+        // itself starts empty and only accumulates the child's own turns.
+        let mut state = AppState::new();
+        let run_id = Uuid::new_v4();
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ChildAgentStarted {
+                run_id,
+                call_id: Uuid::new_v4(),
+                agent_type: "reviewer".to_string(),
+                task: "look into flaky test".to_string(),
+                label: "Investigate flaky test".to_string(),
+            }),
+            &empty_textarea(),
+        );
+        assert!(state.child_conversations[&run_id].messages.is_empty());
+    }
+
+    #[test]
+    fn child_tool_pending_auto_switches_view_and_arms_auto_return() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::Streaming;
+        let run_id = tracked_child(&mut state);
+        let id = Uuid::new_v4();
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolPending {
+                id,
+                name: "write".to_string(),
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                run_id: Some(run_id),
+            }),
+            &empty_textarea(),
+        );
+        assert!(
+            matches!(state.active_view, ConversationView::Child { run_id: r, .. } if r == run_id),
+            "expected auto-switch to the child's view, got {:?}",
+            state.active_view
+        );
+        assert!(state.auto_switched_to_child);
+
+        // Resolving the pause (denial) auto-returns since the switch was
+        // automatic, not a manual navigation.
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolDenied { id }),
+            &empty_textarea(),
+        );
+        assert_eq!(state.active_view, ConversationView::Root);
+        assert!(!state.auto_switched_to_child);
+    }
+
+    #[test]
+    fn manual_navigation_to_child_view_prevents_auto_return() {
+        // A user who already drilled in manually (e.g. clicked the spawn
+        // bubble) should not get yanked back to Root the moment the child's
+        // pending tool call resolves — only an *auto*-switch re-arms
+        // auto-return.
+        let mut state = AppState::new();
+        state.mode = TuiMode::Streaming;
+        let run_id = tracked_child(&mut state);
+        state.switch_to_child_view(run_id);
+        assert!(!state.auto_switched_to_child);
+
+        let id = Uuid::new_v4();
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolPending {
+                id,
+                name: "write".to_string(),
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                run_id: Some(run_id),
+            }),
+            &empty_textarea(),
+        );
+        assert!(matches!(state.active_view, ConversationView::Child { .. }));
+        assert!(!state.auto_switched_to_child);
+
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolDenied { id }),
+            &empty_textarea(),
+        );
+        assert!(
+            matches!(state.active_view, ConversationView::Child { .. }),
+            "manual navigation must not auto-return: {:?}",
+            state.active_view
+        );
+    }
+
+    #[test]
+    fn child_tool_pending_for_a_different_running_child_auto_switches_away_from_a_finished_childs_view_and_restores_it_on_resolve(
+    ) {
+        // Regression: with two subagents spawned, one already finished (and
+        // the user manually drilled into its transcript) and a second still
+        // running, an approval belonging to the *second* (background) child
+        // must not be stranded behind the finished child's transcript — it
+        // has to switch to the child that actually needs the approval, then
+        // return to exactly the view the user was on before.
+        let mut state = AppState::new();
+        state.mode = TuiMode::Streaming;
+
+        // First child finishes; user manually drills into its (now static)
+        // transcript.
+        let finished_run_id = tracked_child(&mut state);
+        state.running_child = None;
+        state.switch_to_child_view(finished_run_id);
+        assert!(!state.auto_switched_to_child);
+
+        // Second child starts running in the background and hits a bash
+        // approval.
+        let running_run_id = Uuid::new_v4();
+        state.start_child_run(crate::tui_reducer_state::ChildRunInfo {
+            run_id: running_run_id,
+            bubble_id: Uuid::new_v4(),
+            agent_type: "reviewer".to_string(),
+            task: "run the test suite".to_string(),
+            label: "Run tests".to_string(),
+        });
+        let id = Uuid::new_v4();
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolPending {
+                id,
+                name: "bash".to_string(),
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                run_id: Some(running_run_id),
+            }),
+            &empty_textarea(),
+        );
+
+        assert!(
+            matches!(state.active_view, ConversationView::Child { run_id: r, .. } if r == running_run_id),
+            "expected auto-switch to the child awaiting approval, got {:?}",
+            state.active_view
+        );
+        assert!(state.auto_switched_to_child);
+
+        // Resolving the approval must return to the finished child's view —
+        // not Root, since that's what the user was actually looking at.
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolDenied { id }),
+            &empty_textarea(),
+        );
+        assert!(
+            matches!(state.active_view, ConversationView::Child { run_id: r, .. } if r == finished_run_id),
+            "expected to return to the previously-viewed finished child, got {:?}",
+            state.active_view
+        );
+        assert!(!state.auto_switched_to_child);
+    }
+
+    #[test]
+    fn esc_with_empty_draft_in_child_view_navigates_back_to_root() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::Streaming;
+        let run_id = tracked_child(&mut state);
+        state.switch_to_child_view(run_id);
+        assert!(matches!(state.active_view, ConversationView::Child { .. }));
+
+        let effects = update(
+            &mut state,
+            TuiEvent::Input(InputEvent::Escape),
+            &empty_textarea(),
+        );
+
+        assert_eq!(state.active_view, ConversationView::Root);
+        assert!(
+            effects.is_empty(),
+            "back-navigation must not touch TuiMode/Aborting effects: {effects:?}"
+        );
+        assert_eq!(
+            state.mode,
+            TuiMode::Streaming,
+            "the root agent's own busy state must be left untouched by back-navigation"
+        );
+    }
+
+    #[test]
+    fn esc_with_non_empty_draft_in_child_view_clears_draft_instead_of_navigating() {
+        let mut state = AppState::new();
+        let run_id = tracked_child(&mut state);
+        state.switch_to_child_view(run_id);
+
+        let effects = update(
+            &mut state,
+            TuiEvent::Input(InputEvent::Escape),
+            &textarea_with("some draft"),
+        );
+
+        assert!(matches!(state.active_view, ConversationView::Child { .. }));
+        assert!(matches!(effects.as_slice(), [Effect::ClearTextarea]));
     }
 
     // ── Ctrl+C tests ──────────────────────────────────────────────────────────
@@ -1216,6 +2321,7 @@ mod tests {
         state.mode = TuiMode::DoublePressAbort {
             pressed_at: Instant::now(),
             return_to: Box::new(TuiMode::Idle),
+            armed_by: ConfirmKey::CtrlC,
         };
         let effects = update(
             &mut state,
@@ -1223,6 +2329,65 @@ mod tests {
             &empty_textarea(),
         );
         assert!(effects.contains(&Effect::Quit));
+    }
+
+    #[test]
+    fn escape_after_ctrl_c_while_idle_clears_draft_instead_of_confirming_quit() {
+        // Regression: pressing Ctrl-C once (arming the quit confirm), then
+        // Esc, must not be treated as the confirming second press. Esc
+        // dismisses the pending quit and clears the draft instead.
+        let mut state = AppState::new();
+        state.mode = TuiMode::Idle;
+        update(
+            &mut state,
+            TuiEvent::Input(InputEvent::CtrlC),
+            &empty_textarea(),
+        );
+        assert!(matches!(state.mode, TuiMode::DoublePressAbort { .. }));
+
+        let effects = update(
+            &mut state,
+            TuiEvent::Input(InputEvent::Escape),
+            &empty_textarea(),
+        );
+        assert!(!effects.contains(&Effect::Quit));
+        assert_eq!(state.mode, TuiMode::Idle);
+    }
+
+    #[test]
+    fn ctrl_c_after_escape_while_streaming_does_not_quit() {
+        // Regression: pressing Esc once (arming the cancel-only confirm),
+        // then Ctrl-C, must not be treated as Ctrl-C's confirming second
+        // press. Ctrl-C instead starts its own fresh confirm window.
+        let mut state = AppState::new();
+        state.mode = TuiMode::Streaming;
+        update(
+            &mut state,
+            TuiEvent::Input(InputEvent::Escape),
+            &empty_textarea(),
+        );
+        assert!(matches!(
+            state.mode,
+            TuiMode::DoublePressAbort {
+                armed_by: ConfirmKey::Escape,
+                ..
+            }
+        ));
+
+        let effects = update(
+            &mut state,
+            TuiEvent::Input(InputEvent::CtrlC),
+            &empty_textarea(),
+        );
+        assert!(!effects.contains(&Effect::StopAgent));
+        assert!(!state.aborting_exit);
+        assert!(matches!(
+            state.mode,
+            TuiMode::DoublePressAbort {
+                armed_by: ConfirmKey::CtrlC,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1247,6 +2412,7 @@ mod tests {
         state.mode = TuiMode::DoublePressAbort {
             pressed_at: Instant::now(),
             return_to: Box::new(TuiMode::Streaming),
+            armed_by: ConfirmKey::CtrlC,
         };
         let effects = update(
             &mut state,
@@ -1312,7 +2478,10 @@ mod tests {
         // ToolKilled arrives (no StreamCancelled because no HTTP stream was active).
         let effects = update(
             &mut state,
-            TuiEvent::Domain(DomainEvent::ToolKilled { id: Uuid::new_v4() }),
+            TuiEvent::Domain(DomainEvent::ToolKilled {
+                id: Uuid::new_v4(),
+                run_id: None,
+            }),
             &empty_textarea(),
         );
         assert!(
@@ -1335,7 +2504,10 @@ mod tests {
             TuiEvent::Input(InputEvent::CtrlC),
             &empty_textarea(),
         );
-        assert!(effects.contains(&Effect::DenyTool { id: tool_id }));
+        assert!(effects.contains(&Effect::DenyTool {
+            id: tool_id,
+            reason: String::new(),
+        }));
         assert!(effects.contains(&Effect::RestoreTextarea));
         assert_eq!(state.focus, Focus::MainInput);
     }
@@ -1367,7 +2539,10 @@ mod tests {
             TuiEvent::Input(InputEvent::Escape),
             &empty_textarea(),
         );
-        assert!(effects.contains(&Effect::DenyTool { id: tool_id }));
+        assert!(effects.contains(&Effect::DenyTool {
+            id: tool_id,
+            reason: String::new(),
+        }));
         assert!(effects.contains(&Effect::RestoreTextarea));
     }
 
@@ -1450,6 +2625,36 @@ mod tests {
     }
 
     #[test]
+    fn enter_with_text_in_child_view_is_a_no_op() {
+        // Regression test: Enter must not silently steer the *root* agent
+        // while the user is looking at a subagent's drill-in transcript —
+        // there is no visual confirmation of which conversation the message
+        // would go to, and the child conversation itself does not accept
+        // input.
+        let mut state = AppState::new();
+        state.mode = TuiMode::Streaming;
+        let run_id = tracked_child(&mut state);
+        state.switch_to_child_view(run_id);
+
+        let effects = update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+            &textarea_with("hello"),
+        );
+
+        assert!(effects.is_empty(), "expected no effects, got {effects:?}");
+        assert!(
+            state.queued_steer_texts.is_empty(),
+            "must not queue a steer to the root agent"
+        );
+        assert_eq!(
+            state.mode,
+            TuiMode::Streaming,
+            "must not touch the root agent's TuiMode"
+        );
+    }
+
+    #[test]
     fn enter_while_approval_empty_returns_approve_tool_effect() {
         let mut state = AppState::new();
         let tool_id = Uuid::new_v4();
@@ -1479,8 +2684,411 @@ mod tests {
             TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
             &textarea_with("deny reason"),
         );
-        assert!(effects.contains(&Effect::DenyTool { id: tool_id }));
+        assert!(effects.contains(&Effect::DenyTool {
+            id: tool_id,
+            reason: "deny reason".to_string(),
+        }));
         assert!(effects.contains(&Effect::RestoreTextarea));
+    }
+
+    #[test]
+    fn domain_clarify_pending_sets_tui_mode() {
+        let mut state = AppState::new();
+        state.clarify_banner_state.clarify_scroll_offset = 5; // stale value from a prior clarify banner
+        let effects = update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ClarifyPending {
+                id: Uuid::new_v4(),
+                question: "Test?".to_string(),
+                context: None,
+                choices: None,
+                run_id: None,
+            }),
+            &empty_textarea(),
+        );
+        assert!(effects.contains(&Effect::SaveTextareaAndClear));
+        assert!(matches!(
+            state.mode,
+            TuiMode::ClarifyPending { ref question, choices: None, .. } if question == "Test?"
+        ));
+        // Scrolled to the bottom (clamped to max_scroll on render) so the
+        // question and choices are visible immediately, not the stale offset.
+        assert_eq!(state.clarify_banner_state.clarify_scroll_offset, usize::MAX);
+    }
+
+    #[test]
+    fn domain_pending_clarify_pending_resets_scroll_to_bottom() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::Pending;
+        state.clarify_banner_state.clarify_scroll_offset = 5; // stale value from a prior clarify banner
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ClarifyPending {
+                id: Uuid::new_v4(),
+                question: "Test?".to_string(),
+                context: None,
+                choices: None,
+                run_id: None,
+            }),
+            &empty_textarea(),
+        );
+        assert!(matches!(state.mode, TuiMode::ClarifyPending { .. }));
+        assert_eq!(state.clarify_banner_state.clarify_scroll_offset, usize::MAX);
+    }
+
+    #[test]
+    fn domain_streaming_clarify_pending_resets_scroll_to_bottom() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::Streaming;
+        state.clarify_banner_state.clarify_scroll_offset = 5; // stale value from a prior clarify banner
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ClarifyPending {
+                id: Uuid::new_v4(),
+                question: "Test?".to_string(),
+                context: None,
+                choices: None,
+                run_id: None,
+            }),
+            &empty_textarea(),
+        );
+        assert!(matches!(state.mode, TuiMode::ClarifyPending { .. }));
+        assert_eq!(state.clarify_banner_state.clarify_scroll_offset, usize::MAX);
+    }
+
+    #[test]
+    fn clarify_digit_passes_through_to_textarea() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::ClarifyPending {
+            id: Uuid::new_v4(),
+            question: "Pick one".to_string(),
+            context: None,
+            choices: Some(vec!["alpha".to_string(), "beta".to_string()]),
+        };
+        let key = key_event(KeyCode::Char('2'));
+        let effects = update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key)),
+            &empty_textarea(),
+        );
+        assert_eq!(
+            effects,
+            vec![Effect::TextareaKey(key_event(KeyCode::Char('2')))]
+        );
+    }
+
+    #[test]
+    fn clarify_enter_answers_and_restores_textarea() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::ClarifyPending {
+            id: Uuid::new_v4(),
+            question: "Pick one".to_string(),
+            context: None,
+            choices: None,
+        };
+        let effects = update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+            &textarea_with("free-form answer"),
+        );
+        assert_eq!(state.mode, TuiMode::Pending);
+        assert_eq!(
+            effects,
+            vec![
+                Effect::AnswerClarify("free-form answer".to_string()),
+                Effect::RestoreTextarea,
+            ]
+        );
+    }
+
+    #[test]
+    fn clarify_esc_with_empty_input_aborts_question() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::ClarifyPending {
+            id: Uuid::new_v4(),
+            question: "Pick one".to_string(),
+            context: None,
+            choices: None,
+        };
+        let effects = update(
+            &mut state,
+            TuiEvent::Input(InputEvent::Escape),
+            &empty_textarea(),
+        );
+        assert_eq!(state.mode, TuiMode::Pending);
+        assert!(effects.contains(&Effect::AbortClarify));
+        assert!(effects.contains(&Effect::RestoreTextarea));
+    }
+
+    #[test]
+    fn clarify_esc_with_non_empty_input_clears_input_only() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::ClarifyPending {
+            id: Uuid::new_v4(),
+            question: "Pick one".to_string(),
+            context: None,
+            choices: None,
+        };
+        let effects = update(
+            &mut state,
+            TuiEvent::Input(InputEvent::Escape),
+            &textarea_with("partial answer"),
+        );
+        assert!(
+            matches!(state.mode, TuiMode::ClarifyPending { .. }),
+            "mode must stay ClarifyPending when input is not empty"
+        );
+        assert_eq!(effects, vec![Effect::ClearTextarea]);
+    }
+
+    #[test]
+    fn clarify_choice_click_fills_textarea() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::ClarifyPending {
+            id: Uuid::new_v4(),
+            question: "Pick?".to_string(),
+            context: None,
+            choices: Some(vec!["alpha".to_string(), "beta".to_string()]),
+        };
+        // Banner starts at row 5, width 40.
+        // Row 5: "Pick?" (question), row 6: "1. alpha" (choices start at content row 1).
+        state.layout.clarify_banner = ratatui::layout::Rect::new(0, 5, 40, 4);
+
+        let mouse_down = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 5,
+            row: 6,
+            modifiers: KeyModifiers::NONE,
+        };
+        let effects_down = update(&mut state, TuiEvent::Mouse(mouse_down), &empty_textarea());
+        assert!(effects_down.is_empty(), "mousedown alone must not select");
+        assert_eq!(
+            state.clarify_banner_state.clarify_choice_mousedown,
+            Some((5, 6))
+        );
+
+        let mouse_up = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: 5,
+            row: 6,
+            modifiers: KeyModifiers::NONE,
+        };
+        let effects_up = update(&mut state, TuiEvent::Mouse(mouse_up), &empty_textarea());
+        assert_eq!(
+            effects_up,
+            vec![Effect::SetInputText("alpha".to_string())],
+            "mouseup at same position must fill textarea with choice text"
+        );
+        assert!(state
+            .clarify_banner_state
+            .clarify_choice_mousedown
+            .is_none());
+    }
+
+    #[test]
+    fn clarify_choice_click_on_blank_area_does_not_select() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::ClarifyPending {
+            id: Uuid::new_v4(),
+            question: "Pick?".to_string(),
+            context: None,
+            choices: Some(vec!["alpha".to_string()]),
+        };
+        // Banner at x=0, y=5, width=40.
+        // "1. alpha" is 8 chars wide; clicking at col 20 is past the text.
+        state.layout.clarify_banner = ratatui::layout::Rect::new(0, 5, 40, 3);
+
+        let mouse_down = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 20,
+            row: 6,
+            modifiers: KeyModifiers::NONE,
+        };
+        update(&mut state, TuiEvent::Mouse(mouse_down), &empty_textarea());
+
+        let mouse_up = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: 20,
+            row: 6,
+            modifiers: KeyModifiers::NONE,
+        };
+        let effects_up = update(&mut state, TuiEvent::Mouse(mouse_up), &empty_textarea());
+        assert!(
+            effects_up.is_empty(),
+            "click past choice text must not select the choice; got {effects_up:?}"
+        );
+    }
+
+    #[test]
+    fn clarify_choice_click_with_context_offsets_correctly() {
+        let mut state = AppState::new();
+        // Context is 1 row, spacer is 1 row, question is 1 row → choices start at banner.y + 3.
+        state.mode = TuiMode::ClarifyPending {
+            id: Uuid::new_v4(),
+            question: "Pick an animal?".to_string(),
+            context: Some("Context line.".to_string()),
+            choices: Some(vec!["rhino".to_string(), "panda".to_string()]),
+        };
+        // banner.y = 5, width = 40 → context row 5, context→question spacer row 6,
+        // question row 7, choices at 8 and 9.
+        state.layout.clarify_banner = ratatui::layout::Rect::new(0, 5, 40, 7);
+
+        let click_row = 8u16; // first choice row
+        let mouse_down = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 3,
+            row: click_row,
+            modifiers: KeyModifiers::NONE,
+        };
+        update(&mut state, TuiEvent::Mouse(mouse_down), &empty_textarea());
+
+        let mouse_up = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: 3,
+            row: click_row,
+            modifiers: KeyModifiers::NONE,
+        };
+        let effects_up = update(&mut state, TuiEvent::Mouse(mouse_up), &empty_textarea());
+        assert_eq!(
+            effects_up,
+            vec![Effect::SetInputText("rhino".to_string())],
+            "click on first choice row with context present must select first choice"
+        );
+    }
+
+    #[test]
+    fn clarify_choice_click_with_scroll_offset_selects_correct_choice() {
+        let mut state = AppState::new();
+        // context "line one\nline two" → 1 rendered line (soft break joins)
+        // context→question spacer = 1 row
+        // question "Pick?" → 1 rendered line
+        // choices start at content row 3.
+        // With scroll_offset=3 the banner top shows the first choice at visual row banner.y.
+        state.mode = TuiMode::ClarifyPending {
+            id: Uuid::new_v4(),
+            question: "Pick?".to_string(),
+            context: Some("line one\nline two".to_string()),
+            choices: Some(vec!["alpha".to_string(), "beta".to_string()]),
+        };
+        state.layout.clarify_banner = ratatui::layout::Rect::new(0, 5, 40, 2);
+        state.clarify_banner_state.clarify_scroll_offset = 3; // scrolled so first choice is at visual top
+
+        let click_row = 5u16; // banner.y — visually the first choice
+        let mouse_down = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 3,
+            row: click_row,
+            modifiers: KeyModifiers::NONE,
+        };
+        update(&mut state, TuiEvent::Mouse(mouse_down), &empty_textarea());
+
+        let mouse_up = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: 3,
+            row: click_row,
+            modifiers: KeyModifiers::NONE,
+        };
+        let effects_up = update(&mut state, TuiEvent::Mouse(mouse_up), &empty_textarea());
+        assert_eq!(
+            effects_up,
+            vec![Effect::SetInputText("alpha".to_string())],
+            "click at visual top of scrolled banner must resolve to first choice"
+        );
+    }
+
+    #[test]
+    fn clarify_choice_drag_copies_text_to_clipboard() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::ClarifyPending {
+            id: Uuid::new_v4(),
+            question: "Pick?".to_string(),
+            context: None,
+            choices: Some(vec!["alpha".to_string(), "beta".to_string()]),
+        };
+        // Row 5: "Pick?", row 6: "1. alpha", row 7: "2. beta".
+        state.layout.clarify_banner = ratatui::layout::Rect::new(0, 5, 40, 4);
+
+        let mouse_down = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 5,
+            row: 6,
+            modifiers: KeyModifiers::NONE,
+        };
+        update(&mut state, TuiEvent::Mouse(mouse_down), &empty_textarea());
+
+        // Drag to a different column — simulates text selection.
+        let mouse_drag = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            column: 15,
+            row: 6,
+            modifiers: KeyModifiers::NONE,
+        };
+        update(&mut state, TuiEvent::Mouse(mouse_drag), &empty_textarea());
+        assert_eq!(
+            state.clarify_banner_state.clarify_banner_drag_end,
+            Some((15, 6))
+        );
+
+        let mouse_up = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: 15,
+            row: 6,
+            modifiers: KeyModifiers::NONE,
+        };
+        let effects_up = update(&mut state, TuiEvent::Mouse(mouse_up), &empty_textarea());
+        assert!(
+            effects_up.contains(&Effect::CopyToClipboard("pha".to_string())),
+            "drag must copy selected banner text (trimmed to dragged column range) to clipboard"
+        );
+        assert!(state
+            .clarify_banner_state
+            .clarify_choice_mousedown
+            .is_none());
+        assert!(state.clarify_banner_state.clarify_banner_drag_end.is_none());
+    }
+
+    #[test]
+    fn clarify_choice_multiline_drag_copies_trimmed_text() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::ClarifyPending {
+            id: Uuid::new_v4(),
+            question: "Pick?".to_string(),
+            context: None,
+            choices: Some(vec!["alpha".to_string(), "beta".to_string()]),
+        };
+        // Banner at x=0, y=5, width=40.
+        // Row 5: "Pick?" (question), row 6: "1. alpha", row 7: "2. beta"
+        state.layout.clarify_banner = ratatui::layout::Rect::new(0, 5, 40, 4);
+
+        // Drag starts at col=4, row=6 ("1. alpha"[4..] = "lpha") and ends
+        // at col=7, row=7 ("2. beta"[0..7] = "2. beta").
+        let mouse_down = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 4,
+            row: 6,
+            modifiers: KeyModifiers::NONE,
+        };
+        update(&mut state, TuiEvent::Mouse(mouse_down), &empty_textarea());
+
+        let mouse_drag = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            column: 7,
+            row: 7,
+            modifiers: KeyModifiers::NONE,
+        };
+        update(&mut state, TuiEvent::Mouse(mouse_drag), &empty_textarea());
+
+        let mouse_up = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: 7,
+            row: 7,
+            modifiers: KeyModifiers::NONE,
+        };
+        let effects_up = update(&mut state, TuiEvent::Mouse(mouse_up), &empty_textarea());
+        assert!(
+            effects_up.contains(&Effect::CopyToClipboard("lpha\n2. beta".to_string())),
+            "multiline drag must copy first line trimmed from start col, last line trimmed to end col; got {effects_up:?}"
+        );
     }
 
     // ── Help scroll ───────────────────────────────────────────────────────────
@@ -1489,13 +3097,13 @@ mod tests {
     fn keyboard_in_help_mode_scrolls_help() {
         let mut state = AppState::new();
         state.focus = Focus::HelpPopup;
-        state.help_scroll_offset = 5;
+        state.help_popup.help_scroll_offset = 5;
         update(
             &mut state,
             TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Down))),
             &empty_textarea(),
         );
-        assert_eq!(state.help_scroll_offset, 6);
+        assert_eq!(state.help_popup.help_scroll_offset, 6);
     }
 
     // ── Mouse scroll ──────────────────────────────────────────────────────────
@@ -1503,8 +3111,8 @@ mod tests {
     #[test]
     fn mouse_scroll_up_in_chat_area_decrements_scroll_offset() {
         let mut state = AppState::new();
-        state.scroll_offset = 5;
-        state.scroll_locked = false;
+        state.conversation.scroll_offset = 5;
+        state.conversation.scroll_locked = false;
         let mouse = crossterm::event::MouseEvent {
             kind: MouseEventKind::ScrollUp,
             column: 10,
@@ -1512,10 +3120,199 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         };
         update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
-        assert_eq!(state.scroll_offset, 4);
+        assert_eq!(state.conversation.scroll_offset, 4);
     }
 
-    // ── Mouse click closes modal ───────────────────────────────────────────────
+    #[test]
+    fn mouse_scroll_over_header_bubble_scrolls_the_header_not_the_chat_area() {
+        let mut state = AppState::new();
+        state.layout.header_bubble = ratatui::layout::Rect::new(0, 0, 40, 4);
+        state.child_view.header_bubble_scroll_offset = 2;
+        state.conversation.scroll_offset = 5;
+        state.conversation.scroll_locked = false;
+        let mouse = crossterm::event::MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 10,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        };
+        update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
+        assert_eq!(state.child_view.header_bubble_scroll_offset, 3);
+        assert_eq!(
+            state.conversation.scroll_offset, 5,
+            "scroll over the header must not also move the chat area"
+        );
+    }
+
+    #[test]
+    fn click_on_header_bubble_toggles_its_collapsed_state() {
+        use crate::tui_reducer_state::ToolCallState;
+
+        let mut state = AppState::new();
+        let bubble_id = Uuid::new_v4();
+        state.chat_entries.push(ChatEntry::ToolBubble {
+            id: bubble_id,
+            name: crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
+            state: Box::new(ToolCallState::Running {
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                progress_arguments: vec![],
+            }),
+            collapsed: false,
+        });
+        let run_id = Uuid::new_v4();
+        state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id,
+            agent_type: "reviewer".to_string(),
+            task: "look into flaky test".to_string(),
+            label: "Investigate flaky test".to_string(),
+        });
+        state.switch_to_child_view(run_id);
+        state.layout.header_bubble = ratatui::layout::Rect::new(0, 0, 40, 4);
+        let mouse_down = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 5,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        update(&mut state, TuiEvent::Mouse(mouse_down), &empty_textarea());
+
+        assert!(
+            matches!(&state.chat_entries[0], ChatEntry::ToolBubble { collapsed, .. } if *collapsed),
+            "click on the header bubble must toggle the real root bubble's collapsed state"
+        );
+    }
+
+    #[test]
+    fn click_outside_header_bubble_does_not_toggle_it() {
+        use crate::tui_reducer_state::ToolCallState;
+
+        let mut state = AppState::new();
+        let bubble_id = Uuid::new_v4();
+        state.chat_entries.push(ChatEntry::ToolBubble {
+            id: bubble_id,
+            name: crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
+            state: Box::new(ToolCallState::Running {
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                progress_arguments: vec![],
+            }),
+            collapsed: false,
+        });
+        let run_id = Uuid::new_v4();
+        state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id,
+            agent_type: "reviewer".to_string(),
+            task: "look into flaky test".to_string(),
+            label: "Investigate flaky test".to_string(),
+        });
+        state.switch_to_child_view(run_id);
+        state.layout.header_bubble = ratatui::layout::Rect::new(0, 0, 40, 4);
+        let mouse_down = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 5,
+            row: 10,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        update(&mut state, TuiEvent::Mouse(mouse_down), &empty_textarea());
+
+        assert!(
+            matches!(&state.chat_entries[0], ChatEntry::ToolBubble { collapsed, .. } if !*collapsed),
+            "click below the header bubble must not toggle it"
+        );
+    }
+
+    #[test]
+    fn header_bubble_stays_expanded_after_the_subagent_finishes() {
+        // Regression: a bubble the user manually expanded while the subagent
+        // was still running must stay expanded once it finishes — the user
+        // may still want to inspect the header (task/result) after the fact.
+        let bubble_id = Uuid::new_v4();
+        let run_id = Uuid::new_v4();
+        let mut state = AppState::new();
+
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ChildAgentStarted {
+                run_id,
+                call_id: bubble_id,
+                agent_type: "reviewer".to_string(),
+                task: "look into flaky test".to_string(),
+                label: "Investigate flaky test".to_string(),
+            }),
+            &empty_textarea(),
+        );
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolStart {
+                id: bubble_id,
+                name: crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                run_id: None,
+            }),
+            &empty_textarea(),
+        );
+        assert!(
+            matches!(&state.chat_entries[0], ChatEntry::ToolBubble { collapsed, .. } if *collapsed),
+            "spawn_subagent bubbles start collapsed by default"
+        );
+
+        // User manually expands the header bubble while the subagent runs.
+        state.switch_to_child_view(run_id);
+        state.layout.header_bubble = ratatui::layout::Rect::new(0, 0, 40, 4);
+        update(
+            &mut state,
+            TuiEvent::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: 5,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &empty_textarea(),
+        );
+        assert!(
+            matches!(&state.chat_entries[0], ChatEntry::ToolBubble { collapsed, .. } if !*collapsed),
+            "click must have expanded the header bubble"
+        );
+
+        // The subagent finishes: its final `ToolDone` (the spawn_subagent
+        // call itself completing) and `ChildAgentDone` (bookkeeping) arrive.
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolDone {
+                id: bubble_id,
+                name: crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
+                result_section: ResultSection::plain(String::new()),
+                summary: vec![],
+                duration: std::time::Duration::from_secs(1),
+                content_sections: vec![],
+                run_id: None,
+            }),
+            &empty_textarea(),
+        );
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ChildAgentDone {
+                run_id,
+                status: "done".to_string(),
+                result: None,
+            }),
+            &empty_textarea(),
+        );
+
+        assert!(
+            matches!(&state.chat_entries[0], ChatEntry::ToolBubble { collapsed, .. } if !*collapsed),
+            "the header bubble must still be expanded after the subagent finishes"
+        );
+    }
 
     #[test]
     fn mouse_click_outside_help_popup_closes_modal() {
@@ -1537,9 +3334,9 @@ mod tests {
         // The Presenter must emit CopyToClipboard so the Driver can handle the
         // I/O without the test touching the OS clipboard.
         let mut state = AppState::new();
-        state.chat_drag_active = true;
-        state.chat_rendered_lines = vec!["hello world".to_string()];
-        state.chat_selection = Some(ChatSelection {
+        state.conversation.chat_drag_active = true;
+        state.conversation.chat_rendered_lines = vec!["hello world".to_string()];
+        state.conversation.chat_selection = Some(ChatSelection {
             anchor_line: 0,
             anchor_col: 0,
             cursor_line: 0,
@@ -1558,7 +3355,229 @@ mod tests {
                 .any(|e| matches!(e, Effect::CopyToClipboard(t) if t == "hello")),
             "expected CopyToClipboard(\"hello\"), got {effects:?}"
         );
-        assert!(!state.chat_drag_active, "drag should be cleared");
+        assert!(
+            !state.conversation.chat_drag_active,
+            "drag should be cleared"
+        );
+    }
+
+    #[test]
+    fn click_on_thinking_bubble_title_row_toggles_collapsed() {
+        let mut state = AppState::new();
+        state.chat_entries.push(ChatEntry::ThinkingMessage {
+            text: "reasoning".to_string(),
+            collapsed: true,
+            duration: std::time::Duration::from_secs(1),
+        });
+        // (start_row=0, end_row=2, entry_index=0) — title row is start + 1 = 1.
+        state.conversation.thinking_title_rows = vec![(0, 2, 0)];
+        state.conversation.chat_drag_active = true;
+        state.conversation.chat_rendered_lines = vec![String::new(), String::new(), String::new()];
+        // A zero-width selection at the title row is a plain click, not a drag.
+        state.conversation.chat_selection = Some(ChatSelection {
+            anchor_line: 1,
+            anchor_col: 3,
+            cursor_line: 1,
+            cursor_col: 3,
+        });
+        let mouse = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: 3,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
+
+        assert!(matches!(
+            &state.chat_entries[0],
+            ChatEntry::ThinkingMessage { collapsed, .. } if !*collapsed
+        ));
+    }
+
+    #[test]
+    fn click_on_streaming_thinking_bubble_title_row_toggles_partial_collapsed() {
+        let mut state = AppState::new();
+        state.turn_buffer.partial_thinking_text = "pondering...".to_string();
+        state.turn_buffer.partial_thinking_collapsed = false;
+        // (start_row=0, end_row=2, sentinel index) — title row is start + 1 = 1.
+        state.conversation.thinking_title_rows = vec![(
+            0,
+            2,
+            crate::tui_reducer_state::STREAMING_THINKING_ENTRY_INDEX,
+        )];
+        state.conversation.chat_drag_active = true;
+        state.conversation.chat_rendered_lines = vec![String::new(), String::new(), String::new()];
+        // A zero-width selection at the title row is a plain click, not a drag.
+        state.conversation.chat_selection = Some(ChatSelection {
+            anchor_line: 1,
+            anchor_col: 3,
+            cursor_line: 1,
+            cursor_col: 3,
+        });
+        let mouse = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: 3,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
+
+        assert!(state.turn_buffer.partial_thinking_collapsed);
+    }
+
+    /// Sets up `state` with a single `spawn_subagent` `ToolBubble` at
+    /// `bubble_id`, plus the title-row/rendered-line bookkeeping needed for a
+    /// click at row 1 to resolve to it, and returns a `MouseEvent::Up` click
+    /// at that row.
+    fn spawn_bubble_click_fixture(
+        state: &mut AppState,
+        bubble_id: Uuid,
+    ) -> crossterm::event::MouseEvent {
+        state.chat_entries.push(ChatEntry::ToolBubble {
+            id: bubble_id,
+            name: crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
+            state: Box::new(ToolCallState::Running {
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                progress_arguments: vec![],
+            }),
+            collapsed: false,
+        });
+        // (start_row=0, end_row=2, bubble_id) — title row is start + 1 = 1.
+        state.conversation.bubble_title_rows = vec![(0, 2, bubble_id)];
+        state.conversation.chat_drag_active = true;
+        state.conversation.chat_rendered_lines = vec![String::new(), String::new(), String::new()];
+        // A zero-width selection at the title row is a plain click, not a drag.
+        state.conversation.chat_selection = Some(ChatSelection {
+            anchor_line: 1,
+            anchor_col: 3,
+            cursor_line: 1,
+            cursor_col: 3,
+        });
+        crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: 3,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn single_click_on_spawn_bubble_title_toggles_collapsed_not_drill_in() {
+        // A single click must behave exactly like every other bubble
+        // (collapse/expand) — drilling in requires a second, fast click. The
+        // toggle itself is deferred until the double-click window expires
+        // (see `BubbleClickWindowExpired`) so bubble layout stays stable
+        // while a confirming second click could still arrive.
+        let mut state = AppState::new();
+        let bubble_id = Uuid::new_v4();
+        let run_id = Uuid::new_v4();
+        state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id,
+            agent_type: "reviewer".to_string(),
+            task: "look into flaky test".to_string(),
+            label: "Investigate flaky test".to_string(),
+        });
+        let mouse = spawn_bubble_click_fixture(&mut state, bubble_id);
+
+        update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
+
+        assert_eq!(state.active_view, ConversationView::Root);
+        assert!(matches!(
+            &state.chat_entries[0],
+            ChatEntry::ToolBubble { collapsed, .. } if !*collapsed
+        ));
+        assert!(state.last_bubble_click.is_some());
+
+        // The window expires with no confirming second click — now the
+        // deferred toggle commits.
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::BubbleClickWindowExpired),
+            &empty_textarea(),
+        );
+
+        assert!(matches!(
+            &state.chat_entries[0],
+            ChatEntry::ToolBubble { collapsed, .. } if *collapsed
+        ));
+        assert!(state.last_bubble_click.is_none());
+    }
+
+    #[test]
+    fn double_click_on_spawn_bubble_title_drills_into_child_view() {
+        let mut state = AppState::new();
+        let bubble_id = Uuid::new_v4();
+        let run_id = Uuid::new_v4();
+        state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id,
+            agent_type: "reviewer".to_string(),
+            task: "look into flaky test".to_string(),
+            label: "Investigate flaky test".to_string(),
+        });
+        let mouse = spawn_bubble_click_fixture(&mut state, bubble_id);
+
+        // First click: arms double-click detection, defers the toggle.
+        update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
+        // A zero-width selection at the title row is a plain click, not a drag.
+        state.conversation.chat_drag_active = true;
+        state.conversation.chat_selection = Some(ChatSelection {
+            anchor_line: 1,
+            anchor_col: 3,
+            cursor_line: 1,
+            cursor_col: 3,
+        });
+        // Second click, same bubble, well within the double-click window.
+        update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
+
+        assert!(matches!(
+            state.active_view,
+            ConversationView::Child { run_id: r, .. } if r == run_id
+        ));
+        // The deferred toggle from the first click must not have committed —
+        // the bubble was never collapsed, since the pair resolved as a
+        // drill-in instead.
+        assert!(matches!(
+            &state.chat_entries[0],
+            ChatEntry::ToolBubble { collapsed, .. } if !*collapsed
+        ));
+    }
+
+    #[test]
+    fn double_click_on_finished_spawn_bubble_still_drills_in_via_child_conversations() {
+        // Once the child finishes, `running_child` is cleared but its entry
+        // in `child_conversations` survives — the bubble must still be
+        // drillable.
+        let mut state = AppState::new();
+        let bubble_id = Uuid::new_v4();
+        let run_id = Uuid::new_v4();
+        state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id,
+            agent_type: "reviewer".to_string(),
+            task: "look into flaky test".to_string(),
+            label: "Investigate flaky test".to_string(),
+        });
+        state.running_child = None;
+        let mouse = spawn_bubble_click_fixture(&mut state, bubble_id);
+
+        update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
+        state.conversation.chat_drag_active = true;
+        state.conversation.chat_selection = Some(ChatSelection {
+            anchor_line: 1,
+            anchor_col: 3,
+            cursor_line: 1,
+            cursor_col: 3,
+        });
+        update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
+
+        assert!(matches!(
+            state.active_view,
+            ConversationView::Child { run_id: r, .. } if r == run_id
+        ));
     }
 
     // ── Domain events ─────────────────────────────────────────────────────────
@@ -1576,6 +3595,533 @@ mod tests {
     }
 
     #[test]
+    fn domain_stream_done_preserves_manual_scroll_position() {
+        // Regression test: a response completing must not override a
+        // manual scroll-up (e.g. to view an earlier subagent bubble) by
+        // force-snapping the chat back to the bottom.
+        let mut state = AppState::new();
+        state.mode = TuiMode::Streaming;
+        state.conversation.scroll_locked = false;
+        state.conversation.scroll_offset = 12;
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::StreamDone),
+            &empty_textarea(),
+        );
+        assert!(!state.conversation.scroll_locked);
+        assert_eq!(state.conversation.scroll_offset, 12);
+    }
+
+    #[test]
+    fn domain_stream_cancelled_preserves_manual_scroll_position() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::Streaming;
+        state.conversation.scroll_locked = false;
+        state.conversation.scroll_offset = 12;
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::StreamCancelled),
+            &empty_textarea(),
+        );
+        assert!(!state.conversation.scroll_locked);
+        assert_eq!(state.conversation.scroll_offset, 12);
+    }
+
+    #[test]
+    fn domain_stream_thinking_chunk_appends_to_partial_thinking_text_while_streaming() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::Streaming;
+        state.conversation.scroll_locked = true;
+        state.conversation.scroll_offset = 7;
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::StreamThinkingChunk("pondering...".to_string())),
+            &empty_textarea(),
+        );
+        assert_eq!(state.turn_buffer.partial_thinking_text, "pondering...");
+        assert!(
+            state.turn_buffer.partial_assistant_text.is_empty(),
+            "thinking must not contaminate the assistant text accumulator"
+        );
+        assert_eq!(
+            state.conversation.scroll_offset, 0,
+            "scroll-locked must snap to bottom"
+        );
+    }
+
+    #[test]
+    fn domain_streaming_interleaved_thinking_and_response_flush_into_separate_bubbles_in_order() {
+        // A turn that alternates thinking → response → thinking with no tool
+        // call in between must still split into one bubble per segment, in
+        // chronological order, rather than merging every thinking fragment
+        // into one bubble and every response fragment into another.
+        let mut state = AppState::new();
+        state.mode = TuiMode::Streaming;
+        for event in [
+            DomainEvent::StreamThinkingChunk("first thought".to_string()),
+            DomainEvent::StreamChunk("first reply".to_string()),
+            DomainEvent::StreamThinkingChunk("second thought".to_string()),
+            DomainEvent::StreamChunk("second reply".to_string()),
+            DomainEvent::StreamDone,
+        ] {
+            update(&mut state, TuiEvent::Domain(event), &empty_textarea());
+        }
+
+        assert_eq!(state.chat_entries.len(), 4, "{:?}", state.chat_entries);
+        assert!(matches!(
+            &state.chat_entries[0],
+            ChatEntry::ThinkingMessage { text, .. } if text == "first thought"
+        ));
+        assert!(matches!(
+            &state.chat_entries[1],
+            ChatEntry::AssistantMessage { text, .. } if text == "first reply"
+        ));
+        assert!(matches!(
+            &state.chat_entries[2],
+            ChatEntry::ThinkingMessage { text, .. } if text == "second thought"
+        ));
+        assert!(matches!(
+            &state.chat_entries[3],
+            ChatEntry::AssistantMessage { text, .. } if text == "second reply"
+        ));
+    }
+
+    #[test]
+    fn child_agent_token_interleaved_thinking_and_response_flush_into_separate_bubbles_in_order() {
+        // Mirrors `domain_streaming_interleaved_thinking_and_response_flush_into_separate_bubbles_in_order`
+        // for a child conversation: `ChildAgentToken`'s `is_thinking` flag must
+        // route each fragment to the child's own `TurnBuffer` the same way the
+        // root's `StreamThinkingChunk`/`StreamChunk` do, rather than merging
+        // thinking and response text into a single blob (the bug this test
+        // guards against).
+        let mut state = AppState::new();
+        let run_id = Uuid::new_v4();
+        state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id: Uuid::new_v4(),
+            agent_type: "reviewer".to_string(),
+            task: "look into flaky test".to_string(),
+            label: "Investigate flaky test".to_string(),
+        });
+        for (text, is_thinking) in [
+            ("first thought", true),
+            ("first reply", false),
+            ("second thought", true),
+            ("second reply", false),
+        ] {
+            update(
+                &mut state,
+                TuiEvent::Domain(DomainEvent::ChildAgentToken {
+                    run_id,
+                    text: text.to_string(),
+                    is_thinking,
+                }),
+                &empty_textarea(),
+            );
+        }
+        state.flush_child_partial_text(run_id);
+
+        let conversation = state
+            .child_conversations
+            .get(&run_id)
+            .expect("conversation");
+        assert_eq!(
+            conversation.messages.len(),
+            4,
+            "{:?}",
+            conversation.messages
+        );
+        assert!(matches!(
+            &conversation.messages[0],
+            ChatEntry::ThinkingMessage { text, .. } if text == "first thought"
+        ));
+        assert!(matches!(
+            &conversation.messages[1],
+            ChatEntry::AssistantMessage { text, .. } if text == "first reply"
+        ));
+        assert!(matches!(
+            &conversation.messages[2],
+            ChatEntry::ThinkingMessage { text, .. } if text == "second thought"
+        ));
+        assert!(matches!(
+            &conversation.messages[3],
+            ChatEntry::AssistantMessage { text, .. } if text == "second reply"
+        ));
+    }
+
+    #[test]
+    fn domain_stream_started_clears_partial_thinking_text() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::Pending;
+        state.turn_buffer.partial_thinking_text = "stale thinking".to_string();
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::StreamStarted),
+            &empty_textarea(),
+        );
+        assert!(state.turn_buffer.partial_thinking_text.is_empty());
+    }
+
+    #[test]
+    fn domain_tool_start_flushes_pending_thinking_before_new_tool_bubble() {
+        // An auto-run tool call (no ToolPending approval step) must flush any
+        // thinking accumulated so far into its own bubble *before* the tool
+        // bubble is inserted, so the chat log reads in chronological order:
+        // "thought, then called the tool" rather than "called the tool, then
+        // thought" (the latter happened when thinking was only flushed on
+        // StreamDone, at the very end of the whole tool-using turn).
+        let mut state = AppState::new();
+        state.mode = TuiMode::Streaming;
+        state.turn_buffer.partial_thinking_text = "deciding to read the file".to_string();
+        state.turn_buffer.thinking_started_at = Some(std::time::Instant::now());
+        let tool_id = Uuid::new_v4();
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolStart {
+                id: tool_id,
+                name: "read".to_string(),
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                run_id: None,
+            }),
+            &empty_textarea(),
+        );
+
+        assert!(
+            state.turn_buffer.partial_thinking_text.is_empty(),
+            "thinking must be flushed, not left dangling"
+        );
+        assert_eq!(
+            state.chat_entries.len(),
+            2,
+            "expected [ThinkingMessage, ToolBubble]"
+        );
+        assert!(matches!(
+            &state.chat_entries[0],
+            ChatEntry::ThinkingMessage { text, .. } if text == "deciding to read the file"
+        ));
+        assert!(matches!(
+            &state.chat_entries[1],
+            ChatEntry::ToolBubble { id, .. } if *id == tool_id
+        ));
+    }
+
+    #[test]
+    fn domain_tool_progress_patches_progress_arguments_on_running_bubble() {
+        // `ToolProgress` is an interim status update (e.g. `spawn_subagent`
+        // reporting status=spawned/queued) — it must patch `progress_arguments`
+        // on the existing `Running` bubble (not `title_arguments`, which stays
+        // the call's real, static arguments) without transitioning it to a
+        // terminal state (spinner keeps going, content sections untouched).
+        let mut state = AppState::new();
+        state.mode = TuiMode::Streaming;
+        let tool_id = Uuid::new_v4();
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolStart {
+                id: tool_id,
+                name: "spawn_subagent".to_string(),
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![(
+                    "label".to_string(),
+                    serde_json::json!("Refactor auth token validation"),
+                )],
+                run_id: None,
+            }),
+            &empty_textarea(),
+        );
+
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolProgress {
+                id: tool_id,
+                title_arguments: vec![
+                    ("status".to_string(), serde_json::json!("running")),
+                    ("run_id".to_string(), serde_json::json!("abc-123")),
+                ],
+            }),
+            &empty_textarea(),
+        );
+
+        let entry = state
+            .chat_entries
+            .iter()
+            .find(|entry| matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == tool_id))
+            .expect("tool bubble should still exist");
+        match entry {
+            ChatEntry::ToolBubble { state: bubble, .. } => match bubble.as_ref() {
+                ToolCallState::Running {
+                    title_arguments,
+                    progress_arguments,
+                    ..
+                } => {
+                    assert_eq!(
+                        title_arguments,
+                        &vec![(
+                            "label".to_string(),
+                            serde_json::json!("Refactor auth token validation")
+                        )],
+                        "the call's real title_arguments must be untouched by ToolProgress"
+                    );
+                    assert_eq!(
+                        progress_arguments,
+                        &vec![
+                            ("status".to_string(), serde_json::json!("running")),
+                            ("run_id".to_string(), serde_json::json!("abc-123")),
+                        ]
+                    );
+                }
+                other => panic!("expected the bubble to remain Running, got: {other:?}"),
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn domain_tool_done_does_not_inherit_stale_progress_arguments() {
+        // Regression test: once ToolDone arrives, any interim
+        // `progress_arguments` (e.g. status=spawned/run_id=...) must not
+        // linger in the terminal bubble — only the call's real
+        // `title_arguments` (e.g. `label`) survive, and the final status
+        // comes solely from `summary`.
+        let mut state = AppState::new();
+        state.mode = TuiMode::Streaming;
+        let tool_id = Uuid::new_v4();
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolStart {
+                id: tool_id,
+                name: "spawn_subagent".to_string(),
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![(
+                    "label".to_string(),
+                    serde_json::json!("Refactor auth token validation"),
+                )],
+                run_id: None,
+            }),
+            &empty_textarea(),
+        );
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolProgress {
+                id: tool_id,
+                title_arguments: vec![
+                    ("status".to_string(), serde_json::json!("running")),
+                    ("run_id".to_string(), serde_json::json!("abc-123")),
+                ],
+            }),
+            &empty_textarea(),
+        );
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolDone {
+                id: tool_id,
+                name: "spawn_subagent".to_string(),
+                result_section: crate::tui_reducer_state::ResultSection::plain(String::new()),
+                content_sections: vec![],
+                summary: vec![("status".to_string(), "unstructured".to_string())],
+                duration: std::time::Duration::from_millis(1500),
+                run_id: None,
+            }),
+            &empty_textarea(),
+        );
+
+        let entry = state
+            .chat_entries
+            .iter()
+            .find(|entry| matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == tool_id))
+            .expect("tool bubble should still exist");
+        match entry {
+            ChatEntry::ToolBubble { state: bubble, .. } => match bubble.as_ref() {
+                ToolCallState::Done {
+                    title_arguments,
+                    summary,
+                    duration,
+                    ..
+                } => {
+                    assert_eq!(
+                        title_arguments,
+                        &vec![(
+                            "label".to_string(),
+                            serde_json::json!("Refactor auth token validation")
+                        )],
+                        "the stale spawned/run_id progress values must not leak into Done"
+                    );
+                    assert_eq!(
+                        summary,
+                        &vec![("status".to_string(), "unstructured".to_string())]
+                    );
+                    assert_eq!(*duration, std::time::Duration::from_millis(1500));
+                }
+                other => panic!("expected the bubble to be Done, got: {other:?}"),
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn domain_tool_progress_is_a_no_op_when_bubble_is_not_running() {
+        // Once a bubble reached a terminal state, a stray/late ToolProgress
+        // must not resurrect or otherwise mutate it.
+        let mut state = AppState::new();
+        state.mode = TuiMode::Streaming;
+        let tool_id = Uuid::new_v4();
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolStart {
+                id: tool_id,
+                name: "spawn_subagent".to_string(),
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                run_id: None,
+            }),
+            &empty_textarea(),
+        );
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolDone {
+                id: tool_id,
+                name: "spawn_subagent".to_string(),
+                result_section: crate::tui_reducer_state::ResultSection::plain(String::new()),
+                content_sections: vec![],
+                summary: vec![("status".to_string(), "success".to_string())],
+                duration: std::time::Duration::ZERO,
+                run_id: None,
+            }),
+            &empty_textarea(),
+        );
+
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolProgress {
+                id: tool_id,
+                title_arguments: vec![("status".to_string(), serde_json::json!("running"))],
+            }),
+            &empty_textarea(),
+        );
+
+        let entry = state
+            .chat_entries
+            .iter()
+            .find(|entry| matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == tool_id))
+            .expect("tool bubble should still exist");
+        match entry {
+            ChatEntry::ToolBubble { state: bubble, .. } => {
+                assert!(
+                    matches!(bubble.as_ref(), ToolCallState::Done { .. }),
+                    "a late ToolProgress must not move the bubble out of Done, got: {bubble:?}"
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn steer_queued_mid_round_commits_after_intervening_thinking_and_tool_bubbles() {
+        // Regression test: a steer typed while thinking/tool-calls are still
+        // in flight for the current round must NOT be committed to
+        // `chat_entries` at `Enter`-press time (that would fix its position
+        // before the round's content is flushed, wedging it ahead of
+        // chronologically-earlier bubbles). It must land in `chat_entries`
+        // only once `SteerApplied` fires, after everything already flushed.
+        let mut state = AppState::new();
+        state.mode = TuiMode::Streaming;
+
+        // Thinking starts, then a tool call is issued (auto-flushes the
+        // thinking bubble), then the user types a steer mid-round.
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::StreamThinkingChunk("deciding".to_string())),
+            &empty_textarea(),
+        );
+        let tool_id_1 = Uuid::new_v4();
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolStart {
+                id: tool_id_1,
+                name: "read".to_string(),
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                run_id: None,
+            }),
+            &empty_textarea(),
+        );
+        state.queue_steer_message("steer me".to_string());
+
+        // The steer must be staged, not committed, while the round is still
+        // in flight — even though a ThinkingMessage and ToolBubble already
+        // exist ahead of it in `chat_entries`.
+        assert_eq!(
+            state.queued_steer_texts,
+            vec!["steer me".to_string()],
+            "steer should be staged, not yet committed"
+        );
+        assert!(
+            !state
+                .chat_entries
+                .iter()
+                .any(|entry| matches!(entry, ChatEntry::UserMessage { .. })),
+            "chat_entries must not contain the steer yet: {:?}",
+            state.chat_entries
+        );
+
+        // A second tool call runs and completes while the steer is still
+        // staged.
+        let tool_id_2 = Uuid::new_v4();
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolStart {
+                id: tool_id_2,
+                name: "write".to_string(),
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                run_id: None,
+            }),
+            &empty_textarea(),
+        );
+
+        // Now the steer gets applied to the model (backend injected it and
+        // is starting the next request).
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::SteerApplied { run_id: None }),
+            &empty_textarea(),
+        );
+
+        assert!(
+            state.queued_steer_texts.is_empty(),
+            "staged steer should be drained on SteerApplied"
+        );
+        assert_eq!(state.chat_entries.len(), 4, "{:?}", state.chat_entries);
+        assert!(matches!(
+            &state.chat_entries[0],
+            ChatEntry::ThinkingMessage { text, .. } if text == "deciding"
+        ));
+        assert!(matches!(
+            &state.chat_entries[1],
+            ChatEntry::ToolBubble { id, .. } if *id == tool_id_1
+        ));
+        assert!(matches!(
+            &state.chat_entries[2],
+            ChatEntry::ToolBubble { id, .. } if *id == tool_id_2
+        ));
+        assert!(
+            matches!(
+                &state.chat_entries[3],
+                ChatEntry::UserMessage { text, state: UserMessageState::Steered } if text == "steer me"
+            ),
+            "steer bubble must land AFTER the intervening thinking/tool bubbles: {:?}",
+            state.chat_entries[3]
+        );
+    }
+
+    #[test]
     fn domain_tool_pending_while_aborting_returns_deny_effect() {
         let mut state = AppState::new();
         state.mode = TuiMode::Aborting;
@@ -1589,10 +4135,14 @@ mod tests {
                 content_sections: vec![],
 
                 title_arguments: vec![],
+                run_id: None,
             }),
             &empty_textarea(),
         );
-        assert!(effects.contains(&Effect::DenyTool { id: tool_id }));
+        assert!(effects.contains(&Effect::DenyTool {
+            id: tool_id,
+            reason: String::new(),
+        }));
         // Focus must not change to ToolApproval.
         assert_ne!(
             state.focus,
@@ -1609,6 +4159,7 @@ mod tests {
         state.mode = TuiMode::DoublePressAbort {
             pressed_at: Instant::now(),
             return_to: Box::new(TuiMode::Streaming),
+            armed_by: ConfirmKey::CtrlC,
         };
         update(
             &mut state,
@@ -1627,6 +4178,7 @@ mod tests {
         state.mode = TuiMode::DoublePressAbort {
             pressed_at,
             return_to: Box::new(TuiMode::Streaming),
+            armed_by: ConfirmKey::CtrlC,
         };
         update(
             &mut state,
@@ -1638,7 +4190,7 @@ mod tests {
             "DoublePressAbort must survive a StreamChunk"
         );
         assert_eq!(
-            state.partial_assistant_text, "hello",
+            state.turn_buffer.partial_assistant_text, "hello",
             "chunk must still be appended"
         );
     }
@@ -1658,6 +4210,7 @@ mod tests {
                 content_sections: vec![],
 
                 title_arguments: vec![],
+                run_id: None,
             }),
             &empty_textarea(),
         );
@@ -1667,11 +4220,10 @@ mod tests {
             &empty_textarea(),
         );
         let denied_bubble = state.chat_entries.iter().find_map(|entry| {
-            if let ChatEntry::ToolBubble {
-                state: ToolCallState::Denied { arguments, .. },
-                ..
-            } = entry
-            {
+            let ChatEntry::ToolBubble { state, .. } = entry else {
+                return None;
+            };
+            if let ToolCallState::Denied { arguments, .. } = state.as_ref() {
                 return Some(arguments.clone());
             }
             None

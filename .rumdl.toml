@@ -1,3 +1,7 @@
 [global]
 # Set global line length (used by MD013 and other line-length rules)
 line-length = 100
+
+[MD013]
+# Don't check line length inside code blocks
+code-blocks = false

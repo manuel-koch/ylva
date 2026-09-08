@@ -106,6 +106,7 @@ pub trait Provider: Send + Sync {
 #[derive(Debug, Clone)]
 pub enum MockEvent {
     Text(String),
+    Thinking(String),
     Delta(DeltaChunk),
 }
 
@@ -162,6 +163,7 @@ impl Provider for MockProvider {
                 for (index, event) in script.into_iter().enumerate() {
                     let stream_event = match event {
                         MockEvent::Text(text) => StreamEvent::Text(text),
+                        MockEvent::Thinking(text) => StreamEvent::Thinking(text),
                         MockEvent::Delta(delta) => StreamEvent::Delta(delta),
                     };
                     if tx.send(stream_event).await.is_err() {
@@ -187,7 +189,10 @@ impl Provider for MockProvider {
 
 /// Tool results arrive as `role`:"tool" messages whose `content` is a JSON
 /// envelope of this shape. `ok` is authoritative: when it is `false`, report
-/// the error and do not claim the operation succeeded.
+/// the error and do not claim the operation succeeded. When `result_metadata`
+/// is present it carries structured facts about the result (e.g. byte counts,
+/// match counts); `result_metadata_schema` describes each field that actually
+/// appears — types and descriptions — so the shape is always self-documenting.
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[schemars(title = "ToolResponseEnvelope")]
 pub struct ToolEnvelope {
@@ -196,6 +201,10 @@ pub struct ToolEnvelope {
     result: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result_metadata: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result_metadata_schema: Option<serde_json::Value>,
 }
 
 impl ToolEnvelope {
@@ -257,11 +266,19 @@ pub fn serialize_messages(messages: &[Message]) -> serde_json::Value {
                 }
                 value
             }
-            Message::ToolResult { id, result, .. } => {
+            Message::ToolResult {
+                id,
+                result,
+                result_metadata,
+                result_metadata_schema,
+                ..
+            } => {
                 let content = ToolEnvelope {
                     ok: true,
                     result: Some(result.clone()),
                     error: None,
+                    result_metadata: result_metadata.clone(),
+                    result_metadata_schema: result_metadata_schema.clone(),
                 }
                 .to_string_checked();
                 serde_json::json!({
@@ -275,6 +292,8 @@ pub fn serialize_messages(messages: &[Message]) -> serde_json::Value {
                     ok: false,
                     result: None,
                     error: Some(error.clone()),
+                    result_metadata: None,
+                    result_metadata_schema: None,
                 }
                 .to_string_checked();
                 serde_json::json!({
@@ -463,11 +482,14 @@ mod tests {
                 id,
                 name: "read".into(),
                 result: "file contents".into(),
+                result_metadata: None,
+                result_metadata_schema: None,
             },
             Message::ToolError {
                 id,
                 name: "read".into(),
                 error: "boom".into(),
+                duration: std::time::Duration::ZERO,
             },
         ];
         let value = serialize_messages(&messages);

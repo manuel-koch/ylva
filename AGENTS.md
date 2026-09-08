@@ -7,12 +7,17 @@ A Rust-based terminal UI that implements an agent-harness.
 1. **Before investigating behavior:** skim
    - [README](./README.md) (project intro and quickstart)
    - [features](./docs/features.md) (implemented feature reference)
+   - [implementation-notes](./docs/implementation-notes.md) (internal mechanics
+     behind the features above; module/struct-level detail for contributors)
    - [architecture-design-records](./docs/architecture-design-records/) (recorded architecture decisions)
    - [configuration](./docs/configuration.md) (how to configure ylva runtime)
    - [keybindings](./docs/keybindings.md) (keybindings implemented in the TUI)
    - [plans](./docs/plans/) (planned implementations, one file per subject/feature)
+   - [known-test-issues](./docs/known-test-issues.md) (persistent quirks and required workarounds for testing)
 2. **Testing:** While implementing code changes (consent given), write tests according to
-   [development-workflow](./docs/development-workflow.md)
+   [development-workflow](./docs/development-workflow.md). Before writing tests involving
+   `tracing`, cwd, or integration-test side-effects, read the relevant entries in
+   [known-test-issues](./docs/known-test-issues.md).
 3. **Before reporting done**, run the verification commands in
    [development-workflow](./docs/development-workflow.md) and fix any findings.
 4. **Plan execution:** Planned implementations are executed from their plan file
@@ -42,6 +47,7 @@ A Rust-based terminal UI that implements an agent-harness.
     "can we refactor Y", "what if Z" (and equivalent-intent phrases).
   - Imperatives — DO edit: "apply it", "do it", "go ahead", "fix it", "fix the bug",
     "implement it" (and equivalent-intent phrases)
+- Don't git branch/commit/stage anything without explicit user consent
 
 When consent applies to a multi-step task, complete all the steps the user asked
 for before reporting back; partial completion is not the same as completion.
@@ -77,7 +83,7 @@ abbreviations (e.g. `case_sensitive_sort` not `cs`, `config_path` not `cp`,
 `format_timestamp` not `fmt_ts`).
 
 **Binary + library split.** The project ships both a `[[bin]]` (`src/main.rs`) and a
-`[lib]` (`src/lib.rs`) with the same crate name `yvla` (see `Cargo.toml`). Any
+`[lib]` (`src/lib.rs`) with the same crate name `ylva` (see `Cargo.toml`). Any
 type, function, or module that integration tests in `tests/` need to reach must be
 re-exported through `src/lib.rs` — `tests/*.rs` cannot `use` items from `src/main.rs`.
 

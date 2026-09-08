@@ -1,7 +1,7 @@
 # CLI option parsing
 
-CLI option parsing is current handwritten and brittle.
-We need to refactor to a established lib can can do this for us.
+CLI option parsing is currently handwritten and brittle.
+Refactor to an established library.
 
-The refactoring should be included as a new phase within `blueprint.md`,
+The refactoring should be included as a new phase in `blueprint.md`,
 shifting other phases back.

@@ -2,7 +2,7 @@
 
 ## Context
 
-- The current `WriteFileArgs` interface (`src/agent/tools/fs.rs`) only lets a
+- The current `WriteFileArgs` interface (`src/agent/tools/write.rs`) only lets a
   model write string data:
 
   ```rust
@@ -92,5 +92,5 @@ fetch needs a security review (SSRF) before it can be considered.
 - `docs/features.md` — write tool description: `encoding` argument.
 - `docs/configuration.md` — only if `encoding` becomes configurable at the
   CLI level (not planned; it is a per-call argument, so **no change**).
-- Relevant source files: `src/agent/tools/fs.rs` (`WriteFileArgs`,
+- Relevant source files: `src/agent/tools/write.rs` (`WriteFileArgs`,
   `WriteTool::description`/`schema`, `write_file`, redacted arguments).

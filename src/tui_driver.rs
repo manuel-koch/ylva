@@ -39,19 +39,21 @@ use ratatui_textarea::{Scrolling, TextArea};
 use tokio::select;
 use tokio::sync::mpsc;
 
-use crate::agent::{AgentCommand, AgentLoop, Role, UiUpdate};
+use crate::agent::tools::DEFAULT_TUI_TOOLS;
+use crate::agent::{AgentCommand, AgentLoop, AgentMode, Role, UiUpdate};
 use crate::agent_factory::AgentFactory;
 use crate::app::App;
-use crate::app_state::{
-    AppState, DomainEvent, Effect, Focus, HistoryDirection, InputEvent, TuiMode, TuiState,
-    UserMessageState,
-};
 use crate::config::{AgentConfig, ProfileConfig};
 use crate::engine::{Engine, EngineConfig, EngineImpl, DEFAULT_CONTEXT_LENGTH};
 use crate::events::{spawn_crossterm_bridge, AppAction};
 use crate::llm::Provider;
 use crate::presenter::{self, TextareaContext, TuiEvent};
 use crate::render;
+use crate::tui_reducer_state::{
+    AppState, ConfirmKey, DomainEvent, Effect, Focus, HistoryDirection, InputEvent, TuiMode,
+    UserMessageState,
+};
+use crate::tui_render_state::TuiState;
 use crate::ToolRegistry;
 
 /// Abstracts writing text to the OS clipboard so the Driver can be tested
@@ -102,6 +104,46 @@ pub enum ActionOutcome {
     Quit,
 }
 
+/// Driver-local tracking of which child agent (if any) raised each pending
+/// tool/clarify approval. The Presenter/`AppState`/`Effect` surface stays
+/// agent-agnostic (an `Effect::ApproveTool { id }` carries no `run_id`); this
+/// struct is threaded separately through the Driver alongside `AppState` so
+/// the resulting `AgentCommand` can still be routed correctly.
+///
+/// - `tool_run_ids` maps a pending tool call's `id` (as carried on
+///   `UiUpdate::ToolPending`/`Effect::ApproveTool`/`Effect::DenyTool`) to the
+///   child's `run_id` that raised it. Populated in `process_one_update` when
+///   a `ToolPending` update carries `Some(run_id)`; consumed (removed) in
+///   `execute_effects` when the corresponding `ApproveTool`/`DenyTool` effect
+///   fires. A missing key means "root's own pending tool" — same meaning as
+///   `run_id: None` on the originating `UiUpdate`.
+/// - `clarify_run_id` tracks the *current* pending clarify's `run_id`
+///   separately, because `Effect::AnswerClarify`/`Effect::AbortClarify`
+///   carry no `id` at all (unlike `ApproveTool`/`DenyTool`) — the Presenter
+///   already resets `AppState::mode` out of `ClarifyPending` in the same
+///   `presenter::update` call that produces these effects, so the id can't
+///   be recovered from `state.mode` by the time `execute_effects` runs. Set
+///   in `process_one_update` from `UiUpdate::ClarifyPending::run_id`; taken
+///   (cleared) in `execute_effects` when `AnswerClarify`/`AbortClarify` fires.
+#[derive(Debug, Default)]
+struct PendingRunIds {
+    tool_run_ids: std::collections::HashMap<uuid::Uuid, uuid::Uuid>,
+    clarify_run_id: Option<uuid::Uuid>,
+}
+
+/// Wraps `command` in `AgentCommand::ForChild { run_id, .. }` when `run_id`
+/// is `Some`; otherwise returns `command` unchanged, exactly as sent today
+/// for the root's own pending items.
+fn route_command(run_id: Option<uuid::Uuid>, command: AgentCommand) -> AgentCommand {
+    match run_id {
+        Some(run_id) => AgentCommand::ForChild {
+            run_id,
+            command: Box::new(command),
+        },
+        None => command,
+    }
+}
+
 /// Apply the standard Ylva textarea configuration: word-or-glyph wrapping and
 /// no cursor-line underline decoration.
 fn configure_textarea(textarea: &mut TextArea<'_>) {
@@ -130,22 +172,38 @@ fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
     match update {
         UiUpdate::StreamStarted => Some(DomainEvent::StreamStarted),
         UiUpdate::AppendText(text) => Some(DomainEvent::StreamChunk(text.clone())),
+        UiUpdate::AppendThinking(text) => Some(DomainEvent::StreamThinkingChunk(text.clone())),
         UiUpdate::StreamDone => Some(DomainEvent::StreamDone),
         UiUpdate::StreamCancelled => Some(DomainEvent::StreamCancelled),
-        UiUpdate::SteerQueued => Some(DomainEvent::SteerQueued),
-        UiUpdate::SteerApplied => Some(DomainEvent::SteerApplied),
+        UiUpdate::SteerQueued { run_id } => Some(DomainEvent::SteerQueued { run_id: *run_id }),
+        UiUpdate::SteerApplied { run_id } => Some(DomainEvent::SteerApplied { run_id: *run_id }),
         UiUpdate::ToolPending {
             id,
             name,
             arguments,
             content_sections,
             title_arguments,
+            run_id,
         } => Some(DomainEvent::ToolPending {
             id: *id,
             name: name.clone(),
             arguments: arguments.clone(),
             content_sections: content_sections.clone(),
             title_arguments: title_arguments.clone(),
+            run_id: *run_id,
+        }),
+        UiUpdate::ClarifyPending {
+            id,
+            question,
+            context,
+            choices,
+            run_id,
+        } => Some(DomainEvent::ClarifyPending {
+            id: *id,
+            question: question.clone(),
+            context: context.clone(),
+            choices: choices.clone(),
+            run_id: *run_id,
         }),
         UiUpdate::ToolStart {
             id,
@@ -153,34 +211,81 @@ fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
             arguments,
             content_sections,
             title_arguments,
-            ..
+            run_id,
         } => Some(DomainEvent::ToolStart {
             id: *id,
             name: name.clone(),
             arguments: arguments.clone(),
             content_sections: content_sections.clone(),
             title_arguments: title_arguments.clone(),
+            run_id: *run_id,
+        }),
+        UiUpdate::ToolProgress {
+            id,
+            title_arguments,
+        } => Some(DomainEvent::ToolProgress {
+            id: *id,
+            title_arguments: title_arguments.clone(),
         }),
         UiUpdate::ToolDone {
             id,
             name,
-            result,
+            result_section,
             summary,
             duration,
             content_sections,
+            run_id,
         } => Some(DomainEvent::ToolDone {
             id: *id,
             name: name.clone(),
-            result: result.clone(),
+            result_section: result_section.clone(),
             summary: summary.clone(),
             duration: *duration,
             content_sections: content_sections.clone(),
+            run_id: *run_id,
         }),
-        UiUpdate::ToolKilled { id } => Some(DomainEvent::ToolKilled { id: *id }),
-        UiUpdate::Error(message) => Some(DomainEvent::Error(message.clone())),
-        // ToolError is handled directly by the Driver via AppState::apply_tool_error;
-        // no corresponding DomainEvent exists in the Presenter's surface.
-        UiUpdate::ToolError { .. } => None,
+        UiUpdate::ToolKilled { id, run_id } => Some(DomainEvent::ToolKilled {
+            id: *id,
+            run_id: *run_id,
+        }),
+        UiUpdate::Error { message, run_id } => Some(DomainEvent::Error {
+            message: message.clone(),
+            run_id: *run_id,
+        }),
+        UiUpdate::ChildAgentStarted {
+            run_id,
+            call_id,
+            agent_type,
+            task,
+            label,
+        } => Some(DomainEvent::ChildAgentStarted {
+            run_id: *run_id,
+            call_id: *call_id,
+            agent_type: agent_type.clone(),
+            task: task.clone(),
+            label: label.clone(),
+        }),
+        UiUpdate::ChildAgentToken {
+            run_id,
+            text,
+            is_thinking,
+        } => Some(DomainEvent::ChildAgentToken {
+            run_id: *run_id,
+            text: text.clone(),
+            is_thinking: *is_thinking,
+        }),
+        UiUpdate::ChildAgentDone {
+            run_id,
+            status,
+            result,
+        } => Some(DomainEvent::ChildAgentDone {
+            run_id: *run_id,
+            status: status.clone(),
+            result: result.clone(),
+        }),
+        // ToolError and ToolAutoDenied are handled directly by the Driver via
+        // AppState; no corresponding DomainEvent exists in the Presenter's surface.
+        UiUpdate::ToolError { .. } | UiUpdate::ToolAutoDenied { .. } => None,
     }
 }
 
@@ -194,6 +299,7 @@ async fn execute_effects(
     effects: Vec<Effect>,
     mouse_drag: &mut MouseDrag,
     clipboard: &mut dyn ClipboardSink,
+    pending_run_ids: &mut PendingRunIds,
 ) -> ActionOutcome {
     for effect in effects {
         match effect {
@@ -215,10 +321,18 @@ async fn execute_effects(
                 configure_textarea(textarea);
             }
             Effect::RestoreTextarea => {
-                if let Some(snapshot) = state.pending_approval_input_snapshot.take() {
-                    *textarea = TextArea::from(snapshot);
-                    configure_textarea(textarea);
-                }
+                *textarea = if let Some(snapshot) = state.pending_approval_input_snapshot.take() {
+                    TextArea::from(snapshot)
+                } else {
+                    TextArea::default()
+                };
+                configure_textarea(textarea);
+            }
+            Effect::SetInputText(text) => {
+                let lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
+                *textarea = TextArea::from(lines);
+                configure_textarea(textarea);
+                textarea.move_cursor(ratatui_textarea::CursorMove::End);
             }
             Effect::TextareaKey(key_event) => {
                 textarea.input(key_event);
@@ -243,14 +357,22 @@ async fn execute_effects(
                 }
             }
             Effect::ApproveTool { id } => {
-                let _ = cmd_tx.try_send(AgentCommand::ApproveTool { id });
+                let run_id = pending_run_ids.tool_run_ids.remove(&id);
+                let _ = cmd_tx.try_send(route_command(run_id, AgentCommand::ApproveTool { id }));
             }
-            Effect::DenyTool { id } => {
-                state.apply_tool_denied(id);
-                let _ = cmd_tx.try_send(AgentCommand::DenyTool {
-                    id,
-                    reason: "Denied by user".into(),
-                });
+            Effect::DenyTool { id, reason } => {
+                state.apply_tool_denied(id, &reason);
+                let run_id = pending_run_ids.tool_run_ids.remove(&id);
+                let _ =
+                    cmd_tx.try_send(route_command(run_id, AgentCommand::DenyTool { id, reason }));
+            }
+            Effect::AnswerClarify(answer) => {
+                let run_id = pending_run_ids.clarify_run_id.take();
+                let _ = cmd_tx.try_send(route_command(run_id, AgentCommand::AnswerClarify(answer)));
+            }
+            Effect::AbortClarify => {
+                let run_id = pending_run_ids.clarify_run_id.take();
+                let _ = cmd_tx.try_send(route_command(run_id, AgentCommand::AbortClarify));
             }
             Effect::StopAgent => {
                 let _ = cmd_tx.try_send(AgentCommand::Stop {
@@ -298,10 +420,12 @@ async fn execute_effects(
                 }
             }
             Effect::FinalizeInputSelection => {
-                textarea.copy();
-                let yanked = textarea.yank_text();
-                if !yanked.is_empty() && clipboard.write_text(yanked) {
-                    state.set_toast("Copied to clipboard");
+                if mouse_drag.moved {
+                    textarea.copy();
+                    let yanked = textarea.yank_text();
+                    if !yanked.is_empty() && clipboard.write_text(yanked) {
+                        state.set_toast("Copied to clipboard");
+                    }
                 }
                 *mouse_drag = MouseDrag::default();
             }
@@ -317,6 +441,7 @@ async fn execute_effects(
 
 /// Process one [`UiUpdate`]: convert to a [`DomainEvent`] (or handle directly
 /// for `ToolError`) and run the resulting effects.
+#[expect(clippy::too_many_arguments)]
 async fn process_one_update(
     state: &mut AppState,
     textarea: &mut TextArea<'_>,
@@ -325,14 +450,70 @@ async fn process_one_update(
     update: &UiUpdate,
     mouse_drag: &mut MouseDrag,
     clipboard: &mut dyn ClipboardSink,
+    pending_run_ids: &mut PendingRunIds,
 ) -> ActionOutcome {
-    if let UiUpdate::ToolError { id, error } = update {
-        state.apply_tool_error(*id, error.clone());
+    if let UiUpdate::ToolError {
+        id,
+        error,
+        duration,
+        content_sections,
+        run_id,
+    } = update
+    {
+        state.apply_tool_error(
+            *id,
+            error.clone(),
+            *duration,
+            content_sections.clone(),
+            *run_id,
+        );
         return ActionOutcome::Continue;
+    }
+    if let UiUpdate::ToolAutoDenied {
+        id,
+        name,
+        title_arguments,
+        content_sections,
+        reason,
+        run_id,
+    } = update
+    {
+        state.apply_tool_auto_denied(
+            *id,
+            name.clone(),
+            title_arguments.clone(),
+            content_sections.clone(),
+            reason.clone(),
+            *run_id,
+        );
+        return ActionOutcome::Continue;
+    }
+    // Record which child (if any) raised this pending approval *before*
+    // converting to the agent-agnostic `DomainEvent`/`Effect` surface — see
+    // `PendingRunIds`.
+    if let UiUpdate::ToolPending {
+        id,
+        run_id: Some(run_id),
+        ..
+    } = update
+    {
+        pending_run_ids.tool_run_ids.insert(*id, *run_id);
+    }
+    if let UiUpdate::ClarifyPending { run_id, .. } = update {
+        pending_run_ids.clarify_run_id = *run_id;
     }
     if let Some(domain_event) = ui_update_to_domain_event(update) {
         let effects = presenter::update(state, TuiEvent::Domain(domain_event), textarea_ctx);
-        execute_effects(state, textarea, cmd_tx, effects, mouse_drag, clipboard).await
+        execute_effects(
+            state,
+            textarea,
+            cmd_tx,
+            effects,
+            mouse_drag,
+            clipboard,
+            pending_run_ids,
+        )
+        .await
     } else {
         ActionOutcome::Continue
     }
@@ -344,33 +525,67 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
     // Extract method results before consuming fields.
     let agent_mode = app.agent_mode();
     let show_help = app.show_help();
+    let pending_clarify = if let TuiMode::ClarifyPending {
+        question,
+        context,
+        choices,
+        ..
+    } = &app.mode
+    {
+        Some((question.clone(), choices.clone(), context.clone()))
+    } else {
+        None
+    };
     let input_area_rect = app.layout.input_area.rect;
     let chat_area_rect = app.layout.chat_area.rect;
     TuiState {
         agent_mode,
         chat_entries: app.chat_entries,
-        partial_assistant_text: app.partial_assistant_text,
-        show_help,
+        partial_assistant_text: app.turn_buffer.partial_assistant_text,
+        partial_thinking_text: app.turn_buffer.partial_thinking_text,
+        thinking_started_at: app.turn_buffer.thinking_started_at,
+        partial_thinking_collapsed: app.turn_buffer.partial_thinking_collapsed,
+        queued_steer_texts: app.queued_steer_texts,
         steer_indicator: app.steer_indicator,
-        scroll_offset: app.scroll_offset,
-        scroll_locked: app.scroll_locked,
-        chat_area_height: app.chat_area_height,
         pending_approval: None,
+        pending_approval_is_subagent: false,
         pending_approval_input_snapshot: app.pending_approval_input_snapshot,
         input_history: app.input_history,
         history_index: app.history_index,
         draft: app.draft,
         input_area: input_area_rect,
-        chat_area: chat_area_rect,
-        chat_rendered_lines: app.chat_rendered_lines,
-        chat_selection: app.chat_selection,
-        chat_drag_active: app.chat_drag_active,
         toast: app.toast,
         spinner_frame: app.spinner_frame,
-        help_scroll_offset: app.help_scroll_offset,
-        help_scroll_x: app.help_scroll_x,
         input_scroll_top: app.input_scroll_top,
-        bubble_title_rows: app.bubble_title_rows,
+        help_popup: crate::tui_render_state::HelpPopupState {
+            show_help,
+            help_scroll_offset: app.help_popup.help_scroll_offset,
+            help_scroll_x: app.help_popup.help_scroll_x,
+            help_popup_rect: app.layout.help_popup.rect,
+        },
+        clarify_banner_state: crate::tui_render_state::ClarifyBannerState {
+            pending_clarify,
+            clarify_scroll_offset: app.clarify_banner_state.clarify_scroll_offset,
+            clarify_banner_drag: None,
+            clarify_banner: ratatui::layout::Rect::default(),
+        },
+        child_view: crate::tui_render_state::ChildViewState {
+            child_view_bubble: None,
+            header_bubble_scroll_offset: 0,
+            header_bubble_area: ratatui::layout::Rect::default(),
+        },
+        conversation: crate::tui_render_state::ConversationListState {
+            scroll_offset: app.conversation.scroll_offset,
+            scroll_locked: app.conversation.scroll_locked,
+            chat_area_height: app.conversation.chat_area_height,
+            chat_area: chat_area_rect,
+            chat_rendered_lines: app.conversation.chat_rendered_lines,
+            chat_rendered_line_chrome_widths: app.conversation.chat_rendered_line_chrome_widths,
+            chat_selection: app.conversation.chat_selection,
+            chat_drag_active: app.conversation.chat_drag_active,
+            bubble_title_rows: app.conversation.bubble_title_rows,
+            thinking_title_rows: app.conversation.thinking_title_rows,
+        },
     }
 }
 
@@ -401,6 +616,7 @@ where
     // Driver-local tracking — not part of AppState.
     let mut mouse_pos: Option<(u16, u16)> = None;
     let mut mouse_drag = MouseDrag::default();
+    let mut pending_run_ids = PendingRunIds::default();
 
     let handle = agent.run();
 
@@ -471,6 +687,7 @@ where
                         presenter::update(&mut state, TuiEvent::Mouse(mouse), &textarea_ctx);
                     if execute_effects(
                         &mut state, &mut textarea, &cmd_tx, effects, &mut mouse_drag, clipboard,
+                        &mut pending_run_ids,
                     )
                     .await
                         == ActionOutcome::Quit
@@ -484,6 +701,7 @@ where
                 let effects = presenter::update(&mut state, event, &textarea_ctx);
                 if execute_effects(
                     &mut state, &mut textarea, &cmd_tx, effects, &mut mouse_drag, clipboard,
+                    &mut pending_run_ids,
                 )
                 .await
                     == ActionOutcome::Quit
@@ -497,7 +715,7 @@ where
 
                 if process_one_update(
                     &mut state, &mut textarea, &cmd_tx, &textarea_ctx, &update, &mut mouse_drag,
-                    clipboard,
+                    clipboard, &mut pending_run_ids,
                 )
                 .await
                     == ActionOutcome::Quit
@@ -511,7 +729,7 @@ where
                         Ok(next) => {
                             if process_one_update(
                                 &mut state, &mut textarea, &cmd_tx, &textarea_ctx,
-                                &next, &mut mouse_drag, clipboard,
+                                &next, &mut mouse_drag, clipboard, &mut pending_run_ids,
                             )
                             .await
                                 == ActionOutcome::Quit
@@ -536,12 +754,26 @@ where
                 );
                 execute_effects(
                     &mut state, &mut textarea, &cmd_tx, effects, &mut mouse_drag, clipboard,
+                    &mut pending_run_ids,
+                )
+                .await;
+            }
+
+            _ = bubble_click_timeout(&state) => {
+                let effects = presenter::update(
+                    &mut state,
+                    TuiEvent::Domain(DomainEvent::BubbleClickWindowExpired),
+                    &textarea_ctx,
+                );
+                execute_effects(
+                    &mut state, &mut textarea, &cmd_tx, effects, &mut mouse_drag, clipboard,
+                    &mut pending_run_ids,
                 )
                 .await;
             }
 
             _ = spinner_tick.tick() => {
-                if !matches!(state.mode, TuiMode::Idle | TuiMode::DoublePressAbort { .. }) {
+                if spinner_should_tick(&state) {
                     state.spinner_frame = state.spinner_frame.wrapping_add(1);
                 }
             }
@@ -644,11 +876,21 @@ fn confirm_hint(state: &AppState) -> Option<String> {
     if matches!(state.mode, TuiMode::Aborting) {
         return None;
     }
-    if let TuiMode::DoublePressAbort { return_to, .. } = &state.mode {
-        let hint = if matches!(**return_to, TuiMode::Idle) {
-            " Press Ctrl+C or Esc again to quit"
-        } else {
-            " Press Ctrl+C or Esc again to cancel"
+    if let TuiMode::DoublePressAbort {
+        return_to,
+        armed_by,
+        ..
+    } = &state.mode
+    {
+        let is_idle = matches!(**return_to, TuiMode::Idle);
+        // Only the same key's second press confirms (see `ConfirmKey`), so
+        // name that one key explicitly rather than both — naming both would
+        // wrongly imply either key finishes the same action.
+        let hint = match (armed_by, is_idle) {
+            (ConfirmKey::CtrlC, true) => " Press ctrl-c again to quit",
+            (ConfirmKey::CtrlC, false) => " Press ctrl-c again to cancel & quit",
+            (ConfirmKey::Escape, true) => " Press esc again to clear",
+            (ConfirmKey::Escape, false) => " Press esc again to cancel",
         };
         Some(hint.to_string())
     } else {
@@ -656,11 +898,41 @@ fn confirm_hint(state: &AppState) -> Option<String> {
     }
 }
 
+/// Whether the footer/header spinner glyph should advance this tick.
+///
+/// Gates on `agent_mode()`, not raw `TuiMode`, so the spinner keeps advancing
+/// whenever *anything* is animating a spinner glyph — including a
+/// `spawn_subagent` tool bubble (and its child-view header re-render) that's
+/// still `Running` while the root's own `TuiMode` has already gone `Idle`
+/// waiting on it, regardless of whether the subagent itself is currently
+/// paused for its own tool approval (that only affects the subagent's
+/// *inner* bubble, not the root `spawn_subagent` bubble's `Running` state).
+/// `DoublePressAbort` stays frozen regardless, matching its static
+/// confirm-prompt UI.
+fn spinner_should_tick(state: &AppState) -> bool {
+    !matches!(state.mode, TuiMode::DoublePressAbort { .. }) && state.agent_mode() != AgentMode::Idle
+}
+
 /// A future that resolves once the double-press confirm window elapses (or
 /// never, when no confirm is pending).
 async fn confirm_timeout(state: &AppState) {
     if let TuiMode::DoublePressAbort { pressed_at, .. } = &state.mode {
         let remaining = (*pressed_at + CONFIRM_TIMEOUT).saturating_duration_since(Instant::now());
+        tokio::time::sleep(remaining).await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// A future that resolves once a bubble's deferred single-click
+/// collapse/expand toggle window elapses (or never, when no click is
+/// currently armed). Armed by a first click on a `spawn_subagent` bubble's
+/// title — see `crate::tui_reducer_state::DOUBLE_CLICK_WINDOW` for why the
+/// toggle is deferred rather than applied immediately.
+async fn bubble_click_timeout(state: &AppState) {
+    if let Some((_, clicked_at)) = state.last_bubble_click {
+        let remaining = (clicked_at + crate::tui_reducer_state::DOUBLE_CLICK_WINDOW)
+            .saturating_duration_since(Instant::now());
         tokio::time::sleep(remaining).await;
     } else {
         std::future::pending::<()>().await;
@@ -751,10 +1023,13 @@ pub async fn run_tui_on_stdout(
         api_key: None,
     };
     let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(provider, engine_config));
-    let factory = Arc::new(AgentFactory::new(std::collections::HashMap::from([(
-        "default".to_string(),
-        engine,
-    )])));
+    let factory = Arc::new(
+        AgentFactory::new(std::collections::HashMap::from([(
+            "default".to_string(),
+            engine,
+        )]))
+        .with_allowed_tools(DEFAULT_TUI_TOOLS),
+    );
     let profile = ProfileConfig {
         default_engine: "default".to_string(),
         compact_engine: None,
@@ -820,6 +1095,7 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tokio::sync::mpsc;
+    use uuid::Uuid;
 
     fn key_event(code: KeyCode) -> crossterm::event::KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -844,6 +1120,75 @@ mod tests {
         let mut textarea = TextArea::default();
         configure_textarea(&mut textarea);
         (AppState::new(), textarea, cmd_tx, cmd_rx)
+    }
+
+    #[test]
+    fn spinner_ticks_while_root_is_idle_but_a_spawned_child_is_still_running() {
+        // Regression: the root loop's own `TuiMode` can settle to `Idle` while
+        // a spawned subagent's `spawn_subagent` tool bubble stays `Running` —
+        // the spinner must keep advancing (driving both the footer and the
+        // child-view header bubble's spinner glyph) rather than freezing.
+        let mut state = AppState::new();
+        state.mode = TuiMode::Idle;
+        state
+            .chat_entries
+            .push(crate::tui_reducer_state::ChatEntry::ToolBubble {
+                id: Uuid::new_v4(),
+                name: "spawn_subagent".to_string(),
+                state: Box::new(crate::tui_reducer_state::ToolCallState::Running {
+                    arguments: serde_json::json!({}),
+                    content_sections: vec![],
+                    title_arguments: vec![],
+                    progress_arguments: vec![],
+                }),
+                collapsed: true,
+            });
+        assert!(spinner_should_tick(&state));
+    }
+
+    #[test]
+    fn spinner_keeps_ticking_while_the_spawned_child_itself_is_paused_for_approval() {
+        // The child's own inner tool-approval pause sets `Focus::ToolApproval`
+        // but does not touch the root `spawn_subagent` bubble's `Running`
+        // state or the root's `TuiMode` — the spinner must not stall just
+        // because *something* is paused.
+        let mut state = AppState::new();
+        state.mode = TuiMode::Idle;
+        state
+            .chat_entries
+            .push(crate::tui_reducer_state::ChatEntry::ToolBubble {
+                id: Uuid::new_v4(),
+                name: "spawn_subagent".to_string(),
+                state: Box::new(crate::tui_reducer_state::ToolCallState::Running {
+                    arguments: serde_json::json!({}),
+                    content_sections: vec![],
+                    title_arguments: vec![],
+                    progress_arguments: vec![],
+                }),
+                collapsed: true,
+            });
+        state.focus = crate::tui_reducer_state::Focus::ToolApproval {
+            tool_id: Uuid::new_v4(),
+            tool_name: "bash".to_string(),
+        };
+        assert!(spinner_should_tick(&state));
+    }
+
+    #[test]
+    fn spinner_does_not_tick_while_truly_idle() {
+        let state = AppState::new();
+        assert!(!spinner_should_tick(&state));
+    }
+
+    #[test]
+    fn spinner_does_not_tick_during_double_press_abort() {
+        let mut state = AppState::new();
+        state.mode = TuiMode::DoublePressAbort {
+            pressed_at: Instant::now(),
+            return_to: Box::new(TuiMode::Streaming),
+            armed_by: ConfirmKey::CtrlC,
+        };
+        assert!(!spinner_should_tick(&state));
     }
 
     #[test]
@@ -880,6 +1225,7 @@ mod tests {
             effects,
             &mut MouseDrag::default(),
             &mut NoopClipboard,
+            &mut PendingRunIds::default(),
         )
         .await;
         assert_eq!(outcome, ActionOutcome::Quit);
@@ -901,6 +1247,7 @@ mod tests {
             effects,
             &mut MouseDrag::default(),
             &mut NoopClipboard,
+            &mut PendingRunIds::default(),
         )
         .await;
         assert_eq!(textarea.lines(), &[""]);
@@ -922,6 +1269,7 @@ mod tests {
             effects,
             &mut MouseDrag::default(),
             &mut NoopClipboard,
+            &mut PendingRunIds::default(),
         )
         .await;
         assert_eq!(textarea.lines(), &[""]);
@@ -948,6 +1296,7 @@ mod tests {
             effects2,
             &mut MouseDrag::default(),
             &mut NoopClipboard,
+            &mut PendingRunIds::default(),
         )
         .await;
         assert!(matches!(cmd_rx.try_recv(), Ok(AgentCommand::Stop { .. })));
@@ -968,6 +1317,7 @@ mod tests {
             effects,
             &mut MouseDrag::default(),
             &mut NoopClipboard,
+            &mut PendingRunIds::default(),
         )
         .await;
         assert!(matches!(cmd_rx.try_recv(), Ok(AgentCommand::Stop { .. })));
@@ -993,6 +1343,7 @@ mod tests {
             effects,
             &mut MouseDrag::default(),
             &mut NoopClipboard,
+            &mut PendingRunIds::default(),
         )
         .await;
         assert_eq!(textarea.lines(), &[""]);
@@ -1013,6 +1364,7 @@ mod tests {
                 content_sections: vec![],
 
                 title_arguments: vec![],
+                run_id: None,
             }),
             &textarea_ctx_from(&textarea),
         );
@@ -1023,13 +1375,17 @@ mod tests {
             effects,
             &mut MouseDrag::default(),
             &mut NoopClipboard,
+            &mut PendingRunIds::default(),
         )
         .await;
         assert!(matches!(state.focus, Focus::ToolApproval { .. }));
 
         let ctx = textarea_ctx_from(&textarea);
         let effects = presenter::update(&mut state, TuiEvent::Input(InputEvent::CtrlC), &ctx);
-        assert!(effects.contains(&Effect::DenyTool { id: tool_id }));
+        assert!(effects.contains(&Effect::DenyTool {
+            id: tool_id,
+            reason: String::new(),
+        }));
         execute_effects(
             &mut state,
             &mut textarea,
@@ -1037,13 +1393,14 @@ mod tests {
             effects,
             &mut MouseDrag::default(),
             &mut NoopClipboard,
+            &mut PendingRunIds::default(),
         )
         .await;
         assert_eq!(
             cmd_rx.try_recv(),
             Ok(AgentCommand::DenyTool {
                 id: tool_id,
-                reason: "Denied by user".into(),
+                reason: String::new(),
             })
         );
     }
@@ -1061,6 +1418,7 @@ mod tests {
                 content_sections: vec![],
 
                 title_arguments: vec![],
+                run_id: None,
             }),
             &textarea_ctx_from(&textarea),
         );
@@ -1071,6 +1429,7 @@ mod tests {
             setup_effects,
             &mut MouseDrag::default(),
             &mut NoopClipboard,
+            &mut PendingRunIds::default(),
         )
         .await;
 
@@ -1088,6 +1447,7 @@ mod tests {
             effects,
             &mut MouseDrag::default(),
             &mut NoopClipboard,
+            &mut PendingRunIds::default(),
         )
         .await;
         assert!(matches!(state.focus, Focus::MainInput));
@@ -1110,6 +1470,7 @@ mod tests {
                 content_sections: vec![],
 
                 title_arguments: vec![],
+                run_id: None,
             }),
             &textarea_ctx_from(&textarea),
         );
@@ -1120,12 +1481,16 @@ mod tests {
             setup_effects,
             &mut MouseDrag::default(),
             &mut NoopClipboard,
+            &mut PendingRunIds::default(),
         )
         .await;
 
         let ctx = textarea_ctx_from(&textarea);
         let effects = presenter::update(&mut state, TuiEvent::Input(InputEvent::Escape), &ctx);
-        assert!(effects.contains(&Effect::DenyTool { id: tool_id }));
+        assert!(effects.contains(&Effect::DenyTool {
+            id: tool_id,
+            reason: String::new(),
+        }));
         execute_effects(
             &mut state,
             &mut textarea,
@@ -1133,6 +1498,7 @@ mod tests {
             effects,
             &mut MouseDrag::default(),
             &mut NoopClipboard,
+            &mut PendingRunIds::default(),
         )
         .await;
         assert!(matches!(state.focus, Focus::MainInput));
@@ -1140,7 +1506,7 @@ mod tests {
             cmd_rx.try_recv(),
             Ok(AgentCommand::DenyTool {
                 id: tool_id,
-                reason: "Denied by user".into()
+                reason: String::new(),
             })
         );
     }
@@ -1159,6 +1525,7 @@ mod tests {
                 content_sections: vec![],
 
                 title_arguments: vec![],
+                run_id: None,
             }),
             &textarea_ctx_from(&textarea),
         );
@@ -1169,6 +1536,7 @@ mod tests {
             setup_effects,
             &mut MouseDrag::default(),
             &mut NoopClipboard,
+            &mut PendingRunIds::default(),
         )
         .await;
         assert_eq!(
@@ -1185,6 +1553,7 @@ mod tests {
             vec![Effect::RestoreTextarea],
             &mut MouseDrag::default(),
             &mut NoopClipboard,
+            &mut PendingRunIds::default(),
         )
         .await;
         assert_eq!(textarea.lines(), &["hello world"]);

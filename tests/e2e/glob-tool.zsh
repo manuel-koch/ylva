@@ -1,8 +1,11 @@
 #!/bin/zsh
 YLVA=${CARGO_TARGET_DIR:-./target}/debug/ylva
-LOG_DIR=$(git rev-parse --show-toplevel)/logs
-LOG_PREFIX=$(basename $0 .zsh)
-LOG_FORMAT=json
+ROOT_DIR=$(git rev-parse --show-toplevel)
+LOG_DIR=${ROOT_DIR}/logs
+LOG_FORMAT=text
+PREFIX=$(basename $0 .zsh)
+
+cd ${ROOT_DIR}
 
 make build-debug
 
@@ -10,9 +13,14 @@ test -d "${LOG_DIR}" || mkdir -p "${LOG_DIR}"
 echo "**" > "${LOG_DIR}/.gitignore"
 
 function ylva() {
-  ${YLVA} --no-tui \
-          --log-file $(git rev-parse --show-toplevel)/logs/${LOG_PREFIX}_$(date +%Y%m%d%H%M%S).log \
-          --log-level DEBUG --log-format ${LOG_FORMAT}
+    PREFIX_TIMESTAMPED="${LOG_DIR}/${PREFIX}_$(date +%Y%m%d%H%M%S)"
+    LOG_PATH="${PREFIX_TIMESTAMPED}.log"
+    OUT_PATH="${PREFIX_TIMESTAMPED}.txt"
+    export YLVA_REQUEST_DUMP_PATH=${PREFIX_TIMESTAMPED}.json
+    ${YLVA} --no-tui \
+            --log-file ${LOG_PATH} \
+            --log-level TRACE --log-format ${LOG_FORMAT} \
+            | tee ${OUT_PATH}
 }
 
 echo "----------------------------------------------------------"
@@ -31,4 +39,34 @@ echo "----------------------------------------------------------"
 ylva << '__EOT__'
 Search for files in the project root (non-recursive).
 Count the number of found files!
+__EOT__
+
+echo "----------------------------------------------------------"
+ylva << '__EOT__'
+How many files are in project ( incl. git ignored files and hidden files) ?
+__EOT__
+
+echo "----------------------------------------------------------"
+ylva << '__EOT__'
+How many files are in project ( excl. git ignored files and hidden files ) ?
+__EOT__
+
+echo "----------------------------------------------------------"
+ylva << '__EOT__'
+How many directories are in project ( incl. git ignored dirs and hidden dirs ) ?
+__EOT__
+
+echo "----------------------------------------------------------"
+ylva << '__EOT__'
+How many directories are in project ( excl. git ignored dirs and hidden dirs ) ?
+__EOT__
+
+echo "----------------------------------------------------------"
+ylva << '__EOT__'
+How many files/directories are in project ( incl. git ignored paths and hidden paths ) ?
+__EOT__
+
+echo "----------------------------------------------------------"
+ylva << '__EOT__'
+How many files/directories are in project ( excl. git ignored paths and hidden paths ) ?
 __EOT__

@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 
 /// Per-agent configuration within a profile.
+#[derive(Debug, Clone)]
 pub struct AgentConfig {
     /// Name of the engine to use for this agent type. When `None`, resolves to
     /// `ProfileConfig::default_engine`.
@@ -33,6 +34,7 @@ pub struct AgentConfig {
 }
 
 /// Top-level runtime profile that groups engine selection and per-agent settings.
+#[derive(Debug, Clone)]
 pub struct ProfileConfig {
     /// Name of the engine used for all agents unless overridden by
     /// `AgentConfig::engine`.

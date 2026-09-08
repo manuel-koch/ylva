@@ -7,16 +7,14 @@ OpenRouter reference. This is what lets the whole Ylva architecture use a single
 `reqwest` + `eventsource-stream` provider for both Ollama and OpenRouter backends
 (see `docs/blueprint.md` §0 Spike 3 / §2 / §4A / §5).
 
-Unlike Spikes 1 and 2 — which are standalone Rust crates — this spike is a `curl`
-POST plus a lightweight Python inspection script. It is **not** production code,
-is **not** wired into any future `src/` tree, and is not added to the workspace.
-The full intent and the acceptance criteria are recorded in
-[`docs/plans/spike-ollama-tool-calling.md`](../../docs/plans/spike-ollama-tool-calling.md).
+Unlike Spikes 1 and 2, which are standalone Rust crates, this spike is a `curl`
+POST plus a lightweight Python inspection script. It is not production code,
+is not wired into any future `src/` tree, and is not added to the workspace.
 
-The default run is optimistic over a local Ollama server; it needs no API key and
-no network beyond `localhost`. A live OpenRouter comparison is **opted into**
-(`inspect_openrouter_tool_calls.sh`, requires `OPENROUTER_API_KEY`) and is **not**
-part of the default pass — without it, Criterion B's "byte-for-byte compatible with
+The default run requires a local Ollama server; it needs no API key and
+no network beyond `localhost`. A live OpenRouter comparison is opted in via
+`inspect_openrouter_tool_calls.sh` (requires `OPENROUTER_API_KEY`) and is not
+part of the default pass. Without it, Criterion B's "byte-for-byte compatible with
 OpenRouter" claim is only checked structurally against the documented reference
 shape, not against a live OpenRouter stream.
 
@@ -101,16 +99,16 @@ summary:
   `{name, arguments}` (no Ollama-specific renames); the live byte-for-byte check is
   the empty-diff comparison of the two `--shape` outputs above.
 
-The process exits non-zero if either criterion fails, and prints a note pointing
-toward the required `ollama_native` provider when the endpoint silently ignores
-`tools` (HTTP 200 with no tool calls).
+The process exits non-zero if either criterion fails. When the endpoint silently
+ignores `tools` (HTTP 200 with no tool calls), the script prints a note pointing
+toward the `ollama_native` provider.
 
 ## Outcome
 
 **Criterion A: PASS** on live Ollama for `gemma4:e4b-mlx` and `gpt-oss:20b`.
 **Criterion B: structural PASS** — the Ollama shape matches the documented OpenRouter
 reference (`tool_calls[i].{id,index,type,function}.function.{name,arguments}`).
-The **live byte-for-byte OpenRouter diff is not yet run** (requires
-`OPENROUTER_API_KEY`); until then, treat Criterion B's *live* "identical to a real
-OpenRouter stream" claim as unverified. See the outcome note under
+The live byte-for-byte OpenRouter diff has not been run yet (requires
+`OPENROUTER_API_KEY`); treat Criterion B's live "identical to a real
+OpenRouter stream" claim as unverified until then. See the outcome note under
 `docs/blueprint.md` §0 Spike 3 for details and raw captures in `out/`.
