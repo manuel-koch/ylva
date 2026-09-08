@@ -30,7 +30,7 @@ use tracing::Instrument;
 
 use super::{
     SearchResultLine, SearchResultSection, Section, Tool, ToolCall, ToolCallResult, ToolError,
-    DEFAULT_TIMEOUT_SECS,
+    DEFAULT_TOOL_TIMEOUT_SECS,
 };
 use crate::sandbox::{ApprovalCheck, SandboxContext};
 
@@ -345,7 +345,7 @@ impl Tool for SearchTool {
 
     fn timeout_secs(&self) -> u64 {
         if self.timeout_secs == 0 {
-            DEFAULT_TIMEOUT_SECS
+            DEFAULT_TOOL_TIMEOUT_SECS
         } else {
             self.timeout_secs
         }

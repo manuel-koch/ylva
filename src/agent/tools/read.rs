@@ -20,7 +20,7 @@
 //! parsing incoming arguments).
 //!
 //! **`timeout_secs` sentinel (Q6):** the tool carries a `timeout_secs: u64`
-//! override where `0` selects [`DEFAULT_TIMEOUT_SECS`]. A timeout is always
+//! override where `0` selects [`DEFAULT_TOOL_TIMEOUT_SECS`]. A timeout is always
 //! enforced — there is no "no-timeout" value; `0` merely selects the module
 //! default.
 
@@ -31,7 +31,7 @@ use serde_json::Value;
 use tracing::Instrument;
 
 use super::{
-    ContentSection, Section, Tool, ToolCall, ToolCallResult, ToolError, DEFAULT_TIMEOUT_SECS,
+    ContentSection, Section, Tool, ToolCall, ToolCallResult, ToolError, DEFAULT_TOOL_TIMEOUT_SECS,
 };
 use crate::sandbox::{ApprovalCheck, SandboxContext};
 
@@ -289,7 +289,7 @@ impl Tool for ReadTool {
 
     fn timeout_secs(&self) -> u64 {
         if self.timeout_secs == 0 {
-            DEFAULT_TIMEOUT_SECS
+            DEFAULT_TOOL_TIMEOUT_SECS
         } else {
             self.timeout_secs
         }
@@ -411,7 +411,7 @@ mod tests {
             tool.needs_approval(&args),
             crate::sandbox::ApprovalCheck::AutoApproved
         ));
-        assert_eq!(tool.timeout_secs(), DEFAULT_TIMEOUT_SECS);
+        assert_eq!(tool.timeout_secs(), DEFAULT_TOOL_TIMEOUT_SECS);
     }
 
     #[test]
@@ -433,7 +433,7 @@ mod tests {
 
     #[test]
     fn undeclared_tool_timeout_uses_default() {
-        assert_eq!(ReadTool::default().timeout_secs(), DEFAULT_TIMEOUT_SECS);
+        assert_eq!(ReadTool::default().timeout_secs(), DEFAULT_TOOL_TIMEOUT_SECS);
     }
 
     #[test]
@@ -709,7 +709,7 @@ mod tests {
         assert_eq!(call.id(), id);
         assert_eq!(call.name(), "read");
         assert_eq!(call.arguments(), &args);
-        assert_eq!(call.timeout_secs(), DEFAULT_TIMEOUT_SECS);
+        assert_eq!(call.timeout_secs(), DEFAULT_TOOL_TIMEOUT_SECS);
         assert_eq!(call.argument_order("path"), 0);
         let redacted = call.non_default_redacted_arguments();
         assert!(redacted.iter().any(|(key, _)| key == "path"));

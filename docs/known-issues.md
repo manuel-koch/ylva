@@ -318,11 +318,16 @@ tests.
       happen.
       Should we allow steering a subagent via the input-draft message?
 
-- [ ] Inconsistency worth noting: the module header references
+- [x] ~~Inconsistency worth noting: the module header references
       DEFAULT_TOOL_TIMEOUT_SECS , but the constant that actually exists is
       DEFAULT_TIMEOUT_SECS (5s) in tools.rs , which is what
-      WriteTool::timeout_secs() uses.
-      The constant should be named DEFAULT_TOOL_TIMEOUT_SECS.
+      WriteTool::timeout_secs() uses.~~ **Fixed**: `tools.rs` no longer
+      defines its own `DEFAULT_TIMEOUT_SECS` constant; it now
+      `pub use`s `agent::DEFAULT_TOOL_TIMEOUT_SECS` (single source of truth),
+      and every tool module (`glob.rs`, `read.rs`, `write.rs`, `edit.rs`,
+      `search.rs`, `agent_finish.rs`, `spawn_subagent.rs`) was updated to
+      import/use that name, matching the doc comments that already referenced
+      it.
 
 - [x] ~~`Context::push_system` is used mid-conversation~~ **Fixed**: the two
       mid-conversation `push_system` call sites (subagent-finished and

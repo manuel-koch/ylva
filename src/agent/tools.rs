@@ -38,8 +38,12 @@ pub mod search;
 pub mod spawn_subagent;
 pub mod write;
 
-/// Default execution timeout for file-system tools.
-pub const DEFAULT_TIMEOUT_SECS: u64 = 5;
+/// Default execution timeout for tools.
+///
+/// Single source of truth: [`super::DEFAULT_TOOL_TIMEOUT_SECS`]. Re-exported
+/// here so tool modules can `use` it alongside the other tool-trait items
+/// without an extra `crate::agent::` import.
+pub use super::DEFAULT_TOOL_TIMEOUT_SECS;
 
 /// Failure from a single tool invocation, mapped to the flat
 /// `String`-returning [`crate::agent::PendingTool::execute`] contract and to

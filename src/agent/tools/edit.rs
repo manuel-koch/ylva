@@ -33,7 +33,7 @@ use tracing::Instrument;
 use super::validate_args_with_schema;
 
 use super::{
-    DiffSection, Section, Tool, ToolCall, ToolCallResult, ToolError, DEFAULT_TIMEOUT_SECS,
+    DiffSection, Section, Tool, ToolCall, ToolCallResult, ToolError, DEFAULT_TOOL_TIMEOUT_SECS,
 };
 use crate::sandbox::{ApprovalCheck, SandboxContext};
 
@@ -450,7 +450,7 @@ impl Tool for EditTool {
 
     fn timeout_secs(&self) -> u64 {
         if self.timeout_secs == 0 {
-            DEFAULT_TIMEOUT_SECS
+            DEFAULT_TOOL_TIMEOUT_SECS
         } else {
             self.timeout_secs
         }
@@ -820,7 +820,7 @@ mod tests {
     async fn nonexistent_file_returns_error() {
         let args = make_args_search_replace("/no/such/file.txt", "x", "y");
         let id = uuid::Uuid::new_v4();
-        let call = create_edit_call(id, args, DEFAULT_TIMEOUT_SECS);
+        let call = create_edit_call(id, args, DEFAULT_TOOL_TIMEOUT_SECS);
         let result = Box::new(call).run().await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("does not exist"));
@@ -830,7 +830,7 @@ mod tests {
     async fn nonexistent_file_via_line_range_returns_error() {
         let args = make_args_line_range("/no/such/file.txt", 1, 1, "x");
         let id = uuid::Uuid::new_v4();
-        let call = create_edit_call(id, args, DEFAULT_TIMEOUT_SECS);
+        let call = create_edit_call(id, args, DEFAULT_TOOL_TIMEOUT_SECS);
         let result = Box::new(call).run().await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("does not exist"));
@@ -842,7 +842,7 @@ mod tests {
         let path = file.path().to_str().unwrap().to_string();
         let args = make_args_search_replace(&path, "hello", "hi");
         let id = uuid::Uuid::new_v4();
-        let call = create_edit_call(id, args, DEFAULT_TIMEOUT_SECS);
+        let call = create_edit_call(id, args, DEFAULT_TOOL_TIMEOUT_SECS);
         let sections = call.pending_content_sections();
         assert_eq!(sections.len(), 1);
         assert!(matches!(sections[0], Section::Diff(_)));
@@ -860,7 +860,7 @@ mod tests {
         let file = write_temp("hello\nworld\n");
         let path = file.path().to_str().unwrap().to_string();
         let args = make_args_search_replace(&path, "hello", "hi");
-        let call = create_edit_call(uuid::Uuid::new_v4(), args, DEFAULT_TIMEOUT_SECS);
+        let call = create_edit_call(uuid::Uuid::new_v4(), args, DEFAULT_TOOL_TIMEOUT_SECS);
         let title_arguments = call.title_arguments();
         assert!(
             title_arguments
@@ -881,7 +881,7 @@ mod tests {
         let file = write_temp("hello\nworld\n");
         let path = file.path().to_str().unwrap().to_string();
         let args = make_args_search_replace(&path, "not-present", "hi");
-        let call = create_edit_call(uuid::Uuid::new_v4(), args, DEFAULT_TIMEOUT_SECS);
+        let call = create_edit_call(uuid::Uuid::new_v4(), args, DEFAULT_TOOL_TIMEOUT_SECS);
         assert!(call.pending_content_sections().is_empty());
         let title_arguments = call.title_arguments();
         assert!(title_arguments.iter().any(|(k, _)| k == "old_string"));
@@ -894,7 +894,7 @@ mod tests {
         let path = file.path().to_str().unwrap().to_string();
         let args = make_args_search_replace(&path, "beta", "gamma");
         let id = uuid::Uuid::new_v4();
-        let call = create_edit_call(id, args, DEFAULT_TIMEOUT_SECS);
+        let call = create_edit_call(id, args, DEFAULT_TOOL_TIMEOUT_SECS);
         Box::new(call).run().await.unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
         assert_eq!(written, "alpha\ngamma\n");
@@ -965,7 +965,7 @@ mod tests {
         let file = write_temp("hello\nworld\n");
         let path = file.path().to_str().unwrap().to_string();
         let args = make_args_search_replace(&path, "hello", "hi");
-        let call = create_edit_call(uuid::Uuid::new_v4(), args, DEFAULT_TIMEOUT_SECS);
+        let call = create_edit_call(uuid::Uuid::new_v4(), args, DEFAULT_TOOL_TIMEOUT_SECS);
         let result = Box::new(call).run().await.unwrap();
         let sections = result.content_sections();
         assert_eq!(sections.len(), 1, "diff section must be present after run");
@@ -1108,7 +1108,7 @@ mod tests {
         let file = write_temp("hello\n");
         let path = file.path().to_str().unwrap().to_string();
         let args = make_args_search_replace(&path, "hello", "hi");
-        let call = create_edit_call(uuid::Uuid::new_v4(), args, DEFAULT_TIMEOUT_SECS);
+        let call = create_edit_call(uuid::Uuid::new_v4(), args, DEFAULT_TOOL_TIMEOUT_SECS);
         // path must be rank 0 so it renders as the keyless primary arg in the TUI.
         assert_eq!(call.argument_order("path"), 0);
         assert!(call.argument_order("path") < call.argument_order("mode"));
@@ -1129,7 +1129,7 @@ mod tests {
     #[test]
     fn edit_tool_default_timeout() {
         let tool = EditTool::default();
-        assert_eq!(tool.timeout_secs(), DEFAULT_TIMEOUT_SECS);
+        assert_eq!(tool.timeout_secs(), DEFAULT_TOOL_TIMEOUT_SECS);
     }
 
     #[test]
@@ -1168,10 +1168,10 @@ mod tests {
         let path = file.path().to_str().unwrap().to_string();
         let args = make_args_search_replace(&path, "hello", "hi");
         let id = uuid::Uuid::new_v4();
-        let call = create_edit_call(id, args.clone(), DEFAULT_TIMEOUT_SECS);
+        let call = create_edit_call(id, args.clone(), DEFAULT_TOOL_TIMEOUT_SECS);
         assert_eq!(call.id(), id);
         assert_eq!(call.name(), "edit");
-        assert_eq!(call.timeout_secs(), DEFAULT_TIMEOUT_SECS);
+        assert_eq!(call.timeout_secs(), DEFAULT_TOOL_TIMEOUT_SECS);
         let redacted = call.non_default_redacted_arguments();
         assert!(!redacted.is_empty());
     }

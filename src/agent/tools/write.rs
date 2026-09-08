@@ -20,7 +20,7 @@
 //! parsing incoming arguments).
 //!
 //! **`timeout_secs` sentinel (Q6):** the tool carries a `timeout_secs: u64`
-//! override where `0` selects [`DEFAULT_TIMEOUT_SECS`]. A timeout is always
+//! override where `0` selects [`DEFAULT_TOOL_TIMEOUT_SECS`]. A timeout is always
 //! enforced — there is no "no-timeout" value; `0` merely selects the module
 //! default.
 
@@ -33,7 +33,7 @@ use serde_json::Value;
 use tracing::Instrument;
 
 use super::{
-    ContentSection, Section, Tool, ToolCall, ToolCallResult, ToolError, DEFAULT_TIMEOUT_SECS,
+    ContentSection, Section, Tool, ToolCall, ToolCallResult, ToolError, DEFAULT_TOOL_TIMEOUT_SECS,
 };
 use crate::sandbox::{ApprovalCheck, SandboxContext};
 
@@ -324,7 +324,7 @@ impl Tool for WriteTool {
 
     fn timeout_secs(&self) -> u64 {
         if self.timeout_secs == 0 {
-            DEFAULT_TIMEOUT_SECS
+            DEFAULT_TOOL_TIMEOUT_SECS
         } else {
             self.timeout_secs
         }

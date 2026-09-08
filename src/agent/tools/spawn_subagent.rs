@@ -34,7 +34,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::{
-    ContentSection, Section, Tool, ToolCall, ToolCallResult, ToolError, DEFAULT_TIMEOUT_SECS,
+    ContentSection, Section, Tool, ToolCall, ToolCallResult, ToolError, DEFAULT_TOOL_TIMEOUT_SECS,
 };
 use crate::sandbox::ApprovalCheck;
 
@@ -122,7 +122,7 @@ impl Tool for SpawnSubagentTool {
     }
 
     fn timeout_secs(&self) -> u64 {
-        DEFAULT_TIMEOUT_SECS
+        DEFAULT_TOOL_TIMEOUT_SECS
     }
 
     fn create_call(&self, id: Uuid, arguments: Value) -> Box<dyn ToolCall> {
@@ -147,7 +147,7 @@ impl ToolCall for SpawnSubagentCall {
     }
 
     fn timeout_secs(&self) -> u64 {
-        DEFAULT_TIMEOUT_SECS
+        DEFAULT_TOOL_TIMEOUT_SECS
     }
 
     fn is_body_argument(&self, key: &str) -> bool {

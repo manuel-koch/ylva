@@ -29,7 +29,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use super::{Tool, ToolCall, ToolCallResult, ToolError, DEFAULT_TIMEOUT_SECS};
+use super::{Tool, ToolCall, ToolCallResult, ToolError, DEFAULT_TOOL_TIMEOUT_SECS};
 use crate::child_agent_manager::FinishResult;
 use crate::sandbox::ApprovalCheck;
 
@@ -134,7 +134,7 @@ impl Tool for AgentFinishTool {
     }
 
     fn timeout_secs(&self) -> u64 {
-        DEFAULT_TIMEOUT_SECS
+        DEFAULT_TOOL_TIMEOUT_SECS
     }
 
     fn create_call(&self, id: Uuid, arguments: Value) -> Box<dyn ToolCall> {
@@ -160,7 +160,7 @@ impl ToolCall for AgentFinishCall {
     }
 
     fn timeout_secs(&self) -> u64 {
-        DEFAULT_TIMEOUT_SECS
+        DEFAULT_TOOL_TIMEOUT_SECS
     }
 
     fn argument_order(&self, key: &str) -> usize {

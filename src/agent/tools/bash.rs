@@ -41,7 +41,7 @@ use crate::sandbox::{ApprovalCheck, SandboxContext};
 /// Default timeout for bash commands (seconds). Separate from
 /// [`crate::agent::DEFAULT_TOOL_TIMEOUT_SECS`] because shell commands
 /// routinely take longer than 5 s.
-pub const DEFAULT_BASH_TIMEOUT_SECS: u64 = 30;
+pub const DEFAULT_BASH_TIMEOUT_SECS: u64 = 300;
 
 /// Grace period added to [`BashCall::timeout_secs`] so the outer
 /// `tokio::time::timeout` in `agent.rs` always fires *after* bash's internal
