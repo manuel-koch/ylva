@@ -123,12 +123,12 @@ them to a `tracing` macro.
 
 ### Tracing subscriber isolation in tests
 
-See [known-issues.md — Tracing subscriber isolation](known-issues.md#tracing-subscriber-isolation-in-tests)
+See [known-test-issues.md — Tracing subscriber isolation](known-test-issues.md#tracing-subscriber-isolation-in-tests)
 for the root cause, required lock acquisition rules, and `run_locked` usage.
 
 ### Process-global cwd mutation in tests
 
-See [known-issues.md — cwd mutation](known-issues.md#process-global-cwd-mutation-in-tests)
+See [known-test-issues.md — cwd mutation](known-test-issues.md#process-global-cwd-mutation-in-tests)
 for why tests that read `current_dir()` must also hold `SUBSCRIBER_LOCK`.
 
 ## Planned implementations
@@ -202,5 +202,5 @@ SSOT applies here as well.
 
 ## `cfg(test)` does not reach library code from integration tests
 
-See [known-issues.md — cfg(test) does not reach library code](known-issues.md#cfgtest-does-not-reach-library-code-from-integration-tests)
+See [known-test-issues.md — cfg(test) does not reach library code](known-test-issues.md#cfgtest-does-not-reach-library-code-from-integration-tests)
 for the explanation and the required abstraction pattern.

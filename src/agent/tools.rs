@@ -866,7 +866,7 @@ mod tests {
     fn create_call_rewrites_absolute_path_like_argument_to_cwd_relative() {
         // Reads std::env::current_dir(); must hold SUBSCRIBER_LOCK to avoid
         // racing the logging test that temporarily mutates process cwd (see
-        // docs/known-issues.md "Process-global cwd mutation in tests").
+        // docs/known-test-issues.md "Process-global cwd mutation in tests").
         let _lock = crate::test_support::SUBSCRIBER_LOCK
             .lock()
             .expect("subscriber mutex poisoned");

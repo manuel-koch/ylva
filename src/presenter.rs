@@ -500,7 +500,7 @@ fn handle_key_main(
             // misleading — the user would have no visual confirmation of
             // which conversation their message actually went to. So Enter
             // is a no-op here until per-subagent steering exists (see
-            // `docs/known-issues.md`).
+            // `docs/known-test-issues.md`).
             if matches!(state.active_view, ConversationView::Child { .. }) {
                 return vec![];
             }

@@ -1843,7 +1843,7 @@ impl AppState {
     /// projected in `project_for_draw`) never renders as a streaming bubble,
     /// because `tui_widgets::draw` only shows it when `agent_mode ==
     /// AgentMode::Streaming` — text popped straight from "invisible" to a
-    /// fully-committed bubble once flushed (see docs/known-issues.md).
+    /// fully-committed bubble once flushed (see docs/known-test-issues.md).
     pub fn agent_mode_for_child(&self, run_id: uuid::Uuid) -> AgentMode {
         let is_pending_approval_for_this_child = matches!(self.focus, Focus::ToolApproval { tool_id, .. }
         if self.child_conversations.get(&run_id).is_some_and(|conversation| {
@@ -2167,7 +2167,7 @@ mod tests {
         // spawned child is still working — its `spawn_subagent` tool bubble
         // stays `Running` until the child actually finishes. The footer must
         // not report `Idle` in that case; that made a genuinely-running
-        // subagent look finished/stuck (see docs/known-issues.md).
+        // subagent look finished/stuck (see docs/known-test-issues.md).
         let mut state = AppState::new();
         state.mode = TuiMode::Idle;
         state.chat_entries.push(ChatEntry::ToolBubble {

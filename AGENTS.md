@@ -7,15 +7,17 @@ A Rust-based terminal UI that implements an agent-harness.
 1. **Before investigating behavior:** skim
    - [README](./README.md) (project intro and quickstart)
    - [features](./docs/features.md) (implemented feature reference)
+   - [implementation-notes](./docs/implementation-notes.md) (internal mechanics
+     behind the features above; module/struct-level detail for contributors)
    - [architecture-design-records](./docs/architecture-design-records/) (recorded architecture decisions)
    - [configuration](./docs/configuration.md) (how to configure ylva runtime)
    - [keybindings](./docs/keybindings.md) (keybindings implemented in the TUI)
    - [plans](./docs/plans/) (planned implementations, one file per subject/feature)
-   - [known-issues](./docs/known-issues.md) (persistent quirks and required workarounds)
+   - [known-test-issues](./docs/known-test-issues.md) (persistent quirks and required workarounds for testing)
 2. **Testing:** While implementing code changes (consent given), write tests according to
    [development-workflow](./docs/development-workflow.md). Before writing tests involving
    `tracing`, cwd, or integration-test side-effects, read the relevant entries in
-   [known-issues](./docs/known-issues.md).
+   [known-test-issues](./docs/known-test-issues.md).
 3. **Before reporting done**, run the verification commands in
    [development-workflow](./docs/development-workflow.md) and fix any findings.
 4. **Plan execution:** Planned implementations are executed from their plan file

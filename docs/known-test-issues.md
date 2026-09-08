@@ -1,4 +1,4 @@
-# Known Issues
+# Known Test Issues
 
 Workarounds and explanations for persistent test-environment quirks.
 
@@ -101,16 +101,3 @@ Abstract the side-effectful operation behind a trait or callback parameter and
 inject a no-op implementation from integration test call sites. Do not rely on
 `#[cfg(not(test))]` in library code to suppress behaviour from integration
 tests.
-
-## Backlog of issues discovered while testing
-
-- [ ]  
-
-## Features document to verbose
-
-The `features.md` document contains many code-like references and detailed
-implementation details.
-This document should be a user-facing documentation of the features of Ylva.
-We should condense the documentation and get rid of any in-detail-implementation references and code-snippets.
-If this information is of any use, we should mayne move the implemenentation
-detail info into a dedicated file instead ?

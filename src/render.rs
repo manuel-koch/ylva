@@ -451,7 +451,7 @@ mod tests {
         // `agent_mode == AgentMode::Streaming`) — it only appeared once
         // flushed into a committed `ChatEntry`, i.e. no visible
         // in-progress-thinking bubble for subagents (see
-        // docs/known-issues.md).
+        // docs/known-test-issues.md).
         let mut state = AppState::new();
         let run_id = Uuid::new_v4();
         let bubble_id = Uuid::new_v4();

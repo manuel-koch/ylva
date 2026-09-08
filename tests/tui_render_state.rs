@@ -770,7 +770,7 @@ fn footer_says_subagent_streaming_while_child_streams_response_text() {
 /// and stayed completely invisible in that window, only appearing once
 /// flushed into a fully-committed bubble — i.e. it "popped in" with no
 /// visible streaming progress (regression test for
-/// docs/known-issues.md: "After main agent has spawned multiple subagents
+/// docs/known-test-issues.md: "After main agent has spawned multiple subagents
 /// ... a thinking bubble pops up in the conversation without any previous
 /// thinking-progress").
 #[test]
