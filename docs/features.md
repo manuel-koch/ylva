@@ -190,8 +190,9 @@ keys via `Tool::path_like_arguments()`.
   sleep loops instead of trusting the automatic re-prompt described below. The
   child's eventual outcome arrives later as a trailing `system` message announcing
   the finish (referencing the same `tool_call_id`), once the child calls its own
-  `agent_finish` tool (or is cancelled, hits the iteration cap, or otherwise goes idle
-  without calling `agent_finish` — see below). The original provisional tool result is
+  `agent_finish` tool, is cancelled, goes idle without calling `agent_finish` (see
+  below), or hits the iteration cap (reported as a distinct `status: "failure"`,
+  see below). The original provisional tool result is
   never rewritten or duplicated: the tool-calling wire protocol permits only one
   `role: "tool"` message per `tool_call_id`, so the real outcome is appended as a
   distinct `system` message instead of a second tool result.
@@ -204,9 +205,15 @@ keys via `Tool::path_like_arguments()`.
   the `result` field's schema description both instruct the child to make `result`
   self-contained (e.g. inline the full requested table/findings) rather than referencing
   "earlier"/"above" content the parent cannot see. If a child goes idle (final assistant
-  text with no tool call, a killed tool, or the iteration cap) without ever calling
-  `agent_finish`, the parent instead receives a synthesized `status: "unstructured"`
-  result built from the child's last assistant message.
+  text with no tool call, or a killed tool) without ever calling `agent_finish`, the
+  parent instead receives a synthesized `status: "unstructured"` result built from the
+  child's last assistant message. If the child instead hits the max-tool-iterations cap
+  before ever calling `agent_finish`, there is no genuine final answer to salvage — the
+  parent receives a clear `status: "failure"` (`error` explains the cap was hit,
+  `result: None`) instead, so it isn't mistaken for the child's own conclusion. A child
+  is also given a heads-up system message ahead of its briefing, stating its tool-use
+  iteration budget, so a capable model can pace itself and call `agent_finish` before
+  running out rather than being cut off unaware.
 
 ## Child-agent delegation
 

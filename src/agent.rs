@@ -30,8 +30,14 @@ pub mod tools;
 use tools::{ToolCall, ToolRegistry};
 
 /// Maximum number of LLM requests the tool-use loop starts within a single user
-/// turn before the guard stops re-prompting. Per-engine configurability is a
-/// later (Phase 5) concern; this module-level default is the Phase 3 SSOT.
+/// turn before the guard stops re-prompting. Applies identically to the root
+/// loop and to every child `AgentLoop` spawned via `spawn_subagent` — each
+/// loop tracks its own `iterations` counter independently, so a child
+/// tripping this guard neither counts against nor is masked by the root's own
+/// counter. See `UiUpdate::Error::run_id` for how the resulting error is
+/// attributed back to whichever loop (root or child) actually exceeded it.
+/// Per-engine configurability is a later (Phase 5) concern; this
+/// module-level default is the Phase 3 SSOT.
 pub const MAX_TOOL_USE_ITERATIONS: usize = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,7 +131,13 @@ pub enum UiUpdate {
     StreamStarted,
     StreamDone,
     StreamCancelled,
-    Error(String),
+    Error {
+        message: String,
+        /// `None` when this error originates in the root's own loop;
+        /// `Some(run_id)` identifies which child raised it (see
+        /// `AgentLoop::own_run_id`). See `UiUpdate::ToolPending::run_id`.
+        run_id: Option<Uuid>,
+    },
     ToolStart {
         name: String,
         id: Uuid,
@@ -200,11 +212,23 @@ pub enum UiUpdate {
         /// See `UiUpdate::ToolPending::run_id`.
         run_id: Option<Uuid>,
     },
-    /// A steer (user message while busy) was queued. No payload — the TUI
-    /// driver creates the pending bubble itself before sending the command.
-    SteerQueued,
+    /// A steer (user message while busy) was queued. The TUI driver creates
+    /// the pending bubble itself before sending the command.
+    SteerQueued {
+        /// `None` when this loop's own root steer queue changed; `Some(run_id)`
+        /// identifies which child raised it (see `AgentLoop::own_run_id`).
+        /// Today no driver ever routes a `Prompt` to a child (only
+        /// `ApproveTool`/`DenyTool`/`AnswerClarify`/`AbortClarify` cross
+        /// `AgentCommand::ForChild`), so `Some` is unreachable in practice —
+        /// carried anyway so this can never silently misattribute to the
+        /// root if that changes. See `UiUpdate::ToolPending::run_id`.
+        run_id: Option<Uuid>,
+    },
     /// All previously queued steers have been injected into the LLM context.
-    SteerApplied,
+    SteerApplied {
+        /// See `UiUpdate::SteerQueued::run_id`.
+        run_id: Option<Uuid>,
+    },
     /// A fragment of extended-thinking / reasoning-token output arrived.
     /// Appended to `partial_thinking_text`, never to the assistant-text
     /// accumulator; flushed into a `ChatEntry::ThinkingMessage` bubble ahead
@@ -344,6 +368,19 @@ pub enum Message {
 /// without changing call sites.
 pub const DEFAULT_SYSTEM_PROMPT: &str = "You are Ylva, a helpful agent with tool capabilities.";
 
+/// Prefix marking an asynchronous, out-of-band harness notice (e.g. "a
+/// spawned subagent finished") sent via `Context::push_async_harness_notice`
+/// as a `role:"user"` message rather than `role:"system"`. Not every
+/// provider/model tolerates a `system`-role message appearing after the
+/// conversation's leading system-prompt block — many open-weight chat
+/// templates (Mistral-family included) only support `system` as the very
+/// first message and reject/mis-render one injected mid-conversation (seen
+/// in practice as an HTTP 400 "Invalid request" from `mistralai/mistral-nemo`
+/// via OpenRouter's "Io Net" backend). `role:"user"` is safe everywhere, so
+/// this marker lets the model tell the harness's own notice apart from
+/// something the human actually typed.
+pub const HARNESS_NOTICE_MARKER: &str = "[harness notice — not from the user]";
+
 /// System-prompt snippet, injected immediately after the persona/initial
 /// system prompt, that documents the uniform tool-response envelope a model
 /// must parse. The described JSON matches the schema derived from
@@ -410,6 +447,17 @@ impl Context {
             content: text,
             kind: UserMessageKind::ImplicitToolNote,
         });
+    }
+
+    /// Push an asynchronous, out-of-band harness notice (e.g. "a spawned
+    /// subagent finished/was cancelled") that arrives mid-conversation, well
+    /// after the leading system-prompt block. Sent as `push_implicit_user`
+    /// (`role:"user"`, hidden from the UI) rather than `push_system`, and
+    /// prefixed with `HARNESS_NOTICE_MARKER` so the model can tell it apart
+    /// from a real user message — see that constant's doc comment for why
+    /// `role:"system"` is unsafe here.
+    pub fn push_async_harness_notice(&mut self, text: String) {
+        self.push_implicit_user(format!("{HARNESS_NOTICE_MARKER}\n{text}"));
     }
 
     pub fn push_assistant(&mut self, content: String, status: AssistantStatus) {
@@ -876,6 +924,23 @@ impl AgentLoop {
             if let Some(briefing) = briefing {
                 context.push_system(briefing);
             }
+            if is_child {
+                // Give the child a chance to budget its own tool calls: it
+                // has no visibility into `advance_tool_queue`'s guard (it
+                // cannot tell "was cut off" from "chose to stop"), so a smart
+                // model can only avoid the cap by knowing about it up front
+                // and wrapping up (calling `agent_finish`) well before it
+                // hits.
+                context.push_system(format!(
+                    "You have a budget of at most {MAX_TOOL_USE_ITERATIONS} tool-use \
+                     round(s) to complete this task. Work efficiently — batch related \
+                     tool calls where possible — and call `agent_finish` with your \
+                     result as soon as you have an answer, well before you run out of \
+                     rounds. If you exhaust this budget without calling `agent_finish`, \
+                     your work will be reported as failed and none of your findings will \
+                     reach the caller."
+                ));
+            }
             let mut mode = AgentMode::Idle;
             let mut current_cancel: Option<CancellationToken> = None;
             let mut current_tool_cancel: Option<CancellationToken> = None;
@@ -894,6 +959,12 @@ impl AgentLoop {
             // sees zero pending children and ends the conversation, and the
             // child's result silently never reaches the model.
             let mut pending_child_finish_reprompt = false;
+            // Set (only for a child loop) when `advance_tool_queue`'s
+            // max-tool-use-iterations guard trips — see that function's doc
+            // comment. Checked below at the `is_child && mode == Idle` tail
+            // to report a clear `Err` (→ `status: "failure"`) instead of the
+            // generic "unstructured" `Ok(context)` fallback.
+            let mut iteration_cap_exceeded: Option<String> = None;
 
             loop {
                 tokio::select! {
@@ -903,11 +974,13 @@ impl AgentLoop {
                             AgentEvent::StreamDone { partial } => {
                                 context.push_assistant(partial, AssistantStatus::Complete);
                                 let steers_injected = inject_pending_steers(&mut pending_steers, &mut context);
-                                if steers_injected || pending_child_finish_reprompt {
+                                if steers_injected {
                                     pending_child_finish_reprompt = false;
-                                    if steers_injected {
-                                        let _ = ui_tx.send(UiUpdate::SteerApplied).await;
-                                    }
+                                    let _ = ui_tx
+                                        .send(UiUpdate::SteerApplied {
+                                            run_id: own_run_id,
+                                        })
+                                        .await;
                                     mode = AgentMode::Streaming;
                                     current_cancel = Some(start_request(
                                         &context,
@@ -917,6 +990,38 @@ impl AgentLoop {
                                         agent_tx.clone(),
                                         own_run_id,
                                     ));
+                                } else if pending_child_finish_reprompt {
+                                    pending_child_finish_reprompt = false;
+                                    // Same iteration budget as any other
+                                    // re-prompt — without this guard a model
+                                    // whose replies never contain a tool call
+                                    // (so this branch, not `advance_tool_queue`'s
+                                    // queue-empty branch, is the one that
+                                    // clears a finish notice deferred while it
+                                    // was still streaming) could reprompt
+                                    // forever, bypassing the cap entirely; see
+                                    // `bump_and_check_iteration_cap`'s doc
+                                    // comment.
+                                    if !bump_and_check_iteration_cap(
+                                        &mut iterations,
+                                        &mut context,
+                                        &mut mode,
+                                        &ui_tx,
+                                        own_run_id,
+                                        &mut iteration_cap_exceeded,
+                                    )
+                                    .await
+                                    {
+                                        mode = AgentMode::Streaming;
+                                        current_cancel = Some(start_request(
+                                            &context,
+                                            engine.clone(),
+                                            registry.schemas(),
+                                            ui_tx.clone(),
+                                            agent_tx.clone(),
+                                            own_run_id,
+                                        ));
+                                    }
                                 } else {
                                     mode = AgentMode::Idle;
                                 }
@@ -934,7 +1039,12 @@ impl AgentLoop {
                                 pending_steers.clear();
                                 mode = AgentMode::Idle;
                                 tracing::error!(message = %error, "agent stream error");
-                                let _ = ui_tx.send(UiUpdate::Error(error)).await;
+                                let _ = ui_tx
+                                    .send(UiUpdate::Error {
+                                        message: error,
+                                        run_id: own_run_id,
+                                    })
+                                    .await;
                             }
                             AgentEvent::ToolCall { calls } => {
                                 let requests = calls
@@ -994,6 +1104,7 @@ impl AgentLoop {
                                     &mut spawn_content_sections,
                                     own_run_id,
                                     &mut pending_child_finish_reprompt,
+                                    &mut iteration_cap_exceeded,
                                 )
                                 .await;
                             }
@@ -1038,6 +1149,7 @@ impl AgentLoop {
                                     &mut spawn_content_sections,
                                     own_run_id,
                                     &mut pending_child_finish_reprompt,
+                                    &mut iteration_cap_exceeded,
                                 )
                                 .await;
                             }
@@ -1069,6 +1181,7 @@ impl AgentLoop {
                                     &mut spawn_content_sections,
                                     own_run_id,
                                     &mut pending_child_finish_reprompt,
+                                    &mut iteration_cap_exceeded,
                                 )
                                 .await;
                             }
@@ -1150,7 +1263,7 @@ impl AgentLoop {
                              conversation and produce your final answer for the user now."
                                 .to_string()
                         };
-                        context.push_system(format!(
+                        context.push_async_harness_notice(format!(
                             "The subagent spawned via `{tool_name}` (tool_call_id={call_id}) has finished. \
                              Its final result:\n{result_text}\n\
                              This result is already shown to the user verbatim (as the tool result's \
@@ -1194,16 +1307,41 @@ impl AgentLoop {
                             "finish_rx: deciding whether to reprompt root after child result"
                         );
                         if mode == AgentMode::Idle {
-                            tracing::info!(tool_call_id = %call_id, "finish_rx: root was idle, forcing reprompt");
-                            mode = AgentMode::Streaming;
-                            current_cancel = Some(start_request(
-                                &context,
-                                engine.clone(),
-                                registry.schemas(),
-                                ui_tx.clone(),
-                                agent_tx.clone(),
+                            // Same iteration budget as any other re-prompt
+                            // (`advance_tool_queue`'s queue-empty branch) —
+                            // without this guard a model that just keeps
+                            // calling `spawn_subagent` again on every finish
+                            // notice, instead of ever answering, loops here
+                            // forever: this branch used to call
+                            // `start_request` unconditionally, bypassing the
+                            // cap entirely (see `bump_and_check_iteration_cap`'s
+                            // doc comment).
+                            if bump_and_check_iteration_cap(
+                                &mut iterations,
+                                &mut context,
+                                &mut mode,
+                                &ui_tx,
                                 own_run_id,
-                            ));
+                                &mut iteration_cap_exceeded,
+                            )
+                            .await
+                            {
+                                tracing::info!(
+                                    tool_call_id = %call_id,
+                                    "finish_rx: root was idle but iteration cap already exceeded; not reprompting"
+                                );
+                            } else {
+                                tracing::info!(tool_call_id = %call_id, "finish_rx: root was idle, forcing reprompt");
+                                mode = AgentMode::Streaming;
+                                current_cancel = Some(start_request(
+                                    &context,
+                                    engine.clone(),
+                                    registry.schemas(),
+                                    ui_tx.clone(),
+                                    agent_tx.clone(),
+                                    own_run_id,
+                                ));
+                            }
                         } else {
                             pending_child_finish_reprompt = true;
                             tracing::debug!(
@@ -1311,7 +1449,11 @@ impl AgentLoop {
                                     // stream. Queued from ToolPending too; injection
                                     // is deferred (Phase 4 adds descope_pending_tools).
                                     pending_steers.push_back(text);
-                                    let _ = ui_tx.send(UiUpdate::SteerQueued).await;
+                                    let _ = ui_tx
+                                        .send(UiUpdate::SteerQueued {
+                                            run_id: own_run_id,
+                                        })
+                                        .await;
                                 }
                             }
                             AgentCommand::ApproveTool { id } => {
@@ -1352,6 +1494,7 @@ impl AgentLoop {
                                             &mut spawn_content_sections,
                                             own_run_id,
                                             &mut pending_child_finish_reprompt,
+                                            &mut iteration_cap_exceeded,
                                         )
                                         .await;
                                     } else {
@@ -1436,6 +1579,7 @@ impl AgentLoop {
                                         &mut spawn_content_sections,
                                         own_run_id,
                                         &mut pending_child_finish_reprompt,
+                                        &mut iteration_cap_exceeded,
                                     )
                                     .await;
                                 }
@@ -1496,6 +1640,7 @@ impl AgentLoop {
                                         &mut spawn_content_sections,
                                         own_run_id,
                                         &mut pending_child_finish_reprompt,
+                                        &mut iteration_cap_exceeded,
                                     )
                                     .await;
                                 }
@@ -1545,6 +1690,7 @@ impl AgentLoop {
                                         &mut spawn_content_sections,
                                         own_run_id,
                                         &mut pending_child_finish_reprompt,
+                                        &mut iteration_cap_exceeded,
                                     )
                                     .await;
                                 }
@@ -1586,7 +1732,7 @@ impl AgentLoop {
                                             "run_id": cancelled.run_id.to_string(),
                                         }))
                                         .unwrap_or_default();
-                                        context.push_system(format!(
+                                        context.push_async_harness_notice(format!(
                                             "The subagent spawned via `{tool_name}` (tool_call_id={call_id}) was cancelled \
                                              before finishing. Its terminal status:\n{result_text}",
                                             tool_name = tools::spawn_subagent::SpawnSubagentTool::NAME,
@@ -1713,11 +1859,23 @@ impl AgentLoop {
 
                 // A `Role::Child` loop has nobody left to drive it once it
                 // goes idle (no user, no more steers) — the "unstructured
-                // fallback" case (the model stopped calling tools, or the
-                // iteration cap kicked in, without ever calling `agent_finish`).
-                // Returning here lets the caller (the spawn wrapper) harvest
-                // the final `Context` and report an "unstructured" outcome.
+                // fallback" case (the model stopped calling tools without
+                // ever calling `agent_finish`). Returning here lets the caller
+                // (the spawn wrapper) harvest the final `Context` and report
+                // an "unstructured" outcome.
+                //
+                // The iteration-cap case is different and reported as a hard
+                // `Err` instead: `iteration_cap_exceeded` (set only for a
+                // child, see `advance_tool_queue`'s doc comment) means the
+                // model never got a chance to conclude naturally, so there is
+                // no "final answer" to salvage — `drive_child_to_completion`'s
+                // existing `Ok(Err(error))` arm already reports exactly the
+                // right shape (`status: "failure"`, explicit `error`, no
+                // fabricated `result`) with zero changes needed there.
                 if is_child && mode == AgentMode::Idle {
+                    if let Some(message) = iteration_cap_exceeded.take() {
+                        return Err(anyhow::anyhow!(message));
+                    }
                     return Ok(context);
                 }
             }
@@ -1852,6 +2010,81 @@ async fn resolve_spawn_subagent(
 /// already carries any deferred `spawn_subagent` child result (see
 /// `AgentLoop::run`'s `finish_rx` arm), so the flag's job is done and a later
 /// `StreamDone` must not force a redundant extra re-prompt for it.
+///
+/// `iteration_cap_exceeded` is set (to the guard's explanation message) when
+/// `MAX_TOOL_USE_ITERATIONS` is exceeded — but only for a child loop
+/// (`own_run_id.is_some()`); a root loop's own hit is reported to the human
+/// directly (an `Interrupted` assistant bubble) and never sets this. The
+/// caller (`AgentLoop::run`'s `is_child && mode == AgentMode::Idle` tail)
+/// checks it to return `Err` instead of `Ok(context)` — so
+/// `drive_child_to_completion` reports a clear `status: "failure"` instead of
+/// folding this into the generic "unstructured" fallback used when a child
+/// simply goes idle without ever calling `agent_finish`. See docs/features.md
+/// → *spawn_subagent*/*agent_finish* for the distinction.
+/// Increments `*iterations` and, if that now exceeds `MAX_TOOL_USE_ITERATIONS`,
+/// reports the guard tripping and forces `*mode = AgentMode::Idle`: for the
+/// root (`own_run_id: None`) a human reads the transcript directly, so a real
+/// `Interrupted` assistant bubble is pushed; for a child, the explanation is
+/// instead handed back via `*iteration_cap_exceeded` (never pushed as an
+/// assistant message — `extract_last_assistant_text` in `agent_factory.rs`
+/// would otherwise mistake this guard boilerplate for the child's own final
+/// answer) for `AgentLoop::run`'s `is_child && mode == AgentMode::Idle` tail
+/// to turn into an `Err`, producing an honest `status: "failure"` instead of
+/// folding this into the generic "unstructured" fallback (see
+/// `advance_tool_queue`'s doc comment and docs/features.md →
+/// *spawn_subagent*/*agent_finish*).
+///
+/// Returns `true` when the cap was exceeded (the caller must not start a new
+/// request this round) and `false` otherwise (still under budget, proceed as
+/// normal). Shared by `advance_tool_queue`'s queue-empty branch and
+/// `AgentLoop::run`'s `finish_rx` idle-reprompt branch — both are re-prompt
+/// call sites, and both must enforce the same budget. Without this, a child
+/// finishing while the root is idle re-prompts it directly via `start_request`,
+/// bypassing `advance_tool_queue`'s iteration counter entirely; a model that
+/// just keeps calling `spawn_subagent` again on every finish notice (rather
+/// than ever answering) can then loop forever — one HTTP request every few
+/// seconds, with no cap at all — instead of tripping the same guard as any
+/// other tool-use round.
+async fn bump_and_check_iteration_cap(
+    iterations: &mut usize,
+    context: &mut Context,
+    mode: &mut AgentMode,
+    ui_tx: &mpsc::Sender<UiUpdate>,
+    own_run_id: Option<Uuid>,
+    iteration_cap_exceeded: &mut Option<String>,
+) -> bool {
+    *iterations += 1;
+    tracing::debug!(iterations = *iterations, "advancing tool queue");
+    if *iterations <= MAX_TOOL_USE_ITERATIONS {
+        return false;
+    }
+    tracing::warn!(
+        iterations = *iterations,
+        run_id = ?own_run_id,
+        "max tool-use iterations exceeded"
+    );
+    let message = format!(
+        "Max tool-use iterations ({}) exceeded.",
+        MAX_TOOL_USE_ITERATIONS
+    );
+    match own_run_id {
+        None => {
+            context.push_assistant(message.clone(), AssistantStatus::Interrupted);
+        }
+        Some(_) => {
+            *iteration_cap_exceeded = Some(message.clone());
+        }
+    }
+    let _ = ui_tx
+        .send(UiUpdate::Error {
+            message,
+            run_id: own_run_id,
+        })
+        .await;
+    *mode = AgentMode::Idle;
+    true
+}
+
 #[expect(clippy::too_many_arguments)]
 async fn advance_tool_queue(
     pending_tools: &mut VecDeque<PendingTool>,
@@ -1871,28 +2104,37 @@ async fn advance_tool_queue(
     spawn_content_sections: &mut HashMap<Uuid, Vec<crate::agent::tools::Section>>,
     own_run_id: Option<Uuid>,
     pending_child_finish_reprompt: &mut bool,
+    iteration_cap_exceeded: &mut Option<String>,
 ) {
+    // `spawn_subagent` and auto-denied tools resolve synchronously within
+    // this same loop (unlike a normally-executing auto-approved tool, which
+    // `return`s here and waits for a later `ToolDone`/`ToolError` event to
+    // re-invoke this function with `increment_iterations: true`). Without
+    // this, a round made up entirely of such synchronously-resolved tools
+    // could reach the queue-empty re-prompt below still carrying whatever
+    // `increment_iterations` this call was originally invoked with (`false`,
+    // since the `ToolCall` handler always calls this function that way) —
+    // silently completing a full tool-use round without ever counting
+    // against `MAX_TOOL_USE_ITERATIONS`. Shadow the parameter as mutable so
+    // resolving any such tool below can flip it to `true` for the rest of
+    // this call.
+    let mut increment_iterations = increment_iterations;
     loop {
         match pending_tools.front() {
             None => {
                 // Queue empty: optionally increment and re-prompt.
-                if increment_iterations {
-                    *iterations += 1;
-                    tracing::debug!(iterations = *iterations, "advancing tool queue");
-                    if *iterations > MAX_TOOL_USE_ITERATIONS {
-                        tracing::warn!(
-                            iterations = *iterations,
-                            "max tool-use iterations exceeded"
-                        );
-                        let message = format!(
-                            "Max tool-use iterations ({}) exceeded.",
-                            MAX_TOOL_USE_ITERATIONS
-                        );
-                        context.push_assistant(message.clone(), AssistantStatus::Interrupted);
-                        let _ = ui_tx.send(UiUpdate::Error(message)).await;
-                        *mode = AgentMode::Idle;
-                        return;
-                    }
+                if increment_iterations
+                    && bump_and_check_iteration_cap(
+                        iterations,
+                        context,
+                        mode,
+                        &ui_tx,
+                        own_run_id,
+                        iteration_cap_exceeded,
+                    )
+                    .await
+                {
+                    return;
                 }
                 // All tool results for this round are now in context — this is
                 // the earliest safe point to inject queued steers (pending user
@@ -1900,7 +2142,9 @@ async fn advance_tool_queue(
                 // model on the very next request rather than waiting for a full
                 // tool-free turn to complete via StreamDone.
                 if inject_pending_steers(pending_steers, context) {
-                    let _ = ui_tx.send(UiUpdate::SteerApplied).await;
+                    let _ = ui_tx
+                        .send(UiUpdate::SteerApplied { run_id: own_run_id })
+                        .await;
                 }
                 // This re-prompt's `context` already carries any child result
                 // that arrived (and was deferred) while the root was mid-turn
@@ -1955,7 +2199,9 @@ async fn advance_tool_queue(
                         .await;
                         // Resolves synchronously (unlike a normally-executing
                         // tool); continue the loop to process the next
-                        // pending tool or re-prompt.
+                        // pending tool or re-prompt. This still counts as a
+                        // completed tool-use round against the iteration cap.
+                        increment_iterations = true;
                     }
                     crate::sandbox::ApprovalCheck::AutoApproved => {
                         let pending = pending_tools.pop_front().expect("checked front");
@@ -1997,7 +2243,11 @@ async fn advance_tool_queue(
                                 run_id: own_run_id,
                             })
                             .await;
-                        // Continue loop to handle next tool in queue.
+                        // Continue loop to handle next tool in queue. This
+                        // still counts as a completed tool-use round against
+                        // the iteration cap (see comment on
+                        // `increment_iterations` above).
+                        increment_iterations = true;
                     }
                     crate::sandbox::ApprovalCheck::UserApprovalRequired
                         if front.call.name() == tools::clarify::ClarifyTool::NAME =>
@@ -2104,7 +2354,12 @@ fn start_request(
                     } else {
                         let message = format!("{error}");
                         tracing::error!(message = %message, "engine chat failed");
-                        let _ = ui_tx.send(UiUpdate::Error(message.clone())).await;
+                        let _ = ui_tx
+                            .send(UiUpdate::Error {
+                                message: message.clone(),
+                                run_id: own_run_id,
+                            })
+                            .await;
                         let _ = agent_tx.send(AgentEvent::StreamError(message)).await;
                     }
                     return;
@@ -2161,7 +2416,12 @@ fn start_request(
                                 }
                             }
                             if let Some(error) = error {
-                                let _ = ui_tx.send(UiUpdate::Error(error.clone())).await;
+                                let _ = ui_tx
+                                    .send(UiUpdate::Error {
+                                        message: error.clone(),
+                                        run_id: own_run_id,
+                                    })
+                                    .await;
                                 let _ = agent_tx.send(AgentEvent::StreamError(error)).await;
                             } else {
                                 let _ = agent_tx.send(AgentEvent::ToolCall { calls }).await;
@@ -2178,7 +2438,12 @@ fn start_request(
                     }
                     StreamEvent::Error(error) => {
                         let message = format!("{error}");
-                        let _ = ui_tx.send(UiUpdate::Error(message.clone())).await;
+                        let _ = ui_tx
+                            .send(UiUpdate::Error {
+                                message: message.clone(),
+                                run_id: own_run_id,
+                            })
+                            .await;
                         let _ = agent_tx.send(AgentEvent::StreamError(message)).await;
                         break;
                     }
@@ -2434,7 +2699,7 @@ mod tests {
     }
 
     #[test]
-    fn child_finish_notice_is_appended_as_system_message_not_a_second_tool_result() {
+    fn child_finish_notice_is_appended_as_implicit_user_message_not_a_second_tool_result() {
         // Regression test: `spawn_subagent`'s two-stage protocol (an
         // immediate "running"/"queued" `ToolResult`, later finalized once
         // the child actually finishes) must never leave two `role:"tool"`
@@ -2442,7 +2707,9 @@ mod tests {
         // that violates the one-call/one-response tool-calling protocol and
         // visibly confuses models. The fix is to never touch the original
         // `ToolResult` again; the child's real outcome is appended as a
-        // brand-new `system` message instead, even with an assistant
+        // brand-new implicit `user` message instead (see
+        // `push_async_harness_notice` — not `role:"system"`, which some
+        // providers/models reject mid-conversation), even with an assistant
         // message (the root's "running" reply) already in between.
         let mut context = Context::new();
         let id = Uuid::new_v4();
@@ -2457,7 +2724,7 @@ mod tests {
             "I have spawned the child, standing by.".into(),
             AssistantStatus::Complete,
         );
-        context.push_system(format!(
+        context.push_async_harness_notice(format!(
             "The subagent spawned via `spawn_subagent` (tool_call_id={id}) has finished. \
              Its final result:\n{{\"status\":\"success\",\"result\":\"done\"}}"
         ));
@@ -2485,8 +2752,13 @@ mod tests {
             "the provisional result must never be rewritten"
         );
         assert!(
-            matches!(context.messages().last(), Some(Message::System { content }) if content.contains("has finished")),
-            "the child's real outcome must be appended as a trailing system message, got: {:?}",
+            matches!(
+                context.messages().last(),
+                Some(Message::User { content, kind: UserMessageKind::ImplicitToolNote })
+                    if content.contains(HARNESS_NOTICE_MARKER) && content.contains("has finished")
+            ),
+            "the child's real outcome must be appended as a trailing implicit user message \
+             carrying the harness-notice marker, got: {:?}",
             context.messages()
         );
     }
@@ -2576,9 +2848,13 @@ mod tests {
                 run_id: _,
             } if got == id && got_question == "question"
         ));
-        assert!(
-            matches!(UiUpdate::Error("oops".into()), UiUpdate::Error(message) if message == "oops")
-        );
+        assert!(matches!(
+            UiUpdate::Error {
+                message: "oops".into(),
+                run_id: None,
+            },
+            UiUpdate::Error { message, run_id: None } if message == "oops"
+        ));
 
         assert!(
             matches!(StreamEvent::Text("tok".into()), StreamEvent::Text(text) if text == "tok")
@@ -2774,6 +3050,7 @@ mod tests {
             &mut HashMap::new(),
             None,
             &mut false,
+            &mut None,
         )
         .await;
 
@@ -2837,6 +3114,7 @@ mod tests {
             &mut HashMap::new(),
             None,
             &mut false,
+            &mut None,
         )
         .await;
 
@@ -2890,6 +3168,7 @@ mod tests {
             &mut HashMap::new(),
             None,
             &mut false,
+            &mut None,
         )
         .await;
 
@@ -2902,7 +3181,10 @@ mod tests {
                 kind: UserMessageKind::Explicit,
             })
         );
-        assert!(matches!(ui_rx.recv().await, Some(UiUpdate::SteerApplied)));
+        assert!(matches!(
+            ui_rx.recv().await,
+            Some(UiUpdate::SteerApplied { .. })
+        ));
     }
 
     #[tokio::test]
@@ -3005,9 +3287,9 @@ mod tests {
         );
         assert!(
             context.messages().iter().any(
-                |message| matches!(message, Message::System { content } if content.contains("has finished"))
+                |message| matches!(message, Message::User { content, kind: UserMessageKind::ImplicitToolNote } if content.contains("has finished"))
             ),
-            "the child's finish result must be recorded in context as a system message"
+            "the child's finish result must be recorded in context as an implicit user message"
         );
 
         // Drain the ui updates; just ensure the channel didn't panic/drop.
@@ -3087,6 +3369,14 @@ mod tests {
             ),
             "context should carry the finish tool's result"
         );
+        assert!(
+            context.messages().iter().any(|message| matches!(
+                message,
+                Message::System { content } if content.contains("tool-use") && content.contains(&MAX_TOOL_USE_ITERATIONS.to_string())
+            )),
+            "a child must receive a heads-up system message stating its \
+             tool-use iteration budget, so it can wrap up before hitting it"
+        );
 
         let finish_result = tokio::time::timeout(Duration::from_secs(1), finish_rx.recv())
             .await
@@ -3112,6 +3402,144 @@ mod tests {
             saw_finish_tool_done,
             "expected a ToolDone update for finish"
         );
+    }
+
+    #[tokio::test]
+    async fn root_role_does_not_receive_the_child_iteration_budget_heads_up() {
+        // The heads-up message is only meaningful for a `Role::Child` loop
+        // (only it can be silently cut off with no one to explain things to);
+        // a root loop's `Interrupted` assistant bubble already tells a human
+        // what happened, so it must not get this extra system message too.
+        let registry = Arc::new(tools::default_registry(
+            test_sandbox(),
+            tools::ToolRegistryConfig::default(),
+        ));
+        let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+            Arc::new(MockProvider::new(
+                vec!["answer".to_string()],
+                Duration::from_millis(0),
+            )),
+            EngineConfig {
+                provider: "mock".to_string(),
+                model: "test-model".to_string(),
+                temperature: None,
+                context_length: DEFAULT_CONTEXT_LENGTH,
+                api_base_url: None,
+                api_key: None,
+            },
+        ));
+
+        let (mut agent_loop, _ui_rx) = AgentLoop::new(engine, registry);
+        let handle = agent_loop.run();
+        agent_loop
+            .send_command(AgentCommand::Prompt("hi".into()))
+            .await;
+        drop(agent_loop);
+
+        let context = tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("root run() should return promptly after being dropped")
+            .expect("run() task should not panic")
+            .expect("run() should not return an error");
+
+        assert!(
+            !context
+                .messages()
+                .iter()
+                .any(|message| matches!(message, Message::System { content } if content.contains("tool-use"))),
+            "a root loop must not receive the child-only iteration-budget heads-up"
+        );
+    }
+
+    #[tokio::test]
+    async fn child_role_iteration_cap_exceeded_returns_err_not_unstructured_ok() {
+        // Regression test: a `Role::Child` loop whose model keeps calling
+        // tools without ever calling `agent_finish` must, once the iteration
+        // cap trips, report a clear `Err` (→ `drive_child_to_completion`'s
+        // `Ok(Err(error))` arm, `status: "failure"`) rather than the
+        // "unstructured" `Ok(context)` fallback that would otherwise mistake
+        // the guard's boilerplate message for a genuine final answer.
+        // The mock replays this single scripted tool call on every fresh
+        // request, so the child keeps calling "read" (auto-approved inside
+        // the sandbox root, so no approval round-trip is needed) forever
+        // without ever calling `agent_finish`, tripping the iteration guard.
+        let script = vec![MockEvent::Delta(DeltaChunk {
+            tool_call_index: 0,
+            tool_call_id: Some("call_1".into()),
+            function_name: Some("read".to_string()),
+            arguments_fragment: Some(
+                serde_json::json!({
+                    "path": "Cargo.toml",
+                })
+                .to_string(),
+            ),
+        })];
+        let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+            Arc::new(MockProvider::with_script(script, Duration::from_millis(0))),
+            EngineConfig {
+                provider: "mock".to_string(),
+                model: "test-model".to_string(),
+                temperature: None,
+                context_length: DEFAULT_CONTEXT_LENGTH,
+                api_base_url: None,
+                api_key: None,
+            },
+        ));
+
+        let registry = Arc::new(tools::default_registry(
+            test_sandbox(),
+            tools::ToolRegistryConfig::default(),
+        ));
+
+        let (finish_tx, _finish_rx) = mpsc::channel(1);
+        let (subagent_ui_tx, mut subagent_ui_rx) = mpsc::channel(16);
+        let run_id = Uuid::new_v4();
+        let call_id = Uuid::new_v4();
+
+        let (mut agent_loop, mut ui_rx) = AgentLoop::new(engine, registry);
+        agent_loop = agent_loop.with_child_role(ChildRoleConfig {
+            run_id,
+            call_id,
+            briefing: Some("do the task".to_string()),
+            parent_cancel: CancellationToken::new(),
+            subagent_ui_tx,
+            finish_tx,
+        });
+
+        let handle = agent_loop.run();
+        agent_loop
+            .send_command(AgentCommand::Prompt("child task".into()))
+            .await;
+
+        let result = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("child run() should return promptly once the iteration cap trips")
+            .expect("run() task should not panic");
+
+        let error = result.expect_err(
+            "a child hitting the iteration cap must return Err, not Ok(context) \
+             (which would be mistaken for an 'unstructured' final answer)",
+        );
+        assert!(
+            error.to_string().contains("iterations"),
+            "error should explain the iteration cap was hit; got: {error}"
+        );
+
+        // No boilerplate assistant bubble should have been pushed to the
+        // child's own context (that message is reserved for a human reading
+        // the root's transcript directly).
+        while let Ok(update) = ui_rx.try_recv() {
+            if let UiUpdate::Error {
+                message,
+                run_id: got_run_id,
+            } = update
+            {
+                assert_eq!(got_run_id, Some(run_id));
+                assert!(message.contains("iterations"));
+            }
+        }
+        // Drain the subagent ui channel too; just ensure nothing panics.
+        while subagent_ui_rx.try_recv().is_ok() {}
     }
 
     #[tokio::test]

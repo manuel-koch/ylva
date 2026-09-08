@@ -545,7 +545,7 @@ pub async fn run_cli_to(
                     );
                 }
             }
-            Some(UiUpdate::SteerQueued) | Some(UiUpdate::SteerApplied) => {}
+            Some(UiUpdate::SteerQueued { .. }) | Some(UiUpdate::SteerApplied { .. }) => {}
             // No-op in headless mode: there's no live bubble to patch a
             // status update onto (see `UiUpdate::ToolProgress`'s doc comment
             // for its TUI-only purpose). The eventual `ToolDone` still
@@ -581,10 +581,28 @@ pub async fn run_cli_to(
                     );
                 }
             }
-            Some(UiUpdate::Error(error)) => {
-                flush_thinking_section(out, &mut current_section, &mut thinking_started_at)?;
-                writeln!(out, "---[ Error ]---\n{error}")?;
-                response_finished = true;
+            Some(UiUpdate::Error { message, run_id }) => {
+                match run_id {
+                    None => {
+                        flush_thinking_section(
+                            out,
+                            &mut current_section,
+                            &mut thinking_started_at,
+                        )?;
+                        writeln!(out, "---[ Error ]---\n{message}")?;
+                        response_finished = true;
+                    }
+                    // A child's own stream-level error (e.g. its max-tool-use-
+                    // iterations guard tripped) is not the root conversation
+                    // ending — the root learns the spawn finished via the
+                    // spawn tool's own `ToolDone`/`ToolError` (see above), not
+                    // this generic error. Headless mode has no separate child
+                    // transcript to render into, so just surface it tagged,
+                    // without ending the response.
+                    Some(run_id) => {
+                        writeln!(out, "[child {run_id}] error: {message}")?;
+                    }
+                }
             }
             // Headless mode has no separate child transcript to render into
             // (see drill-in conversation model, Phase 6.10, TUI-only): child

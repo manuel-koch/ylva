@@ -300,9 +300,12 @@ impl TurnBuffer {
     /// Flush only the in-flight assistant reply buffer into a
     /// `ChatEntry::AssistantMessage` appended to `messages`, leaving
     /// `partial_thinking_text` untouched. No-op when there is no pending
-    /// assistant text.
+    /// assistant text, or it is whitespace-only (e.g. a lone `"\n\n"` chunk
+    /// some models emit immediately before a tool call) — pushing that would
+    /// render as a visually-empty bubble ahead of the tool call.
     pub fn flush_response_message(&mut self, messages: &mut Vec<ChatEntry>) {
-        if self.partial_assistant_text.is_empty() {
+        if self.partial_assistant_text.trim().is_empty() {
+            self.partial_assistant_text.clear();
             return;
         }
         messages.push(ChatEntry::AssistantMessage {
@@ -317,10 +320,12 @@ impl TurnBuffer {
     /// `ChatEntry::ThinkingMessage` is pushed immediately before it — even
     /// when `partial_assistant_text` itself is empty (a thinking-only turn,
     /// e.g. the model reasons and then immediately calls a tool with no
-    /// visible prose).
+    /// visible prose). A whitespace-only `partial_assistant_text` (see
+    /// `flush_response_message`) is likewise dropped rather than pushed as an
+    /// empty-looking bubble.
     pub fn flush_assistant_message(&mut self, messages: &mut Vec<ChatEntry>, interrupted: bool) {
         self.flush_thinking_message(messages);
-        if !self.partial_assistant_text.is_empty() {
+        if !self.partial_assistant_text.trim().is_empty() {
             messages.push(ChatEntry::AssistantMessage {
                 text: std::mem::take(&mut self.partial_assistant_text),
                 interrupted,
@@ -600,14 +605,22 @@ pub enum DomainEvent {
     },
     /// A tool call was denied by the user.
     ToolDenied { id: Uuid },
-    /// An error occurred in the agent.
-    Error(String),
+    /// An error occurred in the agent — in its own loop when `run_id` is
+    /// `None`, or in the child run identified by `run_id` (e.g. that
+    /// child's own max-tool-use-iterations guard tripped). See
+    /// `DomainEvent::ToolPending::run_id`.
+    Error {
+        message: String,
+        run_id: Option<Uuid>,
+    },
     /// The double-press confirm window expired; revert to `return_to` mode.
     ConfirmExpired,
-    /// A steer was queued while the agent was busy.
-    SteerQueued,
-    /// All queued steers have been injected into the LLM context.
-    SteerApplied,
+    /// A steer was queued while the agent was busy. See
+    /// `UiUpdate::SteerQueued::run_id`.
+    SteerQueued { run_id: Option<Uuid> },
+    /// All queued steers have been injected into the LLM context. See
+    /// `UiUpdate::SteerQueued::run_id`.
+    SteerApplied { run_id: Option<Uuid> },
     /// A fragment of extended-thinking / reasoning-token output arrived.
     StreamThinkingChunk(String),
     /// A child agent actually started running. See `UiUpdate::ChildAgentStarted`.
@@ -660,10 +673,10 @@ impl DomainEvent {
             DomainEvent::ToolDone { .. } => "ToolDone",
             DomainEvent::ToolKilled { .. } => "ToolKilled",
             DomainEvent::ToolDenied { .. } => "ToolDenied",
-            DomainEvent::Error(_) => "Error",
+            DomainEvent::Error { .. } => "Error",
             DomainEvent::ConfirmExpired => "ConfirmExpired",
-            DomainEvent::SteerQueued => "SteerQueued",
-            DomainEvent::SteerApplied => "SteerApplied",
+            DomainEvent::SteerQueued { .. } => "SteerQueued",
+            DomainEvent::SteerApplied { .. } => "SteerApplied",
             DomainEvent::StreamThinkingChunk(_) => "StreamThinkingChunk",
             DomainEvent::ChildAgentStarted { .. } => "ChildAgentStarted",
             DomainEvent::ChildAgentToken { .. } => "ChildAgentToken",
@@ -2370,6 +2383,49 @@ mod tests {
         let mut state = AppState::new();
         state.flush_partial_assistant_message(false);
         assert!(state.chat_entries.is_empty());
+    }
+
+    #[test]
+    fn flush_partial_assistant_message_drops_whitespace_only_assistant_text() {
+        // Some models (observed: deepseek/deepseek-v4-flash) stream a lone
+        // `"\n\n"` content chunk immediately before a tool call, with no
+        // other prose. That whitespace-only text must not surface as a
+        // visually-empty `AssistantMessage` bubble.
+        let mut state = AppState::new();
+        state.turn_buffer.partial_assistant_text = "\n\n".to_string();
+        state.flush_partial_assistant_message(false);
+
+        assert!(state.chat_entries.is_empty(), "{:?}", state.chat_entries);
+        assert!(state.turn_buffer.partial_assistant_text.is_empty());
+    }
+
+    #[test]
+    fn flush_child_partial_text_drops_whitespace_only_assistant_text() {
+        let mut state = AppState::new();
+        let run_id = Uuid::new_v4();
+        state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id: Uuid::new_v4(),
+            agent_type: "reviewer".to_string(),
+            task: "look into flaky test".to_string(),
+            label: "Investigate flaky test".to_string(),
+        });
+        let conversation = state
+            .child_conversations
+            .get_mut(&run_id)
+            .expect("conversation");
+        conversation.turn_buffer.partial_assistant_text = "\n\n".to_string();
+        state.flush_child_partial_text(run_id);
+
+        let conversation = state
+            .child_conversations
+            .get(&run_id)
+            .expect("conversation");
+        assert!(
+            conversation.messages.is_empty(),
+            "{:?}",
+            conversation.messages
+        );
     }
 
     #[test]

@@ -290,18 +290,80 @@ tests.
       `root_view_shows_live_thinking_progress_while_a_tool_bubble_is_running`
       in `tests/tui_render_state.rs`.
 
-- [ ] Looks like hitting max-iterations-per-turn within a subagent is not handled
+- [x] Looks like hitting max-iterations-per-turn within a subagent is not handled
       properly. The subagent just stops working and doesn't communicate back
       its (current) result.
-      Main agent still waiting for subagent result, which will never arrive.
+      The error "Max tool-use iterations (2) exceeded." is rendered in
+      main conversation and not in the subagent where it was triggered.
+      Main agent may still waiting for subagent result, which will never arrive.
       Should this result in an error within subagent or should we allow subagent to
-      one more turn without any tools to wrap up the current state and
+      do one more turn (without any tools) to wrap up the current state and
       send atleast something to parent agent as result ?
+      Resolved: `UiUpdate`/`DomainEvent::Error` (and `SteerQueued`/`SteerApplied`) now
+      carry `run_id`, so a child's error is attributed to its own transcript instead of
+      the root's. A child hitting the iteration cap now returns `Err` from
+      `AgentLoop::run()`, landing on `drive_child_to_completion`'s existing
+      `Ok(Err(error))` arm — the parent gets a clear `status: "failure"` instead of a
+      fabricated `"unstructured"` result built from the guard's boilerplate message.
+      Giving the child one more turn to wrap up was considered and rejected: it has no
+      way to know it was halted, and feeding it its own truncated progress would just
+      start another tool-call-capable turn. A child now also gets a heads-up system
+      message ahead of its briefing stating its tool-use iteration budget, so a capable
+      model can pace itself and call `agent_finish` before running out. See
+      `docs/features.md`/`docs/blueprint.md`.
+
+- [ ] If a subagent conversation encounters an upstream error from llm provider
+      ( e.g. recoverable error like out-of-credits ) then there is no way to continue/retry the current subagent conversation. It is just stuck.
+      And parent agent is stuck too in waiting for subagent result that will never
+      happen.
+      Should we allow steering a subagent via the input-draft message?
 
 - [ ] Inconsistency worth noting: the module header references
       DEFAULT_TOOL_TIMEOUT_SECS , but the constant that actually exists is
       DEFAULT_TIMEOUT_SECS (5s) in tools.rs , which is what
       WriteTool::timeout_secs() uses.
+      The constant should be named DEFAULT_TOOL_TIMEOUT_SECS.
+
+- [x] ~~`Context::push_system` is used mid-conversation~~ **Fixed**: the two
+      mid-conversation `push_system` call sites (subagent-finished and
+      subagent-cancelled harness notices in `agent.rs`) now use the new
+      `Context::push_async_harness_notice()`, which sends the notice as an
+      implicit `role:"user"` message (`UserMessageKind::ImplicitToolNote`,
+      hidden from the TUI/CLI transcript) prefixed with
+      `HARNESS_NOTICE_MARKER`, instead of a mid-conversation `role:"system"`
+      message. This mirrors LiteLLM's `map_system_message_pt()` workaround
+      and avoids the HTTP 400 "Invalid request" previously seen from
+      `mistralai/mistral-nemo` routed through OpenRouter's "Io Net" backend,
+      whose chat template only accepts `system`-role messages in the
+      conversation's leading block. The two *leading* `push_system` calls
+      (child briefing, tool-budget note — both issued before any `user`
+      message) are unaffected and unchanged.
+
+- [x] ~~Runaway `spawn_subagent` reprompt loop bypasses
+      `MAX_TOOL_USE_ITERATIONS`~~ **Fixed**: while investigating the above,
+      found that a weak model (e.g. `mistralai/mistral-nemo`) that just
+      keeps calling `spawn_subagent` again on every harness notice — instead
+      of ever answering — could reprompt the root forever with **zero**
+      iteration-budget enforcement, because three separate re-prompt call
+      sites in `agent.rs` didn't all go through the same cap check:
+      `advance_tool_queue`'s queue-empty branch (correct), the `finish_rx`
+      arm's "root was idle, forcing reprompt" branch (bypassed it —
+      called `start_request` directly), and the `StreamDone` arm's
+      "`pending_child_finish_reprompt`" branch (also bypassed it). Separately,
+      `advance_tool_queue` itself under-counted: `spawn_subagent` and
+      auto-denied tools resolve *synchronously* within the same call (unlike
+      a normally-executing auto-approved tool, which returns and waits for a
+      later `ToolDone` event to re-invoke the function with
+      `increment_iterations: true`), so a round made up entirely of such
+      tools reached the queue-empty re-prompt still carrying
+      `increment_iterations: false` — silently completing a full tool-use
+      round without ever counting against the cap. Fixed by extracting the
+      cap-check into a shared `bump_and_check_iteration_cap()` helper used
+      by all three re-prompt sites, and by having `advance_tool_queue` flip
+      its (now-mutable) `increment_iterations` to `true` whenever it
+      resolves a `spawn_subagent` or auto-denied tool in-loop. Regression
+      tests: `iteration_guard_also_stops_a_runaway_spawn_subagent_finish_reprompt_loop`
+      in `tests/tools_agent_loop.rs`.
 
 ## Code style smell
 

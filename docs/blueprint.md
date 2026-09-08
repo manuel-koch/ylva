@@ -1799,10 +1799,19 @@ child agents as well.
    ```
 
    The `agent_finish` call is **exempt** from the iteration cap; it is the natural
-   termination state. If the child never calls `agent_finish` (timeout, max
-   iterations, or user abort), the system extracts the last assistant message as
-   raw text, wraps it in a synthetic `{"status": "unstructured", "result": "..."}`
-   object, and returns that to the parent.
+   termination state. If the child goes idle without ever calling `agent_finish`
+   (final assistant text with no tool call, or a killed tool), the system extracts
+   the last assistant message as raw text, wraps it in a synthetic
+   `{"status": "unstructured", "result": "..."}` object, and returns that to the
+   parent. If the child instead hits the max-tool-iterations cap before ever
+   calling `agent_finish`, there is no genuine final answer to salvage — the
+   child loop returns an `Err` instead of its `Context`, and the parent receives
+   a `{"status": "failure", "error": "...", "result": null}` object explaining
+   the cap was hit, rather than mistaking the cap's boilerplate message for the
+   child's own conclusion. Ahead of its briefing, a child also receives a
+   heads-up system message stating its tool-use iteration budget, so a
+   capable model can pace its tool calls and call `agent_finish` before it
+   runs out.
 5. **Re-integration:** the `result` field of the structured output is injected
    into the root conversation as a `Message::System` (or a dedicated
    `Message::ChildResult`) so the root LLM can use it on its next turn.

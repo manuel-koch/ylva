@@ -1130,18 +1130,32 @@ fn domain_idle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             choices,
             run_id,
         } => push_clarify_pending_bubble(state, id, question, context, choices, run_id),
-        DomainEvent::Error(message) => {
-            state.chat_entries.push(ChatEntry::ErrorLine { message });
-            state.mode = TuiMode::Idle;
+        DomainEvent::Error { message, run_id } => {
+            if run_id.is_none() {
+                state.mode = TuiMode::Idle;
+            }
+            state
+                .target_messages_mut(run_id)
+                .push(ChatEntry::ErrorLine { message });
             vec![]
         }
-        DomainEvent::SteerQueued => {
-            state.steer_indicator = true;
+        DomainEvent::SteerQueued { run_id } => {
+            // No driver routes `Prompt` to a child today (see
+            // `UiUpdate::SteerQueued::run_id`), so `run_id: Some(_)` is
+            // unreachable in practice; guard anyway rather than silently
+            // flipping the root's own indicator for a child steer.
+            if run_id.is_none() {
+                state.steer_indicator = true;
+            }
             vec![]
         }
-        DomainEvent::SteerApplied => {
-            state.commit_queued_steer_messages(UserMessageState::Steered);
-            state.steer_indicator = false;
+        DomainEvent::SteerApplied { run_id } => {
+            // See `DomainEvent::SteerQueued` above: only the root's own
+            // steer queue/indicator is meaningful today.
+            if run_id.is_none() {
+                state.commit_queued_steer_messages(UserMessageState::Steered);
+                state.steer_indicator = false;
+            }
             vec![]
         }
         DomainEvent::AgentIdle => {
@@ -1235,9 +1249,13 @@ fn domain_pending(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             state.mode = TuiMode::Idle;
             vec![]
         }
-        DomainEvent::Error(message) => {
-            state.chat_entries.push(ChatEntry::ErrorLine { message });
-            state.mode = TuiMode::Idle;
+        DomainEvent::Error { message, run_id } => {
+            if run_id.is_none() {
+                state.mode = TuiMode::Idle;
+            }
+            state
+                .target_messages_mut(run_id)
+                .push(ChatEntry::ErrorLine { message });
             vec![]
         }
         DomainEvent::ToolPending {
@@ -1263,13 +1281,23 @@ fn domain_pending(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             choices,
             run_id,
         } => push_clarify_pending_bubble(state, id, question, context, choices, run_id),
-        DomainEvent::SteerQueued => {
-            state.steer_indicator = true;
+        DomainEvent::SteerQueued { run_id } => {
+            // No driver routes `Prompt` to a child today (see
+            // `UiUpdate::SteerQueued::run_id`), so `run_id: Some(_)` is
+            // unreachable in practice; guard anyway rather than silently
+            // flipping the root's own indicator for a child steer.
+            if run_id.is_none() {
+                state.steer_indicator = true;
+            }
             vec![]
         }
-        DomainEvent::SteerApplied => {
-            state.commit_queued_steer_messages(UserMessageState::Steered);
-            state.steer_indicator = false;
+        DomainEvent::SteerApplied { run_id } => {
+            // See `DomainEvent::SteerQueued` above: only the root's own
+            // steer queue/indicator is meaningful today.
+            if run_id.is_none() {
+                state.commit_queued_steer_messages(UserMessageState::Steered);
+                state.steer_indicator = false;
+            }
             vec![]
         }
         DomainEvent::AgentIdle => {
@@ -1468,18 +1496,32 @@ fn domain_streaming(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             }
             vec![]
         }
-        DomainEvent::Error(message) => {
-            state.chat_entries.push(ChatEntry::ErrorLine { message });
-            state.mode = TuiMode::Idle;
+        DomainEvent::Error { message, run_id } => {
+            if run_id.is_none() {
+                state.mode = TuiMode::Idle;
+            }
+            state
+                .target_messages_mut(run_id)
+                .push(ChatEntry::ErrorLine { message });
             vec![]
         }
-        DomainEvent::SteerQueued => {
-            state.steer_indicator = true;
+        DomainEvent::SteerQueued { run_id } => {
+            // No driver routes `Prompt` to a child today (see
+            // `UiUpdate::SteerQueued::run_id`), so `run_id: Some(_)` is
+            // unreachable in practice; guard anyway rather than silently
+            // flipping the root's own indicator for a child steer.
+            if run_id.is_none() {
+                state.steer_indicator = true;
+            }
             vec![]
         }
-        DomainEvent::SteerApplied => {
-            state.commit_queued_steer_messages(UserMessageState::Steered);
-            state.steer_indicator = false;
+        DomainEvent::SteerApplied { run_id } => {
+            // See `DomainEvent::SteerQueued` above: only the root's own
+            // steer queue/indicator is meaningful today.
+            if run_id.is_none() {
+                state.commit_queued_steer_messages(UserMessageState::Steered);
+                state.steer_indicator = false;
+            }
             vec![]
         }
         DomainEvent::AgentIdle => {
@@ -1604,9 +1646,13 @@ fn domain_aborting(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
             update_tool_bubble_to_denied(state, id);
             vec![]
         }
-        DomainEvent::Error(message) => {
-            state.chat_entries.push(ChatEntry::ErrorLine { message });
-            state.mode = TuiMode::Idle;
+        DomainEvent::Error { message, run_id } => {
+            if run_id.is_none() {
+                state.mode = TuiMode::Idle;
+            }
+            state
+                .target_messages_mut(run_id)
+                .push(ChatEntry::ErrorLine { message });
             vec![]
         }
         DomainEvent::StreamDone => {
@@ -4044,7 +4090,7 @@ mod tests {
         // is starting the next request).
         update(
             &mut state,
-            TuiEvent::Domain(DomainEvent::SteerApplied),
+            TuiEvent::Domain(DomainEvent::SteerApplied { run_id: None }),
             &empty_textarea(),
         );
 

@@ -175,8 +175,8 @@ fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
         UiUpdate::AppendThinking(text) => Some(DomainEvent::StreamThinkingChunk(text.clone())),
         UiUpdate::StreamDone => Some(DomainEvent::StreamDone),
         UiUpdate::StreamCancelled => Some(DomainEvent::StreamCancelled),
-        UiUpdate::SteerQueued => Some(DomainEvent::SteerQueued),
-        UiUpdate::SteerApplied => Some(DomainEvent::SteerApplied),
+        UiUpdate::SteerQueued { run_id } => Some(DomainEvent::SteerQueued { run_id: *run_id }),
+        UiUpdate::SteerApplied { run_id } => Some(DomainEvent::SteerApplied { run_id: *run_id }),
         UiUpdate::ToolPending {
             id,
             name,
@@ -248,7 +248,10 @@ fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
             id: *id,
             run_id: *run_id,
         }),
-        UiUpdate::Error(message) => Some(DomainEvent::Error(message.clone())),
+        UiUpdate::Error { message, run_id } => Some(DomainEvent::Error {
+            message: message.clone(),
+            run_id: *run_id,
+        }),
         UiUpdate::ChildAgentStarted {
             run_id,
             call_id,

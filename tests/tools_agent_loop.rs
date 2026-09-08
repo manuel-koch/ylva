@@ -25,9 +25,10 @@ use tempfile::TempDir;
 use tokio::sync::mpsc;
 
 use ylva::{
-    default_registry, AgentCommand, AgentLoop, ApprovalCheck, DeltaChunk, EngineImpl, Message,
-    MockEvent, MockProvider, Sandbox, Tool, ToolCall, ToolCallResult, ToolError, ToolRegistry,
-    ToolRegistryConfig, UiUpdate, MAX_TOOL_USE_ITERATIONS,
+    default_registry, AgentCommand, AgentLoop, ApprovalCheck, AssistantStatus, DeltaChunk,
+    EngineImpl, Message, MockEvent, MockProvider, Sandbox, Tool, ToolCall, ToolCallResult,
+    ToolError, ToolRegistry, ToolRegistryConfig, UiUpdate, UserMessageKind,
+    MAX_TOOL_USE_ITERATIONS,
 };
 
 /// Build a `MockEvent::Delta` carrying a complete tool call for `index`.
@@ -653,14 +654,14 @@ async fn iteration_guard_stops_after_max_reprompts() {
     let handle = agent.run();
 
     let done = drive_until(&agent, &mut ui_rx, registry.as_ref(), interval, |u| {
-        matches!(u, UiUpdate::Error(_))
+        matches!(u, UiUpdate::Error { .. })
     })
     .await;
 
     assert!(
         done.iter()
-            .any(|u| matches!(u, UiUpdate::Error(e) if e.contains("iterations"))),
-        "guard must emit an explanation error"
+            .any(|u| matches!(u, UiUpdate::Error { message, run_id: None } if message.contains("iterations"))),
+        "guard must emit an explanation error attributed to the root loop (run_id: None)"
     );
     let starts = done
         .iter()
@@ -674,6 +675,105 @@ async fn iteration_guard_stops_after_max_reprompts() {
         .messages()
         .iter()
         .any(|m| matches!(m, Message::ToolError { name, .. } if name == "write")));
+}
+
+#[tokio::test(start_paused = true)]
+async fn iteration_guard_also_stops_a_runaway_spawn_subagent_finish_reprompt_loop() {
+    // Regression test: a child that resolves near-instantly (finishes via
+    // `finish_tx` essentially as soon as it's spawned) drives the root
+    // through the `finish_rx` "root was idle, forcing reprompt" branch
+    // instead of `advance_tool_queue`'s queue-empty branch. That branch used
+    // to call `start_request` directly with no iteration bookkeeping at all
+    // — so a model that just keeps calling `spawn_subagent` again on every
+    // finish notice (rather than ever answering) could reprompt forever,
+    // one HTTP request per "finish", completely bypassing
+    // `MAX_TOOL_USE_ITERATIONS`. The guard must trip here exactly like it
+    // does for the plain `write`-in-a-loop case above.
+    use tokio_util::sync::CancellationToken;
+    use ylva::child_agent_manager::{ChildAgentManager, FinishResult, SpawnFn};
+
+    let registry = Arc::new(default_registry(
+        make_sandbox(),
+        ToolRegistryConfig {
+            include_spawn_subagent: true,
+            auto_approve_spawn: true,
+            ..ToolRegistryConfig::default()
+        },
+    ));
+    let interval = Duration::from_millis(5);
+    let provider = MockProvider::with_script(
+        vec![call(
+            "spawn_subagent",
+            0,
+            serde_json::json!({ "label": "Do it again", "task": "do it again" }),
+        )],
+        interval,
+    );
+    let (mut agent, mut ui_rx) = AgentLoop::new(
+        Arc::new(EngineImpl::new(
+            Arc::new(provider),
+            common::test_engine_config(),
+        )),
+        Arc::clone(&registry),
+    );
+
+    let (finish_tx, finish_rx) = mpsc::channel(64);
+    let (subagent_ui_tx, subagent_ui_rx) = mpsc::channel(64);
+    // Resolves immediately: reports success via `finish_tx` right away and
+    // never actually does any work, simulating a child that finishes near-
+    // instantly relative to the root's own request/response cycle.
+    let spawn_fn: SpawnFn = Box::new(move |request, _cancel: CancellationToken, _ui_tx| {
+        let finish_tx = finish_tx.clone();
+        let handle = tokio::spawn(async move {
+            let _ = finish_tx
+                .send(FinishResult {
+                    run_id: request.run_id,
+                    call_id: request.call_id,
+                    status: "success".to_string(),
+                    result: Some("done".to_string()),
+                    error: None,
+                    sources: vec![],
+                })
+                .await;
+        });
+        ylva::child_agent_manager::SpawnOutcome {
+            command_sender: None,
+            handle,
+        }
+    });
+    let manager = ChildAgentManager::new(subagent_ui_tx, spawn_fn);
+    agent = agent.with_child_agent_manager(manager, finish_rx, subagent_ui_rx);
+
+    agent
+        .send_command(AgentCommand::Prompt("delegate forever".into()))
+        .await;
+    let handle = agent.run();
+
+    let done = drive_until(&agent, &mut ui_rx, registry.as_ref(), interval, |u| {
+        matches!(u, UiUpdate::Error { .. })
+    })
+    .await;
+
+    assert!(
+        done.iter()
+            .any(|u| matches!(u, UiUpdate::Error { message, run_id: None } if message.contains("iterations"))),
+        "guard must trip and emit an explanation error attributed to the root loop \
+         (run_id: None), got: {done:?}"
+    );
+
+    drop(agent);
+    let context = handle.await.expect("loop ok").expect("context");
+    assert!(
+        matches!(
+            context.messages().last(),
+            Some(Message::Assistant {
+                status: AssistantStatus::Interrupted,
+                ..
+            })
+        ),
+        "the guard tripping must be reported as an Interrupted assistant bubble, got: {:?}",
+        context.messages()
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -845,13 +945,14 @@ async fn stop_while_spawn_subagent_is_running_resolves_it_to_cancelled_tool_done
     let saw_cancelled_notice = context.messages().iter().any(|message| {
         matches!(
             message,
-            Message::System { content }
+            Message::User { content, kind: UserMessageKind::ImplicitToolNote }
                 if content.contains("spawn_subagent") && content.contains("cancelled")
         )
     });
     assert!(
         saw_cancelled_notice,
-        "expected a trailing system message announcing the cancelled spawn_subagent child, got: {:?}",
+        "expected a trailing implicit user message announcing the cancelled spawn_subagent \
+         child, got: {:?}",
         context.messages()
     );
 }
