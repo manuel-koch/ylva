@@ -1868,6 +1868,55 @@ mod tests {
     }
 
     #[test]
+    fn enter_activates_the_selected_partial_command_instead_of_submitting_it() {
+        let (mut state, _textarea, _cmd_tx, _cmd_rx) = setup();
+        let mut textarea = TextArea::from(vec!["/model".to_string()]);
+        configure_textarea(&mut textarea);
+        state.refresh_slash_overlay(&textarea.lines().join("\n"));
+
+        let effects = presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+            &textarea_ctx_from(&textarea),
+        );
+
+        assert_eq!(
+            effects,
+            vec![Effect::ClearTextarea, Effect::ListModels],
+            "Enter should activate the highlighted /models suggestion"
+        );
+        assert_eq!(state.slash_overlay, SlashOverlay::Hidden);
+        assert!(state.chat_entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tab_completes_models_from_the_partial_model_prefix() {
+        let (mut state, _textarea, cmd_tx, _cmd_rx) = setup();
+        let mut textarea = TextArea::from(vec!["/model".to_string()]);
+        configure_textarea(&mut textarea);
+        state.refresh_slash_overlay(&textarea.lines().join("\n"));
+
+        let effects = presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Tab))),
+            &textarea_ctx_from(&textarea),
+        );
+        assert_eq!(effects, vec![Effect::SetInputText("/models".to_string())]);
+
+        execute_effects(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            effects,
+            &mut MouseDrag::default(),
+            &mut NoopClipboard,
+            &mut PendingRunIds::default(),
+        )
+        .await;
+        assert_eq!(textarea.lines(), &["/models"]);
+    }
+
+    #[test]
     fn the_suggestion_overlay_tracks_the_partially_typed_command() {
         let mut state = AppState::new();
 

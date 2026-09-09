@@ -508,10 +508,11 @@ fn handle_key_main(
     key_event: crossterm::event::KeyEvent,
     textarea: &TextareaContext,
 ) -> Vec<Effect> {
-    // The command suggestion overlay owns navigation and completion while it
-    // is open. Tab replaces the partial command with the canonical name of
-    // the highlighted entry; the normal textarea handler remains available
-    // when no command suggestions are shown.
+    // The command suggestion overlay owns navigation, completion, and plain
+    // Enter while it is open. Tab replaces the partial command with the
+    // canonical name of the highlighted entry; Enter activates that entry.
+    // The normal textarea handler remains available when no command
+    // suggestions are shown.
     if matches!(state.slash_overlay, SlashOverlay::Suggestions { .. }) {
         match key_event.code {
             KeyCode::Up => {
@@ -525,6 +526,12 @@ fn handle_key_main(
             KeyCode::Tab => {
                 if let Some(command) = state.selected_slash_command() {
                     return vec![Effect::SetInputText(command.name.to_string())];
+                }
+            }
+            KeyCode::Enter if key_event.modifiers.is_empty() => {
+                if let Some(command) = state.selected_slash_command().map(|info| info.command) {
+                    state.slash_overlay = SlashOverlay::Hidden;
+                    return slash_command_effects(command);
                 }
             }
             _ => {}

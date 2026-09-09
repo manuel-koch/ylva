@@ -511,10 +511,11 @@ and `slash_command_suggestions` (prefix match, drives the overlay). It is
 pure and has no knowledge of the TUI.
 
 The Presenter (`presenter.rs`) checks the **raw**, un-dedented draft on
-`Enter`, so only a `/` in the input's first cell can start a command. The
-suggestion overlay owns `↑`/`↓` and `Tab`: its selected index is kept in
-`AppState`, and `Tab` emits `Effect::SetInputText` with the selected command's
-canonical name. The `/models` picker queries provider-connection-qualified
+`Enter`, so only a `/` in the input's first cell can start a command. While
+suggestions are visible, the selected index is kept in `AppState`; `Tab` emits
+`Effect::SetInputText` with the selected command's canonical name, and plain
+`Enter` activates the selected command even when the draft is only a prefix.
+The `/models` picker queries provider-connection-qualified
 options from `EngineRouter`, displays `provider_connection/model`, has the
 same bounded `↑`/`↓` movement semantics, uses `page-up`/`fn-up` and
 `page-down`/`fn-down` to move the highlighted option by three entries, uses

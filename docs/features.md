@@ -408,10 +408,12 @@ Profiles are read from `~/.ylva/profiles/<name>/config.toml`; see
 
 Typing `/` as the **first character** of the draft-message input opens a
 command overlay above the conversation; it narrows as the command is typed.
-`↑`/`↓` highlight a command and `Tab` completes the highlighted command.
+`↑`/`↓` highlight a command, `Tab` completes the highlighted command, and
+`Enter` activates it even when only a partial command has been typed.
 The command set is a fixed allowlist — a leading `/` that matches nothing in
-it (e.g. `/foo`) is ordinary chat text and is sent to the model unchanged, as
-is any `/` that is not the first character of the input.
+it (e.g. `/foo`) remains ordinary chat text when no suggestion is selected
+and is sent to the model unchanged, as is any `/` that is not the first
+character of the input.
 
 The `/models` picker displays provider-reported context lengths as
 `context: <size>` labels using integer binary sizes (`2048` appears as

@@ -4,8 +4,9 @@
       typing an argument after the slash-command doesn't prefilter the
       list of available models
 
-- [ ] Typing "/model", models popup is shown with an entry selected,
+- [x] Typing "/model", models popup is shown with an entry selected,
       hitting enter sends "/model" to llm instead of activating the current selected entry in the popup.
+      Can't type tab to autocomplete on the selected entry either.
 
 - [ ] "/models" popup should show the predefined "engines" first, as
       shortcuts to the provider/model/config that they use.
@@ -29,7 +30,12 @@
 - [ ] Switching a model via "/models" slash-command persists a "system" message
       in conversation:
       ```json
-      {"type":"message","v":1,"message":{"role":"system","content":"Switched to openrouter/deepseek/deepseek-v4-flash-0731 (reasoning: provider default)."}}
+      {
+      "type": "message", "v": 1,
+      "message": {
+      "role": "system", "content": "Switched to openrouter/deepseek/deepseek-v4-flash-0731 (reasoning: provider default)."
+      }
+      }
       ```
       Shouldn't this be just a notice that is rendered in TUI, but it seems to be
       a real "system" message in the conversation send to llm ?

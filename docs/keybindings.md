@@ -56,7 +56,7 @@ Reference for Ylva's TUI keybindings.
 | `/` as the first character | Input focused | Open the command overlay; it narrows as more of the command is typed |
 | `↑` / `↓` | Command overlay open | Move the highlighted command |
 | `tab` | Command overlay open | Complete the highlighted command |
-| `enter` | Input holds a recognized command | Run the command instead of sending the draft to the model (see [features](./features.md#slash-commands)) |
+| `enter` | Input holds a recognized command or a highlighted command suggestion | Run the selected command instead of sending the draft to the model (see [features](./features.md#slash-commands)) |
 | `esc` | Command overlay open | Close the overlay; the draft is untouched |
 | `↑` / `↓` | `/models` picker open | Move the highlighted provider-connection/model |
 | `page-up` / `fn-up` | `/models` picker open | Move the highlighted provider-connection/model up by a page |
