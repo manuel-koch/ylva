@@ -23,7 +23,7 @@
 pub mod mock_llm_server;
 
 use tokio::sync::mpsc;
-use ylva::{EngineConfig, UiUpdate, DEFAULT_CONTEXT_LENGTH};
+use ylva::{EngineConfig, UiUpdate};
 
 /// Whether `value` matches `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$`
 /// (the trailing `Z` is literal — a `+00:00` style must fail).
@@ -78,8 +78,9 @@ pub fn test_engine_config() -> EngineConfig {
         provider_connection: "mock".to_string(),
         model: "test-model".to_string(),
         temperature: None,
-        context_length: DEFAULT_CONTEXT_LENGTH,
+        context_length: None,
         api_base_url: None,
         api_key: None,
+        reasoning: None,
     }
 }

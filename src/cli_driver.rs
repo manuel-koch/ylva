@@ -27,7 +27,7 @@ use crate::agent::{AgentCommand, AgentLoop, Role, UiUpdate};
 use crate::agent_factory::AgentFactory;
 use crate::app::App;
 use crate::config::ProfileConfig;
-use crate::llm::engine::{EngineConfig, EngineImpl, DEFAULT_CONTEXT_LENGTH};
+use crate::llm::engine::{EngineConfig, EngineImpl};
 use crate::llm::{serialize_messages, Provider};
 use crate::sandbox::{ApprovalCheck, Sandbox};
 use crate::ToolRegistry;
@@ -212,9 +212,10 @@ pub async fn run_cli(
         provider_connection: provider.name().to_string(),
         model: String::new(),
         temperature: None,
-        context_length: DEFAULT_CONTEXT_LENGTH,
+        context_length: None,
         api_base_url: None,
         api_key: None,
+        reasoning: None,
     };
     let engine = Arc::new(EngineImpl::new(provider, engine_config));
     let (agent, ui_rx) = AgentLoop::new(engine, Arc::clone(&registry));

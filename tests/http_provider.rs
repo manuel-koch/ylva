@@ -23,8 +23,7 @@ use ylva::llm::ProviderRegistry;
 use ylva::{
     AgentCommand, AgentLoop, AssistantStatus, EngineConfig, EngineImpl, Message, OllamaProvider,
     OpenAiCompatibleProvider, OpenRouterProvider, Provider, ProviderConnectionConfig, StreamEvent,
-    ToolRegistry, UiUpdate, UserMessageKind, DEFAULT_CONTEXT_LENGTH, DEFAULT_SYSTEM_PROMPT,
-    TOOL_PROTOCOL_SYSTEM_PROMPT,
+    ToolRegistry, UiUpdate, UserMessageKind, DEFAULT_SYSTEM_PROMPT, TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
 
 use common::collect_until;
@@ -166,9 +165,10 @@ async fn named_ollama_connection_uses_native_model_discovery() {
         provider_connection: "ollama-local".to_string(),
         model: "gemma4:latest".to_string(),
         temperature: None,
-        context_length: DEFAULT_CONTEXT_LENGTH,
+        context_length: None,
         api_base_url: None,
         api_key: None,
+        reasoning: None,
     };
     let provider = ProviderRegistry::provider_from_provider_config(
         "ollama-local",

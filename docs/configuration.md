@@ -130,9 +130,10 @@ model switch affects subsequent requests without rebuilding the provider.
 | `provider_connection` | `String` | Name of the connection under `[provider_connections.*]`. The connection's `provider` field must be `"mock"`, `"ollama"`, or `"openrouter"`. Ollama uses the server origin as `api_base_url` and derives both `/v1` chat and `/api` catalog endpoints; OpenRouter uses its origin as `api_base_url` and derives `/api/v1` for chat and model discovery. |
 | `model` | `String` | Model identifier passed to the provider. May be omitted, in which case the profile's `default_model` fills it in. |
 | `temperature` | `Option<f32>` | Sampling temperature. `None` uses the model's own default. |
-| `context_length` | `usize` | Maximum token context window (default `128 000`). Phase 9 reads this to drive compaction budgeting. |
+| `context_length` | `Option<usize>` | Maximum token context window. `None` (the default when the field is left out of TOML) means the profile doesn't limit it explicitly. Accepts either a plain integer or a string with a `kb`/`mb` suffix (e.g. `"265kb"` = `265 * 1024`, `"2mb"` = `2 * 1024 * 1024`) — the same 1024-based units `/models` uses to display context lengths. `EngineConfig::effective_context_length` resolves the value actually used, in priority order: this configured value, then the provider's advertised context length for the active model (from its `/models` catalog), then the built-in default of `128 000`. Phase 9 reads the resolved value to drive compaction budgeting. |
 | `api_base_url` | `Option<String>` | Optional engine-level override for the connection's base URL. |
 | `api_key` | `Option<String>` | Optional engine-level override for the connection's API key. |
+| `reasoning` | `Option<String>` | Initial explicit reasoning effort applied when the engine is constructed. `None` uses the provider's own default. Later changes go through `/models`, which validates the effort against the model's advertised options before switching. |
 
 ## Profile configuration (`ProfileConfig`)
 

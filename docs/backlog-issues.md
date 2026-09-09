@@ -8,7 +8,7 @@
       hitting enter sends "/model" to llm instead of activating the current selected entry in the popup.
       Can't type tab to autocomplete on the selected entry either.
 
-- [ ] "/models" popup should show the predefined "engines" first, as
+- [x] "/models" popup should show the predefined "engines" first, as
       shortcuts to the provider/model/config that they use.
       Add a seperator between the "engines" section and the known
       "models" section.
@@ -42,6 +42,11 @@
 
 - [x] "/models" should display the llm context-length as kb/mb size
       ( integer representation, 2048 == 2kb ) to increase readability.
+
+- [ ] "/models" popup dialog should provide vertical scroll-indicators
+      for showing engines & models.
+
+- [ ] "/models" can't scroll by mouse in the popup dialog showing engines & models.
 
 - [ ] Can't use mouse drag'n'drop to select text in slash-command popup
 

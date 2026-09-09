@@ -23,9 +23,7 @@ use crate::agent::tools::{default_registry, ToolRegistryConfig, DEFAULT_CLI_TOOL
 use crate::agent::{AgentLoop, ChildRoleConfig, Context, Message, Role, UiUpdate};
 use crate::child_agent_manager::{ChildAgentManager, FinishResult, SpawnRequest};
 use crate::config::ProfileConfig;
-use crate::llm::engine::{
-    Engine, EngineConfig, EngineDisplayInfo, EngineRouter, DEFAULT_CONTEXT_LENGTH,
-};
+use crate::llm::engine::{Engine, EngineConfig, EngineDisplayInfo, EngineRouter};
 use crate::llm::ProviderRegistry;
 use crate::sandbox::Sandbox;
 use crate::store::Store;
@@ -539,9 +537,10 @@ fn implicit_engine_config(
         provider_connection: provider_connection_name.to_string(),
         model: default_model.unwrap_or_default().to_string(),
         temperature: None,
-        context_length: DEFAULT_CONTEXT_LENGTH,
+        context_length: None,
         api_base_url: None,
         api_key: None,
+        reasoning: None,
     }
 }
 
@@ -723,7 +722,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::llm::engine::{EngineConfig, EngineImpl, DEFAULT_CONTEXT_LENGTH};
+    use crate::llm::engine::{EngineConfig, EngineImpl};
     use crate::llm::MockProvider;
     use crate::{AgentConfig, AssistantStatus, ProfileConfig};
     use uuid::Uuid;
@@ -733,9 +732,10 @@ mod tests {
             provider_connection: "mock".to_string(),
             model: "test-model".to_string(),
             temperature: None,
-            context_length: DEFAULT_CONTEXT_LENGTH,
+            context_length: None,
             api_base_url: None,
             api_key: None,
+            reasoning: None,
         }
     }
 
@@ -780,9 +780,10 @@ mod tests {
             provider_connection: "mock".to_string(),
             model: model.to_string(),
             temperature: None,
-            context_length: crate::llm::engine::DEFAULT_CONTEXT_LENGTH,
+            context_length: None,
             api_base_url: None,
             api_key: None,
+            reasoning: None,
         };
         ProfileConfig {
             default_engine: "main".to_string(),
@@ -861,9 +862,10 @@ mod tests {
                         provider_connection: "ollama-local".to_string(),
                         model: "local-model".to_string(),
                         temperature: None,
-                        context_length: DEFAULT_CONTEXT_LENGTH,
+                        context_length: None,
                         api_base_url: None,
                         api_key: None,
+                        reasoning: None,
                     },
                 ),
                 (
@@ -872,9 +874,10 @@ mod tests {
                         provider_connection: "ollama-cloud".to_string(),
                         model: "cloud-model".to_string(),
                         temperature: None,
-                        context_length: DEFAULT_CONTEXT_LENGTH,
+                        context_length: None,
                         api_base_url: None,
                         api_key: None,
+                        reasoning: None,
                     },
                 ),
             ]),
@@ -918,9 +921,10 @@ mod tests {
                     provider_connection: "ollama".to_string(),
                     model: "some-model".to_string(),
                     temperature: None,
-                    context_length: crate::llm::engine::DEFAULT_CONTEXT_LENGTH,
+                    context_length: None,
                     api_base_url: None,
                     api_key: None,
+                    reasoning: None,
                 },
             )]),
             ..ProfileConfig::default()

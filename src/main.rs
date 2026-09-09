@@ -633,9 +633,10 @@ mod tests {
                 provider_connection: "ollama".to_string(),
                 model: "local".to_string(),
                 temperature: None,
-                context_length: ylva::DEFAULT_CONTEXT_LENGTH,
+                context_length: None,
                 api_base_url: Some("http://localhost:11434".to_string()),
                 api_key: None,
+                reasoning: None,
             },
         );
         profile.engines.insert(
@@ -644,9 +645,10 @@ mod tests {
                 provider_connection: "openrouter".to_string(),
                 model: "hosted/model".to_string(),
                 temperature: None,
-                context_length: ylva::DEFAULT_CONTEXT_LENGTH,
+                context_length: None,
                 api_base_url: Some("https://openrouter.ai".to_string()),
                 api_key: Some("explicit-key".to_string()),
+                reasoning: None,
             },
         );
         let provider_env = ProviderEnv {

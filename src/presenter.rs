@@ -2207,6 +2207,7 @@ mod tests {
                         reasoning_effort: None,
                     },
                     is_active: false,
+                    engine_name: None,
                 })
                 .collect(),
             filter: String::new(),

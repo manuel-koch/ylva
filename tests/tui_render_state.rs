@@ -737,6 +737,7 @@ fn model_picker_footer_shows_picker_controls_instead_of_send() {
                     reasoning_effort: None,
                 },
                 is_active: false,
+                engine_name: None,
             }],
             filter: String::new(),
             selected: 0,
@@ -769,7 +770,7 @@ fn model_picker_footer_shows_picker_controls_instead_of_send() {
         "rendered footer: {rendered:?}"
     );
     assert!(
-        rendered.contains("Provider Models"),
+        rendered.contains("Engines & Provider Models"),
         "model picker must use the provider models title: {rendered:?}"
     );
     assert!(
@@ -810,6 +811,7 @@ fn model_picker_shows_a_message_instead_of_vanishing_when_the_filter_matches_not
                     reasoning_effort: None,
                 },
                 is_active: false,
+                engine_name: None,
             }],
             filter: "no-such-model".to_string(),
             selected: 0,
@@ -834,7 +836,7 @@ fn model_picker_shows_a_message_instead_of_vanishing_when_the_filter_matches_not
         "the panel must explain why it is empty instead of vanishing: {rendered:?}"
     );
     assert!(
-        rendered.contains("Provider Models"),
+        rendered.contains("Engines & Provider Models"),
         "the panel must stay open under its usual title: {rendered:?}"
     );
 }

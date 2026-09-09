@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::config::ProviderConnectionConfig;
-use crate::llm::engine::{EngineConfig, DEFAULT_CONTEXT_LENGTH};
+use crate::llm::engine::EngineConfig;
 
 use super::{MockProvider, OllamaProvider, OpenAiCompatibleProvider, OpenRouterProvider, Provider};
 
@@ -205,9 +205,10 @@ impl ProviderSelection {
                 provider_connection: "mock".to_string(),
                 model: default_model.unwrap_or_default().to_string(),
                 temperature: None,
-                context_length: DEFAULT_CONTEXT_LENGTH,
+                context_length: None,
                 api_base_url: None,
                 api_key: None,
+                reasoning: None,
             },
             ProviderSelection::OpenAiCompatible {
                 provider_connection,
@@ -222,9 +223,10 @@ impl ProviderSelection {
                     model.clone()
                 },
                 temperature: None,
-                context_length: DEFAULT_CONTEXT_LENGTH,
+                context_length: None,
                 api_base_url: Some(base_url.clone()),
                 api_key: api_key.clone(),
+                reasoning: None,
             },
         }
     }
@@ -568,9 +570,10 @@ mod tests {
             provider_connection: "ollama".to_string(),
             model: "local".to_string(),
             temperature: None,
-            context_length: crate::llm::engine::DEFAULT_CONTEXT_LENGTH,
+            context_length: None,
             api_base_url: Some("http://localhost:11434".to_string()),
             api_key: None,
+            reasoning: None,
         };
 
         environment.apply_missing_api_key(&mut engine);
@@ -587,9 +590,10 @@ mod tests {
             provider_connection: "anthropic".to_string(),
             model: "claude".to_string(),
             temperature: None,
-            context_length: crate::llm::engine::DEFAULT_CONTEXT_LENGTH,
+            context_length: None,
             api_base_url: Some("https://example.test/v1".to_string()),
             api_key: None,
+            reasoning: None,
         };
 
         let error = ProviderRegistry::from_engine_config(&config)
@@ -603,9 +607,10 @@ mod tests {
             provider_connection: "ollama".to_string(),
             model: "llama".to_string(),
             temperature: None,
-            context_length: crate::llm::engine::DEFAULT_CONTEXT_LENGTH,
+            context_length: None,
             api_base_url: None,
             api_key: None,
+            reasoning: None,
         };
 
         let error = ProviderRegistry::from_engine_config(&config)
@@ -622,9 +627,10 @@ mod tests {
             provider_connection: "mock".to_string(),
             model: "ignored".to_string(),
             temperature: None,
-            context_length: crate::llm::engine::DEFAULT_CONTEXT_LENGTH,
+            context_length: None,
             api_base_url: None,
             api_key: None,
+            reasoning: None,
         };
 
         let provider = ProviderRegistry::provider_from_engine_config(&config)
@@ -638,9 +644,10 @@ mod tests {
             provider_connection: "openrouter".to_string(),
             model: "some/model".to_string(),
             temperature: None,
-            context_length: crate::llm::engine::DEFAULT_CONTEXT_LENGTH,
+            context_length: None,
             api_base_url: Some("https://openrouter.ai".to_string()),
             api_key: Some("secret".to_string()),
+            reasoning: None,
         };
 
         let provider = ProviderRegistry::provider_from_engine_config(&config)
@@ -659,9 +666,10 @@ mod tests {
             provider_connection: "ollama-local".to_string(),
             model: "local-model".to_string(),
             temperature: None,
-            context_length: crate::llm::engine::DEFAULT_CONTEXT_LENGTH,
+            context_length: None,
             api_base_url: None,
             api_key: None,
+            reasoning: None,
         };
 
         let selection = ProviderRegistry::from_provider_config(

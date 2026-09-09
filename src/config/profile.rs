@@ -347,6 +347,13 @@ model = "some/cheap-model"
 api_base_url = "https://openrouter.ai"
 context_length = 32000
 
+[engines.thinking]
+provider = "openrouter"
+model = "some/thinking-model"
+api_base_url = "https://openrouter.ai"
+context_length = "265kb"
+reasoning = "xhigh"
+
 [agents.default]
 engine = "fast"
 allowed_tools = ["read", "glob"]
@@ -376,14 +383,29 @@ persona = "You explore code."
         );
         assert_eq!(fast.temperature, Some(0.2));
         assert_eq!(
-            fast.context_length,
-            crate::llm::engine::DEFAULT_CONTEXT_LENGTH,
-            "an unset context_length falls back to the default"
+            fast.context_length, None,
+            "an unset context_length in TOML stays None; it is resolved lazily \
+             against the provider catalog and only then the built-in default"
         );
 
         let cheap = profile.engines.get("cheap").expect("the cheap engine");
         assert_eq!(cheap.model, "some/cheap-model", "an explicit model wins");
-        assert_eq!(cheap.context_length, 32_000);
+        assert_eq!(cheap.context_length, Some(32_000));
+
+        let thinking = profile
+            .engines
+            .get("thinking")
+            .expect("the thinking engine");
+        assert_eq!(
+            thinking.context_length,
+            Some(265 * 1024),
+            "a 'kb'-suffixed context_length expands using 1024-based units"
+        );
+        assert_eq!(
+            thinking.reasoning.as_deref(),
+            Some("xhigh"),
+            "an explicit reasoning field seeds the engine's initial reasoning effort"
+        );
 
         let default_agent = profile.agents.get("default").expect("the default agent");
         assert_eq!(default_agent.engine.as_deref(), Some("fast"));

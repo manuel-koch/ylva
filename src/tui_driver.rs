@@ -45,13 +45,14 @@ use crate::agent_factory::AgentFactory;
 use crate::app::App;
 use crate::config::ProfileConfig;
 use crate::events::{spawn_crossterm_bridge, AppAction};
-use crate::llm::engine::{Engine, EngineConfig, EngineImpl, DEFAULT_CONTEXT_LENGTH};
+use crate::llm::engine::{Engine, EngineConfig, EngineImpl};
 use crate::llm::Provider;
 use crate::presenter::{self, TextareaContext, TuiEvent};
 use crate::render;
 use crate::tui_reducer_state::{
-    matching_model_indices, model_choice_label, AppState, ConfirmKey, DomainEvent, Effect, Focus,
-    HistoryDirection, InputEvent, ModelChoice, SlashOverlay, TuiMode, UserMessageState,
+    engine_choice_label, matching_model_indices, model_choice_label, AppState, ConfirmKey,
+    DomainEvent, Effect, Focus, HistoryDirection, InputEvent, ModelChoice, SlashOverlay, TuiMode,
+    UserMessageState,
 };
 use crate::tui_render_state::TuiState;
 use crate::ToolRegistry;
@@ -507,12 +508,83 @@ async fn execute_slash_effects(
                     }
                     Ok(Ok(models)) => {
                         let active_reasoning_effort = engine.reasoning_effort();
-                        let choices: Vec<ModelChoice> = models
+                        let is_active_option = |provider_connection: &str, model_id: &str| {
+                            provider_connection == active_config.provider_connection
+                                && model_id == active_config.model
+                        };
+                        // Looked up so an engine shortcut can show the real
+                        // context length and advertised reasoning efforts of
+                        // the model it names, rather than reporting
+                        // "unavailable" for a model the catalog does list.
+                        let catalog_by_identity: std::collections::HashMap<
+                            (String, String),
+                            crate::llm::ModelInfo,
+                        > = models
+                            .iter()
+                            .map(|option| {
+                                (
+                                    (option.provider_connection.clone(), option.model.id.clone()),
+                                    option.model.clone(),
+                                )
+                            })
+                            .collect();
+                        // Named engines (explicit `[engines.*]` tables, or
+                        // their implicit one-per-connection equivalent) come
+                        // first as shortcuts to the provider/model/config
+                        // they name, ahead of the raw catalog below.
+                        let engine_choices: Vec<ModelChoice> = engine
+                            .named_engines()
+                            .into_iter()
+                            .map(|(engine_name, engine_config)| {
+                                let is_active = is_active_option(
+                                    &engine_config.provider_connection,
+                                    &engine_config.model,
+                                );
+                                let catalog_model = catalog_by_identity.get(&(
+                                    engine_config.provider_connection.clone(),
+                                    engine_config.model.clone(),
+                                ));
+                                // The engine's own configured budget wins if
+                                // TOML set one; otherwise fall back to the
+                                // provider's advertised context length for
+                                // this model, and finally to the built-in
+                                // default (see
+                                // `EngineConfig::effective_context_length`).
+                                // Computed before `engine_config.model` moves
+                                // into `ModelInfo::id` below.
+                                let effective_context_length = engine_config
+                                    .effective_context_length(
+                                        catalog_model.and_then(|m| m.context_length),
+                                    );
+                                let model = crate::llm::ModelInfo {
+                                    id: engine_config.model,
+                                    context_length: Some(effective_context_length),
+                                    reasoning_efforts: catalog_model
+                                        .and_then(|m| m.reasoning_efforts.clone()),
+                                };
+                                let reasoning_effort = if is_active {
+                                    active_reasoning_effort.clone()
+                                } else {
+                                    engine_config.reasoning
+                                };
+                                let selection = crate::llm::ProviderModelOption {
+                                    provider_connection: engine_config.provider_connection,
+                                    model,
+                                    reasoning_effort,
+                                };
+                                ModelChoice {
+                                    label: engine_choice_label(&engine_name, &selection, is_active),
+                                    selection,
+                                    is_active,
+                                    engine_name: Some(engine_name),
+                                }
+                            })
+                            .collect();
+                        let model_choices: Vec<ModelChoice> = models
                             .into_iter()
                             .map(|mut option| {
-                                let is_active = option.provider_connection
-                                    == active_config.provider_connection
-                                    && option.model.id == active_config.model;
+                                let is_active =
+                                    is_active_option(&option.provider_connection, &option.model.id);
                                 if is_active {
                                     option.reasoning_effort = active_reasoning_effort.clone();
                                 }
@@ -520,9 +592,12 @@ async fn execute_slash_effects(
                                     label: model_choice_label(&option, is_active),
                                     selection: option,
                                     is_active,
+                                    engine_name: None,
                                 }
                             })
                             .collect();
+                        let choices: Vec<ModelChoice> =
+                            engine_choices.into_iter().chain(model_choices).collect();
                         let filter = filter.unwrap_or_default();
                         let selected = matching_model_indices(&choices, &filter)
                             .into_iter()
@@ -1201,9 +1276,10 @@ pub async fn run_tui_on_stdout(
         provider_connection: provider.name().to_string(),
         model: String::new(),
         temperature: None,
-        context_length: DEFAULT_CONTEXT_LENGTH,
+        context_length: None,
         api_base_url: None,
         api_key: None,
+        reasoning: None,
     };
     let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(provider, engine_config));
     let factory = Arc::new(
@@ -1263,6 +1339,7 @@ fn install_sigint_relay(action_tx: mpsc::Sender<AppAction>) -> anyhow::Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::engine::DEFAULT_CONTEXT_LENGTH;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tokio::sync::mpsc;
     use uuid::Uuid;
@@ -1766,6 +1843,7 @@ mod tests {
         models: Vec<crate::llm::ModelInfo>,
         switched_to: std::sync::Mutex<Vec<String>>,
         config: std::sync::Mutex<EngineConfig>,
+        named_engines: Vec<(String, EngineConfig)>,
     }
 
     impl StubEngine {
@@ -1784,10 +1862,77 @@ mod tests {
                     provider_connection: "stub".to_string(),
                     model: active_model.to_string(),
                     temperature: None,
-                    context_length: DEFAULT_CONTEXT_LENGTH,
+                    context_length: None,
                     api_base_url: None,
                     api_key: None,
+                    reasoning: None,
                 }),
+                named_engines: Vec::new(),
+            })
+        }
+
+        /// Like [`Self::with_models`], but also configures one named-engine
+        /// shortcut whose model advertises `reasoning_efforts` and is seeded
+        /// with `engine_reasoning` — reproducing a profile's
+        /// `[engines.<name>]` table for `/models` shortcut tests. The
+        /// catalog's advertised `context_length` (`catalog_context_length`)
+        /// is set to a different value than `engine_context_length` so
+        /// tests can tell which one the shortcut actually displays.
+        #[allow(clippy::too_many_arguments)]
+        fn with_named_engine(
+            model_ids: &[&str],
+            active_model: &str,
+            engine_name: &str,
+            engine_model: &str,
+            reasoning_efforts: &[&str],
+            engine_reasoning: Option<&str>,
+            engine_context_length: Option<usize>,
+            catalog_context_length: Option<usize>,
+        ) -> Arc<StubEngine> {
+            Arc::new(StubEngine {
+                models: model_ids
+                    .iter()
+                    .map(|id| crate::llm::ModelInfo {
+                        id: (*id).to_string(),
+                        context_length: if *id == engine_model {
+                            catalog_context_length
+                        } else {
+                            None
+                        },
+                        reasoning_efforts: if *id == engine_model {
+                            Some(
+                                reasoning_efforts
+                                    .iter()
+                                    .map(|effort| effort.to_string())
+                                    .collect(),
+                            )
+                        } else {
+                            None
+                        },
+                    })
+                    .collect(),
+                switched_to: std::sync::Mutex::new(Vec::new()),
+                config: std::sync::Mutex::new(EngineConfig {
+                    provider_connection: "stub".to_string(),
+                    model: active_model.to_string(),
+                    temperature: None,
+                    context_length: None,
+                    api_base_url: None,
+                    api_key: None,
+                    reasoning: None,
+                }),
+                named_engines: vec![(
+                    engine_name.to_string(),
+                    EngineConfig {
+                        provider_connection: "stub".to_string(),
+                        model: engine_model.to_string(),
+                        temperature: None,
+                        context_length: engine_context_length,
+                        api_base_url: None,
+                        api_key: None,
+                        reasoning: engine_reasoning.map(str::to_string),
+                    },
+                )],
             })
         }
     }
@@ -1821,6 +1966,10 @@ mod tests {
                 .push(model.to_string());
             self.config.lock().expect("stub config lock").model = model.to_string();
             Ok(())
+        }
+
+        fn named_engines(&self) -> Vec<(String, EngineConfig)> {
+            self.named_engines.clone()
         }
     }
 
@@ -2166,6 +2315,140 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn models_lists_an_engine_shortcut_with_its_catalog_reasoning_efforts() {
+        // Reproduces a profile's `[engines.<name>]` table naming a model the
+        // catalog *does* advertise reasoning efforts for — the shortcut must
+        // show those efforts (and the configured one), not "unavailable".
+        let (mut state, _textarea, cmd_tx, _cmd_rx) = setup();
+        let engine: Arc<dyn Engine> = StubEngine::with_named_engine(
+            &["small", "thinking"],
+            "small",
+            "openrouter",
+            "thinking",
+            &["low", "high", "max"],
+            Some("max"),
+            Some(32_000),
+            Some(999_999),
+        );
+
+        execute_slash_effects(
+            &mut state,
+            vec![Effect::ListModels { filter: None }],
+            &engine,
+            &cmd_tx,
+        )
+        .await;
+
+        let SlashOverlay::ModelPicker { choices, .. } = &state.slash_overlay else {
+            panic!("expected a model picker, got {:?}", state.slash_overlay);
+        };
+        let shortcut = choices
+            .iter()
+            .find(|choice| choice.engine_name.is_some())
+            .expect("the named engine must appear as a shortcut");
+        assert_eq!(
+            shortcut.selection.model.reasoning_efforts,
+            Some(vec![
+                "low".to_string(),
+                "high".to_string(),
+                "max".to_string()
+            ]),
+            "the shortcut's model must carry the catalog's advertised reasoning efforts"
+        );
+        assert_eq!(
+            shortcut.selection.model.context_length,
+            Some(32_000),
+            "the shortcut must show the engine's own configured context_length, \
+             not the provider's advertised one (999_999)"
+        );
+        assert_eq!(
+            shortcut.label, "openrouter → stub/thinking  context: 31kb  reasoning: max ⚙",
+            "the shortcut must show its configured reasoning effort instead of 'unavailable'"
+        );
+    }
+
+    #[tokio::test]
+    async fn models_lists_an_engine_shortcut_falling_back_to_the_catalogs_context_length() {
+        // When the profile's `[engines.<name>]` table doesn't set
+        // `context_length`, the shortcut must show the provider's advertised
+        // context length for the model instead of silently defaulting.
+        let (mut state, _textarea, cmd_tx, _cmd_rx) = setup();
+        let engine: Arc<dyn Engine> = StubEngine::with_named_engine(
+            &["small", "thinking"],
+            "small",
+            "openrouter",
+            "thinking",
+            &["low", "high", "max"],
+            Some("max"),
+            None,
+            Some(999_999),
+        );
+
+        execute_slash_effects(
+            &mut state,
+            vec![Effect::ListModels { filter: None }],
+            &engine,
+            &cmd_tx,
+        )
+        .await;
+
+        let SlashOverlay::ModelPicker { choices, .. } = &state.slash_overlay else {
+            panic!("expected a model picker, got {:?}", state.slash_overlay);
+        };
+        let shortcut = choices
+            .iter()
+            .find(|choice| choice.engine_name.is_some())
+            .expect("the named engine must appear as a shortcut");
+        assert_eq!(
+            shortcut.selection.model.context_length,
+            Some(999_999),
+            "an unconfigured context_length must fall back to the catalog's advertised value"
+        );
+        assert_eq!(
+            shortcut.label,
+            "openrouter → stub/thinking  context: 976kb  reasoning: max ⚙"
+        );
+    }
+
+    #[tokio::test]
+    async fn models_lists_an_engine_shortcut_falling_back_to_the_built_in_default_context_length() {
+        // When neither TOML nor the catalog advertise a context length, the
+        // shortcut must show the built-in default rather than nothing.
+        let (mut state, _textarea, cmd_tx, _cmd_rx) = setup();
+        let engine: Arc<dyn Engine> = StubEngine::with_named_engine(
+            &["small", "thinking"],
+            "small",
+            "openrouter",
+            "thinking",
+            &["low", "high", "max"],
+            Some("max"),
+            None,
+            None,
+        );
+
+        execute_slash_effects(
+            &mut state,
+            vec![Effect::ListModels { filter: None }],
+            &engine,
+            &cmd_tx,
+        )
+        .await;
+
+        let SlashOverlay::ModelPicker { choices, .. } = &state.slash_overlay else {
+            panic!("expected a model picker, got {:?}", state.slash_overlay);
+        };
+        let shortcut = choices
+            .iter()
+            .find(|choice| choice.engine_name.is_some())
+            .expect("the named engine must appear as a shortcut");
+        assert_eq!(
+            shortcut.selection.model.context_length,
+            Some(DEFAULT_CONTEXT_LENGTH),
+            "an unconfigured, unadvertised context_length must fall back to the built-in default"
+        );
+    }
+
+    #[tokio::test]
     async fn models_preselects_the_active_model_within_an_initial_filter() {
         let (mut state, _textarea, cmd_tx, _cmd_rx) = setup();
         let engine: Arc<dyn Engine> =
@@ -2343,6 +2626,7 @@ mod tests {
                 label: "stub/thinking  reasoning: default".to_string(),
                 selection,
                 is_active: false,
+                engine_name: None,
             }],
             filter: String::new(),
             selected: 0,

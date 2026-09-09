@@ -2611,6 +2611,7 @@ fn draw_normal_footer(
 /// directly above the input box, so the list grows upward over the
 /// conversation instead of pushing the input around while the user types.
 fn draw_slash_overlay(frame: &mut Frame, input_area: Rect, overlay: &SlashOverlay) {
+    let mut separator_before: Option<usize> = None;
     let (title, entries, selected) = match overlay {
         SlashOverlay::Hidden => return,
         SlashOverlay::Suggestions { choices, selected } => (
@@ -2634,13 +2635,21 @@ fn draw_slash_overlay(frame: &mut Frame, input_area: Rect, overlay: &SlashOverla
             let visible_indices = matching_model_indices(choices, filter);
             if visible_indices.is_empty() {
                 (
-                    "Provider Models".to_string(),
+                    "Engines & Provider Models".to_string(),
                     vec!["Nothing matched your model filter.".to_string()],
                     None,
                 )
             } else {
+                // Engine shortcuts always precede the raw provider/model
+                // catalog within `choices` (see `Effect::ListModels`), and
+                // filtering only narrows — it never reorders — so the
+                // boundary is simply where `engine_name` stops being set.
+                separator_before = visible_indices
+                    .iter()
+                    .position(|&index| choices[index].engine_name.is_none())
+                    .filter(|&boundary| boundary > 0);
                 (
-                    "Provider Models".to_string(),
+                    "Engines & Provider Models".to_string(),
                     visible_indices
                         .into_iter()
                         .map(|index| choices[index].label.clone())
@@ -2654,10 +2663,20 @@ fn draw_slash_overlay(frame: &mut Frame, input_area: Rect, overlay: &SlashOverla
         return;
     }
 
+    // Map each rendered row to the entry it shows, or `None` for the
+    // divider row inserted between the engine-shortcut and provider/model
+    // sections.
+    let rows: Vec<Option<usize>> = (0..entries.len())
+        .flat_map(|index| {
+            let separator = (separator_before == Some(index)).then_some(None);
+            separator.into_iter().chain(std::iter::once(Some(index)))
+        })
+        .collect();
+
     // Cap the panel at half the space above the input so a provider with
     // hundreds of models cannot hide the conversation entirely.
     let max_content_height = (input_area.y.saturating_sub(1) / 2).max(1);
-    let content_height = (entries.len() as u16).min(max_content_height);
+    let content_height = (rows.len() as u16).min(max_content_height);
     let panel_height = content_height + 2;
     let panel_area = Rect {
         x: input_area.x,
@@ -2668,16 +2687,25 @@ fn draw_slash_overlay(frame: &mut Frame, input_area: Rect, overlay: &SlashOverla
 
     // Keep the highlighted row inside the visible window when the list is
     // longer than the panel.
-    let first_visible = selected
+    let selected_row =
+        selected.and_then(|selected| rows.iter().position(|row| *row == Some(selected)));
+    let first_visible = selected_row
         .unwrap_or(0)
         .saturating_sub(content_height.saturating_sub(1) as usize);
-    let lines: Vec<Line<'static>> = entries
+    let lines: Vec<Line<'static>> = rows
         .iter()
         .enumerate()
         .skip(first_visible)
         .take(content_height as usize)
-        .map(|(index, entry)| {
-            let is_selected = selected == Some(index);
+        .map(|(_, entry_index)| {
+            let Some(index) = entry_index else {
+                return Line::styled(
+                    "─".repeat(input_area.width as usize),
+                    Style::default().fg(Color::DarkGray),
+                );
+            };
+            let entry = &entries[*index];
+            let is_selected = selected == Some(*index);
             let style = if is_selected {
                 Style::default()
                     .fg(Color::Black)

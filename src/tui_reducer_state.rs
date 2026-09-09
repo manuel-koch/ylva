@@ -730,18 +730,57 @@ pub struct ModelChoice {
     pub label: String,
     /// Whether this choice is the model currently serving the conversation.
     pub is_active: bool,
+    /// `Some(engine_name)` when this entry is a shortcut to a configured
+    /// `[engines.<name>]` table (or its implicit one-per-connection
+    /// equivalent), rendered ahead of the raw provider/model catalog and
+    /// separated from it by a divider. `None` for a plain provider/model
+    /// entry from the catalog itself.
+    pub engine_name: Option<String>,
 }
 
 impl ModelChoice {
     /// Refresh the row text after changing its selected reasoning effort.
     pub fn refresh_label(&mut self) {
-        self.label = model_choice_label(&self.selection, self.is_active);
+        self.label = match &self.engine_name {
+            Some(engine_name) => engine_choice_label(engine_name, &self.selection, self.is_active),
+            None => model_choice_label(&self.selection, self.is_active),
+        };
     }
 }
 
-/// Render one `/models` picker row.
+/// Render one `/models` picker row for a plain provider/model catalog entry.
 pub(crate) fn model_choice_label(option: &ProviderModelOption, is_active: bool) -> String {
-    let mut label = format!("{}/{}", option.provider_connection, option.model.id);
+    format_model_choice_label(
+        format!("{}/{}", option.provider_connection, option.model.id),
+        option,
+        is_active,
+    )
+}
+
+/// Render one `/models` picker row for a named-engine shortcut, prefixed
+/// with the engine name so it reads as a shortcut to the provider/model it
+/// resolves to.
+pub(crate) fn engine_choice_label(
+    engine_name: &str,
+    option: &ProviderModelOption,
+    is_active: bool,
+) -> String {
+    format_model_choice_label(
+        format!(
+            "{engine_name} → {}/{}",
+            option.provider_connection, option.model.id
+        ),
+        option,
+        is_active,
+    )
+}
+
+fn format_model_choice_label(
+    prefix: String,
+    option: &ProviderModelOption,
+    is_active: bool,
+) -> String {
+    let mut label = prefix;
     if let Some(context_length) = option.model.context_length {
         label.push_str(&format!(
             "  context: {}",
@@ -2368,6 +2407,7 @@ mod tests {
                 reasoning_effort: None,
             },
             is_active: false,
+            engine_name: None,
         };
         let choices = vec![
             choice("openrouter", "deepseek-v3"),

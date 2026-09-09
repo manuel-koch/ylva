@@ -57,12 +57,45 @@ pub struct EngineConfig {
     /// `None` means the provider uses the model's own default; `Some(v)` overrides it.
     #[serde(default)]
     pub temperature: Option<f32>,
-    #[serde(default = "default_context_length")]
-    pub context_length: usize,
+    /// Either a plain integer or a string carrying a `kb`/`mb` suffix (for
+    /// example `"265kb"`, meaning `265 * 1024`) — the same 1024-based units
+    /// `/models` uses to display context lengths (see
+    /// `crate::tui_reducer_state::format_context_length`).
+    ///
+    /// `None` means the profile's `[engines.*]` table left this unset;
+    /// [`EngineConfig::effective_context_length`] then falls back to the
+    /// provider's advertised model context length, and finally to
+    /// [`DEFAULT_CONTEXT_LENGTH`], so an explicit TOML value always wins but
+    /// an unset one still benefits from what the provider knows about the
+    /// model.
+    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_context_length")]
+    pub context_length: Option<usize>,
     #[serde(default)]
     pub api_base_url: Option<String>,
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Initial explicit reasoning effort, or `None` to use the provider's
+    /// own default. Applied once at construction — later changes go through
+    /// `/models`, which validates the effort against the model's advertised
+    /// options before switching.
+    #[serde(default)]
+    pub reasoning: Option<String>,
+}
+
+impl EngineConfig {
+    /// Resolve the context-length budget to use for this engine.
+    ///
+    /// An explicit TOML `context_length` always wins. Otherwise, falls back
+    /// to `catalog_context_length` — the active model's context length as
+    /// advertised by the provider's `/models` catalog — and finally to
+    /// [`DEFAULT_CONTEXT_LENGTH`] if the provider doesn't advertise one
+    /// either.
+    pub fn effective_context_length(&self, catalog_context_length: Option<usize>) -> usize {
+        self.context_length
+            .or(catalog_context_length)
+            .unwrap_or(DEFAULT_CONTEXT_LENGTH)
+    }
 }
 
 /// The provider and model names shown for the conversation currently on
@@ -102,8 +135,55 @@ impl From<&EngineConfig> for EngineDisplayInfo {
     }
 }
 
-fn default_context_length() -> usize {
-    DEFAULT_CONTEXT_LENGTH
+/// Number of context-length units per `kb`/`mb` suffix step, matching the
+/// 1024-based convention `format_context_length` uses to display these
+/// values in `/models` (see `crate::tui_reducer_state`).
+const CONTEXT_LENGTH_KILO: usize = 1024;
+const CONTEXT_LENGTH_MEGA: usize = CONTEXT_LENGTH_KILO * 1024;
+
+/// Accept `context_length` as either a plain integer or a string carrying a
+/// `kb`/`mb` suffix (for example `"265kb"`, meaning `265 * 1024`). Absent
+/// entirely, the field deserializes to `None` via `#[serde(default)]`.
+fn deserialize_context_length<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum ContextLengthValue {
+        Number(usize),
+        Text(String),
+    }
+
+    match <ContextLengthValue as serde::Deserialize>::deserialize(deserializer)? {
+        ContextLengthValue::Number(value) => Ok(Some(value)),
+        ContextLengthValue::Text(text) => parse_context_length(&text)
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+    }
+}
+
+/// Parse a `context_length` string such as `"265kb"`, `"2mb"`, or a bare
+/// `"32000"` into its expanded unit count.
+fn parse_context_length(text: &str) -> Result<usize, String> {
+    let trimmed = text.trim();
+    let lowered = trimmed.to_lowercase();
+    let (digits, multiplier) = if let Some(prefix) = lowered.strip_suffix("mb") {
+        (prefix, CONTEXT_LENGTH_MEGA)
+    } else if let Some(prefix) = lowered.strip_suffix("kb") {
+        (prefix, CONTEXT_LENGTH_KILO)
+    } else {
+        (lowered.as_str(), 1)
+    };
+    digits
+        .trim()
+        .parse::<usize>()
+        .map(|value| value * multiplier)
+        .map_err(|_| {
+            format!(
+                "invalid context_length '{text}': expected an integer, optionally followed by 'kb' or 'mb'"
+            )
+        })
 }
 
 /// Mutable engine settings shared by an [`Engine`] and its [`Provider`].
@@ -125,8 +205,11 @@ impl From<&EngineConfig> for EngineRuntimeConfig {
         EngineRuntimeConfig {
             model: config.model.clone(),
             temperature: config.temperature,
-            context_length: config.context_length,
-            reasoning_effort: None,
+            // No provider catalog is available yet at construction time, so
+            // this only resolves the TOML value against the built-in
+            // default; see `EngineConfig::effective_context_length`.
+            context_length: config.effective_context_length(None),
+            reasoning_effort: config.reasoning.clone(),
         }
     }
 }
@@ -194,6 +277,20 @@ pub trait Engine: Send + Sync {
                     .collect()
             })
         })
+    }
+
+    /// Every configured named engine's connection/model settings, sorted by
+    /// name.
+    ///
+    /// `/models` lists these as shortcuts ahead of the raw provider/model
+    /// catalog from [`Engine::list_model_options`], so picking one jumps
+    /// straight to the provider connection, model, and sampling parameters a
+    /// profile's `[engines.<name>]` table (or its implicit
+    /// one-per-connection equivalent) names. A bare, non-routed engine has no
+    /// named siblings to offer, so the default returns an empty list;
+    /// [`EngineRouter`] overrides this with its full configured set.
+    fn named_engines(&self) -> Vec<(String, EngineConfig)> {
+        Vec::new()
     }
 
     /// Point this engine — and therefore every agent sharing it — at
@@ -406,6 +503,16 @@ impl Engine for EngineRouter {
         self.active_engine().switch_model(model)
     }
 
+    fn named_engines(&self) -> Vec<(String, EngineConfig)> {
+        let mut engines: Vec<(String, EngineConfig)> = self
+            .engines
+            .iter()
+            .map(|(name, engine)| (name.clone(), engine.config()))
+            .collect();
+        engines.sort_by(|left, right| left.0.cmp(&right.0));
+        engines
+    }
+
     fn switch_model_option(&self, option: &ProviderModelOption) -> anyhow::Result<()> {
         let (provider_connection, engine_name, engine) = self
             .provider_engines()
@@ -477,7 +584,6 @@ impl Engine for EngineImpl {
         let mut config = self.config.clone();
         config.model = runtime_config.model;
         config.temperature = runtime_config.temperature;
-        config.context_length = runtime_config.context_length;
         config
     }
 
@@ -526,9 +632,10 @@ mod tests {
             provider_connection: "mock".to_string(),
             model: "test-model".to_string(),
             temperature: None,
-            context_length: DEFAULT_CONTEXT_LENGTH,
+            context_length: None,
             api_base_url: None,
             api_key: None,
+            reasoning: None,
         }
     }
 
@@ -545,9 +652,10 @@ mod tests {
                     provider_connection: provider.to_string(),
                     model: model.to_string(),
                     temperature: None,
-                    context_length: DEFAULT_CONTEXT_LENGTH,
+                    context_length: None,
                     api_base_url: Some(format!("https://{provider}.test/v1")),
                     api_key: None,
+                    reasoning: None,
                 }),
                 models: models
                     .iter()
@@ -616,7 +724,136 @@ mod tests {
             config.provider_connection
         );
         assert_eq!(engine.config().model, config.model);
-        assert_eq!(engine.config().context_length, DEFAULT_CONTEXT_LENGTH);
+        assert_eq!(engine.config().context_length, None);
+    }
+
+    #[test]
+    fn engine_config_context_length_accepts_a_plain_integer() {
+        let config: EngineConfig = toml::from_str(
+            r#"
+provider_connection = "ollama"
+model = "local"
+context_length = 32000
+"#,
+        )
+        .expect("a plain integer context_length parses");
+        assert_eq!(config.context_length, Some(32_000));
+    }
+
+    #[test]
+    fn engine_config_context_length_defaults_to_none_when_unset() {
+        let config: EngineConfig = toml::from_str(
+            r#"
+provider_connection = "ollama"
+model = "local"
+"#,
+        )
+        .expect("an EngineConfig without context_length parses");
+        assert_eq!(
+            config.context_length, None,
+            "an unset context_length must not silently become a concrete default"
+        );
+    }
+
+    #[test]
+    fn engine_config_context_length_accepts_kb_and_mb_suffixed_strings() {
+        let kilobytes: EngineConfig = toml::from_str(
+            r#"
+provider_connection = "openrouter"
+model = "deepseek/deepseek-v4-flash-0731"
+context_length = "265kb"
+"#,
+        )
+        .expect("a 'kb'-suffixed context_length parses");
+        assert_eq!(kilobytes.context_length, Some(265 * 1024));
+
+        let megabytes: EngineConfig = toml::from_str(
+            r#"
+provider_connection = "openrouter"
+model = "deepseek/deepseek-v4-flash-0731"
+context_length = "2mb"
+"#,
+        )
+        .expect("an 'mb'-suffixed context_length parses");
+        assert_eq!(megabytes.context_length, Some(2 * 1024 * 1024));
+    }
+
+    #[test]
+    fn engine_config_context_length_rejects_an_unparsable_string() {
+        let error = toml::from_str::<EngineConfig>(
+            r#"
+provider_connection = "ollama"
+model = "local"
+context_length = "not-a-size"
+"#,
+        )
+        .expect_err("a non-numeric, non-suffixed context_length must be rejected");
+        assert!(
+            error.to_string().contains("invalid context_length"),
+            "the error must name the offending value: {error}"
+        );
+    }
+
+    #[test]
+    fn engine_config_reasoning_seeds_the_initial_reasoning_effort() {
+        let config: EngineConfig = toml::from_str(
+            r#"
+provider_connection = "openrouter"
+model = "deepseek/deepseek-v4-flash-0731"
+reasoning = "xhigh"
+"#,
+        )
+        .expect("a reasoning field parses");
+        assert_eq!(config.reasoning.as_deref(), Some("xhigh"));
+
+        let runtime_config = EngineRuntimeConfig::from(&config);
+        assert_eq!(
+            runtime_config.reasoning_effort.as_deref(),
+            Some("xhigh"),
+            "the initial runtime reasoning effort comes from the engine config"
+        );
+    }
+
+    #[test]
+    fn engine_config_reasoning_defaults_to_none() {
+        let config: EngineConfig = toml::from_str(
+            r#"
+provider_connection = "ollama"
+model = "local"
+"#,
+        )
+        .expect("an engine config without 'reasoning' still parses");
+        assert_eq!(config.reasoning, None);
+    }
+
+    #[test]
+    fn effective_context_length_prefers_the_configured_toml_value() {
+        let config = EngineConfig {
+            context_length: Some(32_000),
+            ..make_engine_config()
+        };
+        assert_eq!(config.effective_context_length(Some(999_999)), 32_000);
+    }
+
+    #[test]
+    fn effective_context_length_falls_back_to_the_catalogs_context_length() {
+        let config = EngineConfig {
+            context_length: None,
+            ..make_engine_config()
+        };
+        assert_eq!(config.effective_context_length(Some(64_000)), 64_000);
+    }
+
+    #[test]
+    fn effective_context_length_falls_back_to_the_built_in_default() {
+        let config = EngineConfig {
+            context_length: None,
+            ..make_engine_config()
+        };
+        assert_eq!(
+            config.effective_context_length(None),
+            DEFAULT_CONTEXT_LENGTH
+        );
     }
 
     #[test]
@@ -631,15 +868,16 @@ mod tests {
             provider_connection: "test".to_string(),
             model: "engine-model".to_string(),
             temperature: Some(0.2),
-            context_length: 32_000,
+            context_length: Some(32_000),
             api_base_url: Some("http://localhost:1234/v1".to_string()),
             api_key: None,
+            reasoning: None,
         };
         let engine = EngineImpl::new(Arc::clone(&provider) as Arc<dyn Provider>, config);
 
         assert_eq!(engine.config().model, "engine-model");
         assert_eq!(engine.config().temperature, Some(0.2));
-        assert_eq!(engine.config().context_length, 32_000);
+        assert_eq!(engine.config().context_length, Some(32_000));
 
         provider
             .set_model("updated-model")

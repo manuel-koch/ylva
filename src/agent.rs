@@ -2651,7 +2651,7 @@ mod tests {
     use crate::test_support::capture_logs;
     use crate::{
         agent::tools::{clarify::ClarifyTool, write::WriteTool},
-        llm::engine::{Engine, EngineConfig, EngineImpl, DEFAULT_CONTEXT_LENGTH},
+        llm::engine::{Engine, EngineConfig, EngineImpl},
         llm::{MockEvent, MockProvider},
         sandbox::{Sandbox, SandboxContext},
     };
@@ -2663,9 +2663,10 @@ mod tests {
                 provider_connection: "mock".to_string(),
                 model: "test-model".to_string(),
                 temperature: None,
-                context_length: DEFAULT_CONTEXT_LENGTH,
+                context_length: None,
                 api_base_url: None,
                 api_key: None,
+                reasoning: None,
             },
         ))
     }
@@ -3353,9 +3354,10 @@ mod tests {
                 provider_connection: "mock".to_string(),
                 model: "test-model".to_string(),
                 temperature: None,
-                context_length: DEFAULT_CONTEXT_LENGTH,
+                context_length: None,
                 api_base_url: None,
                 api_key: None,
+                reasoning: None,
             },
         ));
 
@@ -3458,9 +3460,10 @@ mod tests {
                 provider_connection: "mock".to_string(),
                 model: "test-model".to_string(),
                 temperature: None,
-                context_length: DEFAULT_CONTEXT_LENGTH,
+                context_length: None,
                 api_base_url: None,
                 api_key: None,
+                reasoning: None,
             },
         ));
 
@@ -3563,9 +3566,10 @@ mod tests {
                 provider_connection: "mock".to_string(),
                 model: "test-model".to_string(),
                 temperature: None,
-                context_length: DEFAULT_CONTEXT_LENGTH,
+                context_length: None,
                 api_base_url: None,
                 api_key: None,
+                reasoning: None,
             },
         ));
 
@@ -3620,9 +3624,10 @@ mod tests {
                 provider_connection: "mock".to_string(),
                 model: "test-model".to_string(),
                 temperature: None,
-                context_length: DEFAULT_CONTEXT_LENGTH,
+                context_length: None,
                 api_base_url: None,
                 api_key: None,
+                reasoning: None,
             },
         ));
 
