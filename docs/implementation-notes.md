@@ -513,9 +513,10 @@ suggestion overlay owns `↑`/`↓` and `Tab`: its selected index is kept in
 `AppState`, and `Tab` emits `Effect::SetInputText` with the selected command's
 canonical name. The `/models` picker queries provider-connection-qualified
 options from `EngineRouter`, displays `provider_connection/model`, has the
-same bounded `↑`/`↓` movement semantics, uses `←`/`→` to cycle reasoning
-efforts when available, and `Enter` activates both the selected connection,
-model, and effort;
+same bounded `↑`/`↓` movement semantics, uses `page-up`/`fn-up` and
+`page-down`/`fn-down` to move the highlighted option by three entries, uses
+`←`/`→` to cycle reasoning efforts when available, and `Enter` activates both
+the selected connection, model, and effort;
 `Esc` closes any open overlay before the usual draft-clear/abort ladder.
 
 Slash effects (`Effect::ClearConversation`/`ShowTools`/`ListModels`/

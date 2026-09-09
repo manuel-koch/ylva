@@ -410,6 +410,6 @@ is any `/` that is not the first character of the input.
 
 | Command | Effect | Result bubble |
 | --- | --- | --- |
-| `/models` | Queries every configured provider connection, lists successful results as `provider_connection/model`, and switches the engine to the picked connection/model. `↑`/`↓` select, `←`/`→` cycle reasoning effort when available, `Enter` confirms, `Esc` cancels. | Persisted — the switch changes which provider connection/model later turns use; the reasoning effort applies to the current runtime |
+| `/models` | Queries every configured provider connection, lists successful results as `provider_connection/model`, and switches the engine to the picked connection/model. `↑`/`↓` select, `page-up`/`fn-up` and `page-down`/`fn-down` move by a page, `←`/`→` cycle reasoning effort when available, `Enter` confirms, `Esc` cancels. | Persisted — the switch changes which provider connection/model later turns use; the reasoning effort applies to the current runtime |
 | `/tools` | Lists the tools the running agent may call, as resolved for its agent type. | Transient |
 | `/clear` (alias `/reset`) | Drops the conversation and continues in a brand-new session file; earlier prompts stay recallable with `↑`. | Transient |

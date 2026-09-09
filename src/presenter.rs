@@ -501,6 +501,8 @@ fn slash_command_effects(command: SlashCommand) -> Vec<Effect> {
     vec![Effect::ClearTextarea, command_effect]
 }
 
+const SLASH_OVERLAY_PAGE_SIZE: isize = 3;
+
 fn handle_key_main(
     state: &mut AppState,
     key_event: crossterm::event::KeyEvent,
@@ -540,6 +542,14 @@ fn handle_key_main(
             }
             KeyCode::Down => {
                 state.move_slash_selection(1);
+                return vec![];
+            }
+            KeyCode::PageUp => {
+                state.move_slash_selection(-SLASH_OVERLAY_PAGE_SIZE);
+                return vec![];
+            }
+            KeyCode::PageDown => {
+                state.move_slash_selection(SLASH_OVERLAY_PAGE_SIZE);
                 return vec![];
             }
             KeyCode::Left => {
@@ -2061,9 +2071,10 @@ mod tests {
 
     use super::*;
     use crate::tui_reducer_state::{
-        AppState, ChatEntry, ConversationView, Focus, InputEvent, ResultSection, ToolCallState,
-        TuiMode,
+        AppState, ChatEntry, ConversationView, Focus, InputEvent, ModelChoice, ResultSection,
+        SlashOverlay, ToolCallState, TuiMode,
     };
+    use crate::ProviderModelOption;
 
     fn empty_textarea() -> TextareaContext {
         TextareaContext {
@@ -2145,6 +2156,55 @@ mod tests {
 
     fn key_event(code: KeyCode) -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn model_picker_pages_selection_with_page_keys() {
+        let mut state = AppState::new();
+        state.slash_overlay = SlashOverlay::ModelPicker {
+            choices: (0..10)
+                .map(|index| ModelChoice {
+                    label: format!("stub/model-{index}"),
+                    selection: ProviderModelOption {
+                        provider_connection: "stub".to_string(),
+                        model: crate::llm::ModelInfo {
+                            id: format!("model-{index}"),
+                            name: None,
+                            context_length: None,
+                            reasoning_efforts: None,
+                        },
+                        reasoning_effort: None,
+                    },
+                    is_active: false,
+                })
+                .collect(),
+            selected: 5,
+        };
+        let textarea = empty_textarea();
+
+        update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::PageUp))),
+            &textarea,
+        );
+        assert_eq!(
+            state
+                .selected_model()
+                .map(|choice| choice.selection.model.id.as_str()),
+            Some("model-2")
+        );
+
+        update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::PageDown))),
+            &textarea,
+        );
+        assert_eq!(
+            state
+                .selected_model()
+                .map(|choice| choice.selection.model.id.as_str()),
+            Some("model-5")
+        );
     }
 
     // ── Phase 6.10 drill-in view tests ─────────────────────────────────────────

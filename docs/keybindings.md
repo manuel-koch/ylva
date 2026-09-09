@@ -59,6 +59,8 @@ Reference for Ylva's TUI keybindings.
 | `enter` | Input holds a recognized command | Run the command instead of sending the draft to the model (see [features](./features.md#slash-commands)) |
 | `esc` | Command overlay open | Close the overlay; the draft is untouched |
 | `↑` / `↓` | `/models` picker open | Move the highlighted provider-connection/model |
+| `page-up` / `fn-up` | `/models` picker open | Move the highlighted provider-connection/model up by a page |
+| `page-down` / `fn-down` | `/models` picker open | Move the highlighted provider-connection/model down by a page |
 | `←` / `→` | `/models` picker open | Cycle the highlighted model's reasoning effort when alternatives are available |
 | `enter` | `/models` picker open | Switch to the highlighted provider connection/model and apply its selected reasoning effort |
 | `esc` | `/models` picker open | Cancel without switching |

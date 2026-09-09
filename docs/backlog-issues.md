@@ -4,7 +4,29 @@
       typing an argument after the slash-command doesn't prefilter the
       list of available models
 
-- [ ] Can't use fn-up/down to page scroll in /models popup list of providers/models
+- [ ] Typing "/model", models popup is shown with an entry selected,
+      hitting enter sends "/model" to llm instead of activating the current selected entry in the popup.
+
+- [ ] "/models" popup should show the predefined "engines" first, as
+      shortcuts to the provider/model/config that they use.
+      Add a seperator between the "engines" section and the known
+      "models" section.
+
+- [ ] "/models" popup shows verbose model name / title too for some models.
+      This title is most of the time almost identical to the plain model-name.
+      IMO we don't need that.
+      Additionally that title make the line sometimes too long, so that important
+      info like context-length and reasoning and clipped.
+
+- [ ] Ability to toggle reasoning-effort in the "/models" popup is rather hidden.
+      It only works for some models. Maybe we should highlight whether the reasoning
+      can be adjusted or not. Otherwise user tries `←`/`→` to cylce it, but
+      nothing seems to happens.
+      The keybindings in the footer don't give a hint about `←`/`→` or enter/esc.
+      Footer still shows "enter: send" which is wrong while the slash-command
+      popup is active.
+
+- [x] Can't use fn-up/down to page scroll in /models popup list of providers/models
 
 - [x] Error on loading/parsing profile `config.toml` doesn't state which profile
       was tried ( neither the name nor the full directory ), only the config error

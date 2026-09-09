@@ -2606,7 +2606,8 @@ fn draw_slash_overlay(frame: &mut Frame, input_area: Rect, overlay: &SlashOverla
             None,
         ),
         SlashOverlay::ModelPicker { choices, selected } => (
-            "Models  (↑/↓ select · ←/→ reasoning · Enter switch · Esc cancel)".to_string(),
+            "Models  (↑/↓ select · PgUp/PgDn page · ←/→ reasoning · Enter switch · Esc cancel)"
+                .to_string(),
             choices.iter().map(|choice| choice.label.clone()).collect(),
             Some(*selected),
         ),
