@@ -28,7 +28,7 @@ use uuid::Uuid;
 
 use crate::agent::tools::clarify::ClarifyTool;
 use crate::markdown::render_markdown;
-use crate::slash_command::{parse_slash_command, SlashCommand};
+use crate::slash_command::{parse_slash_command_invocation, SlashCommand, SlashCommandInvocation};
 use crate::tui_reducer_state::{
     AppState, ChatEntry, ChatSelection, ChildRunInfo, ConfirmKey, ConversationView, DomainEvent,
     Effect, Focus, HistoryDirection, InputEvent, SlashOverlay, ToolCallState, TuiMode,
@@ -414,9 +414,20 @@ fn handle_ctrl_c_generic(state: &mut AppState, textarea_is_empty: bool) -> Vec<E
 fn handle_escape_main(state: &mut AppState, textarea: &TextareaContext) -> Vec<Effect> {
     // An open slash overlay is the innermost dismissible thing on screen, so
     // it consumes Esc before the draft-clearing / abort-confirm ladder.
+    //
+    // Every slash overlay (including `Suggestions`) is purely a function of
+    // the current draft text (see `AppState::refresh_slash_overlay`, called
+    // by the Driver after every action). Hiding the overlay here without
+    // also clearing the draft would be undone on the very next recompute —
+    // the same still-matching text would immediately reopen it, making Esc
+    // look like a no-op. So Esc always clears the draft alongside hiding
+    // the overlay, matching the plain "Esc clears a non-empty draft"
+    // behavior below.
     if state.slash_overlay.is_visible() {
         state.slash_overlay = SlashOverlay::Hidden;
-        return vec![];
+        state.history_index = None;
+        state.draft = String::new();
+        return vec![Effect::ClearTextarea];
     }
 
     let mode_is_idle = matches!(effective_mode(&state.mode), TuiMode::Idle);
@@ -489,16 +500,26 @@ fn handle_escape_main(state: &mut AppState, textarea: &TextareaContext) -> Vec<E
 
 /// Translate a recognized slash command into its effects.
 ///
-/// Every command clears the input first so the command line never lingers as
-/// a draft, and none of them commits a user bubble: a command is an
-/// instruction to the TUI, not a turn in the conversation.
-fn slash_command_effects(command: SlashCommand) -> Vec<Effect> {
-    let command_effect = match command {
-        SlashCommand::Models => Effect::ListModels,
-        SlashCommand::Tools => Effect::ShowTools,
-        SlashCommand::Clear => Effect::ClearConversation,
-    };
-    vec![Effect::ClearTextarea, command_effect]
+/// `/tools` and `/clear` clear the input first so the command line never
+/// lingers as a draft. `/models` instead normalizes the draft to the
+/// canonical `/models <filter>` form and leaves it in the textarea: the
+/// picker it opens stays keyed off that text, so further typing narrows the
+/// already-fetched catalog live instead of being silently dropped. None of
+/// these commands commits a user bubble: a command is an instruction to the
+/// TUI, not a turn in the conversation.
+fn slash_command_effects(invocation: SlashCommandInvocation) -> Vec<Effect> {
+    match invocation.command {
+        SlashCommand::Models => {
+            let filter = invocation.argument;
+            let normalized_draft = format!("/models {}", filter.clone().unwrap_or_default());
+            vec![
+                Effect::SetInputText(normalized_draft),
+                Effect::ListModels { filter },
+            ]
+        }
+        SlashCommand::Tools => vec![Effect::ClearTextarea, Effect::ShowTools],
+        SlashCommand::Clear => vec![Effect::ClearTextarea, Effect::ClearConversation],
+    }
 }
 
 const SLASH_OVERLAY_PAGE_SIZE: isize = 3;
@@ -531,7 +552,10 @@ fn handle_key_main(
             KeyCode::Enter if key_event.modifiers.is_empty() => {
                 if let Some(command) = state.selected_slash_command().map(|info| info.command) {
                     state.slash_overlay = SlashOverlay::Hidden;
-                    return slash_command_effects(command);
+                    return slash_command_effects(SlashCommandInvocation {
+                        command,
+                        argument: None,
+                    });
                 }
             }
             _ => {}
@@ -572,10 +596,11 @@ fn handle_key_main(
                     .selected_model()
                     .map(|choice| choice.selection.clone());
                 state.slash_overlay = SlashOverlay::Hidden;
-                return match picked {
-                    Some(model) => vec![Effect::SwitchModel(model)],
-                    None => vec![],
-                };
+                let mut effects = vec![Effect::ClearTextarea];
+                if let Some(model) = picked {
+                    effects.push(Effect::SwitchModel(model));
+                }
+                return effects;
             }
             _ => {}
         }
@@ -609,9 +634,9 @@ fn handle_key_main(
             // Parsed from the *raw* draft, not the dedented text: the
             // trigger is a `/` in the very first cell of the input, so an
             // indented line stays ordinary chat.
-            if let Some(command) = parse_slash_command(raw_text) {
+            if let Some(invocation) = parse_slash_command_invocation(raw_text) {
                 state.slash_overlay = SlashOverlay::Hidden;
-                return slash_command_effects(command);
+                return slash_command_effects(invocation);
             }
             let text = dedent(raw_text);
             let mode_is_idle = matches!(state.mode, TuiMode::Idle);
@@ -2184,6 +2209,7 @@ mod tests {
                     is_active: false,
                 })
                 .collect(),
+            filter: String::new(),
             selected: 5,
         };
         let textarea = empty_textarea();

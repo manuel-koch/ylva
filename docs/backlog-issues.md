@@ -1,6 +1,6 @@
 # Backlog of issues discovered while testing
 
-- [ ] /models command only allows completion for the command itself,
+- [x] /models command only allows completion for the command itself,
       typing an argument after the slash-command doesn't prefilter the
       list of available models
 
@@ -33,7 +33,7 @@
       {
       "type": "message", "v": 1,
       "message": {
-      "role": "system", "content": "Switched to openrouter/deepseek/deepseek-v4-flash-0731 (reasoning: provider default)."
+      "role": "system", "content": "Switched to selected model (reasoning: provider default)."
       }
       }
       ```

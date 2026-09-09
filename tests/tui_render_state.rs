@@ -738,6 +738,7 @@ fn model_picker_footer_shows_picker_controls_instead_of_send() {
                 },
                 is_active: false,
             }],
+            filter: String::new(),
             selected: 0,
         },
         ..TuiState::new()
@@ -778,6 +779,63 @@ fn model_picker_footer_shows_picker_controls_instead_of_send() {
     assert!(
         !rendered.contains("enter: send"),
         "model picker must not advertise sending: {rendered:?}"
+    );
+}
+
+/// A live filter that matches nothing must not make the picker vanish
+/// entirely — the panel stays open (so the user can keep editing the
+/// filter) and shows a message explaining why nothing is listed.
+#[test]
+fn model_picker_shows_a_message_instead_of_vanishing_when_the_filter_matches_nothing() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_reducer_state::{ModelChoice, SlashOverlay};
+    use ylva::tui_widgets;
+    use ylva::{ModelInfo, ProviderModelOption, TuiState};
+
+    let backend = TestBackend::new(80, 20);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    let mut state = TuiState {
+        slash_overlay: SlashOverlay::ModelPicker {
+            choices: vec![ModelChoice {
+                label: "stub/thinking  reasoning: default".to_string(),
+                selection: ProviderModelOption {
+                    provider_connection: "stub".to_string(),
+                    model: ModelInfo {
+                        id: "thinking".to_string(),
+                        context_length: None,
+                        reasoning_efforts: None,
+                    },
+                    reasoning_effort: None,
+                },
+                is_active: false,
+            }],
+            filter: "no-such-model".to_string(),
+            selected: 0,
+        },
+        ..TuiState::new()
+    };
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("draw");
+
+    let buffer = terminal.backend().buffer().clone();
+    let rendered: String = (0..20u16)
+        .flat_map(|row| (0..80u16).map(move |column| (column, row)))
+        .map(|(column, row)| buffer.cell((column, row)).unwrap().symbol().to_string())
+        .collect();
+    assert!(
+        rendered.contains("Nothing matched your model filter."),
+        "the panel must explain why it is empty instead of vanishing: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("Provider Models"),
+        "the panel must stay open under its usual title: {rendered:?}"
     );
 }
 

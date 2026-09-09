@@ -74,7 +74,8 @@ pub use llm::{
 pub use presenter::{TextareaContext, TuiEvent};
 pub use sandbox::{ApprovalCheck, Sandbox, SandboxContext};
 pub use slash_command::{
-    parse_slash_command, slash_command_suggestions, SlashCommand, SlashCommandInfo, SLASH_COMMANDS,
+    parse_slash_command, parse_slash_command_invocation, slash_command_suggestions, SlashCommand,
+    SlashCommandInfo, SlashCommandInvocation, SLASH_COMMANDS,
 };
 pub use store::{
     default_chats_root, project_key, session_path, SessionMeta, SessionSummary, Store, StoreError,

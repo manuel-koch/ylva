@@ -418,9 +418,21 @@ character of the input.
 The `/models` picker displays provider-reported context lengths as
 `context: <size>` labels using integer binary sizes (`2048` appears as
 `context: 2kb`; `1_048_576` appears as `context: 1mb`).
+Submitting `/models` (with or without an initial argument, e.g.
+`/models deepseek`) fetches the full catalog once and does *not* clear the
+input — the draft stays as `/models <filter>` so the picker can be
+narrowed by continuing to type. Every keystroke re-derives the filter from
+the draft and re-applies it to the already-fetched `provider_connection/model`
+identities without another provider round-trip. A multi-word filter (e.g.
+`/models deepseek v3`) matches when every word appears somewhere in the
+identity, case-insensitively and in any order — not the joined phrase as one
+substring. A filter that matches nothing keeps the panel open with a
+"Nothing matched your model filter." message rather than vanishing, so the
+user can keep editing it. `Enter` confirms the highlighted model and clears
+the input; `Esc` cancels and clears it too.
 
 | Command | Effect | Result bubble |
 | --- | --- | --- |
-| `/models` | Queries every configured provider connection, lists successful results as `provider_connection/model`, and switches the engine to the picked connection/model. `↑`/`↓` select, `page-up`/`fn-up` and `page-down`/`fn-down` move by a page, `←`/`→` cycle reasoning effort when available, `Enter` confirms, `Esc` cancels. | Persisted — the switch changes which provider connection/model later turns use; the reasoning effort applies to the current runtime |
+| `/models [filter]` | Queries every configured provider connection once, lists them as `provider_connection/model`, and switches the engine to the picked connection/model. `filter` (typed after the command, and refined live afterwards) narrows the displayed/selectable choices to those matching every filter word, case-insensitively and in any order, without re-querying. `↑`/`↓` select, `page-up`/`fn-up` and `page-down`/`fn-down` move by a page, `←`/`→` cycle reasoning effort when available, `Enter` confirms, `Esc` cancels. | Persisted — the switch changes which provider connection/model later turns use; the reasoning effort applies to the current runtime |
 | `/tools` | Lists the tools the running agent may call, as resolved for its agent type. | Transient |
 | `/clear` (alias `/reset`) | Drops the conversation and continues in a brand-new session file; earlier prompts stay recallable with `↑`. | Transient |

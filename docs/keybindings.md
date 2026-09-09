@@ -57,13 +57,14 @@ Reference for Ylva's TUI keybindings.
 | `↑` / `↓` | Command overlay open | Move the highlighted command |
 | `tab` | Command overlay open | Complete the highlighted command |
 | `enter` | Input holds a recognized command or a highlighted command suggestion | Run the selected command instead of sending the draft to the model (see [features](./features.md#slash-commands)) |
-| `esc` | Command overlay open | Close the overlay; the draft is untouched |
+| `esc` | Command overlay open | Close the overlay and clear the input (otherwise the still-matching draft would immediately reopen it) |
 | `↑` / `↓` | `/models` picker open | Move the highlighted provider-connection/model |
 | `page-up` / `fn-up` | `/models` picker open | Move the highlighted provider-connection/model up by a page |
 | `page-down` / `fn-down` | `/models` picker open | Move the highlighted provider-connection/model down by a page |
 | `←` / `→` | `/models` picker open | Cycle the highlighted model's reasoning effort when alternatives are available |
-| `enter` | `/models` picker open | Switch to the highlighted provider connection/model and apply its selected reasoning effort |
-| `esc` | `/models` picker open | Cancel without switching |
+| any character / backspace | `/models` picker open | Insert into the draft (`/models <filter>`) and live-narrow the picker's already-fetched choices; no re-query |
+| `enter` | `/models` picker open | Switch to the highlighted provider connection/model, apply its selected reasoning effort, and clear the input |
+| `esc` | `/models` picker open | Cancel without switching and clear the input |
 
 Only a second press of the *same* key confirms a pending double-press action.
 Pressing the other key instead starts that key's own fresh confirm window

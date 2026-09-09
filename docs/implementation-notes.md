@@ -58,6 +58,26 @@ switches the active connection only after it successfully accepts the
 selected model. Connection settings remain owned by each underlying engine;
 switching connections does not mutate another connection's configuration.
 
+The `/models` slash command normalizes the draft to `/models <filter>` and
+fetches the full catalog once via `Effect::ListModels { filter }`, storing
+every fetched `ModelChoice` in `SlashOverlay::ModelPicker { choices, filter,
+selected }` — `choices` is never re-filtered out of the vector. The input is
+deliberately *not* cleared: `AppState::refresh_slash_overlay` re-derives
+`filter` from the live draft on every keystroke while the picker is open (a
+prior no-op) and `matching_model_indices` — shared by selection movement,
+`selected_model`, reasoning-effort cycling, and rendering — recomputes which
+indices are currently displayed/selectable from `choices` + `filter` without
+touching the network. `matching_model_indices` splits `filter` on whitespace
+and requires every word to appear somewhere in the choice's
+`provider_connection/model` identity, case-insensitively — an AND match
+across words in any order, not a single joined-phrase substring, so
+`/models deepseek v3` and `/models v3 deepseek` both match `stub/deepseek-v3`.
+Confirming (`Enter`) or cancelling (`Esc`) the picker
+clears the input. When `matching_model_indices` returns no indices,
+`tui_widgets::draw_slash_overlay` keeps the panel open and renders a single
+"Nothing matched your model filter." row (selection `None`) instead of
+hiding the overlay, so the filter stays editable.
+
 `ProviderRegistry` centralizes provider-name validation, environment-based
 selection, and construction. A profile separates
 `provider_connections.<name>` (connection identity and endpoint) from its
@@ -521,7 +541,10 @@ same bounded `↑`/`↓` movement semantics, uses `page-up`/`fn-up` and
 `page-down`/`fn-down` to move the highlighted option by three entries, uses
 `←`/`→` to cycle reasoning efforts when available, and `Enter` activates both
 the selected connection, model, and effort;
-`Esc` closes any open overlay before the usual draft-clear/abort ladder.
+`Esc` closes any open overlay and clears the draft (before the usual
+draft-clear/abort ladder), since leaving the draft in place would make the
+next per-action `refresh_slash_overlay` recompute reopen the very overlay
+just dismissed.
 Model rows identify reasoning as unavailable, at the default, or adjustable
 with a `⚙` marker. The user-facing fixed value is rendered as `default`. The
 footer switches from the normal `enter: send` hint to the controls for the

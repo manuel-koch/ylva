@@ -50,8 +50,8 @@ use crate::llm::Provider;
 use crate::presenter::{self, TextareaContext, TuiEvent};
 use crate::render;
 use crate::tui_reducer_state::{
-    model_choice_label, AppState, ConfirmKey, DomainEvent, Effect, Focus, HistoryDirection,
-    InputEvent, ModelChoice, SlashOverlay, TuiMode, UserMessageState,
+    matching_model_indices, model_choice_label, AppState, ConfirmKey, DomainEvent, Effect, Focus,
+    HistoryDirection, InputEvent, ModelChoice, SlashOverlay, TuiMode, UserMessageState,
 };
 use crate::tui_render_state::TuiState;
 use crate::ToolRegistry;
@@ -446,7 +446,7 @@ async fn execute_effects(
             // before this function ever sees them).
             Effect::ClearConversation
             | Effect::ShowTools
-            | Effect::ListModels
+            | Effect::ListModels { .. }
             | Effect::SwitchModel(_) => {}
         }
     }
@@ -464,19 +464,18 @@ fn split_slash_effects(effects: Vec<Effect>) -> (Vec<Effect>, Vec<Effect>) {
             effect,
             Effect::ClearConversation
                 | Effect::ShowTools
-                | Effect::ListModels
+                | Effect::ListModels { .. }
                 | Effect::SwitchModel(_)
         )
     })
 }
 
-/// Execute the slash-command effects (blueprint §6).
+/// Execute the slash-command effects.
 ///
 /// Split out of [`execute_effects`] because these are the only effects that
 /// reach past the textarea/clipboard into the engine — and because nothing
 /// here may touch the session store directly: persistence goes through
-/// `AgentCommand`s so the agent loop stays the sole `Context` mutator
-/// (blueprint §4C).
+/// `AgentCommand`s so the agent loop stays the sole `Context` mutator.
 async fn execute_slash_effects(
     state: &mut AppState,
     effects: Vec<Effect>,
@@ -496,7 +495,7 @@ async fn execute_slash_effects(
             Effect::ShowTools => {
                 state.push_notice(tools_notice_text(&state.available_tool_names));
             }
-            Effect::ListModels => {
+            Effect::ListModels { filter } => {
                 state.slash_overlay = SlashOverlay::LoadingModels;
                 let active_config = engine.config();
                 match tokio::time::timeout(MODEL_LIST_TIMEOUT, engine.list_model_options()).await {
@@ -524,15 +523,20 @@ async fn execute_slash_effects(
                                 }
                             })
                             .collect();
-                        let selected = choices
-                            .iter()
-                            .position(|choice| {
-                                choice.selection.provider_connection
+                        let filter = filter.unwrap_or_default();
+                        let selected = matching_model_indices(&choices, &filter)
+                            .into_iter()
+                            .position(|index| {
+                                choices[index].selection.provider_connection
                                     == active_config.provider_connection
-                                    && choice.selection.model.id == active_config.model
+                                    && choices[index].selection.model.id == active_config.model
                             })
                             .unwrap_or(0);
-                        state.slash_overlay = SlashOverlay::ModelPicker { choices, selected };
+                        state.slash_overlay = SlashOverlay::ModelPicker {
+                            choices,
+                            filter,
+                            selected,
+                        };
                     }
                     Ok(Err(error)) => {
                         state.slash_overlay = SlashOverlay::Hidden;
@@ -1882,11 +1886,36 @@ mod tests {
 
         assert_eq!(
             effects,
-            vec![Effect::ClearTextarea, Effect::ListModels],
+            vec![
+                Effect::SetInputText("/models ".to_string()),
+                Effect::ListModels { filter: None }
+            ],
             "Enter should activate the highlighted /models suggestion"
         );
         assert_eq!(state.slash_overlay, SlashOverlay::Hidden);
         assert!(state.chat_entries.is_empty());
+    }
+
+    #[test]
+    fn models_command_passes_a_typed_filter_instead_of_submitting_chat() {
+        let (mut state, _textarea, _cmd_tx, _cmd_rx) = setup();
+        let mut textarea = TextArea::default();
+
+        let effects = submit(&mut state, &mut textarea, "/models deepseek");
+
+        assert_eq!(
+            effects,
+            vec![
+                Effect::SetInputText("/models deepseek".to_string()),
+                Effect::ListModels {
+                    filter: Some("deepseek".to_string())
+                }
+            ]
+        );
+        assert!(
+            !effects.contains(&Effect::SubmitPrompt { steer: false }),
+            "a model filter is a slash-command argument, not a chat prompt"
+        );
     }
 
     #[tokio::test]
@@ -1930,6 +1959,74 @@ mod tests {
 
         state.refresh_slash_overlay("hello");
         assert_eq!(state.slash_overlay, SlashOverlay::Hidden);
+    }
+
+    #[tokio::test]
+    async fn escape_while_command_suggestions_are_open_closes_them_and_clears_the_draft() {
+        // Regression: Esc used to only hide the suggestion overlay without
+        // touching the draft. Since `refresh_slash_overlay` recomputes the
+        // overlay from the draft on every action, the still-matching
+        // "/models" text made the very same overlay reopen on that same
+        // recompute — Esc looked like a no-op from the user's perspective.
+        let (mut state, mut textarea, cmd_tx, _cmd_rx) = setup();
+        let mut mouse_drag = MouseDrag::default();
+        let mut clipboard = NoopClipboard;
+        let mut pending_run_ids = PendingRunIds::default();
+
+        // Type "/models" one character at a time through the real driver
+        // path: each key both edits the textarea and re-derives the
+        // suggestion overlay from the resulting draft.
+        for ch in "/models".chars() {
+            let ctx = textarea_ctx_from(&textarea);
+            let effects = presenter::update(
+                &mut state,
+                TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Char(ch)))),
+                &ctx,
+            );
+            execute_effects(
+                &mut state,
+                &mut textarea,
+                &cmd_tx,
+                effects,
+                &mut mouse_drag,
+                &mut clipboard,
+                &mut pending_run_ids,
+            )
+            .await;
+            state.refresh_slash_overlay(&textarea.lines().join("\n"));
+        }
+
+        assert!(
+            matches!(state.slash_overlay, SlashOverlay::Suggestions { .. }),
+            "expected the suggestion overlay to be open, got {:?}",
+            state.slash_overlay
+        );
+        assert_eq!(textarea.lines().join("\n"), "/models");
+
+        let ctx = textarea_ctx_from(&textarea);
+        let effects = presenter::update(&mut state, TuiEvent::Input(InputEvent::Escape), &ctx);
+        execute_effects(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            effects,
+            &mut mouse_drag,
+            &mut clipboard,
+            &mut pending_run_ids,
+        )
+        .await;
+        state.refresh_slash_overlay(&textarea.lines().join("\n"));
+
+        assert_eq!(
+            state.slash_overlay,
+            SlashOverlay::Hidden,
+            "Esc must close the suggestion overlay and it must stay closed"
+        );
+        assert_eq!(
+            textarea.lines().join("\n"),
+            "",
+            "Esc must clear the draft so the overlay cannot immediately reopen"
+        );
     }
 
     #[test]
@@ -2034,9 +2131,18 @@ mod tests {
         let (mut state, _textarea, cmd_tx, _cmd_rx) = setup();
         let engine: Arc<dyn Engine> = StubEngine::with_models(&["small", "large"], "large");
 
-        execute_slash_effects(&mut state, vec![Effect::ListModels], &engine, &cmd_tx).await;
+        execute_slash_effects(
+            &mut state,
+            vec![Effect::ListModels { filter: None }],
+            &engine,
+            &cmd_tx,
+        )
+        .await;
 
-        let SlashOverlay::ModelPicker { choices, selected } = &state.slash_overlay else {
+        let SlashOverlay::ModelPicker {
+            choices, selected, ..
+        } = &state.slash_overlay
+        else {
             panic!("expected a model picker, got {:?}", state.slash_overlay);
         };
         assert_eq!(
@@ -2059,6 +2165,167 @@ mod tests {
         assert_eq!(*selected, 1);
     }
 
+    #[tokio::test]
+    async fn models_preselects_the_active_model_within_an_initial_filter() {
+        let (mut state, _textarea, cmd_tx, _cmd_rx) = setup();
+        let engine: Arc<dyn Engine> =
+            StubEngine::with_models(&["small", "deepseek-v3", "large"], "large");
+
+        execute_slash_effects(
+            &mut state,
+            vec![Effect::ListModels {
+                filter: Some("DEEPSEEK".to_string()),
+            }],
+            &engine,
+            &cmd_tx,
+        )
+        .await;
+
+        // The catalog always holds every fetched model — filtering only
+        // narrows what is displayed/selectable, so further typing can
+        // widen the results again without another provider round-trip.
+        let SlashOverlay::ModelPicker {
+            choices, filter, ..
+        } = &state.slash_overlay
+        else {
+            panic!(
+                "expected a filtered model picker, got {:?}",
+                state.slash_overlay
+            );
+        };
+        assert_eq!(
+            choices
+                .iter()
+                .map(|choice| choice.selection.model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["small", "deepseek-v3", "large"]
+        );
+        assert_eq!(filter, "DEEPSEEK");
+        assert_eq!(
+            state
+                .selected_model()
+                .map(|choice| choice.selection.model.id.as_str()),
+            Some("deepseek-v3")
+        );
+    }
+
+    #[tokio::test]
+    async fn models_keeps_the_picker_open_when_an_initial_filter_matches_nothing() {
+        let (mut state, _textarea, cmd_tx, _cmd_rx) = setup();
+        let engine: Arc<dyn Engine> = StubEngine::with_models(&["small", "large"], "large");
+
+        execute_slash_effects(
+            &mut state,
+            vec![Effect::ListModels {
+                filter: Some("missing".to_string()),
+            }],
+            &engine,
+            &cmd_tx,
+        )
+        .await;
+
+        // No auto-hide/notice on a no-match filter: the picker stays open
+        // so the user can keep editing the filter (e.g. backspace) to
+        // recover matches, without re-fetching the catalog.
+        assert!(matches!(
+            state.slash_overlay,
+            SlashOverlay::ModelPicker { .. }
+        ));
+        assert_eq!(state.selected_model(), None);
+    }
+
+    #[tokio::test]
+    async fn typing_after_models_narrows_the_already_open_picker_without_clearing_the_draft() {
+        let (mut state, mut textarea, cmd_tx, _cmd_rx) = setup();
+        let engine: Arc<dyn Engine> =
+            StubEngine::with_models(&["small", "deepseek-v3", "large"], "large");
+        let mut mouse_drag = MouseDrag::default();
+        let mut clipboard = NoopClipboard;
+        let mut pending_run_ids = PendingRunIds::default();
+
+        // Submit "/models": the picker opens and the draft is normalized to
+        // "/models " (not cleared), ready for more typing.
+        let effects = submit(&mut state, &mut textarea, "/models");
+        let (slash_effects, other_effects) = split_slash_effects(effects);
+        execute_effects(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            other_effects,
+            &mut mouse_drag,
+            &mut clipboard,
+            &mut pending_run_ids,
+        )
+        .await;
+        execute_slash_effects(&mut state, slash_effects, &engine, &cmd_tx).await;
+        state.refresh_slash_overlay(&textarea.lines().join("\n"));
+
+        assert!(matches!(
+            state.slash_overlay,
+            SlashOverlay::ModelPicker { .. }
+        ));
+        assert_eq!(textarea.lines().join("\n"), "/models ");
+
+        // Keep typing: each keystroke must land in the still-open picker's
+        // filter, not be dropped or start a disconnected fresh draft.
+        for ch in "deepseek".chars() {
+            let ctx = textarea_ctx_from(&textarea);
+            let effects = presenter::update(
+                &mut state,
+                TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Char(ch)))),
+                &ctx,
+            );
+            execute_effects(
+                &mut state,
+                &mut textarea,
+                &cmd_tx,
+                effects,
+                &mut mouse_drag,
+                &mut clipboard,
+                &mut pending_run_ids,
+            )
+            .await;
+            state.refresh_slash_overlay(&textarea.lines().join("\n"));
+        }
+
+        assert_eq!(textarea.lines().join("\n"), "/models deepseek");
+        let SlashOverlay::ModelPicker {
+            choices, filter, ..
+        } = &state.slash_overlay
+        else {
+            panic!("expected the model picker to stay open while typing a live filter");
+        };
+        assert_eq!(filter, "deepseek");
+        // The full catalog is still cached — only the display/selection is
+        // narrowed — so no second provider round-trip was needed.
+        assert_eq!(choices.len(), 3);
+        assert_eq!(
+            state
+                .selected_model()
+                .map(|choice| choice.selection.model.id.as_str()),
+            Some("deepseek-v3")
+        );
+
+        // Reported regression: Esc while the (still-open, live-filtered)
+        // picker is showing must close the popup AND clear the "/models
+        // deepseek" residue from the draft — not leave either behind.
+        let ctx = textarea_ctx_from(&textarea);
+        let effects = presenter::update(&mut state, TuiEvent::Input(InputEvent::Escape), &ctx);
+        execute_effects(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            effects,
+            &mut mouse_drag,
+            &mut clipboard,
+            &mut pending_run_ids,
+        )
+        .await;
+
+        assert_eq!(state.slash_overlay, SlashOverlay::Hidden);
+        assert_eq!(textarea.lines().join("\n"), "");
+    }
+
     #[test]
     fn model_picker_cycles_reasoning_effort_with_left_and_right() {
         let (mut state, textarea, _cmd_tx, _cmd_rx) = setup();
@@ -2077,6 +2344,7 @@ mod tests {
                 selection,
                 is_active: false,
             }],
+            filter: String::new(),
             selected: 0,
         };
         let context = textarea_ctx_from(&textarea);
@@ -2144,7 +2412,13 @@ mod tests {
         let stub = StubEngine::with_models(&["small", "large"], "large");
         let engine: Arc<dyn Engine> = stub.clone();
 
-        execute_slash_effects(&mut state, vec![Effect::ListModels], &engine, &cmd_tx).await;
+        execute_slash_effects(
+            &mut state,
+            vec![Effect::ListModels { filter: None }],
+            &engine,
+            &cmd_tx,
+        )
+        .await;
         // Move the selection off the active model, then confirm it.
         state.move_slash_selection(-1);
         let picked = state
@@ -2163,7 +2437,10 @@ mod tests {
             TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
             &ctx,
         );
-        assert_eq!(effects, vec![Effect::SwitchModel(picked)]);
+        assert_eq!(
+            effects,
+            vec![Effect::ClearTextarea, Effect::SwitchModel(picked)]
+        );
         assert_eq!(state.slash_overlay, SlashOverlay::Hidden);
 
         execute_slash_effects(&mut state, effects, &engine, &cmd_tx).await;
@@ -2185,7 +2462,13 @@ mod tests {
         let (mut state, textarea, cmd_tx, _cmd_rx) = setup();
         let stub = StubEngine::with_models(&["small", "large"], "large");
         let engine: Arc<dyn Engine> = stub.clone();
-        execute_slash_effects(&mut state, vec![Effect::ListModels], &engine, &cmd_tx).await;
+        execute_slash_effects(
+            &mut state,
+            vec![Effect::ListModels { filter: None }],
+            &engine,
+            &cmd_tx,
+        )
+        .await;
 
         let ctx = textarea_ctx_from(&textarea);
         presenter::update(&mut state, TuiEvent::Input(InputEvent::Escape), &ctx);

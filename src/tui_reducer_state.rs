@@ -789,9 +789,14 @@ pub enum SlashOverlay {
     },
     /// `/models` was submitted and the provider's list is being fetched.
     LoadingModels,
-    /// `/models` returned; the user picks the model to switch to.
+    /// `/models` returned; the user picks the model to switch to. `choices`
+    /// always holds the full fetched catalog — narrowing by `filter` only
+    /// changes which indices are *displayed/selectable*, so an in-progress
+    /// reasoning-effort edit on a choice survives the user typing more of
+    /// the filter afterwards.
     ModelPicker {
         choices: Vec<ModelChoice>,
+        filter: String,
         selected: usize,
     },
 }
@@ -801,6 +806,40 @@ impl SlashOverlay {
     pub fn is_visible(&self) -> bool {
         !matches!(self, SlashOverlay::Hidden)
     }
+}
+
+/// Indices into `choices` whose `provider_connection/model` identity
+/// contains every whitespace-separated word of `filter`, case-insensitively
+/// (in any order — e.g. `"deepseek v3"` matches `stub/deepseek-v3` and
+/// `"v3 deepseek"` matches it too). An empty (or all-whitespace) filter
+/// matches every choice.
+pub(crate) fn matching_model_indices(choices: &[ModelChoice], filter: &str) -> Vec<usize> {
+    let filter_words: Vec<String> = filter.split_whitespace().map(str::to_lowercase).collect();
+    choices
+        .iter()
+        .enumerate()
+        .filter(|(_, choice)| {
+            let identity = format!(
+                "{}/{}",
+                choice.selection.provider_connection, choice.selection.model.id
+            )
+            .to_lowercase();
+            filter_words.iter().all(|word| identity.contains(word))
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// The live model-picker filter typed after `/models` in `draft`. Falls
+/// back to the whole trimmed draft if it no longer starts with `/models`
+/// (e.g. the user backspaced into the command name itself).
+fn extract_models_filter(draft: &str) -> String {
+    let trimmed = draft.trim_start();
+    trimmed
+        .strip_prefix("/models")
+        .unwrap_or(trimmed)
+        .trim()
+        .to_string()
 }
 
 // ─── Effect ───────────────────────────────────────────────────────────────────
@@ -856,8 +895,9 @@ pub enum Effect {
     ClearConversation,
     /// `/tools` — show the tools the running agent may call.
     ShowTools,
-    /// `/models` — fetch the provider's model list for the picker.
-    ListModels,
+    /// `/models` — fetch the provider's model list for the picker,
+    /// optionally narrowed by a typed model filter.
+    ListModels { filter: Option<String> },
     /// A provider-connection/model was picked: activate it and confirm in the transcript.
     SwitchModel(ProviderModelOption),
 }
@@ -1647,12 +1687,22 @@ impl AppState {
     ///
     /// Called by the Driver after every textarea mutation. A visible model
     /// picker outranks suggestions: it was opened by an already-submitted
-    /// command and is dismissed by Esc or a selection, not by typing.
+    /// command and is dismissed by Esc or a selection, not by typing — but
+    /// further typing still live-narrows the picker's already-fetched
+    /// catalog by re-deriving its filter from the draft.
     pub fn refresh_slash_overlay(&mut self, draft: &str) {
-        if matches!(
-            self.slash_overlay,
-            SlashOverlay::ModelPicker { .. } | SlashOverlay::LoadingModels
-        ) {
+        if let SlashOverlay::ModelPicker {
+            filter, selected, ..
+        } = &mut self.slash_overlay
+        {
+            let new_filter = extract_models_filter(draft);
+            if *filter != new_filter {
+                *filter = new_filter;
+                *selected = 0;
+            }
+            return;
+        }
+        if matches!(self.slash_overlay, SlashOverlay::LoadingModels) {
             return;
         }
         let suggestions = slash_command_suggestions(draft);
@@ -1673,8 +1723,13 @@ impl AppState {
             SlashOverlay::Suggestions { choices, selected } => {
                 move_selection(selected, choices.len(), delta);
             }
-            SlashOverlay::ModelPicker { choices, selected } => {
-                move_selection(selected, choices.len(), delta);
+            SlashOverlay::ModelPicker {
+                choices,
+                filter,
+                selected,
+            } => {
+                let visible_count = matching_model_indices(choices, filter).len();
+                move_selection(selected, visible_count, delta);
             }
             _ => {}
         }
@@ -1684,12 +1739,18 @@ impl AppState {
     /// selectable alternatives. The implicit first state is the provider
     /// default, followed by each advertised effort in order.
     pub fn cycle_selected_model_reasoning_effort(&mut self, delta: isize) {
-        let SlashOverlay::ModelPicker { choices, selected } = &mut self.slash_overlay else {
+        let SlashOverlay::ModelPicker {
+            choices,
+            filter,
+            selected,
+        } = &mut self.slash_overlay
+        else {
             return;
         };
-        let Some(choice) = choices.get_mut(*selected) else {
+        let Some(&actual_index) = matching_model_indices(choices, filter).get(*selected) else {
             return;
         };
+        let choice = &mut choices[actual_index];
         let Some(reasoning_efforts) = choice.selection.model.reasoning_efforts.as_ref() else {
             return;
         };
@@ -1730,7 +1791,14 @@ impl AppState {
     /// The model the picker currently highlights, if it is open.
     pub fn selected_model(&self) -> Option<&ModelChoice> {
         match &self.slash_overlay {
-            SlashOverlay::ModelPicker { choices, selected } => choices.get(*selected),
+            SlashOverlay::ModelPicker {
+                choices,
+                filter,
+                selected,
+            } => {
+                let actual_index = *matching_model_indices(choices, filter).get(*selected)?;
+                choices.get(actual_index)
+            }
             _ => None,
         }
     }
@@ -2285,6 +2353,57 @@ impl Default for AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn matching_model_indices_requires_every_filter_word_in_any_order() {
+        let choice = |provider_connection: &str, model_id: &str| ModelChoice {
+            label: format!("{provider_connection}/{model_id}"),
+            selection: ProviderModelOption {
+                provider_connection: provider_connection.to_string(),
+                model: crate::llm::ModelInfo {
+                    id: model_id.to_string(),
+                    context_length: None,
+                    reasoning_efforts: None,
+                },
+                reasoning_effort: None,
+            },
+            is_active: false,
+        };
+        let choices = vec![
+            choice("openrouter", "deepseek-v3"),
+            choice("ollama", "llama3.2"),
+            choice("stub", "small"),
+        ];
+
+        // A multi-word filter must narrow by every word, not the joined
+        // phrase as a single substring — each word can match anywhere
+        // (provider or model) and in any order.
+        assert_eq!(
+            matching_model_indices(&choices, "deepseek v3"),
+            vec![0],
+            "every word of the filter must match, regardless of order"
+        );
+        assert_eq!(
+            matching_model_indices(&choices, "v3 deepseek"),
+            vec![0],
+            "word order must not matter"
+        );
+        assert_eq!(
+            matching_model_indices(&choices, "openrouter deepseek"),
+            vec![0],
+            "words may match across the provider and the model id"
+        );
+        assert_eq!(
+            matching_model_indices(&choices, "deepseek missing-word"),
+            Vec::<usize>::new(),
+            "every word must match somewhere; one unmatched word excludes the choice"
+        );
+        assert_eq!(
+            matching_model_indices(&choices, "   "),
+            vec![0, 1, 2],
+            "an all-whitespace filter matches everything"
+        );
+    }
 
     #[test]
     fn model_choice_label_explains_reasoning_effort_availability() {

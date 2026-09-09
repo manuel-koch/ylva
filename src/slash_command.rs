@@ -42,6 +42,19 @@ pub struct SlashCommandInfo {
     /// One-line help shown in the suggestion overlay.
     pub description: &'static str,
     pub command: SlashCommand,
+    /// Whether text after the command name is a valid argument rather than
+    /// a parse error. Declared per-command so accepting one is never a
+    /// hardcoded special case elsewhere in the parser.
+    pub accepts_argument: bool,
+}
+
+/// A recognized slash command together with its optional argument.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SlashCommandInvocation {
+    /// The command selected by the input.
+    pub command: SlashCommand,
+    /// The trimmed argument supplied after the command, if any.
+    pub argument: Option<String>,
 }
 
 /// The complete allowlist, in the order the suggestion overlay lists them.
@@ -51,36 +64,63 @@ pub const SLASH_COMMANDS: &[SlashCommandInfo] = &[
         aliases: &["/reset"],
         description: "Clear the conversation and start a new session",
         command: SlashCommand::Clear,
+        accepts_argument: false,
     },
     SlashCommandInfo {
         name: "/models",
         aliases: &[],
         description: "List available models and switch the active one",
         command: SlashCommand::Models,
+        accepts_argument: true,
     },
     SlashCommandInfo {
         name: "/tools",
         aliases: &[],
         description: "Show the tools the agent may call",
         command: SlashCommand::Tools,
+        accepts_argument: false,
     },
 ];
 
 /// Return the command `input` invokes, or `None` when `input` is ordinary chat.
 ///
 /// `input` is the raw draft as typed. Trailing whitespace is tolerated because
-/// it is invisible; anything else after the command name is not, since no
-/// Phase 7 command takes arguments and silently ignoring them would hide a
-/// typo.
+/// it is invisible. Whether trailing text is accepted as an argument (versus
+/// rejecting the whole input as unrecognized) is declared per-command via
+/// [`SlashCommandInfo::accepts_argument`].
 pub fn parse_slash_command(input: &str) -> Option<SlashCommand> {
+    parse_slash_command_invocation(input).map(|invocation| invocation.command)
+}
+
+/// Return the command and optional argument represented by `input`.
+///
+/// Only commands with `accepts_argument: true` (currently `/models`, whose
+/// argument is passed to the model picker as a case-insensitive filter) may
+/// carry trailing text; the rest remain exact no-argument commands.
+pub fn parse_slash_command_invocation(input: &str) -> Option<SlashCommandInvocation> {
     if !starts_with_slash(input) {
         return None;
     }
-    let word = input.trim_end();
-    SLASH_COMMANDS
+
+    let mut parts = input.trim_end().splitn(2, char::is_whitespace);
+    let word = parts.next()?;
+    let argument = parts
+        .next()
+        .map(str::trim)
+        .filter(|argument| !argument.is_empty())
+        .map(str::to_owned);
+    let info = SLASH_COMMANDS
         .iter()
-        .find(|info| info.name == word || info.aliases.contains(&word))
-        .map(|info| info.command)
+        .find(|info| info.name == word || info.aliases.contains(&word))?;
+
+    if argument.is_some() && !info.accepts_argument {
+        return None;
+    }
+
+    Some(SlashCommandInvocation {
+        command: info.command,
+        argument,
+    })
 }
 
 /// Return the commands whose name starts with the partially typed `input`.
@@ -139,8 +179,24 @@ mod tests {
     }
 
     #[test]
-    fn arguments_are_not_silently_ignored() {
-        assert_eq!(parse_slash_command("/models gpt-4"), None);
+    fn models_accepts_an_optional_filter_argument() {
+        assert_eq!(
+            parse_slash_command_invocation("/models gpt-4"),
+            Some(SlashCommandInvocation {
+                command: SlashCommand::Models,
+                argument: Some("gpt-4".to_string()),
+            })
+        );
+        assert_eq!(
+            parse_slash_command("/models gpt-4"),
+            Some(SlashCommand::Models)
+        );
+    }
+
+    #[test]
+    fn other_commands_reject_arguments() {
+        assert_eq!(parse_slash_command("/tools extra"), None);
+        assert_eq!(parse_slash_command("/clear extra"), None);
     }
 
     #[test]

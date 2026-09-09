@@ -33,7 +33,8 @@ use crate::agent::AgentMode;
 use crate::build_info::BUILD_INFO;
 use crate::markdown::render_markdown;
 use crate::tui_reducer_state::{
-    BannerDragSelection, ChatEntry, SlashOverlay, ToolCallState, UserMessageState,
+    matching_model_indices, BannerDragSelection, ChatEntry, SlashOverlay, ToolCallState,
+    UserMessageState,
 };
 use crate::tui_render_state::TuiState;
 
@@ -2625,11 +2626,29 @@ fn draw_slash_overlay(frame: &mut Frame, input_area: Rect, overlay: &SlashOverla
             vec!["Loading models…".to_string()],
             None,
         ),
-        SlashOverlay::ModelPicker { choices, selected } => (
-            "Provider Models".to_string(),
-            choices.iter().map(|choice| choice.label.clone()).collect(),
-            Some(*selected),
-        ),
+        SlashOverlay::ModelPicker {
+            choices,
+            filter,
+            selected,
+        } => {
+            let visible_indices = matching_model_indices(choices, filter);
+            if visible_indices.is_empty() {
+                (
+                    "Provider Models".to_string(),
+                    vec!["Nothing matched your model filter.".to_string()],
+                    None,
+                )
+            } else {
+                (
+                    "Provider Models".to_string(),
+                    visible_indices
+                        .into_iter()
+                        .map(|index| choices[index].label.clone())
+                        .collect(),
+                    Some(*selected),
+                )
+            }
+        }
     };
     if entries.is_empty() || input_area.width < 4 || input_area.y < 3 {
         return;
