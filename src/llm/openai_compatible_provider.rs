@@ -416,7 +416,7 @@ pub(crate) fn parse_sse_payload(data: &str) -> Option<StreamEvent> {
 
 /// Translate an OpenAI-compatible `GET /models` body into [`ModelInfo`]s.
 ///
-/// OpenRouter carries `name` and `context_length` in each `data` entry.
+/// OpenRouter carries `context_length` in each `data` entry.
 /// Entries without an `id` are the only ones dropped — every other field is
 /// best-effort so an unknown OpenAI-compatible backend still yields a usable
 /// list.
@@ -431,10 +431,6 @@ fn parse_model_list(body: &serde_json::Value) -> Vec<crate::llm::ModelInfo> {
             let id = entry.get("id").and_then(serde_json::Value::as_str)?;
             Some(crate::llm::ModelInfo {
                 id: id.to_string(),
-                name: entry
-                    .get("name")
-                    .and_then(serde_json::Value::as_str)
-                    .map(String::from),
                 context_length: entry
                     .get("context_length")
                     .and_then(serde_json::Value::as_u64)
@@ -474,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_model_list_preserves_openrouter_metadata() {
+    fn parse_model_list_preserves_context_length() {
         let body = serde_json::json!({
             "data": [
                 {
@@ -490,7 +486,6 @@ mod tests {
             parse_model_list(&body),
             vec![crate::llm::ModelInfo {
                 id: "openai/gpt-oss-120b".to_string(),
-                name: Some("OpenAI: GPT OSS 120B".to_string()),
                 context_length: Some(131072),
                 reasoning_efforts: None,
             }]

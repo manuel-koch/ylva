@@ -2169,7 +2169,6 @@ mod tests {
                         provider_connection: "stub".to_string(),
                         model: crate::llm::ModelInfo {
                             id: format!("model-{index}"),
-                            name: None,
                             context_length: None,
                             reasoning_efforts: None,
                         },

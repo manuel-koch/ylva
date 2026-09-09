@@ -12,7 +12,7 @@
       Add a seperator between the "engines" section and the known
       "models" section.
 
-- [ ] "/models" popup shows verbose model name / title too for some models.
+- [x] "/models" popup shows verbose model name / title too for some models.
       This title is most of the time almost identical to the plain model-name.
       IMO we don't need that.
       Additionally that title make the line sometimes too long, so that important
@@ -33,6 +33,9 @@
       ```
       Shouldn't this be just a notice that is rendered in TUI, but it seems to be
       a real "system" message in the conversation send to llm ?
+
+- [ ] "/models" should display the llm context-length as kb/mb size
+      ( integer representation, 2048 == 2kb ) to increase readability.
 
 - [ ] Can't use mouse drag'n'drop to select text in slash-command popup
 

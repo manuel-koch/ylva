@@ -1771,7 +1771,6 @@ mod tests {
                     .iter()
                     .map(|id| crate::llm::ModelInfo {
                         id: (*id).to_string(),
-                        name: None,
                         context_length: None,
                         reasoning_efforts: None,
                     })
@@ -2018,7 +2017,6 @@ mod tests {
             provider_connection: "stub".to_string(),
             model: crate::llm::ModelInfo {
                 id: "thinking".to_string(),
-                name: None,
                 context_length: None,
                 reasoning_efforts: Some(vec!["low".to_string(), "high".to_string()]),
             },

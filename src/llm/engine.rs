@@ -553,7 +553,6 @@ mod tests {
                     .iter()
                     .map(|id| ModelInfo {
                         id: (*id).to_string(),
-                        name: None,
                         context_length: None,
                         reasoning_efforts: None,
                     })

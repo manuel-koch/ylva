@@ -731,7 +731,6 @@ fn model_picker_footer_shows_picker_controls_instead_of_send() {
                     provider_connection: "stub".to_string(),
                     model: ModelInfo {
                         id: "thinking".to_string(),
-                        name: None,
                         context_length: None,
                         reasoning_efforts: Some(vec!["low".to_string(), "high".to_string()]),
                     },

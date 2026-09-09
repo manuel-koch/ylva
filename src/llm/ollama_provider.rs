@@ -154,11 +154,6 @@ fn parse_tags(body: &serde_json::Value) -> Vec<ModelInfo> {
                 .get("model")
                 .or_else(|| entry.get("name"))
                 .and_then(serde_json::Value::as_str)?;
-            let name = entry
-                .get("name")
-                .and_then(serde_json::Value::as_str)
-                .filter(|name| *name != id)
-                .map(String::from);
             let context_length = entry
                 .get("context_length")
                 .and_then(json_usize)
@@ -170,7 +165,6 @@ fn parse_tags(body: &serde_json::Value) -> Vec<ModelInfo> {
                 });
             Some(ModelInfo {
                 id: id.to_string(),
-                name,
                 context_length,
                 reasoning_efforts: parse_reasoning_efforts(entry),
             })
@@ -230,7 +224,6 @@ mod tests {
             parse_tags(&body),
             vec![ModelInfo {
                 id: "gemma4:latest".to_string(),
-                name: None,
                 context_length: Some(32768),
                 reasoning_efforts: None,
             }]

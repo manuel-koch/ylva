@@ -742,11 +742,6 @@ impl ModelChoice {
 /// Render one `/models` picker row.
 pub(crate) fn model_choice_label(option: &ProviderModelOption, is_active: bool) -> String {
     let mut label = format!("{}/{}", option.provider_connection, option.model.id);
-    if let Some(name) = option.model.name.as_deref() {
-        if name != option.model.id {
-            label.push_str(&format!("  ({name})"));
-        }
-    }
     if let Some(context_length) = option.model.context_length {
         label.push_str(&format!("  {context_length} tokens"));
     }
@@ -2281,7 +2276,6 @@ mod tests {
             provider_connection: "stub".to_string(),
             model: crate::llm::ModelInfo {
                 id: "model".to_string(),
-                name: None,
                 context_length: None,
                 reasoning_efforts,
             },
@@ -2299,6 +2293,24 @@ mod tests {
         assert_eq!(
             model_choice_label(&model_option(Some(vec!["low".to_string()])), false),
             "stub/model  reasoning: default ⚙"
+        );
+    }
+
+    #[test]
+    fn model_choice_label_keeps_context_and_reasoning_metadata_visible() {
+        let option = ProviderModelOption {
+            provider_connection: "openrouter".to_string(),
+            model: crate::llm::ModelInfo {
+                id: "openai/gpt-oss-120b".to_string(),
+                context_length: Some(131_072),
+                reasoning_efforts: Some(vec!["low".to_string()]),
+            },
+            reasoning_effort: None,
+        };
+
+        assert_eq!(
+            model_choice_label(&option, false),
+            "openrouter/openai/gpt-oss-120b  131072 tokens  reasoning: default ⚙"
         );
     }
 

@@ -438,7 +438,6 @@ trait Provider: Send + Sync {
 /// `EngineConfig.context_length` from TOML is the SSOT for engine construction.
 struct ModelInfo {
     id: String,
-    name: Option<String>,
     context_length: Option<usize>,
 }
 

@@ -70,14 +70,14 @@ impl ToolSchema {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelInfo {
     pub id: String,
-    pub name: Option<String>,
     pub context_length: Option<usize>,
     /// Reasoning support advertised by the provider.
     ///
-    /// `None` means that reasoning support is not advertised. `Some([])`
-    /// means that reasoning is supported but the provider exposes no
-    /// selectable effort alternatives. `Some(values)` means that reasoning
-    /// is supported and `values` contains the selectable effort values.
+    /// - `None` means that reasoning support is not advertised.
+    /// - `Some([])` means that reasoning is supported but the
+    ///    provider exposes no selectable effort alternatives.
+    /// - `Some(values)` means that reasoning is supported and
+    ///   `values` contains the selectable effort values.
     pub reasoning_efforts: Option<Vec<String>>,
 }
 
