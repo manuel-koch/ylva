@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! One-level agent delegation: `ChildAgentManager` owns the lifecycle of a
+//! Child-agent delegation: `ChildAgentManager` owns the lifecycle of a
 //! single running child agent plus an unbounded FIFO of queued spawn
 //! requests. A parent `AgentLoop` holds at most one `ChildAgentManager`
 //! (present only for `Role::Root` agents whose `AgentConfig::can_spawn` is
@@ -34,6 +34,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::agent::{AgentCommand, UiUpdate};
+use crate::store::Store;
 
 /// A request to run a child agent, either starting immediately or queued
 /// behind an already-running child.
@@ -199,6 +200,9 @@ pub struct ChildAgentManager {
     queue: VecDeque<SpawnRequest>,
     subagent_ui_tx: mpsc::Sender<UiUpdate>,
     spawn_fn: SpawnFn,
+    /// The **parent** session's store, when persistence is enabled: every
+    /// child run appends a `child_start`/`child_result` pair to it.
+    store: Option<Store>,
 }
 
 /// Builds the `UiUpdate::ToolProgress` title-argument pairs shown on the
@@ -218,7 +222,40 @@ impl ChildAgentManager {
             queue: VecDeque::new(),
             subagent_ui_tx,
             spawn_fn,
+            store: None,
         }
+    }
+
+    /// Enables persistence: `child_start`/`child_result` records for every
+    /// child run are appended to the parent session identified by `store`.
+    pub fn with_store(mut self, store: Store) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    /// The parent session's store, when persistence is enabled. Used by the
+    /// parent `AgentLoop` to persist a finished child's own transcript.
+    pub fn store(&self) -> Option<Store> {
+        self.store.clone()
+    }
+
+    /// Append the `child_result` record for a finished child run to the
+    /// parent session. Called by the parent `AgentLoop` when a
+    /// [`FinishResult`] arrives, before `on_child_finished` clears the
+    /// running slot.
+    pub fn record_child_result(&self, finish_result: &FinishResult) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        store.record_child_result(
+            finish_result.run_id,
+            &finish_result.status,
+            finish_result
+                .result
+                .clone()
+                .or_else(|| finish_result.error.clone()),
+            finish_result.sources.clone(),
+        );
     }
 
     pub fn is_running(&self) -> bool {
@@ -316,6 +353,9 @@ impl ChildAgentManager {
             id: call_id,
             title_arguments: spawn_progress_title_arguments("running", run_id),
         });
+        if let Some(store) = &self.store {
+            store.record_child_start(run_id, &request.agent_type, &request.task);
+        }
         let cancel = CancellationToken::new();
         let outcome = (self.spawn_fn)(request, cancel.clone(), self.subagent_ui_tx.clone());
         self.running = Some(RunningChild {
@@ -410,6 +450,115 @@ mod tests {
         assert!(matches!(status, SpawnStatus::Started(_)));
         assert!(manager.is_running());
         assert_eq!(calls.lock().unwrap().len(), 1, "spawn_fn called once");
+    }
+
+    #[tokio::test]
+    async fn child_start_and_child_result_are_appended_to_the_parent_session() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let chats_root = temp.path().join("chats");
+        let parent_session_id = Uuid::new_v4();
+        let store = Store::create(
+            &chats_root,
+            temp.path(),
+            parent_session_id,
+            "openrouter",
+            "gpt-4o",
+        )
+        .expect("parent store created");
+        let (mut manager, _calls) = test_manager();
+        manager = manager.with_store(store.clone());
+
+        let call_id = Uuid::new_v4();
+        let status = manager.spawn(
+            "investigate the flaky test".to_string(),
+            None,
+            "explorer".to_string(),
+            "label".to_string(),
+            call_id,
+        );
+        let SpawnStatus::Started(run_id) = status else {
+            panic!("expected the spawn to start immediately")
+        };
+        manager.record_child_result(&FinishResult {
+            run_id,
+            call_id,
+            status: "success".to_string(),
+            result: Some("found it".to_string()),
+            error: None,
+            sources: vec!["src/agent.rs".to_string()],
+        });
+        store.flush().await;
+
+        let lines = std::fs::read_to_string(store.path()).expect("session file readable");
+        let events: Vec<crate::store::StoreEvent> = lines
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("every line parses"))
+            .collect();
+        let start = events
+            .iter()
+            .find_map(|event| match event {
+                crate::store::StoreEvent::ChildStart {
+                    id,
+                    parent_session,
+                    agent_type,
+                    task,
+                    ..
+                } => Some((*id, *parent_session, agent_type.clone(), task.clone())),
+                _ => None,
+            })
+            .expect("a child_start record was written");
+        assert_eq!(start.0, run_id);
+        assert_eq!(start.1, parent_session_id, "linked to the parent session");
+        assert_eq!(start.2, "explorer");
+        assert_eq!(start.3, "investigate the flaky test");
+
+        let result = events
+            .iter()
+            .find_map(|event| match event {
+                crate::store::StoreEvent::ChildResult {
+                    id,
+                    parent_session,
+                    status,
+                    result,
+                    sources,
+                    ..
+                } => Some((
+                    *id,
+                    *parent_session,
+                    status.clone(),
+                    result.clone(),
+                    sources.clone(),
+                )),
+                _ => None,
+            })
+            .expect("a child_result record was written");
+        assert_eq!(result.0, run_id);
+        assert_eq!(result.1, parent_session_id);
+        assert_eq!(result.2, "success");
+        assert_eq!(result.3.as_deref(), Some("found it"));
+        assert_eq!(result.4, vec!["src/agent.rs".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_manager_without_a_store_records_nothing_and_still_spawns() {
+        let (mut manager, calls) = test_manager();
+        manager.record_child_result(&FinishResult {
+            run_id: Uuid::new_v4(),
+            call_id: Uuid::new_v4(),
+            status: "success".to_string(),
+            result: None,
+            error: None,
+            sources: vec![],
+        });
+        manager.spawn(
+            "task".to_string(),
+            None,
+            "default".to_string(),
+            "label".to_string(),
+            Uuid::new_v4(),
+        );
+        assert_eq!(calls.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

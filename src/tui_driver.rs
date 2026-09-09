@@ -43,15 +43,15 @@ use crate::agent::tools::DEFAULT_TUI_TOOLS;
 use crate::agent::{AgentCommand, AgentLoop, AgentMode, Role, UiUpdate};
 use crate::agent_factory::AgentFactory;
 use crate::app::App;
-use crate::config::{AgentConfig, ProfileConfig};
-use crate::engine::{Engine, EngineConfig, EngineImpl, DEFAULT_CONTEXT_LENGTH};
+use crate::config::ProfileConfig;
 use crate::events::{spawn_crossterm_bridge, AppAction};
+use crate::llm::engine::{Engine, EngineConfig, EngineImpl, DEFAULT_CONTEXT_LENGTH};
 use crate::llm::Provider;
 use crate::presenter::{self, TextareaContext, TuiEvent};
 use crate::render;
 use crate::tui_reducer_state::{
-    AppState, ConfirmKey, DomainEvent, Effect, Focus, HistoryDirection, InputEvent, TuiMode,
-    UserMessageState,
+    model_choice_label, AppState, ConfirmKey, DomainEvent, Effect, Focus, HistoryDirection,
+    InputEvent, ModelChoice, SlashOverlay, TuiMode, UserMessageState,
 };
 use crate::tui_render_state::TuiState;
 use crate::ToolRegistry;
@@ -265,6 +265,12 @@ fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
             task: task.clone(),
             label: label.clone(),
         }),
+        UiUpdate::ChildAgentEngineConfigured { run_id, engine } => {
+            Some(DomainEvent::ChildAgentEngineConfigured {
+                run_id: *run_id,
+                engine: engine.clone(),
+            })
+        }
         UiUpdate::ChildAgentToken {
             run_id,
             text,
@@ -434,9 +440,168 @@ async fn execute_effects(
                     state.set_toast("Copied to clipboard");
                 }
             }
+            // Slash-command effects need the engine, which this function
+            // deliberately does not own; `execute_slash_effects` runs them
+            // (they are split out of the batch by `split_slash_effects`
+            // before this function ever sees them).
+            Effect::ClearConversation
+            | Effect::ShowTools
+            | Effect::ListModels
+            | Effect::SwitchModel(_) => {}
         }
     }
     ActionOutcome::Continue
+}
+
+/// How long `/models` waits for the provider's model list before giving up.
+const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Split `effects` into the slash-command effects and everything else,
+/// preserving each group's original order.
+fn split_slash_effects(effects: Vec<Effect>) -> (Vec<Effect>, Vec<Effect>) {
+    effects.into_iter().partition(|effect| {
+        matches!(
+            effect,
+            Effect::ClearConversation
+                | Effect::ShowTools
+                | Effect::ListModels
+                | Effect::SwitchModel(_)
+        )
+    })
+}
+
+/// Execute the slash-command effects (blueprint §6).
+///
+/// Split out of [`execute_effects`] because these are the only effects that
+/// reach past the textarea/clipboard into the engine — and because nothing
+/// here may touch the session store directly: persistence goes through
+/// `AgentCommand`s so the agent loop stays the sole `Context` mutator
+/// (blueprint §4C).
+async fn execute_slash_effects(
+    state: &mut AppState,
+    effects: Vec<Effect>,
+    engine: &Arc<dyn Engine>,
+    cmd_tx: &mpsc::Sender<AgentCommand>,
+) {
+    for effect in effects {
+        match effect {
+            Effect::ClearConversation => {
+                state.clear_conversation();
+                let _ = cmd_tx.send(AgentCommand::ClearContext).await;
+                state.push_notice(
+                    "Conversation cleared. Following turns are recorded in a new session."
+                        .to_string(),
+                );
+            }
+            Effect::ShowTools => {
+                state.push_notice(tools_notice_text(&state.available_tool_names));
+            }
+            Effect::ListModels => {
+                state.slash_overlay = SlashOverlay::LoadingModels;
+                let active_config = engine.config();
+                match tokio::time::timeout(MODEL_LIST_TIMEOUT, engine.list_model_options()).await {
+                    Ok(Ok(models)) if models.is_empty() => {
+                        state.slash_overlay = SlashOverlay::Hidden;
+                        state.push_notice(
+                            "No configured provider connection reported any models.".to_string(),
+                        );
+                    }
+                    Ok(Ok(models)) => {
+                        let active_reasoning_effort = engine.reasoning_effort();
+                        let choices: Vec<ModelChoice> = models
+                            .into_iter()
+                            .map(|mut option| {
+                                let is_active = option.provider_connection
+                                    == active_config.provider_connection
+                                    && option.model.id == active_config.model;
+                                if is_active {
+                                    option.reasoning_effort = active_reasoning_effort.clone();
+                                }
+                                ModelChoice {
+                                    label: model_choice_label(&option, is_active),
+                                    selection: option,
+                                    is_active,
+                                }
+                            })
+                            .collect();
+                        let selected = choices
+                            .iter()
+                            .position(|choice| {
+                                choice.selection.provider_connection
+                                    == active_config.provider_connection
+                                    && choice.selection.model.id == active_config.model
+                            })
+                            .unwrap_or(0);
+                        state.slash_overlay = SlashOverlay::ModelPicker { choices, selected };
+                    }
+                    Ok(Err(error)) => {
+                        state.slash_overlay = SlashOverlay::Hidden;
+                        state.push_notice(format!("Could not list models: {error}"));
+                    }
+                    Err(_) => {
+                        state.slash_overlay = SlashOverlay::Hidden;
+                        state.push_notice(format!(
+                            "Could not list models: the provider did not answer within {} s.",
+                            MODEL_LIST_TIMEOUT.as_secs()
+                        ));
+                    }
+                }
+            }
+            Effect::SwitchModel(selection) => match engine.switch_model_option(&selection) {
+                Ok(()) => {
+                    let config = engine.config();
+                    let confirmation = match selection.model.reasoning_efforts.as_ref() {
+                        Some(_) => format!(
+                            "Switched to {}/{} (reasoning: {}).",
+                            config.provider_connection,
+                            config.model,
+                            selection
+                                .reasoning_effort
+                                .as_deref()
+                                .unwrap_or("provider default")
+                        ),
+                        None => format!(
+                            "Switched to {}/{}.",
+                            config.provider_connection, config.model
+                        ),
+                    };
+                    state.push_notice(confirmation.clone());
+                    // Persisted through the agent loop so the model change is
+                    // part of the transcript a resumed session replays.
+                    let _ = cmd_tx.send(AgentCommand::RecordNotice(confirmation)).await;
+                    // Read both values from the live engine because a
+                    // selection may have changed the active provider as well
+                    // as its model.
+                    let _ = cmd_tx
+                        .send(AgentCommand::RecordModelChanged {
+                            provider_connection: config.provider_connection,
+                            model: config.model,
+                        })
+                        .await;
+                }
+                Err(error) => {
+                    state.push_notice(format!(
+                        "Could not switch to {}/{}: {error}",
+                        selection.provider_connection, selection.model.id
+                    ));
+                }
+            },
+            _ => {}
+        }
+    }
+}
+
+/// Render the `/tools` notice body.
+fn tools_notice_text(tool_names: &[String]) -> String {
+    if tool_names.is_empty() {
+        return "No tools are enabled for this session.".to_string();
+    }
+    let mut text = String::from("Tools available to the agent:");
+    for name in tool_names {
+        text.push_str("\n  • ");
+        text.push_str(name);
+    }
+    text
 }
 
 /// Process one [`UiUpdate`]: convert to a [`DomainEvent`] (or handle directly
@@ -545,6 +710,7 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
         partial_thinking_text: app.turn_buffer.partial_thinking_text,
         thinking_started_at: app.turn_buffer.thinking_started_at,
         partial_thinking_collapsed: app.turn_buffer.partial_thinking_collapsed,
+        engine_display: app.engine_display,
         queued_steer_texts: app.queued_steer_texts,
         steer_indicator: app.steer_indicator,
         pending_approval: None,
@@ -557,6 +723,7 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
         toast: app.toast,
         spinner_frame: app.spinner_frame,
         input_scroll_top: app.input_scroll_top,
+        slash_overlay: app.slash_overlay,
         help_popup: crate::tui_render_state::HelpPopupState {
             show_help,
             help_scroll_offset: app.help_popup.help_scroll_offset,
@@ -612,6 +779,13 @@ where
     let mut textarea = TextArea::default();
     configure_textarea(&mut textarea);
     let cmd_tx = agent.command_sender();
+    let engine = agent.engine();
+    state.engine_display = crate::llm::engine::EngineDisplayInfo::from(&engine.config());
+    // Sorted once here so `/tools` output is stable — the registry is a
+    // `HashMap`, whose iteration order is not.
+    let mut available_tool_names = agent.registry().names();
+    available_tool_names.sort();
+    state.available_tool_names = available_tool_names;
 
     // Driver-local tracking — not part of AppState.
     let mut mouse_pos: Option<(u16, u16)> = None;
@@ -632,6 +806,7 @@ where
     }
 
     loop {
+        state.engine_display = crate::llm::engine::EngineDisplayInfo::from(&engine.config());
         let hint = confirm_hint(&state);
         terminal.draw(|frame| {
             render::render(frame, &mut state, &mut textarea, hint.as_deref(), mouse_pos);
@@ -699,6 +874,9 @@ where
 
                 let Some(event) = app_action_to_tui_event(action) else { continue };
                 let effects = presenter::update(&mut state, event, &textarea_ctx);
+                // Slash-command effects are the only ones needing the engine,
+                // and only key input can produce them.
+                let (slash_effects, effects) = split_slash_effects(effects);
                 if execute_effects(
                     &mut state, &mut textarea, &cmd_tx, effects, &mut mouse_drag, clipboard,
                     &mut pending_run_ids,
@@ -708,6 +886,10 @@ where
                 {
                     break;
                 }
+                execute_slash_effects(&mut state, slash_effects, &engine, &cmd_tx).await;
+                // The suggestion overlay tracks the draft, so it is
+                // recomputed after every key that may have changed it.
+                state.refresh_slash_overlay(&textarea.lines().join("\n"));
             }
 
             update = ui_rx.recv() => {
@@ -1015,7 +1197,7 @@ pub async fn run_tui_on_stdout(
     initial_prompt: Option<String>,
 ) -> anyhow::Result<()> {
     let engine_config = EngineConfig {
-        provider: provider.name().to_string(),
+        provider_connection: provider.name().to_string(),
         model: String::new(),
         temperature: None,
         context_length: DEFAULT_CONTEXT_LENGTH,
@@ -1030,20 +1212,7 @@ pub async fn run_tui_on_stdout(
         )]))
         .with_allowed_tools(DEFAULT_TUI_TOOLS),
     );
-    let profile = ProfileConfig {
-        default_engine: "default".to_string(),
-        compact_engine: None,
-        agents: std::collections::HashMap::from([(
-            "default".to_string(),
-            AgentConfig {
-                engine: None,
-                allowed_tools: None,
-                timeout_secs: None,
-                persona: None,
-                can_spawn: true,
-            },
-        )]),
-    };
+    let profile = ProfileConfig::default();
     let _ = registry; // registry is created internally by AgentFactory; parameter kept for API compat
     TuiApp::new(factory, profile, "default".to_string(), initial_prompt)
         .run()
@@ -1586,5 +1755,445 @@ mod tests {
             "no DenyTool should be emitted when closing help popup"
         );
         let _ = tool_id; // used in setup
+    }
+
+    // ── slash commands (Phase 7, blueprint §6) ──────────────────────────────
+
+    /// Engine double whose model list and switch outcome are scripted, so the
+    /// `/models` flow can be exercised without a provider.
+    struct StubEngine {
+        models: Vec<crate::llm::ModelInfo>,
+        switched_to: std::sync::Mutex<Vec<String>>,
+        config: std::sync::Mutex<EngineConfig>,
+    }
+
+    impl StubEngine {
+        fn with_models(model_ids: &[&str], active_model: &str) -> Arc<StubEngine> {
+            Arc::new(StubEngine {
+                models: model_ids
+                    .iter()
+                    .map(|id| crate::llm::ModelInfo {
+                        id: (*id).to_string(),
+                        name: None,
+                        context_length: None,
+                        reasoning_efforts: None,
+                    })
+                    .collect(),
+                switched_to: std::sync::Mutex::new(Vec::new()),
+                config: std::sync::Mutex::new(EngineConfig {
+                    provider_connection: "stub".to_string(),
+                    model: active_model.to_string(),
+                    temperature: None,
+                    context_length: DEFAULT_CONTEXT_LENGTH,
+                    api_base_url: None,
+                    api_key: None,
+                }),
+            })
+        }
+    }
+
+    impl Engine for StubEngine {
+        fn chat<'a>(
+            &'a self,
+            _messages: Vec<crate::agent::Message>,
+            _tools: Vec<crate::llm::ToolSchema>,
+            _cancel: tokio_util::sync::CancellationToken,
+        ) -> futures::future::BoxFuture<'a, anyhow::Result<mpsc::Receiver<crate::agent::StreamEvent>>>
+        {
+            Box::pin(async { anyhow::bail!("the stub engine does not stream") })
+        }
+
+        fn config(&self) -> EngineConfig {
+            self.config.lock().expect("stub config lock").clone()
+        }
+
+        fn list_models(
+            &self,
+        ) -> futures::future::BoxFuture<'_, anyhow::Result<Vec<crate::llm::ModelInfo>>> {
+            let models = self.models.clone();
+            Box::pin(async move { Ok(models) })
+        }
+
+        fn switch_model(&self, model: &str) -> anyhow::Result<()> {
+            self.switched_to
+                .lock()
+                .expect("stub switch lock")
+                .push(model.to_string());
+            self.config.lock().expect("stub config lock").model = model.to_string();
+            Ok(())
+        }
+    }
+
+    fn submit(state: &mut AppState, textarea: &mut TextArea<'static>, text: &str) -> Vec<Effect> {
+        *textarea = TextArea::from(vec![text.to_string()]);
+        configure_textarea(textarea);
+        let ctx = textarea_ctx_from(textarea);
+        presenter::update(
+            state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+            &ctx,
+        )
+    }
+
+    #[test]
+    fn clear_and_reset_reach_the_same_handler() {
+        let (mut state, mut textarea, _cmd_tx, _cmd_rx) = setup();
+
+        let clear_effects = submit(&mut state, &mut textarea, "/clear");
+        let reset_effects = submit(&mut state, &mut textarea, "/reset");
+
+        assert!(clear_effects.contains(&Effect::ClearConversation));
+        assert_eq!(clear_effects, reset_effects);
+    }
+
+    #[test]
+    fn a_command_is_only_recognized_as_the_first_character_of_the_input() {
+        let (mut state, mut textarea, _cmd_tx, _cmd_rx) = setup();
+
+        let mid_message = submit(&mut state, &mut textarea, "please run /tools for me");
+        assert!(mid_message.contains(&Effect::SubmitPrompt { steer: false }));
+        assert!(!mid_message.contains(&Effect::ShowTools));
+
+        let indented = submit(&mut state, &mut textarea, " /tools");
+        assert!(!indented.contains(&Effect::ShowTools));
+    }
+
+    #[test]
+    fn an_unknown_slash_word_is_sent_to_the_model_as_ordinary_input() {
+        let (mut state, mut textarea, _cmd_tx, _cmd_rx) = setup();
+
+        let effects = submit(&mut state, &mut textarea, "/foo");
+
+        assert!(effects.contains(&Effect::SubmitPrompt { steer: false }));
+        assert!(matches!(
+            state.chat_entries.last(),
+            Some(crate::tui_reducer_state::ChatEntry::UserMessage { text, .. }) if text == "/foo"
+        ));
+    }
+
+    #[test]
+    fn the_suggestion_overlay_tracks_the_partially_typed_command() {
+        let mut state = AppState::new();
+
+        state.refresh_slash_overlay("/mo");
+        let SlashOverlay::Suggestions { choices, selected } = &state.slash_overlay else {
+            panic!("expected suggestions, got {:?}", state.slash_overlay);
+        };
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0].name, "/models");
+        assert_eq!(*selected, 0);
+
+        state.refresh_slash_overlay("hello");
+        assert_eq!(state.slash_overlay, SlashOverlay::Hidden);
+    }
+
+    #[test]
+    fn command_suggestions_navigate_with_up_and_down_and_tab_completes_the_selection() {
+        let mut state = AppState::new();
+        state.refresh_slash_overlay("/");
+        let textarea = TextareaContext {
+            is_empty: false,
+            text: "/".to_string(),
+            cursor_row: 0,
+            cursor_row_is_last: true,
+        };
+
+        let down = presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Down))),
+            &textarea,
+        );
+        assert!(down.is_empty());
+        assert_eq!(
+            state.selected_slash_command().map(|command| command.name),
+            Some("/models")
+        );
+
+        presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Down))),
+            &textarea,
+        );
+        assert_eq!(
+            state.selected_slash_command().map(|command| command.name),
+            Some("/tools")
+        );
+
+        presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Down))),
+            &textarea,
+        );
+        assert_eq!(
+            state.selected_slash_command().map(|command| command.name),
+            Some("/tools")
+        );
+
+        presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Up))),
+            &textarea,
+        );
+        assert_eq!(
+            state.selected_slash_command().map(|command| command.name),
+            Some("/models")
+        );
+
+        let completion = presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Tab))),
+            &textarea,
+        );
+        assert_eq!(
+            completion,
+            vec![Effect::SetInputText("/models".to_string())]
+        );
+    }
+
+    #[test]
+    fn tab_completes_the_only_matching_command_and_is_normal_input_without_suggestions() {
+        let mut state = AppState::new();
+        state.refresh_slash_overlay("/re");
+        let completion = presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Tab))),
+            &TextareaContext {
+                is_empty: false,
+                text: "/re".to_string(),
+                cursor_row: 0,
+                cursor_row_is_last: true,
+            },
+        );
+        assert_eq!(completion, vec![Effect::SetInputText("/clear".to_string())]);
+
+        state.slash_overlay = SlashOverlay::Hidden;
+        let tab = key_event(KeyCode::Tab);
+        let normal_input = presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(tab)),
+            &TextareaContext {
+                is_empty: true,
+                text: String::new(),
+                cursor_row: 0,
+                cursor_row_is_last: true,
+            },
+        );
+        assert_eq!(
+            normal_input,
+            vec![Effect::ExitBrowsing, Effect::TextareaKey(tab)]
+        );
+    }
+
+    #[tokio::test]
+    async fn models_lists_the_candidates_and_preselects_the_active_model() {
+        let (mut state, _textarea, cmd_tx, _cmd_rx) = setup();
+        let engine: Arc<dyn Engine> = StubEngine::with_models(&["small", "large"], "large");
+
+        execute_slash_effects(&mut state, vec![Effect::ListModels], &engine, &cmd_tx).await;
+
+        let SlashOverlay::ModelPicker { choices, selected } = &state.slash_overlay else {
+            panic!("expected a model picker, got {:?}", state.slash_overlay);
+        };
+        assert_eq!(
+            choices
+                .iter()
+                .map(|choice| choice.selection.model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["small", "large"]
+        );
+        assert_eq!(
+            choices
+                .iter()
+                .map(|choice| choice.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["stub/small", "stub/large  — active"]
+        );
+        assert_eq!(*selected, 1);
+    }
+
+    #[test]
+    fn model_picker_cycles_reasoning_effort_with_left_and_right() {
+        let (mut state, textarea, _cmd_tx, _cmd_rx) = setup();
+        let selection = crate::llm::ProviderModelOption {
+            provider_connection: "stub".to_string(),
+            model: crate::llm::ModelInfo {
+                id: "thinking".to_string(),
+                name: None,
+                context_length: None,
+                reasoning_efforts: Some(vec!["low".to_string(), "high".to_string()]),
+            },
+            reasoning_effort: None,
+        };
+        state.slash_overlay = SlashOverlay::ModelPicker {
+            choices: vec![ModelChoice {
+                label: "stub/thinking  reasoning: default".to_string(),
+                selection,
+                is_active: false,
+            }],
+            selected: 0,
+        };
+        let context = textarea_ctx_from(&textarea);
+
+        let effects = presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Right))),
+            &context,
+        );
+        assert!(effects.is_empty());
+        assert_eq!(
+            state
+                .selected_model()
+                .and_then(|choice| choice.selection.reasoning_effort.as_deref()),
+            Some("low")
+        );
+        assert!(state
+            .selected_model()
+            .expect("selected model")
+            .label
+            .contains("reasoning: low"));
+
+        presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Right))),
+            &context,
+        );
+        assert_eq!(
+            state
+                .selected_model()
+                .and_then(|choice| choice.selection.reasoning_effort.as_deref()),
+            Some("high")
+        );
+
+        presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Left))),
+            &context,
+        );
+        assert_eq!(
+            state
+                .selected_model()
+                .and_then(|choice| choice.selection.reasoning_effort.as_deref()),
+            Some("low")
+        );
+
+        presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Left))),
+            &context,
+        );
+        assert_eq!(
+            state
+                .selected_model()
+                .expect("selected model")
+                .selection
+                .reasoning_effort,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn confirming_a_picked_model_switches_the_engine_and_persists_the_confirmation() {
+        let (mut state, _textarea, cmd_tx, mut cmd_rx) = setup();
+        let stub = StubEngine::with_models(&["small", "large"], "large");
+        let engine: Arc<dyn Engine> = stub.clone();
+
+        execute_slash_effects(&mut state, vec![Effect::ListModels], &engine, &cmd_tx).await;
+        // Move the selection off the active model, then confirm it.
+        state.move_slash_selection(-1);
+        let picked = state
+            .selected_model()
+            .expect("a highlighted model")
+            .selection
+            .clone();
+        let ctx = TextareaContext {
+            is_empty: true,
+            text: String::new(),
+            cursor_row: 0,
+            cursor_row_is_last: true,
+        };
+        let effects = presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+            &ctx,
+        );
+        assert_eq!(effects, vec![Effect::SwitchModel(picked)]);
+        assert_eq!(state.slash_overlay, SlashOverlay::Hidden);
+
+        execute_slash_effects(&mut state, effects, &engine, &cmd_tx).await;
+
+        assert_eq!(
+            *stub.switched_to.lock().expect("stub switch lock"),
+            vec!["small".to_string()]
+        );
+        assert_eq!(engine.config().model, "small");
+        let command = cmd_rx.try_recv().expect("a notice command");
+        assert!(matches!(
+            command,
+            AgentCommand::RecordNotice(text) if text.contains("small")
+        ));
+    }
+
+    #[tokio::test]
+    async fn escape_dismisses_the_model_picker_without_switching() {
+        let (mut state, textarea, cmd_tx, _cmd_rx) = setup();
+        let stub = StubEngine::with_models(&["small", "large"], "large");
+        let engine: Arc<dyn Engine> = stub.clone();
+        execute_slash_effects(&mut state, vec![Effect::ListModels], &engine, &cmd_tx).await;
+
+        let ctx = textarea_ctx_from(&textarea);
+        presenter::update(&mut state, TuiEvent::Input(InputEvent::Escape), &ctx);
+
+        assert_eq!(state.slash_overlay, SlashOverlay::Hidden);
+        assert!(stub
+            .switched_to
+            .lock()
+            .expect("stub switch lock")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn clear_resets_the_transcript_and_tells_the_agent_to_start_a_new_session() {
+        let (mut state, _textarea, cmd_tx, mut cmd_rx) = setup();
+        let engine: Arc<dyn Engine> = StubEngine::with_models(&[], "large");
+        state.push_user_bubble("earlier question".to_string(), UserMessageState::Sent);
+
+        execute_slash_effects(
+            &mut state,
+            vec![Effect::ClearConversation],
+            &engine,
+            &cmd_tx,
+        )
+        .await;
+
+        assert!(matches!(
+            state.chat_entries.as_slice(),
+            [crate::tui_reducer_state::ChatEntry::Notice { .. }]
+        ));
+        // The prompt stays recallable with ↑ even though the transcript is gone.
+        assert_eq!(state.input_history, vec!["earlier question".to_string()]);
+        assert!(matches!(
+            cmd_rx.try_recv().expect("a clear command"),
+            AgentCommand::ClearContext
+        ));
+    }
+
+    #[tokio::test]
+    async fn tools_reports_the_registry_names_without_touching_the_agent() {
+        let (mut state, _textarea, cmd_tx, mut cmd_rx) = setup();
+        let engine: Arc<dyn Engine> = StubEngine::with_models(&[], "large");
+        state.available_tool_names = vec!["read_file".to_string(), "run_command".to_string()];
+
+        execute_slash_effects(&mut state, vec![Effect::ShowTools], &engine, &cmd_tx).await;
+
+        let Some(crate::tui_reducer_state::ChatEntry::Notice { text }) = state.chat_entries.last()
+        else {
+            panic!("expected a notice bubble");
+        };
+        assert!(text.contains("read_file"));
+        assert!(text.contains("run_command"));
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "/tools must not command the agent"
+        );
     }
 }

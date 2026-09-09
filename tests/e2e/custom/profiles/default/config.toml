@@ -1,0 +1,27 @@
+default_engine = "ollama/local"
+
+[provider_connections.ollama-local]
+provider = "ollama"
+api_base_url = "http://localhost:11434"
+
+[provider_connections.ollama-cloud]
+provider = "ollama"
+api_base_url = "https://ollama.com"
+api_key = "${OLLAMA_CLOUD_API_KEY}"
+
+[provider_connections.openrouter]
+provider = "openrouter"
+api_base_url = "https://openrouter.ai"
+api_key = "${OPENROUTER_API_KEY}"
+
+[engines."ollama/local"]
+provider_connection = "ollama-local"
+model = "gemma4:e4b-mlx"
+
+[engines."ollama/cloud"]
+provider_connection = "ollama-cloud"
+model = "gemma4:31b-cloud"
+
+[engines.openrouter]
+provider_connection = "openrouter"
+model = "deepseek/deepseek-v4-flash-0731"

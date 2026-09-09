@@ -137,8 +137,12 @@ fn project_for_draw(state: &AppState) -> TuiState {
         ConversationView::Child { run_id, .. } => state.agent_mode_for_child(*run_id),
         ConversationView::Root => state.agent_mode(),
     };
+    let engine_display = showing_child_run_id
+        .and_then(|run_id| state.child_engine_displays.get(&run_id).cloned())
+        .unwrap_or_else(|| state.engine_display.clone());
     TuiState {
         agent_mode,
+        engine_display,
         chat_entries,
         partial_assistant_text,
         partial_thinking_text,
@@ -156,6 +160,7 @@ fn project_for_draw(state: &AppState) -> TuiState {
         toast: state.toast.clone(),
         spinner_frame: state.spinner_frame,
         input_scroll_top: state.input_scroll_top,
+        slash_overlay: state.slash_overlay.clone(),
         help_popup: crate::tui_render_state::HelpPopupState {
             show_help: state.show_help(),
             help_scroll_offset: state.help_popup.help_scroll_offset,
@@ -331,6 +336,48 @@ mod tests {
             matches!(&projected.chat_entries[0], ChatEntry::AssistantMessage { text, .. } if text == "root reply")
         );
         assert!(projected.child_view.child_view_bubble.is_none());
+    }
+
+    #[test]
+    fn project_for_draw_selects_the_identity_of_the_visible_conversation() {
+        let mut state = AppState::new();
+        state.engine_display = crate::llm::engine::EngineDisplayInfo {
+            provider_connection: "openrouter".to_string(),
+            model: "root-model".to_string(),
+        };
+
+        let root_projection = project_for_draw(&state);
+        assert_eq!(
+            root_projection.engine_display.provider_connection,
+            "openrouter"
+        );
+        assert_eq!(root_projection.engine_display.model, "root-model");
+
+        let run_id = Uuid::new_v4();
+        let bubble_id = Uuid::new_v4();
+        push_spawn_bubble(&mut state, bubble_id, "reviewer", "look into flaky test");
+        state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id,
+            agent_type: "reviewer".to_string(),
+            task: "look into flaky test".to_string(),
+            label: "Investigate flaky test".to_string(),
+        });
+        state.child_engine_displays.insert(
+            run_id,
+            crate::llm::engine::EngineDisplayInfo {
+                provider_connection: "ollama".to_string(),
+                model: "child-model".to_string(),
+            },
+        );
+        state.switch_to_child_view(run_id);
+
+        let child_projection = project_for_draw(&state);
+        assert_eq!(
+            child_projection.engine_display.provider_connection,
+            "ollama"
+        );
+        assert_eq!(child_projection.engine_display.model, "child-model");
     }
 
     #[test]

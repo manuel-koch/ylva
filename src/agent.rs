@@ -22,9 +22,11 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use uuid::Uuid;
 
-use crate::engine::Engine;
+use crate::llm::engine::Engine;
 use crate::llm::{ToolEnvelope, ToolSchema};
+use crate::store::Store;
 
+pub mod child_agent_manager;
 pub mod tools;
 
 use tools::{ToolCall, ToolRegistry};
@@ -86,6 +88,27 @@ pub enum AgentCommand {
     ForChild {
         run_id: Uuid,
         command: Box<AgentCommand>,
+    },
+    /// `/clear` (blueprint §6): drop the conversation and continue in a
+    /// brand-new persisted session.
+    ///
+    /// Handled here rather than in the TUI Driver because the §4C ownership
+    /// rule makes the outer loop the only mutator of `Context` — and, through
+    /// it, the only writer to the session store.
+    ClearContext,
+    /// Append a harness-authored system message (e.g. `/models`' switch
+    /// confirmation) to the conversation, so it is both visible to the model
+    /// on the next turn and persisted through the normal commit point.
+    RecordNotice(String),
+    /// Persist a structured `model_changed` record directly to the session
+    /// store (bypassing `Context`/`RecordNotice`'s conversation-message
+    /// path): the human-readable confirmation is a `RecordNotice`, this is
+    /// the machine-readable history entry a resumed session (or any tool
+    /// reading the JSONL) can rely on. Sent alongside `RecordNotice` after a
+    /// successful `/models` switch.
+    RecordModelChanged {
+        provider_connection: String,
+        model: String,
     },
 }
 
@@ -253,6 +276,13 @@ pub enum UiUpdate {
         task: String,
         label: String,
     },
+    /// The child engine's provider-connection/model identity, emitted immediately after
+    /// the child has been constructed so the TUI can label its conversation
+    /// independently from the root engine.
+    ChildAgentEngineConfigured {
+        run_id: Uuid,
+        engine: crate::llm::engine::EngineDisplayInfo,
+    },
     /// A fragment of `run_id`'s own assistant text/thinking output,
     /// forwarded from that child's `AppendText`/`AppendThinking` and
     /// rendered into that child's own conversation transcript only — never
@@ -306,13 +336,14 @@ pub enum StreamEvent {
     Error(anyhow::Error),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AssistantStatus {
     Complete,
     Interrupted,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ToolCallRequest {
     pub id: Uuid,
     pub name: String,
@@ -326,25 +357,34 @@ pub struct ToolCallRequest {
 /// headless CLI output. `ImplicitToolNote` messages are sent to the model
 /// as regular `role: "user"` turns but are **never rendered** in any UI —
 /// they exist solely to give the model richer context (e.g. a denial reason).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum UserMessageKind {
     #[default]
     Explicit,
     ImplicitToolNote,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Persisted as one JSONL line by `crate::store` — hence the `serde`
+/// derives. The discriminant is serialized as a `role` field
+/// (`#[serde(tag = "role")]`) and **no** `deny_unknown_fields` is used, so a
+/// session file written by an older or newer build still deserializes
+/// (blueprint §4H decision 4).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "role", rename_all = "snake_case")]
 pub enum Message {
     System {
         content: String,
     },
     User {
         content: String,
+        #[serde(default)]
         kind: UserMessageKind,
     },
     Assistant {
         content: String,
         status: AssistantStatus,
+        #[serde(default)]
         tool_calls: Vec<ToolCallRequest>,
     },
     ToolResult {
@@ -352,14 +392,17 @@ pub enum Message {
         name: String,
         result: String,
         /// Structured metadata emitted by the tool for this specific result.
+        #[serde(default)]
         result_metadata: Option<serde_json::Value>,
         /// JSON Schema for the fields present in `result_metadata`.
+        #[serde(default)]
         result_metadata_schema: Option<serde_json::Value>,
     },
     ToolError {
         id: Uuid,
         name: String,
         error: String,
+        #[serde(default)]
         duration: std::time::Duration,
     },
 }
@@ -409,11 +452,16 @@ pub static TOOL_PROTOCOL_SYSTEM_PROMPT: LazyLock<String> = LazyLock::new(|| {
 #[derive(Debug, Default)]
 pub struct Context {
     messages: Vec<Message>,
+    /// Session store this context appends its committed messages to, when
+    /// persistence is enabled (blueprint §4H). `None` for child agents and
+    /// for runs started without a store.
+    store: Option<Store>,
 }
 
 impl Context {
     pub fn new() -> Self {
         Context {
+            store: None,
             messages: vec![
                 Message::System {
                     content: DEFAULT_SYSTEM_PROMPT.to_string(),
@@ -425,8 +473,39 @@ impl Context {
         }
     }
 
+    /// Attach a session store, so every message committed from here on is
+    /// also appended to the session file.
+    ///
+    /// The two system prompts installed by [`Context::new`] are deliberately
+    /// not persisted: they are rebuilt from the running binary on every
+    /// resume, so storing them would pin a stale copy into the transcript.
+    pub fn set_store(&mut self, store: Store) {
+        self.store = Some(store);
+    }
+
+    /// The session store this context currently appends to, when persistence
+    /// is enabled. Cloning is cheap (see [`Store`]). Tracks `/clear`
+    /// rollovers correctly — unlike a store handle captured once at loop
+    /// startup — because it reads whichever store `set_store` last attached.
+    pub fn store(&self) -> Option<Store> {
+        self.store.clone()
+    }
+
+    /// The single commit point for the conversation: every message enters the
+    /// context here, and is forwarded to the session store from here.
+    ///
+    /// Keeping the forward in one place upholds the ownership
+    /// rule — only the outer loop mutates `Context`, so only the outer loop
+    /// can produce a store event, and the on-disk order is the commit order.
+    fn commit(&mut self, message: Message) {
+        if let Some(store) = &self.store {
+            store.record_message(&message);
+        }
+        self.messages.push(message);
+    }
+
     pub fn push_user(&mut self, text: String) {
-        self.messages.push(Message::User {
+        self.commit(Message::User {
             content: text,
             kind: UserMessageKind::Explicit,
         });
@@ -436,14 +515,14 @@ impl Context {
     /// agent's `briefing` ahead of its task, after the standard system
     /// prompts `Context::new` already installed.
     pub fn push_system(&mut self, text: String) {
-        self.messages.push(Message::System { content: text });
+        self.commit(Message::System { content: text });
     }
 
     /// Push a model hint injected by the agent harness. The message is sent
     /// to the model as a regular `role: "user"` turn but is never rendered in
     /// any UI (TUI conversation list or headless CLI output).
     pub fn push_implicit_user(&mut self, text: String) {
-        self.messages.push(Message::User {
+        self.commit(Message::User {
             content: text,
             kind: UserMessageKind::ImplicitToolNote,
         });
@@ -461,7 +540,7 @@ impl Context {
     }
 
     pub fn push_assistant(&mut self, content: String, status: AssistantStatus) {
-        self.messages.push(Message::Assistant {
+        self.commit(Message::Assistant {
             content,
             status,
             tool_calls: Vec::new(),
@@ -474,7 +553,7 @@ impl Context {
         status: AssistantStatus,
         tool_calls: Vec<ToolCallRequest>,
     ) {
-        self.messages.push(Message::Assistant {
+        self.commit(Message::Assistant {
             content,
             status,
             tool_calls,
@@ -489,7 +568,7 @@ impl Context {
         result_metadata: Option<serde_json::Value>,
         result_metadata_schema: Option<serde_json::Value>,
     ) {
-        self.messages.push(Message::ToolResult {
+        self.commit(Message::ToolResult {
             id,
             name,
             result,
@@ -512,7 +591,7 @@ impl Context {
             ),
             None => error,
         };
-        self.messages.push(Message::ToolError {
+        self.commit(Message::ToolError {
             id,
             name,
             error: llm_error,
@@ -778,6 +857,9 @@ pub struct AgentLoop {
     child_agent_manager: Option<crate::child_agent_manager::ChildAgentManager>,
     finish_rx: Option<mpsc::Receiver<crate::child_agent_manager::FinishResult>>,
     subagent_ui_rx: Option<mpsc::Receiver<UiUpdate>>,
+    /// Set via [`AgentLoop::with_store`] when persistence is enabled: the
+    /// session file this loop's committed messages are appended to.
+    store: Option<Store>,
 }
 
 /// Awaits the next `FinishResult` when `rx` is `Some`, else never resolves.
@@ -832,6 +914,7 @@ impl AgentLoop {
             child_agent_manager: None,
             finish_rx: None,
             subagent_ui_rx: None,
+            store: None,
         };
         (agent, ui_rx)
     }
@@ -853,10 +936,10 @@ impl AgentLoop {
 
     /// This loop's tool registry, as resolved by `AgentFactory::build` (per-
     /// `agent_type` `allowed_tools`, `include_spawn_subagent`, etc.).
-    /// `pub(crate)` since only same-crate tests need to inspect which tools
-    /// ended up registered; production code never needs to reach into an
-    /// `AgentLoop`'s registry from outside `agent.rs`/`agent_factory.rs`.
-    #[cfg(test)]
+    /// `pub(crate)` because the only readers are same-crate: the TUI Driver
+    /// (which captures the resolved tool names once at startup for the
+    /// `/tools` slash command) and tests inspecting which tools ended up
+    /// registered.
     pub(crate) fn registry(&self) -> &Arc<ToolRegistry> {
         &self.registry
     }
@@ -874,6 +957,25 @@ impl AgentLoop {
         self.finish_rx = Some(finish_rx);
         self.subagent_ui_rx = Some(subagent_ui_rx);
         self
+    }
+
+    /// The engine this loop runs on. Used by the driver to answer engine-level
+    /// queries (the model list) without reaching through the factory.
+    pub fn engine(&self) -> Arc<dyn Engine> {
+        self.engine.clone()
+    }
+
+    /// Enables persistence for this loop: every message the outer loop
+    /// commits to its `Context` is also appended to `store`'s session file.
+    pub fn with_store(mut self, store: Store) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    /// The session store this loop persists to, when persistence is enabled.
+    /// Cloning is cheap: every clone shares one writer task (see [`Store`]).
+    pub fn store(&self) -> Option<Store> {
+        self.store.clone()
     }
 
     pub async fn send_command(&self, cmd: AgentCommand) {
@@ -905,6 +1007,10 @@ impl AgentLoop {
         let mut child_agent_manager = self.child_agent_manager.take();
         let mut finish_rx = self.finish_rx.take();
         let mut subagent_ui_rx = self.subagent_ui_rx.take();
+        let store = self.store.clone();
+        // Retained past `Context::set_store` so `AgentCommand::ClearContext`
+        // can roll the session over to a fresh file on the same store root.
+        let store_for_commands = store.clone();
         // Stashes each in-flight `spawn_subagent` call's task/briefing content
         // sections (shown while pending/running) keyed by call id, so they
         // can be carried forward into the eventual real `ToolDone` — sent
@@ -921,6 +1027,9 @@ impl AgentLoop {
 
         tokio::spawn(async move {
             let mut context = Context::new();
+            if let Some(store) = store {
+                context.set_store(store);
+            }
             if let Some(briefing) = briefing {
                 context.push_system(briefing);
             }
@@ -1299,6 +1408,7 @@ impl AgentLoop {
                             })
                             .await;
                         if let Some(manager) = child_agent_manager.as_mut() {
+                            manager.record_child_result(&finish_result);
                             manager.on_child_finished(run_id);
                         }
                         tracing::debug!(
@@ -1829,6 +1939,36 @@ impl AgentLoop {
                                     mode = AgentMode::Idle;
                                 }
                             }
+                            AgentCommand::ClearContext => {
+                                tracing::info!("command: clear context");
+                                let mut fresh_context = Context::new();
+                                if let Some(store) = &store_for_commands {
+                                    let config = engine.config();
+                                    match store.start_new_session(
+                                        &config.provider_connection,
+                                        &config.model,
+                                        None,
+                                    ) {
+                                        Ok(new_store) => fresh_context.set_store(new_store),
+                                        Err(error) => tracing::warn!(
+                                            %error,
+                                            "could not start a new session file;                                              the cleared conversation is not persisted"
+                                        ),
+                                    }
+                                }
+                                context = fresh_context;
+                            }
+                            AgentCommand::RecordNotice(text) => {
+                                context.push_system(text);
+                            }
+                            AgentCommand::RecordModelChanged {
+                                provider_connection,
+                                model,
+                            } => {
+                                if let Some(store) = context.store() {
+                                    store.record_model_changed(&provider_connection, &model);
+                                }
+                            }
                             AgentCommand::ForChild { run_id, command } => {
                                 // Only a root loop's `child_agent_manager` can
                                 // resolve `run_id` to a live child command
@@ -2329,7 +2469,7 @@ fn start_request(
     // (see `AgentLoop::own_run_id`); attaching it to this span lets every
     // nested log emitted while this request is in flight — including the
     // provider-level "chat request started"/"stream ended with [DONE]"
-    // lines in `llm::openai_provider` — identify which agent loop it
+    // lines in `llm::openai_compatible_provider` — identify which agent loop it
     // belongs to, without threading `run_id` through the provider itself.
     let span = tracing::info_span!("agent_stream", run_id = ?own_run_id);
     tokio::spawn(
@@ -2511,7 +2651,7 @@ mod tests {
     use crate::test_support::capture_logs;
     use crate::{
         agent::tools::{clarify::ClarifyTool, write::WriteTool},
-        engine::{Engine, EngineConfig, EngineImpl, DEFAULT_CONTEXT_LENGTH},
+        llm::engine::{Engine, EngineConfig, EngineImpl, DEFAULT_CONTEXT_LENGTH},
         llm::{MockEvent, MockProvider},
         sandbox::{Sandbox, SandboxContext},
     };
@@ -2520,7 +2660,7 @@ mod tests {
         Arc::new(EngineImpl::new(
             Arc::new(MockProvider::new(vec![], Duration::from_millis(0))),
             EngineConfig {
-                provider: "mock".to_string(),
+                provider_connection: "mock".to_string(),
                 model: "test-model".to_string(),
                 temperature: None,
                 context_length: DEFAULT_CONTEXT_LENGTH,
@@ -3210,7 +3350,7 @@ mod tests {
         let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
             Arc::new(MockProvider::with_script(script, Duration::from_millis(80))),
             EngineConfig {
-                provider: "mock".to_string(),
+                provider_connection: "mock".to_string(),
                 model: "test-model".to_string(),
                 temperature: None,
                 context_length: DEFAULT_CONTEXT_LENGTH,
@@ -3315,7 +3455,7 @@ mod tests {
         let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
             Arc::new(MockProvider::with_script(script, Duration::from_millis(0))),
             EngineConfig {
-                provider: "mock".to_string(),
+                provider_connection: "mock".to_string(),
                 model: "test-model".to_string(),
                 temperature: None,
                 context_length: DEFAULT_CONTEXT_LENGTH,
@@ -3420,7 +3560,7 @@ mod tests {
                 Duration::from_millis(0),
             )),
             EngineConfig {
-                provider: "mock".to_string(),
+                provider_connection: "mock".to_string(),
                 model: "test-model".to_string(),
                 temperature: None,
                 context_length: DEFAULT_CONTEXT_LENGTH,
@@ -3477,7 +3617,7 @@ mod tests {
         let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
             Arc::new(MockProvider::with_script(script, Duration::from_millis(0))),
             EngineConfig {
-                provider: "mock".to_string(),
+                provider_connection: "mock".to_string(),
                 model: "test-model".to_string(),
                 temperature: None,
                 context_length: DEFAULT_CONTEXT_LENGTH,

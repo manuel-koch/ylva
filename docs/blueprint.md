@@ -168,13 +168,13 @@ single provider serving both backends for Ollama and OpenRouter via the OpenAI
   judged by the presence of `data:` events, not by its first non-empty line. The
   parser-facing consequences of these runs (comment-line tolerance, reasoning deltas
   without `tool_calls`) are captured as an implementation note in §4A.
-- **Architectural consequence:** keep the unified provider (§2, §4A, §5). No `ollama_native`
-  provider is required. **Base URL / HTTP constraint to note:** per-backend `base_url`
-  differs (Ollama `http://localhost:11434/v1/chat/completions` vs OpenRouter
-  `https://openrouter.ai/api/v1/chat/completions`), so the provider takes `base_url` as a
-  config parameter while sharing one client and one request/parse path. Local Ollama holds
-  the connection until the stream ends; unload via `ollama stop <model>` between model
-  switches.
+- **Architectural consequence:** keep the shared streaming transport (§2, §4A, §5). No
+  `ollama_native` chat provider is required. **Base URL / HTTP constraint to note:**
+  Ollama receives the server origin (`http://localhost:11434`) and derives
+  `/v1/chat/completions` for chat plus native `/api` catalog requests, while
+  OpenRouter receives `https://openrouter.ai` and derives `/api/v1`; both still share one client
+  and one streaming request/parse path. Local Ollama holds the connection until
+  the stream ends; unload via `ollama stop <model>` between model switches.
 - **Models actually used:** `gemma4:e4b-mlx` (primary) and `gpt-oss:20b` (confirmation);
   the models named in §Spike 3 text (`llama3.1:8b`, `qwen2.5`, `mistral-nemo`) were not
   pulled and were not used. Raw capture: `spikes/spike-ollama-tool-calling/out/sse_*.log`.
@@ -344,7 +344,7 @@ src/
 ├── cli.rs               # Headless mode: arg parsing, fake TUI wrapper, exit codes
 ├── llm.rs               # trait Provider { async fn chat(...) }
 ├── llm/
-│   └── openai_provider.rs  # Raw reqwest + eventsource-stream targeting OpenAI spec
+│   └── openai_compatible_provider.rs  # Raw reqwest + eventsource-stream targeting OpenAI spec
 │                           # Works for both OpenRouter and Ollama via config
 ├── agent.rs             # ReAct loop: select! { stream, cmd_rx }
 ├── agent/
@@ -397,11 +397,14 @@ The runtime exposes **two** layers (see [class-diagram.mmd](./class-diagram.mmd)
 > OpenAI-endpoint string. Its meaning — which endpoints and request paths exist under that base — is
 > defined **only inside the concrete provider implementation**, never in the `Provider` trait. The fact
 > that Ylva currently ships an OpenAI-compatible provider must not leak the OpenAI path structure into
-> the trait or into `base_url`'s meaning. The concrete `OpenAiProvider` receives a `base_url` that
-> includes the backend origin and version prefix (OpenRouter `https://openrouter.ai/api/v1`, Ollama
-> `http://localhost:11434/v1`) and internally appends `/chat/completions`. This leaves
-> room for future provider-side queries (e.g. model listing) under the
-> same `base_url`.
+> the trait or into `base_url`'s meaning. The concrete
+> `OpenAiCompatibleProvider` receives a `base_url` that includes the backend
+> origin and version prefix for the OpenAI-compatible chat endpoint. OpenRouter
+> instead receives its origin (`https://openrouter.ai`) and derives `/api/v1`.
+> Ollama instead receives its server origin
+> (`http://localhost:11434`) and derives `/v1/chat/completions` for chat plus
+> native `/api` catalog endpoints. This leaves room for future provider-side
+> queries under the provider's own paths.
 
 ```rust
 use serde_json::Value;
@@ -507,9 +510,12 @@ loop {
 }
 ```
 
-**OpenRouter:** Configure `base_url = "https://openrouter.ai/api/v1"` and pass the OpenRouter API key.
+**OpenRouter:** Configure `base_url = "https://openrouter.ai"` and pass the
+OpenRouter API key. The provider derives `/api/v1`.
 
-**Ollama:** Configure `base_url = "http://localhost:11434/v1"`. No API key required for local Ollama.
+**Ollama:** Configure `base_url = "http://localhost:11434"`. The provider
+derives `/v1/chat/completions` for chat and `/api/tags` plus `/api/show` for
+model discovery. No API key is required for local Ollama.
 
 **Tool call accumulation:** OpenAI streams tool calls incrementally across multiple
 SSE chunks (`delta.tool_calls[0].function.arguments`). The **provider** does **not**
@@ -648,7 +654,10 @@ enum AgentCommand {
     Stop,                    // Interrupt current generation
     // The following variants are deferred to Phase 3 (tools):
     // ApproveTool { id: Uuid },
-    // SwitchModel(String),   // wired via /models slash command in Phase 7
+    // Phase 7 instead switches the model on the shared `Engine`
+    // (`Engine::switch_model`) from the `/models` slash command, and records
+    // the confirmation with `AgentCommand::RecordNotice`; no `SwitchModel`
+    // command variant was needed.
 }
 
 enum AgentEvent {
@@ -1586,14 +1595,13 @@ synonym for the default profile. Profile names are referenced by value
 The project `.ylva/` is meant to be **committed** to the project repo (shared,
 team-consistent config).
 
-**Secrets — never stored in config files.** API keys come only from the
-environment. Optional per-scope `.env` files (e.g.
-`~/.ylva/profiles/default/.env` or `.ylva/profiles/default/.env`) are
-auto-loaded at startup, with an already-exported environment variable taking
-precedence over the `.env` value. `ylva init --project` also deploys a
-`.gitignore` inside the project's `.ylva/` (write-if-missing / `--force`) that
-ignores `.env`, so secrets stay uncommitted while the rest of the config is
-committed.
+The home profile's optional `.env` file
+(`~/.ylva/profiles/default/.env`) is auto-loaded at startup, with an
+already-exported environment variable taking precedence over the `.env`
+value. TOML string values can reference the merged environment with
+`${ENV_VAR}`. Missing variables are startup errors, and secret values are
+never logged. Project-scoped `.env` loading and the `ylva init --project`-
+managed `.gitignore` remain Phase 8 work.
 
 **Global agent types** (`~/.ylva/agents/`) define *behavior*: tools,
 prompts, max iterations, timeouts, `can_spawn`. They are fully self-contained
@@ -1601,8 +1609,9 @@ and shared across all profiles, and the same entries are usable as root or
 child.
 
 **Profiles** (`~/.ylva/profiles/<name>/`) define *infrastructure*:
-which engine (provider/model/temperature/context-size) each agent type uses,
-and can optionally override behavioral settings or disable a type entirely.
+which engine (provider-connection/model/temperature/context-size) each agent
+type uses, and can optionally override behavioral settings or disable a type
+entirely.
 
 ##### Agent-Type File Formats
 
@@ -1650,39 +1659,57 @@ out-of-the-box experience.
 
 ##### Engine Definitions (Model Plumbing)
 
-An **engine** is the configuration name for a reusable bundle of LLM connection and sampling parameters.
-At runtime, each engine definition is built into a concrete `Engine` trait object (a thin wrapper
-around a `Provider` plus the `EngineConfig`). The terms are separate concepts: **engine** = configuration
-data; **Engine** = runtime trait the agent depends on; **Provider** = low-level backend trait (see
+An **engine** is the configuration name for a reusable bundle of model and
+sampling parameters. A named provider connection owns the endpoint and
+credentials. At runtime, each engine definition is built into a concrete
+`Engine` trait object (a thin wrapper around a `Provider` plus the
+`EngineConfig`). The terms are separate concepts: **engine** = model/runtime
+configuration; **provider connection** = named endpoint and credentials;
+**provider** = implementation kind; **Engine** = runtime trait the agent
+depends on; **Provider** = low-level backend trait (see
 [class-diagram.mmd](./class-diagram.mmd)).
 
 ```toml
 # profiles/work/config.toml
-[engines.openrouter_fast]
-provider = "openrouter"  # maps to Provider implementation (not the trait name)
-model = "mistralai/mistral-small"
-temperature = 0.2
-context_length = 128000
+default_engine = "ollama/local"
 
-[engines.ollama_local]
+[provider_connections.ollama-local]
+provider = "ollama"  # implementation kind
+api_base_url = "http://localhost:11434"
+
+[provider_connections.ollama-cloud]
 provider = "ollama"
+api_base_url = "https://ollama.com"
+api_key = "${OLLAMA_CLOUD_API_KEY}"
+
+[engines."ollama/local"]
+provider_connection = "ollama-local"
 model = "llama3.1:8b"
 temperature = 0.7
 context_length = 8192
+
+[engines."ollama/cloud"]
+provider_connection = "ollama-cloud"
+model = "llama3.1:70b"
+temperature = 0.2
 ```
 
-Engines are named and referenced by string. They contain **only** model
-specific properties (`provider`, `model`, `temperature`, `context_length`, `api_base_url`,
-optionally `api_key`). They do **not** contain tools, prompts, or agent logic.
+Provider connections are named and own endpoint and credential settings.
+Engines are named and reference a connection with `provider_connection`; this
+allows multiple connections to use the same implementation kind. Engine-level
+`api_base_url` and `api_key` values override the connection values. Engines
+contain model-specific properties (`provider_connection`, `model`,
+`temperature`, `context_length`, and optional connection overrides). They do
+not contain tools, prompts, or agent logic.
 
 **Quoted keys (optional):** TOML allows quoted keys containing `/` or `:` for
-human-readable provider/model hints. The dotted form (`openrouter_fast`) is the
+human-readable engine-name hints. The dotted form (`openrouter_fast`) is the
 recommended default and works with all TOML tooling; quoted keys are an opt-in
 for readability and carry no extra semantics:
 
 ```toml
 [engines."ollama/local"]
-provider = "ollama"
+provider_connection = "ollama-local"
 model = "llama3.1:8b"
 ```
 
@@ -1857,7 +1884,10 @@ store (see §4H). Two JSONL record shapes are written per parent session file:
   `meta` header (auto-title = the child `task`), mirroring §4H layout —
   so child reasoning stays inspectable and audit-able without a
   relational table. Per §4H decision 9, this sub-session is written **once at
-  completion**, not streamed live.
+  completion**, not streamed live. Its own `meta` header also carries
+  `parent_session` (the parent's `session_id`), so the link is discoverable
+  bottom-up from the child file alone, not only top-down via the parent's
+  `child_start`/`child_result` records.
 - Querying by run id / parent is a scan of the project directory's session
   files (the `meta`/`child_*` lines), which is cheap at the single-user,
   per-project scale involved here.
@@ -1895,7 +1925,11 @@ stored.
 1. **Scope — one global store, not per-project:**
    History is cross-project user data, so it is stored once, globally, under
    `~/.ylva/chats/`. Project-scoped `.ylva/` stays config-only (and committed);
-   chat data is never mixed into it.
+   chat data is never mixed into it. The `~/.ylva/` root is resolved from the
+   dedicated `YLVA_HOME` environment variable when set and non-empty — used
+   verbatim as the root, with no further `.ylva` nesting, matching
+   `CARGO_HOME`/`RUSTUP_HOME`-style conventions — and otherwise from
+   `<operating-system-home>/.ylva`.
 
 2. **Project grouping — hash of the raw CWD, not git root:**
 
@@ -2023,9 +2057,13 @@ stored.
    - **No separate per-project index/`.index` file** and no runtime browsing
      built-in.
    - Every session's `meta` header carries an **auto-generated title**: the
-     first user message, truncated to a configurable length (e.g. first 40–80
-     chars, on one line). The title is derived and written once, when the
-     first user turn is committed.
+     first explicit user message, truncated to a configurable length (e.g.
+     first 40–80 chars, on one line). The header itself is written to disk
+     immediately (empty title) when the session is created, so no event is
+     ever held only in memory waiting on it; the title is filled in once,
+     by an atomic rewrite of just that first line, when the first
+     conversation turn completes (the first assistant reply) — never by
+     delaying the durability of anything committed before then.
    - The **sidecar — a file that is the session's abstract**: a small,
      human-readable, always-plaintext summary record per session that carries
      the session's discoverable essence (title, meta fields, status, size,
@@ -2265,8 +2303,12 @@ exit code `4` and a descriptive error to stderr.
 with `--provider` + `--model` flags (e.g., `--provider openrouter --model anthropic/claude-3.5-haiku`)
 for one-off scripts. No hidden defaults.
 
-**Commands:** Slash commands (`/models`, `/tools`, `/clear`, `/save`) are only recognised at the start
-of a line to avoid triggering inside pasted code.
+**Commands:** Slash commands are only recognised as the first character of the
+draft input, to avoid triggering inside pasted code. Phase 7 ships `/models`,
+`/tools`, and `/clear` (alias `/reset`) in the TUI; `/save` was dropped
+(persistence is unconditional, see §4H) and the headless CLI has no
+interactive command surface. Anything outside the allowlist is ordinary chat
+text.
 
 **Conversation titles:** The `meta` header carries an auto-generated title —
 the first user message, truncated and single-line (see §4H decision 8) — so
@@ -2364,25 +2406,30 @@ top of a proven agent loop.
       and `StreamEvent::Cancelled`) stays **unchanged** — no `Delta` variant, no tool-call pipeline
       (see Step 3 refinement below).
 
-- [x] **Step 3 refinement (deferred tool-call assembly):** implement **one** provider
-      (`OpenAiProvider`) using raw `reqwest` + `eventsource-stream`. The provider emits only
+- [x] **Step 3 refinement (deferred tool-call assembly):** implement **one**
+      provider (`OpenAiCompatibleProvider`) using raw `reqwest` +
+      `eventsource-stream`. The provider emits only
       `StreamEvent::Text` for `delta.content`; it **skips** non-content deltas (`reasoning`/`role`-only
       and `tool_calls`-only chunks). It does **not** emit `StreamEvent::Delta`. The
       `ToolCallAccumulator` and tool-call assembly move to **Phase 3** and live in the **agent's
       streaming task** per §4A — never "inside the provider" (this supersedes the earlier Phase 2
       bullet that placed the accumulator in the provider).
 
-- [x] Implement the `OpenAiProvider` struct (`base_url`, `model`, `api_key`, `reqwest::Client`) with
+- [x] Implement the `OpenAiCompatibleProvider` struct (`base_url`, `model`,
+      `api_key`, `reqwest::Client`) with
       helper function `serialize_messages(&[Message]) -> Value` (skip `ToolResult`/`ToolError`
       silently — unreachable in Phase 2). Append `/chat/completions` to `base_url` internally per the
       §4A `base_url` semantics note.
 
-- [x] Verify provider works for both OpenRouter (`base_url` override) and Ollama (`/v1` endpoint)
+- [x] Verify provider works for both OpenRouter (`base_url` override) and Ollama
+      (server-origin `base_url`, with derived `/v1` chat and `/api` catalog endpoints)
       via config switch. **Blocked until Spike 3 (§0) validates Ollama tool-calling support.**
       If Spike 3 fails, replace this step with: implement a second `ollama_native`
       provider targeting `/api/chat` with manual tool-injection prompting, and
       remove the "unified provider" claim from §4A and §5.
-      Spike 3 has **passed** — the unified provider is kept, no `ollama_native` provider.
+      Spike 3 has **passed** — the shared streaming transport is kept; Ollama's
+      model catalog uses a dedicated provider wrapper rather than a second
+      streaming transport.
 
 - [x] Spawn chat in a `tokio::task`; send `StreamEvent::Text` chunks over `mpsc`
 
@@ -2397,12 +2444,12 @@ top of a proven agent loop.
 - [x] **Pre-stream HTTP retry** (`429`/`5xx`/connect): bounded exponential backoff, up to 3 retries,
       base 1 s, max 30 s, jitter, honoring `Retry-After`; never retry mid-stream (§4A).
 
-- [x] **Demo wiring (Phase 2, no CLI/config):** `main.rs` selects the provider from env vars with
-      **Ollama-first** precedence — a non-empty `OLLAMA_BASE_URL` (+ optional `OLLAMA_MODEL`/
-      `OLLAMA_API_KEY`) selects Ollama; otherwise any of `OPENROUTER_BASE_URL`/`OPENROUTER_MODEL`/
-      `OPENROUTER_API_KEY` being set selects OpenRouter, defaulting `OPENROUTER_BASE_URL` to
-      `https://openrouter.ai/api/v1` when unset (OpenRouter is a single hosted service, unlike
-      Ollama's arbitrary host); else fall back to `MockProvider`.
+- [x] **Demo wiring (Phase 2, no CLI/config):** `main.rs` discovers every
+      configured supported provider from the process environment and the
+      selected profile's optional `.env`, with process values taking
+      precedence. Ollama is initially selected when configured; OpenRouter
+      uses `https://openrouter.ai` when its base URL is unset, and the
+      `MockProvider` remains the fallback when no backend is configured.
 
 - [x] No TUI yet. Still stdout/stderr only.
 
@@ -2633,7 +2680,7 @@ See reducer-state-handling-plan.md.
 - [x] **`App` trait:** `async fn run(self) -> anyhow::Result<u8>`. `TuiApp` and
       `ConsoleApp` implement it (§6). `main.rs` dispatches on CLI mode.
 
-- [x] **`Provider::list_models()`:** add to the `Provider` trait; `OpenAiProvider`
+- [x] **`Provider::list_models()`:** add to the `Provider` trait; `OpenAiCompatibleProvider`
       queries `/models` (OpenRouter) or `/api/tags` (Ollama). Returns `Vec<ModelInfo>`
       for a future `/models` slash command.
 
@@ -2690,22 +2737,21 @@ See reducer-state-handling-plan.md.
 
 ### Phase 7: Polish & Persistence
 
-- [ ] **Goal:** Usable daily driver.
+- [x] **Goal:** Usable daily driver.
 
-- [ ] `syntect` highlighting for all Markdown code fences (already shipped in
+- [x] `syntect` highlighting for all Markdown code fences (already shipped in
       Phase 6, §4F); live rendering during streaming/thinking already matches
       the completed-message rendering path — no separate "raw text while
       streaming" behavior is planned (see §4F "Streaming markdown strategy")
 
-- [ ] Two built-in themes: dark, light (a third "monokai" theme is deferred — no
+- [x] Two built-in themes: dark, light (a third "monokai" theme is deferred — no
       bundled `syntect` default theme is named "monokai"; sourcing/embedding a
       third theme asset is tracked as a standalone future idea, not a phase task —
       see `docs/ideas/monokai-theme.md`)
 
-- [ ] JSONL persistence for conversations, child agents, and schema-version handling (§4H)
+- [x] JSONL persistence for conversations, child agents, and schema-version handling (§4H)
 
-<<<<<<< Updated upstream
-- [ ] Implement the `Store` (`src/store.rs`, §4H) as the single persistence path for
+- [x] Implement the `Store` (`src/store.rs`, §4H) as the single persistence path for
       **both** main-conversation messages and child-agent records — do not build a
       child-only persistence layer. Append `child_start` / `child_result` JSONL
       records (shapes in §4G *Persistence* / §4H) to the parent session file via the
@@ -2714,48 +2760,35 @@ See reducer-state-handling-plan.md.
       Phase 6.12 in `docs/plans/phase6-terminal-superpowers.md`, dropped because it
       had no main-session persistence to attach to.
 
-=======
-<<<<<<< Updated upstream
->>>>>>> Stashed changes
-- [ ] Resume an existing session via explicit `--conversation-id` (no auto-resume, no picker)
-=======
-- [ ] Implement the `Store` (`src/store.rs`, §4H) as the single persistence path for
-      **both** main-conversation messages and child-agent records — do not build a
-      child-only persistence layer. Append `child_start` / `child_result` JSONL
-      records (shapes in §4G *Persistence* / §4H) to the parent session file via the
-      same writer used for conversation messages, keyed by `parent_session` +
-      `run_id`. This supersedes the child-persistence task originally planned as
-      Phase 6.12 in `docs/plans/phase6-terminal-superpowers.md`, dropped because it
-      had no main-session persistence to attach to.
-
-- [ ] Resume an existing session via explicit `--conversation-id` (no auto-resume, no
+- [x] Resume an existing session via explicit `--conversation-id` (no auto-resume, no
       picker); an id that does not match an existing session file is a hard error,
-      never a silent new-session fallback
->>>>>>> Stashed changes
+      never a silent new-session fallback. Phase 7 resume **appends** to the session
+      file; replaying its earlier turns back into the in-memory `Context` is Phase 8.
 
-- [ ] Config hierarchy — **narrow scope**: load a single flat
+- [x] Config hierarchy — **narrow scope**: load a single flat
       `~/.ylva/profiles/<name>/config.toml` (default profile at
       `~/.ylva/profiles/default/config.toml`) into the existing
       `ProfileConfig`/`AgentConfig`/`EngineConfig` structs for default model,
       theme, keybindings, and agent-type engine assignments. The full `§4G`
       three-layer fallback chain (project `.ylva/` → home `~/.ylva/` → embedded
       `config/`), `ylva init`/`ylva init --project` distribution, `SOUL.md`
-      persona loading, global `agents/*.md` type files, and `.env` auto-loading
-      are **out of scope for Phase 7** — see Phase 8 below.
+      persona loading, and global `agents/*.md` type files are **out of scope
+      for Phase 7** — see Phase 8 below. Profile-scoped `.env` loading is
+      implemented for the provider environment.
 
-- [ ] `/commands` in input box, recognised only when `/` is the first character
+- [x] `/commands` in input box, recognised only when `/` is the first character
       of the draft message (never mid-paste): `/models` (list available models
-      from the active provider via `Provider::list_models()`, §4A, and switch
-      the active engine on selection — supersedes the standalone `SwitchModel`
-      placeholder), `/tools` (show the active agent's allowed tool list),
-      `/clear`/`/reset` (aliases; reset `Context` and start a fresh `Store`
-      session). `/save` is dropped — it had no behavior distinct from the
-      `Store`'s existing automatic per-line flush, §4H decision 10. A
-      recognised command may open a small overlay above the conversation list
-      while typing (e.g. `/models`' candidate list) and always produces a
-      result bubble in the conversation on confirm. `/agent` (overlay listing
-      (sub-)agent runs and switching the view to one) is **not** in Phase 7
-      scope — see `docs/ideas/slash-commands.md`.
+      from every configured provider via `Provider::list_models()`, §4A, and
+      switch the active engine and model on selection — supersedes the
+      standalone `SwitchModel` placeholder), `/tools` (show the active agent's
+      allowed tool list), `/clear`/`/reset` (aliases; reset `Context` and start
+      a fresh `Store` session). `/save` is dropped — it had no behavior
+      distinct from the `Store`'s existing automatic per-line flush, §4H
+      decision 10. A recognised command may open a small overlay above the
+      conversation list while typing (e.g. `/models`' candidate list) and
+      always produces a result bubble in the conversation on confirm. `/agent`
+      (overlay listing (sub-)agent runs and switching the view to one) is **not**
+      in Phase 7 scope — see `docs/ideas/slash-commands.md`.
 
 **Key crates:** `serde_json`, `sha2`, `toml`, `chrono`
 
@@ -2783,10 +2816,13 @@ See reducer-state-handling-plan.md.
       frontmatter, e.g. `research.md`, `code_edit.md`), shared across profiles
       and usable as root or child agent types
 
-- [ ] `.env` auto-loading per scope (e.g. `~/.ylva/profiles/default/.env`,
-      `.ylva/profiles/default/.env`), with an already-exported environment
-      variable taking precedence; `ylva init --project` also deploys a
-      `.gitignore` inside the project's `.ylva/` ignoring `.env`
+- [x] Profile-scoped `.env` auto-loading
+      (`~/.ylva/profiles/<name>/.env`), with an already-exported environment
+      variable taking precedence.
+
+- [ ] Project-scoped `.env` auto-loading (e.g. `.ylva/profiles/default/.env`);
+      `ylva init --project` also deploys a `.gitignore` inside the project's
+      `.ylva/` ignoring `.env`
 
 - [ ] Per-tool sandbox rule configuration: load configurable `[tool.*]` rule
       lists (including `outside_workspace`/`dot_path` overrides, §4E) from the
@@ -3018,7 +3054,7 @@ where they are documented in the body of this document.
 | **TUI async context**          | `main.rs` uses `rt.block_on` for the TUI loop                                                                                                                                                  | §4B ReAct Loop                               |
 | **Token counting**             | `tiktoken-rs` for OpenAI; byte heuristic for Ollama; cached per `TieredMessage`. Counts are **approximate/advisory** (encoding is model-family dependent); rely on `context_length × 0.9` margin | §4C Context State Machine                    |
 | **Context tiers**              | `System` (never drop), `InitialContext` (never drop), `Recent` (drop oldest), `Compacted` (summarize in Phase 9)                                                                               | §4C Context State Machine                    |
-| **Ollama tools**               | Unified OpenAI-compatible provider using raw `reqwest` to `/v1/chat/completions`; no separate `ollama-rs` crate                                                                                | §2 Crate Ecosystem, §5 OpenRouter vs Ollama  |
+| **Ollama tools**               | Dedicated Ollama provider reusing the unified raw `reqwest` streaming transport for `/v1/chat/completions`; model discovery uses native `/api/tags` and `/api/show`; no separate `ollama-rs` crate | §2 Crate Ecosystem, §5 OpenRouter vs Ollama  |
 | **OS signals**                 | `ctrlc` handler mapped to `AgentCommand::Stop`                                                                                                                                                 | §1 Vision, §2 Crate Ecosystem                |
 | **Tool binary checks**         | Lazy check at invocation with graceful fallback                                                                                                                                                | §4D Tool Registry                            |
 | **Tool timeouts**              | `tokio::time::timeout` around `Command::output` with user-visible defaults                                                                                                                     | §4D Tool Registry                            |
@@ -3027,11 +3063,11 @@ where they are documented in the body of this document.
 | **Output streams**             | Split stdout (content) / stderr (status); `--quiet` flag; buffer and emit at end                                                                                                               | §7 CLI Surface                               |
 | **Headless safety**            | Mutating tools require `--auto-approve-*`; exit code `4` if denied                                                                                                                             | §4E Safety, §7 CLI Surface                   |
 | **Conversation titles**        | Auto-generated from first user message, truncated single-line in the `meta` header (§4H decision 8)                                                                                                     | §7 CLI Surface, §4H decision 8               |
-| **Model switching**            | Supported mid-conversation; `SwitchModel` is a documented placeholder, not yet wired — arrives via `/models` in the slash-command phase                                                        | §4B ReAct Loop, §7 CLI Surface               |
+| **Model switching**            | Supported mid-conversation via `/models`, which queries each configured provider connection once and switches the selected connection/model through `EngineRouter`; the `SwitchModel` command placeholder was dropped | §4B ReAct Loop, §6 Commands |
 | **App state**                  | Dumb view model; agent loop owns state machine                                                                                                                                                 | §4B ReAct Loop                               |
 | **Config format**              | TOML for all config files; YAML explicitly rejected                                                                                                                                            | §2 Crate Ecosystem, §4G Agent Types & Delegation |
-| **Engine vs Provider mapping** | `Engine` = config data (static, named); `Provider` = runtime trait object built from Engine at startup                                                                                         | §4A Provider Trait, §4G Engine Definitions   |
-| **Syntect themes**             | 3 built-in: dark, light, monokai                                                                                                                                                               | §4F Rich Chat Rendering                      |
+| **Engine vs Provider mapping** | `Engine` = named model/runtime configuration; `provider_connection` = named endpoint/credential connection; `provider` = implementation kind; `Provider` = runtime trait object built from a connection at startup | §4A Provider Trait, §4G Engine Definitions |
+| **Syntect themes**             | 2 built-in and selectable: dark, light; "monokai" is not bundled with `syntect` and stays an idea (`docs/ideas/monokai-theme.md`)                                                                | §4F Rich Chat Rendering                      |
 | **edit tool**             | Both search-and-replace and line-range modes                                                                                                                                                   | §4D Tool Registry                            |
 | **Slash commands**             | Only recognised at start of line                                                                                                                                                               | §7 CLI Surface                               |
 | **Headless buffering**         | Buffer everything; emit at end                                                                                                                                                                 | §7 CLI Surface                               |
@@ -3070,7 +3106,7 @@ where they are documented in the body of this document.
 | **Context Phase 1**            | Simple `Vec<Message>`; no `buffer`, no `TieredMessage` (Q2, Q13)                                                                                                                              | §4C Context                                  |
 | **Persona / system message**   | `Context::new()` seeds `Message::System` = "You are Ylva, a helpful agent with tool capabilities." (SSOT constant); a config phase loads it from a `SOUL.md` (project `.ylva/` / home `~/.ylva/`, three-layer fallback)                                                                                      | §4C Context, §4G Config, §7 Phase 1/6        |
 | **Ollama tools validation**    | Spike required before Phase 2; fallback to native provider if `/v1` lacks tool support (Q3). **Spike 3 PASSED** — unified provider kept, no `ollama_native` fallback                                                                                                | §5 OpenRouter vs Ollama, §0 Spike 3                      |
-| **`base_url` semantics**       | `base_url` is a generic provider concept: endpoint/path interpretation lives only in the concrete provider; OpenAI compatibility never enters the `Provider` trait. `OpenAiProvider` receives a base incl. the origin+version prefix and internally appends `/chat/completions` (Phase 2 refinement) | §4A Unified Provider Trait |
+| **`base_url` semantics**       | `base_url` is a generic provider concept: endpoint/path interpretation lives only in the concrete provider; OpenAI compatibility never enters the `Provider` trait. `OpenAiCompatibleProvider` receives a base incl. the origin+version prefix and internally appends `/chat/completions` (Phase 2 refinement) | §4A Unified Provider Trait |
 | **HTTP retry**                 | Inside Provider; 3 retries, base 1 s, max 30 s, exponential with jitter, honoring `Retry-After`; pre-stream only (Q4)                                                                         | §4A Unified Provider Trait                   |
 | **lib.rs API**                 | `AgentLoop::new(provider) -> (AgentLoop, Receiver<UiUpdate>)`; `run()` spawns outer task, returns `JoinHandle<Result<Context>>` (final history on shutdown via drop of `AgentLoop` → closed cmd channel); `send_command()` + `ui_updates()` (Q5, Q9)                                                | §4B ReAct Loop, §7 Phase 1                   |
 | **PendingTool**                | `AssembledToolCall` + `timeout_secs`, with `execute()` method dispatching to `ToolRegistry` (Q6)                                                                                           | §4D Tool Registry                            |
@@ -3084,6 +3120,6 @@ where they are documented in the body of this document.
 | **OpenAI serialization**       | Free function in provider module; `Message` decoupled from wire format (Q19)                                                                                                               | §4A Unified Provider Trait                   |
 | **CancellationToken**          | Outer loop creates it; passes clone to Provider; `take().cancel()` on `Stop` (Q20)                                                                                                         | §4B ReAct Loop                               |
 | **Phase 1 Cargo.toml**         | `tokio`, `tokio-util`, `futures`, `thiserror`, `anyhow` plus `uuid` (`v4`) and `serde_json` for the full `Message` skeleton (Q23)                                                | §7 Phase 1, §9 Cargo.toml                    |
-| **File layout**                | Flat files for Phase 1 (`src/agent.rs`, `src/llm.rs`); directories when >150 lines (Q24)                                                                                                     | §7 Phase 1                                   |
-| **Shared mock**                | `tests/common/mock_provider.rs` with `MockProvider` (Q25)                                                                                                                                     | §7 Phase 1                                   |
+| **File layout**                | `src/agent.rs` remains a top-level module; the LLM package is split into `src/llm.rs` plus focused `src/llm/*.rs` modules as implementations grow (Q24)                                      | §7 Phase 1                                   |
+| **Shared mock**                | `src/llm/mock_provider.rs` with the deterministic `MockProvider` and `MockEvent` script (Q25)                                                                                                  | §7 Phase 1                                   |
 | **Empty Prompt**               | Ignored in Phase 1; `is_internal_continuation` deferred to Phase 3 (Q26)                                                                                                                       | §4B ReAct Loop                               |

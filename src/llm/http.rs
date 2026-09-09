@@ -24,6 +24,41 @@ pub(crate) const RETRY_BASE_SECONDS: u64 = 1;
 /// Upper bound on a single backoff delay, in seconds.
 pub(crate) const RETRY_MAX_SECONDS: u64 = 30;
 
+/// Perform a JSON `GET` request with optional bearer authentication.
+pub(crate) async fn get_json(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: Option<&str>,
+    operation: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let mut request = client.get(url);
+    if let Some(api_key) = api_key {
+        request = request.bearer_auth(api_key);
+    }
+    let response = request.send().await?;
+    let status = response.status();
+    anyhow::ensure!(status.is_success(), "{operation} failed with HTTP {status}");
+    Ok(response.json().await?)
+}
+
+/// Perform a JSON `POST` request with optional bearer authentication.
+pub(crate) async fn post_json(
+    client: &reqwest::Client,
+    url: &str,
+    body: &serde_json::Value,
+    api_key: Option<&str>,
+    operation: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let mut request = client.post(url).json(body);
+    if let Some(api_key) = api_key {
+        request = request.bearer_auth(api_key);
+    }
+    let response = request.send().await?;
+    let status = response.status();
+    anyhow::ensure!(status.is_success(), "{operation} failed with HTTP {status}");
+    Ok(response.json().await?)
+}
+
 /// Perform a `POST` with bounded exponential backoff retry for `429`/`5xx`/
 /// connect failures, honoring `Retry-After` when present. Returns the first
 /// successful response or a terminal [`anyhow::Error`].

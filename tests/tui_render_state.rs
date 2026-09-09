@@ -654,6 +654,42 @@ fn footer_says_subagent_working_while_child_is_only_streaming() {
     );
 }
 
+#[test]
+fn footer_shows_the_active_provider_and_model() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_widgets;
+    use ylva::{EngineDisplayInfo, TuiState};
+
+    let backend = TestBackend::new(60, 20);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    let mut state = TuiState {
+        engine_display: EngineDisplayInfo {
+            provider_connection: "ollama".to_string(),
+            model: "llama3.2".to_string(),
+        },
+        ..TuiState::new()
+    };
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("draw");
+
+    let buffer = terminal.backend().buffer().clone();
+    let rendered: String = (0..20u16)
+        .flat_map(|row| (0..60u16).map(move |column| (column, row)))
+        .map(|(column, row)| buffer.cell((column, row)).unwrap().symbol().to_string())
+        .collect();
+    assert!(
+        rendered.contains("ollama/llama3.2"),
+        "footer must show the active provider/model identity: {rendered:?}"
+    );
+}
+
 /// While viewing a child that is streaming extended-thinking/reasoning text
 /// (no visible reply yet), the footer must say "Subagent thinking…" rather
 /// than the generic "Subagent working…" — mirrors the root's own

@@ -28,9 +28,11 @@ use uuid::Uuid;
 
 use crate::agent::tools::clarify::ClarifyTool;
 use crate::markdown::render_markdown;
+use crate::slash_command::{parse_slash_command, SlashCommand};
 use crate::tui_reducer_state::{
     AppState, ChatEntry, ChatSelection, ChildRunInfo, ConfirmKey, ConversationView, DomainEvent,
-    Effect, Focus, HistoryDirection, InputEvent, ToolCallState, TuiMode, UserMessageState,
+    Effect, Focus, HistoryDirection, InputEvent, SlashOverlay, ToolCallState, TuiMode,
+    UserMessageState,
 };
 
 // ─── Public surface ───────────────────────────────────────────────────────────
@@ -410,6 +412,13 @@ fn handle_ctrl_c_generic(state: &mut AppState, textarea_is_empty: bool) -> Vec<E
 }
 
 fn handle_escape_main(state: &mut AppState, textarea: &TextareaContext) -> Vec<Effect> {
+    // An open slash overlay is the innermost dismissible thing on screen, so
+    // it consumes Esc before the draft-clearing / abort-confirm ladder.
+    if state.slash_overlay.is_visible() {
+        state.slash_overlay = SlashOverlay::Hidden;
+        return vec![];
+    }
+
     let mode_is_idle = matches!(effective_mode(&state.mode), TuiMode::Idle);
 
     if mode_is_idle {
@@ -478,11 +487,83 @@ fn handle_escape_main(state: &mut AppState, textarea: &TextareaContext) -> Vec<E
     }
 }
 
+/// Translate a recognized slash command into its effects.
+///
+/// Every command clears the input first so the command line never lingers as
+/// a draft, and none of them commits a user bubble: a command is an
+/// instruction to the TUI, not a turn in the conversation.
+fn slash_command_effects(command: SlashCommand) -> Vec<Effect> {
+    let command_effect = match command {
+        SlashCommand::Models => Effect::ListModels,
+        SlashCommand::Tools => Effect::ShowTools,
+        SlashCommand::Clear => Effect::ClearConversation,
+    };
+    vec![Effect::ClearTextarea, command_effect]
+}
+
 fn handle_key_main(
     state: &mut AppState,
     key_event: crossterm::event::KeyEvent,
     textarea: &TextareaContext,
 ) -> Vec<Effect> {
+    // The command suggestion overlay owns navigation and completion while it
+    // is open. Tab replaces the partial command with the canonical name of
+    // the highlighted entry; the normal textarea handler remains available
+    // when no command suggestions are shown.
+    if matches!(state.slash_overlay, SlashOverlay::Suggestions { .. }) {
+        match key_event.code {
+            KeyCode::Up => {
+                state.move_slash_selection(-1);
+                return vec![];
+            }
+            KeyCode::Down => {
+                state.move_slash_selection(1);
+                return vec![];
+            }
+            KeyCode::Tab => {
+                if let Some(command) = state.selected_slash_command() {
+                    return vec![Effect::SetInputText(command.name.to_string())];
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // The model picker owns navigation, reasoning-effort selection, and
+    // confirmation while it is open; every other key (including plain
+    // typing) falls through to the normal input handling.
+    if matches!(state.slash_overlay, SlashOverlay::ModelPicker { .. }) {
+        match key_event.code {
+            KeyCode::Up => {
+                state.move_slash_selection(-1);
+                return vec![];
+            }
+            KeyCode::Down => {
+                state.move_slash_selection(1);
+                return vec![];
+            }
+            KeyCode::Left => {
+                state.cycle_selected_model_reasoning_effort(-1);
+                return vec![];
+            }
+            KeyCode::Right => {
+                state.cycle_selected_model_reasoning_effort(1);
+                return vec![];
+            }
+            KeyCode::Enter => {
+                let picked = state
+                    .selected_model()
+                    .map(|choice| choice.selection.clone());
+                state.slash_overlay = SlashOverlay::Hidden;
+                return match picked {
+                    Some(model) => vec![Effect::SwitchModel(model)],
+                    None => vec![],
+                };
+            }
+            _ => {}
+        }
+    }
+
     match key_event.code {
         // Shift+Enter or Alt+Enter: insert a newline, exit history browsing.
         KeyCode::Enter
@@ -507,6 +588,13 @@ fn handle_key_main(
             let raw_text = &textarea.text;
             if raw_text.trim().is_empty() {
                 return vec![];
+            }
+            // Parsed from the *raw* draft, not the dedented text: the
+            // trigger is a `/` in the very first cell of the input, so an
+            // indented line stays ordinary chat.
+            if let Some(command) = parse_slash_command(raw_text) {
+                state.slash_overlay = SlashOverlay::Hidden;
+                return slash_command_effects(command);
             }
             let text = dedent(raw_text);
             let mode_is_idle = matches!(state.mode, TuiMode::Idle);
@@ -918,9 +1006,9 @@ fn route_domain(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
     effects
 }
 
-/// Handles `ChildAgentStarted`/`ChildAgentToken`/`ChildAgentDone` ahead of the
-/// mode-specific dispatch; every other event falls through unchanged to the
-/// per-`TuiMode` handlers.
+/// Handles child lifecycle/configuration events ahead of the mode-specific
+/// dispatch; every other event falls through unchanged to the per-`TuiMode`
+/// handlers.
 fn domain_child_lifecycle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
     match event {
         DomainEvent::ChildAgentStarted {
@@ -943,6 +1031,10 @@ fn domain_child_lifecycle(state: &mut AppState, event: DomainEvent) -> Vec<Effec
             // `render::project_for_draw`'s `child_view_bubble`), which
             // already shows the task/label/agent_type — duplicating it as
             // the transcript's first turn would just repeat the same text.
+            vec![]
+        }
+        DomainEvent::ChildAgentEngineConfigured { run_id, engine } => {
+            state.child_engine_displays.insert(run_id, engine);
             vec![]
         }
         DomainEvent::ChildAgentToken {
@@ -3225,6 +3317,32 @@ mod tests {
         assert!(
             matches!(&state.chat_entries[0], ChatEntry::ToolBubble { collapsed, .. } if !*collapsed),
             "click below the header bubble must not toggle it"
+        );
+    }
+
+    #[test]
+    fn child_engine_configuration_is_retained_for_its_conversation_view() {
+        let mut state = AppState::new();
+        let run_id = Uuid::new_v4();
+
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ChildAgentEngineConfigured {
+                run_id,
+                engine: crate::llm::engine::EngineDisplayInfo {
+                    provider_connection: "ollama".to_string(),
+                    model: "child-model".to_string(),
+                },
+            }),
+            &empty_textarea(),
+        );
+
+        assert_eq!(
+            state.child_engine_displays.get(&run_id),
+            Some(&crate::llm::engine::EngineDisplayInfo {
+                provider_connection: "ollama".to_string(),
+                model: "child-model".to_string(),
+            })
         );
     }
 

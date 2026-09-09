@@ -30,7 +30,7 @@ of this planning pass, shifting the former "Phase 8: CLI Surface" to "Phase
 - **Phase 8: Full Configuration & Persona System** — the three-layer
   `.ylva`/`~/.ylva`/embedded-`config/` fallback chain, `ylva init`/`ylva init
   --project`, `SOUL.md` persona loading, global `agents/*.md` type files,
-  `.env` auto-loading, and per-tool sandbox rule configuration.
+  project-scoped `.env` auto-loading, and per-tool sandbox rule configuration.
 - **Phase 9: Context Compaction & Token Budgeting** — `TieredMessage`/
   `MessageTier`, token counting (`tiktoken-rs`), `maybe_compact`'s
   hysteresis trigger/target algorithm, and tool-result truncation at
@@ -126,16 +126,31 @@ History") side by side; the first test to run after step 1 lands is
 
 ### Store & persistence (§4H, §4G *Persistence*)
 
-1. [ ] Add `sha2`, `chrono`, and `dirs` to `[dependencies]` in `Cargo.toml`
+1. [x] Add `sha2`, `chrono`, and `dirs` to `[dependencies]` in `Cargo.toml`
    (all three named in the blueprint's Phase 7 "Key crates" list and not yet
    present). `sha2` computes the `project_key` content-hash of the
    canonicalized CWD (§4H decision 2); `chrono` formats the `meta` header's
    `created_at`/session timestamps; `dirs::home_dir()` resolves `~/.ylva/`
-   cross-platform — on unix this reads the `HOME` env var, which is exactly
-   what lets step 8's integration test isolate a test run's persisted data
-   into a `tempfile::TempDir` by overriding `HOME` on the spawned child
-   process, without touching the real user's `~/.ylva/`.
-2. [ ] Create `src/store.rs` with:
+   cross-platform as the fallback default. **Amendment (post-review):** the
+   `~/.ylva/` root is resolved through a dedicated `YLVA_HOME` env var
+   override (checked first; falls back to `dirs::home_dir()` + `.ylva` when
+   unset), instead of relying on the ambient `HOME` env var read by
+   `dirs::home_dir()`. **Second amendment:** when set and non-empty,
+   `YLVA_HOME` names the root **directly** — no `.ylva` is appended to it —
+   matching the convention of every other `*_HOME` variable in this
+   ecosystem (`CARGO_HOME`, `RUSTUP_HOME`, `GOPATH`, `XDG_DATA_HOME`, …),
+   which all point straight at the tool's state directory rather than at a
+   parent that then gets a hidden dot-folder appended; only the
+   `dirs::home_dir()` fallback gets `.ylva` appended. Rationale for the
+   override itself: overriding the real `HOME` on a spawned test process
+   would also affect any real executable that process might invoke (shell rc
+   files, git/ssh config lookups, etc.), which is an unnecessary and fragile
+   side effect just to redirect persistence. A dedicated `YLVA_HOME`
+   override lets step 8's integration test isolate persisted data into a
+   `tempfile::TempDir` by setting only `YLVA_HOME` on the spawned child
+   process, leaving the real `HOME` untouched for that process and anything
+   it might invoke.
+2. [x] Create `src/store.rs` with:
    - `StoreEvent` enum: `Meta`, `MessageEvent { msg: Message }`,
      `ChildStart`, `ChildResult` variants, `#[serde(tag = "type")]` (never
      `deny_unknown_fields`), each variant carrying its own `v: u32` field
@@ -156,10 +171,11 @@ History") side by side; the first test to run after step 1 lands is
      `project_key`s, per decision 2's accepted per-launch-directory
      grouping.
    - Session path helper: `~/.ylva/chats/<project_key>/<session_id>.jsonl`,
-     where `~` resolves via `dirs::home_dir()` (step 1) — this is the seam
-     step 8's integration test uses to redirect persistence into a tempdir
-     by overriding the spawned process's `HOME`, with no test-only code
-     path or `#[cfg(test)]` guard needed.
+     where `~` resolves via the `YLVA_HOME`-then-`dirs::home_dir()` chain
+     (step 1) — this is the seam step 8's integration test uses to redirect
+     persistence into a tempdir by setting only `YLVA_HOME` (not `HOME`) on
+     the spawned process, with no test-only code path or `#[cfg(test)]`
+     guard needed.
    - `Store::create(cwd, session_id) -> Store` (fresh session) and
      `Store::resume(cwd, session_id) -> Result<Store, StoreError>` (existing
      session; `StoreError::SessionNotFound` when the file does not exist —
@@ -179,7 +195,7 @@ History") side by side; the first test to run after step 1 lands is
      decision 10). The agent loop enqueues events in commit order; the
      writer task appends them serially, preserving order without blocking
      the loop.
-3. [ ] Wire `AgentLoop` (`src/agent.rs`) to hold a `Store` sender and forward
+3. [x] Wire `AgentLoop` (`src/agent.rs`) to hold a `Store` sender and forward
    every **committed** message (`push_user`, `push_assistant` once
    `Complete`/`Interrupted`, tool call + result) to it as a `MessageEvent` —
    never the live `partial` stream (§4H decision 3). Locate the existing
@@ -188,7 +204,7 @@ History") side by side; the first test to run after step 1 lands is
    add the store-forwarding call alongside each commit point, from the same
    outer-loop call sites that already own `Context` mutation (per the
    ownership rule in Key Constraints).
-4. [ ] Wire `ChildAgentManager` (`src/child_agent_manager.rs`) to append a
+4. [x] Wire `ChildAgentManager` (`src/agent/child_agent_manager.rs`) to append a
    `ChildStart` record to the **parent** session's `Store` sender before a
    child run begins, and a `ChildResult` record at completion (status,
    result, sources) — shapes given in §4G *Persistence*. This finishes the
@@ -199,13 +215,13 @@ History") side by side; the first test to run after step 1 lands is
      its own `<sub-session_id>.jsonl` under the same `project_key`, with its
      own `meta` header (auto-title = the child's `task`) — §4H decision 9.
      Not streamed live.
-5. [ ] Add `--conversation-id <uuid>` handling in `src/cli_driver.rs` /
+5. [x] Add `--conversation-id <uuid>` handling in `src/cli_driver.rs` /
    `src/tui_driver.rs` (or wherever CLI args are currently parsed pre-Phase-10
    `clap` — inspect `src/main.rs` first) so a supplied id calls
    `Store::resume` (hard error if not found, step 2) instead of
    `Store::create`. Absent the flag, both headless and TUI start a fresh
    session (no auto-resume, no picker — §4H decision 5).
-6. [ ] Tests: `Store` round-trip (write events, reopen, verify order and
+6. [x] Tests: `Store` round-trip (write events, reopen, verify order and
    content), lock-conflict error on double-open, corrupt-trailing-line
    repair-on-resume vs. no-mutation-on-read-only-open, `project_key` is
    stable for the same CWD and differs across CWDs, `project_key` is
@@ -215,7 +231,7 @@ History") side by side; the first test to run after step 1 lands is
    correctly linked `parent_session`, `--conversation-id` resumes and
    appends rather than overwriting, `--conversation-id <nonexistent-uuid>`
    fails with a clear error rather than creating a new session.
-7. [ ] Add `Store::list_sessions(project_key: &str) -> Result<Vec<SessionSummary>,
+7. [x] Add `Store::list_sessions(project_key: &str) -> Result<Vec<SessionSummary>,
    StoreError>` to `src/store.rs`: scan
    `~/.ylva/chats/<project_key>/*.jsonl`, parse only each file's first
    (`meta`) line into a small `SessionSummary { session_id, created_at,
@@ -230,7 +246,7 @@ History") side by side; the first test to run after step 1 lands is
    deferred idea into shipped Phase 7 scope, and gives step 8's integration
    test a real public API to assert persistence through, instead of
    hand-parsing directory listings in test code.
-8. [ ] Add an automated end-to-end persistence test,
+8. [x] Add an automated end-to-end persistence test,
    `tests/store_persistence_e2e.rs`, that spawns the real compiled `ylva`
    binary (`env!("CARGO_BIN_EXE_ylva")`, the same pattern `tests/
    cli_version.rs` already uses) rather than driving `AgentLoop` in-process
@@ -243,16 +259,15 @@ History") side by side; the first test to run after step 1 lands is
      `content_frame("...")`, `end_after_frames: true`) — a fake
      OpenAI-compatible endpoint, no live network, no real API key.
    - Create a `tempfile::TempDir` and set it as **both** the spawned
-     process's `HOME` (`Command::env`) and its working directory
-     (`Command::current_dir`): `HOME` isolates `~/.ylva/chats/` from the
-     real user's data (per step 1's `dirs::home_dir()` resolution), and a
+     process's `YLVA_HOME` (`Command::env`, per step 1's amendment — never
+     the real `HOME`) and its working directory (`Command::current_dir`):
+     `YLVA_HOME` isolates `~/.ylva/chats/` from the real user's data, and a
      fixed cwd gives a deterministic, reproducible `project_key`.
    - Point the child process at the mock server the same way the manual
      scripts point at a real backend: `Command::env("OLLAMA_BASE_URL",
      server.base_url())` (mirrors `tests/e2e/ollama-local/.envrc`'s
-     `OLLAMA_BASE_URL`, reusing `select_provider`'s existing Ollama-first
-     env-var precedence in `src/main.rs` — no new provider-selection code
-     needed).
+     `OLLAMA_BASE_URL`, using the provider environment discovery in
+     `src/main.rs` — no live network or real API key is needed).
    - Run headless (`--no-tui --prompt "<fixed test prompt>"`) and wait for
      a successful exit status.
    - Assert persistence through the **public API**, not by guessing a
@@ -283,7 +298,7 @@ History") side by side; the first test to run after step 1 lands is
      --ignored` locally against a real backend, reusing the same
      assertion helper with no duplicated provider-wiring or assertion code
      between the deterministic and live-opt-in variants.
-9. [ ] Documentation: replace the stub `docs/persistence.md` (currently just
+9. [x] Documentation: replace the stub `docs/persistence.md` (currently just
    a title and one-line description) with the concrete on-disk layout,
    `StoreEvent` shapes, `project_key` derivation, `list_sessions` (step 7),
    and the lock/resume contract; add a `--conversation-id` entry to
@@ -298,28 +313,28 @@ History") side by side; the first test to run after step 1 lands is
 
 ### Config hierarchy — narrow scope (§4G *Config-Driven Types*, Phase 7 bullet only)
 
-10. [ ] Add `toml` to `[dependencies]` in `Cargo.toml` (blueprint Phase 7 key
+10. [x] Add `toml` to `[dependencies]` in `Cargo.toml` (blueprint Phase 7 key
    crate). Do **not** add the `config` crate for this narrow, single-file
    load — a flat `toml::from_str` into the existing structs needs no
    multi-source merge library; revisit only if Phase 8's layered system
    later needs real merge semantics (YAGNI).
-11. [ ] Extend `src/config.rs` to load `~/.ylva/profiles/<name>/config.toml`
+11. [x] Extend `src/config.rs` to load `~/.ylva/profiles/<name>/config.toml`
    into the existing `ProfileConfig`/`AgentConfig` structs (add
    `#[derive(Deserialize)]` alongside the existing `Debug, Clone`), plus a
    new `default_model`/`theme`/`keybindings` surface matching the Phase 7
    bullet ("default model, theme, keybindings, and agent-type engine
    assignments"). This is a **flat load of one file** — no project `.ylva/`
    discovery, no `ylva init`, no `SOUL.md`, no `agents/*.md` (all Phase 8).
-   Keep `EngineConfig` (`src/engine.rs`) as the field-level SSOT for
+   Keep `EngineConfig` (`src/llm/engine.rs`) as the field-level SSOT for
    sampling parameters per its existing doc comment; the loader populates
    it, it does not duplicate its fields.
-12. [ ] Wire `AgentFactory` (`src/agent_factory.rs`) to build its
+12. [x] Wire `AgentFactory` (`src/agent_factory.rs`) to build its
     `HashMap<String, Arc<dyn Engine>>` from the loaded TOML rather than
     hand-constructed `EngineConfig` values, resolving the documented
     `default_engine`/`compact_engine` fallback (`docs/configuration.md`
     already specifies this resolution — keep it as the SSOT and update it
     only if the loader changes the contract).
-13. [ ] Update `src/engine.rs`'s `EngineConfig` doc comment (currently:
+13. [x] Update `src/llm/engine.rs`'s `EngineConfig` doc comment (currently:
     "`model`, `temperature`, `context_length`, `api_base_url`, and `api_key`
     are advisory in Phase 5 ... Phase 7 wires these fields into provider
     construction from TOML config, making `EngineConfig` the true SSOT for
@@ -338,11 +353,11 @@ History") side by side; the first test to run after step 1 lands is
     of requiring a reader to cross-reference the blueprint to know which
     claims are still Phase-7-only. Resolves the Consistency Issues entry
     about this doc comment (see below).
-14. [ ] Tests: TOML fixture loads into the expected `ProfileConfig`, missing
+14. [x] Tests: TOML fixture loads into the expected `ProfileConfig`, missing
     file falls back to an in-code default profile (never a hard error),
     malformed TOML produces a clear error, an `AgentConfig` engine override
     still resolves correctly through `AgentFactory`.
-15. [ ] Documentation: update `docs/configuration.md`'s "Phase 7 will wire
+15. [x] Documentation: update `docs/configuration.md`'s "Phase 7 will wire
     them into provider construction from a TOML config file" note (under
     `EngineConfig`) to describe the shipped flat-file loader, its exact
     path, and precedence; update `docs/cli-options.md` if a `--profile`
@@ -352,7 +367,7 @@ History") side by side; the first test to run after step 1 lands is
 
 ### Rendering polish (§4F)
 
-16. [ ] In `src/highlight.rs`, replace the hardcoded
+16. [x] In `src/highlight.rs`, replace the hardcoded
     `THEME_SET.get_or_init(...).themes["base16-ocean.dark"]` in
     `highlight_theme()` with a parameter (`ThemeName::Dark | Light`,
     resolving to the bundled `base16-ocean.dark`/`base16-ocean.light`
@@ -362,13 +377,13 @@ History") side by side; the first test to run after step 1 lands is
     include the active theme in the cache key (`highlight_cache_key`), since
     a theme switch must invalidate previously-cached highlighted lines. Do
     **not** add a third theme — see `docs/ideas/monokai-theme.md`.
-17. [ ] Wire the resolved theme from config through to every
+17. [x] Wire the resolved theme from config through to every
     `highlighted_lines_cached` call site (`src/markdown.rs`/
     `src/tui_widgets.rs`).
-18. [ ] Tests: theme switch changes the cache key and produces different
+18. [x] Tests: theme switch changes the cache key and produces different
     styled output for the same content; `highlight_theme` resolves each of
     the two theme names to a distinct loaded `Theme`.
-19. [ ] Documentation: update `docs/features.md`'s rendering section (and
+19. [x] Documentation: update `docs/features.md`'s rendering section (and
     `docs/configuration.md` if `theme` becomes a documented config key) to
     describe the two selectable themes; note that a third ("monokai") theme
     is tracked in `docs/ideas/monokai-theme.md`, not yet implemented. Live
@@ -379,7 +394,7 @@ History") side by side; the first test to run after step 1 lands is
 
 ### Slash commands
 
-20. [ ] Add a slash-command parser triggered only when `/` is the first
+20. [x] Add a slash-command parser triggered only when `/` is the first
     character of the TUI draft-message input (per
     `docs/ideas/slash-commands.md`'s trigger rule, so it never fires inside
     pasted code — matches `docs/blueprint.md` §6 "Commands" for headless/CLI
@@ -399,40 +414,40 @@ History") side by side; the first test to run after step 1 lands is
     **not** a parser error — the parser only special-cases the fixed
     allowlist and otherwise falls through untouched, so the draft is sent
     as normal chat input to the LLM (see step 24).
-21. [ ] Implement `/clear` (alias `/reset` — both trigger the same handler):
+21. [x] Implement `/clear` (alias `/reset` — both trigger the same handler):
     reset the current in-memory `Context` and start a fresh `Store` session
     (mirrors §4H's "fresh session" semantics but triggered mid-run rather
     than at launch). The confirmation bubble is transient (not persisted to
     the old session, since a new session has already started).
-22. [ ] Implement `/models`: call the already-implemented
-    `Provider::list_models()` (§4A, `src/llm.rs`) to populate a candidate
-    overlay (per step 20's overlay behavior) with the models available from
-    the active provider, and switch the active agent's engine to the
-    selected model on confirm — this both fulfills the listing groundwork
-    already documented in `docs/features.md` ("`/models` command (coming
-    soon)") and the idea doc's "select the current provider and model."
-    Supersedes the `SwitchModel` action placeholder referenced in
-    `docs/blueprint.md` §4B. The switch-confirmation bubble is committed to
-    the `Store` (it changes which engine subsequent turns use, which is
-    session-affecting).
-23. [ ] Implement `/tools`: display the currently allowed tool list for the
+22. [x] Implement `/models`: query `Provider::list_models()` (§4A,
+    `src/llm.rs`) concurrently through `EngineRouter` and populate a
+    provider-connection-qualified candidate overlay (per step 20's overlay
+    behavior). Confirming a row switches both the active provider connection
+    and its selected model; provider failures are omitted when another
+    connection succeeds. This both
+    fulfills the listing groundwork already documented in `docs/features.md`
+    and the idea doc's "select the current provider and model." Supersedes
+    the `SwitchModel` action placeholder referenced in `docs/blueprint.md`
+    §4B. The switch-confirmation bubble is committed to the `Store` (it
+    changes which engine subsequent turns use, which is session-affecting).
+23. [x] Implement `/tools`: display the currently allowed tool list for the
     active agent (`AgentConfig::allowed_tools` resolution, already
     documented in `docs/configuration.md`) as a transient, informational
     bubble (not persisted — it reports existing state, it doesn't change
     it).
-24. [ ] Tests: each command (and its aliases) is recognized only when it is
+24. [x] Tests: each command (and its aliases) is recognized only when it is
     the first character of the input box (not mid-message, not mid-paste);
     an unrecognized `/foo` is **not** intercepted — it is sent to the LLM
     as ordinary plain user input, exactly like a message with no leading
     `/`, since the command set is a fixed, small allowlist and anything
     outside it is just chat text (e.g. a user genuinely typing "/foo" as
     part of a sentence); `/clear` and `/reset` both reach the same handler;
-    `/models`' overlay lists the candidates returned by a stubbed
-    `Provider::list_models()` and confirms the correct engine switch; each
-    command's effect is observable via the reducer state
+    `/models`' overlay lists provider-connection-qualified candidates returned
+    by stubbed providers and confirms the correct connection/model switch; each command's
+    effect is observable via the reducer state
     (`tui_reducer_state.rs` tests already exercise this
     pattern).
-25. [ ] Documentation: add a "Slash commands" section to `docs/features.md`
+25. [x] Documentation: add a "Slash commands" section to `docs/features.md`
     covering `/models`, `/tools`, `/clear`/`/reset`, replacing the old
     "`/models` command (coming soon)" placeholder subsection; add the
     commands to `docs/keybindings.md` if that doc covers input-box
@@ -446,11 +461,11 @@ History") side by side; the first test to run after step 1 lands is
 
 ### Final verification
 
-26. [ ] Run `make format`, `make lint`, `make test-coverage` (per
+26. [x] Run `make format`, `make lint`, `make test-coverage` (per
     `docs/development-workflow.md`) and fix any findings; confirm the
     ≥80% coverage gate still passes for every non-excluded file touched by
     this plan.
-27. [ ] Re-read `docs/blueprint.md` §7 Phase 7 and flip every corresponding
+27. [x] Re-read `docs/blueprint.md` §7 Phase 7 and flip every corresponding
     `[ ]` to `[x]` in that section once its item is verified shipped and
     documented.
 
@@ -515,7 +530,7 @@ History") side by side; the first test to run after step 1 lands is
   commit-point call sites for `push_assistant` currently sit around lines
   975, 1034, 1060, 2072 (worth re-`grep`-ping before editing, since line
   numbers shift).
-- `src/engine.rs`'s `EngineConfig` doc comment already states the Phase 7
+- `src/llm/engine.rs`'s `EngineConfig` doc comment already states the Phase 7
   contract explicitly: "Phase 7 wires these fields into provider
   construction from TOML config, making `EngineConfig` the true SSOT for
   sampling parameters" — this is the authoritative statement of what "done"

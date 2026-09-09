@@ -50,8 +50,33 @@ turn finishes. Without this flag, `spawn_subagent` is denied outright in CLI
 mode. See [implementation notes](./implementation-notes.md#cli-driver) for
 details.
 
-**WIP:** Provider selection is from environment variables; see
-[CLI options — Environment variables](./cli-options.md#environment-variables).
+Provider configuration is loaded from the selected profile's optional `.env`
+file and the process environment; see [CLI options — Environment
+variables](./cli-options.md#environment-variables).
+
+## Session Persistence
+
+Every conversation is appended to a JSON Lines file under
+`${YLVA_HOME:-${HOME}/.ylva}/chats/<project_key>/<session_id>.jsonl` as it happens
+for TUI and CLI alike. A killed `ylva` process leaves everything already committed
+intact.
+
+- Sessions are grouped per project by a hash of the canonicalized launch
+  directory, so the same checkout always lands in the same folder.
+- Every start begins a **fresh** session: Ylva never auto-resumes and shows no
+  startup picker.
+- `--conversation-id <uuid>` re-attaches an existing session and appends to it;
+  an unknown id is an error rather than a silent fresh session.
+- A session is exclusively locked while open, so a second Ylva cannot
+  interleave writes into the same file.
+- Child-agent runs record a start/result pair in the parent session and write
+  their own transcript alongside it.
+- On exit, Ylva prints the session id and a ready-to-paste
+  `ylva --conversation-id <uuid>` command to stderr, so resuming never
+  requires hunting through the chats directory.
+
+See [persistence](./persistence.md) for the on-disk format and the full resume
+contract.
 
 ## TUI Runtime
 
@@ -63,8 +88,30 @@ Interactive terminal UI launched automatically when stdout is a terminal
 
 Currently the following AI model providers are supported:
 
-- Ollama ( via OpenAI compatible endpoints )
+- Ollama (OpenAI-compatible chat plus native model discovery endpoints)
 - OpenRouter ( via OpenAI compatible endpoints )
+
+Named provider connections are constructed independently, so multiple
+connections can use the same implementation (for example, local Ollama and
+Ollama Cloud). The active connection is shown in the conversation footer, and
+`/models` queries each connection once and lists
+`provider_connection/model` entries so a selection can change both connection
+and model.
+
+Model discovery also advertises optional reasoning-effort support. Ylva keeps
+three provider-neutral states:
+
+- `None`: the provider does not advertise reasoning support.
+- `Some([])`: reasoning is supported, but the provider exposes no selectable
+  effort alternatives; the provider's own default behavior is used.
+- `Some(values)`: reasoning is supported and `values` are the selectable
+  effort alternatives.
+
+When alternatives are available, `←`/`→` in the `/models` picker cycles
+between the provider default and the advertised values for the highlighted
+model. `Enter` applies both the model and the selected effort to subsequent
+requests. The selected effort is runtime state and is not added to the
+session's provider/model metadata.
 
 ## Tools to be used by models
 
@@ -228,7 +275,9 @@ module structure (model/presenter/view/driver split).
 
 - **Layout:** a scrollable chat-history area, a variable-height input box
   (capped at 1/3 of the terminal height), a `─` separator line, and a 2-row
-  footer (mode/hint row and key-hints row). No sidebar.
+  footer (mode/hint row and key-hints row). The mode/hint row also shows the
+  active `provider-connection/model` identity for the transcript on screen, including
+  the selected child while drilled in. No sidebar.
 - **Input always active:** the input box is never disabled. `Enter` sends
   unconditionally — while the model is streaming, the message is queued as a
   pending steer (shown dimmed, then committed once the model has seen it),
@@ -312,7 +361,11 @@ module structure (model/presenter/view/driver split).
   when a language tag is given), bullet/numbered lists, headings,
   blockquotes, horizontal rules, and tables. Plain text with no Markdown
   syntax wraps as plain text. Unsupported syntax (links, images, HTML)
-  degrades to plain text rather than crashing or dropping content.
+  degrades to plain text rather than crashing or dropping content. Markdown
+  and syntax highlighting are applied live while a response streams.
+- **Selectable syntax theme:** code blocks and file previews highlight with
+  either the `dark` or the `light` theme, chosen with the `theme` key of the
+  runtime profile (see [configuration](./configuration.md#profile-file)).
 - **Thinking bubble:** extended-thinking/reasoning output gets its own
   bubble: dim-blue border, Markdown rendering, shown before the assistant's
   reply. Starts expanded; title shows a live elapsed timer while streaming,
@@ -331,6 +384,10 @@ model, sampling parameters, and connection details. Multiple engines can be defi
 and referenced by name, for example a fast local Ollama engine for chat and
 a more capable OpenRouter model for heavier tasks.
 
+Engines are read from one flat profile file,
+`~/.ylva/profiles/<name>/config.toml` (`--profile <name>` selects it). Without
+such a file, the backend comes from environment variables as before.
+
 See [configuration](./configuration.md) for all available fields.
 
 ### Runtime profiles
@@ -339,10 +396,20 @@ A profile groups a default engine with optional per-agent overrides. This is the
 groundwork for Phase 6 child agents, which will let different agent types run against
 different engines automatically.
 
-**WIP:** Profile and engine definitions are constructed in code; TOML file loading
-is introduced in Phase 7.
+Profiles are read from `~/.ylva/profiles/<name>/config.toml`; see
+[configuration](./configuration.md#profile-file) for the supported keys.
 
-### `/models` command (coming soon)
+## Slash commands
 
-The groundwork for a `/models` slash command is in place. When implemented it will
-list the models available from the active provider directly inside the conversation.
+Typing `/` as the **first character** of the draft-message input opens a
+command overlay above the conversation; it narrows as the command is typed.
+`↑`/`↓` highlight a command and `Tab` completes the highlighted command.
+The command set is a fixed allowlist — a leading `/` that matches nothing in
+it (e.g. `/foo`) is ordinary chat text and is sent to the model unchanged, as
+is any `/` that is not the first character of the input.
+
+| Command | Effect | Result bubble |
+| --- | --- | --- |
+| `/models` | Queries every configured provider connection, lists successful results as `provider_connection/model`, and switches the engine to the picked connection/model. `↑`/`↓` select, `←`/`→` cycle reasoning effort when available, `Enter` confirms, `Esc` cancels. | Persisted — the switch changes which provider connection/model later turns use; the reasoning effort applies to the current runtime |
+| `/tools` | Lists the tools the running agent may call, as resolved for its agent type. | Transient |
+| `/clear` (alias `/reset`) | Drops the conversation and continues in a brand-new session file; earlier prompts stay recallable with `↑`. | Transient |

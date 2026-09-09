@@ -24,8 +24,9 @@
 use std::time::Instant;
 
 use crate::agent::AgentMode;
+use crate::llm::engine::EngineDisplayInfo;
 use crate::tui_reducer_state::{
-    BannerDragSelection, ChatEntry, ChatSelection, InputArea, ToolCallState,
+    BannerDragSelection, ChatEntry, ChatSelection, InputArea, SlashOverlay, ToolCallState,
 };
 
 // ─── Per-area sub-structs ──────────────────────────────────────────────────────
@@ -159,6 +160,8 @@ impl Default for ConversationListState {
 
 pub struct TuiState {
     pub agent_mode: AgentMode,
+    /// Provider/model identity for the transcript currently being rendered.
+    pub engine_display: EngineDisplayInfo,
     pub chat_entries: Vec<ChatEntry>,
     pub partial_assistant_text: String,
     /// In-flight extended-thinking/reasoning fragments, accumulated separately
@@ -228,12 +231,17 @@ pub struct TuiState {
 
     // ── scroll state / chat selection / bubble hit-testing ─────────────────
     pub conversation: ConversationListState,
+
+    /// Slash-command suggestion list / model picker, rendered as a floating
+    /// overlay directly above the input box.
+    pub slash_overlay: SlashOverlay,
 }
 
 impl TuiState {
     pub fn new() -> Self {
         TuiState {
             agent_mode: AgentMode::Idle,
+            engine_display: EngineDisplayInfo::default(),
             chat_entries: Vec::new(),
             partial_assistant_text: String::new(),
             partial_thinking_text: String::new(),
@@ -269,6 +277,7 @@ impl TuiState {
                 header_bubble_area: ratatui::layout::Rect::default(),
             },
             conversation: ConversationListState::default(),
+            slash_overlay: SlashOverlay::default(),
         }
     }
 

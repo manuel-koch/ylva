@@ -4,6 +4,73 @@ Internal mechanics, module/struct/field references, and design rationale that
 back the user-facing behavior described in [features](./features.md). This
 document is for contributors working on Ylva's internals, not end users.
 
+## Engine/provider runtime configuration
+
+`EngineConfig` contains the engine's immutable connection settings and the
+initial values for its model and sampling policy. `EngineRuntimeConfig` is the
+shared mutable snapshot for request-level settings (`model`, `temperature`,
+`context_length`, and `reasoning_effort`).
+
+`OpenAiCompatibleProvider` and `EngineImpl` share one `EngineRuntimeConfigHandle` rather
+than maintaining independent mutable copies. The provider clones the snapshot
+before starting a request and releases the lock before network I/O, so a
+runtime update cannot produce a request with mixed settings. Updates apply to
+subsequent requests; an already-running stream keeps the snapshot it started
+with. `context_length` remains available to the engine's context-budgeting
+logic and is not sent as an OpenAI request parameter. `reasoning_effort` is
+translated into the provider-specific request field when it is explicit;
+`None` leaves the provider's own default behavior in place.
+
+`OpenRouterProvider` reuses that transport for both chat and OpenRouter's
+metadata-rich `/models` catalog. Its selected effort is sent as
+`reasoning.effort`. `OllamaProvider` accepts the Ollama server origin as its
+base URL, derives `/v1/chat/completions` for chat, lists models from
+`/api/tags`, and enriches each entry with `/api/show` model metadata when
+available. An explicit Ollama effort is sent as the OpenAI-compatible
+`reasoning_effort` field; models that only advertise the `thinking`
+capability use Ollama's own default because they have no selectable effort
+alternatives. The Ollama base URL must be the server origin and must not
+include the `/v1` path.
+
+`OpenRouterProvider` likewise accepts only the OpenRouter origin and derives
+`/api/v1` before constructing the shared OpenAI-compatible transport. A
+configured OpenRouter path is not rewritten or supported.
+
+The shared chat transport receives a request-body customization function from
+the concrete provider wrapper. This keeps provider-specific wire fields in
+`OpenRouterProvider` and `OllamaProvider` rather than centralizing them in a
+format-dispatch enum.
+
+`ModelInfo.reasoning_efforts` normalizes provider metadata into three states:
+`None` means no advertised reasoning support, `Some([])` means supported
+reasoning without selectable alternatives, and `Some(values)` means supported
+reasoning with those alternatives. The `/models` picker adds an implicit
+provider-default choice before `values`; the chosen explicit value is carried
+in `ProviderModelOption` and applied when the selection is confirmed.
+
+`EngineRouter` owns the configured engine set when a profile or environment
+provides more than one provider connection. It delegates chat and runtime
+configuration to the active engine, groups engines by their named provider
+connection, queries each connection once and concurrently for `/models`, and
+switches the active connection only after it successfully accepts the
+selected model. Connection settings remain owned by each underlying engine;
+switching connections does not mutate another connection's configuration.
+
+`ProviderRegistry` centralizes provider-name validation, environment-based
+selection, and construction. A profile separates
+`provider_connections.<name>` (connection identity and endpoint) from its
+`provider` field (implementation kind), and an engine references the
+connection with `provider_connection`. Multiple connections may therefore use
+the same implementation. Engine-level endpoint and credential values override
+connection values. A missing API key may be filled from the matching profile
+environment variable.
+
+Environment discovery loads the selected profile's `.env` plus exported
+process variables, and the merged snapshot is used both for provider
+discovery and `${ENV_VAR}` interpolation in every TOML string. Process
+variables win over `.env` values, and missing interpolation variables fail
+profile loading. The merged snapshot is never logged.
+
 ## Tool-result wire protocol
 
 Every `role:"tool"` message carries its `content` as a JSON struct derived
@@ -66,6 +133,86 @@ with `{"status": "running"/"queued"}` while the child keeps running
 concurrently. Without `--auto-approve-spawn`, `spawn_subagent` is denied
 outright in CLI mode (`UserApprovalRequired` has no approval path headless),
 so this only matters when that flag is used.
+
+## Store & persistence
+
+Implemented in `src/store.rs`. See [persistence](./persistence.md) for the
+user-facing on-disk contract; this section is the contributor view.
+
+- **One handle, one writer.** `Store` is a cheap `Arc` handle. Every clone
+  shares one `flock`ed file and one writer task, so append order is the commit
+  order regardless of who holds the clone. The advisory lock is released once
+  the last clone drops and the writer drains.
+- **Off the hot path.** `Store::record_*` enqueue onto an `mpsc` channel and
+  never block; the writer task appends one line per event, `flush`ing but never
+  `fsync`ing. `Store::flush().await` is a barrier used by tests and shutdown
+  paths — it is fed by a second channel of `oneshot` acks, and the writer
+  drains all pending events before acknowledging.
+- **One commit point.** `Context::commit` is the only place a message enters
+  the conversation, and therefore the only place a `message` event is produced.
+  This upholds the blueprint §4C ownership rule: only the outer loop mutates
+  `Context`, so no streaming task can ever write. `AgentLoop::with_store`
+  attaches the store to the `Context` the loop creates.
+- **Immediate `meta` header, deferred title.** The header is written to disk
+  right away (empty `title`) when the session is created, so every subsequent
+  event is durable the instant it is written — nothing is ever buffered only
+  in memory waiting on a title. Once the first conversation turn completes
+  (the first committed `Message::Assistant`), `SessionWriter::finalize_title_if_pending`
+  rewrites just that first line via `rewrite_meta_line` (temp file plus
+  `rename()`, the same pattern as a schema-upgrade rewrite), then reopens and
+  re-`flock`s the file at its new inode so later appends keep landing at the
+  same path. `Store::resume` re-derives the title source from the transcript
+  (`first_explicit_user_message`) when the on-disk title is still empty, so a
+  session killed mid-turn still gets titled once a later run completes a
+  turn.
+- **`model_changed`, not `meta.provider_connection`/`meta.model`.**
+  `meta.provider_connection`/`meta.model` capture only the
+  connection/model pair resolved at session creation and are
+  never rewritten afterwards. `StoreEvent::ModelChanged` carries the actual
+  `provider_connection`/`model` (read off `EngineConfig`, never a
+  config-table name) and
+  is recorded via `Store::record_model_changed` on every process start (fresh
+  or resumed) and again after every successful `/models` switch
+  (`Effect::SwitchModel` in `tui_driver.rs` → `AgentCommand::RecordModelChanged`
+  → `Context::store()`, so it follows `/clear` rollovers correctly) — it is
+  the only authoritative, replayable history of what has actually served the
+  session, including that first value. A child's own session file gets its
+  own independent `model_changed` history from its resolved engine, passed
+  through `ChildTranscriptTarget::engine_config` into
+  `Store::write_child_transcript`.
+- **Repair-on-open.** `Store::resume` truncates a trailing incomplete or
+  unparseable line before the first append. `list_sessions` and any other read
+  path never mutate, not even a file with a corrupt tail.
+- **Child agents.** `ChildAgentManager::with_store` holds the *parent's* store
+  and writes `child_start` (from `start`) and `child_result` (from
+  `record_child_result`, called by `AgentLoop::run`'s `finish_rx` arm). The
+  child's own transcript is written once at completion by
+  `agent_factory::write_child_transcript` via `Store::write_child_transcript`,
+  which opens a fresh sub-session in the same project directory and passes its
+  own `session_id` as the child's `meta.parent_session`, so the parent link is
+  discoverable from the child file too, not just top-down via the parent's
+  `child_start`/`child_result` events. `Store::start_new_session` takes an
+  explicit `parent_session: Option<Uuid>` for exactly this reason — `/clear`
+  passes `None` (a rollover is a fresh session, not a child run) while
+  `write_child_transcript` passes `Some(self.inner.session_id)`.
+- **Testing seam.** `chats_root` is an explicit parameter on `Store::create`,
+  `Store::resume`, and `Store::list_sessions`; only `main.rs` resolves the real
+  `~/.ylva/chats` through `default_chats_root()`. Unit tests pass a `TempDir`
+  directly, and the end-to-end test sets `YLVA_HOME` for the spawned binary —
+  no `#[cfg(test)]` seam in library code.
+- **Mandatory startup persistence.** `main.rs` fails startup when
+  `default_chats_root()` cannot resolve the Ylva home or when the session file
+  cannot be created or resumed. The CLI has no transient, non-persisted mode;
+  `Option<Store>` remains available only to lower-level APIs and tests that
+  intentionally run without persistence.
+- **`~/.ylva` resolution.** `src/ylva_home.rs` is the single source of truth for
+  the per-user root shared by `chats/` and `profiles/`: `ylva_root()` returns a
+  non-empty `YLVA_HOME` verbatim as the root, else `dirs::home_dir()` with
+  `.ylva` appended. Its pure core,
+  `resolve_ylva_root(override_value, home_directory)`, takes both inputs as
+  arguments so it is unit-testable without mutating the process environment.
+  `store::default_chats_root()` and `config::default_profiles_root()` both build
+  on it and map a missing root to their own domain error.
 
 ## Child-agent delegation internals
 
@@ -230,6 +377,10 @@ so this only matters when that flag is used.
   paused for its own inner tool approval, since that only sets
   `Focus::ToolApproval` and never touches the root `spawn_subagent` bubble's
   `Running` state.
+- The footer's right-aligned `provider-connection/model` identity is projected from the
+  live root `EngineConfig` or the configured child engine, so it follows the
+  transcript currently on screen. Root model switches refresh the label before
+  the next frame.
 - A thin separator line (the same dim `─` rule used between the chat area
   and the input/footer panel) is rendered directly below the child-view
   header bubble, so it never reads as part of the scrollable
@@ -348,6 +499,49 @@ returned `Vec<Effect>` via `execute_effects()`.
 `cli_driver.rs` consumes `UiUpdate` events from the agent, streams the
 assistant response to stdout, and prints the final conversation as JSONL on
 exit.
+
+## Slash commands
+
+`src/slash_command.rs` is the whole parser: a closed allowlist
+(`SLASH_COMMANDS`) plus `parse_slash_command` (exact match on the raw draft)
+and `slash_command_suggestions` (prefix match, drives the overlay). It is
+pure and has no knowledge of the TUI.
+
+The Presenter (`presenter.rs`) checks the **raw**, un-dedented draft on
+`Enter`, so only a `/` in the input's first cell can start a command. The
+suggestion overlay owns `↑`/`↓` and `Tab`: its selected index is kept in
+`AppState`, and `Tab` emits `Effect::SetInputText` with the selected command's
+canonical name. The `/models` picker queries provider-connection-qualified
+options from `EngineRouter`, displays `provider_connection/model`, has the
+same bounded `↑`/`↓` movement semantics, uses `←`/`→` to cycle reasoning
+efforts when available, and `Enter` activates both the selected connection,
+model, and effort;
+`Esc` closes any open overlay before the usual draft-clear/abort ladder.
+
+Slash effects (`Effect::ClearConversation`/`ShowTools`/`ListModels`/
+`SwitchModel`) are the only ones that need the engine, so
+`tui_driver::split_slash_effects` peels them out of each batch and
+`execute_slash_effects` runs them; `execute_effects` matches them as no-ops.
+
+Two rules keep this consistent with blueprint §4C:
+
+- Nothing on the Driver side writes to the session store. `/models`'
+  confirmation is persisted by sending `AgentCommand::RecordNotice`, and
+  `/clear` rolls the session file over by sending `AgentCommand::ClearContext`
+  — both handled inside the agent loop, the sole `Context` mutator.
+- `AgentCommand::ClearContext`'s handler reads the *live* `engine.config()`
+  (not a value cached from session creation) and passes its
+  `provider_connection`/
+  `model` to `Store::start_new_session`, so the successor session's `meta`
+  header reflects whatever backend actually served the conversation up to
+  that point — including a `/models` switch that happened since the session
+  was created — rather than reusing whatever
+  `meta.provider_connection`/`meta.model` were
+  written at creation.
+
+`AppState::available_tool_names` is captured once, at TUI startup, from the
+resolved `AgentLoop::registry()` (sorted, since the registry is a `HashMap`),
+which is why `/tools` needs no I/O.
 
 ## TUI behavior internals
 

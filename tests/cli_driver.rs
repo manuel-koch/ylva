@@ -484,6 +484,7 @@ async fn console_app_reacts_to_child_finish_through_real_agent_factory_and_run_c
                 can_spawn: true,
             },
         )]),
+        ..ylva::ProfileConfig::default()
     };
 
     let factory = ylva::AgentFactory::new(std::collections::HashMap::from([(
@@ -648,6 +649,7 @@ async fn spawned_child_bash_approval_is_routed_to_the_child_not_the_root() {
                 can_spawn: true,
             },
         )]),
+        ..ylva::ProfileConfig::default()
     };
 
     let factory = ylva::AgentFactory::new(std::collections::HashMap::from([(

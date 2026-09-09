@@ -15,7 +15,9 @@ use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::highlight::{highlighted_lines_cached, syntect_fg_span, wrap_highlighted_line};
+use crate::highlight::{
+    active_theme, highlighted_lines_cached, syntect_fg_span, wrap_highlighted_line,
+};
 
 /// Foreground color used for `inline code` spans.
 pub const INLINE_CODE_FG: Color = Color::Rgb(224, 168, 82);
@@ -456,7 +458,7 @@ fn push_highlighted_code_block(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(normalize_lang_ext);
-    let highlighted = highlighted_lines_cached(trimmed, ext.as_deref());
+    let highlighted = highlighted_lines_cached(trimmed, ext.as_deref(), active_theme());
     for (line_index, hl_line) in highlighted.into_iter().enumerate() {
         let line_number = format!("{:>gutter_width$} │ ", line_index + 1);
         let gutter = Span::styled(line_number, gutter_style);

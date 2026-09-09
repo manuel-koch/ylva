@@ -22,3 +22,10 @@ target
 
 # exported mermaid diagram images
 *.mmd.*
+
+# Secure envvars
+.envrc
+.env
+
+# Test chat persistence
+tests/e2e/custom/chats

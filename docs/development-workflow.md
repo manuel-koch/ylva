@@ -16,11 +16,14 @@ by `make test-coverage` (below the threshold the command fails).
 The following `make` targets are available:
 
 ```shell
-make format                          # cargo fmt — enforce consistent formatting
+make format                          # Enforce consistent formatting on known files
+make format-rust                     # Enforce consistent formatting on Rust files
+make format-markdown                 # Enforce consistent formatting on Markdown files
 make lint                            # cargo check + cargo clippy — fix all warnings before committing
 make test-coverage                   # run tests + print per-file coverage summary; fails if <80%
 make test-coverage-missing           # same as test-coverage but also prints uncovered line numbers
 make test                            # cargo test — all tests must pass
+make test-e2e-persistence              # run live-provider persistence tests; missing variables fail
 make build-debug                     # cargo build (debug)
 make build-debug-and-run             # build debug binary and launch it
 make build-debug-and-run-with-logs   # build debug binary and launch it with tracing logs enabled
@@ -183,6 +186,39 @@ integration test (`tests/*.rs`) via `mod common;`, with helpers reached as
 - **No duplication.** Add a new shared helper to `tests/common.rs` (small) or a
   new `tests/common/<name>.rs` submodule (larger); never copy a helper across
   test files. SSOT applies here.
+
+### Spawning the compiled binary in an integration test
+
+Most integration tests drive an `AgentLoop` in-process. When the behavior under
+test only exists in the assembled product — argument parsing, provider
+selection from the environment, or where a file lands under `${YLVA_HOME}` — spawn
+the real binary instead:
+
+- Launch it via `Command::new(env!("CARGO_BIN_EXE_ylva"))` (see
+  `tests/cli_version.rs` for the minimal form, and
+  `tests/store_persistence_e2e.rs` for the full pattern).
+- Give it a `tempfile::TempDir` as **both** `YLVA_HOME` (`Command::env`) and its
+  working directory (`Command::current_dir`): `YLVA_HOME` names the state root
+  directly (`<tempdir>/chats`, `<tempdir>/profiles`, and the fixed cwd makes
+  any cwd-derived key deterministic. `YLVA_HOME` redirects Ylva's state and nothing else.
+- Point it at a `common::mock_llm_server::MockLlmServer` through the same
+  environment variable a user would use (`OLLAMA_BASE_URL`).
+- Isolate the child's environment with an **allowlist**: `Command::env_clear()`
+  first, then re-add only what the binary needs (`PATH`, `YLVA_HOME`, and the
+  variables the test itself is exercising). A blocklist of `env_remove` calls
+  stops isolating the test the day a variable is added or renamed, so nothing
+  from the developer's or CI's ambient environment may survive by default.
+- Because `Command::output()` blocks, run it from `spawn_blocking` under a
+  `#[tokio::test(flavor = "multi_thread")]`, otherwise the mock server's accept
+  loop is starved.
+- **Live-provider variants.** Add `#[ignore]`d tests that forward whichever of
+  `OLLAMA_*`/`OPENROUTER_*` the *test runner's own* environment already has
+  (the names `tests/e2e/*/.envrc` export) into the same assertion helper, and
+  fail with a clear configuration error when the required variable is unset.
+  CI stays offline because the variants remain ignored; a developer who
+  `direnv allow`ed one of the `tests/e2e/*` directories runs
+  `cargo test --test store_persistence_e2e -- --ignored` against a real backend
+  with no duplicated wiring or assertions.
 
 ## Unit-test shared helpers (`src/test_support.rs`)
 

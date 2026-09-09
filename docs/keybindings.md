@@ -49,6 +49,20 @@ Reference for Ylva's TUI keybindings.
 | `esc` (input non-empty) | Subagent drill-in view | Clear the input field (same as elsewhere; does not navigate back) |
 | `enter` | Subagent drill-in view | No-op; the subagent conversation doesn't accept input and Enter no longer steers the root agent from here (footer omits `enter: send`) |
 
+## Slash-command overlay
+
+| Key | Context | Action |
+|---|---|---|
+| `/` as the first character | Input focused | Open the command overlay; it narrows as more of the command is typed |
+| `↑` / `↓` | Command overlay open | Move the highlighted command |
+| `tab` | Command overlay open | Complete the highlighted command |
+| `enter` | Input holds a recognized command | Run the command instead of sending the draft to the model (see [features](./features.md#slash-commands)) |
+| `esc` | Command overlay open | Close the overlay; the draft is untouched |
+| `↑` / `↓` | `/models` picker open | Move the highlighted provider-connection/model |
+| `←` / `→` | `/models` picker open | Cycle the highlighted model's reasoning effort when alternatives are available |
+| `enter` | `/models` picker open | Switch to the highlighted provider connection/model and apply its selected reasoning effort |
+| `esc` | `/models` picker open | Cancel without switching |
+
 Only a second press of the *same* key confirms a pending double-press action.
 Pressing the other key instead starts that key's own fresh confirm window
 (and dismisses the one it replaced) — e.g. `esc` then `ctrl-c` never quits on

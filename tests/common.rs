@@ -75,7 +75,7 @@ where
 /// Use this helper instead of inline struct literals to keep test code DRY.
 pub fn test_engine_config() -> EngineConfig {
     EngineConfig {
-        provider: "mock".to_string(),
+        provider_connection: "mock".to_string(),
         model: "test-model".to_string(),
         temperature: None,
         context_length: DEFAULT_CONTEXT_LENGTH,

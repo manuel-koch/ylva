@@ -33,6 +33,8 @@ use ratatui::layout::Rect;
 use uuid::Uuid;
 
 use crate::agent::AgentMode;
+use crate::llm::engine::{EngineDisplayInfo, ProviderModelOption};
+use crate::slash_command::{slash_command_suggestions, SlashCommandInfo};
 
 // ─── Duration constant ───────────────────────────────────────────────────────
 
@@ -244,6 +246,13 @@ pub enum ChatEntry {
     },
     ErrorLine {
         message: String,
+    },
+    /// Informational output produced by the TUI itself (slash-command
+    /// results), never by the model. Only `/models`' switch confirmation is
+    /// also committed to the [`crate::store::Store`]; the rest are transient
+    /// and vanish with the session.
+    Notice {
+        text: String,
     },
 }
 
@@ -633,6 +642,11 @@ pub enum DomainEvent {
         task: String,
         label: String,
     },
+    /// The provider-connection/model identity of a constructed child engine.
+    ChildAgentEngineConfigured {
+        run_id: Uuid,
+        engine: EngineDisplayInfo,
+    },
     /// A fragment of `run_id`'s own text/thinking output.
     /// See `UiUpdate::ChildAgentToken`.
     ChildAgentToken {
@@ -679,6 +693,7 @@ impl DomainEvent {
             DomainEvent::SteerApplied { .. } => "SteerApplied",
             DomainEvent::StreamThinkingChunk(_) => "StreamThinkingChunk",
             DomainEvent::ChildAgentStarted { .. } => "ChildAgentStarted",
+            DomainEvent::ChildAgentEngineConfigured { .. } => "ChildAgentEngineConfigured",
             DomainEvent::ChildAgentToken { .. } => "ChildAgentToken",
             DomainEvent::ChildAgentDone { .. } => "ChildAgentDone",
             DomainEvent::BubbleClickWindowExpired => "BubbleClickWindowExpired",
@@ -700,6 +715,78 @@ impl DomainEvent {
             | DomainEvent::ToolDenied { id } => Some(*id),
             _ => None,
         }
+    }
+}
+
+// ─── slash-command overlay ───────────────────────────────────────────────────
+
+/// One selectable entry of the `/models` picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelChoice {
+    /// Named provider connection and model passed to
+    /// `Engine::switch_model_option`.
+    pub selection: ProviderModelOption,
+    /// Human-readable line shown in the picker.
+    pub label: String,
+    /// Whether this choice is the model currently serving the conversation.
+    pub is_active: bool,
+}
+
+impl ModelChoice {
+    /// Refresh the row text after changing its selected reasoning effort.
+    pub fn refresh_label(&mut self) {
+        self.label = model_choice_label(&self.selection, self.is_active);
+    }
+}
+
+/// Render one `/models` picker row.
+pub(crate) fn model_choice_label(option: &ProviderModelOption, is_active: bool) -> String {
+    let mut label = format!("{}/{}", option.provider_connection, option.model.id);
+    if let Some(name) = option.model.name.as_deref() {
+        if name != option.model.id {
+            label.push_str(&format!("  ({name})"));
+        }
+    }
+    if let Some(context_length) = option.model.context_length {
+        label.push_str(&format!("  {context_length} tokens"));
+    }
+    if option.model.reasoning_efforts.is_some() {
+        label.push_str(&format!(
+            "  reasoning: {}",
+            option.reasoning_effort.as_deref().unwrap_or("default")
+        ));
+    }
+    if is_active {
+        label.push_str("  — active");
+    }
+    label
+}
+
+/// Overlay rendered above the input while a slash command is being composed
+/// or resolved (blueprint §6).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum SlashOverlay {
+    /// No slash command is in play.
+    #[default]
+    Hidden,
+    /// The draft looks like a partially typed command; list what it could be.
+    Suggestions {
+        choices: Vec<SlashCommandInfo>,
+        selected: usize,
+    },
+    /// `/models` was submitted and the provider's list is being fetched.
+    LoadingModels,
+    /// `/models` returned; the user picks the model to switch to.
+    ModelPicker {
+        choices: Vec<ModelChoice>,
+        selected: usize,
+    },
+}
+
+impl SlashOverlay {
+    /// Whether the overlay currently captures navigation keys.
+    pub fn is_visible(&self) -> bool {
+        !matches!(self, SlashOverlay::Hidden)
     }
 }
 
@@ -752,6 +839,14 @@ pub enum Effect {
     CopyToClipboard(String),
     /// Finalize and copy the current textarea text selection.
     FinalizeInputSelection,
+    /// `/clear` — drop the transcript and start a new persisted session.
+    ClearConversation,
+    /// `/tools` — show the tools the running agent may call.
+    ShowTools,
+    /// `/models` — fetch the provider's model list for the picker.
+    ListModels,
+    /// A provider-connection/model was picked: activate it and confirm in the transcript.
+    SwitchModel(ProviderModelOption),
 }
 
 // ─── AppLayout ────────────────────────────────────────────────────────────────
@@ -941,6 +1036,15 @@ impl Default for ConversationListState {
     }
 }
 
+fn move_selection(selected: &mut usize, choices_length: usize, delta: isize) {
+    if choices_length == 0 {
+        return;
+    }
+    let last_index = choices_length - 1;
+    let moved = (*selected as isize + delta).clamp(0, last_index as isize);
+    *selected = moved as usize;
+}
+
 // ─── AppState ────────────────────────────────────────────────────────────────
 
 /// The authoritative TUI view-model owned by the Driver.
@@ -959,6 +1063,10 @@ pub struct AppState {
     pub mode: TuiMode,
     pub focus: Focus,
     pub layout: AppLayout,
+    /// Provider/model identity for the root conversation. The Driver refreshes
+    /// this from the live root engine before each frame so runtime model
+    /// switches are reflected immediately.
+    pub engine_display: EngineDisplayInfo,
 
     // ── chat view-model ─────────────────────────────────────────────────────
     pub chat_entries: Vec<ChatEntry>,
@@ -1039,6 +1147,11 @@ pub struct AppState {
     /// whenever the next queued child started, corrupting whichever
     /// child's conversation the user was currently viewing.
     pub child_conversations: HashMap<Uuid, ChildConversation>,
+    /// Provider/model identity for each constructed child engine, keyed by
+    /// child run id. Child conversations can remain drillable after a run
+    /// finishes, so these entries have the same session lifetime as their
+    /// transcripts.
+    pub child_engine_displays: HashMap<Uuid, EngineDisplayInfo>,
     /// Identifies the currently *running* child (at most one at a time —
     /// see `ChildAgentManager`), independent of whether `active_view` has
     /// switched to it yet, and independent of which (if any) child the user
@@ -1092,6 +1205,13 @@ pub struct AppState {
     /// bubbles), which scrolls to that bubble's row and clears this field.
     /// `None` when there is nothing pending.
     pub pending_scroll_to_bubble: Option<uuid::Uuid>,
+
+    // ── slash commands (Phase 7) ─────────────────────────────────────────────
+    /// Suggestion list / model picker driven by the slash-command line.
+    pub slash_overlay: SlashOverlay,
+    /// Names of the tools the running agent may call, captured once at
+    /// startup from the resolved `ToolRegistry` so `/tools` needs no I/O.
+    pub available_tool_names: Vec<String>,
 }
 
 impl AppState {
@@ -1100,6 +1220,7 @@ impl AppState {
             mode: TuiMode::Idle,
             focus: Focus::MainInput,
             layout: AppLayout::default(),
+            engine_display: EngineDisplayInfo::default(),
 
             chat_entries: Vec::new(),
             turn_buffer: TurnBuffer::default(),
@@ -1128,10 +1249,14 @@ impl AppState {
 
             _history_direction: None,
 
+            slash_overlay: SlashOverlay::default(),
+            available_tool_names: Vec::new(),
+
             aborting_exit: false,
 
             active_view: ConversationView::Root,
             child_conversations: HashMap::new(),
+            child_engine_displays: HashMap::new(),
             running_child: None,
             auto_switched_to_child: false,
             pre_pause_view: None,
@@ -1478,6 +1603,125 @@ impl AppState {
     /// Only for messages sent immediately (`UserMessageState::Sent`); a steer
     /// sent while the agent is busy must go through `queue_steer_message`
     /// instead, since it isn't safe to commit to `chat_entries` yet.
+    /// Drop everything the user can see of the current conversation, keeping
+    /// only what is not part of it: the input history (so ↑ still recalls
+    /// earlier prompts) and the captured tool names.
+    ///
+    /// The in-memory `Context` and the session file are *not* touched here —
+    /// the agent loop owns those and resets them on `AgentCommand::ClearContext`
+    /// (blueprint §4C).
+    pub fn clear_conversation(&mut self) {
+        self.chat_entries.clear();
+        self.turn_buffer = TurnBuffer::default();
+        self.queued_steer_texts.clear();
+        self.steer_indicator = false;
+        self.child_conversations.clear();
+        self.running_child = None;
+        self.active_view = ConversationView::Root;
+        self.child_view = ChildViewState::default();
+        self.conversation.chat_selection = None;
+        self.conversation.scroll_offset = 0;
+        self.conversation.scroll_locked = true;
+        self.history_index = None;
+    }
+
+    /// Append an informational bubble produced by a slash command.
+    pub fn push_notice(&mut self, text: String) {
+        self.chat_entries.push(ChatEntry::Notice { text });
+    }
+
+    /// Recompute the suggestion overlay from the live draft.
+    ///
+    /// Called by the Driver after every textarea mutation. A visible model
+    /// picker outranks suggestions: it was opened by an already-submitted
+    /// command and is dismissed by Esc or a selection, not by typing.
+    pub fn refresh_slash_overlay(&mut self, draft: &str) {
+        if matches!(
+            self.slash_overlay,
+            SlashOverlay::ModelPicker { .. } | SlashOverlay::LoadingModels
+        ) {
+            return;
+        }
+        let suggestions = slash_command_suggestions(draft);
+        self.slash_overlay = if suggestions.is_empty() {
+            SlashOverlay::Hidden
+        } else {
+            SlashOverlay::Suggestions {
+                choices: suggestions,
+                selected: 0,
+            }
+        };
+    }
+
+    /// Move the visible slash overlay's selection by `delta` entries,
+    /// saturating at both ends. A no-op unless a selectable overlay is open.
+    pub fn move_slash_selection(&mut self, delta: isize) {
+        match &mut self.slash_overlay {
+            SlashOverlay::Suggestions { choices, selected } => {
+                move_selection(selected, choices.len(), delta);
+            }
+            SlashOverlay::ModelPicker { choices, selected } => {
+                move_selection(selected, choices.len(), delta);
+            }
+            _ => {}
+        }
+    }
+
+    /// Cycle the selected model's reasoning effort, if the model advertises
+    /// selectable alternatives. The implicit first state is the provider
+    /// default, followed by each advertised effort in order.
+    pub fn cycle_selected_model_reasoning_effort(&mut self, delta: isize) {
+        let SlashOverlay::ModelPicker { choices, selected } = &mut self.slash_overlay else {
+            return;
+        };
+        let Some(choice) = choices.get_mut(*selected) else {
+            return;
+        };
+        let Some(reasoning_efforts) = choice.selection.model.reasoning_efforts.as_ref() else {
+            return;
+        };
+        if reasoning_efforts.is_empty() {
+            return;
+        }
+
+        let current_index = choice
+            .selection
+            .reasoning_effort
+            .as_deref()
+            .and_then(|effort| {
+                reasoning_efforts
+                    .iter()
+                    .position(|candidate| candidate == effort)
+                    .map(|index| index + 1)
+            })
+            .unwrap_or(0);
+        let option_count = reasoning_efforts.len() + 1;
+        let next_index =
+            (current_index as isize + delta).rem_euclid(option_count as isize) as usize;
+        choice.selection.reasoning_effort = if next_index == 0 {
+            None
+        } else {
+            Some(reasoning_efforts[next_index - 1].clone())
+        };
+        choice.refresh_label();
+    }
+
+    /// The command currently highlighted in the suggestion overlay, if any.
+    pub fn selected_slash_command(&self) -> Option<SlashCommandInfo> {
+        match &self.slash_overlay {
+            SlashOverlay::Suggestions { choices, selected } => choices.get(*selected).copied(),
+            _ => None,
+        }
+    }
+
+    /// The model the picker currently highlights, if it is open.
+    pub fn selected_model(&self) -> Option<&ModelChoice> {
+        match &self.slash_overlay {
+            SlashOverlay::ModelPicker { choices, selected } => choices.get(*selected),
+            _ => None,
+        }
+    }
+
     pub fn push_user_bubble(&mut self, text: String, state: UserMessageState) {
         self.chat_entries.push(ChatEntry::UserMessage {
             text: text.clone(),

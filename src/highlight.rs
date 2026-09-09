@@ -22,6 +22,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use ratatui::style::Color;
 use ratatui::text::Span;
@@ -38,9 +39,60 @@ pub(crate) fn syntax_set() -> &'static SyntaxSet {
     SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines)
 }
 
-pub(crate) fn highlight_theme() -> &'static Theme {
+/// Selectable syntax-highlighting theme, resolved from the `theme` key of the
+/// runtime profile (see `docs/configuration.md`).
+///
+/// Deliberately only two variants: both are bundled with syntect, so no theme
+/// files ship with Ylva.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeName {
+    #[default]
+    Dark,
+    Light,
+}
+
+impl ThemeName {
+    /// The syntect bundle key this theme resolves to.
+    pub fn syntect_key(self) -> &'static str {
+        match self {
+            ThemeName::Dark => "base16-ocean.dark",
+            ThemeName::Light => "base16-ocean.light",
+        }
+    }
+}
+
+/// The theme every renderer highlights with, set once at startup from the
+/// loaded profile.
+///
+/// A process-wide value rather than a parameter threaded through every render
+/// function: the theme is chosen before the first frame and never changes
+/// during a run, so passing it down ~20 rendering signatures would be pure
+/// ceremony. The highlighting API itself still takes the theme explicitly, so
+/// nothing below this line reads global state.
+static ACTIVE_THEME: AtomicU8 = AtomicU8::new(0);
+
+/// Select the theme every subsequent render highlights with.
+pub fn set_active_theme(theme_name: ThemeName) {
+    let encoded = match theme_name {
+        ThemeName::Dark => 0,
+        ThemeName::Light => 1,
+    };
+    ACTIVE_THEME.store(encoded, Ordering::Relaxed);
+}
+
+/// The theme selected by [`set_active_theme`], defaulting to
+/// [`ThemeName::Dark`].
+pub fn active_theme() -> ThemeName {
+    match ACTIVE_THEME.load(Ordering::Relaxed) {
+        1 => ThemeName::Light,
+        _ => ThemeName::Dark,
+    }
+}
+
+pub(crate) fn highlight_theme(theme_name: ThemeName) -> &'static Theme {
     let theme_set = THEME_SET.get_or_init(ThemeSet::load_defaults);
-    &theme_set.themes["base16-ocean.dark"]
+    &theme_set.themes[theme_name.syntect_key()]
 }
 
 /// One token produced by syntect: a foreground style and the text fragment.
@@ -56,11 +108,15 @@ thread_local! {
     static HIGHLIGHT_CACHE: RefCell<HighlightCacheMap> = RefCell::new(HashMap::new());
 }
 
-fn highlight_cache_key(content: &str, file_extension: Option<&str>) -> u64 {
+/// Cache key for one highlighting result. The theme is part of the key: the
+/// same content highlighted with a different theme is a different result, so
+/// a theme switch must not return stale styled lines.
+fn highlight_cache_key(content: &str, file_extension: Option<&str>, theme_name: ThemeName) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     content.hash(&mut hasher);
     file_extension.hash(&mut hasher);
+    theme_name.syntect_key().hash(&mut hasher);
     hasher.finish()
 }
 
@@ -70,15 +126,19 @@ fn highlight_cache_key(content: &str, file_extension: Option<&str>) -> u64 {
 /// `file_extension` is used for grammar selection (e.g. `Some("rs")` for
 /// Rust). When `None` (or when no grammar matches the extension), syntect
 /// attempts first-line detection and falls back to plain text.
-pub fn highlighted_lines_cached(content: &str, file_extension: Option<&str>) -> HighlightedLines {
-    let key = highlight_cache_key(content, file_extension);
+pub fn highlighted_lines_cached(
+    content: &str,
+    file_extension: Option<&str>,
+    theme_name: ThemeName,
+) -> HighlightedLines {
+    let key = highlight_cache_key(content, file_extension, theme_name);
     HIGHLIGHT_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         if let Some(lines) = cache.get(&key) {
             return lines.clone();
         }
         let ss = syntax_set();
-        let theme = highlight_theme();
+        let theme = highlight_theme(theme_name);
         let syntax = file_extension
             .and_then(|ext| ss.find_syntax_by_extension(ext))
             .or_else(|| ss.find_syntax_by_first_line(content))
@@ -180,4 +240,63 @@ pub fn wrap_highlighted_line(
         rows.push(Vec::new());
     }
     rows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn both_theme_names_resolve_to_a_distinct_bundled_syntect_theme() {
+        let dark = highlight_theme(ThemeName::Dark);
+        let light = highlight_theme(ThemeName::Light);
+        assert_eq!(dark.name.as_deref(), Some("Base16 Ocean Dark"));
+        assert_eq!(light.name.as_deref(), Some("Base16 Ocean Light"));
+        assert_ne!(
+            dark.settings.background, light.settings.background,
+            "the two themes must not resolve to the same loaded theme"
+        );
+    }
+
+    #[test]
+    fn the_cache_key_distinguishes_themes() {
+        assert_ne!(
+            highlight_cache_key("let x = 1;", Some("rs"), ThemeName::Dark),
+            highlight_cache_key("let x = 1;", Some("rs"), ThemeName::Light),
+            "a theme switch must invalidate previously cached highlighted lines"
+        );
+    }
+
+    #[test]
+    fn the_same_content_is_styled_differently_per_theme() {
+        let dark = highlighted_lines_cached("let x = 1;\n", Some("rs"), ThemeName::Dark);
+        let light = highlighted_lines_cached("let x = 1;\n", Some("rs"), ThemeName::Light);
+        let dark_foregrounds: Vec<_> = dark[0].iter().map(|(style, _)| style.foreground).collect();
+        let light_foregrounds: Vec<_> =
+            light[0].iter().map(|(style, _)| style.foreground).collect();
+        assert_eq!(
+            dark[0]
+                .iter()
+                .map(|(_, token)| token.clone())
+                .collect::<Vec<_>>(),
+            light[0]
+                .iter()
+                .map(|(_, token)| token.clone())
+                .collect::<Vec<_>>(),
+            "the same content tokenizes identically in both themes"
+        );
+        assert_ne!(
+            dark_foregrounds, light_foregrounds,
+            "but is styled with different colors"
+        );
+    }
+
+    #[test]
+    fn the_active_theme_defaults_to_dark_and_follows_the_last_selection() {
+        assert_eq!(active_theme(), ThemeName::Dark);
+        set_active_theme(ThemeName::Light);
+        assert_eq!(active_theme(), ThemeName::Light);
+        set_active_theme(ThemeName::Dark);
+        assert_eq!(active_theme(), ThemeName::Dark);
+    }
 }

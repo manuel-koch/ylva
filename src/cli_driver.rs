@@ -27,7 +27,7 @@ use crate::agent::{AgentCommand, AgentLoop, Role, UiUpdate};
 use crate::agent_factory::AgentFactory;
 use crate::app::App;
 use crate::config::ProfileConfig;
-use crate::engine::{EngineConfig, EngineImpl, DEFAULT_CONTEXT_LENGTH};
+use crate::llm::engine::{EngineConfig, EngineImpl, DEFAULT_CONTEXT_LENGTH};
 use crate::llm::{serialize_messages, Provider};
 use crate::sandbox::{ApprovalCheck, Sandbox};
 use crate::ToolRegistry;
@@ -209,7 +209,7 @@ pub async fn run_cli(
 ) -> anyhow::Result<()> {
     // TODO Phase 5 Step 9: replace with AgentFactory
     let engine_config = EngineConfig {
-        provider: provider.name().to_string(),
+        provider_connection: provider.name().to_string(),
         model: String::new(),
         temperature: None,
         context_length: DEFAULT_CONTEXT_LENGTH,
@@ -612,6 +612,7 @@ pub async fn run_cli_to(
             // silently ignored here.
             Some(
                 UiUpdate::ChildAgentStarted { .. }
+                | UiUpdate::ChildAgentEngineConfigured { .. }
                 | UiUpdate::ChildAgentToken { .. }
                 | UiUpdate::ChildAgentDone { .. },
             ) => {}
