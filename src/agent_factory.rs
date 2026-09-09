@@ -364,8 +364,9 @@ impl AgentFactory {
                 let child_engine_config = engines
                     .get(&child_engine_name)
                     .map(|engine| engine.config());
-                let child_engine_display =
-                    child_engine_config.as_ref().map(EngineDisplayInfo::from);
+                let child_engine_display = engines
+                    .get(&child_engine_name)
+                    .map(|engine| EngineDisplayInfo::from_engine(engine.as_ref()));
                 let run_id = request.run_id;
                 let call_id = request.call_id;
 

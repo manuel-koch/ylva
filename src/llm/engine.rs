@@ -70,11 +70,26 @@ pub struct EngineConfig {
 ///
 /// This intentionally contains only display metadata. Runtime request
 /// settings remain owned by [`EngineRuntimeConfig`], while the immutable
-/// connection details stay in [`EngineConfig`].
+/// connection details stay in [`EngineConfig`]. The reasoning effort is
+/// copied from the runtime snapshot for display only.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EngineDisplayInfo {
     pub provider_connection: String,
     pub model: String,
+    /// Explicit reasoning effort, or `None` when the provider default is used.
+    pub reasoning_effort: Option<String>,
+}
+
+impl EngineDisplayInfo {
+    /// Snapshot the identity and explicit reasoning effort shown on screen.
+    pub fn from_engine(engine: &dyn Engine) -> Self {
+        let config = engine.config();
+        Self {
+            provider_connection: config.provider_connection,
+            model: config.model,
+            reasoning_effort: engine.reasoning_effort(),
+        }
+    }
 }
 
 impl From<&EngineConfig> for EngineDisplayInfo {
@@ -82,6 +97,7 @@ impl From<&EngineConfig> for EngineDisplayInfo {
         EngineDisplayInfo {
             provider_connection: config.provider_connection.clone(),
             model: config.model.clone(),
+            reasoning_effort: None,
         }
     }
 }

@@ -1,7 +1,11 @@
 #!/bin/zsh
 YLVA=${CARGO_TARGET_DIR:-./target}/debug/ylva
 ROOT_DIR=$(git rev-parse --show-toplevel)
-LOG_DIR=${ROOT_DIR}/logs
+if [ -n "${YLVA_HOME}" ] ; then
+    LOG_DIR=${YLVA_HOME}/logs
+else
+    LOG_DIR=${ROOT_DIR}/logs
+fi
 LOG_FORMAT=text
 PREFIX=$(basename $0 .zsh)
 

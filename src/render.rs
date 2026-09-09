@@ -344,6 +344,7 @@ mod tests {
         state.engine_display = crate::llm::engine::EngineDisplayInfo {
             provider_connection: "openrouter".to_string(),
             model: "root-model".to_string(),
+            reasoning_effort: None,
         };
 
         let root_projection = project_for_draw(&state);
@@ -368,6 +369,7 @@ mod tests {
             crate::llm::engine::EngineDisplayInfo {
                 provider_connection: "ollama".to_string(),
                 model: "child-model".to_string(),
+                reasoning_effort: None,
             },
         );
         state.switch_to_child_view(run_id);

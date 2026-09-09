@@ -750,11 +750,13 @@ pub(crate) fn model_choice_label(option: &ProviderModelOption, is_active: bool) 
     if let Some(context_length) = option.model.context_length {
         label.push_str(&format!("  {context_length} tokens"));
     }
-    if option.model.reasoning_efforts.is_some() {
-        label.push_str(&format!(
-            "  reasoning: {}",
+    match option.model.reasoning_efforts.as_deref() {
+        None => label.push_str("  reasoning: unavailable"),
+        Some([]) => label.push_str("  reasoning: default"),
+        Some(_) => label.push_str(&format!(
+            "  reasoning: {} ⚙",
             option.reasoning_effort.as_deref().unwrap_or("default")
-        ));
+        )),
     }
     if is_active {
         label.push_str("  — active");
@@ -2272,6 +2274,33 @@ impl Default for AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_choice_label_explains_reasoning_effort_availability() {
+        let model_option = |reasoning_efforts| ProviderModelOption {
+            provider_connection: "stub".to_string(),
+            model: crate::llm::ModelInfo {
+                id: "model".to_string(),
+                name: None,
+                context_length: None,
+                reasoning_efforts,
+            },
+            reasoning_effort: None,
+        };
+
+        assert_eq!(
+            model_choice_label(&model_option(None), false),
+            "stub/model  reasoning: unavailable"
+        );
+        assert_eq!(
+            model_choice_label(&model_option(Some(vec![])), false),
+            "stub/model  reasoning: default"
+        );
+        assert_eq!(
+            model_choice_label(&model_option(Some(vec!["low".to_string()])), false),
+            "stub/model  reasoning: default ⚙"
+        );
+    }
 
     // ── Focus::is_modal ───────────────────────────────────────────────────────
 

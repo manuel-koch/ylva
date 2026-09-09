@@ -668,6 +668,7 @@ fn footer_shows_the_active_provider_and_model() {
         engine_display: EngineDisplayInfo {
             provider_connection: "ollama".to_string(),
             model: "llama3.2".to_string(),
+            reasoning_effort: Some("max".to_string()),
         },
         ..TuiState::new()
     };
@@ -685,8 +686,99 @@ fn footer_shows_the_active_provider_and_model() {
         .map(|(column, row)| buffer.cell((column, row)).unwrap().symbol().to_string())
         .collect();
     assert!(
-        rendered.contains("ollama/llama3.2"),
+        rendered.contains("ollama/llama3.2 (max)"),
         "footer must show the active provider/model identity: {rendered:?}"
+    );
+
+    state.engine_display.reasoning_effort = None;
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("draw without explicit reasoning effort");
+
+    let buffer = terminal.backend().buffer().clone();
+    let rendered_without_reasoning: String = (0..20u16)
+        .flat_map(|row| (0..60u16).map(move |column| (column, row)))
+        .map(|(column, row)| buffer.cell((column, row)).unwrap().symbol().to_string())
+        .collect();
+    assert!(
+        rendered_without_reasoning.contains("ollama/llama3.2"),
+        "footer must retain the active provider/model identity: {rendered_without_reasoning:?}"
+    );
+    assert!(
+        !rendered_without_reasoning.contains("ollama/llama3.2 ("),
+        "footer must omit the default reasoning effort: {rendered_without_reasoning:?}"
+    );
+}
+
+#[test]
+fn model_picker_footer_shows_picker_controls_instead_of_send() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_reducer_state::{ModelChoice, SlashOverlay};
+    use ylva::tui_widgets;
+    use ylva::{ModelInfo, ProviderModelOption, TuiState};
+
+    let backend = TestBackend::new(80, 20);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    let mut state = TuiState {
+        slash_overlay: SlashOverlay::ModelPicker {
+            choices: vec![ModelChoice {
+                label: "stub/thinking  reasoning: default ⚙".to_string(),
+                selection: ProviderModelOption {
+                    provider_connection: "stub".to_string(),
+                    model: ModelInfo {
+                        id: "thinking".to_string(),
+                        name: None,
+                        context_length: None,
+                        reasoning_efforts: Some(vec!["low".to_string(), "high".to_string()]),
+                    },
+                    reasoning_effort: None,
+                },
+                is_active: false,
+            }],
+            selected: 0,
+        },
+        ..TuiState::new()
+    };
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("draw");
+
+    let buffer = terminal.backend().buffer().clone();
+    let rendered: String = (0..20u16)
+        .flat_map(|row| (0..80u16).map(move |column| (column, row)))
+        .map(|(column, row)| buffer.cell((column, row)).unwrap().symbol().to_string())
+        .collect();
+    assert!(
+        rendered.contains("←/→: effort"),
+        "rendered footer: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("enter: switch"),
+        "rendered footer: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("esc: cancel"),
+        "rendered footer: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("Provider Models"),
+        "model picker must use the provider models title: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("adjust reasoning"),
+        "model picker title must not duplicate footer controls: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("enter: send"),
+        "model picker must not advertise sending: {rendered:?}"
     );
 }
 

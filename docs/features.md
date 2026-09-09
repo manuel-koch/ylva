@@ -109,9 +109,13 @@ three provider-neutral states:
 
 When alternatives are available, `←`/`→` in the `/models` picker cycles
 between the provider default and the advertised values for the highlighted
-model. `Enter` applies both the model and the selected effort to subsequent
-requests. The selected effort is runtime state and is not added to the
-session's provider/model metadata.
+model. Each picker row labels reasoning as `unavailable`, `default`, or the
+current value followed by `⚙` when it can be adjusted, so models that do not
+respond to `←`/`→` are distinguishable. While an overlay is open, the footer
+replaces the normal send hint with the controls for that overlay.
+`Enter` applies both the model and the selected effort to subsequent requests.
+The selected effort is runtime state and is not added to the session's
+provider/model metadata.
 
 ## Tools to be used by models
 
@@ -276,8 +280,9 @@ module structure (model/presenter/view/driver split).
 - **Layout:** a scrollable chat-history area, a variable-height input box
   (capped at 1/3 of the terminal height), a `─` separator line, and a 2-row
   footer (mode/hint row and key-hints row). The mode/hint row also shows the
-  active `provider-connection/model` identity for the transcript on screen, including
-  the selected child while drilled in. No sidebar.
+  active `provider-connection/model` identity for the transcript on screen,
+  including an explicit reasoning effort in parentheses and the selected child
+  while drilled in. No sidebar.
 - **Input always active:** the input box is never disabled. `Enter` sends
   unconditionally — while the model is streaming, the message is queued as a
   pending steer (shown dimmed, then committed once the model has seen it),

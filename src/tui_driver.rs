@@ -555,10 +555,7 @@ async fn execute_slash_effects(
                             "Switched to {}/{} (reasoning: {}).",
                             config.provider_connection,
                             config.model,
-                            selection
-                                .reasoning_effort
-                                .as_deref()
-                                .unwrap_or("provider default")
+                            selection.reasoning_effort.as_deref().unwrap_or("default")
                         ),
                         None => format!(
                             "Switched to {}/{}.",
@@ -780,7 +777,7 @@ where
     configure_textarea(&mut textarea);
     let cmd_tx = agent.command_sender();
     let engine = agent.engine();
-    state.engine_display = crate::llm::engine::EngineDisplayInfo::from(&engine.config());
+    state.engine_display = crate::llm::engine::EngineDisplayInfo::from_engine(engine.as_ref());
     // Sorted once here so `/tools` output is stable — the registry is a
     // `HashMap`, whose iteration order is not.
     let mut available_tool_names = agent.registry().names();
@@ -806,7 +803,7 @@ where
     }
 
     loop {
-        state.engine_display = crate::llm::engine::EngineDisplayInfo::from(&engine.config());
+        state.engine_display = crate::llm::engine::EngineDisplayInfo::from_engine(engine.as_ref());
         let hint = confirm_hint(&state);
         terminal.draw(|frame| {
             render::render(frame, &mut state, &mut textarea, hint.as_deref(), mouse_pos);
@@ -2006,7 +2003,10 @@ mod tests {
                 .iter()
                 .map(|choice| choice.label.as_str())
                 .collect::<Vec<_>>(),
-            vec!["stub/small", "stub/large  — active"]
+            vec![
+                "stub/small  reasoning: unavailable",
+                "stub/large  reasoning: unavailable  — active"
+            ]
         );
         assert_eq!(*selected, 1);
     }

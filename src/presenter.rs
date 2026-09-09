@@ -3392,6 +3392,7 @@ mod tests {
                 engine: crate::llm::engine::EngineDisplayInfo {
                     provider_connection: "ollama".to_string(),
                     model: "child-model".to_string(),
+                    reasoning_effort: None,
                 },
             }),
             &empty_textarea(),
@@ -3402,6 +3403,7 @@ mod tests {
             Some(&crate::llm::engine::EngineDisplayInfo {
                 provider_connection: "ollama".to_string(),
                 model: "child-model".to_string(),
+                reasoning_effort: None,
             })
         );
     }

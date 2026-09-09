@@ -16,15 +16,27 @@
       This title is most of the time almost identical to the plain model-name.
       IMO we don't need that.
       Additionally that title make the line sometimes too long, so that important
-      info like context-length and reasoning and clipped.
+      info like context-length and reasoning are clipped.
 
-- [ ] Ability to toggle reasoning-effort in the "/models" popup is rather hidden.
+- [x] Ability to toggle reasoning-effort in the "/models" popup is rather hidden.
       It only works for some models. Maybe we should highlight whether the reasoning
       can be adjusted or not. Otherwise user tries `←`/`→` to cylce it, but
       nothing seems to happens.
       The keybindings in the footer don't give a hint about `←`/`→` or enter/esc.
       Footer still shows "enter: send" which is wrong while the slash-command
       popup is active.
+
+- [ ] Switching a model via "/models" slash-command persists a "system" message
+      in conversation:
+      ```json
+      {"type":"message","v":1,"message":{"role":"system","content":"Switched to openrouter/deepseek/deepseek-v4-flash-0731 (reasoning: provider default)."}}
+      ```
+      Shouldn't this be just a notice that is rendered in TUI, but it seems to be
+      a real "system" message in the conversation send to llm ?
+
+- [ ] Can't use mouse drag'n'drop to select text in slash-command popup
+
+- [ ] Can't use mouse click to select a popup an entry in slash-command popup
 
 - [x] Can't use fn-up/down to page scroll in /models popup list of providers/models
 

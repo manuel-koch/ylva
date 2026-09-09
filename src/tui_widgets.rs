@@ -484,43 +484,7 @@ pub fn draw(
             hint,
         )
     } else {
-        let in_child_view = state.child_view.child_view_bubble.is_some();
-        let keybinding_hint = if state.clarify_banner_state.pending_clarify.is_some() {
-            " enter: answer  click choice  ctrl-c/esc: cancel  F1: help"
-        } else if in_child_view && !input_is_empty {
-            // Viewing a subagent's drill-in transcript: `enter: send` is
-            // omitted entirely — the child conversation doesn't accept
-            // input (only one agent loop is driven at a time), and Enter no
-            // longer steers the *root* agent from here either (see
-            // `presenter::handle_key_main`), since that would silently act
-            // on a conversation other than the one currently on screen.
-            " ctrl-c/esc: clear draft  F1: help"
-        } else if in_child_view {
-            // Esc with an empty draft while viewing a subagent's drill-in
-            // transcript navigates back to the root conversation instead of
-            // acting on the root agent's own busy/idle `TuiMode` (see
-            // `presenter::keyboard_main`) — the drilled-into transcript is
-            // read-only, so "cancel"/"quit" here would misleadingly suggest
-            // esc affects the *root* agent's turn.
-            if state.agent_mode != AgentMode::Idle {
-                " esc: back to conversation  ctrl-c: cancel & quit  F1: help"
-            } else {
-                " esc: back to conversation  ctrl-c: quit  F1: help"
-            }
-        } else if state.agent_mode != AgentMode::Idle && !input_is_empty {
-            " enter: send  ctrl-c/esc: clear draft  F1: help"
-        } else if state.agent_mode != AgentMode::Idle {
-            // Busy with an empty draft: esc only stops the turn, ctrl-c stops
-            // the turn *and* quits the TUI. Naming both keys avoids a user
-            // reading "cancel/quit" as ambiguous about which key does what.
-            " enter: send  esc: cancel  ctrl-c: cancel & quit  F1: help"
-        } else if !input_is_empty {
-            // Idle with a draft: esc clears it (no quit); ctrl-c does not
-            // clear it and quits on a second press, same as idle-empty.
-            " enter: send  esc: clear draft  ctrl-c: quit  F1: help"
-        } else {
-            " enter: send  ctrl-c: quit  F1: help"
-        };
+        let keybinding_hint = footer_keybinding_hint(state, input_is_empty);
         draw_normal_footer(
             frame,
             footer_row_1,
@@ -543,6 +507,49 @@ pub fn draw(
     }
 
     button_areas
+}
+
+fn footer_keybinding_hint(state: &TuiState, input_is_empty: bool) -> &'static str {
+    match &state.slash_overlay {
+        SlashOverlay::Suggestions { .. } => {
+            " ↑/↓: select  tab: complete  enter: run  esc: close  F1: help"
+        }
+        SlashOverlay::LoadingModels => " loading models…  esc: close  F1: help",
+        SlashOverlay::ModelPicker { .. } => {
+            " ↑/↓: select  ←/→: effort  enter: switch  esc: cancel  F1: help"
+        }
+        SlashOverlay::Hidden => {
+            let in_child_view = state.child_view.child_view_bubble.is_some();
+            if state.clarify_banner_state.pending_clarify.is_some() {
+                " enter: answer  click choice  ctrl-c/esc: cancel  F1: help"
+            } else if in_child_view && !input_is_empty {
+                // Viewing a subagent's drill-in transcript: `enter: send` is
+                // omitted entirely — the child conversation doesn't accept
+                // input (only one agent loop is driven at a time), and Enter
+                // no longer steers the root agent from here either.
+                " ctrl-c/esc: clear draft  F1: help"
+            } else if in_child_view {
+                // Esc with an empty draft navigates back to the root
+                // conversation instead of acting on the root agent's turn.
+                if state.agent_mode != AgentMode::Idle {
+                    " esc: back to conversation  ctrl-c: cancel & quit  F1: help"
+                } else {
+                    " esc: back to conversation  ctrl-c: quit  F1: help"
+                }
+            } else if state.agent_mode != AgentMode::Idle && !input_is_empty {
+                " enter: send  ctrl-c/esc: clear draft  F1: help"
+            } else if state.agent_mode != AgentMode::Idle {
+                // Busy with an empty draft: Esc stops the turn, while Ctrl-C
+                // stops the turn and quits the TUI.
+                " enter: send  esc: cancel  ctrl-c: cancel & quit  F1: help"
+            } else if !input_is_empty {
+                // Idle with a draft: Esc clears it; Ctrl-C quits on confirm.
+                " enter: send  esc: clear draft  ctrl-c: quit  F1: help"
+            } else {
+                " enter: send  ctrl-c: quit  F1: help"
+            }
+        }
+    }
 }
 
 fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
@@ -2446,6 +2453,19 @@ fn draw_footer_row(
         return;
     }
 
+    let engine_identity = if !engine_identity.is_empty() {
+        match state
+            .engine_display
+            .reasoning_effort
+            .as_deref()
+            .filter(|reasoning_effort| *reasoning_effort != "default")
+        {
+            Some(reasoning_effort) => format!("{engine_identity} ({reasoning_effort})"),
+            None => engine_identity,
+        }
+    } else {
+        engine_identity
+    };
     let identity_text = format!(" {engine_identity}");
     let identity_width = (identity_text.chars().count() as u16).min(area.width);
     let [left_area, identity_area] = Layout::default()
@@ -2593,7 +2613,7 @@ fn draw_slash_overlay(frame: &mut Frame, input_area: Rect, overlay: &SlashOverla
     let (title, entries, selected) = match overlay {
         SlashOverlay::Hidden => return,
         SlashOverlay::Suggestions { choices, selected } => (
-            "Commands  (↑/↓ select · Tab complete)".to_string(),
+            "Commands".to_string(),
             choices
                 .iter()
                 .map(|info| format!("{:<8} {}", info.name, info.description))
@@ -2606,8 +2626,7 @@ fn draw_slash_overlay(frame: &mut Frame, input_area: Rect, overlay: &SlashOverla
             None,
         ),
         SlashOverlay::ModelPicker { choices, selected } => (
-            "Models  (↑/↓ select · PgUp/PgDn page · ←/→ reasoning · Enter switch · Esc cancel)"
-                .to_string(),
+            "Provider Models".to_string(),
             choices.iter().map(|choice| choice.label.clone()).collect(),
             Some(*selected),
         ),

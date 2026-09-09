@@ -377,10 +377,11 @@ user-facing on-disk contract; this section is the contributor view.
   paused for its own inner tool approval, since that only sets
   `Focus::ToolApproval` and never touches the root `spawn_subagent` bubble's
   `Running` state.
-- The footer's right-aligned `provider-connection/model` identity is projected from the
-  live root `EngineConfig` or the configured child engine, so it follows the
-  transcript currently on screen. Root model switches refresh the label before
-  the next frame.
+- The footer's right-aligned `provider-connection/model` identity and explicit
+  reasoning effort are projected from the live root engine or the configured
+  child engine, so they follow the transcript currently on screen. The effort
+  is shown in parentheses only when it is not the provider default. Root model
+  switches refresh the label before the next frame.
 - A thin separator line (the same dim `─` rule used between the chat area
   and the input/footer panel) is rendered directly below the child-view
   header bubble, so it never reads as part of the scrollable
@@ -518,6 +519,11 @@ same bounded `↑`/`↓` movement semantics, uses `page-up`/`fn-up` and
 `←`/`→` to cycle reasoning efforts when available, and `Enter` activates both
 the selected connection, model, and effort;
 `Esc` closes any open overlay before the usual draft-clear/abort ladder.
+Model rows identify reasoning as unavailable, at the default, or adjustable
+with a `⚙` marker. The user-facing fixed value is rendered as `default`. The
+footer switches from the normal `enter: send` hint to the controls for the
+active command overlay, including the model picker's reasoning, switch, and
+cancel keys.
 
 Slash effects (`Effect::ClearConversation`/`ShowTools`/`ListModels`/
 `SwitchModel`) are the only ones that need the engine, so
