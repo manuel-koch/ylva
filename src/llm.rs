@@ -75,7 +75,7 @@ pub struct ModelInfo {
     ///
     /// - `None` means that reasoning support is not advertised.
     /// - `Some([])` means that reasoning is supported but the
-    ///    provider exposes no selectable effort alternatives.
+    ///   provider exposes no selectable effort alternatives.
     /// - `Some(values)` means that reasoning is supported and
     ///   `values` contains the selectable effort values.
     pub reasoning_efforts: Option<Vec<String>>,

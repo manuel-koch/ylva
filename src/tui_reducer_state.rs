@@ -743,7 +743,10 @@ impl ModelChoice {
 pub(crate) fn model_choice_label(option: &ProviderModelOption, is_active: bool) -> String {
     let mut label = format!("{}/{}", option.provider_connection, option.model.id);
     if let Some(context_length) = option.model.context_length {
-        label.push_str(&format!("  {context_length} tokens"));
+        label.push_str(&format!(
+            "  context: {}",
+            format_context_length(context_length)
+        ));
     }
     match option.model.reasoning_efforts.as_deref() {
         None => label.push_str("  reasoning: unavailable"),
@@ -757,6 +760,19 @@ pub(crate) fn model_choice_label(option: &ProviderModelOption, is_active: bool) 
         label.push_str("  — active");
     }
     label
+}
+
+fn format_context_length(context_length: usize) -> String {
+    const KILOBYTE: usize = 1024;
+    const MEGABYTE: usize = KILOBYTE * 1024;
+
+    if context_length >= MEGABYTE {
+        format!("{}mb", context_length / MEGABYTE)
+    } else if context_length >= KILOBYTE {
+        format!("{}kb", context_length / KILOBYTE)
+    } else {
+        format!("{context_length} tokens")
+    }
 }
 
 /// Overlay rendered above the input while a slash command is being composed
@@ -2310,7 +2326,33 @@ mod tests {
 
         assert_eq!(
             model_choice_label(&option, false),
-            "openrouter/openai/gpt-oss-120b  131072 tokens  reasoning: default ⚙"
+            "openrouter/openai/gpt-oss-120b  context: 128kb  reasoning: default ⚙"
+        );
+    }
+
+    #[test]
+    fn model_choice_label_formats_context_length_as_integer_binary_size() {
+        let model_option = |context_length| ProviderModelOption {
+            provider_connection: "stub".to_string(),
+            model: crate::llm::ModelInfo {
+                id: "model".to_string(),
+                context_length: Some(context_length),
+                reasoning_efforts: None,
+            },
+            reasoning_effort: None,
+        };
+
+        assert_eq!(
+            model_choice_label(&model_option(2_048), false),
+            "stub/model  context: 2kb  reasoning: unavailable"
+        );
+        assert_eq!(
+            model_choice_label(&model_option(1_048_576), false),
+            "stub/model  context: 1mb  reasoning: unavailable"
+        );
+        assert_eq!(
+            model_choice_label(&model_option(1_023), false),
+            "stub/model  context: 1023 tokens  reasoning: unavailable"
         );
     }
 

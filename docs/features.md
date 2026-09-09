@@ -413,6 +413,10 @@ The command set is a fixed allowlist — a leading `/` that matches nothing in
 it (e.g. `/foo`) is ordinary chat text and is sent to the model unchanged, as
 is any `/` that is not the first character of the input.
 
+The `/models` picker displays provider-reported context lengths as
+`context: <size>` labels using integer binary sizes (`2048` appears as
+`context: 2kb`; `1_048_576` appears as `context: 1mb`).
+
 | Command | Effect | Result bubble |
 | --- | --- | --- |
 | `/models` | Queries every configured provider connection, lists successful results as `provider_connection/model`, and switches the engine to the picked connection/model. `↑`/`↓` select, `page-up`/`fn-up` and `page-down`/`fn-down` move by a page, `←`/`→` cycle reasoning effort when available, `Enter` confirms, `Esc` cancels. | Persisted — the switch changes which provider connection/model later turns use; the reasoning effort applies to the current runtime |

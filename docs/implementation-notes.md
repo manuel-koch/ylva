@@ -46,7 +46,9 @@ format-dispatch enum.
 reasoning without selectable alternatives, and `Some(values)` means supported
 reasoning with those alternatives. The `/models` picker adds an implicit
 provider-default choice before `values`; the chosen explicit value is carried
-in `ProviderModelOption` and applied when the selection is confirmed.
+in `ProviderModelOption` and applied when the selection is confirmed. Picker
+rows render available context lengths as `context: <size>` labels using
+integer binary `kb`/`mb` sizes.
 
 `EngineRouter` owns the configured engine set when a profile or environment
 provides more than one provider connection. It delegates chat and runtime

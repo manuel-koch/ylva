@@ -34,7 +34,7 @@
       Shouldn't this be just a notice that is rendered in TUI, but it seems to be
       a real "system" message in the conversation send to llm ?
 
-- [ ] "/models" should display the llm context-length as kb/mb size
+- [x] "/models" should display the llm context-length as kb/mb size
       ( integer representation, 2048 == 2kb ) to increase readability.
 
 - [ ] Can't use mouse drag'n'drop to select text in slash-command popup
