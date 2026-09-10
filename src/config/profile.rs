@@ -36,7 +36,7 @@ pub struct ProfileConfig {
     #[serde(default = "default_engine_name")]
     pub default_engine: String,
     /// Name of the engine used for compact/summarisation tasks. When `None`,
-    /// falls back to `default_engine`. Phase 9 wires this at runtime.
+    /// falls back to `default_engine`. Phase 10 wires this at runtime.
     #[serde(default)]
     pub compact_engine: Option<String>,
     /// Named provider connections, keyed by the connection name referenced by

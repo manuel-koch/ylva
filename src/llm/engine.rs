@@ -38,10 +38,10 @@ pub const DEFAULT_CONTEXT_LENGTH: usize = 128_000;
 /// Later phases add file layers and readers on top without displacing that
 /// SSOT:
 ///
-/// - **Phase 8 (Full Configuration & Persona System)** adds the three-layer
+/// - **Phase 9 (Full Configuration & Persona System)** adds the three-layer
 ///   project/home/embedded fallback chain and persona/`agents/*.md` sourcing,
 ///   which populate this same struct through additional layers.
-/// - **Phase 9 (Context Compaction & Token Budgeting)** reads
+/// - **Phase 10 (Context Compaction & Token Budgeting)** reads
 ///   `context_length` to drive `maybe_compact`'s budget; it adds no fields
 ///   here.
 #[derive(Clone, Debug, serde::Deserialize)]

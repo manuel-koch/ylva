@@ -197,7 +197,7 @@ Listing sessions takes no lock — it is a pure read.
 
 In Phase 7 a resumed session appends to the existing file but does **not**
 replay the earlier turns back into the in-memory conversation — restoring a
-transcript into the running UI is Phase 8 scope.
+transcript into the running UI is Phase 8 (Session Replay on Resume) scope.
 
 ## Listing sessions
 

@@ -22,4 +22,4 @@ OUT_PATH="${PREFIX_TIMESTAMPED}.txt"
 export YLVA_REQUEST_DUMP_PATH=${PREFIX_TIMESTAMPED}.json
 ${YLVA} --log-file ${LOG_PATH} \
         --log-level TRACE --log-format ${LOG_FORMAT} \
-        --auto-approve-spawn
+        --auto-approve-spawn "$@"

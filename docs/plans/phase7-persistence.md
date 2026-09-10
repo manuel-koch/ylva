@@ -25,13 +25,14 @@ much larger systems than Phase 7's checklist bullets ever asked for. To keep
 this plan honest and avoid scope creep, three things were carved out into
 their own new blueprint phases (inserted into `docs/blueprint.md` §7 as part
 of this planning pass, shifting the former "Phase 8: CLI Surface" to "Phase
-10"):
+10" — later further shifted to Phase 11 when Phase 8: Session Replay on
+Resume was inserted; see the final note at the end of this section):
 
-- **Phase 8: Full Configuration & Persona System** — the three-layer
+- **Phase 9: Full Configuration & Persona System** — the three-layer
   `.ylva`/`~/.ylva`/embedded-`config/` fallback chain, `ylva init`/`ylva init
   --project`, `SOUL.md` persona loading, global `agents/*.md` type files,
   project-scoped `.env` auto-loading, and per-tool sandbox rule configuration.
-- **Phase 9: Context Compaction & Token Budgeting** — `TieredMessage`/
+- **Phase 10: Context Compaction & Token Budgeting** — `TieredMessage`/
   `MessageTier`, token counting (`tiktoken-rs`), `maybe_compact`'s
   hysteresis trigger/target algorithm, and tool-result truncation at
   insertion.
@@ -66,7 +67,7 @@ dropped and `/agent` is deferred, see Implementation Hints).
   `ProfileConfig`/`EngineConfig`/`AgentConfig` (default model, theme,
   keybindings, per-agent-type engine assignment) instead of being
   hand-constructed in-process only. This is a **flat single-file load**, not
-  the full §4G three-layer/`ylva init`/`SOUL.md` system (Phase 8).
+  the full §4G three-layer/`ylva init`/`SOUL.md` system (Phase 9).
 - The TUI ships two selectable `syntect` themes (dark = `base16-ocean.dark`,
   light = `base16-ocean.light`) instead of the single hardcoded theme.
 - `/models`, `/tools`, `/clear` (alias `/reset`) are recognized as slash
@@ -84,7 +85,7 @@ dropped and `/agent` is deferred, see Implementation Hints).
 - `Context` ownership rule (HARD, §4C): the outer agent loop is the **sole
   writer** to `Context`; the inner streaming task never holds a mutable
   reference/lock to it. This plan does not touch `Context`'s tiering (that's
-  Phase 9), but the `Store`-forwarding added here must still respect the
+  Phase 10), but the `Store`-forwarding added here must still respect the
   rule — forward committed messages from the same outer-loop call sites that
   already own `Context` mutation, never from inside the streaming task.
 - §4H durability bar is **process-crash-safe, not power-cut-safe**: flush
@@ -316,7 +317,7 @@ History") side by side; the first test to run after step 1 lands is
 10. [x] Add `toml` to `[dependencies]` in `Cargo.toml` (blueprint Phase 7 key
    crate). Do **not** add the `config` crate for this narrow, single-file
    load — a flat `toml::from_str` into the existing structs needs no
-   multi-source merge library; revisit only if Phase 8's layered system
+   multi-source merge library; revisit only if Phase 9's layered system
    later needs real merge semantics (YAGNI).
 11. [x] Extend `src/config.rs` to load `~/.ylva/profiles/<name>/config.toml`
    into the existing `ProfileConfig`/`AgentConfig` structs (add
@@ -324,7 +325,7 @@ History") side by side; the first test to run after step 1 lands is
    new `default_model`/`theme`/`keybindings` surface matching the Phase 7
    bullet ("default model, theme, keybindings, and agent-type engine
    assignments"). This is a **flat load of one file** — no project `.ylva/`
-   discovery, no `ylva init`, no `SOUL.md`, no `agents/*.md` (all Phase 8).
+   discovery, no `ylva init`, no `SOUL.md`, no `agents/*.md` (all Phase 9).
    Keep `EngineConfig` (`src/llm/engine.rs`) as the field-level SSOT for
    sampling parameters per its existing doc comment; the loader populates
    it, it does not duplicate its fields.
@@ -343,10 +344,10 @@ History") side by side; the first test to run after step 1 lands is
     that Phase 7 wires these five fields from the narrow flat single-file
     loader (steps 10–12) into `AgentFactory`'s provider construction,
     making `EngineConfig` the SSOT for *these fields* specifically — and
-    name what later phases add on top without displacing that SSOT: Phase 8
+    name what later phases add on top without displacing that SSOT: Phase 9
     (Full Configuration & Persona System) adds the three-layer project/
     home/embedded fallback chain and persona/`agents/*.md` sourcing that
-    populate the same struct through additional file layers; Phase 9
+    populate the same struct through additional file layers; Phase 10
     (Context Compaction & Token Budgeting) reads `context_length` to drive
     `maybe_compact`'s budget without adding new `EngineConfig` fields. This
     keeps the doc comment honest about scope as more phases ship, instead
@@ -361,8 +362,8 @@ History") side by side; the first test to run after step 1 lands is
     them into provider construction from a TOML config file" note (under
     `EngineConfig`) to describe the shipped flat-file loader, its exact
     path, and precedence; update `docs/cli-options.md` if a `--profile`
-    flag's resolution changes; do not claim Phase 8's three-layer/`SOUL.md`
-    behavior here — that stays documented as future work until Phase 8
+    flag's resolution changes; do not claim Phase 9's three-layer/`SOUL.md`
+    behavior here — that stays documented as future work until Phase 9
     ships.
 
 ### Rendering polish (§4F)
@@ -485,7 +486,7 @@ History") side by side; the first test to run after step 1 lands is
   `tiktoken-rs` (both named in the blueprint's original, now-superseded
   Phase 7 "Key crates" line) are deliberately **not** added here — `config`
   is deferred as YAGNI for a single flat file, and `tiktoken-rs` moved to
-  Phase 9 with the rest of token counting/compaction.
+  Phase 10 with the rest of token counting/compaction.
 - `src/config.rs` (103 lines) currently holds only in-memory
   `AgentConfig`/`ProfileConfig` structs (`#[derive(Debug, Clone)]`, no
   `Deserialize`, no file I/O) with unit tests constructing them by hand —
@@ -537,7 +538,7 @@ History") side by side; the first test to run after step 1 lands is
   means for steps 11–12, beyond the blueprint bullet text.
 - `docs/configuration.md` already documents `ProfileConfig`/`AgentConfig`/
   `EngineConfig` field tables; its `compact_engine` and per-tool sandbox
-  `[tool.*]` notes now point at Phase 9 and Phase 8 respectively (updated as
+  `[tool.*]` notes now point at Phase 10 and Phase 9 respectively (updated as
   part of this planning pass, since those two features moved out of Phase
   7) — only the `EngineConfig` provider-construction note still points at
   Phase 7, matching this plan's steps 11–12.
@@ -571,3 +572,16 @@ History") side by side; the first test to run after step 1 lands is
   (in §4C and §4G) were updated to point at Phase 9/Phase 8 respectively as
   part of this planning pass — a future plan for either new phase can rely
   on those blueprint sections already being consistent.
+
+  **Update (later planning pass):** a further phase, *Session Replay on
+  Resume*, was inserted after Phase 7 to cover replaying a resumed
+  session's persisted turns into `Context`/the TUI (a gap this plan
+  explicitly left open — see the `--conversation-id` resume bullet in
+  Phase 7's blueprint checklist). This shifted every phase above by one:
+  Phase 7 (this plan) → **Phase 8 (Session Replay on Resume, new)** →
+  Phase 9 (Full Configuration & Persona System, formerly Phase 8) → Phase 10
+  (Context Compaction & Token Budgeting, formerly Phase 9) → Phase 11 (CLI
+  Surface, formerly Phase 10). All in-blueprint cross-references were
+  updated accordingly; the phase numbers quoted earlier in this file are
+  the numbers as of *this plan's own* planning pass and are superseded by
+  the mapping above.

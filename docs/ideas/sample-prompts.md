@@ -117,9 +117,9 @@ Give user 3 random animal options to choose from.
 
 Read project documentation and summarize the goal and main features of the project:
 
-- ./README.md (must read)
-- ./AGENTS.md (must read)
-- ./docs/*.md (pick/read files that seem to related to the topic in question)
+- `./README.md` (must read)
+- `./AGENTS.md` (must read)
+- `./docs/*.md` (pick/read files that seem to related to the topic in question)
 
 Summarize features with brief description in a markdown table.
 Summerize current state of planned implementation progress.

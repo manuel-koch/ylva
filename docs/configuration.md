@@ -74,7 +74,7 @@ can_spawn = true
 | Key | Type | Description |
 |---|---|---|
 | `default_engine` | `String` | Name of the `[engines.*]` entry used when an agent type names none. Defaults to `default`. |
-| `compact_engine` | `Option<String>` | Engine used for summarisation tasks; resolves to `default_engine` when absent. Phase 9 wires this at runtime. |
+| `compact_engine` | `Option<String>` | Engine used for summarisation tasks; resolves to `default_engine` when absent. Phase 10 wires this at runtime. |
 | `default_model` | `Option<String>` | Model filled into every `[engines.*]` entry that names none of its own. |
 | `theme` | `dark` \| `light` | Syntax-highlighting theme. Defaults to `dark`. See [features — rendering](./features.md#tui-architecture). |
 | `keybindings` | table of strings | **Reserved.** Accepted and validated so a profile carrying one loads, but Phase 7 ships the fixed key map in `docs/keybindings.md` and does not apply these entries yet. |
@@ -109,7 +109,7 @@ malformed references are hard startup errors; expanded secret values are never
 logged.
 
 **WIP:** The three-layer project/home/embedded fallback chain, `SOUL.md`, and
-`agents/*.md` persona sourcing are **not** implemented — they remain Phase 8
+`agents/*.md` persona sourcing are **not** implemented — they remain Phase 9
 work.
 
 ## Engine configuration (`EngineConfig`)
@@ -130,7 +130,7 @@ model switch affects subsequent requests without rebuilding the provider.
 | `provider_connection` | `String` | Name of the connection under `[provider_connections.*]`. The connection's `provider` field must be `"mock"`, `"ollama"`, or `"openrouter"`. Ollama uses the server origin as `api_base_url` and derives both `/v1` chat and `/api` catalog endpoints; OpenRouter uses its origin as `api_base_url` and derives `/api/v1` for chat and model discovery. |
 | `model` | `String` | Model identifier passed to the provider. May be omitted, in which case the profile's `default_model` fills it in. |
 | `temperature` | `Option<f32>` | Sampling temperature. `None` uses the model's own default. |
-| `context_length` | `Option<usize>` | Maximum token context window. `None` (the default when the field is left out of TOML) means the profile doesn't limit it explicitly. Accepts either a plain integer or a string with a `kb`/`mb` suffix (e.g. `"265kb"` = `265 * 1024`, `"2mb"` = `2 * 1024 * 1024`) — the same 1024-based units `/models` uses to display context lengths. `EngineConfig::effective_context_length` resolves the value actually used, in priority order: this configured value, then the provider's advertised context length for the active model (from its `/models` catalog), then the built-in default of `128 000`. Phase 9 reads the resolved value to drive compaction budgeting. |
+| `context_length` | `Option<usize>` | Maximum token context window. `None` (the default when the field is left out of TOML) means the profile doesn't limit it explicitly. Accepts either a plain integer or a string with a `kb`/`mb` suffix (e.g. `"265kb"` = `265 * 1024`, `"2mb"` = `2 * 1024 * 1024`) — the same 1024-based units `/models` uses to display context lengths. `EngineConfig::effective_context_length` resolves the value actually used, in priority order: this configured value, then the provider's advertised context length for the active model (from its `/models` catalog), then the built-in default of `128 000`. Phase 10 reads the resolved value to drive compaction budgeting. |
 | `api_base_url` | `Option<String>` | Optional engine-level override for the connection's base URL. |
 | `api_key` | `Option<String>` | Optional engine-level override for the connection's API key. |
 | `reasoning` | `Option<String>` | Initial explicit reasoning effort applied when the engine is constructed. `None` uses the provider's own default. Later changes go through `/models`, which validates the effort against the model's advertised options before switching. |
@@ -142,7 +142,7 @@ A profile groups engine selection and per-agent settings for a runtime session.
 | Field | Type | Description |
 |---|---|---|
 | `default_engine` | `String` | Name of the engine used when no agent-level override is present (required). |
-| `compact_engine` | `Option<String>` | Engine used for summarisation tasks. Resolves to `default_engine` when absent. Phase 9 wires this at runtime. |
+| `compact_engine` | `Option<String>` | Engine used for summarisation tasks. Resolves to `default_engine` when absent. Phase 10 wires this at runtime. |
 | `provider_connections` | `HashMap<String, ProviderConnectionConfig>` | Named provider connections, keyed by connection name. |
 | `engines` | `HashMap<String, EngineConfig>` | Named model/runtime configurations, keyed by engine name. |
 | `agents` | `HashMap<String, AgentConfig>` | Per-agent-type settings, keyed by agent-type name. |
@@ -175,7 +175,7 @@ named glob rule (last match wins):
 | `outside_workspace` | `AutoDenied` | Any path that normalizes outside the workspace root. |
 | `dot_path` | `AutoDenied` | Any path whose relative-to-root form has a component starting with `.` (dot-files/dot-directories). |
 
-**WIP:** These two rules are not yet configurable — Phase 8 is expected to load
+**WIP:** These two rules are not yet configurable — Phase 9 is expected to load
 per-tool `[tool.*]` rule lists (including `outside_workspace`/`dot_path`
 overrides) from the layered TOML config; until then the defaults above apply to
 every tool uniformly. `search`'s `path: None` (cwd, never leaves the

@@ -17,7 +17,7 @@
 //! Phase 7 loads exactly **one** flat file —
 //! `~/.ylva/profiles/<name>/config.toml` — into the structs below. There is
 //! deliberately no project-local `.ylva/` discovery, no `SOUL.md`, and no
-//! `agents/*.md` sourcing: the layered three-source chain is Phase 8 scope.
+//! `agents/*.md` sourcing: the layered three-source chain is Phase 9 scope.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

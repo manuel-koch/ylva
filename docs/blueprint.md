@@ -1040,7 +1040,7 @@ enum MessageTier {
 }
 
 struct Context {
-    messages: Vec<Message>,  // Phase 1: simple Vec.  Phase 9 adds TieredMessage + token_count.
+    messages: Vec<Message>,  // Phase 1: simple Vec.  Phase 10 adds TieredMessage + token_count.
 }
 
 impl Context {
@@ -1060,7 +1060,7 @@ impl Context {
         &self.messages
     }
     // Phase 3 adds: push_tool_result, push_tool_error, descope_pending_tools
-    // Phase 9 adds: push_system, push_initial_context, maybe_compact, token counting
+    // Phase 10 adds: push_system, push_initial_context, maybe_compact, token counting
 }
 ```
 
@@ -1068,23 +1068,23 @@ impl Context {
 
 - `Context::new()` seeds the initial system message `Message::System { content:
   "You are Ylva, a helpful agent with tool capabilities." }` (SSOT constant for
-  Phase 1; Phase 8 sources this from a customizable **SOUL.md**,
+  Phase 1; Phase 9 sources this from a customizable **SOUL.md**,
   see §4G).
 - `push_user(text)` → `Message::User { content: text }`
 - `push_assistant(content, status, tool_calls)` →
   `Message::Assistant { content, status, tool_calls }`
 
-**Phase 9 (future):** Replace `Vec<Message>` with `Vec<TieredMessage>`, add
+**Phase 10 (future):** Replace `Vec<Message>` with `Vec<TieredMessage>`, add
 `push_system`, `push_initial_context`, `push_compacted`, `maybe_compact`,
 `find_oldest_droppable`, and `find_oversized_result`.
 
 **Context ownership rule (HARD):** The outer agent loop is the **sole writer** to `Context`.
 
-**Compaction (Phase 9 future):**
+**Compaction (Phase 10 future):**
 
 Phase 1 does not implement compaction or token counting. The full algorithm
 (`maybe_compact`, `find_oldest_droppable`, `find_oversized_result`) is deferred
-until Phase 9 when `TieredMessage` and `tiktoken-rs` are introduced.
+until Phase 10 when `TieredMessage` and `tiktoken-rs` are introduced.
 
 **Compaction trigger and target:** `maybe_compact` uses a **hysteresis** model
 with a single control, `compact_target_ratio` (fraction of `context_length`):
@@ -1105,7 +1105,7 @@ with a single control, `compact_target_ratio` (fraction of `context_length`):
   in practice over-discards, add `max_drop_ratio` ("never drop more than X% of
   current in one pass") then.
 
-**Tool-result truncation (Phase 9 future):** Tool results are **truncated at
+**Tool-result truncation (Phase 10 future):** Tool results are **truncated at
 insertion** to a configurable cap (default ~8–16 KB / engine-tunable), with a
 clear marker such as `… [truncated M of K chars]`. Combined with
 `maybe_compact` preferring oversized results, a large result neither swallows
@@ -1113,7 +1113,7 @@ the window nor forces many older turns to be dropped. If the model needs more
 of a file, it re-calls `read`/`edit` with `offset`/`limit` — the
 existing tool contract.
 
-**Phase 9 (future):** Replace `find_oldest_droppable` + `remove` with a
+**Phase 10 (future):** Replace `find_oldest_droppable` + `remove` with a
 summarization pass: collect K oldest `Recent` messages, spawn a background
 summarizer model, and replace them with one `Compacted` system message.
 
@@ -1163,7 +1163,7 @@ generation is reserved for the explicit interrupt (`Ctrl+C` / `Esc`).
 **Token counting:** Use `tiktoken-rs` for OpenAI-compatible models and a byte-length
 heuristic (4 chars ≈ 1 token) for Ollama as a cheap fallback. Maintain a rolling
 window that trims the oldest user/assistant pairs (never the system prompt) when
-the total exceeds the model limit. For a more advanced solution (Phase 9), summarise
+the total exceeds the model limit. For a more advanced solution (Phase 10), summarise
 dropped messages via a cheap summariser model call and prepend a system message
 with the summary.
 
@@ -1558,7 +1558,7 @@ a chat (the root agent's persona) follows the same scopes, expressed as a
 built-in default. It resolves through the same three-layer fallback chain
 below. Phase 1 hard-codes the default message (`"You are Ylva, a helpful agent
 with tool capabilities."`) as an SSOT constant; the SOUL.md loader replaces
-that constant's source in the config phase (§4C, §7 Phase 8).
+that constant's source in the config phase (§4C, §7 Phase 9).
 
 **Three-layer fallback chain**, resolved per-file with **whole-layer replace**
 (highest layer that defines a file wins; lower layers ignored for that file):
@@ -1600,7 +1600,7 @@ already-exported environment variable taking precedence over the `.env`
 value. TOML string values can reference the merged environment with
 `${ENV_VAR}`. Missing variables are startup errors, and secret values are
 never logged. Project-scoped `.env` loading and the `ylva init --project`-
-managed `.gitignore` remain Phase 8 work.
+managed `.gitignore` remain Phase 9 work.
 
 **Global agent types** (`~/.ylva/agents/`) define *behavior*: tools,
 prompts, max iterations, timeouts, `can_spawn`. They are fully self-contained
@@ -1739,7 +1739,7 @@ explicit `<role>_engine` → `default_engine` → hard error.
 
 ```toml
 # Future roles, added when the corresponding feature is implemented:
-compact_engine = "openrouter_small"   # context compaction summarizer (Phase 9)
+compact_engine = "openrouter_small"   # context compaction summarizer (Phase 10)
 # curator_engine = "openrouter_small" # reserved for a future curator child agent
 ```
 
@@ -2762,7 +2762,8 @@ See reducer-state-handling-plan.md.
 - [x] Resume an existing session via explicit `--conversation-id` (no auto-resume, no
       picker); an id that does not match an existing session file is a hard error,
       never a silent new-session fallback. Phase 7 resume **appends** to the session
-      file; replaying its earlier turns back into the in-memory `Context` is Phase 8.
+      file; replaying its earlier turns back into the in-memory `Context` is
+      Phase 8 (Session Replay on Resume, below).
 
 - [x] Config hierarchy — **narrow scope**: load a single flat
       `~/.ylva/profiles/<name>/config.toml` (default profile at
@@ -2772,7 +2773,7 @@ See reducer-state-handling-plan.md.
       three-layer fallback chain (project `.ylva/` → home `~/.ylva/` → embedded
       `config/`), `ylva init`/`ylva init --project` distribution, `SOUL.md`
       persona loading, and global `agents/*.md` type files are **out of scope
-      for Phase 7** — see Phase 8 below. Profile-scoped `.env` loading is
+      for Phase 7** — see Phase 9 below. Profile-scoped `.env` loading is
       implemented for the provider environment.
 
 - [x] `/commands` in input box, recognised only when `/` is the first character
@@ -2791,7 +2792,66 @@ See reducer-state-handling-plan.md.
 
 **Key crates:** `serde_json`, `sha2`, `toml`, `chrono`
 
-### Phase 8: Full Configuration & Persona System
+### Phase 8: Session Replay on Resume
+
+- [ ] **Goal:** Resuming a session (`--conversation-id`) reconstructs its prior
+      turns instead of starting blank, so both the model and the user see
+      continuous history — closing the gap Phase 7 explicitly deferred (§4H
+      decision 5's resume model **appends** to the file but does not replay
+      it back into `Context` or the TUI).
+
+- [ ] `Store::read_messages` (already shipped in Phase 7) is used on
+      `Store::resume` to hydrate a **new**, silent seam on `Context` — e.g.
+      `Context::hydrate(messages)` — that appends the persisted messages
+      without re-`commit`-ing them to the store a second time (re-recording
+      already-persisted lines would duplicate every prior turn on next
+      resume). The two leading system prompts stay sourced fresh from the
+      running binary (per §4H decision 4's schema-tolerance note) — the
+      hydrated messages are only the committed conversation ones after them.
+
+- [ ] Headless (`ConsoleApp`): a resumed session's hydrated `Context` is
+      visible to the model on the very next turn (prior turns are part of
+      the request payload), matching how a live session behaves.
+
+- [ ] TUI (`TuiApp`/`AppState`): the hydrated messages are projected into
+      `chat_entries` before the first frame renders, so a resumed session
+      shows its prior turns immediately instead of an empty transcript —
+      `Message::User` → `ChatEntry::UserMessage { state: Sent }`,
+      `Message::Assistant` → `ChatEntry::AssistantMessage`, `Message::ToolResult`/
+      `Message::ToolError` → a completed/errored `ChatEntry::ToolBubble` (no
+      `Pending`/`Running` state is ever reconstructed — a tool call that
+      never got a result before the process ended has no result to show and
+      is dropped from the replay, same as it already has no terminal event
+      in the JSONL). The chat view opens scrolled to the bottom of the
+      replayed history (existing auto-scroll behavior, not a new mechanism).
+
+- [ ] Child-agent transcripts (`parent_session`-linked `.jsonl` files) are
+      **not** rehydrated into the drill-in view in this phase — a resumed
+      session's root transcript replays; a child's own sub-session remains
+      readable directly (`Store::read_messages` on its file) but not wired
+      into `AppState::child_conversations` automatically. Tracked as a
+      follow-up, not blocking this phase's goal.
+
+- [ ] Tests: `Context` hydration round-trips a written session's messages in
+      order without re-persisting them (a second resume + flush must not
+      double every line); an end-to-end test (extending
+      `tests/store_persistence_e2e.rs`'s spawn-the-binary pattern) resumes a
+      session that already has a completed turn and asserts the **next**
+      request payload includes the earlier turn's content; a TUI-side test
+      (`tests/tui_render_state.rs`/presenter unit tests) asserts
+      `chat_entries` is populated from a hydrated `Context` before the first
+      `draw_frame` call.
+
+- [ ] Documentation: update `docs/persistence.md`'s resume contract (remove
+      the "does not replay" caveat, describe the new hydration behavior and
+      the child-transcript exception above); update `docs/features.md`'s
+      Session Persistence section; add a "Session replay" subsection to
+      `docs/implementation-notes.md` describing the `Context::hydrate` seam
+      and the `Message` → `ChatEntry` projection.
+
+**Key crates:** none new (uses the existing `Store::read_messages`, §4H).
+
+### Phase 9: Full Configuration & Persona System
 
 - [ ] **Goal:** Replace Phase 7's single flat config file with the complete `§4G`
       config-driven-types system, so behavior (agent types, persona) and
@@ -2805,7 +2865,8 @@ See reducer-state-handling-plan.md.
 
 - [ ] `ylva init` (seeds the full standard set into `~/.ylva/`) and
       `ylva init --project` (seeds a minimal `.ylva/profiles/default/config.toml`
-      into the project root); both write-if-missing by default, `--force` reseeds
+      into the project root); both write-if-missing by default, `--force` reseeds.
+      What standard config should be used for engine/provider/agent ?
 
 - [ ] `SOUL.md` persona / initial system message loader (project `.ylva/` and
       home `~/.ylva/`, built-in default), replacing the Phase 1 SSOT constant's
@@ -2815,11 +2876,19 @@ See reducer-state-handling-plan.md.
       frontmatter, e.g. `research.md`, `code_edit.md`), shared across profiles
       and usable as root or child agent types
 
+- [ ] Profile-scoped agent-type definitions (`~/.ylva/profiles/<name>/agents/*.md`
+      with `+++` frontmatter, e.g. `research.md`, `code_edit.md`), usable as root
+      or child agent types
+
+- [ ] Project-scoped agent-type definitions (`.ylva/agents/*.md`
+      with `+++` frontmatter, e.g. `research.md`, `code_edit.md`), usable as root
+      or child agent types
+
 - [x] Profile-scoped `.env` auto-loading
       (`~/.ylva/profiles/<name>/.env`), with an already-exported environment
       variable taking precedence.
 
-- [ ] Project-scoped `.env` auto-loading (e.g. `.ylva/profiles/default/.env`);
+- [ ] Project-scoped `.env` auto-loading (e.g. `.ylva/profiles/<name>/.env`);
       `ylva init --project` also deploys a `.gitignore` inside the project's
       `.ylva/` ignoring `.env`
 
@@ -2830,7 +2899,7 @@ See reducer-state-handling-plan.md.
 **Key crates:** `toml` (already added in Phase 7); evaluate `dirs`/`directories`
 for home-directory resolution when this phase starts.
 
-### Phase 9: Context Compaction & Token Budgeting
+### Phase 10: Context Compaction & Token Budgeting
 
 - [ ] **Goal:** Keep the context window bounded for long-running conversations
       without losing the most valuable context (§4C).
@@ -2853,13 +2922,13 @@ for home-directory resolution when this phase starts.
 - [ ] Tool-result truncation at insertion (default ~8–16 KB, engine-tunable),
       with a `"… [truncated M of K chars]"` marker
 
-- [ ] Phase 9 extension: replace "drop" with on-the-fly summarization via a
+- [ ] Phase 10 extension: replace "drop" with on-the-fly summarization via a
       cheap local model (engine = `compact_engine`, §4G/§4G config, wired in
-      Phase 8)
+      Phase 9)
 
 **Key crates:** `tiktoken-rs`
 
-### Phase 10: CLI Surface
+### Phase 11: CLI Surface
 
 **Decision:** Headless mode already works from Phase 1. This phase adds the full `clap` CLI interface
 for scripting and automation.
@@ -3052,7 +3121,7 @@ where they are documented in the body of this document.
 | **TUI event loop**             | `spawn_blocking` for crossterm + `select!` on `ui_rx` + `subagent_ui_rx` + `event_rx`                                                                                                          | §4B ReAct Loop                               |
 | **TUI async context**          | `main.rs` uses `rt.block_on` for the TUI loop                                                                                                                                                  | §4B ReAct Loop                               |
 | **Token counting**             | `tiktoken-rs` for OpenAI; byte heuristic for Ollama; cached per `TieredMessage`. Counts are **approximate/advisory** (encoding is model-family dependent); rely on `context_length × 0.9` margin | §4C Context State Machine                    |
-| **Context tiers**              | `System` (never drop), `InitialContext` (never drop), `Recent` (drop oldest), `Compacted` (summarize in Phase 9)                                                                               | §4C Context State Machine                    |
+| **Context tiers**              | `System` (never drop), `InitialContext` (never drop), `Recent` (drop oldest), `Compacted` (summarize in Phase 10)                                                                               | §4C Context State Machine                    |
 | **Ollama tools**               | Dedicated Ollama provider reusing the unified raw `reqwest` streaming transport for `/v1/chat/completions`; model discovery uses native `/api/tags` and `/api/show`; no separate `ollama-rs` crate | §2 Crate Ecosystem, §5 OpenRouter vs Ollama  |
 | **OS signals**                 | `ctrlc` handler mapped to `AgentCommand::Stop`                                                                                                                                                 | §1 Vision, §2 Crate Ecosystem                |
 | **Tool binary checks**         | Lazy check at invocation with graceful fallback                                                                                                                                                | §4D Tool Registry                            |

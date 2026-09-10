@@ -406,7 +406,7 @@ pub enum Message {
     },
 }
 
-/// config phase (Phase 8 §4G layering) may source this from a SOUL.md file
+/// config phase (Phase 9 §4G layering) may source this from a SOUL.md file
 /// without changing call sites.
 pub const DEFAULT_SYSTEM_PROMPT: &str = "You are Ylva, a helpful agent with tool capabilities.";
 
