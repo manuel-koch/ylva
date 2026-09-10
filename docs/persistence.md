@@ -55,28 +55,29 @@ Each line is one JSON object with a `type` tag. The **first line of every file
 is the `meta` header**; every following line is an event.
 
 ```json
-{"type":"meta","v":1,"schema_version":1,"app_version":"0.7.0","created_at":"2026-01-08T09:41:07Z","project_key":"7f3c…","provider_connection":"openrouter","model":"gpt-4o","session_id":"6f1e…","title":"explain the store layout"}
-{"type":"model_changed","v":1,"provider_connection":"openrouter","model":"gpt-4o","changed_at":"2026-01-08T09:41:07Z"}
-{"type":"message","v":1,"message":{"role":"user","content":"explain the store layout","kind":"explicit"}}
-{"type":"message","v":1,"message":{"role":"assistant","content":"…","status":"complete","tool_calls":[]}}
-{"type":"child_start","v":1,"id":"…","parent_session":"6f1e…","agent_type":"explorer","task":"…","created_at":"…"}
-{"type":"child_result","v":1,"id":"…","parent_session":"6f1e…","status":"success","result":"…","sources":[],"completed_at":"…"}
+{"type":"meta","version":1,"created_at":"2026-01-08T09:41:07.123Z","schema_version":1,"app_version":"0.7.0","project_key":"7f3c…","provider_connection":"openrouter","model":"gpt-4o","session_id":"6f1e…","title":"explain the store layout"}
+{"type":"model_changed","version":1,"changed_at":"2026-01-08T09:41:07.123Z","provider_connection":"openrouter","model":"gpt-4o"}
+{"type":"message","version":1,"timestamp":"2026-01-08T09:41:07.456Z","message":{"role":"user","content":"explain the store layout","kind":"explicit"}}
+{"type":"message","version":1,"timestamp":"2026-01-08T09:41:09.012Z","message":{"role":"assistant","content":"…","status":"complete","tool_calls":[]}}
+{"type":"child_start","version":1,"created_at":"…","id":"…","parent_session":"6f1e…","agent_type":"explorer","task":"…"}
+{"type":"child_result","version":1,"completed_at":"…","id":"…","parent_session":"6f1e…","status":"success","result":"…","sources":[]}
 ```
 
 A child-agent's own session file carries `parent_session` in its own `meta`
 line too:
 
 ```json
-{"type":"meta","v":1,"schema_version":1,"app_version":"0.7.0","created_at":"…","project_key":"7f3c…","provider_connection":"ollama","model":"llama3","session_id":"9a2d…","title":"…","parent_session":"6f1e…"}
+{"type":"meta","version":1,"created_at":"…","schema_version":1,"app_version":"0.7.0","project_key":"7f3c…","provider_connection":"ollama","model":"llama3","session_id":"9a2d…","title":"…","parent_session":"6f1e…"}
 ```
 
 ### `meta`
 
 | Field | Description |
 | --- | --- |
-| `schema_version` | Version marker governing the whole file. |
+| `version` | Per-line version of the `meta` event's own shape — see [Schema tolerance](#schema-tolerance) below for how this differs from `schema_version`. |
+| `created_at` | RFC 3339 UTC timestamp, millisecond precision (sorts lexicographically). |
+| `schema_version` | Version marker governing the whole file. Written **once**, when the session is created, and never rewritten afterwards — not even across a later resume under a newer Ylva build. A session created by an old build and resumed for months by newer ones keeps that original `schema_version` forever; it is not a "current shape" indicator, only a record of what the file's format was when it was created (see [Schema tolerance](#schema-tolerance)). |
 | `app_version` | Ylva version that created the session. |
-| `created_at` | RFC 3339 UTC timestamp, second precision (sorts lexicographically). |
 | `project_key` | The [`project_key`](#project_key-derivation) of the launch directory. |
 | `provider_connection` / `model` | The provider-connection/model resolved for this session at creation time — mirrors the very first `model_changed` record (see below) so it's readable from the header alone. Never rewritten after creation; a later `/models` switch or a different resolution on a fresh process start is tracked only by `model_changed`. |
 | `session_id` | The session's UUID — matches the file name. |
@@ -95,6 +96,10 @@ is killed before the reply arrives, the title stays empty and a later resume
 re-derives it from the transcript; the rewrite then happens as soon as either
 a new turn completes or that resume's session is closed, whichever comes
 first — closing alone is enough once the title source has been re-derived.
+`Store::resume` never reconstructs `SessionMeta` from scratch — the only
+in-place rewrite of the `meta` line mutates `title` on the already-parsed
+struct, leaving `schema_version`, `app_version`, and every other field
+byte-for-byte as they were on disk before the rewrite.
 
 ### `message`
 
@@ -103,6 +108,14 @@ turn, a completed or interrupted assistant turn, a tool result, or a tool
 error. Live streaming deltas are ephemeral UI state and never reach disk; a
 message is written once, at the moment the agent loop commits it to its
 `Context`, so the on-disk order is the commit order.
+
+`timestamp` (RFC 3339 UTC, millisecond precision) records that same commit
+instant — effectively "sent" for a user message and "response fully
+assembled" for an assistant message, since a message has exactly one commit
+point. It is *not* a stream-start or first-token instant: no such event is
+persisted, so per-message generation latency (e.g. time-to-first-token) can't
+be derived from the transcript today. Lines written before this field existed
+read back with `timestamp: ""`.
 
 The two system prompts every context starts with are deliberately not
 persisted: they are rebuilt from the running binary on every start, so storing
@@ -119,7 +132,7 @@ creation and are never rewritten afterwards, so `model_changed` is the only
 authoritative, replayable history of every value that has actually served the
 conversation, including that first one. A child-agent session gets its own
 independent `model_changed` history, starting with the child's own resolved
-engine — it never needs to cross-reference the parent's. For compatibility,
+engine — it never needs to cross-reference the parent's.
 
 ### `child_start` / `child_result`
 
@@ -135,8 +148,27 @@ parent.
 Events are `#[serde(tag = "type")]` and **never**
 `#[serde(deny_unknown_fields)]`: unknown fields are ignored and an unknown
 `type` fails only that one line. Old readers load new files and vice versa. The
-per-event `v` field lets a reader take an event-type-specific path even without
-consulting the header.
+per-event `version` field lets a reader take an event-type-specific path even
+without consulting the header.
+
+`version` and `schema_version` deliberately track two different things, at
+two different scopes, and can drift apart within a single file:
+
+- `schema_version` lives only on the `meta` header and describes the file as
+  a whole. It is written once, at creation, and — as noted above — never
+  rewritten, not even across a resume by a newer Ylva build.
+- `version` lives on **every** line (`meta` included) and describes just that
+  one line's own shape. It is stamped fresh, from the *currently running*
+  binary, every time a line is written.
+
+Consequently, a session file created under an old build and resumed later
+under a newer one can end up with a `meta.schema_version` frozen at its
+original value while later lines in the very same file carry a higher
+`version` than that — the newer binary's per-event shape moved on even though
+nothing rewrote the header to say so. Only a hard, whole-file semantic break
+(needing a real migration/upgrader) is meant to ever bump `schema_version`;
+ordinary per-event evolution is exactly what the per-line `version` field
+exists to tolerate without that.
 
 ## Locking
 

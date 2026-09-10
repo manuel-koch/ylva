@@ -97,24 +97,33 @@ pub enum StoreEvent {
     Meta(SessionMeta),
     /// One committed conversation message.
     Message {
+        #[serde(default, alias = "v")]
+        version: u32,
+        /// The instant this message became part of the transcript (commit
+        /// time — for a user message effectively "sent", for an assistant
+        /// message "response fully assembled", since `Context::commit` is
+        /// the single point every message passes through). Empty for lines
+        /// written before this field existed; `#[serde(default)]` reads
+        /// those back as `""` rather than failing.
         #[serde(default)]
-        v: u32,
+        timestamp: String,
         message: Message,
     },
     /// A child-agent run is about to start (§4G *Persistence*).
     ChildStart {
-        #[serde(default)]
-        v: u32,
+        #[serde(default, alias = "v")]
+        version: u32,
+        created_at: String,
         id: Uuid,
         parent_session: Uuid,
         agent_type: String,
         task: String,
-        created_at: String,
     },
     /// A child-agent run finished (§4G *Persistence*).
     ChildResult {
-        #[serde(default)]
-        v: u32,
+        #[serde(default, alias = "v")]
+        version: u32,
+        completed_at: String,
         id: Uuid,
         parent_session: Uuid,
         status: String,
@@ -122,7 +131,6 @@ pub enum StoreEvent {
         result: Option<String>,
         #[serde(default)]
         sources: Vec<String>,
-        completed_at: String,
     },
     /// The provider-connection/model actually serving this session changed — written
     /// once on **every process start** (a fresh session or a resume alike,
@@ -134,22 +142,22 @@ pub enum StoreEvent {
     /// authoritative, replayable history of every value that has served the
     /// session since, including that first one.
     ModelChanged {
-        #[serde(default)]
-        v: u32,
+        #[serde(default, alias = "v")]
+        version: u32,
+        changed_at: String,
         provider_connection: String,
         model: String,
-        changed_at: String,
     },
 }
 
 /// The `meta` header record written as the first line of every session file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionMeta {
-    #[serde(default)]
-    pub v: u32,
+    #[serde(default, alias = "v")]
+    pub version: u32,
+    pub created_at: String,
     pub schema_version: u32,
     pub app_version: String,
-    pub created_at: String,
     /// `project_key` of the launch directory — see [`project_key`].
     pub project_key: String,
     /// The provider-connection/model resolved for this session at creation time.
@@ -231,11 +239,14 @@ pub fn session_path(chats_root: &Path, project_key: &str, session_id: Uuid) -> P
     project_directory(chats_root, project_key).join(format!("{session_id}.jsonl"))
 }
 
-/// Current UTC timestamp in RFC 3339 (`…Z`) shape, second precision — the one
-/// timestamp format written to the store, so `created_at` values sort
-/// lexicographically.
+/// Current UTC timestamp in RFC 3339 (`…Z`) shape, millisecond precision —
+/// the one timestamp format written to the store, so `created_at`/
+/// `changed_at`/`completed_at`/`timestamp` values sort lexicographically.
+/// Millisecond (not second) precision so back-to-back events — e.g. a fast
+/// child's `child_start`/`child_result` pair, or several tool-call turns in
+/// one second — don't collide on the same value.
 pub fn now_timestamp() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 /// Derive a session title from the first user message: single-line, trimmed,
@@ -353,10 +364,10 @@ impl Store {
         let mut file = open_locked_session_file(&path, session_id, false)?;
         let meta_awaiting_title = if file_length(&path)? == 0 {
             let meta = SessionMeta {
-                v: EVENT_VERSION,
+                version: EVENT_VERSION,
+                created_at: now_timestamp(),
                 schema_version: SCHEMA_VERSION,
                 app_version: crate::build_info::BUILD_INFO.version.to_string(),
-                created_at: now_timestamp(),
                 project_key: project_key.clone(),
                 provider_connection: provider_connection.to_string(),
                 model: model.to_string(),
@@ -435,10 +446,10 @@ impl Store {
         let path = directory.join(format!("{session_id}.jsonl"));
         let mut file = open_locked_session_file(&path, session_id, false)?;
         let meta = SessionMeta {
-            v: EVENT_VERSION,
+            version: EVENT_VERSION,
+            created_at: now_timestamp(),
             schema_version: SCHEMA_VERSION,
             app_version: crate::build_info::BUILD_INFO.version.to_string(),
-            created_at: now_timestamp(),
             project_key: self.inner.project_key.clone(),
             provider_connection: provider_connection.to_string(),
             model: model.to_string(),
@@ -529,7 +540,8 @@ impl Store {
     /// Enqueue one committed conversation message.
     pub fn record_message(&self, message: &Message) {
         self.record_event(StoreEvent::Message {
-            v: EVENT_VERSION,
+            version: EVENT_VERSION,
+            timestamp: now_timestamp(),
             message: message.clone(),
         });
     }
@@ -540,10 +552,10 @@ impl Store {
     /// `meta.provider_connection`/`meta.model` — is the authoritative history.
     pub fn record_model_changed(&self, provider_connection: &str, model: &str) {
         self.record_event(StoreEvent::ModelChanged {
-            v: EVENT_VERSION,
+            version: EVENT_VERSION,
+            changed_at: now_timestamp(),
             provider_connection: provider_connection.to_string(),
             model: model.to_string(),
-            changed_at: now_timestamp(),
         });
     }
 
@@ -551,12 +563,12 @@ impl Store {
     /// before a child run begins (§4G *Persistence*).
     pub fn record_child_start(&self, run_id: Uuid, agent_type: &str, task: &str) {
         self.record_event(StoreEvent::ChildStart {
-            v: EVENT_VERSION,
+            version: EVENT_VERSION,
+            created_at: now_timestamp(),
             id: run_id,
             parent_session: self.inner.session_id,
             agent_type: agent_type.to_string(),
             task: task.to_string(),
-            created_at: now_timestamp(),
         });
     }
 
@@ -570,13 +582,13 @@ impl Store {
         sources: Vec<String>,
     ) {
         self.record_event(StoreEvent::ChildResult {
-            v: EVENT_VERSION,
+            version: EVENT_VERSION,
+            completed_at: now_timestamp(),
             id: run_id,
             parent_session: self.inner.session_id,
             status: status.to_string(),
             result,
             sources,
-            completed_at: now_timestamp(),
         });
     }
 
@@ -604,7 +616,8 @@ impl Store {
             child_store.record_model_changed(provider_connection, model);
         }
         child_store.record_event(StoreEvent::Message {
-            v: EVENT_VERSION,
+            version: EVENT_VERSION,
+            timestamp: now_timestamp(),
             message: Message::User {
                 content: task.to_string(),
                 kind: UserMessageKind::Explicit,
@@ -1170,6 +1183,46 @@ mod tests {
             Message::Assistant { content, status: AssistantStatus::Complete, .. }
                 if content == "a haiku"
         ));
+    }
+
+    #[tokio::test]
+    async fn every_committed_message_carries_a_millisecond_precision_timestamp() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let chats_root = temp.path().join("chats");
+        let store = Store::create(
+            &chats_root,
+            temp.path(),
+            Uuid::new_v4(),
+            "openrouter",
+            "gpt-4o",
+        )
+        .expect("store created");
+
+        let mut context = crate::agent::Context::new();
+        context.set_store(store.clone());
+        context.push_user("write a haiku".to_string());
+        context.push_assistant("a haiku".to_string(), AssistantStatus::Complete);
+        store.flush().await;
+
+        let events = read_events(store.path());
+        let timestamps: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                StoreEvent::Message { timestamp, .. } => Some(timestamp.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(timestamps.len(), 2, "one timestamp per committed message");
+        for timestamp in timestamps {
+            assert!(
+                chrono::DateTime::parse_from_rfc3339(timestamp).is_ok(),
+                "expected an RFC 3339 timestamp, got {timestamp:?}"
+            );
+            assert!(
+                timestamp.contains('.'),
+                "expected millisecond precision (a fractional-seconds part), got {timestamp:?}"
+            );
+        }
     }
 
     #[tokio::test]

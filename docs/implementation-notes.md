@@ -175,6 +175,17 @@ user-facing on-disk contract; this section is the contributor view.
   This upholds the blueprint §4C ownership rule: only the outer loop mutates
   `Context`, so no streaming task can ever write. `AgentLoop::with_store`
   attaches the store to the `Context` the loop creates.
+- **Every event carries a millisecond-precision timestamp.** `now_timestamp()`
+  formats RFC 3339 at `SecondsFormat::Millis`, and every `StoreEvent` variant
+  has a timestamp field: `meta.created_at`, `message.timestamp`,
+  `child_start.created_at`, `child_result.completed_at`, and
+  `model_changed.changed_at`. For a `message` event this is the instant
+  `Context::commit` accepted it — effectively "sent" for a user message and
+  "response fully assembled" for an assistant message, since only one commit
+  point exists per message today; it is *not* a stream-start or
+  first-token instant (no such event is persisted). `#[serde(default)]`
+  reads a `message` line written before this field existed back as `""`
+  rather than failing.
 - **Immediate `meta` header, deferred title.** The header is written to disk
   right away (empty `title`) when the session is created, so every subsequent
   event is durable the instant it is written — nothing is ever buffered only
