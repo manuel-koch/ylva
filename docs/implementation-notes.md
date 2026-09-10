@@ -568,7 +568,17 @@ cancel keys.
 Slash effects (`Effect::ClearConversation`/`ShowTools`/`ListModels`/
 `SwitchModel`) are the only ones that need the engine, so
 `tui_driver::split_slash_effects` peels them out of each batch and
-`execute_slash_effects` runs them; `execute_effects` matches them as no-ops.
+`execute_slash_effects` handles the immediate ones; the runtime driver hands
+`ListModels` to a background task, while `execute_effects` matches all of
+these engine effects as no-ops.
+The driver sets `SlashOverlay::LoadingModels` after the `/models` draft is
+normalized and starts provider catalog discovery in a cancellable
+driver-local task. The next normal loop render displays the loading state.
+The task's result is handled by a separate `select!` branch, so the main loop
+continues consuming agent updates, input, timeouts, and spinner ticks while
+discovery is pending. Dismissing the loading overlay cancels the pending
+request; completed results are ignored unless the loading overlay is still
+active.
 
 Two rules keep this consistent with blueprint §4C:
 

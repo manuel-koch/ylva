@@ -457,6 +457,193 @@ async fn execute_effects(
 /// How long `/models` waits for the provider's model list before giving up.
 const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Result of a provider catalog request, including the two failures that need
+/// distinct user-facing messages.
+enum ModelListResult {
+    Models(Vec<crate::llm::ProviderModelOption>),
+    ProviderError(anyhow::Error),
+    Timeout,
+}
+
+/// A model catalog request owned by the TUI driver.
+struct PendingModelList {
+    filter: Option<String>,
+    task: tokio::task::JoinHandle<ModelListResult>,
+}
+
+/// Query one provider catalog without tying the request to the driver's event
+/// loop.
+async fn fetch_model_list(engine: Arc<dyn Engine>) -> ModelListResult {
+    match tokio::time::timeout(MODEL_LIST_TIMEOUT, engine.list_model_options()).await {
+        Ok(Ok(models)) => ModelListResult::Models(models),
+        Ok(Err(error)) => ModelListResult::ProviderError(error),
+        Err(_) => ModelListResult::Timeout,
+    }
+}
+
+/// Start a model catalog request, cancelling any older request whose result is
+/// no longer relevant to the visible picker.
+fn start_model_list(
+    pending_model_list: &mut Option<PendingModelList>,
+    filter: Option<String>,
+    engine: &Arc<dyn Engine>,
+) {
+    abort_pending_model_list(pending_model_list);
+    let task = tokio::spawn(fetch_model_list(Arc::clone(engine)));
+    *pending_model_list = Some(PendingModelList { filter, task });
+}
+
+/// Cancel a model catalog request that is no longer needed by the UI.
+fn abort_pending_model_list(pending_model_list: &mut Option<PendingModelList>) {
+    if let Some(pending) = pending_model_list.take() {
+        pending.task.abort();
+    }
+}
+
+/// Wait for the current catalog request, or remain disabled when no request is
+/// active so the main `select!` loop can continue handling other events.
+async fn wait_for_model_list(
+    pending_model_list: &mut Option<PendingModelList>,
+) -> Option<(Option<String>, ModelListResult)> {
+    let Some(pending) = pending_model_list.as_mut() else {
+        return std::future::pending().await;
+    };
+    let filter = pending.filter.clone();
+    let result = match (&mut pending.task).await {
+        Ok(result) => result,
+        Err(error) => {
+            ModelListResult::ProviderError(anyhow::anyhow!("model catalog task failed: {error}"))
+        }
+    };
+    Some((filter, result))
+}
+
+/// Apply a completed model catalog request to the visible picker.
+fn apply_model_list_result(
+    state: &mut AppState,
+    filter: Option<String>,
+    result: ModelListResult,
+    engine: &Arc<dyn Engine>,
+) {
+    match result {
+        ModelListResult::Models(models) if models.is_empty() => {
+            state.slash_overlay = SlashOverlay::Hidden;
+            state.push_notice("No configured provider connection reported any models.".to_string());
+        }
+        ModelListResult::Models(models) => {
+            let active_config = engine.config();
+            let active_reasoning_effort = engine.reasoning_effort();
+            let is_active_option = |provider_connection: &str, model_id: &str| {
+                provider_connection == active_config.provider_connection
+                    && model_id == active_config.model
+            };
+            // Looked up so an engine shortcut can show the real context
+            // length and advertised reasoning efforts of the model it names,
+            // rather than reporting "unavailable" for a model the catalog
+            // does list.
+            let catalog_by_identity: std::collections::HashMap<
+                (String, String),
+                crate::llm::ModelInfo,
+            > = models
+                .iter()
+                .map(|option| {
+                    (
+                        (option.provider_connection.clone(), option.model.id.clone()),
+                        option.model.clone(),
+                    )
+                })
+                .collect();
+            // Named engines (explicit `[engines.*]` tables, or their
+            // implicit one-per-connection equivalent) come first as
+            // shortcuts to the provider/model/config they name, ahead of the
+            // raw catalog below.
+            let engine_choices: Vec<ModelChoice> = engine
+                .named_engines()
+                .into_iter()
+                .map(|(engine_name, engine_config)| {
+                    let is_active =
+                        is_active_option(&engine_config.provider_connection, &engine_config.model);
+                    let catalog_model = catalog_by_identity.get(&(
+                        engine_config.provider_connection.clone(),
+                        engine_config.model.clone(),
+                    ));
+                    // The engine's own configured budget wins if TOML set
+                    // one; otherwise fall back to the provider's advertised
+                    // context length for this model, and finally to the
+                    // built-in default.
+                    let effective_context_length = engine_config.effective_context_length(
+                        catalog_model.and_then(|model| model.context_length),
+                    );
+                    let model = crate::llm::ModelInfo {
+                        id: engine_config.model,
+                        context_length: Some(effective_context_length),
+                        reasoning_efforts: catalog_model
+                            .and_then(|model| model.reasoning_efforts.clone()),
+                    };
+                    let reasoning_effort = if is_active {
+                        active_reasoning_effort.clone()
+                    } else {
+                        engine_config.reasoning
+                    };
+                    let selection = crate::llm::ProviderModelOption {
+                        provider_connection: engine_config.provider_connection,
+                        model,
+                        reasoning_effort,
+                    };
+                    ModelChoice {
+                        label: engine_choice_label(&engine_name, &selection, is_active),
+                        selection,
+                        is_active,
+                        engine_name: Some(engine_name),
+                    }
+                })
+                .collect();
+            let model_choices: Vec<ModelChoice> = models
+                .into_iter()
+                .map(|mut option| {
+                    let is_active = is_active_option(&option.provider_connection, &option.model.id);
+                    if is_active {
+                        option.reasoning_effort = active_reasoning_effort.clone();
+                    }
+                    ModelChoice {
+                        label: model_choice_label(&option, is_active),
+                        selection: option,
+                        is_active,
+                        engine_name: None,
+                    }
+                })
+                .collect();
+            let choices: Vec<ModelChoice> =
+                engine_choices.into_iter().chain(model_choices).collect();
+            let filter = filter.unwrap_or_default();
+            let selected = matching_model_indices(&choices, &filter)
+                .into_iter()
+                .position(|index| {
+                    choices[index].selection.provider_connection
+                        == active_config.provider_connection
+                        && choices[index].selection.model.id == active_config.model
+                })
+                .unwrap_or(0);
+            state.slash_overlay = SlashOverlay::ModelPicker {
+                choices,
+                filter,
+                selected,
+            };
+        }
+        ModelListResult::ProviderError(error) => {
+            state.slash_overlay = SlashOverlay::Hidden;
+            state.push_notice(format!("Could not list models: {error}"));
+        }
+        ModelListResult::Timeout => {
+            state.slash_overlay = SlashOverlay::Hidden;
+            state.push_notice(format!(
+                "Could not list models: the provider did not answer within {} s.",
+                MODEL_LIST_TIMEOUT.as_secs()
+            ));
+        }
+    }
+}
+
 /// Split `effects` into the slash-command effects and everything else,
 /// preserving each group's original order.
 fn split_slash_effects(effects: Vec<Effect>) -> (Vec<Effect>, Vec<Effect>) {
@@ -498,133 +685,8 @@ async fn execute_slash_effects(
             }
             Effect::ListModels { filter } => {
                 state.slash_overlay = SlashOverlay::LoadingModels;
-                let active_config = engine.config();
-                match tokio::time::timeout(MODEL_LIST_TIMEOUT, engine.list_model_options()).await {
-                    Ok(Ok(models)) if models.is_empty() => {
-                        state.slash_overlay = SlashOverlay::Hidden;
-                        state.push_notice(
-                            "No configured provider connection reported any models.".to_string(),
-                        );
-                    }
-                    Ok(Ok(models)) => {
-                        let active_reasoning_effort = engine.reasoning_effort();
-                        let is_active_option = |provider_connection: &str, model_id: &str| {
-                            provider_connection == active_config.provider_connection
-                                && model_id == active_config.model
-                        };
-                        // Looked up so an engine shortcut can show the real
-                        // context length and advertised reasoning efforts of
-                        // the model it names, rather than reporting
-                        // "unavailable" for a model the catalog does list.
-                        let catalog_by_identity: std::collections::HashMap<
-                            (String, String),
-                            crate::llm::ModelInfo,
-                        > = models
-                            .iter()
-                            .map(|option| {
-                                (
-                                    (option.provider_connection.clone(), option.model.id.clone()),
-                                    option.model.clone(),
-                                )
-                            })
-                            .collect();
-                        // Named engines (explicit `[engines.*]` tables, or
-                        // their implicit one-per-connection equivalent) come
-                        // first as shortcuts to the provider/model/config
-                        // they name, ahead of the raw catalog below.
-                        let engine_choices: Vec<ModelChoice> = engine
-                            .named_engines()
-                            .into_iter()
-                            .map(|(engine_name, engine_config)| {
-                                let is_active = is_active_option(
-                                    &engine_config.provider_connection,
-                                    &engine_config.model,
-                                );
-                                let catalog_model = catalog_by_identity.get(&(
-                                    engine_config.provider_connection.clone(),
-                                    engine_config.model.clone(),
-                                ));
-                                // The engine's own configured budget wins if
-                                // TOML set one; otherwise fall back to the
-                                // provider's advertised context length for
-                                // this model, and finally to the built-in
-                                // default (see
-                                // `EngineConfig::effective_context_length`).
-                                // Computed before `engine_config.model` moves
-                                // into `ModelInfo::id` below.
-                                let effective_context_length = engine_config
-                                    .effective_context_length(
-                                        catalog_model.and_then(|m| m.context_length),
-                                    );
-                                let model = crate::llm::ModelInfo {
-                                    id: engine_config.model,
-                                    context_length: Some(effective_context_length),
-                                    reasoning_efforts: catalog_model
-                                        .and_then(|m| m.reasoning_efforts.clone()),
-                                };
-                                let reasoning_effort = if is_active {
-                                    active_reasoning_effort.clone()
-                                } else {
-                                    engine_config.reasoning
-                                };
-                                let selection = crate::llm::ProviderModelOption {
-                                    provider_connection: engine_config.provider_connection,
-                                    model,
-                                    reasoning_effort,
-                                };
-                                ModelChoice {
-                                    label: engine_choice_label(&engine_name, &selection, is_active),
-                                    selection,
-                                    is_active,
-                                    engine_name: Some(engine_name),
-                                }
-                            })
-                            .collect();
-                        let model_choices: Vec<ModelChoice> = models
-                            .into_iter()
-                            .map(|mut option| {
-                                let is_active =
-                                    is_active_option(&option.provider_connection, &option.model.id);
-                                if is_active {
-                                    option.reasoning_effort = active_reasoning_effort.clone();
-                                }
-                                ModelChoice {
-                                    label: model_choice_label(&option, is_active),
-                                    selection: option,
-                                    is_active,
-                                    engine_name: None,
-                                }
-                            })
-                            .collect();
-                        let choices: Vec<ModelChoice> =
-                            engine_choices.into_iter().chain(model_choices).collect();
-                        let filter = filter.unwrap_or_default();
-                        let selected = matching_model_indices(&choices, &filter)
-                            .into_iter()
-                            .position(|index| {
-                                choices[index].selection.provider_connection
-                                    == active_config.provider_connection
-                                    && choices[index].selection.model.id == active_config.model
-                            })
-                            .unwrap_or(0);
-                        state.slash_overlay = SlashOverlay::ModelPicker {
-                            choices,
-                            filter,
-                            selected,
-                        };
-                    }
-                    Ok(Err(error)) => {
-                        state.slash_overlay = SlashOverlay::Hidden;
-                        state.push_notice(format!("Could not list models: {error}"));
-                    }
-                    Err(_) => {
-                        state.slash_overlay = SlashOverlay::Hidden;
-                        state.push_notice(format!(
-                            "Could not list models: the provider did not answer within {} s.",
-                            MODEL_LIST_TIMEOUT.as_secs()
-                        ));
-                    }
-                }
+                let result = fetch_model_list(Arc::clone(engine)).await;
+                apply_model_list_result(state, filter, result, engine);
             }
             Effect::SwitchModel(selection) => match engine.switch_model_option(&selection) {
                 Ok(()) => {
@@ -833,6 +895,29 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
     }
 }
 
+/// Draw one frame from the driver's current state.
+///
+/// Keeps the event-loop render path in one place, including the live engine
+/// display and confirmation hint.
+fn draw_frame<B>(
+    terminal: &mut Terminal<B>,
+    state: &mut AppState,
+    textarea: &mut TextArea<'_>,
+    engine: &Arc<dyn Engine>,
+    mouse_pos: Option<(u16, u16)>,
+) -> anyhow::Result<()>
+where
+    B: Backend,
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
+    state.engine_display = crate::llm::engine::EngineDisplayInfo::from_engine(engine.as_ref());
+    let hint = confirm_hint(state);
+    terminal.draw(|frame| {
+        render::render(frame, state, textarea, hint.as_deref(), mouse_pos);
+    })?;
+    Ok(())
+}
+
 /// Run the TUI event loop against an existing terminal.
 ///
 /// Uses `AppState` internally (the reducer model) and returns a `TuiState`
@@ -868,6 +953,7 @@ where
     let mut mouse_pos: Option<(u16, u16)> = None;
     let mut mouse_drag = MouseDrag::default();
     let mut pending_run_ids = PendingRunIds::default();
+    let mut pending_model_list: Option<PendingModelList> = None;
 
     let handle = agent.run();
 
@@ -883,11 +969,7 @@ where
     }
 
     loop {
-        state.engine_display = crate::llm::engine::EngineDisplayInfo::from_engine(engine.as_ref());
-        let hint = confirm_hint(&state);
-        terminal.draw(|frame| {
-            render::render(frame, &mut state, &mut textarea, hint.as_deref(), mouse_pos);
-        })?;
+        draw_frame(terminal, &mut state, &mut textarea, &engine, mouse_pos)?;
 
         let textarea_ctx = TextareaContext {
             is_empty: textarea.lines() == [""],
@@ -897,6 +979,17 @@ where
         };
 
         select! {
+            model_list_result = wait_for_model_list(&mut pending_model_list) => {
+                let Some((filter, result)) = model_list_result else {
+                    continue;
+                };
+                pending_model_list = None;
+                if matches!(state.slash_overlay, SlashOverlay::LoadingModels) {
+                    apply_model_list_result(&mut state, filter, result, &engine);
+                    state.refresh_slash_overlay(&textarea.lines().join("\n"));
+                }
+            }
+
             action = action_rx.recv() => {
                 let Some(action) = action else { break };
 
@@ -950,6 +1043,7 @@ where
                 }
 
                 let Some(event) = app_action_to_tui_event(action) else { continue };
+                let was_loading_models = matches!(state.slash_overlay, SlashOverlay::LoadingModels);
                 let effects = presenter::update(&mut state, event, &textarea_ctx);
                 // Slash-command effects are the only ones needing the engine,
                 // and only key input can produce them.
@@ -963,7 +1057,31 @@ where
                 {
                     break;
                 }
-                execute_slash_effects(&mut state, slash_effects, &engine, &cmd_tx).await;
+                let (model_list_effects, immediate_slash_effects): (Vec<_>, Vec<_>) =
+                    slash_effects.into_iter().partition(|effect| {
+                        matches!(effect, Effect::ListModels { .. })
+                    });
+                let mut started_model_list = false;
+                for effect in model_list_effects {
+                    if let Effect::ListModels { filter } = effect {
+                        state.slash_overlay = SlashOverlay::LoadingModels;
+                        start_model_list(&mut pending_model_list, filter, &engine);
+                        started_model_list = true;
+                    }
+                }
+                execute_slash_effects(
+                    &mut state,
+                    immediate_slash_effects,
+                    &engine,
+                    &cmd_tx,
+                )
+                .await;
+                if was_loading_models
+                    && !started_model_list
+                    && !matches!(state.slash_overlay, SlashOverlay::LoadingModels)
+                {
+                    abort_pending_model_list(&mut pending_model_list);
+                }
                 // The suggestion overlay tracks the draft, so it is
                 // recomputed after every key that may have changed it.
                 state.refresh_slash_overlay(&textarea.lines().join("\n"));
@@ -1039,6 +1157,7 @@ where
         }
     }
 
+    abort_pending_model_list(&mut pending_model_list);
     drop(cmd_tx);
     drop(agent);
     handle.await??;

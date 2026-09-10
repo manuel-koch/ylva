@@ -46,7 +46,7 @@
 - [x] "/models" popup dialog should provide vertical scroll-indicators
       for showing engines & models.
 
-- [ ] "/models" popup dialog shows no feedabck while model info is gathered.
+- [x] "/models" popup dialog shows no feedback while model info is gathered.
       This can take 1-2s while user doesn't know whether the "/models" command
       is actually triggered or just stuck.
 

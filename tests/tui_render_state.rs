@@ -14,19 +14,191 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::backend::TestBackend;
+use ratatui::backend::{Backend, ClearType, TestBackend, WindowSize};
+use ratatui::buffer::{Buffer, Cell};
+use ratatui::layout::{Position, Size};
 use ratatui::Terminal;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
+use tokio_util::sync::CancellationToken;
 
 use ylva::tui_driver::NoopClipboard;
 use ylva::{
-    tui_driver, AgentLoop, AppAction, ChatEntry, EngineImpl, MockProvider, ToolRegistry,
-    UserMessageState,
+    tui_driver, AgentLoop, AppAction, ChatEntry, Engine, EngineConfig, EngineImpl, Message,
+    MockProvider, ModelInfo, StreamEvent, ToolRegistry, ToolSchema, UserMessageState,
 };
+
+#[derive(Clone)]
+struct InspectableTestBackend {
+    backend: TestBackend,
+    last_buffer: Arc<std::sync::Mutex<Buffer>>,
+    frame_count: Arc<AtomicUsize>,
+}
+
+impl InspectableTestBackend {
+    fn new(width: u16, height: u16) -> (Self, Arc<std::sync::Mutex<Buffer>>, Arc<AtomicUsize>) {
+        let backend = TestBackend::new(width, height);
+        let last_buffer = Arc::new(std::sync::Mutex::new(backend.buffer().clone()));
+        let frame_count = Arc::new(AtomicUsize::new(0));
+        (
+            InspectableTestBackend {
+                backend,
+                last_buffer: Arc::clone(&last_buffer),
+                frame_count: Arc::clone(&frame_count),
+            },
+            last_buffer,
+            frame_count,
+        )
+    }
+}
+
+impl Backend for InspectableTestBackend {
+    type Error = std::convert::Infallible;
+
+    fn draw<'a, I>(&mut self, content: I) -> Result<(), Self::Error>
+    where
+        I: Iterator<Item = (u16, u16, &'a Cell)>,
+    {
+        self.backend.draw(content)?;
+        *self.last_buffer.lock().expect("buffer snapshot lock") = self.backend.buffer().clone();
+        self.frame_count.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn append_lines(&mut self, line_count: u16) -> Result<(), Self::Error> {
+        self.backend.append_lines(line_count)
+    }
+
+    fn hide_cursor(&mut self) -> Result<(), Self::Error> {
+        self.backend.hide_cursor()
+    }
+
+    fn show_cursor(&mut self) -> Result<(), Self::Error> {
+        self.backend.show_cursor()
+    }
+
+    fn get_cursor_position(&mut self) -> Result<Position, Self::Error> {
+        self.backend.get_cursor_position()
+    }
+
+    fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> Result<(), Self::Error> {
+        self.backend.set_cursor_position(position)
+    }
+
+    fn clear(&mut self) -> Result<(), Self::Error> {
+        self.backend.clear()
+    }
+
+    fn clear_region(&mut self, clear_type: ClearType) -> Result<(), Self::Error> {
+        self.backend.clear_region(clear_type)
+    }
+
+    fn size(&self) -> Result<Size, Self::Error> {
+        self.backend.size()
+    }
+
+    fn window_size(&mut self) -> Result<WindowSize, Self::Error> {
+        self.backend.window_size()
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        self.backend.flush()
+    }
+}
+
+struct DelayedCatalogEngine {
+    config: EngineConfig,
+    catalog_started: Arc<Notify>,
+    release_catalog: Arc<Notify>,
+    chat_started: Option<Arc<Notify>>,
+    release_chat: Option<Arc<Notify>>,
+}
+
+impl DelayedCatalogEngine {
+    fn new(catalog_started: Arc<Notify>, release_catalog: Arc<Notify>) -> Self {
+        DelayedCatalogEngine {
+            config: common::test_engine_config(),
+            catalog_started,
+            release_catalog,
+            chat_started: None,
+            release_chat: None,
+        }
+    }
+
+    fn with_chat(
+        catalog_started: Arc<Notify>,
+        release_catalog: Arc<Notify>,
+        chat_started: Arc<Notify>,
+        release_chat: Arc<Notify>,
+    ) -> Self {
+        DelayedCatalogEngine {
+            config: common::test_engine_config(),
+            catalog_started,
+            release_catalog,
+            chat_started: Some(chat_started),
+            release_chat: Some(release_chat),
+        }
+    }
+}
+
+impl Engine for DelayedCatalogEngine {
+    fn chat<'a>(
+        &'a self,
+        _messages: Vec<Message>,
+        _tools: Vec<ToolSchema>,
+        _cancel: CancellationToken,
+    ) -> futures::future::BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        let Some(chat_started) = self.chat_started.clone() else {
+            return Box::pin(async { anyhow::bail!("the delayed catalog engine does not chat") });
+        };
+        let release_chat = self
+            .release_chat
+            .clone()
+            .expect("chat release notification configured with chat start");
+        Box::pin(async move {
+            chat_started.notify_one();
+            release_chat.notified().await;
+            let (stream_tx, stream_rx) = mpsc::channel(4);
+            stream_tx
+                .send(StreamEvent::Text("conversation update".to_string()))
+                .await
+                .expect("test stream receiver open");
+            stream_tx
+                .send(StreamEvent::Done)
+                .await
+                .expect("test stream receiver open");
+            Ok(stream_rx)
+        })
+    }
+
+    fn config(&self) -> EngineConfig {
+        self.config.clone()
+    }
+
+    fn list_models(&self) -> futures::future::BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
+        let catalog_started = Arc::clone(&self.catalog_started);
+        let release_catalog = Arc::clone(&self.release_catalog);
+        Box::pin(async move {
+            catalog_started.notify_one();
+            release_catalog.notified().await;
+            Ok(vec![ModelInfo {
+                id: "delayed-model".to_string(),
+                context_length: None,
+                reasoning_efforts: None,
+            }])
+        })
+    }
+
+    fn switch_model(&self, _model: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
 
 /// Type `text` into the (driver-owned) textarea and press Enter.
 async fn type_and_enter(tx: &mpsc::Sender<AppAction>, text: &str) {
@@ -48,6 +220,132 @@ async fn type_and_enter(tx: &mpsc::Sender<AppAction>, text: &str) {
 
 async fn send(tx: &mpsc::Sender<AppAction>, action: AppAction) {
     tx.send(action).await.expect("action channel open");
+}
+
+fn rendered_text(buffer: &Buffer) -> String {
+    (0..buffer.area.height)
+        .map(|row| {
+            (0..buffer.area.width)
+                .map(|column| buffer[(column, row)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[tokio::test]
+async fn models_command_renders_loading_feedback_before_catalog_finishes() {
+    let catalog_started = Arc::new(Notify::new());
+    let release_catalog = Arc::new(Notify::new());
+    let engine = Arc::new(DelayedCatalogEngine::new(
+        Arc::clone(&catalog_started),
+        Arc::clone(&release_catalog),
+    ));
+    let registry = Arc::new(ToolRegistry::new());
+    let (backend, last_buffer, _) = InspectableTestBackend::new(80, 24);
+    let terminal = Terminal::new(backend).expect("test terminal");
+    let (action_tx, action_rx) = mpsc::channel(64);
+
+    let run_handle = tokio::spawn({
+        let mut terminal = terminal;
+        async move {
+            let (agent, ui_rx) = AgentLoop::new(engine, registry);
+            tui_driver::run_tui(
+                &mut terminal,
+                agent,
+                ui_rx,
+                None,
+                action_rx,
+                &mut NoopClipboard,
+            )
+            .await
+            .expect("run_tui completed")
+        }
+    });
+
+    let catalog_started_wait = catalog_started.notified();
+    type_and_enter(&action_tx, "/models").await;
+    tokio::time::timeout(Duration::from_secs(1), catalog_started_wait)
+        .await
+        .expect("model catalog request should start");
+
+    let rendered = last_buffer.lock().expect("buffer snapshot lock").clone();
+    let rendered_text = rendered_text(&rendered);
+    assert!(
+        rendered_text.contains("Loading models"),
+        "the TUI should show loading feedback while the provider catalog is pending:\n{rendered_text}"
+    );
+
+    release_catalog.notify_one();
+    drop(action_tx);
+    run_handle.await.expect("run task joined");
+}
+
+#[tokio::test]
+async fn model_catalog_does_not_block_conversation_updates() {
+    let catalog_started = Arc::new(Notify::new());
+    let release_catalog = Arc::new(Notify::new());
+    let chat_started = Arc::new(Notify::new());
+    let release_chat = Arc::new(Notify::new());
+    let engine = Arc::new(DelayedCatalogEngine::with_chat(
+        Arc::clone(&catalog_started),
+        Arc::clone(&release_catalog),
+        Arc::clone(&chat_started),
+        Arc::clone(&release_chat),
+    ));
+    let registry = Arc::new(ToolRegistry::new());
+    let (backend, last_buffer, frame_count) = InspectableTestBackend::new(80, 24);
+    let terminal = Terminal::new(backend).expect("test terminal");
+    let (action_tx, action_rx) = mpsc::channel(64);
+
+    let run_handle = tokio::spawn({
+        let mut terminal = terminal;
+        async move {
+            let (agent, ui_rx) = AgentLoop::new(engine, registry);
+            tui_driver::run_tui(
+                &mut terminal,
+                agent,
+                ui_rx,
+                None,
+                action_rx,
+                &mut NoopClipboard,
+            )
+            .await
+            .expect("run_tui completed")
+        }
+    });
+
+    type_and_enter(&action_tx, "hi").await;
+    tokio::time::timeout(Duration::from_secs(1), chat_started.notified())
+        .await
+        .expect("conversation request should start");
+
+    type_and_enter(&action_tx, "/models").await;
+    tokio::time::timeout(Duration::from_secs(1), catalog_started.notified())
+        .await
+        .expect("model catalog request should start");
+
+    let frames_before_conversation = frame_count.load(Ordering::SeqCst);
+    release_chat.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let rendered = last_buffer.lock().expect("buffer snapshot lock").clone();
+            if rendered_text(&rendered).contains("conversation update") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("conversation updates should render while model discovery is pending");
+    assert!(
+        frame_count.load(Ordering::SeqCst) > frames_before_conversation,
+        "the driver should continue rendering while the catalog is pending"
+    );
+
+    release_catalog.notify_one();
+    drop(action_tx);
+    run_handle.await.expect("run task joined");
 }
 
 fn is_assistant_message(entry: &ChatEntry) -> bool {
