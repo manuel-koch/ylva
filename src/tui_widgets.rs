@@ -33,8 +33,8 @@ use crate::agent::AgentMode;
 use crate::build_info::BUILD_INFO;
 use crate::markdown::render_markdown;
 use crate::tui_reducer_state::{
-    matching_model_indices, model_picker_row_entries, BannerDragSelection, ChatEntry, SlashOverlay,
-    SlashOverlayLayout, ToolCallState, UserMessageState,
+    matching_model_indices, model_picker_row_entries, slash_overlay_text_rows, BannerDragSelection,
+    ChatEntry, SlashOverlay, SlashOverlayLayout, ToolCallState, UserMessageState,
 };
 use crate::tui_render_state::TuiState;
 
@@ -453,6 +453,7 @@ pub fn draw(
         frame,
         input_area,
         &state.slash_overlay,
+        state.slash_overlay_drag,
         &mut state.slash_overlay_layout,
     );
 
@@ -2619,25 +2620,17 @@ fn draw_slash_overlay(
     frame: &mut Frame,
     input_area: Rect,
     overlay: &SlashOverlay,
+    drag: Option<BannerDragSelection>,
     overlay_layout: &mut SlashOverlayLayout,
 ) {
     let previous_first_visible = overlay_layout.first_visible_row;
     *overlay_layout = SlashOverlayLayout::default();
-    let (title, entries, selected) = match overlay {
+    let (title, selected) = match overlay {
         SlashOverlay::Hidden => return,
-        SlashOverlay::Suggestions { choices, selected } => (
-            "Commands".to_string(),
-            choices
-                .iter()
-                .map(|info| format!("{:<8} {}", info.name, info.description))
-                .collect::<Vec<String>>(),
-            Some(*selected),
-        ),
-        SlashOverlay::LoadingModels => (
-            "Models  (querying provider connections…)".to_string(),
-            vec!["Loading models…".to_string()],
-            None,
-        ),
+        SlashOverlay::Suggestions { selected, .. } => ("Commands".to_string(), Some(*selected)),
+        SlashOverlay::LoadingModels => {
+            ("Models  (querying provider connections…)".to_string(), None)
+        }
         SlashOverlay::ModelPicker {
             choices,
             filter,
@@ -2645,23 +2638,13 @@ fn draw_slash_overlay(
         } => {
             let visible_indices = matching_model_indices(choices, filter);
             if visible_indices.is_empty() {
-                (
-                    "Engines & Provider Models".to_string(),
-                    vec!["Nothing matched your model filter.".to_string()],
-                    None,
-                )
+                ("Engines & Provider Models".to_string(), None)
             } else {
-                (
-                    "Engines & Provider Models".to_string(),
-                    visible_indices
-                        .into_iter()
-                        .map(|index| choices[index].label.clone())
-                        .collect(),
-                    Some(*selected),
-                )
+                ("Engines & Provider Models".to_string(), Some(*selected))
             }
         }
     };
+    let entries = slash_overlay_text_rows(overlay);
     if entries.is_empty() || input_area.width < 4 || input_area.y < 3 {
         return;
     }
@@ -2694,8 +2677,15 @@ fn draw_slash_overlay(
     // longer than the panel, but preserve the current window when the
     // highlighted row is already visible. This prevents a mouse click from
     // repositioning the popup unnecessarily.
-    let selected_row =
-        selected.and_then(|selected| rows.iter().position(|row| *row == Some(selected)));
+    let selected_row = selected.and_then(|selected| match overlay {
+        SlashOverlay::Suggestions { .. } => rows.iter().position(|row| *row == Some(selected)),
+        SlashOverlay::ModelPicker { .. } => rows
+            .iter()
+            .enumerate()
+            .filter_map(|(row_index, row)| row.is_some().then_some(row_index))
+            .nth(selected),
+        _ => None,
+    });
     let max_first_visible = rows.len().saturating_sub(content_height as usize);
     let mut first_visible = previous_first_visible.min(max_first_visible);
     if let Some(selected_row) = selected_row {
@@ -2709,20 +2699,20 @@ fn draw_slash_overlay(
         }
     }
     let content_width = panel_area.width.saturating_sub(3) as usize;
-    let lines: Vec<Line<'static>> = rows
+    let mut lines: Vec<Line<'static>> = rows
         .iter()
         .enumerate()
         .skip(first_visible)
         .take(content_height as usize)
-        .map(|(_, entry_index)| {
-            let Some(index) = entry_index else {
+        .map(|(row_index, entry_index)| {
+            let Some(_) = entry_index else {
                 return Line::styled(
                     "─".repeat(content_width),
                     Style::default().fg(Color::DarkGray),
                 );
             };
-            let entry = &entries[*index];
-            let is_selected = selected == Some(*index);
+            let entry = &entries[row_index];
+            let is_selected = selected_row == Some(row_index);
             let style = if is_selected {
                 Style::default()
                     .fg(Color::Black)
@@ -2750,6 +2740,25 @@ fn draw_slash_overlay(
         .areas(inner_area);
     overlay_layout.content_area = content_area;
     overlay_layout.first_visible_row = first_visible;
+    if let Some(selection) = drag {
+        for (visible_index, line) in lines.iter_mut().enumerate() {
+            let screen_row = content_area.y.saturating_add(visible_index as u16);
+            if screen_row < selection.start_row || screen_row > selection.end_row {
+                continue;
+            }
+            let column_start = if screen_row == selection.start_row {
+                selection.start_col.saturating_sub(content_area.x) as usize
+            } else {
+                0
+            };
+            let column_end = if screen_row == selection.end_row {
+                selection.end_col.saturating_sub(content_area.x) as usize
+            } else {
+                usize::MAX
+            };
+            apply_selection_highlight_to_line(line, column_start, column_end, Color::Yellow);
+        }
+    }
     frame.render_widget(Paragraph::new(lines), content_area);
 
     if rows.len() > content_height as usize {

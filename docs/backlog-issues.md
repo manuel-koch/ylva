@@ -52,7 +52,7 @@
 
 - [x] "/models" can't scroll by mouse in the popup dialog showing engines & models.
 
-- [ ] Can't use mouse drag'n'drop to select text in slash-command popup.
+- [x] Can't use mouse drag'n'drop to select text in slash-command popup.
 
 - [x] Can't use mouse click to select an entry in slash-command popup.
 

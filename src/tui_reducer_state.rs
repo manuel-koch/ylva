@@ -889,6 +889,42 @@ pub(crate) fn model_picker_row_entries(
         .collect()
 }
 
+/// Return the plain text represented by each selectable row in a slash
+/// overlay. Model-picker divider rows are represented by an empty string
+/// because they have no selectable text.
+pub(crate) fn slash_overlay_text_rows(overlay: &SlashOverlay) -> Vec<String> {
+    match overlay {
+        SlashOverlay::Hidden => Vec::new(),
+        SlashOverlay::Suggestions { choices, .. } => choices
+            .iter()
+            .map(|info| format!("{:<8} {}", info.name, info.description))
+            .collect(),
+        SlashOverlay::LoadingModels => vec!["Loading models…".to_string()],
+        SlashOverlay::ModelPicker {
+            choices, filter, ..
+        } => {
+            let visible_indices = matching_model_indices(choices, filter);
+            if visible_indices.is_empty() {
+                vec!["Nothing matched your model filter.".to_string()]
+            } else {
+                model_picker_row_entries(choices, filter)
+                    .into_iter()
+                    .map(|entry| {
+                        entry
+                            .and_then(|visible_index| {
+                                visible_indices
+                                    .get(visible_index)
+                                    .and_then(|choice_index| choices.get(*choice_index))
+                            })
+                            .map(|choice| choice.label.clone())
+                            .unwrap_or_default()
+                    })
+                    .collect()
+            }
+        }
+    }
+}
+
 /// The live model-picker filter typed after `/models` in `draft`. Falls
 /// back to the whole trimmed draft if it no longer starts with `/models`
 /// (e.g. the user backspaced into the command name itself).
@@ -1344,6 +1380,10 @@ pub struct AppState {
     // ── slash commands (Phase 7) ─────────────────────────────────────────────
     /// Suggestion list / model picker driven by the slash-command line.
     pub slash_overlay: SlashOverlay,
+    /// Screen position where a slash-overlay text drag started.
+    pub slash_overlay_drag_start: Option<(u16, u16)>,
+    /// Current screen position of a slash-overlay text drag.
+    pub slash_overlay_drag_end: Option<(u16, u16)>,
     /// Names of the tools the running agent may call, captured once at
     /// startup from the resolved `ToolRegistry` so `/tools` needs no I/O.
     pub available_tool_names: Vec<String>,
@@ -1385,6 +1425,8 @@ impl AppState {
             _history_direction: None,
 
             slash_overlay: SlashOverlay::default(),
+            slash_overlay_drag_start: None,
+            slash_overlay_drag_end: None,
             available_tool_names: Vec::new(),
 
             aborting_exit: false,
@@ -1773,6 +1815,10 @@ impl AppState {
     /// further typing still live-narrows the picker's already-fetched
     /// catalog by re-deriving its filter from the draft.
     pub fn refresh_slash_overlay(&mut self, draft: &str) {
+        if matches!(self.slash_overlay, SlashOverlay::Hidden) {
+            self.slash_overlay_drag_start = None;
+            self.slash_overlay_drag_end = None;
+        }
         if let SlashOverlay::ModelPicker {
             filter, selected, ..
         } = &mut self.slash_overlay
@@ -1796,6 +1842,31 @@ impl AppState {
                 selected: 0,
             }
         };
+    }
+
+    /// Return the normalised screen-space range of an active slash-overlay
+    /// drag, for rendering its highlight.
+    pub fn slash_overlay_drag_selection(&self) -> Option<BannerDragSelection> {
+        if !self.slash_overlay.is_visible() {
+            return None;
+        }
+        let (Some((start_col, start_row)), Some((end_col, end_row))) =
+            (self.slash_overlay_drag_start, self.slash_overlay_drag_end)
+        else {
+            return None;
+        };
+        let ((start_row, start_col), (end_row, end_col)) =
+            if (start_row, start_col) <= (end_row, end_col) {
+                ((start_row, start_col), (end_row, end_col))
+            } else {
+                ((end_row, end_col), (start_row, start_col))
+            };
+        Some(BannerDragSelection {
+            start_row,
+            start_col,
+            end_row,
+            end_col,
+        })
     }
 
     /// Move the visible slash overlay's selection by `delta` entries,
@@ -2485,6 +2556,55 @@ mod tests {
             matching_model_indices(&choices, "   "),
             vec![0, 1, 2],
             "an all-whitespace filter matches everything"
+        );
+    }
+
+    #[test]
+    fn slash_overlay_text_rows_preserves_filtered_model_labels_and_divider() {
+        let choice =
+            |label: &str, provider_connection: &str, engine_name: Option<&str>| ModelChoice {
+                label: label.to_string(),
+                selection: ProviderModelOption {
+                    provider_connection: provider_connection.to_string(),
+                    model: crate::llm::ModelInfo {
+                        id: label.to_string(),
+                        context_length: None,
+                        reasoning_efforts: None,
+                    },
+                    reasoning_effort: None,
+                },
+                is_active: false,
+                engine_name: engine_name.map(str::to_string),
+            };
+        let choices = vec![
+            choice("engine/model", "engine", Some("engine")),
+            choice("provider/model", "provider", None),
+        ];
+
+        let filtered_overlay = SlashOverlay::ModelPicker {
+            choices: choices.clone(),
+            filter: "provider".to_string(),
+            selected: 0,
+        };
+        assert_eq!(
+            slash_overlay_text_rows(&filtered_overlay),
+            vec!["provider/model".to_string()],
+            "filtering must keep labels tied to the matching choice index"
+        );
+
+        let all_choices_overlay = SlashOverlay::ModelPicker {
+            choices,
+            filter: String::new(),
+            selected: 0,
+        };
+        assert_eq!(
+            slash_overlay_text_rows(&all_choices_overlay),
+            vec![
+                "engine/model".to_string(),
+                String::new(),
+                "provider/model".to_string()
+            ],
+            "the divider must remain an empty non-selectable row"
         );
     }
 

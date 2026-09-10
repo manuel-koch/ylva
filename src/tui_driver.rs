@@ -842,6 +842,7 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
     };
     let input_area_rect = app.layout.input_area.rect;
     let chat_area_rect = app.layout.chat_area.rect;
+    let slash_overlay_drag = app.slash_overlay_drag_selection();
     TuiState {
         agent_mode,
         chat_entries: app.chat_entries,
@@ -863,6 +864,7 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
         spinner_frame: app.spinner_frame,
         input_scroll_top: app.input_scroll_top,
         slash_overlay: app.slash_overlay,
+        slash_overlay_drag,
         slash_overlay_layout: app.layout.slash_overlay,
         help_popup: crate::tui_render_state::HelpPopupState {
             show_help,

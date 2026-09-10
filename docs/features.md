@@ -337,8 +337,10 @@ module structure (model/presenter/view/driver split).
   word-wraps inside the box, and the box grows with its content up to the
   1/3 height cap.
 - **Mouse editing:** a left-click in the input box places the cursor at the
-  clicked character; a left-drag selects text. `read`/`glob` tool status
-  lines and approval buttons remain mouse-clickable.
+  clicked character; a left-drag selects text. The same drag gesture selects
+  visible text in the slash-command overlay and copies it to the clipboard on
+  release. `read`/`glob` tool status lines and approval buttons remain
+  mouse-clickable.
 - **Shift+Enter / Alt+Enter:** insert a newline in terminals that support the
   kitty keyboard protocol (ZED, iTerm2, kitty, WezTerm), so the modifier is
   not mistaken for send.

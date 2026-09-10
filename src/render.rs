@@ -161,6 +161,7 @@ fn project_for_draw(state: &AppState) -> TuiState {
         spinner_frame: state.spinner_frame,
         input_scroll_top: state.input_scroll_top,
         slash_overlay: state.slash_overlay.clone(),
+        slash_overlay_drag: state.slash_overlay_drag_selection(),
         slash_overlay_layout: state.layout.slash_overlay,
         help_popup: crate::tui_render_state::HelpPopupState {
             show_help: state.show_help(),

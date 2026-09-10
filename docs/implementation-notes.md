@@ -572,6 +572,10 @@ with a `⚙` marker. The user-facing fixed value is rendered as `default`. The
 footer switches from the normal `enter: send` hint to the controls for the
 active command overlay, including the model picker's reasoning, switch, and
 cancel keys.
+Left-dragging within any visible slash-command overlay row selects its
+rendered text, highlights the range while dragging, and copies the selected
+text to the clipboard on release without changing the command or model
+selection.
 
 Slash effects (`Effect::ClearConversation`/`ShowTools`/`ListModels`/
 `SwitchModel`) are the only ones that need the engine, so

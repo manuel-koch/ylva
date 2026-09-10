@@ -30,9 +30,9 @@ use crate::agent::tools::clarify::ClarifyTool;
 use crate::markdown::render_markdown;
 use crate::slash_command::{parse_slash_command_invocation, SlashCommand, SlashCommandInvocation};
 use crate::tui_reducer_state::{
-    model_picker_row_entries, AppState, ChatEntry, ChatSelection, ChildRunInfo, ConfirmKey,
-    ConversationView, DomainEvent, Effect, Focus, HistoryDirection, InputEvent, SlashOverlay,
-    ToolCallState, TuiMode, UserMessageState,
+    model_picker_row_entries, slash_overlay_text_rows, AppState, ChatEntry, ChatSelection,
+    ChildRunInfo, ConfirmKey, ConversationView, DomainEvent, Effect, Focus, HistoryDirection,
+    InputEvent, SlashOverlay, ToolCallState, TuiMode, UserMessageState,
 };
 
 // ─── Public surface ───────────────────────────────────────────────────────────
@@ -284,6 +284,68 @@ fn extract_clarify_banner_text(
         .collect();
 
     selected.join("\n")
+}
+
+/// Extract the plain text from slash-overlay rows between two screen
+/// positions. The two leading marker columns are presentation chrome, so
+/// copied text starts at the row content rather than including the marker.
+fn extract_slash_overlay_text(
+    state: &AppState,
+    from_column: u16,
+    from_row: u16,
+    to_column: u16,
+    to_row: u16,
+) -> String {
+    let area = state.layout.slash_overlay.content_area;
+    if area.is_empty() {
+        return String::new();
+    }
+    let rows = slash_overlay_text_rows(&state.slash_overlay);
+    if rows.is_empty() {
+        return String::new();
+    }
+
+    let position = |column: u16, row: u16| {
+        let last_row = area.y.saturating_add(area.height.saturating_sub(1));
+        let clamped_row = row.clamp(area.y, last_row);
+        let clamped_column = column.clamp(area.x, area.x.saturating_add(area.width));
+        let row_index = state.layout.slash_overlay.first_visible_row
+            + clamped_row.saturating_sub(area.y) as usize;
+        let content_column = clamped_column.saturating_sub(area.x).saturating_sub(2) as usize;
+        (row_index, content_column)
+    };
+
+    let start = position(from_column, from_row);
+    let end = position(to_column, to_row);
+    let (start, end) = if start <= end {
+        (start, end)
+    } else {
+        (end, start)
+    };
+    if start.0 >= rows.len() {
+        return String::new();
+    }
+    let end_row = end.0.min(rows.len().saturating_sub(1));
+
+    rows[start.0..=end_row]
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let characters: Vec<char> = line.chars().collect();
+            let line_length = characters.len();
+            let (column_start, column_end) = if start.0 == end_row {
+                (start.1.min(line_length), end.1.min(line_length))
+            } else if index == 0 {
+                (start.1.min(line_length), line_length)
+            } else if index == end_row - start.0 {
+                (0, end.1.min(line_length))
+            } else {
+                (0, line_length)
+            };
+            characters[column_start..column_end].iter().collect()
+        })
+        .collect::<Vec<String>>()
+        .join("\n")
 }
 
 fn keyboard_clarify(
@@ -764,10 +826,13 @@ fn route_mouse(
                 return vec![];
             }
 
-            // A click on a rendered model row changes the highlight only.
-            // Confirmation remains an explicit Enter action.
-            if matches!(state.slash_overlay, SlashOverlay::ModelPicker { .. }) {
+            // A click on a rendered slash-overlay row starts a possible text
+            // drag. Model-picker clicks also change the highlight only;
+            // confirmation remains an explicit Enter action.
+            if state.slash_overlay.is_visible() {
                 if let Some(overlay_row) = state.layout.slash_overlay.row_at(column, row) {
+                    state.slash_overlay_drag_start = Some((column, row));
+                    state.slash_overlay_drag_end = Some((column, row));
                     if let SlashOverlay::ModelPicker {
                         choices,
                         filter,
@@ -869,6 +934,10 @@ fn route_mouse(
         }
 
         MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+            if state.slash_overlay.is_visible() && state.slash_overlay_drag_start.is_some() {
+                state.slash_overlay_drag_end = Some((column, row));
+                return vec![];
+            }
             // Banner drag: update the highlight endpoint; suppress input selection.
             if state
                 .clarify_banner_state
@@ -893,6 +962,20 @@ fn route_mouse(
         }
 
         MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+            if !state.slash_overlay.is_visible() {
+                state.slash_overlay_drag_start = None;
+                state.slash_overlay_drag_end = None;
+            }
+            if let Some((start_column, start_row)) = state.slash_overlay_drag_start.take() {
+                let (end_column, end_row) =
+                    state.slash_overlay_drag_end.take().unwrap_or((column, row));
+                let text =
+                    extract_slash_overlay_text(state, start_column, start_row, end_column, end_row);
+                if !text.is_empty() {
+                    return vec![Effect::CopyToClipboard(text)];
+                }
+                return vec![];
+            }
             // Clarify banner: click selects a choice; drag copies selected text.
             if let Some((down_col, down_row)) =
                 state.clarify_banner_state.clarify_choice_mousedown.take()
@@ -3422,6 +3505,173 @@ mod tests {
         assert!(
             effects.is_empty(),
             "clicking a model row must select it without confirming the switch: {effects:?}"
+        );
+    }
+
+    #[test]
+    fn slash_overlay_model_drag_copies_the_filtered_model_label() {
+        let model_choice = |label: &str, provider_connection: &str, model_id: &str| ModelChoice {
+            label: label.to_string(),
+            selection: ProviderModelOption {
+                provider_connection: provider_connection.to_string(),
+                model: crate::llm::ModelInfo {
+                    id: model_id.to_string(),
+                    context_length: None,
+                    reasoning_efforts: None,
+                },
+                reasoning_effort: None,
+            },
+            is_active: false,
+            engine_name: None,
+        };
+        let expected_text = "provider/provider-model";
+        let mut state = AppState::new();
+        state.slash_overlay = SlashOverlay::ModelPicker {
+            choices: vec![
+                model_choice("engine/engine-model", "engine", "engine-model"),
+                model_choice(expected_text, "provider", "provider-model"),
+            ],
+            filter: "provider".to_string(),
+            selected: 0,
+        };
+        state.layout.slash_overlay.content_area = ratatui::layout::Rect::new(1, 7, 37, 1);
+
+        update(
+            &mut state,
+            TuiEvent::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: 3,
+                row: 7,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &empty_textarea(),
+        );
+        update(
+            &mut state,
+            TuiEvent::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+                column: 3 + expected_text.chars().count() as u16,
+                row: 7,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &empty_textarea(),
+        );
+        let effects = update(
+            &mut state,
+            TuiEvent::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
+                column: 3 + expected_text.chars().count() as u16,
+                row: 7,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &empty_textarea(),
+        );
+
+        assert!(
+            effects.iter().any(|effect| matches!(
+                effect,
+                Effect::CopyToClipboard(text) if text == expected_text
+            )),
+            "dragging a filtered model row must copy its rendered label: {effects:?}"
+        );
+    }
+
+    #[test]
+    fn slash_overlay_drag_emits_copy_to_clipboard_effect() {
+        let mut state = AppState::new();
+        state.slash_overlay = SlashOverlay::Suggestions {
+            choices: vec![crate::slash_command::SLASH_COMMANDS[1]],
+            selected: 0,
+        };
+        state.layout.slash_overlay.content_area = ratatui::layout::Rect::new(1, 7, 37, 1);
+
+        let mouse_down = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 3,
+            row: 7,
+            modifiers: KeyModifiers::NONE,
+        };
+        update(&mut state, TuiEvent::Mouse(mouse_down), &empty_textarea());
+
+        let mouse_drag = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            column: 9,
+            row: 7,
+            modifiers: KeyModifiers::NONE,
+        };
+        update(&mut state, TuiEvent::Mouse(mouse_drag), &empty_textarea());
+
+        let mouse_up = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: 9,
+            row: 7,
+            modifiers: KeyModifiers::NONE,
+        };
+        let effects = update(&mut state, TuiEvent::Mouse(mouse_up), &empty_textarea());
+
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::CopyToClipboard(text) if text == "/model")),
+            "dragging slash-command text must copy the selected range: {effects:?}"
+        );
+    }
+
+    #[test]
+    fn slash_overlay_drag_uses_the_scrolled_content_row() {
+        let mut state = AppState::new();
+        state.slash_overlay = SlashOverlay::Suggestions {
+            choices: crate::slash_command::SLASH_COMMANDS.to_vec(),
+            selected: 0,
+        };
+        state.layout.slash_overlay = crate::tui_reducer_state::SlashOverlayLayout {
+            content_area: ratatui::layout::Rect::new(1, 5, 37, 2),
+            first_visible_row: 1,
+        };
+
+        update(
+            &mut state,
+            TuiEvent::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: 3,
+                row: 5,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &empty_textarea(),
+        );
+        update(
+            &mut state,
+            TuiEvent::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+                column: 9,
+                row: 6,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &empty_textarea(),
+        );
+        let effects = update(
+            &mut state,
+            TuiEvent::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
+                column: 9,
+                row: 6,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &empty_textarea(),
+        );
+
+        let expected_first_line = format!(
+            "{:<8} {}",
+            crate::slash_command::SLASH_COMMANDS[1].name,
+            crate::slash_command::SLASH_COMMANDS[1].description
+        );
+        assert!(
+            effects.iter().any(|effect| matches!(
+                effect,
+                Effect::CopyToClipboard(text)
+                    if text == &format!("{expected_first_line}\n/tools")
+            )),
+            "a scrolled drag must map to the visible overlay rows: {effects:?}"
         );
     }
 

@@ -236,6 +236,9 @@ pub struct TuiState {
     /// Slash-command suggestion list / model picker, rendered as a floating
     /// overlay directly above the input box.
     pub slash_overlay: SlashOverlay,
+    /// While the left mouse button is held in the slash overlay, the
+    /// normalised screen-space text selection to highlight.
+    pub slash_overlay_drag: Option<BannerDragSelection>,
     /// On-screen geometry of the slash overlay's selectable content, written
     /// by `tui_widgets::draw_slash_overlay` for mouse hit-testing.
     pub slash_overlay_layout: SlashOverlayLayout,
@@ -282,6 +285,7 @@ impl TuiState {
             },
             conversation: ConversationListState::default(),
             slash_overlay: SlashOverlay::default(),
+            slash_overlay_drag: None,
             slash_overlay_layout: SlashOverlayLayout::default(),
         }
     }
