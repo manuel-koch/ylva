@@ -641,10 +641,11 @@ async fn execute_slash_effects(
                             config.provider_connection, config.model
                         ),
                     };
-                    state.push_notice(confirmation.clone());
-                    // Persisted through the agent loop so the model change is
-                    // part of the transcript a resumed session replays.
-                    let _ = cmd_tx.send(AgentCommand::RecordNotice(confirmation)).await;
+                    // TUI-only: never injected into the conversation, since a
+                    // mid-conversation `role:"system"` message is rejected by
+                    // some providers/chat templates and the switch is already
+                    // durably recorded below via `RecordModelChanged`.
+                    state.push_notice(confirmation);
                     // Read both values from the live engine because a
                     // selection may have changed the active provider as well
                     // as its model.
@@ -2691,7 +2692,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn confirming_a_picked_model_switches_the_engine_and_persists_the_confirmation() {
+    async fn confirming_a_picked_model_switches_the_engine_and_records_the_change() {
         let (mut state, _textarea, cmd_tx, mut cmd_rx) = setup();
         let stub = StubEngine::with_models(&["small", "large"], "large");
         let engine: Arc<dyn Engine> = stub.clone();
@@ -2734,11 +2735,19 @@ mod tests {
             vec!["small".to_string()]
         );
         assert_eq!(engine.config().model, "small");
-        let command = cmd_rx.try_recv().expect("a notice command");
+        // The confirmation is a TUI-only notice — never injected into the
+        // conversation (see `Effect::SwitchModel`'s handler for why a
+        // mid-conversation `role:"system"` message is unsafe).
+        assert!(matches!(
+            state.chat_entries.last(),
+            Some(crate::tui_reducer_state::ChatEntry::Notice { text }) if text.contains("small")
+        ));
+        let command = cmd_rx.try_recv().expect("a model-changed command");
         assert!(matches!(
             command,
-            AgentCommand::RecordNotice(text) if text.contains("small")
+            AgentCommand::RecordModelChanged { model, .. } if model == "small"
         ));
+        assert!(cmd_rx.try_recv().is_err(), "no further commands are sent");
     }
 
     #[tokio::test]

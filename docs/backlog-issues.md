@@ -27,7 +27,7 @@
       Footer still shows "enter: send" which is wrong while the slash-command
       popup is active.
 
-- [ ] Switching a model via "/models" slash-command persists a "system" message
+- [x] Switching a model via "/models" slash-command persists a "system" message
       in conversation:
       ```json
       {
@@ -48,9 +48,9 @@
 
 - [ ] "/models" can't scroll by mouse in the popup dialog showing engines & models.
 
-- [ ] Can't use mouse drag'n'drop to select text in slash-command popup
+- [ ] Can't use mouse drag'n'drop to select text in slash-command popup.
 
-- [ ] Can't use mouse click to select a popup an entry in slash-command popup
+- [ ] Can't use mouse click to select an entry in slash-command popup.
 
 - [x] Can't use fn-up/down to page scroll in /models popup list of providers/models
 

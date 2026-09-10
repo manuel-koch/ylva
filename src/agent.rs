@@ -96,16 +96,15 @@ pub enum AgentCommand {
     /// rule makes the outer loop the only mutator of `Context` — and, through
     /// it, the only writer to the session store.
     ClearContext,
-    /// Append a harness-authored system message (e.g. `/models`' switch
-    /// confirmation) to the conversation, so it is both visible to the model
-    /// on the next turn and persisted through the normal commit point.
-    RecordNotice(String),
     /// Persist a structured `model_changed` record directly to the session
-    /// store (bypassing `Context`/`RecordNotice`'s conversation-message
-    /// path): the human-readable confirmation is a `RecordNotice`, this is
-    /// the machine-readable history entry a resumed session (or any tool
-    /// reading the JSONL) can rely on. Sent alongside `RecordNotice` after a
-    /// successful `/models` switch.
+    /// store (bypassing `Context`'s conversation-message path). This is the
+    /// machine-readable history entry a resumed session (or any tool reading
+    /// the JSONL) relies on for `/models`' switch. The human-readable
+    /// confirmation is shown only as a TUI notice (`AppState::push_notice`)
+    /// — it is deliberately never added to the conversation: a `role:
+    /// "system"` message injected mid-conversation is rejected by some
+    /// providers/chat templates (see `HARNESS_NOTICE_MARKER`'s doc comment),
+    /// and `model_changed` already gives replay/resume everything it needs.
     RecordModelChanged {
         provider_connection: String,
         model: String,
@@ -1957,9 +1956,6 @@ impl AgentLoop {
                                     }
                                 }
                                 context = fresh_context;
-                            }
-                            AgentCommand::RecordNotice(text) => {
-                                context.push_system(text);
                             }
                             AgentCommand::RecordModelChanged {
                                 provider_connection,

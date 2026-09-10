@@ -559,9 +559,14 @@ Slash effects (`Effect::ClearConversation`/`ShowTools`/`ListModels`/
 Two rules keep this consistent with blueprint §4C:
 
 - Nothing on the Driver side writes to the session store. `/models`'
-  confirmation is persisted by sending `AgentCommand::RecordNotice`, and
-  `/clear` rolls the session file over by sending `AgentCommand::ClearContext`
-  — both handled inside the agent loop, the sole `Context` mutator.
+  switch is persisted by sending `AgentCommand::RecordModelChanged` (a
+  structured `model_changed` store event only — never a conversation
+  message, since a mid-conversation `role:"system"` entry is rejected by
+  some providers/chat templates), and `/clear` rolls the session file over
+  by sending `AgentCommand::ClearContext` — both handled inside the agent
+  loop, the sole `Context` mutator. The human-readable confirmation is a
+  TUI-only notice (`AppState::push_notice`) that is never added to
+  `Context`.
 - `AgentCommand::ClearContext`'s handler reads the *live* `engine.config()`
   (not a value cached from session creation) and passes its
   `provider_connection`/
