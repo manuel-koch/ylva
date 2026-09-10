@@ -783,6 +783,65 @@ fn model_picker_footer_shows_picker_controls_instead_of_send() {
     );
 }
 
+#[test]
+fn model_picker_shows_scrollbar_when_entries_overflow() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_reducer_state::{ModelChoice, SlashOverlay};
+    use ylva::tui_widgets;
+    use ylva::{ModelInfo, ProviderModelOption, TuiState};
+
+    let backend = TestBackend::new(80, 20);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    let choices = (0..20)
+        .map(|index| ModelChoice {
+            label: format!("stub/model-{index}"),
+            selection: ProviderModelOption {
+                provider_connection: "stub".to_string(),
+                model: ModelInfo {
+                    id: format!("model-{index}"),
+                    context_length: None,
+                    reasoning_efforts: None,
+                },
+                reasoning_effort: None,
+            },
+            is_active: false,
+            engine_name: None,
+        })
+        .collect();
+    let mut state = TuiState {
+        slash_overlay: SlashOverlay::ModelPicker {
+            choices,
+            filter: String::new(),
+            selected: 0,
+        },
+        ..TuiState::new()
+    };
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("draw");
+
+    let buffer = terminal.backend().buffer().clone();
+    // The popup reserves the last interior column (x=78, between the content
+    // and right border) for its scrollbar on this 80-column terminal.
+    let scrollbar_symbols: String = (0..20u16)
+        .map(|row| buffer.cell((78, row)).unwrap().symbol().to_string())
+        .collect();
+    assert!(
+        scrollbar_symbols.contains('┃'),
+        "overflowing model picker must render a scrollbar thumb: {scrollbar_symbols:?}"
+    );
+    assert!(
+        scrollbar_symbols.contains('↓'),
+        "overflowing model picker must show a downward scroll indicator: {scrollbar_symbols:?}"
+    );
+}
+
 /// A live filter that matches nothing must not make the picker vanish
 /// entirely — the panel stays open (so the user can keep editing the
 /// filter) and shows a message explaining why nothing is listed.

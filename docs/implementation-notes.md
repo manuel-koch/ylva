@@ -76,7 +76,10 @@ Confirming (`Enter`) or cancelling (`Esc`) the picker
 clears the input. When `matching_model_indices` returns no indices,
 `tui_widgets::draw_slash_overlay` keeps the panel open and renders a single
 "Nothing matched your model filter." row (selection `None`) instead of
-hiding the overlay, so the filter stays editable.
+hiding the overlay, so the filter stays editable. When the rendered rows
+overflow the popup's capped height, the view window is anchored to the
+selected row and `render_chat_scrollbar` draws a one-column scrollbar in the
+popup's right interior gutter.
 
 `ProviderRegistry` centralizes provider-name validation, environment-based
 selection, and construction. A profile separates

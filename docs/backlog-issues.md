@@ -43,8 +43,12 @@
 - [x] "/models" should display the llm context-length as kb/mb size
       ( integer representation, 2048 == 2kb ) to increase readability.
 
-- [ ] "/models" popup dialog should provide vertical scroll-indicators
+- [x] "/models" popup dialog should provide vertical scroll-indicators
       for showing engines & models.
+
+- [ ] "/models" popup dialog shows no feedabck while model info is gathered.
+      This can take 1-2s while user doesn't know whether the "/models" command
+      is actually triggered or just stuck.
 
 - [ ] "/models" can't scroll by mouse in the popup dialog showing engines & models.
 

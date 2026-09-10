@@ -2692,6 +2692,7 @@ fn draw_slash_overlay(frame: &mut Frame, input_area: Rect, overlay: &SlashOverla
     let first_visible = selected_row
         .unwrap_or(0)
         .saturating_sub(content_height.saturating_sub(1) as usize);
+    let content_width = panel_area.width.saturating_sub(3) as usize;
     let lines: Vec<Line<'static>> = rows
         .iter()
         .enumerate()
@@ -2700,7 +2701,7 @@ fn draw_slash_overlay(frame: &mut Frame, input_area: Rect, overlay: &SlashOverla
         .map(|(_, entry_index)| {
             let Some(index) = entry_index else {
                 return Line::styled(
-                    "─".repeat(input_area.width as usize),
+                    "─".repeat(content_width),
                     Style::default().fg(Color::DarkGray),
                 );
             };
@@ -2720,15 +2721,30 @@ fn draw_slash_overlay(frame: &mut Frame, input_area: Rect, overlay: &SlashOverla
         .collect();
 
     frame.render_widget(Clear, panel_area);
-    frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
-                .title(title),
-        ),
-        panel_area,
-    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(title);
+    let inner_area = block.inner(panel_area);
+    frame.render_widget(block, panel_area);
+
+    let [content_area, scrollbar_area] = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Fill(1), Constraint::Length(1)])
+        .areas(inner_area);
+    frame.render_widget(Paragraph::new(lines), content_area);
+
+    let max_first_visible = rows.len().saturating_sub(content_height as usize);
+    if rows.len() > content_height as usize {
+        render_chat_scrollbar(
+            frame,
+            scrollbar_area,
+            first_visible.min(max_first_visible),
+            max_first_visible,
+            rows.len(),
+            content_height as usize,
+        );
+    }
 }
 
 #[expect(clippy::too_many_arguments)]
