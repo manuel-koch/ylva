@@ -863,6 +863,7 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
         spinner_frame: app.spinner_frame,
         input_scroll_top: app.input_scroll_top,
         slash_overlay: app.slash_overlay,
+        slash_overlay_layout: app.layout.slash_overlay,
         help_popup: crate::tui_render_state::HelpPopupState {
             show_help,
             help_scroll_offset: app.help_popup.help_scroll_offset,

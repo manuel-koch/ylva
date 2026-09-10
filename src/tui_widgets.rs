@@ -33,8 +33,8 @@ use crate::agent::AgentMode;
 use crate::build_info::BUILD_INFO;
 use crate::markdown::render_markdown;
 use crate::tui_reducer_state::{
-    matching_model_indices, BannerDragSelection, ChatEntry, SlashOverlay, ToolCallState,
-    UserMessageState,
+    matching_model_indices, model_picker_row_entries, BannerDragSelection, ChatEntry, SlashOverlay,
+    SlashOverlayLayout, ToolCallState, UserMessageState,
 };
 use crate::tui_render_state::TuiState;
 
@@ -449,7 +449,12 @@ pub fn draw(
         );
     }
 
-    draw_slash_overlay(frame, input_area, &state.slash_overlay);
+    draw_slash_overlay(
+        frame,
+        input_area,
+        &state.slash_overlay,
+        &mut state.slash_overlay_layout,
+    );
 
     // Store the input rect for mouse click/drag handling in the event loop.
     state.input_area = input_area;
@@ -2610,8 +2615,14 @@ fn draw_normal_footer(
 /// Draw the slash-command overlay as a floating panel whose bottom edge sits
 /// directly above the input box, so the list grows upward over the
 /// conversation instead of pushing the input around while the user types.
-fn draw_slash_overlay(frame: &mut Frame, input_area: Rect, overlay: &SlashOverlay) {
-    let mut separator_before: Option<usize> = None;
+fn draw_slash_overlay(
+    frame: &mut Frame,
+    input_area: Rect,
+    overlay: &SlashOverlay,
+    overlay_layout: &mut SlashOverlayLayout,
+) {
+    let previous_first_visible = overlay_layout.first_visible_row;
+    *overlay_layout = SlashOverlayLayout::default();
     let (title, entries, selected) = match overlay {
         SlashOverlay::Hidden => return,
         SlashOverlay::Suggestions { choices, selected } => (
@@ -2640,14 +2651,6 @@ fn draw_slash_overlay(frame: &mut Frame, input_area: Rect, overlay: &SlashOverla
                     None,
                 )
             } else {
-                // Engine shortcuts always precede the raw provider/model
-                // catalog within `choices` (see `Effect::ListModels`), and
-                // filtering only narrows — it never reorders — so the
-                // boundary is simply where `engine_name` stops being set.
-                separator_before = visible_indices
-                    .iter()
-                    .position(|&index| choices[index].engine_name.is_none())
-                    .filter(|&boundary| boundary > 0);
                 (
                     "Engines & Provider Models".to_string(),
                     visible_indices
@@ -2666,12 +2669,14 @@ fn draw_slash_overlay(frame: &mut Frame, input_area: Rect, overlay: &SlashOverla
     // Map each rendered row to the entry it shows, or `None` for the
     // divider row inserted between the engine-shortcut and provider/model
     // sections.
-    let rows: Vec<Option<usize>> = (0..entries.len())
-        .flat_map(|index| {
-            let separator = (separator_before == Some(index)).then_some(None);
-            separator.into_iter().chain(std::iter::once(Some(index)))
-        })
-        .collect();
+    let rows = match overlay {
+        SlashOverlay::ModelPicker {
+            choices, filter, ..
+        } if !matching_model_indices(choices, filter).is_empty() => {
+            model_picker_row_entries(choices, filter)
+        }
+        _ => (0..entries.len()).map(Some).collect(),
+    };
 
     // Cap the panel at half the space above the input so a provider with
     // hundreds of models cannot hide the conversation entirely.
@@ -2686,12 +2691,23 @@ fn draw_slash_overlay(frame: &mut Frame, input_area: Rect, overlay: &SlashOverla
     };
 
     // Keep the highlighted row inside the visible window when the list is
-    // longer than the panel.
+    // longer than the panel, but preserve the current window when the
+    // highlighted row is already visible. This prevents a mouse click from
+    // repositioning the popup unnecessarily.
     let selected_row =
         selected.and_then(|selected| rows.iter().position(|row| *row == Some(selected)));
-    let first_visible = selected_row
-        .unwrap_or(0)
-        .saturating_sub(content_height.saturating_sub(1) as usize);
+    let max_first_visible = rows.len().saturating_sub(content_height as usize);
+    let mut first_visible = previous_first_visible.min(max_first_visible);
+    if let Some(selected_row) = selected_row {
+        let visible_end = first_visible.saturating_add(content_height as usize);
+        if selected_row < first_visible {
+            first_visible = selected_row;
+        } else if selected_row >= visible_end {
+            first_visible = selected_row
+                .saturating_sub(content_height.saturating_sub(1) as usize)
+                .min(max_first_visible);
+        }
+    }
     let content_width = panel_area.width.saturating_sub(3) as usize;
     let lines: Vec<Line<'static>> = rows
         .iter()
@@ -2732,9 +2748,10 @@ fn draw_slash_overlay(frame: &mut Frame, input_area: Rect, overlay: &SlashOverla
         .direction(Direction::Horizontal)
         .constraints([Constraint::Fill(1), Constraint::Length(1)])
         .areas(inner_area);
+    overlay_layout.content_area = content_area;
+    overlay_layout.first_visible_row = first_visible;
     frame.render_widget(Paragraph::new(lines), content_area);
 
-    let max_first_visible = rows.len().saturating_sub(content_height as usize);
     if rows.len() > content_height as usize {
         render_chat_scrollbar(
             frame,

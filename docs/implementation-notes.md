@@ -61,7 +61,13 @@ switching connections does not mutate another connection's configuration.
 The `/models` slash command normalizes the draft to `/models <filter>` and
 fetches the full catalog once via `Effect::ListModels { filter }`, storing
 every fetched `ModelChoice` in `SlashOverlay::ModelPicker { choices, filter,
-selected }` — `choices` is never re-filtered out of the vector. The input is
+selected }` — `choices` is never re-filtered out of the vector. Mouse-wheel
+events move the highlighted choice through the same bounded selection helper
+as keyboard navigation, so the rendered window follows the pointer without
+changing the chat scroll position. A left-click on a rendered row updates the
+highlight through the same row mapping, preserves the current popup window
+when that row is already visible, and never emits `SwitchModel`; only Enter
+confirms the choice. The input is
 deliberately *not* cleared: `AppState::refresh_slash_overlay` re-derives
 `filter` from the live draft on every keystroke while the picker is open (a
 prior no-op) and `matching_model_indices` — shared by selection movement,
@@ -551,7 +557,9 @@ suggestions are visible, the selected index is kept in `AppState`; `Tab` emits
 `Enter` activates the selected command even when the draft is only a prefix.
 The `/models` picker queries provider-connection-qualified
 options from `EngineRouter`, displays `provider_connection/model`, has the
-same bounded `↑`/`↓` movement semantics, uses `page-up`/`fn-up` and
+same bounded `↑`/`↓` and mouse-wheel movement semantics, maps left-clicks to
+highlight-only selection without unnecessary window repositioning, and uses
+`page-up`/`fn-up` and
 `page-down`/`fn-down` to move the highlighted option by three entries, uses
 `←`/`→` to cycle reasoning efforts when available, and `Enter` activates both
 the selected connection, model, and effort;

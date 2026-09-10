@@ -161,6 +161,7 @@ fn project_for_draw(state: &AppState) -> TuiState {
         spinner_frame: state.spinner_frame,
         input_scroll_top: state.input_scroll_top,
         slash_overlay: state.slash_overlay.clone(),
+        slash_overlay_layout: state.layout.slash_overlay,
         help_popup: crate::tui_render_state::HelpPopupState {
             show_help: state.show_help(),
             help_scroll_offset: state.help_popup.help_scroll_offset,
@@ -233,6 +234,7 @@ fn sync_from_draw(state: &mut AppState, rendered: TuiState, button_areas: Option
     state.layout.header_bubble = rendered.child_view.header_bubble_area;
     state.child_view.header_bubble_scroll_offset = rendered.child_view.header_bubble_scroll_offset;
     state.layout.help_popup.rect = rendered.help_popup.help_popup_rect;
+    state.layout.slash_overlay = rendered.slash_overlay_layout;
     if let Some(buttons) = button_areas {
         state.layout.approve_button = buttons.approve;
         state.layout.deny_button = buttons.deny;

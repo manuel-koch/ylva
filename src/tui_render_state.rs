@@ -26,7 +26,8 @@ use std::time::Instant;
 use crate::agent::AgentMode;
 use crate::llm::engine::EngineDisplayInfo;
 use crate::tui_reducer_state::{
-    BannerDragSelection, ChatEntry, ChatSelection, InputArea, SlashOverlay, ToolCallState,
+    BannerDragSelection, ChatEntry, ChatSelection, InputArea, SlashOverlay, SlashOverlayLayout,
+    ToolCallState,
 };
 
 // ─── Per-area sub-structs ──────────────────────────────────────────────────────
@@ -235,6 +236,9 @@ pub struct TuiState {
     /// Slash-command suggestion list / model picker, rendered as a floating
     /// overlay directly above the input box.
     pub slash_overlay: SlashOverlay,
+    /// On-screen geometry of the slash overlay's selectable content, written
+    /// by `tui_widgets::draw_slash_overlay` for mouse hit-testing.
+    pub slash_overlay_layout: SlashOverlayLayout,
 }
 
 impl TuiState {
@@ -278,6 +282,7 @@ impl TuiState {
             },
             conversation: ConversationListState::default(),
             slash_overlay: SlashOverlay::default(),
+            slash_overlay_layout: SlashOverlayLayout::default(),
         }
     }
 

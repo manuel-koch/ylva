@@ -84,7 +84,8 @@ pub use store::{
 pub use tui_driver::TuiApp;
 pub use tui_reducer_state::{
     AppLayout, AppState, ChatArea, ChatEntry, ChatSelection, DomainEvent, Effect, Focus,
-    HelpPopupLayout, InputAreaLayout, InputEvent, ToolCallState, TuiMode, UserMessageState,
+    HelpPopupLayout, InputAreaLayout, InputEvent, SlashOverlayLayout, ToolCallState, TuiMode,
+    UserMessageState,
 };
 pub use tui_render_state::TuiState;
 pub use ylva_home::{ylva_root, YLVA_HOME_ENVIRONMENT_VARIABLE};

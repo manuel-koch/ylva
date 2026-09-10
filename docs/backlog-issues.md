@@ -50,11 +50,11 @@
       This can take 1-2s while user doesn't know whether the "/models" command
       is actually triggered or just stuck.
 
-- [ ] "/models" can't scroll by mouse in the popup dialog showing engines & models.
+- [x] "/models" can't scroll by mouse in the popup dialog showing engines & models.
 
 - [ ] Can't use mouse drag'n'drop to select text in slash-command popup.
 
-- [ ] Can't use mouse click to select an entry in slash-command popup.
+- [x] Can't use mouse click to select an entry in slash-command popup.
 
 - [x] Can't use fn-up/down to page scroll in /models popup list of providers/models
 

@@ -30,9 +30,9 @@ use crate::agent::tools::clarify::ClarifyTool;
 use crate::markdown::render_markdown;
 use crate::slash_command::{parse_slash_command_invocation, SlashCommand, SlashCommandInvocation};
 use crate::tui_reducer_state::{
-    AppState, ChatEntry, ChatSelection, ChildRunInfo, ConfirmKey, ConversationView, DomainEvent,
-    Effect, Focus, HistoryDirection, InputEvent, SlashOverlay, ToolCallState, TuiMode,
-    UserMessageState,
+    model_picker_row_entries, AppState, ChatEntry, ChatSelection, ChildRunInfo, ConfirmKey,
+    ConversationView, DomainEvent, Effect, Focus, HistoryDirection, InputEvent, SlashOverlay,
+    ToolCallState, TuiMode, UserMessageState,
 };
 
 // ─── Public surface ───────────────────────────────────────────────────────────
@@ -721,6 +721,8 @@ fn route_mouse(
                 } else {
                     state.help_scroll_down(1);
                 }
+            } else if matches!(state.slash_overlay, SlashOverlay::ModelPicker { .. }) {
+                state.move_slash_selection(if scroll_up { -1 } else { 1 });
             } else if in_clarify_banner {
                 if scroll_up {
                     state.clarify_scroll_up(1);
@@ -760,6 +762,28 @@ fn route_mouse(
                     state.help_popup.help_scroll_x = 0;
                 }
                 return vec![];
+            }
+
+            // A click on a rendered model row changes the highlight only.
+            // Confirmation remains an explicit Enter action.
+            if matches!(state.slash_overlay, SlashOverlay::ModelPicker { .. }) {
+                if let Some(overlay_row) = state.layout.slash_overlay.row_at(column, row) {
+                    if let SlashOverlay::ModelPicker {
+                        choices,
+                        filter,
+                        selected,
+                    } = &mut state.slash_overlay
+                    {
+                        if let Some(entry_index) = model_picker_row_entries(choices, filter)
+                            .get(overlay_row)
+                            .copied()
+                            .flatten()
+                        {
+                            *selected = entry_index;
+                        }
+                    }
+                    return vec![];
+                }
             }
 
             // Click anywhere on the child-view header bubble toggles its
@@ -3306,6 +3330,99 @@ mod tests {
         };
         update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
         assert_eq!(state.conversation.scroll_offset, 4);
+    }
+
+    #[test]
+    fn mouse_scroll_over_model_picker_moves_picker_selection_instead_of_chat() {
+        let mut state = AppState::new();
+        state.slash_overlay = SlashOverlay::ModelPicker {
+            choices: (0..3)
+                .map(|index| ModelChoice {
+                    label: format!("stub/model-{index}"),
+                    selection: ProviderModelOption {
+                        provider_connection: "stub".to_string(),
+                        model: crate::llm::ModelInfo {
+                            id: format!("model-{index}"),
+                            context_length: None,
+                            reasoning_efforts: None,
+                        },
+                        reasoning_effort: None,
+                    },
+                    is_active: false,
+                    engine_name: None,
+                })
+                .collect(),
+            filter: String::new(),
+            selected: 0,
+        };
+        state.conversation.scroll_offset = 5;
+        state.conversation.scroll_locked = false;
+        let mouse = crossterm::event::MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
+
+        assert_eq!(
+            state
+                .selected_model()
+                .map(|choice| choice.selection.model.id.as_str()),
+            Some("model-1")
+        );
+        assert_eq!(
+            state.conversation.scroll_offset, 5,
+            "scrolling the model picker must not move the chat"
+        );
+    }
+
+    #[test]
+    fn mouse_click_on_model_picker_entry_selects_without_switching() {
+        let model_choice = |model_id: &str| ModelChoice {
+            label: format!("stub/{model_id}"),
+            selection: ProviderModelOption {
+                provider_connection: "stub".to_string(),
+                model: crate::llm::ModelInfo {
+                    id: model_id.to_string(),
+                    context_length: None,
+                    reasoning_efforts: None,
+                },
+                reasoning_effort: None,
+            },
+            is_active: false,
+            engine_name: None,
+        };
+        let mut state = AppState::new();
+        state.slash_overlay = SlashOverlay::ModelPicker {
+            choices: vec![model_choice("model-0"), model_choice("model-1")],
+            filter: String::new(),
+            selected: 0,
+        };
+        // With the input at row 10, the two-row picker renders its entries at
+        // rows 7 and 8.
+        state.layout.input_area.rect = ratatui::layout::Rect::new(0, 10, 40, 2);
+        state.layout.slash_overlay.content_area = ratatui::layout::Rect::new(1, 7, 37, 2);
+        let mouse = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 5,
+            row: 8,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        let effects = update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
+
+        assert_eq!(
+            state
+                .selected_model()
+                .map(|choice| choice.selection.model.id.as_str()),
+            Some("model-1")
+        );
+        assert!(
+            effects.is_empty(),
+            "clicking a model row must select it without confirming the switch: {effects:?}"
+        );
     }
 
     #[test]

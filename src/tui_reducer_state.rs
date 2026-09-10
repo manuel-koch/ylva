@@ -869,6 +869,26 @@ pub(crate) fn matching_model_indices(choices: &[ModelChoice], filter: &str) -> V
         .collect()
 }
 
+/// Render-row mapping for the `/models` picker. `Some(index)` identifies an
+/// entry in the filtered choice list; `None` identifies the divider between
+/// configured engines and provider models.
+pub(crate) fn model_picker_row_entries(
+    choices: &[ModelChoice],
+    filter: &str,
+) -> Vec<Option<usize>> {
+    let visible_indices = matching_model_indices(choices, filter);
+    let separator_before = visible_indices
+        .iter()
+        .position(|&index| choices[index].engine_name.is_none())
+        .filter(|&boundary| boundary > 0);
+    (0..visible_indices.len())
+        .flat_map(|index| {
+            let separator = (separator_before == Some(index)).then_some(None);
+            separator.into_iter().chain(std::iter::once(Some(index)))
+        })
+        .collect()
+}
+
 /// The live model-picker filter typed after `/models` in `draft`. Falls
 /// back to the whole trimmed draft if it no longer starts with `/models`
 /// (e.g. the user backspaced into the command name itself).
@@ -1008,6 +1028,28 @@ impl HelpPopupLayout {
     }
 }
 
+/// Screen-space geometry for the slash-command overlay's selectable content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SlashOverlayLayout {
+    pub content_area: Rect,
+    /// Absolute row in the overlay's content list corresponding to the first
+    /// row currently rendered in `content_area`.
+    pub first_visible_row: usize,
+}
+
+impl SlashOverlayLayout {
+    /// Return the absolute content row under a terminal cell, if it is inside
+    /// the rendered entry column.
+    pub fn row_at(&self, col: u16, row: u16) -> Option<usize> {
+        let area = self.content_area;
+        if col < area.x || col >= area.x + area.width || row < area.y || row >= area.y + area.height
+        {
+            return None;
+        }
+        Some(self.first_visible_row + row.saturating_sub(area.y) as usize)
+    }
+}
+
 /// Aggregated screen-space geometry written by the View (`render.rs`) each
 /// frame and read by the Presenter for mouse hit-testing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1015,6 +1057,7 @@ pub struct AppLayout {
     pub chat_area: ChatArea,
     pub input_area: InputAreaLayout,
     pub help_popup: HelpPopupLayout,
+    pub slash_overlay: SlashOverlayLayout,
     /// Rect of the clarify banner. Zero-sized when no clarify is pending.
     pub clarify_banner: ratatui::layout::Rect,
     /// Rect of the child-view header bubble's own content column (excludes

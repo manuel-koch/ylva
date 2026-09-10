@@ -112,6 +112,34 @@ impl Backend for InspectableTestBackend {
     }
 }
 
+fn model_picker_choices(choice_count: usize) -> Vec<ylva::tui_reducer_state::ModelChoice> {
+    (0..choice_count)
+        .map(|index| ylva::tui_reducer_state::ModelChoice {
+            label: format!("stub/model-{index}"),
+            selection: ylva::ProviderModelOption {
+                provider_connection: "stub".to_string(),
+                model: ylva::ModelInfo {
+                    id: format!("model-{index}"),
+                    context_length: None,
+                    reasoning_efforts: None,
+                },
+                reasoning_effort: None,
+            },
+            is_active: false,
+            engine_name: None,
+        })
+        .collect()
+}
+
+fn empty_textarea_context() -> ylva::TextareaContext {
+    ylva::TextareaContext {
+        is_empty: true,
+        text: String::new(),
+        cursor_row: 0,
+        cursor_row_is_last: true,
+    }
+}
+
 struct DelayedCatalogEngine {
     config: EngineConfig,
     catalog_started: Arc<Notify>,
@@ -1082,35 +1110,247 @@ fn model_picker_footer_shows_picker_controls_instead_of_send() {
 }
 
 #[test]
+fn model_picker_click_uses_rendered_row_geometry_without_switching() {
+    use ratatui::backend::TestBackend;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_reducer_state::{AppState, SlashOverlay};
+    use ylva::TuiEvent;
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::ModelPicker {
+        choices: model_picker_choices(2),
+        filter: String::new(),
+        selected: 0,
+    };
+    let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            ylva::render::render(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("draw");
+
+    let content_area = state.layout.slash_overlay.content_area;
+    assert!(
+        content_area.height >= 2,
+        "both model rows must be represented in the rendered content area"
+    );
+    assert_eq!(
+        state
+            .layout
+            .slash_overlay
+            .row_at(content_area.x, content_area.y + 1),
+        Some(1)
+    );
+    let effects = ylva::presenter::update(
+        &mut state,
+        TuiEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: content_area.x,
+            row: content_area.y + 1,
+            modifiers: KeyModifiers::NONE,
+        }),
+        &empty_textarea_context(),
+    );
+
+    assert_eq!(
+        state
+            .selected_model()
+            .map(|choice| choice.selection.model.id.as_str()),
+        Some("model-1")
+    );
+    assert!(
+        effects.is_empty(),
+        "a rendered-row click must not confirm the model switch: {effects:?}"
+    );
+}
+
+#[test]
+fn model_picker_click_uses_absolute_row_after_scrolling() {
+    use ratatui::backend::TestBackend;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_reducer_state::{AppState, SlashOverlay};
+    use ylva::TuiEvent;
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::ModelPicker {
+        choices: model_picker_choices(20),
+        filter: String::new(),
+        selected: 0,
+    };
+    let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            ylva::render::render(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("initial draw");
+    for _ in 0..10 {
+        ylva::presenter::update(
+            &mut state,
+            TuiEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 1,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &empty_textarea_context(),
+        );
+    }
+    terminal
+        .draw(|frame| {
+            ylva::render::render(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("scrolled draw");
+
+    let content_area = state.layout.slash_overlay.content_area;
+    let first_visible_row = state.layout.slash_overlay.first_visible_row;
+    assert!(
+        first_visible_row > 0,
+        "the fixture must exercise a scrolled popup"
+    );
+    let effects = ylva::presenter::update(
+        &mut state,
+        TuiEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: content_area.x,
+            row: content_area.y,
+            modifiers: KeyModifiers::NONE,
+        }),
+        &empty_textarea_context(),
+    );
+
+    assert_eq!(
+        state
+            .selected_model()
+            .map(|choice| choice.selection.model.id.as_str()),
+        Some(format!("model-{first_visible_row}").as_str())
+    );
+    assert!(
+        effects.is_empty(),
+        "a scrolled-row click must not confirm the model switch: {effects:?}"
+    );
+    let first_visible_row_before_click = first_visible_row;
+    terminal
+        .draw(|frame| {
+            ylva::render::render(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("redraw after click");
+    assert_eq!(
+        state.layout.slash_overlay.first_visible_row, first_visible_row_before_click,
+        "clicking a visible row must not reposition the popup"
+    );
+}
+
+#[test]
+fn model_picker_moves_selection_up_inside_scrolled_window() {
+    use ratatui::backend::TestBackend;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_reducer_state::{AppState, InputEvent, SlashOverlay};
+    use ylva::TuiEvent;
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::ModelPicker {
+        choices: model_picker_choices(20),
+        filter: String::new(),
+        selected: 0,
+    };
+    let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
+    let mut textarea = TextArea::default();
+    let textarea_context = empty_textarea_context();
+
+    terminal
+        .draw(|frame| {
+            ylva::render::render(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("initial draw");
+    for _ in 0..10 {
+        ylva::presenter::update(
+            &mut state,
+            TuiEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 1,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &textarea_context,
+        );
+        terminal
+            .draw(|frame| {
+                ylva::render::render(frame, &mut state, &mut textarea, None, None);
+            })
+            .expect("scroll draw");
+    }
+    let first_visible_row = state.layout.slash_overlay.first_visible_row;
+    assert!(first_visible_row > 0);
+
+    for expected_model_index in [9, 8, 7, 6, 5, 4] {
+        ylva::presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(KeyEvent::new(
+                KeyCode::Up,
+                KeyModifiers::NONE,
+            ))),
+            &textarea_context,
+        );
+        terminal
+            .draw(|frame| {
+                ylva::render::render(frame, &mut state, &mut textarea, None, None);
+            })
+            .expect("up-navigation draw");
+        assert_eq!(
+            state
+                .selected_model()
+                .map(|choice| choice.selection.model.id.as_str()),
+            Some(format!("model-{expected_model_index}").as_str())
+        );
+        assert_eq!(
+            state.layout.slash_overlay.first_visible_row, first_visible_row,
+            "moving within the visible window must not keep the selection at its lower edge"
+        );
+    }
+
+    for expected_model_index in [3, 2] {
+        ylva::presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(KeyEvent::new(
+                KeyCode::Up,
+                KeyModifiers::NONE,
+            ))),
+            &textarea_context,
+        );
+        terminal
+            .draw(|frame| {
+                ylva::render::render(frame, &mut state, &mut textarea, None, None);
+            })
+            .expect("upper-bound navigation draw");
+        assert_eq!(
+            state
+                .selected_model()
+                .map(|choice| choice.selection.model.id.as_str()),
+            Some(format!("model-{expected_model_index}").as_str())
+        );
+    }
+    assert_eq!(
+        state.layout.slash_overlay.first_visible_row,
+        first_visible_row - 1,
+        "the window should move only after selection crosses its upper edge"
+    );
+}
+
+#[test]
 fn model_picker_shows_scrollbar_when_entries_overflow() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use ratatui_textarea::TextArea;
-    use ylva::tui_reducer_state::{ModelChoice, SlashOverlay};
+    use ylva::tui_reducer_state::SlashOverlay;
     use ylva::tui_widgets;
-    use ylva::{ModelInfo, ProviderModelOption, TuiState};
+    use ylva::TuiState;
 
     let backend = TestBackend::new(80, 20);
     let mut terminal = Terminal::new(backend).expect("terminal");
-    let choices = (0..20)
-        .map(|index| ModelChoice {
-            label: format!("stub/model-{index}"),
-            selection: ProviderModelOption {
-                provider_connection: "stub".to_string(),
-                model: ModelInfo {
-                    id: format!("model-{index}"),
-                    context_length: None,
-                    reasoning_efforts: None,
-                },
-                reasoning_effort: None,
-            },
-            is_active: false,
-            engine_name: None,
-        })
-        .collect();
     let mut state = TuiState {
         slash_overlay: SlashOverlay::ModelPicker {
-            choices,
+            choices: model_picker_choices(20),
             filter: String::new(),
             selected: 0,
         },

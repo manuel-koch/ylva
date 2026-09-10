@@ -61,6 +61,8 @@ Reference for Ylva's TUI keybindings.
 | `↑` / `↓` | `/models` picker open | Move the highlighted provider-connection/model |
 | `page-up` / `fn-up` | `/models` picker open | Move the highlighted provider-connection/model up by a page |
 | `page-down` / `fn-down` | `/models` picker open | Move the highlighted provider-connection/model down by a page |
+| `Mouse wheel` | `/models` picker open | Move the highlighted provider-connection/model up / down |
+| `left-click` on an entry | `/models` picker open | Highlight the provider-connection/model; does not switch until `enter` |
 | `←` / `→` | `/models` picker open | Cycle the highlighted model's reasoning effort when alternatives are available |
 | any character / backspace | `/models` picker open | Insert into the draft (`/models <filter>`) and live-narrow the picker's already-fetched choices; no re-query |
 | `enter` | `/models` picker open | Switch to the highlighted provider connection/model, apply its selected reasoning effort, and clear the input |
