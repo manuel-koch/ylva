@@ -19,10 +19,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
+use ylva::llm::ProviderRegistry;
 use ylva::{
-    AgentCommand, AgentLoop, AssistantStatus, EngineImpl, Message, OpenAiProvider, Provider,
-    StreamEvent, ToolRegistry, UiUpdate, UserMessageKind, DEFAULT_SYSTEM_PROMPT,
-    TOOL_PROTOCOL_SYSTEM_PROMPT,
+    AgentCommand, AgentLoop, AssistantStatus, EngineConfig, EngineImpl, Message, OllamaProvider,
+    OpenAiCompatibleProvider, OpenRouterProvider, Provider, ProviderConnectionConfig, StreamEvent,
+    ToolRegistry, UiUpdate, UserMessageKind, DEFAULT_SYSTEM_PROMPT, TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
 
 use common::collect_until;
@@ -30,10 +31,10 @@ use common::mock_llm_server::{content_frame, tool_call_frame, MockLlmConfig, Moc
 
 /// A provider (`Provider` trait object) pointed at a running [`MockLlmServer`]
 /// with a fixed model. Trait-typed so consumers are decoupled from the concrete
-/// HTTP provider. Use [`openai_provider_for`] when calling `.chat()` directly —
+/// HTTP provider. Use [`openai_compatible_provider_for`] when calling `.chat()` directly —
 /// rust-analyzer's inference across the `dyn Provider` boundary is unreliable.
 fn provider_for(server: &MockLlmServer) -> Arc<dyn Provider> {
-    Arc::new(OpenAiProvider::new(
+    Arc::new(OpenAiCompatibleProvider::new(
         "test".to_string(),
         server.base_url(),
         "mock-model".into(),
@@ -44,8 +45,8 @@ fn provider_for(server: &MockLlmServer) -> Arc<dyn Provider> {
 /// The concrete HTTP provider pointed at a running [`MockLlmServer`]. Used by
 /// the tests that call `.chat()` directly, so the IDE can infer the stream type
 /// without crossing the `dyn Provider` trait-object boundary.
-fn openai_provider_for(server: &MockLlmServer) -> OpenAiProvider {
-    OpenAiProvider::new(
+fn openai_compatible_provider_for(server: &MockLlmServer) -> OpenAiCompatibleProvider {
+    OpenAiCompatibleProvider::new(
         "test".to_string(),
         server.base_url(),
         "mock-model".into(),
@@ -68,6 +69,170 @@ async fn drain_text_until_done(rx: &mut mpsc::Receiver<StreamEvent>) -> Vec<Stri
 }
 
 #[tokio::test]
+async fn list_models_reads_the_providers_model_endpoint() {
+    let config = MockLlmConfig {
+        models: vec!["small-model".to_string(), "large-model".to_string()],
+        ..Default::default()
+    };
+    let server = MockLlmServer::start(config).await.expect("bind failed");
+
+    let provider = openai_compatible_provider_for(&server);
+    let models = provider
+        .list_models()
+        .await
+        .expect("the mock answers GET /models with a 200");
+
+    assert_eq!(
+        models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["small-model", "large-model"]
+    );
+}
+
+#[tokio::test]
+async fn openrouter_provider_lists_models_from_openai_catalog() {
+    let config = MockLlmConfig {
+        models: vec!["openai/gpt-oss-120b".to_string()],
+        model_path: Some("/api/v1/models".to_string()),
+        ..Default::default()
+    };
+    let server = MockLlmServer::start(config).await.expect("bind failed");
+
+    let provider = OpenRouterProvider::new(
+        "openrouter".to_string(),
+        server.base_url(),
+        "openai/gpt-oss-120b".to_string(),
+        Some("test-key".to_string()),
+    );
+    let models = provider
+        .list_models()
+        .await
+        .expect("OpenRouter should answer its OpenAI-compatible model endpoint");
+
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].id, "openai/gpt-oss-120b");
+}
+
+#[tokio::test]
+async fn ollama_provider_lists_native_models_and_loads_details() {
+    let config = MockLlmConfig {
+        models: vec!["gemma4:latest".to_string(), "qwen3:8b".to_string()],
+        ollama_context_length: Some(131_072),
+        ..Default::default()
+    };
+    let server = MockLlmServer::start(config).await.expect("bind failed");
+
+    let provider = OllamaProvider::new(
+        "ollama-local".to_string(),
+        server.base_url(),
+        "gemma4:latest".to_string(),
+        None,
+    );
+    let models = provider
+        .list_models()
+        .await
+        .expect("Ollama should answer its native model endpoints");
+
+    assert_eq!(
+        models
+            .iter()
+            .map(|model| (model.id.as_str(), model.context_length))
+            .collect::<Vec<_>>(),
+        vec![
+            ("gemma4:latest", Some(131_072)),
+            ("qwen3:8b", Some(131_072)),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn named_ollama_connection_uses_native_model_discovery() {
+    let config = MockLlmConfig {
+        models: vec!["gemma4:latest".to_string()],
+        ollama_context_length: Some(32_768),
+        ..Default::default()
+    };
+    let server = MockLlmServer::start(config).await.expect("bind failed");
+
+    let provider_config = ProviderConnectionConfig {
+        provider: "ollama".to_string(),
+        api_base_url: Some(server.base_url()),
+        api_key: None,
+    };
+    let engine_config = EngineConfig {
+        provider_connection: "ollama-local".to_string(),
+        model: "gemma4:latest".to_string(),
+        temperature: None,
+        context_length: None,
+        api_base_url: None,
+        api_key: None,
+        reasoning: None,
+    };
+    let provider = ProviderRegistry::provider_from_provider_config(
+        "ollama-local",
+        &provider_config,
+        &engine_config,
+    )
+    .expect("named Ollama connection should build");
+
+    let models = provider
+        .list_models()
+        .await
+        .expect("the registry should select native Ollama discovery");
+
+    assert_eq!(models[0].id, "gemma4:latest");
+    assert_eq!(models[0].context_length, Some(32_768));
+}
+
+#[tokio::test]
+async fn list_models_reports_a_non_success_status_as_an_error() {
+    let config = MockLlmConfig {
+        statuses: vec![500],
+        ..Default::default()
+    };
+    let server = MockLlmServer::start(config).await.expect("bind failed");
+
+    let provider = openai_compatible_provider_for(&server);
+    let error = provider
+        .list_models()
+        .await
+        .expect_err("a 500 must not be reported as an empty model list");
+
+    assert!(
+        error.to_string().contains("500"),
+        "the status should surface in the error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn set_model_changes_the_model_sent_on_the_next_request() {
+    let config = MockLlmConfig {
+        frames: vec![content_frame("ok")],
+        end_after_frames: true,
+        ..Default::default()
+    };
+    let server = MockLlmServer::start(config).await.expect("bind failed");
+
+    let provider = openai_compatible_provider_for(&server);
+    provider
+        .set_model("switched-model")
+        .expect("the OpenAI-compatible provider supports switching");
+
+    let mut rx = provider
+        .chat(
+            Vec::new(),
+            Vec::new(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("chat should still succeed after the switch");
+    let texts = drain_text_until_done(&mut rx).await;
+    assert_eq!(texts, vec!["ok"]);
+}
+
+#[tokio::test]
 async fn text_streaming_emits_chunks_in_order_then_done() {
     let config = MockLlmConfig {
         frames: vec![
@@ -80,7 +245,7 @@ async fn text_streaming_emits_chunks_in_order_then_done() {
     };
     let server = MockLlmServer::start(config).await.expect("bind failed");
 
-    let provider = openai_provider_for(&server);
+    let provider = openai_compatible_provider_for(&server);
     let mut rx = provider
         .chat(
             Vec::new(),
@@ -110,7 +275,7 @@ async fn cancel_mid_stream_yields_cancelled_and_releases_connection() {
         .expect("bind failed");
     let live = server.live_counter();
 
-    let provider = openai_provider_for(&server);
+    let provider = openai_compatible_provider_for(&server);
     let cancel = tokio_util::sync::CancellationToken::new();
     let mut rx = provider
         .chat(Vec::new(), Vec::new(), cancel.clone())
@@ -154,7 +319,7 @@ async fn retry_after_500_then_succeeds() {
     };
     let server = MockLlmServer::start(config).await.expect("bind failed");
 
-    let provider = openai_provider_for(&server);
+    let provider = openai_compatible_provider_for(&server);
     let mut rx = provider
         .chat(
             Vec::new(),
@@ -184,7 +349,7 @@ async fn persistent_500_yields_pre_stream_error() {
     };
     let server = MockLlmServer::start(config).await.expect("bind failed");
 
-    let provider = openai_provider_for(&server);
+    let provider = openai_compatible_provider_for(&server);
     let result = tokio::time::timeout(
         Duration::from_secs(40),
         provider.chat(
@@ -216,7 +381,7 @@ async fn non_retryable_status_reports_error_with_backend_body() {
     };
     let server = MockLlmServer::start(config).await.expect("bind failed");
 
-    let provider = openai_provider_for(&server);
+    let provider = openai_compatible_provider_for(&server);
     let message = provider
         .chat(
             Vec::new(),
@@ -292,7 +457,7 @@ async fn agent_loop_round_trip_commits_streamed_text() {
     server.abort();
 }
 
-/// The real `OpenAiProvider` surfaces a `delta.tool_calls` SSE frame as a raw
+/// The real `OpenAiCompatibleProvider` surfaces a `delta.tool_calls` SSE frame as a raw
 /// `StreamEvent::Delta` (assembly stays in the agent; this proves the
 /// provider-level tool-call path over real HTTP/SSE, complementing the
 /// `parse_sse_payload` unit tests). The full ReAct+tool loop on the live
@@ -305,7 +470,7 @@ async fn real_provider_surfaces_tool_call_delta_over_http() {
         ..Default::default()
     };
     let server = MockLlmServer::start(config).await.expect("bind failed");
-    let provider = openai_provider_for(&server);
+    let provider = openai_compatible_provider_for(&server);
     let mut rx = provider
         .chat(
             Vec::new(),
@@ -357,7 +522,7 @@ async fn cancel_closes_socket_verified_via_os_tools() {
         .expect("bind failed");
     let port = server.addr.port();
 
-    let provider = openai_provider_for(&server);
+    let provider = openai_compatible_provider_for(&server);
     let cancel = tokio_util::sync::CancellationToken::new();
     let mut rx = provider
         .chat(Vec::new(), Vec::new(), cancel.clone())

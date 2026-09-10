@@ -43,14 +43,15 @@ use crate::agent::tools::DEFAULT_TUI_TOOLS;
 use crate::agent::{AgentCommand, AgentLoop, AgentMode, Role, UiUpdate};
 use crate::agent_factory::AgentFactory;
 use crate::app::App;
-use crate::config::{AgentConfig, ProfileConfig};
-use crate::engine::{Engine, EngineConfig, EngineImpl, DEFAULT_CONTEXT_LENGTH};
+use crate::config::ProfileConfig;
 use crate::events::{spawn_crossterm_bridge, AppAction};
+use crate::llm::engine::{Engine, EngineConfig, EngineImpl};
 use crate::llm::Provider;
 use crate::presenter::{self, TextareaContext, TuiEvent};
 use crate::render;
 use crate::tui_reducer_state::{
-    AppState, ConfirmKey, DomainEvent, Effect, Focus, HistoryDirection, InputEvent, TuiMode,
+    engine_choice_label, matching_model_indices, model_choice_label, AppState, ConfirmKey,
+    DomainEvent, Effect, Focus, HistoryDirection, InputEvent, ModelChoice, SlashOverlay, TuiMode,
     UserMessageState,
 };
 use crate::tui_render_state::TuiState;
@@ -265,6 +266,12 @@ fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
             task: task.clone(),
             label: label.clone(),
         }),
+        UiUpdate::ChildAgentEngineConfigured { run_id, engine } => {
+            Some(DomainEvent::ChildAgentEngineConfigured {
+                run_id: *run_id,
+                engine: engine.clone(),
+            })
+        }
         UiUpdate::ChildAgentToken {
             run_id,
             text,
@@ -434,9 +441,306 @@ async fn execute_effects(
                     state.set_toast("Copied to clipboard");
                 }
             }
+            // Slash-command effects need the engine, which this function
+            // deliberately does not own; `execute_slash_effects` runs them
+            // (they are split out of the batch by `split_slash_effects`
+            // before this function ever sees them).
+            Effect::ClearConversation
+            | Effect::ShowTools
+            | Effect::ListModels { .. }
+            | Effect::SwitchModel(_) => {}
         }
     }
     ActionOutcome::Continue
+}
+
+/// How long `/models` waits for the provider's model list before giving up.
+const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Result of a provider catalog request, including the two failures that need
+/// distinct user-facing messages.
+enum ModelListResult {
+    Models(Vec<crate::llm::ProviderModelOption>),
+    ProviderError(anyhow::Error),
+    Timeout,
+}
+
+/// A model catalog request owned by the TUI driver.
+struct PendingModelList {
+    filter: Option<String>,
+    task: tokio::task::JoinHandle<ModelListResult>,
+}
+
+/// Query one provider catalog without tying the request to the driver's event
+/// loop.
+async fn fetch_model_list(engine: Arc<dyn Engine>) -> ModelListResult {
+    match tokio::time::timeout(MODEL_LIST_TIMEOUT, engine.list_model_options()).await {
+        Ok(Ok(models)) => ModelListResult::Models(models),
+        Ok(Err(error)) => ModelListResult::ProviderError(error),
+        Err(_) => ModelListResult::Timeout,
+    }
+}
+
+/// Start a model catalog request, cancelling any older request whose result is
+/// no longer relevant to the visible picker.
+fn start_model_list(
+    pending_model_list: &mut Option<PendingModelList>,
+    filter: Option<String>,
+    engine: &Arc<dyn Engine>,
+) {
+    abort_pending_model_list(pending_model_list);
+    let task = tokio::spawn(fetch_model_list(Arc::clone(engine)));
+    *pending_model_list = Some(PendingModelList { filter, task });
+}
+
+/// Cancel a model catalog request that is no longer needed by the UI.
+fn abort_pending_model_list(pending_model_list: &mut Option<PendingModelList>) {
+    if let Some(pending) = pending_model_list.take() {
+        pending.task.abort();
+    }
+}
+
+/// Wait for the current catalog request, or remain disabled when no request is
+/// active so the main `select!` loop can continue handling other events.
+async fn wait_for_model_list(
+    pending_model_list: &mut Option<PendingModelList>,
+) -> Option<(Option<String>, ModelListResult)> {
+    let Some(pending) = pending_model_list.as_mut() else {
+        return std::future::pending().await;
+    };
+    let filter = pending.filter.clone();
+    let result = match (&mut pending.task).await {
+        Ok(result) => result,
+        Err(error) => {
+            ModelListResult::ProviderError(anyhow::anyhow!("model catalog task failed: {error}"))
+        }
+    };
+    Some((filter, result))
+}
+
+/// Apply a completed model catalog request to the visible picker.
+fn apply_model_list_result(
+    state: &mut AppState,
+    filter: Option<String>,
+    result: ModelListResult,
+    engine: &Arc<dyn Engine>,
+) {
+    match result {
+        ModelListResult::Models(models) if models.is_empty() => {
+            state.slash_overlay = SlashOverlay::Hidden;
+            state.push_notice("No configured provider connection reported any models.".to_string());
+        }
+        ModelListResult::Models(models) => {
+            let active_config = engine.config();
+            let active_reasoning_effort = engine.reasoning_effort();
+            let is_active_option = |provider_connection: &str, model_id: &str| {
+                provider_connection == active_config.provider_connection
+                    && model_id == active_config.model
+            };
+            // Looked up so an engine shortcut can show the real context
+            // length and advertised reasoning efforts of the model it names,
+            // rather than reporting "unavailable" for a model the catalog
+            // does list.
+            let catalog_by_identity: std::collections::HashMap<
+                (String, String),
+                crate::llm::ModelInfo,
+            > = models
+                .iter()
+                .map(|option| {
+                    (
+                        (option.provider_connection.clone(), option.model.id.clone()),
+                        option.model.clone(),
+                    )
+                })
+                .collect();
+            // Named engines (explicit `[engines.*]` tables, or their
+            // implicit one-per-connection equivalent) come first as
+            // shortcuts to the provider/model/config they name, ahead of the
+            // raw catalog below.
+            let engine_choices: Vec<ModelChoice> = engine
+                .named_engines()
+                .into_iter()
+                .map(|(engine_name, engine_config)| {
+                    let is_active =
+                        is_active_option(&engine_config.provider_connection, &engine_config.model);
+                    let catalog_model = catalog_by_identity.get(&(
+                        engine_config.provider_connection.clone(),
+                        engine_config.model.clone(),
+                    ));
+                    // The engine's own configured budget wins if TOML set
+                    // one; otherwise fall back to the provider's advertised
+                    // context length for this model, and finally to the
+                    // built-in default.
+                    let effective_context_length = engine_config.effective_context_length(
+                        catalog_model.and_then(|model| model.context_length),
+                    );
+                    let model = crate::llm::ModelInfo {
+                        id: engine_config.model,
+                        context_length: Some(effective_context_length),
+                        reasoning_efforts: catalog_model
+                            .and_then(|model| model.reasoning_efforts.clone()),
+                    };
+                    let reasoning_effort = if is_active {
+                        active_reasoning_effort.clone()
+                    } else {
+                        engine_config.reasoning
+                    };
+                    let selection = crate::llm::ProviderModelOption {
+                        provider_connection: engine_config.provider_connection,
+                        model,
+                        reasoning_effort,
+                    };
+                    ModelChoice {
+                        label: engine_choice_label(&engine_name, &selection, is_active),
+                        selection,
+                        is_active,
+                        engine_name: Some(engine_name),
+                    }
+                })
+                .collect();
+            let model_choices: Vec<ModelChoice> = models
+                .into_iter()
+                .map(|mut option| {
+                    let is_active = is_active_option(&option.provider_connection, &option.model.id);
+                    if is_active {
+                        option.reasoning_effort = active_reasoning_effort.clone();
+                    }
+                    ModelChoice {
+                        label: model_choice_label(&option, is_active),
+                        selection: option,
+                        is_active,
+                        engine_name: None,
+                    }
+                })
+                .collect();
+            let choices: Vec<ModelChoice> =
+                engine_choices.into_iter().chain(model_choices).collect();
+            let filter = filter.unwrap_or_default();
+            let selected = matching_model_indices(&choices, &filter)
+                .into_iter()
+                .position(|index| {
+                    choices[index].selection.provider_connection
+                        == active_config.provider_connection
+                        && choices[index].selection.model.id == active_config.model
+                })
+                .unwrap_or(0);
+            state.slash_overlay = SlashOverlay::ModelPicker {
+                choices,
+                filter,
+                selected,
+            };
+        }
+        ModelListResult::ProviderError(error) => {
+            state.slash_overlay = SlashOverlay::Hidden;
+            state.push_notice(format!("Could not list models: {error}"));
+        }
+        ModelListResult::Timeout => {
+            state.slash_overlay = SlashOverlay::Hidden;
+            state.push_notice(format!(
+                "Could not list models: the provider did not answer within {} s.",
+                MODEL_LIST_TIMEOUT.as_secs()
+            ));
+        }
+    }
+}
+
+/// Split `effects` into the slash-command effects and everything else,
+/// preserving each group's original order.
+fn split_slash_effects(effects: Vec<Effect>) -> (Vec<Effect>, Vec<Effect>) {
+    effects.into_iter().partition(|effect| {
+        matches!(
+            effect,
+            Effect::ClearConversation
+                | Effect::ShowTools
+                | Effect::ListModels { .. }
+                | Effect::SwitchModel(_)
+        )
+    })
+}
+
+/// Execute the slash-command effects.
+///
+/// Split out of [`execute_effects`] because these are the only effects that
+/// reach past the textarea/clipboard into the engine — and because nothing
+/// here may touch the session store directly: persistence goes through
+/// `AgentCommand`s so the agent loop stays the sole `Context` mutator.
+async fn execute_slash_effects(
+    state: &mut AppState,
+    effects: Vec<Effect>,
+    engine: &Arc<dyn Engine>,
+    cmd_tx: &mpsc::Sender<AgentCommand>,
+) {
+    for effect in effects {
+        match effect {
+            Effect::ClearConversation => {
+                state.clear_conversation();
+                let _ = cmd_tx.send(AgentCommand::ClearContext).await;
+                state.push_notice(
+                    "Conversation cleared. Following turns are recorded in a new session."
+                        .to_string(),
+                );
+            }
+            Effect::ShowTools => {
+                state.push_notice(tools_notice_text(&state.available_tool_names));
+            }
+            Effect::ListModels { filter } => {
+                state.slash_overlay = SlashOverlay::LoadingModels;
+                let result = fetch_model_list(Arc::clone(engine)).await;
+                apply_model_list_result(state, filter, result, engine);
+            }
+            Effect::SwitchModel(selection) => match engine.switch_model_option(&selection) {
+                Ok(()) => {
+                    let config = engine.config();
+                    let confirmation = match selection.model.reasoning_efforts.as_ref() {
+                        Some(_) => format!(
+                            "Switched to {}/{} (reasoning: {}).",
+                            config.provider_connection,
+                            config.model,
+                            selection.reasoning_effort.as_deref().unwrap_or("default")
+                        ),
+                        None => format!(
+                            "Switched to {}/{}.",
+                            config.provider_connection, config.model
+                        ),
+                    };
+                    // TUI-only: never injected into the conversation, since a
+                    // mid-conversation `role:"system"` message is rejected by
+                    // some providers/chat templates and the switch is already
+                    // durably recorded below via `RecordModelChanged`.
+                    state.push_notice(confirmation);
+                    // Read both values from the live engine because a
+                    // selection may have changed the active provider as well
+                    // as its model.
+                    let _ = cmd_tx
+                        .send(AgentCommand::RecordModelChanged {
+                            provider_connection: config.provider_connection,
+                            model: config.model,
+                        })
+                        .await;
+                }
+                Err(error) => {
+                    state.push_notice(format!(
+                        "Could not switch to {}/{}: {error}",
+                        selection.provider_connection, selection.model.id
+                    ));
+                }
+            },
+            _ => {}
+        }
+    }
+}
+
+/// Render the `/tools` notice body.
+fn tools_notice_text(tool_names: &[String]) -> String {
+    if tool_names.is_empty() {
+        return "No tools are enabled for this session.".to_string();
+    }
+    let mut text = String::from("Tools available to the agent:");
+    for name in tool_names {
+        text.push_str("\n  • ");
+        text.push_str(name);
+    }
+    text
 }
 
 /// Process one [`UiUpdate`]: convert to a [`DomainEvent`] (or handle directly
@@ -538,6 +842,7 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
     };
     let input_area_rect = app.layout.input_area.rect;
     let chat_area_rect = app.layout.chat_area.rect;
+    let slash_overlay_drag = app.slash_overlay_drag_selection();
     TuiState {
         agent_mode,
         chat_entries: app.chat_entries,
@@ -545,6 +850,7 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
         partial_thinking_text: app.turn_buffer.partial_thinking_text,
         thinking_started_at: app.turn_buffer.thinking_started_at,
         partial_thinking_collapsed: app.turn_buffer.partial_thinking_collapsed,
+        engine_display: app.engine_display,
         queued_steer_texts: app.queued_steer_texts,
         steer_indicator: app.steer_indicator,
         pending_approval: None,
@@ -557,6 +863,9 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
         toast: app.toast,
         spinner_frame: app.spinner_frame,
         input_scroll_top: app.input_scroll_top,
+        slash_overlay: app.slash_overlay,
+        slash_overlay_drag,
+        slash_overlay_layout: app.layout.slash_overlay,
         help_popup: crate::tui_render_state::HelpPopupState {
             show_help,
             help_scroll_offset: app.help_popup.help_scroll_offset,
@@ -589,6 +898,29 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
     }
 }
 
+/// Draw one frame from the driver's current state.
+///
+/// Keeps the event-loop render path in one place, including the live engine
+/// display and confirmation hint.
+fn draw_frame<B>(
+    terminal: &mut Terminal<B>,
+    state: &mut AppState,
+    textarea: &mut TextArea<'_>,
+    engine: &Arc<dyn Engine>,
+    mouse_pos: Option<(u16, u16)>,
+) -> anyhow::Result<()>
+where
+    B: Backend,
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
+    state.engine_display = crate::llm::engine::EngineDisplayInfo::from_engine(engine.as_ref());
+    let hint = confirm_hint(state);
+    terminal.draw(|frame| {
+        render::render(frame, state, textarea, hint.as_deref(), mouse_pos);
+    })?;
+    Ok(())
+}
+
 /// Run the TUI event loop against an existing terminal.
 ///
 /// Uses `AppState` internally (the reducer model) and returns a `TuiState`
@@ -612,11 +944,19 @@ where
     let mut textarea = TextArea::default();
     configure_textarea(&mut textarea);
     let cmd_tx = agent.command_sender();
+    let engine = agent.engine();
+    state.engine_display = crate::llm::engine::EngineDisplayInfo::from_engine(engine.as_ref());
+    // Sorted once here so `/tools` output is stable — the registry is a
+    // `HashMap`, whose iteration order is not.
+    let mut available_tool_names = agent.registry().names();
+    available_tool_names.sort();
+    state.available_tool_names = available_tool_names;
 
     // Driver-local tracking — not part of AppState.
     let mut mouse_pos: Option<(u16, u16)> = None;
     let mut mouse_drag = MouseDrag::default();
     let mut pending_run_ids = PendingRunIds::default();
+    let mut pending_model_list: Option<PendingModelList> = None;
 
     let handle = agent.run();
 
@@ -632,10 +972,7 @@ where
     }
 
     loop {
-        let hint = confirm_hint(&state);
-        terminal.draw(|frame| {
-            render::render(frame, &mut state, &mut textarea, hint.as_deref(), mouse_pos);
-        })?;
+        draw_frame(terminal, &mut state, &mut textarea, &engine, mouse_pos)?;
 
         let textarea_ctx = TextareaContext {
             is_empty: textarea.lines() == [""],
@@ -645,6 +982,17 @@ where
         };
 
         select! {
+            model_list_result = wait_for_model_list(&mut pending_model_list) => {
+                let Some((filter, result)) = model_list_result else {
+                    continue;
+                };
+                pending_model_list = None;
+                if matches!(state.slash_overlay, SlashOverlay::LoadingModels) {
+                    apply_model_list_result(&mut state, filter, result, &engine);
+                    state.refresh_slash_overlay(&textarea.lines().join("\n"));
+                }
+            }
+
             action = action_rx.recv() => {
                 let Some(action) = action else { break };
 
@@ -698,7 +1046,11 @@ where
                 }
 
                 let Some(event) = app_action_to_tui_event(action) else { continue };
+                let was_loading_models = matches!(state.slash_overlay, SlashOverlay::LoadingModels);
                 let effects = presenter::update(&mut state, event, &textarea_ctx);
+                // Slash-command effects are the only ones needing the engine,
+                // and only key input can produce them.
+                let (slash_effects, effects) = split_slash_effects(effects);
                 if execute_effects(
                     &mut state, &mut textarea, &cmd_tx, effects, &mut mouse_drag, clipboard,
                     &mut pending_run_ids,
@@ -708,6 +1060,34 @@ where
                 {
                     break;
                 }
+                let (model_list_effects, immediate_slash_effects): (Vec<_>, Vec<_>) =
+                    slash_effects.into_iter().partition(|effect| {
+                        matches!(effect, Effect::ListModels { .. })
+                    });
+                let mut started_model_list = false;
+                for effect in model_list_effects {
+                    if let Effect::ListModels { filter } = effect {
+                        state.slash_overlay = SlashOverlay::LoadingModels;
+                        start_model_list(&mut pending_model_list, filter, &engine);
+                        started_model_list = true;
+                    }
+                }
+                execute_slash_effects(
+                    &mut state,
+                    immediate_slash_effects,
+                    &engine,
+                    &cmd_tx,
+                )
+                .await;
+                if was_loading_models
+                    && !started_model_list
+                    && !matches!(state.slash_overlay, SlashOverlay::LoadingModels)
+                {
+                    abort_pending_model_list(&mut pending_model_list);
+                }
+                // The suggestion overlay tracks the draft, so it is
+                // recomputed after every key that may have changed it.
+                state.refresh_slash_overlay(&textarea.lines().join("\n"));
             }
 
             update = ui_rx.recv() => {
@@ -780,6 +1160,7 @@ where
         }
     }
 
+    abort_pending_model_list(&mut pending_model_list);
     drop(cmd_tx);
     drop(agent);
     handle.await??;
@@ -1015,12 +1396,13 @@ pub async fn run_tui_on_stdout(
     initial_prompt: Option<String>,
 ) -> anyhow::Result<()> {
     let engine_config = EngineConfig {
-        provider: provider.name().to_string(),
+        provider_connection: provider.name().to_string(),
         model: String::new(),
         temperature: None,
-        context_length: DEFAULT_CONTEXT_LENGTH,
+        context_length: None,
         api_base_url: None,
         api_key: None,
+        reasoning: None,
     };
     let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(provider, engine_config));
     let factory = Arc::new(
@@ -1030,20 +1412,7 @@ pub async fn run_tui_on_stdout(
         )]))
         .with_allowed_tools(DEFAULT_TUI_TOOLS),
     );
-    let profile = ProfileConfig {
-        default_engine: "default".to_string(),
-        compact_engine: None,
-        agents: std::collections::HashMap::from([(
-            "default".to_string(),
-            AgentConfig {
-                engine: None,
-                allowed_tools: None,
-                timeout_secs: None,
-                persona: None,
-                can_spawn: true,
-            },
-        )]),
-    };
+    let profile = ProfileConfig::default();
     let _ = registry; // registry is created internally by AgentFactory; parameter kept for API compat
     TuiApp::new(factory, profile, "default".to_string(), initial_prompt)
         .run()
@@ -1093,6 +1462,7 @@ fn install_sigint_relay(action_tx: mpsc::Sender<AppAction>) -> anyhow::Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::engine::DEFAULT_CONTEXT_LENGTH;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tokio::sync::mpsc;
     use uuid::Uuid;
@@ -1586,5 +1956,989 @@ mod tests {
             "no DenyTool should be emitted when closing help popup"
         );
         let _ = tool_id; // used in setup
+    }
+
+    // ── slash commands (Phase 7, blueprint §6) ──────────────────────────────
+
+    /// Engine double whose model list and switch outcome are scripted, so the
+    /// `/models` flow can be exercised without a provider.
+    struct StubEngine {
+        models: Vec<crate::llm::ModelInfo>,
+        switched_to: std::sync::Mutex<Vec<String>>,
+        config: std::sync::Mutex<EngineConfig>,
+        named_engines: Vec<(String, EngineConfig)>,
+    }
+
+    impl StubEngine {
+        fn with_models(model_ids: &[&str], active_model: &str) -> Arc<StubEngine> {
+            Arc::new(StubEngine {
+                models: model_ids
+                    .iter()
+                    .map(|id| crate::llm::ModelInfo {
+                        id: (*id).to_string(),
+                        context_length: None,
+                        reasoning_efforts: None,
+                    })
+                    .collect(),
+                switched_to: std::sync::Mutex::new(Vec::new()),
+                config: std::sync::Mutex::new(EngineConfig {
+                    provider_connection: "stub".to_string(),
+                    model: active_model.to_string(),
+                    temperature: None,
+                    context_length: None,
+                    api_base_url: None,
+                    api_key: None,
+                    reasoning: None,
+                }),
+                named_engines: Vec::new(),
+            })
+        }
+
+        /// Like [`Self::with_models`], but also configures one named-engine
+        /// shortcut whose model advertises `reasoning_efforts` and is seeded
+        /// with `engine_reasoning` — reproducing a profile's
+        /// `[engines.<name>]` table for `/models` shortcut tests. The
+        /// catalog's advertised `context_length` (`catalog_context_length`)
+        /// is set to a different value than `engine_context_length` so
+        /// tests can tell which one the shortcut actually displays.
+        #[allow(clippy::too_many_arguments)]
+        fn with_named_engine(
+            model_ids: &[&str],
+            active_model: &str,
+            engine_name: &str,
+            engine_model: &str,
+            reasoning_efforts: &[&str],
+            engine_reasoning: Option<&str>,
+            engine_context_length: Option<usize>,
+            catalog_context_length: Option<usize>,
+        ) -> Arc<StubEngine> {
+            Arc::new(StubEngine {
+                models: model_ids
+                    .iter()
+                    .map(|id| crate::llm::ModelInfo {
+                        id: (*id).to_string(),
+                        context_length: if *id == engine_model {
+                            catalog_context_length
+                        } else {
+                            None
+                        },
+                        reasoning_efforts: if *id == engine_model {
+                            Some(
+                                reasoning_efforts
+                                    .iter()
+                                    .map(|effort| effort.to_string())
+                                    .collect(),
+                            )
+                        } else {
+                            None
+                        },
+                    })
+                    .collect(),
+                switched_to: std::sync::Mutex::new(Vec::new()),
+                config: std::sync::Mutex::new(EngineConfig {
+                    provider_connection: "stub".to_string(),
+                    model: active_model.to_string(),
+                    temperature: None,
+                    context_length: None,
+                    api_base_url: None,
+                    api_key: None,
+                    reasoning: None,
+                }),
+                named_engines: vec![(
+                    engine_name.to_string(),
+                    EngineConfig {
+                        provider_connection: "stub".to_string(),
+                        model: engine_model.to_string(),
+                        temperature: None,
+                        context_length: engine_context_length,
+                        api_base_url: None,
+                        api_key: None,
+                        reasoning: engine_reasoning.map(str::to_string),
+                    },
+                )],
+            })
+        }
+    }
+
+    impl Engine for StubEngine {
+        fn chat<'a>(
+            &'a self,
+            _messages: Vec<crate::agent::Message>,
+            _tools: Vec<crate::llm::ToolSchema>,
+            _cancel: tokio_util::sync::CancellationToken,
+        ) -> futures::future::BoxFuture<'a, anyhow::Result<mpsc::Receiver<crate::agent::StreamEvent>>>
+        {
+            Box::pin(async { anyhow::bail!("the stub engine does not stream") })
+        }
+
+        fn config(&self) -> EngineConfig {
+            self.config.lock().expect("stub config lock").clone()
+        }
+
+        fn list_models(
+            &self,
+        ) -> futures::future::BoxFuture<'_, anyhow::Result<Vec<crate::llm::ModelInfo>>> {
+            let models = self.models.clone();
+            Box::pin(async move { Ok(models) })
+        }
+
+        fn switch_model(&self, model: &str) -> anyhow::Result<()> {
+            self.switched_to
+                .lock()
+                .expect("stub switch lock")
+                .push(model.to_string());
+            self.config.lock().expect("stub config lock").model = model.to_string();
+            Ok(())
+        }
+
+        fn named_engines(&self) -> Vec<(String, EngineConfig)> {
+            self.named_engines.clone()
+        }
+    }
+
+    fn submit(state: &mut AppState, textarea: &mut TextArea<'static>, text: &str) -> Vec<Effect> {
+        *textarea = TextArea::from(vec![text.to_string()]);
+        configure_textarea(textarea);
+        let ctx = textarea_ctx_from(textarea);
+        presenter::update(
+            state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+            &ctx,
+        )
+    }
+
+    #[test]
+    fn clear_and_reset_reach_the_same_handler() {
+        let (mut state, mut textarea, _cmd_tx, _cmd_rx) = setup();
+
+        let clear_effects = submit(&mut state, &mut textarea, "/clear");
+        let reset_effects = submit(&mut state, &mut textarea, "/reset");
+
+        assert!(clear_effects.contains(&Effect::ClearConversation));
+        assert_eq!(clear_effects, reset_effects);
+    }
+
+    #[test]
+    fn a_command_is_only_recognized_as_the_first_character_of_the_input() {
+        let (mut state, mut textarea, _cmd_tx, _cmd_rx) = setup();
+
+        let mid_message = submit(&mut state, &mut textarea, "please run /tools for me");
+        assert!(mid_message.contains(&Effect::SubmitPrompt { steer: false }));
+        assert!(!mid_message.contains(&Effect::ShowTools));
+
+        let indented = submit(&mut state, &mut textarea, " /tools");
+        assert!(!indented.contains(&Effect::ShowTools));
+    }
+
+    #[test]
+    fn an_unknown_slash_word_is_sent_to_the_model_as_ordinary_input() {
+        let (mut state, mut textarea, _cmd_tx, _cmd_rx) = setup();
+
+        let effects = submit(&mut state, &mut textarea, "/foo");
+
+        assert!(effects.contains(&Effect::SubmitPrompt { steer: false }));
+        assert!(matches!(
+            state.chat_entries.last(),
+            Some(crate::tui_reducer_state::ChatEntry::UserMessage { text, .. }) if text == "/foo"
+        ));
+    }
+
+    #[test]
+    fn enter_activates_the_selected_partial_command_instead_of_submitting_it() {
+        let (mut state, _textarea, _cmd_tx, _cmd_rx) = setup();
+        let mut textarea = TextArea::from(vec!["/model".to_string()]);
+        configure_textarea(&mut textarea);
+        state.refresh_slash_overlay(&textarea.lines().join("\n"));
+
+        let effects = presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+            &textarea_ctx_from(&textarea),
+        );
+
+        assert_eq!(
+            effects,
+            vec![
+                Effect::SetInputText("/models ".to_string()),
+                Effect::ListModels { filter: None }
+            ],
+            "Enter should activate the highlighted /models suggestion"
+        );
+        assert_eq!(state.slash_overlay, SlashOverlay::Hidden);
+        assert!(state.chat_entries.is_empty());
+    }
+
+    #[test]
+    fn models_command_passes_a_typed_filter_instead_of_submitting_chat() {
+        let (mut state, _textarea, _cmd_tx, _cmd_rx) = setup();
+        let mut textarea = TextArea::default();
+
+        let effects = submit(&mut state, &mut textarea, "/models deepseek");
+
+        assert_eq!(
+            effects,
+            vec![
+                Effect::SetInputText("/models deepseek".to_string()),
+                Effect::ListModels {
+                    filter: Some("deepseek".to_string())
+                }
+            ]
+        );
+        assert!(
+            !effects.contains(&Effect::SubmitPrompt { steer: false }),
+            "a model filter is a slash-command argument, not a chat prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn tab_completes_models_from_the_partial_model_prefix() {
+        let (mut state, _textarea, cmd_tx, _cmd_rx) = setup();
+        let mut textarea = TextArea::from(vec!["/model".to_string()]);
+        configure_textarea(&mut textarea);
+        state.refresh_slash_overlay(&textarea.lines().join("\n"));
+
+        let effects = presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Tab))),
+            &textarea_ctx_from(&textarea),
+        );
+        assert_eq!(effects, vec![Effect::SetInputText("/models".to_string())]);
+
+        execute_effects(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            effects,
+            &mut MouseDrag::default(),
+            &mut NoopClipboard,
+            &mut PendingRunIds::default(),
+        )
+        .await;
+        assert_eq!(textarea.lines(), &["/models"]);
+    }
+
+    #[test]
+    fn the_suggestion_overlay_tracks_the_partially_typed_command() {
+        let mut state = AppState::new();
+
+        state.refresh_slash_overlay("/mo");
+        let SlashOverlay::Suggestions { choices, selected } = &state.slash_overlay else {
+            panic!("expected suggestions, got {:?}", state.slash_overlay);
+        };
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0].name, "/models");
+        assert_eq!(*selected, 0);
+
+        state.refresh_slash_overlay("hello");
+        assert_eq!(state.slash_overlay, SlashOverlay::Hidden);
+    }
+
+    #[tokio::test]
+    async fn escape_while_command_suggestions_are_open_closes_them_and_clears_the_draft() {
+        // Regression: Esc used to only hide the suggestion overlay without
+        // touching the draft. Since `refresh_slash_overlay` recomputes the
+        // overlay from the draft on every action, the still-matching
+        // "/models" text made the very same overlay reopen on that same
+        // recompute — Esc looked like a no-op from the user's perspective.
+        let (mut state, mut textarea, cmd_tx, _cmd_rx) = setup();
+        let mut mouse_drag = MouseDrag::default();
+        let mut clipboard = NoopClipboard;
+        let mut pending_run_ids = PendingRunIds::default();
+
+        // Type "/models" one character at a time through the real driver
+        // path: each key both edits the textarea and re-derives the
+        // suggestion overlay from the resulting draft.
+        for ch in "/models".chars() {
+            let ctx = textarea_ctx_from(&textarea);
+            let effects = presenter::update(
+                &mut state,
+                TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Char(ch)))),
+                &ctx,
+            );
+            execute_effects(
+                &mut state,
+                &mut textarea,
+                &cmd_tx,
+                effects,
+                &mut mouse_drag,
+                &mut clipboard,
+                &mut pending_run_ids,
+            )
+            .await;
+            state.refresh_slash_overlay(&textarea.lines().join("\n"));
+        }
+
+        assert!(
+            matches!(state.slash_overlay, SlashOverlay::Suggestions { .. }),
+            "expected the suggestion overlay to be open, got {:?}",
+            state.slash_overlay
+        );
+        assert_eq!(textarea.lines().join("\n"), "/models");
+
+        let ctx = textarea_ctx_from(&textarea);
+        let effects = presenter::update(&mut state, TuiEvent::Input(InputEvent::Escape), &ctx);
+        execute_effects(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            effects,
+            &mut mouse_drag,
+            &mut clipboard,
+            &mut pending_run_ids,
+        )
+        .await;
+        state.refresh_slash_overlay(&textarea.lines().join("\n"));
+
+        assert_eq!(
+            state.slash_overlay,
+            SlashOverlay::Hidden,
+            "Esc must close the suggestion overlay and it must stay closed"
+        );
+        assert_eq!(
+            textarea.lines().join("\n"),
+            "",
+            "Esc must clear the draft so the overlay cannot immediately reopen"
+        );
+    }
+
+    #[test]
+    fn command_suggestions_navigate_with_up_and_down_and_tab_completes_the_selection() {
+        let mut state = AppState::new();
+        state.refresh_slash_overlay("/");
+        let textarea = TextareaContext {
+            is_empty: false,
+            text: "/".to_string(),
+            cursor_row: 0,
+            cursor_row_is_last: true,
+        };
+
+        let down = presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Down))),
+            &textarea,
+        );
+        assert!(down.is_empty());
+        assert_eq!(
+            state.selected_slash_command().map(|command| command.name),
+            Some("/models")
+        );
+
+        presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Down))),
+            &textarea,
+        );
+        assert_eq!(
+            state.selected_slash_command().map(|command| command.name),
+            Some("/tools")
+        );
+
+        presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Down))),
+            &textarea,
+        );
+        assert_eq!(
+            state.selected_slash_command().map(|command| command.name),
+            Some("/tools")
+        );
+
+        presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Up))),
+            &textarea,
+        );
+        assert_eq!(
+            state.selected_slash_command().map(|command| command.name),
+            Some("/models")
+        );
+
+        let completion = presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Tab))),
+            &textarea,
+        );
+        assert_eq!(
+            completion,
+            vec![Effect::SetInputText("/models".to_string())]
+        );
+    }
+
+    #[test]
+    fn tab_completes_the_only_matching_command_and_is_normal_input_without_suggestions() {
+        let mut state = AppState::new();
+        state.refresh_slash_overlay("/re");
+        let completion = presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Tab))),
+            &TextareaContext {
+                is_empty: false,
+                text: "/re".to_string(),
+                cursor_row: 0,
+                cursor_row_is_last: true,
+            },
+        );
+        assert_eq!(completion, vec![Effect::SetInputText("/clear".to_string())]);
+
+        state.slash_overlay = SlashOverlay::Hidden;
+        let tab = key_event(KeyCode::Tab);
+        let normal_input = presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(tab)),
+            &TextareaContext {
+                is_empty: true,
+                text: String::new(),
+                cursor_row: 0,
+                cursor_row_is_last: true,
+            },
+        );
+        assert_eq!(
+            normal_input,
+            vec![Effect::ExitBrowsing, Effect::TextareaKey(tab)]
+        );
+    }
+
+    #[tokio::test]
+    async fn models_lists_the_candidates_and_preselects_the_active_model() {
+        let (mut state, _textarea, cmd_tx, _cmd_rx) = setup();
+        let engine: Arc<dyn Engine> = StubEngine::with_models(&["small", "large"], "large");
+
+        execute_slash_effects(
+            &mut state,
+            vec![Effect::ListModels { filter: None }],
+            &engine,
+            &cmd_tx,
+        )
+        .await;
+
+        let SlashOverlay::ModelPicker {
+            choices, selected, ..
+        } = &state.slash_overlay
+        else {
+            panic!("expected a model picker, got {:?}", state.slash_overlay);
+        };
+        assert_eq!(
+            choices
+                .iter()
+                .map(|choice| choice.selection.model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["small", "large"]
+        );
+        assert_eq!(
+            choices
+                .iter()
+                .map(|choice| choice.label.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "stub/small  reasoning: unavailable",
+                "stub/large  reasoning: unavailable  — active"
+            ]
+        );
+        assert_eq!(*selected, 1);
+    }
+
+    #[tokio::test]
+    async fn models_lists_an_engine_shortcut_with_its_catalog_reasoning_efforts() {
+        // Reproduces a profile's `[engines.<name>]` table naming a model the
+        // catalog *does* advertise reasoning efforts for — the shortcut must
+        // show those efforts (and the configured one), not "unavailable".
+        let (mut state, _textarea, cmd_tx, _cmd_rx) = setup();
+        let engine: Arc<dyn Engine> = StubEngine::with_named_engine(
+            &["small", "thinking"],
+            "small",
+            "openrouter",
+            "thinking",
+            &["low", "high", "max"],
+            Some("max"),
+            Some(32_000),
+            Some(999_999),
+        );
+
+        execute_slash_effects(
+            &mut state,
+            vec![Effect::ListModels { filter: None }],
+            &engine,
+            &cmd_tx,
+        )
+        .await;
+
+        let SlashOverlay::ModelPicker { choices, .. } = &state.slash_overlay else {
+            panic!("expected a model picker, got {:?}", state.slash_overlay);
+        };
+        let shortcut = choices
+            .iter()
+            .find(|choice| choice.engine_name.is_some())
+            .expect("the named engine must appear as a shortcut");
+        assert_eq!(
+            shortcut.selection.model.reasoning_efforts,
+            Some(vec![
+                "low".to_string(),
+                "high".to_string(),
+                "max".to_string()
+            ]),
+            "the shortcut's model must carry the catalog's advertised reasoning efforts"
+        );
+        assert_eq!(
+            shortcut.selection.model.context_length,
+            Some(32_000),
+            "the shortcut must show the engine's own configured context_length, \
+             not the provider's advertised one (999_999)"
+        );
+        assert_eq!(
+            shortcut.label, "openrouter → stub/thinking  context: 31kb  reasoning: max ⚙",
+            "the shortcut must show its configured reasoning effort instead of 'unavailable'"
+        );
+    }
+
+    #[tokio::test]
+    async fn models_lists_an_engine_shortcut_falling_back_to_the_catalogs_context_length() {
+        // When the profile's `[engines.<name>]` table doesn't set
+        // `context_length`, the shortcut must show the provider's advertised
+        // context length for the model instead of silently defaulting.
+        let (mut state, _textarea, cmd_tx, _cmd_rx) = setup();
+        let engine: Arc<dyn Engine> = StubEngine::with_named_engine(
+            &["small", "thinking"],
+            "small",
+            "openrouter",
+            "thinking",
+            &["low", "high", "max"],
+            Some("max"),
+            None,
+            Some(999_999),
+        );
+
+        execute_slash_effects(
+            &mut state,
+            vec![Effect::ListModels { filter: None }],
+            &engine,
+            &cmd_tx,
+        )
+        .await;
+
+        let SlashOverlay::ModelPicker { choices, .. } = &state.slash_overlay else {
+            panic!("expected a model picker, got {:?}", state.slash_overlay);
+        };
+        let shortcut = choices
+            .iter()
+            .find(|choice| choice.engine_name.is_some())
+            .expect("the named engine must appear as a shortcut");
+        assert_eq!(
+            shortcut.selection.model.context_length,
+            Some(999_999),
+            "an unconfigured context_length must fall back to the catalog's advertised value"
+        );
+        assert_eq!(
+            shortcut.label,
+            "openrouter → stub/thinking  context: 976kb  reasoning: max ⚙"
+        );
+    }
+
+    #[tokio::test]
+    async fn models_lists_an_engine_shortcut_falling_back_to_the_built_in_default_context_length() {
+        // When neither TOML nor the catalog advertise a context length, the
+        // shortcut must show the built-in default rather than nothing.
+        let (mut state, _textarea, cmd_tx, _cmd_rx) = setup();
+        let engine: Arc<dyn Engine> = StubEngine::with_named_engine(
+            &["small", "thinking"],
+            "small",
+            "openrouter",
+            "thinking",
+            &["low", "high", "max"],
+            Some("max"),
+            None,
+            None,
+        );
+
+        execute_slash_effects(
+            &mut state,
+            vec![Effect::ListModels { filter: None }],
+            &engine,
+            &cmd_tx,
+        )
+        .await;
+
+        let SlashOverlay::ModelPicker { choices, .. } = &state.slash_overlay else {
+            panic!("expected a model picker, got {:?}", state.slash_overlay);
+        };
+        let shortcut = choices
+            .iter()
+            .find(|choice| choice.engine_name.is_some())
+            .expect("the named engine must appear as a shortcut");
+        assert_eq!(
+            shortcut.selection.model.context_length,
+            Some(DEFAULT_CONTEXT_LENGTH),
+            "an unconfigured, unadvertised context_length must fall back to the built-in default"
+        );
+    }
+
+    #[tokio::test]
+    async fn models_preselects_the_active_model_within_an_initial_filter() {
+        let (mut state, _textarea, cmd_tx, _cmd_rx) = setup();
+        let engine: Arc<dyn Engine> =
+            StubEngine::with_models(&["small", "deepseek-v3", "large"], "large");
+
+        execute_slash_effects(
+            &mut state,
+            vec![Effect::ListModels {
+                filter: Some("DEEPSEEK".to_string()),
+            }],
+            &engine,
+            &cmd_tx,
+        )
+        .await;
+
+        // The catalog always holds every fetched model — filtering only
+        // narrows what is displayed/selectable, so further typing can
+        // widen the results again without another provider round-trip.
+        let SlashOverlay::ModelPicker {
+            choices, filter, ..
+        } = &state.slash_overlay
+        else {
+            panic!(
+                "expected a filtered model picker, got {:?}",
+                state.slash_overlay
+            );
+        };
+        assert_eq!(
+            choices
+                .iter()
+                .map(|choice| choice.selection.model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["small", "deepseek-v3", "large"]
+        );
+        assert_eq!(filter, "DEEPSEEK");
+        assert_eq!(
+            state
+                .selected_model()
+                .map(|choice| choice.selection.model.id.as_str()),
+            Some("deepseek-v3")
+        );
+    }
+
+    #[tokio::test]
+    async fn models_keeps_the_picker_open_when_an_initial_filter_matches_nothing() {
+        let (mut state, _textarea, cmd_tx, _cmd_rx) = setup();
+        let engine: Arc<dyn Engine> = StubEngine::with_models(&["small", "large"], "large");
+
+        execute_slash_effects(
+            &mut state,
+            vec![Effect::ListModels {
+                filter: Some("missing".to_string()),
+            }],
+            &engine,
+            &cmd_tx,
+        )
+        .await;
+
+        // No auto-hide/notice on a no-match filter: the picker stays open
+        // so the user can keep editing the filter (e.g. backspace) to
+        // recover matches, without re-fetching the catalog.
+        assert!(matches!(
+            state.slash_overlay,
+            SlashOverlay::ModelPicker { .. }
+        ));
+        assert_eq!(state.selected_model(), None);
+    }
+
+    #[tokio::test]
+    async fn typing_after_models_narrows_the_already_open_picker_without_clearing_the_draft() {
+        let (mut state, mut textarea, cmd_tx, _cmd_rx) = setup();
+        let engine: Arc<dyn Engine> =
+            StubEngine::with_models(&["small", "deepseek-v3", "large"], "large");
+        let mut mouse_drag = MouseDrag::default();
+        let mut clipboard = NoopClipboard;
+        let mut pending_run_ids = PendingRunIds::default();
+
+        // Submit "/models": the picker opens and the draft is normalized to
+        // "/models " (not cleared), ready for more typing.
+        let effects = submit(&mut state, &mut textarea, "/models");
+        let (slash_effects, other_effects) = split_slash_effects(effects);
+        execute_effects(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            other_effects,
+            &mut mouse_drag,
+            &mut clipboard,
+            &mut pending_run_ids,
+        )
+        .await;
+        execute_slash_effects(&mut state, slash_effects, &engine, &cmd_tx).await;
+        state.refresh_slash_overlay(&textarea.lines().join("\n"));
+
+        assert!(matches!(
+            state.slash_overlay,
+            SlashOverlay::ModelPicker { .. }
+        ));
+        assert_eq!(textarea.lines().join("\n"), "/models ");
+
+        // Keep typing: each keystroke must land in the still-open picker's
+        // filter, not be dropped or start a disconnected fresh draft.
+        for ch in "deepseek".chars() {
+            let ctx = textarea_ctx_from(&textarea);
+            let effects = presenter::update(
+                &mut state,
+                TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Char(ch)))),
+                &ctx,
+            );
+            execute_effects(
+                &mut state,
+                &mut textarea,
+                &cmd_tx,
+                effects,
+                &mut mouse_drag,
+                &mut clipboard,
+                &mut pending_run_ids,
+            )
+            .await;
+            state.refresh_slash_overlay(&textarea.lines().join("\n"));
+        }
+
+        assert_eq!(textarea.lines().join("\n"), "/models deepseek");
+        let SlashOverlay::ModelPicker {
+            choices, filter, ..
+        } = &state.slash_overlay
+        else {
+            panic!("expected the model picker to stay open while typing a live filter");
+        };
+        assert_eq!(filter, "deepseek");
+        // The full catalog is still cached — only the display/selection is
+        // narrowed — so no second provider round-trip was needed.
+        assert_eq!(choices.len(), 3);
+        assert_eq!(
+            state
+                .selected_model()
+                .map(|choice| choice.selection.model.id.as_str()),
+            Some("deepseek-v3")
+        );
+
+        // Reported regression: Esc while the (still-open, live-filtered)
+        // picker is showing must close the popup AND clear the "/models
+        // deepseek" residue from the draft — not leave either behind.
+        let ctx = textarea_ctx_from(&textarea);
+        let effects = presenter::update(&mut state, TuiEvent::Input(InputEvent::Escape), &ctx);
+        execute_effects(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            effects,
+            &mut mouse_drag,
+            &mut clipboard,
+            &mut pending_run_ids,
+        )
+        .await;
+
+        assert_eq!(state.slash_overlay, SlashOverlay::Hidden);
+        assert_eq!(textarea.lines().join("\n"), "");
+    }
+
+    #[test]
+    fn model_picker_cycles_reasoning_effort_with_left_and_right() {
+        let (mut state, textarea, _cmd_tx, _cmd_rx) = setup();
+        let selection = crate::llm::ProviderModelOption {
+            provider_connection: "stub".to_string(),
+            model: crate::llm::ModelInfo {
+                id: "thinking".to_string(),
+                context_length: None,
+                reasoning_efforts: Some(vec!["low".to_string(), "high".to_string()]),
+            },
+            reasoning_effort: None,
+        };
+        state.slash_overlay = SlashOverlay::ModelPicker {
+            choices: vec![ModelChoice {
+                label: "stub/thinking  reasoning: default".to_string(),
+                selection,
+                is_active: false,
+                engine_name: None,
+            }],
+            filter: String::new(),
+            selected: 0,
+        };
+        let context = textarea_ctx_from(&textarea);
+
+        let effects = presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Right))),
+            &context,
+        );
+        assert!(effects.is_empty());
+        assert_eq!(
+            state
+                .selected_model()
+                .and_then(|choice| choice.selection.reasoning_effort.as_deref()),
+            Some("low")
+        );
+        assert!(state
+            .selected_model()
+            .expect("selected model")
+            .label
+            .contains("reasoning: low"));
+
+        presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Right))),
+            &context,
+        );
+        assert_eq!(
+            state
+                .selected_model()
+                .and_then(|choice| choice.selection.reasoning_effort.as_deref()),
+            Some("high")
+        );
+
+        presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Left))),
+            &context,
+        );
+        assert_eq!(
+            state
+                .selected_model()
+                .and_then(|choice| choice.selection.reasoning_effort.as_deref()),
+            Some("low")
+        );
+
+        presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Left))),
+            &context,
+        );
+        assert_eq!(
+            state
+                .selected_model()
+                .expect("selected model")
+                .selection
+                .reasoning_effort,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn confirming_a_picked_model_switches_the_engine_and_records_the_change() {
+        let (mut state, _textarea, cmd_tx, mut cmd_rx) = setup();
+        let stub = StubEngine::with_models(&["small", "large"], "large");
+        let engine: Arc<dyn Engine> = stub.clone();
+
+        execute_slash_effects(
+            &mut state,
+            vec![Effect::ListModels { filter: None }],
+            &engine,
+            &cmd_tx,
+        )
+        .await;
+        // Move the selection off the active model, then confirm it.
+        state.move_slash_selection(-1);
+        let picked = state
+            .selected_model()
+            .expect("a highlighted model")
+            .selection
+            .clone();
+        let ctx = TextareaContext {
+            is_empty: true,
+            text: String::new(),
+            cursor_row: 0,
+            cursor_row_is_last: true,
+        };
+        let effects = presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+            &ctx,
+        );
+        assert_eq!(
+            effects,
+            vec![Effect::ClearTextarea, Effect::SwitchModel(picked)]
+        );
+        assert_eq!(state.slash_overlay, SlashOverlay::Hidden);
+
+        execute_slash_effects(&mut state, effects, &engine, &cmd_tx).await;
+
+        assert_eq!(
+            *stub.switched_to.lock().expect("stub switch lock"),
+            vec!["small".to_string()]
+        );
+        assert_eq!(engine.config().model, "small");
+        // The confirmation is a TUI-only notice — never injected into the
+        // conversation (see `Effect::SwitchModel`'s handler for why a
+        // mid-conversation `role:"system"` message is unsafe).
+        assert!(matches!(
+            state.chat_entries.last(),
+            Some(crate::tui_reducer_state::ChatEntry::Notice { text }) if text.contains("small")
+        ));
+        let command = cmd_rx.try_recv().expect("a model-changed command");
+        assert!(matches!(
+            command,
+            AgentCommand::RecordModelChanged { model, .. } if model == "small"
+        ));
+        assert!(cmd_rx.try_recv().is_err(), "no further commands are sent");
+    }
+
+    #[tokio::test]
+    async fn escape_dismisses_the_model_picker_without_switching() {
+        let (mut state, textarea, cmd_tx, _cmd_rx) = setup();
+        let stub = StubEngine::with_models(&["small", "large"], "large");
+        let engine: Arc<dyn Engine> = stub.clone();
+        execute_slash_effects(
+            &mut state,
+            vec![Effect::ListModels { filter: None }],
+            &engine,
+            &cmd_tx,
+        )
+        .await;
+
+        let ctx = textarea_ctx_from(&textarea);
+        presenter::update(&mut state, TuiEvent::Input(InputEvent::Escape), &ctx);
+
+        assert_eq!(state.slash_overlay, SlashOverlay::Hidden);
+        assert!(stub
+            .switched_to
+            .lock()
+            .expect("stub switch lock")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn clear_resets_the_transcript_and_tells_the_agent_to_start_a_new_session() {
+        let (mut state, _textarea, cmd_tx, mut cmd_rx) = setup();
+        let engine: Arc<dyn Engine> = StubEngine::with_models(&[], "large");
+        state.push_user_bubble("earlier question".to_string(), UserMessageState::Sent);
+
+        execute_slash_effects(
+            &mut state,
+            vec![Effect::ClearConversation],
+            &engine,
+            &cmd_tx,
+        )
+        .await;
+
+        assert!(matches!(
+            state.chat_entries.as_slice(),
+            [crate::tui_reducer_state::ChatEntry::Notice { .. }]
+        ));
+        // The prompt stays recallable with ↑ even though the transcript is gone.
+        assert_eq!(state.input_history, vec!["earlier question".to_string()]);
+        assert!(matches!(
+            cmd_rx.try_recv().expect("a clear command"),
+            AgentCommand::ClearContext
+        ));
+    }
+
+    #[tokio::test]
+    async fn tools_reports_the_registry_names_without_touching_the_agent() {
+        let (mut state, _textarea, cmd_tx, mut cmd_rx) = setup();
+        let engine: Arc<dyn Engine> = StubEngine::with_models(&[], "large");
+        state.available_tool_names = vec!["read_file".to_string(), "run_command".to_string()];
+
+        execute_slash_effects(&mut state, vec![Effect::ShowTools], &engine, &cmd_tx).await;
+
+        let Some(crate::tui_reducer_state::ChatEntry::Notice { text }) = state.chat_entries.last()
+        else {
+            panic!("expected a notice bubble");
+        };
+        assert!(text.contains("read_file"));
+        assert!(text.contains("run_command"));
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "/tools must not command the agent"
+        );
     }
 }

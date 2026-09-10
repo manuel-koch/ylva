@@ -215,7 +215,7 @@ impl SandboxContext {
     /// On macOS, `/var` is a symlink to `/private/var`; canonicalizing the
     /// existing ancestor `/var/folders/ws` follows that symlink, producing
     /// the `/private/…` prefix that matches a canonical `workspace_root`.
-    fn canonicalize_best_effort(path: &Path) -> PathBuf {
+    pub(crate) fn canonicalize_best_effort(path: &Path) -> PathBuf {
         if let Ok(canonical) = std::fs::canonicalize(path) {
             return canonical;
         }

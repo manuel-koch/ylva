@@ -14,19 +14,219 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::backend::TestBackend;
+use ratatui::backend::{Backend, ClearType, TestBackend, WindowSize};
+use ratatui::buffer::{Buffer, Cell};
+use ratatui::layout::{Position, Size};
 use ratatui::Terminal;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
+use tokio_util::sync::CancellationToken;
 
 use ylva::tui_driver::NoopClipboard;
 use ylva::{
-    tui_driver, AgentLoop, AppAction, ChatEntry, EngineImpl, MockProvider, ToolRegistry,
-    UserMessageState,
+    tui_driver, AgentLoop, AppAction, ChatEntry, Engine, EngineConfig, EngineImpl, Message,
+    MockProvider, ModelInfo, StreamEvent, ToolRegistry, ToolSchema, UserMessageState,
 };
+
+#[derive(Clone)]
+struct InspectableTestBackend {
+    backend: TestBackend,
+    last_buffer: Arc<std::sync::Mutex<Buffer>>,
+    frame_count: Arc<AtomicUsize>,
+}
+
+impl InspectableTestBackend {
+    fn new(width: u16, height: u16) -> (Self, Arc<std::sync::Mutex<Buffer>>, Arc<AtomicUsize>) {
+        let backend = TestBackend::new(width, height);
+        let last_buffer = Arc::new(std::sync::Mutex::new(backend.buffer().clone()));
+        let frame_count = Arc::new(AtomicUsize::new(0));
+        (
+            InspectableTestBackend {
+                backend,
+                last_buffer: Arc::clone(&last_buffer),
+                frame_count: Arc::clone(&frame_count),
+            },
+            last_buffer,
+            frame_count,
+        )
+    }
+}
+
+impl Backend for InspectableTestBackend {
+    type Error = std::convert::Infallible;
+
+    fn draw<'a, I>(&mut self, content: I) -> Result<(), Self::Error>
+    where
+        I: Iterator<Item = (u16, u16, &'a Cell)>,
+    {
+        self.backend.draw(content)?;
+        *self.last_buffer.lock().expect("buffer snapshot lock") = self.backend.buffer().clone();
+        self.frame_count.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn append_lines(&mut self, line_count: u16) -> Result<(), Self::Error> {
+        self.backend.append_lines(line_count)
+    }
+
+    fn hide_cursor(&mut self) -> Result<(), Self::Error> {
+        self.backend.hide_cursor()
+    }
+
+    fn show_cursor(&mut self) -> Result<(), Self::Error> {
+        self.backend.show_cursor()
+    }
+
+    fn get_cursor_position(&mut self) -> Result<Position, Self::Error> {
+        self.backend.get_cursor_position()
+    }
+
+    fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> Result<(), Self::Error> {
+        self.backend.set_cursor_position(position)
+    }
+
+    fn clear(&mut self) -> Result<(), Self::Error> {
+        self.backend.clear()
+    }
+
+    fn clear_region(&mut self, clear_type: ClearType) -> Result<(), Self::Error> {
+        self.backend.clear_region(clear_type)
+    }
+
+    fn size(&self) -> Result<Size, Self::Error> {
+        self.backend.size()
+    }
+
+    fn window_size(&mut self) -> Result<WindowSize, Self::Error> {
+        self.backend.window_size()
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        self.backend.flush()
+    }
+}
+
+fn model_picker_choices(choice_count: usize) -> Vec<ylva::tui_reducer_state::ModelChoice> {
+    (0..choice_count)
+        .map(|index| ylva::tui_reducer_state::ModelChoice {
+            label: format!("stub/model-{index}"),
+            selection: ylva::ProviderModelOption {
+                provider_connection: "stub".to_string(),
+                model: ylva::ModelInfo {
+                    id: format!("model-{index}"),
+                    context_length: None,
+                    reasoning_efforts: None,
+                },
+                reasoning_effort: None,
+            },
+            is_active: false,
+            engine_name: None,
+        })
+        .collect()
+}
+
+fn empty_textarea_context() -> ylva::TextareaContext {
+    ylva::TextareaContext {
+        is_empty: true,
+        text: String::new(),
+        cursor_row: 0,
+        cursor_row_is_last: true,
+    }
+}
+
+struct DelayedCatalogEngine {
+    config: EngineConfig,
+    catalog_started: Arc<Notify>,
+    release_catalog: Arc<Notify>,
+    chat_started: Option<Arc<Notify>>,
+    release_chat: Option<Arc<Notify>>,
+}
+
+impl DelayedCatalogEngine {
+    fn new(catalog_started: Arc<Notify>, release_catalog: Arc<Notify>) -> Self {
+        DelayedCatalogEngine {
+            config: common::test_engine_config(),
+            catalog_started,
+            release_catalog,
+            chat_started: None,
+            release_chat: None,
+        }
+    }
+
+    fn with_chat(
+        catalog_started: Arc<Notify>,
+        release_catalog: Arc<Notify>,
+        chat_started: Arc<Notify>,
+        release_chat: Arc<Notify>,
+    ) -> Self {
+        DelayedCatalogEngine {
+            config: common::test_engine_config(),
+            catalog_started,
+            release_catalog,
+            chat_started: Some(chat_started),
+            release_chat: Some(release_chat),
+        }
+    }
+}
+
+impl Engine for DelayedCatalogEngine {
+    fn chat<'a>(
+        &'a self,
+        _messages: Vec<Message>,
+        _tools: Vec<ToolSchema>,
+        _cancel: CancellationToken,
+    ) -> futures::future::BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        let Some(chat_started) = self.chat_started.clone() else {
+            return Box::pin(async { anyhow::bail!("the delayed catalog engine does not chat") });
+        };
+        let release_chat = self
+            .release_chat
+            .clone()
+            .expect("chat release notification configured with chat start");
+        Box::pin(async move {
+            chat_started.notify_one();
+            release_chat.notified().await;
+            let (stream_tx, stream_rx) = mpsc::channel(4);
+            stream_tx
+                .send(StreamEvent::Text("conversation update".to_string()))
+                .await
+                .expect("test stream receiver open");
+            stream_tx
+                .send(StreamEvent::Done)
+                .await
+                .expect("test stream receiver open");
+            Ok(stream_rx)
+        })
+    }
+
+    fn config(&self) -> EngineConfig {
+        self.config.clone()
+    }
+
+    fn list_models(&self) -> futures::future::BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
+        let catalog_started = Arc::clone(&self.catalog_started);
+        let release_catalog = Arc::clone(&self.release_catalog);
+        Box::pin(async move {
+            catalog_started.notify_one();
+            release_catalog.notified().await;
+            Ok(vec![ModelInfo {
+                id: "delayed-model".to_string(),
+                context_length: None,
+                reasoning_efforts: None,
+            }])
+        })
+    }
+
+    fn switch_model(&self, _model: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
 
 /// Type `text` into the (driver-owned) textarea and press Enter.
 async fn type_and_enter(tx: &mpsc::Sender<AppAction>, text: &str) {
@@ -48,6 +248,132 @@ async fn type_and_enter(tx: &mpsc::Sender<AppAction>, text: &str) {
 
 async fn send(tx: &mpsc::Sender<AppAction>, action: AppAction) {
     tx.send(action).await.expect("action channel open");
+}
+
+fn rendered_text(buffer: &Buffer) -> String {
+    (0..buffer.area.height)
+        .map(|row| {
+            (0..buffer.area.width)
+                .map(|column| buffer[(column, row)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[tokio::test]
+async fn models_command_renders_loading_feedback_before_catalog_finishes() {
+    let catalog_started = Arc::new(Notify::new());
+    let release_catalog = Arc::new(Notify::new());
+    let engine = Arc::new(DelayedCatalogEngine::new(
+        Arc::clone(&catalog_started),
+        Arc::clone(&release_catalog),
+    ));
+    let registry = Arc::new(ToolRegistry::new());
+    let (backend, last_buffer, _) = InspectableTestBackend::new(80, 24);
+    let terminal = Terminal::new(backend).expect("test terminal");
+    let (action_tx, action_rx) = mpsc::channel(64);
+
+    let run_handle = tokio::spawn({
+        let mut terminal = terminal;
+        async move {
+            let (agent, ui_rx) = AgentLoop::new(engine, registry);
+            tui_driver::run_tui(
+                &mut terminal,
+                agent,
+                ui_rx,
+                None,
+                action_rx,
+                &mut NoopClipboard,
+            )
+            .await
+            .expect("run_tui completed")
+        }
+    });
+
+    let catalog_started_wait = catalog_started.notified();
+    type_and_enter(&action_tx, "/models").await;
+    tokio::time::timeout(Duration::from_secs(1), catalog_started_wait)
+        .await
+        .expect("model catalog request should start");
+
+    let rendered = last_buffer.lock().expect("buffer snapshot lock").clone();
+    let rendered_text = rendered_text(&rendered);
+    assert!(
+        rendered_text.contains("Loading models"),
+        "the TUI should show loading feedback while the provider catalog is pending:\n{rendered_text}"
+    );
+
+    release_catalog.notify_one();
+    drop(action_tx);
+    run_handle.await.expect("run task joined");
+}
+
+#[tokio::test]
+async fn model_catalog_does_not_block_conversation_updates() {
+    let catalog_started = Arc::new(Notify::new());
+    let release_catalog = Arc::new(Notify::new());
+    let chat_started = Arc::new(Notify::new());
+    let release_chat = Arc::new(Notify::new());
+    let engine = Arc::new(DelayedCatalogEngine::with_chat(
+        Arc::clone(&catalog_started),
+        Arc::clone(&release_catalog),
+        Arc::clone(&chat_started),
+        Arc::clone(&release_chat),
+    ));
+    let registry = Arc::new(ToolRegistry::new());
+    let (backend, last_buffer, frame_count) = InspectableTestBackend::new(80, 24);
+    let terminal = Terminal::new(backend).expect("test terminal");
+    let (action_tx, action_rx) = mpsc::channel(64);
+
+    let run_handle = tokio::spawn({
+        let mut terminal = terminal;
+        async move {
+            let (agent, ui_rx) = AgentLoop::new(engine, registry);
+            tui_driver::run_tui(
+                &mut terminal,
+                agent,
+                ui_rx,
+                None,
+                action_rx,
+                &mut NoopClipboard,
+            )
+            .await
+            .expect("run_tui completed")
+        }
+    });
+
+    type_and_enter(&action_tx, "hi").await;
+    tokio::time::timeout(Duration::from_secs(1), chat_started.notified())
+        .await
+        .expect("conversation request should start");
+
+    type_and_enter(&action_tx, "/models").await;
+    tokio::time::timeout(Duration::from_secs(1), catalog_started.notified())
+        .await
+        .expect("model catalog request should start");
+
+    let frames_before_conversation = frame_count.load(Ordering::SeqCst);
+    release_chat.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let rendered = last_buffer.lock().expect("buffer snapshot lock").clone();
+            if rendered_text(&rendered).contains("conversation update") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("conversation updates should render while model discovery is pending");
+    assert!(
+        frame_count.load(Ordering::SeqCst) > frames_before_conversation,
+        "the driver should continue rendering while the catalog is pending"
+    );
+
+    release_catalog.notify_one();
+    drop(action_tx);
+    run_handle.await.expect("run task joined");
 }
 
 fn is_assistant_message(entry: &ChatEntry) -> bool {
@@ -651,6 +977,464 @@ fn footer_says_subagent_working_while_child_is_only_streaming() {
     assert!(
         rendered.contains("Running tool"),
         "once the child's own transcript shows a running tool bubble, the plain word is accurate again: {rendered:?}"
+    );
+}
+
+#[test]
+fn footer_shows_the_active_provider_and_model() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_widgets;
+    use ylva::{EngineDisplayInfo, TuiState};
+
+    let backend = TestBackend::new(60, 20);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    let mut state = TuiState {
+        engine_display: EngineDisplayInfo {
+            provider_connection: "ollama".to_string(),
+            model: "llama3.2".to_string(),
+            reasoning_effort: Some("max".to_string()),
+        },
+        ..TuiState::new()
+    };
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("draw");
+
+    let buffer = terminal.backend().buffer().clone();
+    let rendered: String = (0..20u16)
+        .flat_map(|row| (0..60u16).map(move |column| (column, row)))
+        .map(|(column, row)| buffer.cell((column, row)).unwrap().symbol().to_string())
+        .collect();
+    assert!(
+        rendered.contains("ollama/llama3.2 (max)"),
+        "footer must show the active provider/model identity: {rendered:?}"
+    );
+
+    state.engine_display.reasoning_effort = None;
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("draw without explicit reasoning effort");
+
+    let buffer = terminal.backend().buffer().clone();
+    let rendered_without_reasoning: String = (0..20u16)
+        .flat_map(|row| (0..60u16).map(move |column| (column, row)))
+        .map(|(column, row)| buffer.cell((column, row)).unwrap().symbol().to_string())
+        .collect();
+    assert!(
+        rendered_without_reasoning.contains("ollama/llama3.2"),
+        "footer must retain the active provider/model identity: {rendered_without_reasoning:?}"
+    );
+    assert!(
+        !rendered_without_reasoning.contains("ollama/llama3.2 ("),
+        "footer must omit the default reasoning effort: {rendered_without_reasoning:?}"
+    );
+}
+
+#[test]
+fn model_picker_footer_shows_picker_controls_instead_of_send() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_reducer_state::{ModelChoice, SlashOverlay};
+    use ylva::tui_widgets;
+    use ylva::{ModelInfo, ProviderModelOption, TuiState};
+
+    let backend = TestBackend::new(80, 20);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    let mut state = TuiState {
+        slash_overlay: SlashOverlay::ModelPicker {
+            choices: vec![ModelChoice {
+                label: "stub/thinking  reasoning: default ⚙".to_string(),
+                selection: ProviderModelOption {
+                    provider_connection: "stub".to_string(),
+                    model: ModelInfo {
+                        id: "thinking".to_string(),
+                        context_length: None,
+                        reasoning_efforts: Some(vec!["low".to_string(), "high".to_string()]),
+                    },
+                    reasoning_effort: None,
+                },
+                is_active: false,
+                engine_name: None,
+            }],
+            filter: String::new(),
+            selected: 0,
+        },
+        ..TuiState::new()
+    };
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("draw");
+
+    let buffer = terminal.backend().buffer().clone();
+    let rendered: String = (0..20u16)
+        .flat_map(|row| (0..80u16).map(move |column| (column, row)))
+        .map(|(column, row)| buffer.cell((column, row)).unwrap().symbol().to_string())
+        .collect();
+    assert!(
+        rendered.contains("←/→: effort"),
+        "rendered footer: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("enter: switch"),
+        "rendered footer: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("esc: cancel"),
+        "rendered footer: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("Engines & Provider Models"),
+        "model picker must use the provider models title: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("adjust reasoning"),
+        "model picker title must not duplicate footer controls: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("enter: send"),
+        "model picker must not advertise sending: {rendered:?}"
+    );
+}
+
+#[test]
+fn model_picker_click_uses_rendered_row_geometry_without_switching() {
+    use ratatui::backend::TestBackend;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_reducer_state::{AppState, SlashOverlay};
+    use ylva::TuiEvent;
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::ModelPicker {
+        choices: model_picker_choices(2),
+        filter: String::new(),
+        selected: 0,
+    };
+    let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            ylva::render::render(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("draw");
+
+    let content_area = state.layout.slash_overlay.content_area;
+    assert!(
+        content_area.height >= 2,
+        "both model rows must be represented in the rendered content area"
+    );
+    assert_eq!(
+        state
+            .layout
+            .slash_overlay
+            .row_at(content_area.x, content_area.y + 1),
+        Some(1)
+    );
+    let effects = ylva::presenter::update(
+        &mut state,
+        TuiEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: content_area.x,
+            row: content_area.y + 1,
+            modifiers: KeyModifiers::NONE,
+        }),
+        &empty_textarea_context(),
+    );
+
+    assert_eq!(
+        state
+            .selected_model()
+            .map(|choice| choice.selection.model.id.as_str()),
+        Some("model-1")
+    );
+    assert!(
+        effects.is_empty(),
+        "a rendered-row click must not confirm the model switch: {effects:?}"
+    );
+}
+
+#[test]
+fn model_picker_click_uses_absolute_row_after_scrolling() {
+    use ratatui::backend::TestBackend;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_reducer_state::{AppState, SlashOverlay};
+    use ylva::TuiEvent;
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::ModelPicker {
+        choices: model_picker_choices(20),
+        filter: String::new(),
+        selected: 0,
+    };
+    let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            ylva::render::render(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("initial draw");
+    for _ in 0..10 {
+        ylva::presenter::update(
+            &mut state,
+            TuiEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 1,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &empty_textarea_context(),
+        );
+    }
+    terminal
+        .draw(|frame| {
+            ylva::render::render(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("scrolled draw");
+
+    let content_area = state.layout.slash_overlay.content_area;
+    let first_visible_row = state.layout.slash_overlay.first_visible_row;
+    assert!(
+        first_visible_row > 0,
+        "the fixture must exercise a scrolled popup"
+    );
+    let effects = ylva::presenter::update(
+        &mut state,
+        TuiEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: content_area.x,
+            row: content_area.y,
+            modifiers: KeyModifiers::NONE,
+        }),
+        &empty_textarea_context(),
+    );
+
+    assert_eq!(
+        state
+            .selected_model()
+            .map(|choice| choice.selection.model.id.as_str()),
+        Some(format!("model-{first_visible_row}").as_str())
+    );
+    assert!(
+        effects.is_empty(),
+        "a scrolled-row click must not confirm the model switch: {effects:?}"
+    );
+    let first_visible_row_before_click = first_visible_row;
+    terminal
+        .draw(|frame| {
+            ylva::render::render(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("redraw after click");
+    assert_eq!(
+        state.layout.slash_overlay.first_visible_row, first_visible_row_before_click,
+        "clicking a visible row must not reposition the popup"
+    );
+}
+
+#[test]
+fn model_picker_moves_selection_up_inside_scrolled_window() {
+    use ratatui::backend::TestBackend;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_reducer_state::{AppState, InputEvent, SlashOverlay};
+    use ylva::TuiEvent;
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::ModelPicker {
+        choices: model_picker_choices(20),
+        filter: String::new(),
+        selected: 0,
+    };
+    let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
+    let mut textarea = TextArea::default();
+    let textarea_context = empty_textarea_context();
+
+    terminal
+        .draw(|frame| {
+            ylva::render::render(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("initial draw");
+    for _ in 0..10 {
+        ylva::presenter::update(
+            &mut state,
+            TuiEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 1,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &textarea_context,
+        );
+        terminal
+            .draw(|frame| {
+                ylva::render::render(frame, &mut state, &mut textarea, None, None);
+            })
+            .expect("scroll draw");
+    }
+    let first_visible_row = state.layout.slash_overlay.first_visible_row;
+    assert!(first_visible_row > 0);
+
+    for expected_model_index in [9, 8, 7, 6, 5, 4] {
+        ylva::presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(KeyEvent::new(
+                KeyCode::Up,
+                KeyModifiers::NONE,
+            ))),
+            &textarea_context,
+        );
+        terminal
+            .draw(|frame| {
+                ylva::render::render(frame, &mut state, &mut textarea, None, None);
+            })
+            .expect("up-navigation draw");
+        assert_eq!(
+            state
+                .selected_model()
+                .map(|choice| choice.selection.model.id.as_str()),
+            Some(format!("model-{expected_model_index}").as_str())
+        );
+        assert_eq!(
+            state.layout.slash_overlay.first_visible_row, first_visible_row,
+            "moving within the visible window must not keep the selection at its lower edge"
+        );
+    }
+
+    for expected_model_index in [3, 2] {
+        ylva::presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(KeyEvent::new(
+                KeyCode::Up,
+                KeyModifiers::NONE,
+            ))),
+            &textarea_context,
+        );
+        terminal
+            .draw(|frame| {
+                ylva::render::render(frame, &mut state, &mut textarea, None, None);
+            })
+            .expect("upper-bound navigation draw");
+        assert_eq!(
+            state
+                .selected_model()
+                .map(|choice| choice.selection.model.id.as_str()),
+            Some(format!("model-{expected_model_index}").as_str())
+        );
+    }
+    assert_eq!(
+        state.layout.slash_overlay.first_visible_row,
+        first_visible_row - 1,
+        "the window should move only after selection crosses its upper edge"
+    );
+}
+
+#[test]
+fn model_picker_shows_scrollbar_when_entries_overflow() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_reducer_state::SlashOverlay;
+    use ylva::tui_widgets;
+    use ylva::TuiState;
+
+    let backend = TestBackend::new(80, 20);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    let mut state = TuiState {
+        slash_overlay: SlashOverlay::ModelPicker {
+            choices: model_picker_choices(20),
+            filter: String::new(),
+            selected: 0,
+        },
+        ..TuiState::new()
+    };
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("draw");
+
+    let buffer = terminal.backend().buffer().clone();
+    // The popup reserves the last interior column (x=78, between the content
+    // and right border) for its scrollbar on this 80-column terminal.
+    let scrollbar_symbols: String = (0..20u16)
+        .map(|row| buffer.cell((78, row)).unwrap().symbol().to_string())
+        .collect();
+    assert!(
+        scrollbar_symbols.contains('┃'),
+        "overflowing model picker must render a scrollbar thumb: {scrollbar_symbols:?}"
+    );
+    assert!(
+        scrollbar_symbols.contains('↓'),
+        "overflowing model picker must show a downward scroll indicator: {scrollbar_symbols:?}"
+    );
+}
+
+/// A live filter that matches nothing must not make the picker vanish
+/// entirely — the panel stays open (so the user can keep editing the
+/// filter) and shows a message explaining why nothing is listed.
+#[test]
+fn model_picker_shows_a_message_instead_of_vanishing_when_the_filter_matches_nothing() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_reducer_state::{ModelChoice, SlashOverlay};
+    use ylva::tui_widgets;
+    use ylva::{ModelInfo, ProviderModelOption, TuiState};
+
+    let backend = TestBackend::new(80, 20);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    let mut state = TuiState {
+        slash_overlay: SlashOverlay::ModelPicker {
+            choices: vec![ModelChoice {
+                label: "stub/thinking  reasoning: default".to_string(),
+                selection: ProviderModelOption {
+                    provider_connection: "stub".to_string(),
+                    model: ModelInfo {
+                        id: "thinking".to_string(),
+                        context_length: None,
+                        reasoning_efforts: None,
+                    },
+                    reasoning_effort: None,
+                },
+                is_active: false,
+                engine_name: None,
+            }],
+            filter: "no-such-model".to_string(),
+            selected: 0,
+        },
+        ..TuiState::new()
+    };
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("draw");
+
+    let buffer = terminal.backend().buffer().clone();
+    let rendered: String = (0..20u16)
+        .flat_map(|row| (0..80u16).map(move |column| (column, row)))
+        .map(|(column, row)| buffer.cell((column, row)).unwrap().symbol().to_string())
+        .collect();
+    assert!(
+        rendered.contains("Nothing matched your model filter."),
+        "the panel must explain why it is empty instead of vanishing: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("Engines & Provider Models"),
+        "the panel must stay open under its usual title: {rendered:?}"
     );
 }
 

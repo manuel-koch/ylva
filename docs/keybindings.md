@@ -49,6 +49,26 @@ Reference for Ylva's TUI keybindings.
 | `esc` (input non-empty) | Subagent drill-in view | Clear the input field (same as elsewhere; does not navigate back) |
 | `enter` | Subagent drill-in view | No-op; the subagent conversation doesn't accept input and Enter no longer steers the root agent from here (footer omits `enter: send`) |
 
+## Slash-command overlay
+
+| Key | Context | Action |
+|---|---|---|
+| `/` as the first character | Input focused | Open the command overlay; it narrows as more of the command is typed |
+| `↑` / `↓` | Command overlay open | Move the highlighted command |
+| `tab` | Command overlay open | Complete the highlighted command |
+| `enter` | Input holds a recognized command or a highlighted command suggestion | Run the selected command instead of sending the draft to the model (see [features](./features.md#slash-commands)) |
+| `esc` | Command overlay open | Close the overlay and clear the input (otherwise the still-matching draft would immediately reopen it) |
+| `↑` / `↓` | `/models` picker open | Move the highlighted provider-connection/model |
+| `page-up` / `fn-up` | `/models` picker open | Move the highlighted provider-connection/model up by a page |
+| `page-down` / `fn-down` | `/models` picker open | Move the highlighted provider-connection/model down by a page |
+| `Mouse wheel` | `/models` picker open | Move the highlighted provider-connection/model up / down |
+| `left-click` on an entry | `/models` picker open | Highlight the provider-connection/model; does not switch until `enter` |
+| `left-drag` | Slash-command overlay open | Select visible popup text; release copies it to the clipboard |
+| `←` / `→` | `/models` picker open | Cycle the highlighted model's reasoning effort when alternatives are available |
+| any character / backspace | `/models` picker open | Insert into the draft (`/models <filter>`) and live-narrow the picker's already-fetched choices; no re-query |
+| `enter` | `/models` picker open | Switch to the highlighted provider connection/model, apply its selected reasoning effort, and clear the input |
+| `esc` | `/models` picker open | Cancel without switching and clear the input |
+
 Only a second press of the *same* key confirms a pending double-press action.
 Pressing the other key instead starts that key's own fresh confirm window
 (and dismisses the one it replaced) — e.g. `esc` then `ctrl-c` never quits on

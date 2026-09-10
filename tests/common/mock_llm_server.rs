@@ -92,6 +92,12 @@ struct Behavior {
     frames: Vec<String>,
     /// Loop `frames` (or generated frames) forever instead of ending.
     end_after_frames: bool,
+    /// Model ids answered on `GET /models`.
+    models: Vec<String>,
+    /// Optional exact request target required for the model-list response.
+    model_path: Option<String>,
+    /// Context length returned by the Ollama `POST /api/show` endpoint.
+    ollama_context_length: Option<usize>,
 }
 
 /// Configuration for a [`MockLlmServer`].
@@ -109,6 +115,14 @@ pub struct MockLlmConfig {
     pub end_after_frames: bool,
     /// Status used once `statuses` is exhausted (default 200).
     pub fallback_status: u16,
+    /// Model ids the server answers with on `GET /models` (the endpoint
+    /// `Provider::list_models` calls). Empty means an empty `data` array.
+    pub models: Vec<String>,
+    /// When set, only this exact request target receives the model-list
+    /// response. When unset, any target ending in `/models` is accepted.
+    pub model_path: Option<String>,
+    /// Context length returned by the Ollama model-details endpoint.
+    pub ollama_context_length: Option<usize>,
 }
 
 impl Default for MockLlmConfig {
@@ -118,6 +132,9 @@ impl Default for MockLlmConfig {
             frames: Vec::new(),
             end_after_frames: false,
             fallback_status: 200,
+            models: Vec::new(),
+            model_path: None,
+            ollama_context_length: None,
         }
     }
 }
@@ -129,6 +146,9 @@ impl MockLlmConfig {
             status,
             frames: self.frames.clone(),
             end_after_frames: self.end_after_frames,
+            models: self.models.clone(),
+            model_path: self.model_path.clone(),
+            ollama_context_length: self.ollama_context_length,
         }
     }
 }
@@ -194,8 +214,10 @@ impl MockLlmServer {
         Arc::clone(&self.live_connections)
     }
 
-    /// A `base_url` to pass to [`crate::OpenAiProvider`] (which appends
-    /// `/chat/completions` internally).
+    /// A server origin to pass to [`crate::OpenAiCompatibleProvider`] (which
+    /// appends `/chat/completions` internally), [`crate::OpenRouterProvider`]
+    /// (which derives `/api/v1`), or [`crate::OllamaProvider`] (which derives
+    /// both `/v1` and native `/api` paths).
     pub fn base_url(&self) -> String {
         format!("http://{}", self.addr)
     }
@@ -213,7 +235,32 @@ async fn handle_connection(
     live_connections: Arc<AtomicUsize>,
 ) {
     let (mut reader, mut writer) = stream.into_split();
-    if read_request_head(&mut reader).await.is_err() {
+    let request_target = match read_request_head(&mut reader).await {
+        Ok(request_target) => request_target,
+        Err(_) => {
+            live_connections.fetch_sub(1, Ordering::SeqCst);
+            return;
+        }
+    };
+
+    // Model listing and details are plain JSON requests, not streams — answer
+    // them from the request target rather than streaming SSE at them.
+    let model_path_matches = behavior
+        .model_path
+        .as_deref()
+        .is_none_or(|model_path| request_target == model_path);
+    if request_target.ends_with("/models") && model_path_matches && behavior.status == 200 {
+        write_model_list_response(&mut writer, &behavior.models).await;
+        live_connections.fetch_sub(1, Ordering::SeqCst);
+        return;
+    }
+    if request_target.ends_with("/api/tags") && behavior.status == 200 {
+        write_ollama_tags_response(&mut writer, &behavior.models).await;
+        live_connections.fetch_sub(1, Ordering::SeqCst);
+        return;
+    }
+    if request_target.ends_with("/api/show") && behavior.status == 200 {
+        write_ollama_show_response(&mut writer, behavior.ollama_context_length).await;
         live_connections.fetch_sub(1, Ordering::SeqCst);
         return;
     }
@@ -280,10 +327,79 @@ Content-Length: {}\r\n\
     let _ = writer.write_all(body.as_bytes()).await;
 }
 
+/// Write an OpenAI-spec `GET /models` response listing `models`.
+async fn write_model_list_response(
+    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    models: &[String],
+) {
+    let payload = serde_json::json!({
+        "object": "list",
+        "data": models
+            .iter()
+            .map(|id| serde_json::json!({ "id": id, "object": "model" }))
+            .collect::<Vec<serde_json::Value>>(),
+    });
+    let body = payload.to_string();
+    let head = format!(
+        "HTTP/1.1 200 OK\r\n\
+Content-Type: application/json\r\n\
+Content-Length: {}\r\n\
+\r\n",
+        body.len()
+    );
+    let _ = writer.write_all(head.as_bytes()).await;
+    let _ = writer.write_all(body.as_bytes()).await;
+}
+
+/// Write a minimal native Ollama `GET /api/tags` response.
+async fn write_ollama_tags_response(
+    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    models: &[String],
+) {
+    let payload = serde_json::json!({
+        "models": models
+            .iter()
+            .map(|id| serde_json::json!({ "name": id, "model": id }))
+            .collect::<Vec<serde_json::Value>>(),
+    });
+    write_json_response(writer, &payload).await;
+}
+
+/// Write a minimal native Ollama `POST /api/show` response.
+async fn write_ollama_show_response(
+    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    context_length: Option<usize>,
+) {
+    let payload = match context_length {
+        Some(context_length) => serde_json::json!({
+            "model_info": { "llama.context_length": context_length },
+        }),
+        None => serde_json::json!({}),
+    };
+    write_json_response(writer, &payload).await;
+}
+
+async fn write_json_response(
+    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    payload: &serde_json::Value,
+) {
+    let body = payload.to_string();
+    let head = format!(
+        "HTTP/1.1 200 OK\r\n\
+Content-Type: application/json\r\n\
+Content-Length: {}\r\n\
+\r\n",
+        body.len()
+    );
+    let _ = writer.write_all(head.as_bytes()).await;
+    let _ = writer.write_all(body.as_bytes()).await;
+}
+
 /// Read the full HTTP request (head + body) so the server never responds
 /// before the client has finished sending it, which would race reqwest's
-/// request-body write.
-async fn read_request_head(reader: &mut tokio::net::tcp::OwnedReadHalf) -> std::io::Result<()> {
+/// request-body write. Returns the request target (path) from the request
+/// line, so a caller can distinguish `/chat/completions` from `/models`.
+async fn read_request_head(reader: &mut tokio::net::tcp::OwnedReadHalf) -> std::io::Result<String> {
     let mut buffer = Vec::with_capacity(MAX_REQUEST_HEADER_BYTES);
     let mut chunk = [0u8; 512];
     let head_end = loop {
@@ -324,7 +440,17 @@ async fn read_request_head(reader: &mut tokio::net::tcp::OwnedReadHalf) -> std::
             remaining -= read;
         }
     }
-    Ok(())
+    Ok(parse_request_target(&buffer[..head_end]))
+}
+
+/// Extract the request target from an HTTP request line ("GET /models HTTP/1.1").
+fn parse_request_target(head: &[u8]) -> String {
+    std::str::from_utf8(head)
+        .ok()
+        .and_then(|head| head.lines().next())
+        .and_then(|request_line| request_line.split_whitespace().nth(1))
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// Parse the `Content-Length` header (in bytes) from a request head.

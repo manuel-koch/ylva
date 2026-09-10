@@ -47,7 +47,7 @@ fn version_flag_prints_build_info_and_exits_zero() {
         "profile must be debug or release, got: {profile:?}"
     );
 
-    // The version path must short-circuit before `select_provider`, so no
+    // The version path must short-circuit before `select_provider_from_env`, so no
     // provider wiring is emitted (stderr stays empty on this path).
     assert!(
         output.stderr.is_empty(),

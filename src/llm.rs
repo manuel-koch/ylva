@@ -12,21 +12,32 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::time::Duration;
-
 use futures::future::BoxFuture;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::{DeltaChunk, Message, StreamEvent};
+use crate::agent::{Message, StreamEvent};
 
 use schemars::JsonSchema;
 use serde::Serialize;
 
+pub mod engine;
 pub mod http;
-pub mod openai_provider;
+pub mod mock_provider;
+pub mod ollama_provider;
+pub mod openai_compatible_provider;
+pub mod openrouter_provider;
+pub mod provider_registry;
 
-pub use openai_provider::OpenAiProvider;
+pub use engine::{
+    Engine, EngineConfig, EngineDisplayInfo, EngineImpl, EngineRouter, EngineRuntimeConfig,
+    EngineRuntimeConfigHandle, ProviderModelOption, DEFAULT_CONTEXT_LENGTH,
+};
+pub use mock_provider::{MockEvent, MockProvider};
+pub use ollama_provider::OllamaProvider;
+pub use openai_compatible_provider::OpenAiCompatibleProvider;
+pub use openrouter_provider::OpenRouterProvider;
+pub use provider_registry::{ProviderEnv, ProviderRegistry, ProviderSelection};
 
 /// A single tool definition in the OpenAI chat-completions wire shape.
 ///
@@ -56,11 +67,18 @@ impl ToolSchema {
 }
 
 /// Metadata describing a single model available from a provider.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelInfo {
     pub id: String,
-    pub name: Option<String>,
     pub context_length: Option<usize>,
+    /// Reasoning support advertised by the provider.
+    ///
+    /// - `None` means that reasoning support is not advertised.
+    /// - `Some([])` means that reasoning is supported but the
+    ///   provider exposes no selectable effort alternatives.
+    /// - `Some(values)` means that reasoning is supported and
+    ///   `values` contains the selectable effort values.
+    pub reasoning_efforts: Option<Vec<String>>,
 }
 
 /// Runtime abstraction over a chat-completions-style streaming provider.
@@ -86,104 +104,57 @@ pub trait Provider: Send + Sync {
         cancel: CancellationToken,
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>>;
 
-    /// Return the short name identifying this provider (e.g. `"ollama"`, `"openrouter"`, `"mock"`).
+    /// Return the short name identifying this provider connection or the
+    /// built-in implementation (e.g. `"ollama-cloud"`, `"openrouter"`,
+    /// `"mock"`).
     fn name(&self) -> &str;
 
     /// Return the list of models available from this provider.
     ///
-    /// The real HTTP implementation is deferred to the phase that introduces
-    /// the `/models` slash command. Providers that have not yet implemented
-    /// this method return an error.
+    /// Providers that cannot enumerate models return an error. An
+    /// [`EngineRouter`](crate::llm::engine::EngineRouter) omits that connection
+    /// when another configured connection succeeds and aggregates the
+    /// failures when none do. A provider may use more than one backend
+    /// endpoint to build the catalog; [`OllamaProvider`](crate::llm::OllamaProvider),
+    /// for example, combines `/api/tags` with `/api/show` metadata.
     fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>>;
-}
 
-/// One item of a deterministic [`MockProvider`] script.
-///
-/// The script is the single deterministic path both text-streaming and
-/// Tool-use-loop tests share: a sequence of text tokens and raw
-/// [`DeltaChunk`] tool-call fragments, emitted at a fixed interval. `chat()`
-/// always terminates the script with `StreamEvent::Done`.
-#[derive(Debug, Clone)]
-pub enum MockEvent {
-    Text(String),
-    Thinking(String),
-    Delta(DeltaChunk),
-}
-
-/// Deterministic fake provider used by tests and demos.
-///
-/// `chat()` streams the script items one by one, sleeping `interval` between
-/// them, then emits `StreamEvent::Done`. If the `CancellationToken` fires
-/// mid-stream the current sleep is interrupted via `select!` and
-/// `StreamEvent::Cancelled` is emitted promptly. The token sleeps make the mock
-/// fully deterministic under `tokio::time::pause`.
-#[derive(Debug)]
-pub struct MockProvider {
-    script: Vec<MockEvent>,
-    interval: Duration,
-}
-
-impl MockProvider {
-    /// A text-only script from `tokens` (["Phase 2"`MockProvider`][]).
+    /// Return the shared runtime settings when this provider supports them.
     ///
-    /// [Phase 2`MockProvider`]: crate::llm::MockProvider
-    pub fn new(tokens: Vec<String>, interval: Duration) -> Self {
-        let script = tokens.into_iter().map(MockEvent::Text).collect();
-        MockProvider { script, interval }
+    /// [`EngineImpl`](crate::llm::engine::EngineImpl) uses the handle to expose a
+    /// coherent [`EngineConfig`](crate::llm::engine::EngineConfig) snapshot without
+    /// maintaining a second mutable copy of provider settings. Providers that
+    /// do not expose mutable runtime settings may keep the default.
+    fn runtime_config_handle(&self) -> Option<EngineRuntimeConfigHandle> {
+        None
     }
 
-    /// A fully scripted provider (text + tool-call deltas) for deterministic
-    /// tool-use loop tests. `chat()` emits `script` at `interval`, then `Done`.
-    pub fn with_script(script: Vec<MockEvent>, interval: Duration) -> Self {
-        MockProvider { script, interval }
-    }
-}
-
-impl Provider for MockProvider {
-    fn name(&self) -> &str {
-        "mock"
-    }
-
-    fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
-        Box::pin(async { Ok(vec![]) })
+    /// Switch the model used by every subsequent `chat()` call.
+    ///
+    /// Providers share one `Arc<dyn Provider>` across all agents, so the
+    /// switch takes effect through interior mutability rather than by
+    /// rebuilding the provider. Providers that cannot switch (the mock)
+    /// keep the default, which fails loudly.
+    fn set_model(&self, model: &str) -> anyhow::Result<()> {
+        anyhow::bail!(
+            "provider '{}' does not support switching to model '{model}'",
+            self.name()
+        )
     }
 
-    fn chat<'a>(
-        &'a self,
-        _messages: Vec<Message>,
-        _tools: Vec<ToolSchema>,
-        cancel: CancellationToken,
-    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
-        let script = self.script.clone();
-        let interval = self.interval;
-        Box::pin(async move {
-            let (tx, rx) = mpsc::channel(16);
-            tokio::spawn(async move {
-                let last_index = script.len().saturating_sub(1);
-                for (index, event) in script.into_iter().enumerate() {
-                    let stream_event = match event {
-                        MockEvent::Text(text) => StreamEvent::Text(text),
-                        MockEvent::Thinking(text) => StreamEvent::Thinking(text),
-                        MockEvent::Delta(delta) => StreamEvent::Delta(delta),
-                    };
-                    if tx.send(stream_event).await.is_err() {
-                        return;
-                    }
-                    if index == last_index {
-                        break;
-                    }
-                    tokio::select! {
-                        _ = cancel.cancelled() => {
-                            let _ = tx.send(StreamEvent::Cancelled).await;
-                            return;
-                        }
-                        _ = tokio::time::sleep(interval) => {}
-                    }
-                }
-                let _ = tx.send(StreamEvent::Done).await;
-            });
-            Ok(rx)
-        })
+    /// Select a reasoning effort for subsequent requests.
+    ///
+    /// `None` clears an explicit effort and lets the provider use its own
+    /// default behavior. Providers that do not support selectable reasoning
+    /// efforts reject a non-empty value.
+    fn set_reasoning_effort(&self, reasoning_effort: Option<&str>) -> anyhow::Result<()> {
+        if let Some(reasoning_effort) = reasoning_effort {
+            anyhow::bail!(
+                "provider '{}' does not support reasoning effort '{reasoning_effort}'",
+                self.name()
+            );
+        }
+        Ok(())
     }
 }
 
@@ -311,110 +282,6 @@ pub fn serialize_messages(messages: &[Message]) -> serde_json::Value {
 mod tests {
     use super::*;
     use crate::agent::UserMessageKind;
-
-    async fn assert_received_text(rx: &mut mpsc::Receiver<StreamEvent>, expected: &str) {
-        assert!(
-            matches!(rx.recv().await, Some(StreamEvent::Text(text)) if text == expected),
-            "expected Text({expected:?})"
-        );
-    }
-
-    #[test]
-    fn mock_provider_name_returns_mock() {
-        let provider = MockProvider::new(vec![], Duration::from_millis(10));
-        assert_eq!(provider.name(), "mock");
-    }
-
-    #[tokio::test]
-    async fn mock_provider_list_models_returns_empty_vec() {
-        let provider = MockProvider::new(vec![], Duration::from_millis(10));
-        let models = provider.list_models().await.unwrap();
-        assert!(models.is_empty());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn mock_emits_tokens_then_done_at_interval() {
-        let provider = MockProvider::new(
-            vec!["Hello".into(), " ".into(), "World".into()],
-            Duration::from_millis(10),
-        );
-        let mut rx = provider
-            .chat(Vec::new(), Vec::new(), CancellationToken::new())
-            .await
-            .unwrap();
-
-        assert_received_text(&mut rx, "Hello").await;
-        tokio::time::advance(Duration::from_millis(10)).await;
-        assert_received_text(&mut rx, " ").await;
-        tokio::time::advance(Duration::from_millis(10)).await;
-        assert_received_text(&mut rx, "World").await;
-        assert!(matches!(rx.recv().await, Some(StreamEvent::Done)));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn mock_emits_cancelled_when_token_fired_mid_stream() {
-        let provider = MockProvider::new(
-            vec!["first".into(), "second".into(), "third".into()],
-            Duration::from_millis(10),
-        );
-        let cancel = CancellationToken::new();
-        let mut rx = provider
-            .chat(Vec::new(), Vec::new(), cancel.clone())
-            .await
-            .unwrap();
-
-        assert_received_text(&mut rx, "first").await;
-        cancel.cancel();
-        assert!(
-            matches!(rx.recv().await, Some(StreamEvent::Cancelled)),
-            "expected Cancelled after token fired mid-stream"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn mock_emits_first_token_without_delay() {
-        let provider = MockProvider::new(vec!["instant".into()], Duration::from_millis(1000));
-        let mut rx = provider
-            .chat(Vec::new(), Vec::new(), CancellationToken::new())
-            .await
-            .unwrap();
-        assert_received_text(&mut rx, "instant").await;
-        assert!(matches!(rx.recv().await, Some(StreamEvent::Done)));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn mock_script_emits_delta_fragments_then_done() {
-        let provider = MockProvider::with_script(
-            vec![
-                MockEvent::Delta(DeltaChunk {
-                    tool_call_index: 0,
-                    tool_call_id: Some("call_1".into()),
-                    function_name: Some("read".into()),
-                    arguments_fragment: Some("{\"path\":".into()),
-                }),
-                MockEvent::Delta(DeltaChunk {
-                    tool_call_index: 0,
-                    tool_call_id: None,
-                    function_name: None,
-                    arguments_fragment: Some("\"x.txt\"}".into()),
-                }),
-            ],
-            Duration::from_millis(10),
-        );
-        let mut rx = provider
-            .chat(Vec::new(), Vec::new(), CancellationToken::new())
-            .await
-            .unwrap();
-        let first = rx.recv().await;
-        assert!(
-            matches!(first, Some(StreamEvent::Delta(d)) if d.arguments_fragment.as_deref() == Some("{\"path\":"))
-        );
-        let second = rx.recv().await;
-        assert!(
-            matches!(second, Some(StreamEvent::Delta(d)) if d.arguments_fragment.as_deref() == Some("\"x.txt\"}"))
-        );
-        assert!(matches!(rx.recv().await, Some(StreamEvent::Done)));
-    }
 
     #[test]
     fn tool_schema_renders_function_envelope() {

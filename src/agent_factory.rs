@@ -23,8 +23,10 @@ use crate::agent::tools::{default_registry, ToolRegistryConfig, DEFAULT_CLI_TOOL
 use crate::agent::{AgentLoop, ChildRoleConfig, Context, Message, Role, UiUpdate};
 use crate::child_agent_manager::{ChildAgentManager, FinishResult, SpawnRequest};
 use crate::config::ProfileConfig;
-use crate::engine::Engine;
+use crate::llm::engine::{Engine, EngineConfig, EngineDisplayInfo, EngineRouter};
+use crate::llm::ProviderRegistry;
 use crate::sandbox::Sandbox;
+use crate::store::Store;
 
 /// Constructs [`AgentLoop`] instances from a named set of [`Engine`]s and a
 /// [`ProfileConfig`].
@@ -47,6 +49,9 @@ pub struct AgentFactory {
     auto_approve_spawn: bool,
     /// Explicit list of tool names to register. Defaults to [`DEFAULT_CLI_TOOLS`].
     allowed_tools: Vec<String>,
+    /// Session store handed to every `Role::Root` agent this factory builds,
+    /// when persistence is enabled.
+    store: Option<Store>,
 }
 
 impl AgentFactory {
@@ -57,7 +62,106 @@ impl AgentFactory {
             auto_approve_write: false,
             auto_approve_spawn: false,
             allowed_tools: DEFAULT_CLI_TOOLS.iter().map(|s| s.to_string()).collect(),
+            store: None,
         }
+    }
+
+    /// Build a factory whose engines come from a loaded profile's
+    /// `[engines.*]` tables (see [`crate::config::ProfileConfig::load`]).
+    ///
+    /// Each entry is turned into a live [`EngineImpl`] through the named
+    /// provider connection it references. A provider connection that is not
+    /// referenced by an explicit engine is also materialized so `/models`
+    /// can query every configured provider connection. Profiles with provider
+    /// connections but no explicit engines get one implicit engine per
+    /// provider connection.
+    pub fn from_profile(profile: &ProfileConfig) -> anyhow::Result<Self> {
+        let mut engines: HashMap<String, Arc<dyn Engine>> = HashMap::new();
+        if profile.engines.is_empty() {
+            let mut provider_connection_names: Vec<_> =
+                profile.provider_connections.keys().cloned().collect();
+            provider_connection_names.sort();
+            for (index, provider_connection_name) in
+                provider_connection_names.into_iter().enumerate()
+            {
+                let engine_name = if index == 0 {
+                    profile.default_engine.clone()
+                } else {
+                    provider_connection_name.clone()
+                };
+                let engine_name = unique_engine_name(&engines, &engine_name, index);
+                let engine_config = implicit_engine_config(
+                    &provider_connection_name,
+                    profile.default_model.as_deref(),
+                );
+                let engine =
+                    engine_from_profile_config(&engine_config, &profile.provider_connections)?;
+                engines.insert(engine_name, engine);
+            }
+        } else {
+            for (engine_name, engine_config) in &profile.engines {
+                engines.insert(
+                    engine_name.clone(),
+                    engine_from_profile_config(engine_config, &profile.provider_connections)?,
+                );
+            }
+
+            let referenced_provider_connections: std::collections::HashSet<_> = profile
+                .engines
+                .values()
+                .map(|engine_config| engine_config.provider_connection.as_str())
+                .collect();
+            let mut provider_connection_names: Vec<_> = profile
+                .provider_connections
+                .keys()
+                .filter(|provider_connection_name| {
+                    !referenced_provider_connections.contains(provider_connection_name.as_str())
+                })
+                .cloned()
+                .collect();
+            provider_connection_names.sort();
+            for (index, provider_connection_name) in
+                provider_connection_names.into_iter().enumerate()
+            {
+                let engine_name = unique_engine_name(&engines, &provider_connection_name, index);
+                let engine_config = implicit_engine_config(
+                    &provider_connection_name,
+                    profile.default_model.as_deref(),
+                );
+                let engine =
+                    engine_from_profile_config(&engine_config, &profile.provider_connections)?;
+                engines.insert(engine_name, engine);
+            }
+        }
+        for required in [
+            profile.default_engine.as_str(),
+            profile.compact_engine_name(),
+        ] {
+            anyhow::ensure!(
+                engines.contains_key(required),
+                "profile references engine '{required}', which no [engines.*] table defines"
+            );
+        }
+        Ok(AgentFactory::new(engines))
+    }
+
+    /// Snapshot of the named engine's configuration, if it exists.
+    ///
+    /// Used to record the initial [`crate::store::StoreEvent::ModelChanged`]
+    /// right after a session is created — before any `/models` switch, so
+    /// the session's history is never missing its starting
+    /// provider-connection/model.
+    pub fn engine_config(&self, name: &str) -> Option<EngineConfig> {
+        self.engines.get(name).map(|engine| engine.config())
+    }
+
+    /// Enable persistence: every `Role::Root` agent built by this factory
+    /// appends its committed messages to `store`'s session file, and every
+    /// child run it spawns appends `child_start`/`child_result` records plus
+    /// its own transcript alongside it.
+    pub fn with_store(mut self, store: Store) -> Self {
+        self.store = Some(store);
+        self
     }
 
     /// Enable automatic approval of `write` tool calls (no user prompt).
@@ -113,6 +217,7 @@ impl AgentFactory {
             profile,
             agent_type,
             role,
+            self.store.clone(),
         )
     }
 
@@ -131,21 +236,24 @@ impl AgentFactory {
         profile: &ProfileConfig,
         agent_type: &str,
         role: Role,
+        store: Option<Store>,
     ) -> anyhow::Result<(AgentLoop, mpsc::Receiver<UiUpdate>)> {
-        let engine_name = profile
-            .agents
-            .get(agent_type)
-            .and_then(|agent_config| agent_config.engine.as_deref())
-            .unwrap_or(profile.default_engine.as_str());
+        let engine_name = resolve_engine_name(profile, agent_type);
 
-        let engine = engines
+        let configured_engine = engines
             .get(engine_name)
             .ok_or_else(|| anyhow::anyhow!("unknown engine: {engine_name}"))?;
+        let engine: Arc<dyn Engine> = if engines.len() == 1 {
+            configured_engine.clone()
+        } else {
+            Arc::new(EngineRouter::new(engines.clone(), engine_name)?)
+        };
 
         let child_role_config = match role {
             Role::Root => None,
             Role::Child(config) => Some(config),
         };
+        let is_child = child_role_config.is_some();
 
         let can_spawn = child_role_config.is_none()
             && profile
@@ -186,24 +294,37 @@ impl AgentFactory {
                 agent_finish: agent_finish_config,
             },
         ));
-        let (mut agent_loop, ui_rx) = AgentLoop::new(Arc::clone(engine), registry);
+        let (mut agent_loop, ui_rx) = AgentLoop::new(Arc::clone(&engine), registry);
 
         if let Some(child_role_config) = child_role_config {
             agent_loop = agent_loop.with_child_role(child_role_config);
         } else if can_spawn {
-            let manager = Self::build_child_agent_manager(
+            let mut manager = Self::build_child_agent_manager(
                 engines.clone(),
                 allowed_tools.to_vec(),
                 auto_approve_edit,
                 auto_approve_write,
                 auto_approve_spawn,
                 profile.clone(),
+                store.clone(),
             );
+            if let Some(store) = store.clone() {
+                manager.manager = manager.manager.with_store(store);
+            }
             agent_loop = agent_loop.with_child_agent_manager(
                 manager.manager,
                 manager.finish_rx,
                 manager.subagent_ui_rx,
             );
+        }
+
+        // Only the root agent streams into the session file; a child's
+        // transcript is written once, at completion, into its own
+        // sub-session file.
+        if !is_child {
+            if let Some(store) = store {
+                agent_loop = agent_loop.with_store(store);
+            }
         }
 
         Ok((agent_loop, ui_rx))
@@ -222,6 +343,7 @@ impl AgentFactory {
         auto_approve_write: bool,
         auto_approve_spawn: bool,
         profile: ProfileConfig,
+        parent_store: Option<Store>,
     ) -> BuiltChildAgentManager {
         let (finish_tx, finish_rx) = mpsc::channel::<FinishResult>(16);
         let (subagent_ui_tx, subagent_ui_rx) = mpsc::channel::<UiUpdate>(100);
@@ -234,6 +356,15 @@ impl AgentFactory {
                 let allowed_tools = allowed_tools.clone();
                 let profile = profile.clone();
                 let finish_tx = finish_tx.clone();
+                let parent_store = parent_store.clone();
+                let child_engine_name =
+                    resolve_engine_name(&profile, &request.agent_type).to_string();
+                let child_engine_config = engines
+                    .get(&child_engine_name)
+                    .map(|engine| engine.config());
+                let child_engine_display = engines
+                    .get(&child_engine_name)
+                    .map(|engine| EngineDisplayInfo::from_engine(engine.as_ref()));
                 let run_id = request.run_id;
                 let call_id = request.call_id;
 
@@ -263,6 +394,7 @@ impl AgentFactory {
                     &profile,
                     &request.agent_type,
                     Role::Child(child_role_config),
+                    None,
                 );
                 let (child_loop, child_ui_rx) = match built {
                     Ok(built) => built,
@@ -289,6 +421,11 @@ impl AgentFactory {
                     }
                 };
 
+                if let Some(engine) = child_engine_display {
+                    let _ = forward_ui_tx
+                        .try_send(UiUpdate::ChildAgentEngineConfigured { run_id, engine });
+                }
+
                 let command_sender = child_loop.command_sender();
                 let task = request.task.clone();
                 let handle = tokio::spawn(async move {
@@ -301,6 +438,10 @@ impl AgentFactory {
                         cancel,
                         finish_tx,
                         forward_ui_tx,
+                        ChildTranscriptTarget {
+                            parent_store,
+                            engine_config: child_engine_config,
+                        },
                     )
                     .await;
                 });
@@ -337,6 +478,122 @@ struct BuiltChildAgentManager {
 /// can run in the `spawn_fn` closure itself, ahead of `tokio::spawn`, letting
 /// the caller retain the child's `command_sender` (see
 /// `build_child_agent_manager`).
+/// Where a finished child's own transcript is persisted: the **parent**
+/// session's store (`None` when persistence is disabled) plus the child's own
+/// resolved engine config, stamped into the sub-session's `meta` header.
+struct ChildTranscriptTarget {
+    parent_store: Option<Store>,
+    /// The child's own resolved provider-connection/model (which can differ from the
+    /// parent's), recorded in the child session's `meta` header and its
+    /// initial `ModelChanged` event. `None` when the engine name failed to
+    /// resolve — should not happen given `from_profile`'s upfront
+    /// validation, but persisting nothing is safer than persisting a
+    /// misleading empty pair.
+    engine_config: Option<EngineConfig>,
+}
+
+/// Build one live engine from its configuration.
+fn engine_from_config(engine_config: &EngineConfig) -> anyhow::Result<Arc<dyn Engine>> {
+    let provider = ProviderRegistry::provider_from_engine_config(engine_config)?;
+    Ok(Arc::new(crate::llm::engine::EngineImpl::new(
+        provider,
+        engine_config.clone(),
+    )))
+}
+
+/// Build an engine using a named provider connection when one exists, while
+/// retaining support for the legacy flat engine schema where `provider`
+/// directly names the implementation kind.
+fn engine_from_profile_config(
+    engine_config: &EngineConfig,
+    providers: &HashMap<String, crate::config::ProviderConnectionConfig>,
+) -> anyhow::Result<Arc<dyn Engine>> {
+    let Some(provider_config) = providers.get(&engine_config.provider_connection) else {
+        return engine_from_config(engine_config);
+    };
+    let mut resolved_config = engine_config.clone();
+    if resolved_config.api_base_url.is_none() {
+        resolved_config.api_base_url = provider_config.api_base_url.clone();
+    }
+    if resolved_config.api_key.is_none() {
+        resolved_config.api_key = provider_config.api_key.clone();
+    }
+    let provider = ProviderRegistry::provider_from_provider_config(
+        &resolved_config.provider_connection,
+        provider_config,
+        &resolved_config,
+    )?;
+    Ok(Arc::new(crate::llm::engine::EngineImpl::new(
+        provider,
+        resolved_config,
+    )))
+}
+
+fn implicit_engine_config(
+    provider_connection_name: &str,
+    default_model: Option<&str>,
+) -> EngineConfig {
+    EngineConfig {
+        provider_connection: provider_connection_name.to_string(),
+        model: default_model.unwrap_or_default().to_string(),
+        temperature: None,
+        context_length: None,
+        api_base_url: None,
+        api_key: None,
+        reasoning: None,
+    }
+}
+
+fn unique_engine_name(
+    engines: &HashMap<String, Arc<dyn Engine>>,
+    requested_name: &str,
+    index: usize,
+) -> String {
+    if !engines.contains_key(requested_name) {
+        return requested_name.to_string();
+    }
+    format!("{requested_name}-provider-{index}")
+}
+
+/// Persist a finished child's transcript once, into its own sub-session file
+/// under the parent's `project_key`. A failure to
+/// write is logged and swallowed: losing a child transcript must never fail
+/// the run that produced it.
+async fn write_child_transcript(target: &ChildTranscriptTarget, task: &str, context: &Context) {
+    let Some(parent_store) = &target.parent_store else {
+        return;
+    };
+    let provider_connection_and_model = target
+        .engine_config
+        .as_ref()
+        .map(|config| (config.provider_connection.as_str(), config.model.as_str()));
+    match parent_store
+        .write_child_transcript(provider_connection_and_model, task, context.messages())
+        .await
+    {
+        Ok(child_session_id) => {
+            tracing::debug!(%child_session_id, "persisted child agent transcript");
+        }
+        Err(error) => {
+            tracing::warn!(%error, "failed to persist child agent transcript");
+        }
+    }
+}
+
+/// Engine name resolution shared by [`AgentFactory::build`] and the
+/// `spawn_fn` closure: `profile.agents[agent_type].engine`, else
+/// `profile.default_engine`.
+fn resolve_engine_name<'profile>(
+    profile: &'profile ProfileConfig,
+    agent_type: &str,
+) -> &'profile str {
+    profile
+        .agents
+        .get(agent_type)
+        .and_then(|agent_config| agent_config.engine.as_deref())
+        .unwrap_or(profile.default_engine.as_str())
+}
+
 #[expect(clippy::too_many_arguments)]
 async fn drive_child_to_completion(
     mut child_loop: AgentLoop,
@@ -347,6 +604,7 @@ async fn drive_child_to_completion(
     cancel: CancellationToken,
     finish_tx: mpsc::Sender<FinishResult>,
     forward_ui_tx: mpsc::Sender<UiUpdate>,
+    transcript_target: ChildTranscriptTarget,
 ) {
     let forward_task = tokio::spawn(async move {
         while let Some(update) = child_ui_rx.recv().await {
@@ -355,6 +613,7 @@ async fn drive_child_to_completion(
     });
 
     tracing::debug!(%run_id, tool_call_id = %call_id, "run_child: starting child AgentLoop");
+    let task_for_transcript = task.clone();
     let handle = child_loop.run();
     child_loop
         .send_command(crate::agent::AgentCommand::Prompt(task))
@@ -385,6 +644,7 @@ async fn drive_child_to_completion(
 
     match result {
         Ok(Ok(context)) => {
+            write_child_transcript(&transcript_target, &task_for_transcript, &context).await;
             if child_context_called_finish(&context) {
                 // The `agent_finish` tool already sent its own `FinishResult`.
                 tracing::debug!(%run_id, tool_call_id = %call_id, "run_child: agent_finish already reported result, not sending fallback");
@@ -462,19 +722,20 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::engine::{EngineConfig, EngineImpl, DEFAULT_CONTEXT_LENGTH};
+    use crate::llm::engine::{EngineConfig, EngineImpl};
     use crate::llm::MockProvider;
     use crate::{AgentConfig, AssistantStatus, ProfileConfig};
     use uuid::Uuid;
 
     fn test_engine_config() -> EngineConfig {
         EngineConfig {
-            provider: "mock".to_string(),
+            provider_connection: "mock".to_string(),
             model: "test-model".to_string(),
             temperature: None,
-            context_length: DEFAULT_CONTEXT_LENGTH,
+            context_length: None,
             api_base_url: None,
             api_key: None,
+            reasoning: None,
         }
     }
 
@@ -495,6 +756,7 @@ mod tests {
                     can_spawn: true,
                 },
             )]),
+            ..ProfileConfig::default()
         };
         (factory, profile)
     }
@@ -512,13 +774,174 @@ mod tests {
         assert!(!ui_rx.is_closed(), "UiUpdate receiver should be open");
     }
 
+    /// A profile with two mock engines: `main` and `fast`.
+    fn two_engine_profile() -> ProfileConfig {
+        let engine_config = |model: &str| EngineConfig {
+            provider_connection: "mock".to_string(),
+            model: model.to_string(),
+            temperature: None,
+            context_length: None,
+            api_base_url: None,
+            api_key: None,
+            reasoning: None,
+        };
+        ProfileConfig {
+            default_engine: "main".to_string(),
+            engines: HashMap::from([
+                ("main".to_string(), engine_config("main-model")),
+                ("fast".to_string(), engine_config("fast-model")),
+            ]),
+            agents: HashMap::from([
+                (
+                    "default".to_string(),
+                    AgentConfig {
+                        engine: None,
+                        allowed_tools: None,
+                        timeout_secs: None,
+                        persona: None,
+                        can_spawn: false,
+                    },
+                ),
+                (
+                    "quick".to_string(),
+                    AgentConfig {
+                        engine: Some("fast".to_string()),
+                        allowed_tools: None,
+                        timeout_secs: None,
+                        persona: None,
+                        can_spawn: false,
+                    },
+                ),
+            ]),
+            ..ProfileConfig::default()
+        }
+    }
+
+    #[test]
+    fn from_profile_builds_every_configured_engine_and_honors_agent_overrides() {
+        let profile = two_engine_profile();
+        let factory = AgentFactory::from_profile(&profile).expect("the profile builds");
+
+        let (root, _ui_rx) = factory
+            .create(&profile, "default", Role::Root)
+            .expect("the default agent type resolves to default_engine");
+        assert_eq!(root.engine().config().model, "main-model");
+
+        let (quick, _ui_rx) = factory
+            .create(&profile, "quick", Role::Root)
+            .expect("the overriding agent type resolves to its own engine");
+        assert_eq!(quick.engine().config().model, "fast-model");
+    }
+
+    #[test]
+    fn from_profile_resolves_multiple_connections_using_one_provider_kind() {
+        let profile = ProfileConfig {
+            default_engine: "ollama/local".to_string(),
+            provider_connections: HashMap::from([
+                (
+                    "ollama-local".to_string(),
+                    crate::ProviderConnectionConfig {
+                        provider: "ollama".to_string(),
+                        api_base_url: Some("http://localhost:11434".to_string()),
+                        api_key: None,
+                    },
+                ),
+                (
+                    "ollama-cloud".to_string(),
+                    crate::ProviderConnectionConfig {
+                        provider: "ollama".to_string(),
+                        api_base_url: Some("https://ollama.com".to_string()),
+                        api_key: Some("cloud-secret".to_string()),
+                    },
+                ),
+            ]),
+            engines: HashMap::from([
+                (
+                    "ollama/local".to_string(),
+                    EngineConfig {
+                        provider_connection: "ollama-local".to_string(),
+                        model: "local-model".to_string(),
+                        temperature: None,
+                        context_length: None,
+                        api_base_url: None,
+                        api_key: None,
+                        reasoning: None,
+                    },
+                ),
+                (
+                    "ollama/cloud".to_string(),
+                    EngineConfig {
+                        provider_connection: "ollama-cloud".to_string(),
+                        model: "cloud-model".to_string(),
+                        temperature: None,
+                        context_length: None,
+                        api_base_url: None,
+                        api_key: None,
+                        reasoning: None,
+                    },
+                ),
+            ]),
+            ..ProfileConfig::default()
+        };
+
+        let factory = AgentFactory::from_profile(&profile).expect("the profile builds");
+        let local = factory
+            .engine_config("ollama/local")
+            .expect("the local engine exists");
+        let cloud = factory
+            .engine_config("ollama/cloud")
+            .expect("the cloud engine exists");
+
+        assert_eq!(local.provider_connection, "ollama-local");
+        assert_eq!(
+            local.api_base_url.as_deref(),
+            Some("http://localhost:11434")
+        );
+        assert_eq!(cloud.provider_connection, "ollama-cloud");
+        assert_eq!(cloud.api_base_url.as_deref(), Some("https://ollama.com"));
+    }
+
+    #[test]
+    fn from_profile_rejects_a_default_engine_no_table_defines() {
+        let mut profile = two_engine_profile();
+        profile.default_engine = "missing".to_string();
+        let error = AgentFactory::from_profile(&profile)
+            .err()
+            .expect("an undefined default_engine must fail loudly");
+        assert!(error.to_string().contains("missing"), "{error}");
+    }
+
+    #[test]
+    fn from_profile_requires_an_api_base_url_for_an_http_provider() {
+        let profile = ProfileConfig {
+            default_engine: "remote".to_string(),
+            engines: HashMap::from([(
+                "remote".to_string(),
+                EngineConfig {
+                    provider_connection: "ollama".to_string(),
+                    model: "some-model".to_string(),
+                    temperature: None,
+                    context_length: None,
+                    api_base_url: None,
+                    api_key: None,
+                    reasoning: None,
+                },
+            )]),
+            ..ProfileConfig::default()
+        };
+        let error = AgentFactory::from_profile(&profile)
+            .err()
+            .expect("an http provider without a base url must fail loudly");
+        assert!(error.to_string().contains("api_base_url"), "{error}");
+    }
+
     #[test]
     fn create_returns_err_for_unknown_engine() {
         let (factory, _) = make_factory();
         let profile = ProfileConfig {
             default_engine: "nonexistent".to_string(),
-            compact_engine: None,
             agents: HashMap::new(),
+            ..ProfileConfig::default()
         };
         let result = factory.create(&profile, "default", Role::Root);
         assert!(result.is_err(), "expected Err for unknown engine name");
@@ -569,6 +992,7 @@ mod tests {
                     can_spawn: false,
                 },
             )]),
+            ..ProfileConfig::default()
         };
         let result = factory.create(&profile, "myagent", Role::Root);
         assert!(
@@ -665,6 +1089,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_finished_child_transcript_is_written_to_its_own_session_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let chats_root = temp.path().join("chats");
+        let parent_store = crate::store::Store::create(
+            &chats_root,
+            temp.path(),
+            Uuid::new_v4(),
+            "openrouter",
+            "gpt-4o",
+        )
+        .expect("parent store created");
+        let mut child_context = Context::new();
+        child_context.push_assistant("the child's answer".to_string(), AssistantStatus::Complete);
+
+        write_child_transcript(
+            &ChildTranscriptTarget {
+                parent_store: Some(parent_store.clone()),
+                engine_config: Some(test_engine_config()),
+            },
+            "summarize the module",
+            &child_context,
+        )
+        .await;
+
+        let sessions = crate::store::Store::list_sessions(&chats_root, parent_store.project_key())
+            .expect("sessions listable");
+        let child_summary = sessions
+            .iter()
+            .find(|summary| summary.session_id != parent_store.session_id())
+            .expect("the child transcript has its own session file");
+        assert_eq!(
+            child_summary.title, "summarize the module",
+            "the child session is auto-titled from its task"
+        );
+        assert_eq!(
+            child_summary.parent_session,
+            Some(parent_store.session_id()),
+            "the listed child summary names its parent session"
+        );
+        let transcript = std::fs::read_to_string(&child_summary.path).expect("transcript readable");
+        assert!(
+            transcript.contains("the child's answer"),
+            "the child's messages are persisted: {transcript}"
+        );
+        assert!(
+            transcript.contains(r#""provider_connection":"mock""#)
+                && transcript.contains(r#""model":"test-model""#),
+            "the child's own initial provider/model is recorded: {transcript}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_finished_child_transcript_is_skipped_when_persistence_is_disabled() {
+        let mut child_context = Context::new();
+        child_context.push_assistant("unpersisted".to_string(), AssistantStatus::Complete);
+        write_child_transcript(
+            &ChildTranscriptTarget {
+                parent_store: None,
+                engine_config: Some(test_engine_config()),
+            },
+            "task",
+            &child_context,
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn run_child_sends_unstructured_finish_result_when_finish_never_called() {
         // The child's mock script produces only plain assistant text (no
         // tool call), so the child loop goes idle without ever calling
@@ -689,6 +1180,7 @@ mod tests {
                     can_spawn: false,
                 },
             )]),
+            ..ProfileConfig::default()
         };
 
         let (finish_tx, mut finish_rx) = mpsc::channel::<FinishResult>(1);
@@ -722,6 +1214,7 @@ mod tests {
             &profile,
             &request.agent_type,
             Role::Child(child_role_config),
+            None,
         )
         .expect("child agent should construct successfully");
 
@@ -734,6 +1227,10 @@ mod tests {
             cancel,
             finish_tx,
             forward_ui_tx,
+            ChildTranscriptTarget {
+                parent_store: None,
+                engine_config: None,
+            },
         )
         .await;
 

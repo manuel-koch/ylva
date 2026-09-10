@@ -1,7 +1,7 @@
 # Sample prompts
 
 ```shell
-export OLLAMA_BASE_URL=http://localhost:11434/v1
+export OLLAMA_BASE_URL=http://localhost:11434
 
 make format lint test-coverage build-debug-and-run-with-logs
 ```
@@ -92,14 +92,17 @@ Replace first occurance of "lamp" in `logs/poem.md` by "frog" using the `edit` t
 
 Replace line 2+3 in `logs/poem.md` by one line "hello world" using the `edit` tool!
 
-Replace line 1+2 in `logs/poem.md` by 
+Replace line 1+2 in `logs/poem.md` by
+
 ```text
 lorem ipsum
 this is a nice place to be"
 ```
+
 using the `edit` tool!
 
-Read `logs/poem.md` and ask user which other animal ( free text, no constraint or pre-selected options ) to use to replace existing animal in the poem.
+Read `logs/poem.md` and ask user which other animal ( free text, no constraint
+or pre-selected options ) to use to replace existing animal in the poem.
 
 Read `logs/poem.md` and ask user which other animal to use to replace existing animal
 in the poem.
@@ -114,9 +117,9 @@ Give user 3 random animal options to choose from.
 
 Read project documentation and summarize the goal and main features of the project:
 
-- ./README.md (must read)
-- ./AGENTS.md (must read)
-- ./docs/*.md (pick/read files that seem to related to the topic in question)
+- `./README.md` (must read)
+- `./AGENTS.md` (must read)
+- `./docs/*.md` (pick/read files that seem to related to the topic in question)
 
 Summarize features with brief description in a markdown table.
 Summerize current state of planned implementation progress.
@@ -134,8 +137,8 @@ heading and a sentence paragraph.
 
 ---
 
-Starting from src/main.rs, follow every `mod` declaration, read the referenced 
-module file, follow its `mod` declarations, and so on until you've traced the 
+Starting from src/main.rs, follow every `mod` declaration, read the referenced
+module file, follow its `mod` declarations, and so on until you've traced the
 full module tree. Then report the tree structure.
 
 ---
@@ -166,7 +169,7 @@ Run `tests/e2e/heavy-output.bash`.
 
 Run the following task in a subagent and let it report its findings back:
 
-Analyze the `src/child_agent_manager.rs` functionality
+Analyze the `src/agent/child_agent_manager.rs` functionality
 and write a brief summary of its implementation.
 
 ---
@@ -202,6 +205,7 @@ Run the follow task in a subagent and let it report its findings back as structu
 Analyze the TUI functionality implemented in source code
 and list currently implemented features in a table with brief descriptions.
 Format result in structured JSON:
+
 ```json
 {
   "analysed_files": [

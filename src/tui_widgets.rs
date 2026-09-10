@@ -25,12 +25,17 @@ use ratatui::Frame;
 use ratatui_textarea::TextArea;
 use std::time::Instant;
 
-use crate::highlight::{highlighted_lines_cached, syntect_token_to_span, wrap_highlighted_line};
+use crate::highlight::{
+    active_theme, highlighted_lines_cached, syntect_token_to_span, wrap_highlighted_line,
+};
 
 use crate::agent::AgentMode;
 use crate::build_info::BUILD_INFO;
 use crate::markdown::render_markdown;
-use crate::tui_reducer_state::{BannerDragSelection, ChatEntry, ToolCallState, UserMessageState};
+use crate::tui_reducer_state::{
+    matching_model_indices, model_picker_row_entries, slash_overlay_text_rows, BannerDragSelection,
+    ChatEntry, SlashOverlay, SlashOverlayLayout, ToolCallState, UserMessageState,
+};
 use crate::tui_render_state::TuiState;
 
 // User message border colors — extract into Theme struct in a later phase.
@@ -444,6 +449,14 @@ pub fn draw(
         );
     }
 
+    draw_slash_overlay(
+        frame,
+        input_area,
+        &state.slash_overlay,
+        state.slash_overlay_drag,
+        &mut state.slash_overlay_layout,
+    );
+
     // Store the input rect for mouse click/drag handling in the event loop.
     state.input_area = input_area;
     // Store the clarify banner rect for mouse click-to-choose handling.
@@ -470,6 +483,7 @@ pub fn draw(
             frame,
             footer_row_1,
             footer_row_2,
+            state,
             name,
             state.pending_approval_is_subagent,
             input_is_empty,
@@ -477,43 +491,7 @@ pub fn draw(
             hint,
         )
     } else {
-        let in_child_view = state.child_view.child_view_bubble.is_some();
-        let keybinding_hint = if state.clarify_banner_state.pending_clarify.is_some() {
-            " enter: answer  click choice  ctrl-c/esc: cancel  F1: help"
-        } else if in_child_view && !input_is_empty {
-            // Viewing a subagent's drill-in transcript: `enter: send` is
-            // omitted entirely — the child conversation doesn't accept
-            // input (only one agent loop is driven at a time), and Enter no
-            // longer steers the *root* agent from here either (see
-            // `presenter::handle_key_main`), since that would silently act
-            // on a conversation other than the one currently on screen.
-            " ctrl-c/esc: clear draft  F1: help"
-        } else if in_child_view {
-            // Esc with an empty draft while viewing a subagent's drill-in
-            // transcript navigates back to the root conversation instead of
-            // acting on the root agent's own busy/idle `TuiMode` (see
-            // `presenter::keyboard_main`) — the drilled-into transcript is
-            // read-only, so "cancel"/"quit" here would misleadingly suggest
-            // esc affects the *root* agent's turn.
-            if state.agent_mode != AgentMode::Idle {
-                " esc: back to conversation  ctrl-c: cancel & quit  F1: help"
-            } else {
-                " esc: back to conversation  ctrl-c: quit  F1: help"
-            }
-        } else if state.agent_mode != AgentMode::Idle && !input_is_empty {
-            " enter: send  ctrl-c/esc: clear draft  F1: help"
-        } else if state.agent_mode != AgentMode::Idle {
-            // Busy with an empty draft: esc only stops the turn, ctrl-c stops
-            // the turn *and* quits the TUI. Naming both keys avoids a user
-            // reading "cancel/quit" as ambiguous about which key does what.
-            " enter: send  esc: cancel  ctrl-c: cancel & quit  F1: help"
-        } else if !input_is_empty {
-            // Idle with a draft: esc clears it (no quit); ctrl-c does not
-            // clear it and quits on a second press, same as idle-empty.
-            " enter: send  esc: clear draft  ctrl-c: quit  F1: help"
-        } else {
-            " enter: send  ctrl-c: quit  F1: help"
-        };
+        let keybinding_hint = footer_keybinding_hint(state, input_is_empty);
         draw_normal_footer(
             frame,
             footer_row_1,
@@ -536,6 +514,49 @@ pub fn draw(
     }
 
     button_areas
+}
+
+fn footer_keybinding_hint(state: &TuiState, input_is_empty: bool) -> &'static str {
+    match &state.slash_overlay {
+        SlashOverlay::Suggestions { .. } => {
+            " ↑/↓: select  tab: complete  enter: run  esc: close  F1: help"
+        }
+        SlashOverlay::LoadingModels => " loading models…  esc: close  F1: help",
+        SlashOverlay::ModelPicker { .. } => {
+            " ↑/↓: select  ←/→: effort  enter: switch  esc: cancel  F1: help"
+        }
+        SlashOverlay::Hidden => {
+            let in_child_view = state.child_view.child_view_bubble.is_some();
+            if state.clarify_banner_state.pending_clarify.is_some() {
+                " enter: answer  click choice  ctrl-c/esc: cancel  F1: help"
+            } else if in_child_view && !input_is_empty {
+                // Viewing a subagent's drill-in transcript: `enter: send` is
+                // omitted entirely — the child conversation doesn't accept
+                // input (only one agent loop is driven at a time), and Enter
+                // no longer steers the root agent from here either.
+                " ctrl-c/esc: clear draft  F1: help"
+            } else if in_child_view {
+                // Esc with an empty draft navigates back to the root
+                // conversation instead of acting on the root agent's turn.
+                if state.agent_mode != AgentMode::Idle {
+                    " esc: back to conversation  ctrl-c: cancel & quit  F1: help"
+                } else {
+                    " esc: back to conversation  ctrl-c: quit  F1: help"
+                }
+            } else if state.agent_mode != AgentMode::Idle && !input_is_empty {
+                " enter: send  ctrl-c/esc: clear draft  F1: help"
+            } else if state.agent_mode != AgentMode::Idle {
+                // Busy with an empty draft: Esc stops the turn, while Ctrl-C
+                // stops the turn and quits the TUI.
+                " enter: send  esc: cancel  ctrl-c: cancel & quit  F1: help"
+            } else if !input_is_empty {
+                // Idle with a draft: Esc clears it; Ctrl-C quits on confirm.
+                " enter: send  esc: clear draft  ctrl-c: quit  F1: help"
+            } else {
+                " enter: send  ctrl-c: quit  F1: help"
+            }
+        }
+    }
 }
 
 fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
@@ -651,6 +672,24 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
                         format!("      {}", wrapped)
                     };
                     lines.push(Line::styled(display, Style::default().fg(Color::Red)));
+                }
+            }
+            ChatEntry::Notice { text } => {
+                for (index, source_line) in text.lines().enumerate() {
+                    let wrapped_lines =
+                        textwrap::wrap(source_line, wrap_width.saturating_sub(6).max(1));
+                    if wrapped_lines.is_empty() {
+                        lines.push(Line::default());
+                        continue;
+                    }
+                    for (wrap_index, wrapped) in wrapped_lines.into_iter().enumerate() {
+                        let display = if index == 0 && wrap_index == 0 {
+                            format!("  ⓘ  {}", wrapped)
+                        } else {
+                            format!("     {}", wrapped)
+                        };
+                        lines.push(Line::styled(display, Style::default().fg(Color::Cyan)));
+                    }
                 }
             }
         }
@@ -2013,6 +2052,7 @@ fn append_tool_bubble_lines(
                         let all_highlighted = highlighted_lines_cached(
                             &content_section.content,
                             content_section.file_extension.as_deref(),
+                            active_theme(),
                         );
 
                         for (line_index, highlighted) in all_highlighted.into_iter().enumerate() {
@@ -2270,6 +2310,7 @@ fn append_tool_bubble_lines(
                             let highlighted_lines = highlighted_lines_cached(
                                 &search_result_line.content,
                                 search_section.file_extension.as_deref(),
+                                active_theme(),
                             );
                             let highlighted_line =
                                 highlighted_lines.into_iter().next().unwrap_or_default();
@@ -2388,6 +2429,73 @@ fn parse_hunk_range(s: &str) -> Option<(usize, usize)> {
     }
 }
 
+/// Render a footer row with the status text on the left and the active
+/// provider-connection/model identity aligned to the right.
+fn draw_footer_row(
+    frame: &mut Frame,
+    area: Rect,
+    left_text: &str,
+    left_color: Color,
+    state: &TuiState,
+) {
+    let engine_identity = match (
+        state.engine_display.provider_connection.as_str(),
+        state.engine_display.model.as_str(),
+    ) {
+        (provider, model) if !provider.is_empty() && !model.is_empty() => {
+            format!("{provider}/{model}")
+        }
+        (provider, _) if !provider.is_empty() => provider.to_string(),
+        (_, model) if !model.is_empty() => model.to_string(),
+        _ => String::new(),
+    };
+    if engine_identity.is_empty() || area.width == 0 {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                left_text.to_string(),
+                Style::default().fg(left_color),
+            )),
+            area,
+        );
+        return;
+    }
+
+    let engine_identity = if !engine_identity.is_empty() {
+        match state
+            .engine_display
+            .reasoning_effort
+            .as_deref()
+            .filter(|reasoning_effort| *reasoning_effort != "default")
+        {
+            Some(reasoning_effort) => format!("{engine_identity} ({reasoning_effort})"),
+            None => engine_identity,
+        }
+    } else {
+        engine_identity
+    };
+    let identity_text = format!(" {engine_identity}");
+    let identity_width = (identity_text.chars().count() as u16).min(area.width);
+    let [left_area, identity_area] = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Fill(1), Constraint::Length(identity_width)])
+        .areas(area);
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            left_text.to_string(),
+            Style::default().fg(left_color),
+        )),
+        left_area,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            identity_text,
+            Style::default().fg(Color::DarkGray),
+        ))
+        .alignment(Alignment::Right),
+        identity_area,
+    );
+}
+
 fn draw_normal_footer(
     frame: &mut Frame,
     row_1: Rect,
@@ -2495,10 +2603,7 @@ fn draw_normal_footer(
     } else {
         format!(" {spinner_prefix}{mode_word}")
     };
-    frame.render_widget(
-        Paragraph::new(Line::styled(row_1_text, Style::default().fg(Color::Yellow))),
-        row_1,
-    );
+    draw_footer_row(frame, row_1, &row_1_text, Color::Yellow, state);
     frame.render_widget(
         Paragraph::new(Line::styled(
             keybinding_hint.to_string(),
@@ -2506,6 +2611,166 @@ fn draw_normal_footer(
         )),
         row_2,
     );
+}
+
+/// Draw the slash-command overlay as a floating panel whose bottom edge sits
+/// directly above the input box, so the list grows upward over the
+/// conversation instead of pushing the input around while the user types.
+fn draw_slash_overlay(
+    frame: &mut Frame,
+    input_area: Rect,
+    overlay: &SlashOverlay,
+    drag: Option<BannerDragSelection>,
+    overlay_layout: &mut SlashOverlayLayout,
+) {
+    let previous_first_visible = overlay_layout.first_visible_row;
+    *overlay_layout = SlashOverlayLayout::default();
+    let (title, selected) = match overlay {
+        SlashOverlay::Hidden => return,
+        SlashOverlay::Suggestions { selected, .. } => ("Commands".to_string(), Some(*selected)),
+        SlashOverlay::LoadingModels => {
+            ("Models  (querying provider connections…)".to_string(), None)
+        }
+        SlashOverlay::ModelPicker {
+            choices,
+            filter,
+            selected,
+        } => {
+            let visible_indices = matching_model_indices(choices, filter);
+            if visible_indices.is_empty() {
+                ("Engines & Provider Models".to_string(), None)
+            } else {
+                ("Engines & Provider Models".to_string(), Some(*selected))
+            }
+        }
+    };
+    let entries = slash_overlay_text_rows(overlay);
+    if entries.is_empty() || input_area.width < 4 || input_area.y < 3 {
+        return;
+    }
+
+    // Map each rendered row to the entry it shows, or `None` for the
+    // divider row inserted between the engine-shortcut and provider/model
+    // sections.
+    let rows = match overlay {
+        SlashOverlay::ModelPicker {
+            choices, filter, ..
+        } if !matching_model_indices(choices, filter).is_empty() => {
+            model_picker_row_entries(choices, filter)
+        }
+        _ => (0..entries.len()).map(Some).collect(),
+    };
+
+    // Cap the panel at half the space above the input so a provider with
+    // hundreds of models cannot hide the conversation entirely.
+    let max_content_height = (input_area.y.saturating_sub(1) / 2).max(1);
+    let content_height = (rows.len() as u16).min(max_content_height);
+    let panel_height = content_height + 2;
+    let panel_area = Rect {
+        x: input_area.x,
+        y: input_area.y.saturating_sub(panel_height),
+        width: input_area.width,
+        height: panel_height,
+    };
+
+    // Keep the highlighted row inside the visible window when the list is
+    // longer than the panel, but preserve the current window when the
+    // highlighted row is already visible. This prevents a mouse click from
+    // repositioning the popup unnecessarily.
+    let selected_row = selected.and_then(|selected| match overlay {
+        SlashOverlay::Suggestions { .. } => rows.iter().position(|row| *row == Some(selected)),
+        SlashOverlay::ModelPicker { .. } => rows
+            .iter()
+            .enumerate()
+            .filter_map(|(row_index, row)| row.is_some().then_some(row_index))
+            .nth(selected),
+        _ => None,
+    });
+    let max_first_visible = rows.len().saturating_sub(content_height as usize);
+    let mut first_visible = previous_first_visible.min(max_first_visible);
+    if let Some(selected_row) = selected_row {
+        let visible_end = first_visible.saturating_add(content_height as usize);
+        if selected_row < first_visible {
+            first_visible = selected_row;
+        } else if selected_row >= visible_end {
+            first_visible = selected_row
+                .saturating_sub(content_height.saturating_sub(1) as usize)
+                .min(max_first_visible);
+        }
+    }
+    let content_width = panel_area.width.saturating_sub(3) as usize;
+    let mut lines: Vec<Line<'static>> = rows
+        .iter()
+        .enumerate()
+        .skip(first_visible)
+        .take(content_height as usize)
+        .map(|(row_index, entry_index)| {
+            let Some(_) = entry_index else {
+                return Line::styled(
+                    "─".repeat(content_width),
+                    Style::default().fg(Color::DarkGray),
+                );
+            };
+            let entry = &entries[row_index];
+            let is_selected = selected_row == Some(row_index);
+            let style = if is_selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            let marker = if is_selected { "▸ " } else { "  " };
+            Line::styled(format!("{marker}{entry}"), style)
+        })
+        .collect();
+
+    frame.render_widget(Clear, panel_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(title);
+    let inner_area = block.inner(panel_area);
+    frame.render_widget(block, panel_area);
+
+    let [content_area, scrollbar_area] = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Fill(1), Constraint::Length(1)])
+        .areas(inner_area);
+    overlay_layout.content_area = content_area;
+    overlay_layout.first_visible_row = first_visible;
+    if let Some(selection) = drag {
+        for (visible_index, line) in lines.iter_mut().enumerate() {
+            let screen_row = content_area.y.saturating_add(visible_index as u16);
+            if screen_row < selection.start_row || screen_row > selection.end_row {
+                continue;
+            }
+            let column_start = if screen_row == selection.start_row {
+                selection.start_col.saturating_sub(content_area.x) as usize
+            } else {
+                0
+            };
+            let column_end = if screen_row == selection.end_row {
+                selection.end_col.saturating_sub(content_area.x) as usize
+            } else {
+                usize::MAX
+            };
+            apply_selection_highlight_to_line(line, column_start, column_end, Color::Yellow);
+        }
+    }
+    frame.render_widget(Paragraph::new(lines), content_area);
+
+    if rows.len() > content_height as usize {
+        render_chat_scrollbar(
+            frame,
+            scrollbar_area,
+            first_visible.min(max_first_visible),
+            max_first_visible,
+            rows.len(),
+            content_height as usize,
+        );
+    }
 }
 
 #[expect(clippy::too_many_arguments)]
@@ -2717,6 +2982,7 @@ fn draw_approval_footer(
     frame: &mut Frame,
     row_1: Rect,
     row_2: Rect,
+    state: &TuiState,
     tool_name: &str,
     is_subagent: bool,
     input_is_empty: bool,
@@ -2736,10 +3002,7 @@ fn draw_approval_footer(
     } else {
         format!(" Tool '{tool_name}' requests your approval:")
     };
-    frame.render_widget(
-        Paragraph::new(Line::styled(row_1_text, Style::default().fg(Color::Yellow))),
-        row_1,
-    );
+    draw_footer_row(frame, row_1, &row_1_text, Color::Yellow, state);
 
     // When the user is typing a denial reason, Enter will deny rather than
     // approve — reflect this by disabling the Approve button and adding

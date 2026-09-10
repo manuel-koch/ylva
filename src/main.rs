@@ -15,13 +15,11 @@
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::sync::Arc;
-use std::time::Duration;
 
-use ylva::llm::{MockProvider, OpenAiProvider, Provider};
+use ylva::llm::provider_registry::{ProviderEnv, ProviderRegistry, ProviderSelection};
 use ylva::logging::{init_logging, LogConfig, LogFormat};
 use ylva::{
-    AgentConfig, AgentFactory, App, ConsoleApp, Engine, EngineConfig, EngineImpl, ProfileConfig,
-    TuiApp, DEFAULT_CONTEXT_LENGTH, DEFAULT_TUI_TOOLS,
+    AgentFactory, App, ConsoleApp, Engine, EngineImpl, ProfileConfig, TuiApp, DEFAULT_TUI_TOOLS,
 };
 
 /// Fallback demo prompt used when neither `--prompt` nor piped stdin supplies
@@ -63,43 +61,71 @@ fn main() {
     );
     tracing::info!(app = if use_tui { "tui" } else { "cli" }, "starting");
 
-    let provider: Arc<dyn Provider> = select_provider();
+    let profile_environment = match load_profile_environment_for_args(&args) {
+        Ok(environment) => environment,
+        Err(message) => {
+            eprintln!("error: {message}");
+            std::process::exit(2);
+        }
+    };
+    let mut profile = match load_profile(&args, &profile_environment) {
+        Ok(profile) => profile,
+        Err(message) => {
+            eprintln!("error: {message}");
+            std::process::exit(2);
+        }
+    };
+    ylva::highlight::set_active_theme(profile.theme);
+    let provider_env = match load_provider_env(&profile_environment) {
+        Ok(provider_env) => provider_env,
+        Err(message) => {
+            eprintln!("error: {message}");
+            std::process::exit(2);
+        }
+    };
+    apply_provider_env_to_profile(&mut profile, &provider_env);
+
     let runtime = tokio::runtime::Runtime::new().expect("failed to start Tokio runtime");
 
-    let engine_config = EngineConfig {
-        provider: provider.name().to_string(),
-        model: model_from_env(),
-        temperature: None,
-        context_length: DEFAULT_CONTEXT_LENGTH,
-        api_base_url: None,
-        api_key: None,
-    };
-    let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(provider, engine_config));
-
-    let profile = ProfileConfig {
-        default_engine: "default".to_string(),
-        compact_engine: None,
-        agents: HashMap::from([(
-            "default".to_string(),
-            AgentConfig {
-                engine: None,
-                allowed_tools: None,
-                timeout_secs: None,
-                persona: None,
-                can_spawn: true,
-            },
-        )]),
+    let conversation_id = match conversation_id_from_args(&args) {
+        Ok(conversation_id) => conversation_id,
+        Err(message) => {
+            eprintln!("error: {message}");
+            std::process::exit(2);
+        }
     };
 
     let auto_approve_edit = args.contains(&"--auto-approve-edit".to_string());
     let auto_approve_write = args.contains(&"--auto-approve-write".to_string());
     let auto_approve_spawn = args.contains(&"--auto-approve-spawn".to_string());
 
-    let factory = Arc::new({
-        let mut factory = AgentFactory::new(HashMap::from([(
-            "default".to_string(),
-            engine as Arc<dyn Engine>,
-        )]));
+    let factory_without_store = {
+        // Engines come from the profile's `[engines.*]` tables when it defines
+        // any; a profile that defines none (including the in-code default used
+        // when no config file exists) falls back to the environment-derived
+        // provider set.
+        let mut factory = if profile.engines.is_empty() && profile.provider_connections.is_empty() {
+            let engines = match engines_from_environment(
+                &provider_env,
+                &profile.default_engine,
+                profile.default_model.as_deref(),
+            ) {
+                Ok(engines) => engines,
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    std::process::exit(2);
+                }
+            };
+            AgentFactory::new(engines)
+        } else {
+            match AgentFactory::from_profile(&profile) {
+                Ok(factory) => factory,
+                Err(error) => {
+                    eprintln!("error: {}: {error}", selected_profile_context(&args));
+                    std::process::exit(2);
+                }
+            }
+        };
         if use_tui {
             factory = factory.with_allowed_tools(DEFAULT_TUI_TOOLS);
         }
@@ -113,10 +139,37 @@ fn main() {
             factory = factory.with_auto_approve_spawn();
         }
         factory
-    });
+    };
 
-    let result = runtime.block_on(async {
-        if use_tui {
+    let explicit_profile_name = explicit_profile_name_from_args(&args).map(str::to_string);
+
+    let (result, session_hint) = runtime.block_on(async {
+        // Resolved once, up front, so both a fresh session's `meta` header
+        // and the `model_changed` record below (written on every start,
+        // fresh or resumed) use the exact same provider-connection/model.
+        let initial_engine_config = factory_without_store.engine_config(&profile.default_engine);
+        // The store is opened inside the runtime: it spawns the writer task
+        // that owns the session file.
+        let store = match open_store(conversation_id, initial_engine_config.as_ref()) {
+            Ok(store) => store,
+            Err(message) => {
+                eprintln!("error: {message}");
+                std::process::exit(2);
+            }
+        };
+        // Recorded on every start — fresh session and resume alike — not
+        // only on a fresh session: resuming under a different `--profile` or
+        // an edited config can resolve `profile.default_engine` to a
+        // different provider/model than the session's history last showed,
+        // and that must be visible without re-deriving it from config.
+        if let Some(config) = &initial_engine_config {
+            store.record_model_changed(&config.provider_connection, &config.model);
+        }
+        // Captured before `store` moves into the factory, so it survives to
+        // print the resume hint after the app returns.
+        let session_hint = Some(store.session_id());
+        let factory = Arc::new(factory_without_store.with_store(store));
+        let result = if use_tui {
             // The TUI starts with an empty input box. An explicit `--prompt` (or
             // piped stdin) still auto-sends, but the hardcoded demo prompt is only
             // for the headless path — it must not pre-populate the interactive UI.
@@ -140,8 +193,16 @@ fn main() {
             )
             .run()
             .await
-        }
+        };
+        (result, session_hint)
     });
+    // Printed whether the run succeeded or failed, and before any
+    // `std::process::exit` below, so a user can always resume the session
+    // that was just persisted (the TUI has already restored the terminal by
+    // this point; the hint goes to stderr alongside every other status line).
+    if let Some(session_id) = session_hint {
+        print_resume_hint(session_id, explicit_profile_name.as_deref());
+    }
     match result {
         Ok(exit_code) => {
             if exit_code != 0 {
@@ -153,6 +214,236 @@ fn main() {
             std::process::exit(2);
         }
     }
+}
+
+/// Print the session id and a copy-pasteable command that resumes it.
+fn print_resume_hint(session_id: uuid::Uuid, explicit_profile_name: Option<&str>) {
+    eprintln!("{}", resume_hint_text(session_id, explicit_profile_name));
+}
+
+/// Pure core of [`print_resume_hint`], kept separate so its exact wording is
+/// unit-testable without capturing stderr.
+///
+/// `--profile <name>` is included only when it was given explicitly on this
+/// run: the implicit default profile needs no flag to resume with the same
+/// configuration, and echoing a name the user never typed would be
+/// misleading.
+fn resume_hint_text(session_id: uuid::Uuid, explicit_profile_name: Option<&str>) -> String {
+    let mut hint =
+        format!("\nSession: {session_id}\nResume with: ylva --conversation-id {session_id}");
+    if let Some(profile_name) = explicit_profile_name {
+        hint.push_str(&format!(" --profile {profile_name}"));
+    }
+    hint
+}
+
+/// Load the runtime profile, or exit-worthy error text.
+///
+/// An explicitly named profile (`--profile <name>`) with no config file is a
+/// hard error: the user asked for that specific profile, so silently
+/// substituting the in-code default would hide a real typo/misconfiguration.
+/// Only the implicit default profile (no `--profile` flag at all) tolerates a
+/// missing file, so Ylva still runs out of the box without ever writing one.
+fn load_profile(
+    args: &[String],
+    environment: &std::collections::HashMap<String, String>,
+) -> Result<ProfileConfig, String> {
+    match explicit_profile_name_from_args(args) {
+        Some(profile_name) => {
+            let profiles_root = ylva::default_profiles_root().map_err(|error| error.to_string())?;
+            ProfileConfig::load_with_environment(&profiles_root, profile_name, environment)
+                .map_err(|error| error.to_string())
+        }
+        None => {
+            let profiles_root = match ylva::default_profiles_root() {
+                Ok(profiles_root) => profiles_root,
+                Err(error) => {
+                    tracing::warn!(%error, "no home directory; using the default profile");
+                    return Ok(ProfileConfig::default());
+                }
+            };
+            ProfileConfig::load_or_default_with_environment(
+                &profiles_root,
+                ylva::DEFAULT_PROFILE_NAME,
+                environment,
+            )
+            .map_err(|error| error.to_string())
+        }
+    }
+}
+
+/// The profile name explicitly requested via `--profile <name>`, if any. This
+/// is what distinguishes a hard error (the user asked for a specific,
+/// missing profile) from the tolerant implicit-default fallback in
+/// [`load_profile`]: with no `--profile` flag, `None` is returned, not the
+/// resolved default profile name.
+fn explicit_profile_name_from_args(args: &[String]) -> Option<&str> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--profile" {
+            if let Some(value) = iter.next() {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+/// Describe the profile file whose configuration is being materialized.
+///
+/// `ProfileConfig` intentionally remains independent of its on-disk source,
+/// so startup adds this context when a later profile-construction step fails.
+fn selected_profile_context(args: &[String]) -> String {
+    let profile_name = explicit_profile_name_from_args(args).unwrap_or(ylva::DEFAULT_PROFILE_NAME);
+    match ylva::default_profiles_root() {
+        Ok(profiles_root) => {
+            let config_path = ylva::profile_config_path(&profiles_root, profile_name);
+            format!("profile '{profile_name}' at {}", config_path.display())
+        }
+        Err(error) => format!("profile '{profile_name}' (config path unavailable: {error})"),
+    }
+}
+
+/// Load the merged environment belonging to the selected profile.
+///
+/// Missing `.env` files are normal; malformed or unusable files are startup
+/// errors. Process environment values take precedence over profile-file
+/// values.
+fn load_profile_environment_for_args(
+    args: &[String],
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let profile_name = explicit_profile_name_from_args(args).unwrap_or(ylva::DEFAULT_PROFILE_NAME);
+    let profile_env_path = match ylva::default_profiles_root() {
+        Ok(root) => Some(ylva::profile_env_path(&root, profile_name)),
+        Err(error) if explicit_profile_name_from_args(args).is_some() => {
+            return Err(format!("cannot resolve profile environment: {error}"));
+        }
+        Err(error) => {
+            tracing::warn!(%error, "no home directory; using process environment");
+            None
+        }
+    };
+    ylva::load_profile_environment(profile_env_path.as_deref())
+        .map_err(|error| format!("cannot load profile environment: {error}"))
+}
+
+fn load_provider_env(
+    environment: &std::collections::HashMap<String, String>,
+) -> Result<ProviderEnv, String> {
+    Ok(ProviderEnv::from_values(environment))
+}
+
+/// Supply missing API keys for explicitly configured connections and legacy
+/// flat engines from the selected profile environment. Explicit values in
+/// `config.toml` remain authoritative.
+fn apply_provider_env_to_profile(profile: &mut ProfileConfig, provider_env: &ProviderEnv) {
+    for provider_config in profile.provider_connections.values_mut() {
+        provider_env.apply_missing_api_key_to_provider(provider_config);
+    }
+    for engine_config in profile.engines.values_mut() {
+        if !profile
+            .provider_connections
+            .contains_key(&engine_config.provider_connection)
+        {
+            provider_env.apply_missing_api_key(engine_config);
+        }
+    }
+}
+
+/// Build one engine for every provider configured by the environment.
+///
+/// The first provider retains the profile's default engine name and therefore
+/// remains the initial active engine. Additional providers use their provider
+/// names as engine names so the runtime router can switch to them.
+fn engines_from_environment(
+    environment: &ProviderEnv,
+    default_engine_name: &str,
+    default_model: Option<&str>,
+) -> anyhow::Result<HashMap<String, Arc<dyn Engine>>> {
+    let selections = ProviderRegistry::all_from_environment(environment);
+    let mut engines = HashMap::new();
+    for (index, selection) in selections.into_iter().enumerate() {
+        let provider_connection = selection.provider_connection().to_string();
+        let mut engine_name = if index == 0 {
+            default_engine_name.to_string()
+        } else {
+            provider_connection.clone()
+        };
+        if engines.contains_key(&engine_name) {
+            engine_name = format!("{provider_connection}-{index}");
+        }
+
+        log_provider_selection(&selection);
+        let engine_config = selection.engine_config(default_model);
+        let provider = ProviderRegistry::provider_from_environment(selection)?;
+        engines.insert(
+            engine_name,
+            Arc::new(EngineImpl::new(provider, engine_config)) as Arc<dyn Engine>,
+        );
+    }
+    Ok(engines)
+}
+
+/// Open the session file this run appends to.
+///
+/// With `--conversation-id <uuid>`, the existing session is re-attached for
+/// append; an unknown id is a hard error, never a silent fresh-session
+/// fallback. Without the flag, a brand-new session is started — Ylva never
+/// auto-resumes and never shows a startup picker.
+///
+/// Fails when the Ylva home cannot be resolved or the session file cannot be
+/// created or resumed. Persistence is mandatory for runtime sessions; there
+/// is no transient, non-persisted mode.
+fn open_store(
+    conversation_id: Option<uuid::Uuid>,
+    initial_engine_config: Option<&ylva::EngineConfig>,
+) -> Result<ylva::Store, String> {
+    let chats_root =
+        ylva::default_chats_root().map_err(|error| format!("cannot resolve Ylva home: {error}"))?;
+    let cwd = std::env::current_dir().map_err(|error| format!("cannot resolve cwd: {error}"))?;
+    let store = match conversation_id {
+        Some(conversation_id) => ylva::Store::resume(&chats_root, &cwd, conversation_id)
+            .map_err(|error| error.to_string())?,
+        None => {
+            let (provider_connection, model) = initial_engine_config
+                .map(|config| (config.provider_connection.as_str(), config.model.as_str()))
+                .unwrap_or(("", ""));
+            ylva::Store::create(
+                &chats_root,
+                &cwd,
+                uuid::Uuid::new_v4(),
+                provider_connection,
+                model,
+            )
+            .map_err(|error| error.to_string())?
+        }
+    };
+    tracing::info!(
+        session_id = %store.session_id(),
+        path = %store.path().display(),
+        resumed = conversation_id.is_some(),
+        "session store opened"
+    );
+    Ok(store)
+}
+
+/// Extract and validate `--conversation-id <uuid>`.
+///
+/// A missing value or an unparseable uuid is a hard error: silently starting
+/// a fresh session would hide the user's intent to continue a specific one.
+fn conversation_id_from_args(args: &[String]) -> Result<Option<uuid::Uuid>, String> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--conversation-id" {
+            let value = iter
+                .next()
+                .ok_or_else(|| "--conversation-id requires a session uuid".to_string())?;
+            return uuid::Uuid::parse_str(value)
+                .map(Some)
+                .map_err(|error| format!("invalid --conversation-id '{value}': {error}"));
+        }
+    }
+    Ok(None)
 }
 
 /// The explicitly supplied initial user turn, if any: `--prompt <text>`, else
@@ -278,186 +569,31 @@ fn prompt_from_stdin() -> Option<String> {
     Some(buffer)
 }
 
-/// Default Ollama model when `OLLAMA_MODEL` is unset.
-const DEFAULT_OLLAMA_MODEL: &str = "gemma4:e4b-mlx";
-/// Default OpenRouter model when `OPENROUTER_MODEL` is unset.
-const DEFAULT_OPENROUTER_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
-/// Default OpenRouter base URL when `OPENROUTER_BASE_URL` is unset. Unlike
-/// Ollama (which runs on an arbitrary user-chosen host), OpenRouter is a
-/// single hosted service reachable at this fixed endpoint, so it doesn't need
-/// to be exported explicitly.
-const DEFAULT_OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
-
-/// Snapshot of the env vars that [`resolve_provider_from_env`] reads. Kept as
-/// a plain struct (rather than reading `std::env::var` inline) so the
-/// selection logic is a pure function that unit tests can exercise directly,
-/// without mutating real process env vars (which are process-global and
-/// unsafe to touch from parallel tests).
-#[derive(Default, Clone, Debug, PartialEq, Eq)]
-struct ProviderEnv {
-    ollama_base_url: Option<String>,
-    ollama_model: Option<String>,
-    ollama_api_key: Option<String>,
-    openrouter_base_url: Option<String>,
-    openrouter_model: Option<String>,
-    openrouter_api_key: Option<String>,
-}
-
-impl ProviderEnv {
-    /// Read the real process environment.
-    fn from_process_env() -> Self {
-        Self {
-            ollama_base_url: std::env::var("OLLAMA_BASE_URL").ok(),
-            ollama_model: std::env::var("OLLAMA_MODEL").ok(),
-            ollama_api_key: std::env::var("OLLAMA_API_KEY").ok(),
-            openrouter_base_url: std::env::var("OPENROUTER_BASE_URL").ok(),
-            openrouter_model: std::env::var("OPENROUTER_MODEL").ok(),
-            openrouter_api_key: std::env::var("OPENROUTER_API_KEY").ok(),
-        }
-    }
-}
-
-/// The backend selected by [`resolve_provider_from_env`], carrying every
-/// value needed to either construct a provider or log/reproduce the
-/// selection, without re-reading env vars.
-#[derive(Debug, PartialEq, Eq)]
-enum ProviderSelection {
-    Ollama {
-        base_url: String,
-        model: String,
-        api_key: Option<String>,
-    },
-    OpenRouter {
-        base_url: String,
-        model: String,
-        api_key: Option<String>,
-    },
-    Mock,
-}
-
-/// Pick the backend for the given env snapshot, with **Ollama-first**
-/// precedence: `OLLAMA_BASE_URL` (no universal default; a non-empty value
-/// selects Ollama), then any OpenRouter var (`OPENROUTER_BASE_URL`/`_MODEL`/
-/// `_API_KEY` — OpenRouter has one well-known endpoint, so setting any of
-/// these opts in and `OPENROUTER_BASE_URL` defaults to it), else `Mock`.
-fn resolve_provider_from_env(env: &ProviderEnv) -> ProviderSelection {
-    if let Some(base_url) = env.ollama_base_url.as_ref().filter(|url| !url.is_empty()) {
-        let model = env
-            .ollama_model
-            .clone()
-            .unwrap_or_else(|| DEFAULT_OLLAMA_MODEL.to_string());
-        return ProviderSelection::Ollama {
-            base_url: base_url.clone(),
-            model,
-            api_key: env.ollama_api_key.clone(),
-        };
-    }
-    let openrouter_requested = [
-        &env.openrouter_base_url,
-        &env.openrouter_model,
-        &env.openrouter_api_key,
-    ]
-    .into_iter()
-    .any(|value| value.as_ref().is_some_and(|value| !value.is_empty()));
-    if openrouter_requested {
-        let base_url = env
-            .openrouter_base_url
-            .clone()
-            .filter(|url| !url.is_empty())
-            .unwrap_or_else(|| DEFAULT_OPENROUTER_BASE_URL.to_string());
-        let model = env
-            .openrouter_model
-            .clone()
-            .unwrap_or_else(|| DEFAULT_OPENROUTER_MODEL.to_string());
-        return ProviderSelection::OpenRouter {
-            base_url,
-            model,
-            api_key: env.openrouter_api_key.clone(),
-        };
-    }
-    ProviderSelection::Mock
-}
-
-/// Return the model name that matches the active provider's env vars.
-///
-/// TODO: this duplicates provider-specific knowledge that should live on the
-/// provider itself (see `docs/ideas/resolving-provider.md`). Once a
-/// `ProviderRegistry` exists, replace both `select_provider` and
-/// `model_from_env` with a single `ProviderRegistry::resolve_provider` call
-/// that returns a fully-configured provider (including model).
-fn model_from_env() -> String {
-    match resolve_provider_from_env(&ProviderEnv::from_process_env()) {
-        ProviderSelection::Ollama { model, .. } => model,
-        ProviderSelection::OpenRouter { model, .. } => model,
-        ProviderSelection::Mock => String::new(),
-    }
-}
-
-/// Select the Phase 2 demo provider from environment variables with
-/// **Ollama-first** precedence. Falls back to the `MockProvider` when no
-/// backend is configured (still headless; no CLI/config parsing in Phase 2).
-///
-/// The chosen wiring is reported as a `debug!` log event (visible when the
-/// user enables file logging at `--log-level debug`), so a misconfigured
-/// backend (wrong `base_url`, model, or auth) is traceable at startup instead
-/// of surfacing only as a confusing downstream error. Only the *presence* of an
-/// API key is logged — `"set"`/`"unset"` — never the key value itself.
-fn select_provider() -> Arc<dyn Provider> {
-    match resolve_provider_from_env(&ProviderEnv::from_process_env()) {
-        ProviderSelection::Ollama {
+/// Log provider wiring without ever logging secret values.
+fn log_provider_selection(selection: &ProviderSelection) {
+    match selection {
+        ProviderSelection::OpenAiCompatible {
+            provider_connection,
             base_url,
             model,
             api_key,
         } => {
             tracing::debug!(
-                provider = "ollama",
+                provider_connection,
                 base_url,
                 model,
                 api_key = if api_key.is_some() { "set" } else { "unset" },
                 "provider selected"
             );
-            Arc::new(OpenAiProvider::new(
-                "ollama".to_string(),
-                base_url,
-                model,
-                api_key,
-            ))
-        }
-        ProviderSelection::OpenRouter {
-            base_url,
-            model,
-            api_key,
-        } => {
-            tracing::debug!(
-                provider = "openrouter",
-                base_url,
-                model,
-                api_key = if api_key.is_some() { "set" } else { "unset" },
-                "provider selected"
-            );
-            Arc::new(OpenAiProvider::new(
-                "openrouter".to_string(),
-                base_url,
-                model,
-                api_key,
-            ))
         }
         ProviderSelection::Mock => {
             tracing::debug!(
-                provider = "mock",
+                provider_connection = "mock",
                 base_url = "-",
                 model = "-",
                 api_key = "unset",
                 "provider selected"
             );
-            Arc::new(MockProvider::new(
-                vec![
-                    "The sky looks blue ".to_string(),
-                    "because air molecules scatter ".to_string(),
-                    "blue light more than other colors.".to_string(),
-                ],
-                Duration::from_millis(60),
-            ))
         }
     }
 }
@@ -467,118 +603,114 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_provider_from_env_falls_back_to_mock_when_nothing_set() {
-        let env = ProviderEnv::default();
-        assert_eq!(resolve_provider_from_env(&env), ProviderSelection::Mock);
+    fn explicit_profile_name_from_args_is_none_without_a_profile_flag() {
+        let args = vec![
+            "--no-tui".to_string(),
+            "--prompt".to_string(),
+            "hi".to_string(),
+        ];
+        assert_eq!(explicit_profile_name_from_args(&args), None);
     }
 
     #[test]
-    fn resolve_provider_from_env_selects_ollama_when_base_url_set() {
-        let env = ProviderEnv {
+    fn explicit_profile_name_from_args_returns_the_flags_value() {
+        let args = vec!["--profile".to_string(), "work".to_string()];
+        assert_eq!(explicit_profile_name_from_args(&args), Some("work"));
+    }
+
+    #[test]
+    fn explicit_profile_name_from_args_is_none_when_the_flag_has_no_value() {
+        let args = vec!["--profile".to_string()];
+        assert_eq!(explicit_profile_name_from_args(&args), None);
+    }
+
+    #[test]
+    fn profile_environment_fills_only_missing_explicit_engine_api_keys() {
+        let mut profile = ProfileConfig::default();
+        profile.engines.insert(
+            "local".to_string(),
+            ylva::EngineConfig {
+                provider_connection: "ollama".to_string(),
+                model: "local".to_string(),
+                temperature: None,
+                context_length: None,
+                api_base_url: Some("http://localhost:11434".to_string()),
+                api_key: None,
+                reasoning: None,
+            },
+        );
+        profile.engines.insert(
+            "hosted".to_string(),
+            ylva::EngineConfig {
+                provider_connection: "openrouter".to_string(),
+                model: "hosted/model".to_string(),
+                temperature: None,
+                context_length: None,
+                api_base_url: Some("https://openrouter.ai".to_string()),
+                api_key: Some("explicit-key".to_string()),
+                reasoning: None,
+            },
+        );
+        let provider_env = ProviderEnv {
+            ollama_api_key: Some("from-dotenv".to_string()),
+            openrouter_api_key: Some("ignored".to_string()),
+            ..Default::default()
+        };
+
+        apply_provider_env_to_profile(&mut profile, &provider_env);
+
+        assert_eq!(
+            profile.engines["local"].api_key.as_deref(),
+            Some("from-dotenv")
+        );
+        assert_eq!(
+            profile.engines["hosted"].api_key.as_deref(),
+            Some("explicit-key")
+        );
+    }
+
+    #[test]
+    fn environment_builds_one_engine_for_each_configured_provider() {
+        let provider_env = ProviderEnv {
             ollama_base_url: Some("http://localhost:11434".to_string()),
+            ollama_model: Some("local-model".to_string()),
+            openrouter_api_key: Some("test-key".to_string()),
+            openrouter_model: Some("hosted/model".to_string()),
             ..Default::default()
         };
+
+        let engines =
+            engines_from_environment(&provider_env, "default", None).expect("engines build");
+
+        assert_eq!(engines.len(), 2);
+        assert_eq!(engines["default"].config().provider_connection, "ollama");
+        assert_eq!(engines["default"].config().model, "local-model");
         assert_eq!(
-            resolve_provider_from_env(&env),
-            ProviderSelection::Ollama {
-                base_url: "http://localhost:11434".to_string(),
-                model: DEFAULT_OLLAMA_MODEL.to_string(),
-                api_key: None,
-            }
+            engines["openrouter"].config().provider_connection,
+            "openrouter"
+        );
+        assert_eq!(engines["openrouter"].config().model, "hosted/model");
+    }
+
+    #[test]
+    fn resume_hint_text_without_a_profile_names_only_the_conversation_id() {
+        let session_id = uuid::Uuid::nil();
+        let hint = resume_hint_text(session_id, None);
+        assert_eq!(
+            hint,
+            format!("\nSession: {session_id}\nResume with: ylva --conversation-id {session_id}")
         );
     }
 
     #[test]
-    fn resolve_provider_from_env_ignores_ollama_when_base_url_empty() {
-        let env = ProviderEnv {
-            ollama_base_url: Some(String::new()),
-            openrouter_api_key: Some("sk-or-key".to_string()),
-            ..Default::default()
-        };
+    fn resume_hint_text_with_an_explicit_profile_includes_it() {
+        let session_id = uuid::Uuid::nil();
+        let hint = resume_hint_text(session_id, Some("work"));
         assert_eq!(
-            resolve_provider_from_env(&env),
-            ProviderSelection::OpenRouter {
-                base_url: DEFAULT_OPENROUTER_BASE_URL.to_string(),
-                model: DEFAULT_OPENROUTER_MODEL.to_string(),
-                api_key: Some("sk-or-key".to_string()),
-            }
-        );
-    }
-
-    #[test]
-    fn resolve_provider_from_env_selects_openrouter_from_api_key_alone() {
-        let env = ProviderEnv {
-            openrouter_api_key: Some("sk-or-key".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(
-            resolve_provider_from_env(&env),
-            ProviderSelection::OpenRouter {
-                base_url: DEFAULT_OPENROUTER_BASE_URL.to_string(),
-                model: DEFAULT_OPENROUTER_MODEL.to_string(),
-                api_key: Some("sk-or-key".to_string()),
-            }
-        );
-    }
-
-    #[test]
-    fn resolve_provider_from_env_selects_openrouter_from_model_alone() {
-        let env = ProviderEnv {
-            openrouter_model: Some("anthropic/claude-3.5-haiku".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(
-            resolve_provider_from_env(&env),
-            ProviderSelection::OpenRouter {
-                base_url: DEFAULT_OPENROUTER_BASE_URL.to_string(),
-                model: "anthropic/claude-3.5-haiku".to_string(),
-                api_key: None,
-            }
-        );
-    }
-
-    #[test]
-    fn resolve_provider_from_env_honors_explicit_openrouter_base_url() {
-        let env = ProviderEnv {
-            openrouter_base_url: Some("https://custom.example/v1".to_string()),
-            openrouter_api_key: Some("sk-or-key".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(
-            resolve_provider_from_env(&env),
-            ProviderSelection::OpenRouter {
-                base_url: "https://custom.example/v1".to_string(),
-                model: DEFAULT_OPENROUTER_MODEL.to_string(),
-                api_key: Some("sk-or-key".to_string()),
-            }
-        );
-    }
-
-    #[test]
-    fn resolve_provider_from_env_ignores_openrouter_empty_values() {
-        let env = ProviderEnv {
-            openrouter_base_url: Some(String::new()),
-            openrouter_model: Some(String::new()),
-            openrouter_api_key: Some(String::new()),
-            ..Default::default()
-        };
-        assert_eq!(resolve_provider_from_env(&env), ProviderSelection::Mock);
-    }
-
-    #[test]
-    fn resolve_provider_from_env_prefers_ollama_over_openrouter() {
-        let env = ProviderEnv {
-            ollama_base_url: Some("http://localhost:11434".to_string()),
-            openrouter_api_key: Some("sk-or-key".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(
-            resolve_provider_from_env(&env),
-            ProviderSelection::Ollama {
-                base_url: "http://localhost:11434".to_string(),
-                model: DEFAULT_OLLAMA_MODEL.to_string(),
-                api_key: None,
-            }
+            hint,
+            format!(
+                "\nSession: {session_id}\nResume with: ylva --conversation-id {session_id} --profile work"
+            )
         );
     }
 
@@ -623,6 +755,38 @@ mod tests {
         assert!(bad_level.is_err());
         let bad_format = logging_from_args(&["--log-format".to_string(), "xml".to_string()]);
         assert!(bad_format.is_err());
+    }
+
+    #[test]
+    fn conversation_id_is_absent_without_the_flag() {
+        assert_eq!(
+            conversation_id_from_args(&["--no-tui".to_string()]).expect("no flag is not an error"),
+            None
+        );
+    }
+
+    #[test]
+    fn conversation_id_is_parsed_from_the_flag() {
+        let session_id = uuid::Uuid::new_v4();
+        let parsed =
+            conversation_id_from_args(&["--conversation-id".to_string(), session_id.to_string()])
+                .expect("a valid uuid parses");
+        assert_eq!(parsed, Some(session_id));
+    }
+
+    #[test]
+    fn conversation_id_without_a_value_is_an_error() {
+        let error = conversation_id_from_args(&["--conversation-id".to_string()])
+            .expect_err("a missing value must not be silently ignored");
+        assert!(error.contains("requires a session uuid"), "{error}");
+    }
+
+    #[test]
+    fn conversation_id_that_is_not_a_uuid_is_an_error() {
+        let error =
+            conversation_id_from_args(&["--conversation-id".to_string(), "nonsense".to_string()])
+                .expect_err("an unparseable id must not start a fresh session");
+        assert!(error.contains("invalid --conversation-id"), "{error}");
     }
 
     #[test]

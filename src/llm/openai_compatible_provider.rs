@@ -20,44 +20,79 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{DeltaChunk, Message, StreamEvent};
+use crate::llm::engine::{EngineRuntimeConfig, EngineRuntimeConfigHandle, DEFAULT_CONTEXT_LENGTH};
 use crate::llm::{serialize_messages, Provider, ToolSchema};
 
-/// A streaming provider targeting the OpenAI chat-completions spec, serving
-/// both OpenRouter and local Ollama via constructor configuration.
+type RequestBodyCustomizer = fn(&mut serde_json::Value, &EngineRuntimeConfig);
+
+fn no_request_body_customization(
+    _request_body: &mut serde_json::Value,
+    _runtime_config: &EngineRuntimeConfig,
+) {
+}
+
+/// Shared streaming transport targeting the OpenAI chat-completions spec.
 ///
 /// `base_url` is a **generic provider concept** interpreted solely by this
 /// concrete implementation: it includes the backend origin and version prefix
-/// (e.g. Ollama `http://localhost:11434/v1`, OpenRouter
-/// `https://openrouter.ai/api/v1`) and the provider appends `/chat/completions`
-/// internally. The `Provider` trait carries no `base_url` and no path
-/// semantics — this leaves room for future provider-side queries (model
-/// listing) under the same base URL.
+/// used by the OpenAI-compatible chat endpoint (for example,
+/// `https://openrouter.ai/api/v1`). The provider appends
+/// `/chat/completions` internally. Backend-specific providers may wrap this
+/// transport when their model catalog lives outside that path, as Ollama's
+/// native `/api` endpoints do.
 ///
 /// Pre-stream failures (`429`/`5xx`/connect) are retried with bounded
 /// exponential backoff honoring `Retry-After`; once streaming begins no retry
 /// occurs and mid-stream errors surface as `StreamEvent::Error`.
 #[derive(Debug)]
-pub struct OpenAiProvider {
+pub struct OpenAiCompatibleProvider {
     name: String,
     base_url: String,
-    model: String,
+    /// Behind one lock so model and future request-level settings are
+    /// snapshotted atomically for each request.
+    runtime_config: EngineRuntimeConfigHandle,
     api_key: Option<String>,
     client: reqwest::Client,
+    request_body_customizer: RequestBodyCustomizer,
 }
 
-impl OpenAiProvider {
+impl OpenAiCompatibleProvider {
     /// Create a provider for an OpenAI-compatible backend.
     ///
-    /// `name` is the short identifier for this provider instance (e.g. `"ollama"`, `"openrouter"`).
-    /// `base_url` must include the backend origin and version prefix.
+    /// `name` is the short identifier for this provider instance (for example,
+    /// an Ollama connection name or `"openrouter"`).
+    /// `base_url` must include the backend origin and version prefix used by
+    /// the OpenAI-compatible chat endpoint.
     /// `api_key` is `None` for backends that need no auth (local Ollama).
     pub fn new(name: String, base_url: String, model: String, api_key: Option<String>) -> Self {
-        OpenAiProvider {
+        Self::new_with_request_body_customizer(
             name,
             base_url,
             model,
             api_key,
+            no_request_body_customization,
+        )
+    }
+
+    pub(crate) fn new_with_request_body_customizer(
+        name: String,
+        base_url: String,
+        model: String,
+        api_key: Option<String>,
+        request_body_customizer: RequestBodyCustomizer,
+    ) -> Self {
+        OpenAiCompatibleProvider {
+            name,
+            base_url,
+            runtime_config: std::sync::Arc::new(std::sync::RwLock::new(EngineRuntimeConfig {
+                model,
+                temperature: None,
+                context_length: DEFAULT_CONTEXT_LENGTH,
+                reasoning_effort: None,
+            })),
+            api_key,
             client: reqwest::Client::new(),
+            request_body_customizer,
         }
     }
 
@@ -67,15 +102,72 @@ impl OpenAiProvider {
     fn completions_url(&self) -> String {
         format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
     }
+
+    /// Compose the model-listing endpoint from `base_url`, the same way
+    /// [`Self::completions_url`] composes the chat endpoint.
+    fn models_url(&self) -> String {
+        format!("{}/models", self.base_url.trim_end_matches('/'))
+    }
+
+    /// Return a clone of the HTTP client for a provider-specific request.
+    pub(crate) fn http_client(&self) -> reqwest::Client {
+        self.client.clone()
+    }
+
+    /// Return the API key for a provider-specific request.
+    pub(crate) fn api_key(&self) -> Option<&str> {
+        self.api_key.as_deref()
+    }
+
+    /// Snapshot all mutable request-level settings before starting a request.
+    fn current_runtime_config(&self) -> anyhow::Result<EngineRuntimeConfig> {
+        self.runtime_config
+            .read()
+            .map(|config| config.clone())
+            .map_err(|_| anyhow::anyhow!("the engine runtime configuration lock is poisoned"))
+    }
+
+    pub(crate) fn set_runtime_reasoning_effort(
+        &self,
+        reasoning_effort: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let mut runtime_config = self
+            .runtime_config
+            .write()
+            .map_err(|_| anyhow::anyhow!("the engine runtime configuration lock is poisoned"))?;
+        runtime_config.reasoning_effort = reasoning_effort.map(String::from);
+        Ok(())
+    }
 }
 
-impl Provider for OpenAiProvider {
+impl Provider for OpenAiCompatibleProvider {
     fn name(&self) -> &str {
         self.name.as_str()
     }
 
+    fn runtime_config_handle(&self) -> Option<EngineRuntimeConfigHandle> {
+        Some(std::sync::Arc::clone(&self.runtime_config))
+    }
+
     fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<crate::llm::ModelInfo>>> {
-        Box::pin(async { anyhow::bail!("list_models not yet implemented") })
+        let models_url = self.models_url();
+        let client = self.client.clone();
+        let api_key = self.api_key.clone();
+        Box::pin(async move {
+            let body =
+                super::http::get_json(&client, &models_url, api_key.as_deref(), "model listing")
+                    .await?;
+            Ok(parse_model_list(&body))
+        })
+    }
+
+    fn set_model(&self, model: &str) -> anyhow::Result<()> {
+        let mut runtime_config = self
+            .runtime_config
+            .write()
+            .map_err(|_| anyhow::anyhow!("the engine runtime configuration lock is poisoned"))?;
+        runtime_config.model = model.to_string();
+        Ok(())
     }
 
     fn chat<'a>(
@@ -84,9 +176,14 @@ impl Provider for OpenAiProvider {
         tools: Vec<ToolSchema>,
         cancel: CancellationToken,
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
-        let model = self.model.clone();
+        let runtime_config = match self.current_runtime_config() {
+            Ok(runtime_config) => runtime_config,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        let model = runtime_config.model.clone();
         let api_key = self.api_key.clone();
         let client = self.client.clone();
+        let request_body_customizer = self.request_body_customizer;
         let tools: Vec<serde_json::Value> = if tools.is_empty() {
             Vec::new()
         } else {
@@ -98,14 +195,19 @@ impl Provider for OpenAiProvider {
                 "messages": serialize_messages(&messages),
                 "stream": true,
             });
+            if let Some(temperature) = runtime_config.temperature {
+                request_body["temperature"] = serde_json::json!(temperature);
+            }
+            request_body_customizer(&mut request_body, &runtime_config);
             if !tools.is_empty() {
                 request_body["tools"] = serde_json::Value::Array(tools);
                 request_body["tool_choice"] = serde_json::json!("auto");
             }
             let completions_url = self.completions_url();
             let mut headers = HeaderMap::new();
-            if let Some(key) = &api_key {
-                headers.insert(AUTHORIZATION, format!("Bearer {key}").parse()?);
+            if let Some(value) = &api_key {
+                let authorization = format!("{} {}", "Bearer", value);
+                headers.insert(AUTHORIZATION, authorization.parse()?);
             }
             // Only the URL and model are logged — never the request headers
             // (which carry the `Authorization`/API-key value) or the body.
@@ -312,6 +414,51 @@ pub(crate) fn parse_sse_payload(data: &str) -> Option<StreamEvent> {
     None
 }
 
+/// Translate an OpenAI-compatible `GET /models` body into [`ModelInfo`]s.
+///
+/// OpenRouter carries `context_length` in each `data` entry.
+/// Entries without an `id` are the only ones dropped — every other field is
+/// best-effort so an unknown OpenAI-compatible backend still yields a usable
+/// list.
+fn parse_model_list(body: &serde_json::Value) -> Vec<crate::llm::ModelInfo> {
+    let entries = match body.get("data").and_then(serde_json::Value::as_array) {
+        Some(entries) => entries,
+        None => return Vec::new(),
+    };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let id = entry.get("id").and_then(serde_json::Value::as_str)?;
+            Some(crate::llm::ModelInfo {
+                id: id.to_string(),
+                context_length: entry
+                    .get("context_length")
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|length| length as usize),
+                reasoning_efforts: parse_reasoning_efforts(entry),
+            })
+        })
+        .collect()
+}
+
+fn parse_reasoning_efforts(entry: &serde_json::Value) -> Option<Vec<String>> {
+    let reasoning = entry.get("reasoning")?;
+    Some(
+        reasoning
+            .get("supported_efforts")
+            .and_then(serde_json::Value::as_array)
+            .map(|efforts| {
+                efforts
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .filter(|effort| !effort.is_empty())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,6 +467,61 @@ mod tests {
         ($name:literal) => {
             include_str!(concat!("../../tests/fixtures/", $name))
         };
+    }
+
+    #[test]
+    fn parse_model_list_preserves_context_length() {
+        let body = serde_json::json!({
+            "data": [
+                {
+                    "id": "openai/gpt-oss-120b",
+                    "name": "OpenAI: GPT OSS 120B",
+                    "context_length": 131072
+                },
+                {"name": "missing-id"}
+            ]
+        });
+
+        assert_eq!(
+            parse_model_list(&body),
+            vec![crate::llm::ModelInfo {
+                id: "openai/gpt-oss-120b".to_string(),
+                context_length: Some(131072),
+                reasoning_efforts: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_model_list_extracts_reasoning_effort_scenarios() {
+        let body = serde_json::json!({
+            "data": [
+                {
+                    "id": "provider/with-efforts",
+                    "reasoning": {
+                        "supported_efforts": ["low", "high"]
+                    }
+                },
+                {
+                    "id": "provider/without-selector",
+                    "reasoning": {}
+                },
+                {"id": "provider/without-reasoning"}
+            ]
+        });
+
+        let models = parse_model_list(&body);
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.reasoning_efforts.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                Some(vec!["low".to_string(), "high".to_string()]),
+                Some(Vec::new()),
+                None,
+            ]
+        );
     }
 
     #[test]

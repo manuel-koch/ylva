@@ -11,11 +11,11 @@ endif
 # without a full terminal emulator harness.
 COVERAGE_THRESHOLD := 80
 
-.PHONY: lint format \
+.PHONY: lint format format-rust format-markdown \
 	create-logs-dir \
 	build-debug build-debug-and-run \
 	build-release build-release-and-run build-debug-and-run-with-logs \
-	test test-coverage test-coverage-missing \
+	test test-e2e-persistence test-coverage test-coverage-missing \
 	install tag-version \
 	outdated-dependencies upgrade-dependencies
 
@@ -28,9 +28,16 @@ lint:
  	    $(if $(filter true,$(strip $(VERBOSE))),,--quiet) \
 	    --all-targets --all-features
 
-# Run cargo fmt to enforce consistent formatting
-format:
+# Run rumdl to enforce consistent formatting of Markdown files
+format-markdown:
+	rumdl fmt --quiet $(REPO_ROOT)
+
+# Run cargo fmt to enforce consistent formatting of Rust files
+format-rust:
 	cargo fmt
+
+# Enforce consistent formatting
+format: format-rust format-markdown
 
 logs:
 	mkdir logs
@@ -69,6 +76,15 @@ install:
 # Run all unit and integration tests
 test:
 	cargo test $(if $(filter true,$(strip $(VERBOSE))),,--quiet)
+
+# Run e2e persistence tests
+test-e2e-persistence:
+	. $(REPO_ROOT)/tests/e2e/ollama-local/.envrc && \
+	    cargo test --test store_persistence_e2e persistence_e2e_ollama_local -- --ignored --no-capture
+	. $(REPO_ROOT)/tests/e2e/ollama-cloud/.envrc && \
+	    cargo test --test store_persistence_e2e persistence_e2e_ollama_cloud -- --ignored --no-capture
+	. $(REPO_ROOT)/tests/e2e/openrouter/.envrc && \
+	    cargo test --test store_persistence_e2e persistence_e2e_openrouter -- --ignored --no-capture
 
 # Run all tests and print a per-file coverage summary.
 # Fails if total line coverage of testable files drops below $(COVERAGE_THRESHOLD).

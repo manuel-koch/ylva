@@ -16,10 +16,8 @@ pub mod agent;
 pub mod agent_factory;
 pub mod app;
 pub mod build_info;
-pub mod child_agent_manager;
 pub mod cli_driver;
 pub mod config;
-pub mod engine;
 pub mod events;
 pub mod highlight;
 pub mod llm;
@@ -28,16 +26,20 @@ pub mod markdown;
 pub mod presenter;
 pub mod render;
 pub mod sandbox;
+pub mod slash_command;
+pub mod store;
 pub mod tui_driver;
 pub mod tui_reducer_state;
 pub mod tui_render_state;
 pub mod tui_widgets;
+pub mod ylva_home;
 
 #[cfg(test)]
 mod test_support;
 
 pub use logging::{init_logging, LogConfig, LogFormat, LogGuards};
 
+pub use agent::child_agent_manager;
 pub use agent::tools::{
     default_registry, Tool, ToolCall, ToolCallResult, ToolError, ToolRegistry, ToolRegistryConfig,
     DEFAULT_CLI_TOOLS, DEFAULT_TUI_TOOLS,
@@ -53,15 +55,37 @@ pub use app::App;
 pub use build_info::{BuildInfo, BUILD_INFO};
 pub use child_agent_manager::{ChildAgentManager, FinishResult, SpawnRequest, SpawnStatus};
 pub use cli_driver::{run_cli, run_cli_to, ConsoleApp};
-pub use config::{AgentConfig, ProfileConfig};
-pub use engine::{Engine, EngineConfig, EngineImpl, DEFAULT_CONTEXT_LENGTH};
+pub use config::{
+    default_profiles_root, load_profile_environment, profile_config_path, profile_env_path,
+    AgentConfig, ConfigError, ProfileConfig, ProviderConfig, ProviderConnectionConfig,
+    DEFAULT_PROFILE_NAME, PROFILE_CONFIG_FILE_NAME, PROFILE_ENV_FILE_NAME,
+};
 pub use events::AppAction;
-pub use llm::{MockEvent, MockProvider, ModelInfo, OpenAiProvider, Provider, ToolSchema};
+pub use highlight::{active_theme, set_active_theme, ThemeName};
+pub use llm::engine;
+pub use llm::engine::{
+    Engine, EngineConfig, EngineDisplayInfo, EngineImpl, EngineRouter, EngineRuntimeConfig,
+    EngineRuntimeConfigHandle, ProviderModelOption, DEFAULT_CONTEXT_LENGTH,
+};
+pub use llm::{
+    MockEvent, MockProvider, ModelInfo, OllamaProvider, OpenAiCompatibleProvider,
+    OpenRouterProvider, Provider, ToolSchema,
+};
 pub use presenter::{TextareaContext, TuiEvent};
 pub use sandbox::{ApprovalCheck, Sandbox, SandboxContext};
+pub use slash_command::{
+    parse_slash_command, parse_slash_command_invocation, slash_command_suggestions, SlashCommand,
+    SlashCommandInfo, SlashCommandInvocation, SLASH_COMMANDS,
+};
+pub use store::{
+    default_chats_root, project_key, session_path, SessionMeta, SessionSummary, Store, StoreError,
+    StoreEvent,
+};
 pub use tui_driver::TuiApp;
 pub use tui_reducer_state::{
     AppLayout, AppState, ChatArea, ChatEntry, ChatSelection, DomainEvent, Effect, Focus,
-    HelpPopupLayout, InputAreaLayout, InputEvent, ToolCallState, TuiMode, UserMessageState,
+    HelpPopupLayout, InputAreaLayout, InputEvent, SlashOverlayLayout, ToolCallState, TuiMode,
+    UserMessageState,
 };
 pub use tui_render_state::TuiState;
+pub use ylva_home::{ylva_root, YLVA_HOME_ENVIRONMENT_VARIABLE};
