@@ -80,7 +80,7 @@ pub(crate) async fn post_with_retry(
     request_dump_path: Option<&Path>,
 ) -> anyhow::Result<reqwest::Response> {
     if let Some(dump_path) = request_dump_path {
-        dump_request_body(body, dump_path);
+        dump_request(url, headers, body, dump_path);
     }
 
     let mut retries = 0usize;
@@ -163,27 +163,104 @@ pub(crate) async fn post_with_retry(
     }
 }
 
-/// Dump `body` as pretty-printed JSON to `file_path`.
+/// Header names whose value is redacted before ever reaching the request
+/// dump — credentials/session tokens must never land in a debug artifact on
+/// disk. Matched case-insensitively against the header name.
+const SENSITIVE_HEADER_NAMES: &[&str] = &[
+    "authorization",
+    "proxy-authorization",
+    "x-api-key",
+    "api-key",
+    "cookie",
+    "set-cookie",
+];
+
+/// Placeholder written in place of any [`is_sensitive_header_name`] header's
+/// value in a request dump.
+const REDACTED_HEADER_VALUE: &str = "<REDACTED>";
+
+/// `true` when `name` is a known credential-carrying header (see
+/// [`SENSITIVE_HEADER_NAMES`]).
+fn is_sensitive_header_name(name: &str) -> bool {
+    SENSITIVE_HEADER_NAMES
+        .iter()
+        .any(|sensitive| name.eq_ignore_ascii_case(sensitive))
+}
+
+/// Render `headers` as a JSON object for the request dump, replacing the
+/// value of any [`is_sensitive_header_name`] header with
+/// [`REDACTED_HEADER_VALUE`] so an `Authorization`/API-key value is never
+/// written to disk. Multiple values for the same header name are joined with
+/// `", "`, matching how the wire form of a repeated header is usually
+/// rendered.
+fn redacted_headers_json(headers: &reqwest::header::HeaderMap) -> serde_json::Value {
+    let mut redacted = serde_json::Map::new();
+    for name in headers.keys() {
+        let value = if is_sensitive_header_name(name.as_str()) {
+            REDACTED_HEADER_VALUE.to_string()
+        } else {
+            headers
+                .get_all(name)
+                .iter()
+                .map(|value| value.to_str().unwrap_or("<non-utf8>"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        redacted.insert(name.as_str().to_string(), serde_json::Value::String(value));
+    }
+    serde_json::Value::Object(redacted)
+}
+
+/// Dump an outgoing request to `file_path` as two JSON Lines: a metadata line
+/// (URL scheme/host/path plus headers, with any [`is_sensitive_header_name`]
+/// value redacted) followed by the request body, compact (not
+/// pretty-printed, so it stays on its own single line).
 ///
 /// The parent directory of `file_path` is created if it does not yet exist.
 /// Errors are logged at `warn` level and silently ignored so a dump failure
 /// never breaks a live request.
-pub(crate) fn dump_request_body(body: &serde_json::Value, file_path: &Path) {
+pub(crate) fn dump_request(
+    url: &str,
+    headers: &reqwest::header::HeaderMap,
+    body: &serde_json::Value,
+    file_path: &Path,
+) {
     if let Err(error) = std::fs::create_dir_all(file_path.parent().unwrap_or(Path::new("."))) {
         tracing::warn!(path = %file_path.display(), error = %error, "failed to create request dump dir");
         return;
     }
 
-    match serde_json::to_string_pretty(body) {
-        Ok(json_text) => {
-            if let Err(error) = std::fs::write(file_path, json_text) {
-                tracing::warn!(path = %file_path.display(), error = %error, "failed to write request dump file");
-            } else {
-                tracing::debug!(path = %file_path.display(), "dumped request body");
-            }
-        }
+    let parsed_url = match reqwest::Url::parse(url) {
+        Ok(parsed) => parsed,
         Err(error) => {
-            tracing::warn!(error = %error, "failed to serialize request body for dump");
+            tracing::warn!(url, error = %error, "failed to parse request URL for dump");
+            return;
+        }
+    };
+    let meta = serde_json::json!({
+        "scheme": parsed_url.scheme(),
+        "host": parsed_url.host_str().unwrap_or(""),
+        "path": parsed_url.path(),
+        "headers": redacted_headers_json(headers),
+    });
+
+    let (meta_line, body_line) = match (serde_json::to_string(&meta), serde_json::to_string(body)) {
+        (Ok(meta_line), Ok(body_line)) => (meta_line, body_line),
+        (meta_result, body_result) => {
+            if let Err(error) = meta_result {
+                tracing::warn!(error = %error, "failed to serialize request metadata for dump");
+            }
+            if let Err(error) = body_result {
+                tracing::warn!(error = %error, "failed to serialize request body for dump");
+            }
+            return;
+        }
+    };
+
+    match std::fs::write(file_path, format!("{meta_line}\n{body_line}\n")) {
+        Ok(()) => tracing::debug!(path = %file_path.display(), "dumped request"),
+        Err(error) => {
+            tracing::warn!(path = %file_path.display(), error = %error, "failed to write request dump file");
         }
     }
 }
@@ -219,16 +296,17 @@ pub(crate) fn append_response_dump_line(line: &str, file_path: &Path) {
     }
 }
 
-/// Derive the dump file path for the outgoing request body from the
-/// `YLVA_REQUEST_DUMP_PATH` environment variable, embedding `timestamp` (see
-/// [`current_dump_timestamp`]) so it can be paired with a response dump built
-/// from the same `timestamp` via [`build_response_dump_path`].
+/// Derive the dump file path for the outgoing request (metadata + body, as
+/// two JSON Lines — see [`dump_request`]) from the `YLVA_REQUEST_DUMP_PATH`
+/// environment variable, embedding `timestamp` (see [`current_dump_timestamp`])
+/// so it can be paired with a response dump built from the same `timestamp`
+/// via [`build_response_dump_path`].
 ///
 /// Returns `None` when the envvar is unset, empty, or whitespace-only.
 /// Delegates path construction to [`build_dump_path_from_template`].
 pub(crate) fn build_request_dump_path(timestamp: &str) -> Option<PathBuf> {
     let template = std::env::var("YLVA_REQUEST_DUMP_PATH").ok()?;
-    build_dump_path_from_template(&template, timestamp, "request", "json")
+    build_dump_path_from_template(&template, timestamp, "request", "jsonl")
 }
 
 /// Derive the dump file path for the raw SSE transcript of a streamed
@@ -555,26 +633,74 @@ mod tests {
     }
 
     #[test]
-    fn dump_request_body_writes_pretty_json_to_given_path() {
+    fn dump_request_writes_metadata_then_body_as_two_json_lines() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
-        let file_path = temp_dir.path().join("request.json");
+        let file_path = temp_dir.path().join("request.jsonl");
         let body = serde_json::json!({"model": "test", "messages": []});
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-custom", "value".parse().expect("header value"));
 
-        dump_request_body(&body, &file_path);
+        dump_request(
+            "https://example.com/v1/chat/completions?stream=true",
+            &headers,
+            &body,
+            &file_path,
+        );
 
-        let written: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&file_path).expect("read file"))
-                .expect("valid json");
-        assert_eq!(written, body);
+        let contents = std::fs::read_to_string(&file_path).expect("read file");
+        let mut lines = contents.lines();
+        let meta: serde_json::Value =
+            serde_json::from_str(lines.next().expect("meta line")).expect("valid json");
+        let written_body: serde_json::Value =
+            serde_json::from_str(lines.next().expect("body line")).expect("valid json");
+        assert!(lines.next().is_none(), "exactly two lines expected");
+
+        assert_eq!(meta["scheme"], "https");
+        assert_eq!(meta["host"], "example.com");
+        assert_eq!(meta["path"], "/v1/chat/completions");
+        assert_eq!(meta["headers"]["x-custom"], "value");
+        assert_eq!(written_body, body);
     }
 
     #[test]
-    fn dump_request_body_creates_parent_dir_when_missing() {
+    fn dump_request_redacts_sensitive_header_values() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
-        let file_path = temp_dir.path().join("nested/dir/request.json");
+        let file_path = temp_dir.path().join("request.jsonl");
+        let body = serde_json::json!({});
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            "Bearer super-secret-key".parse().expect("header value"),
+        );
+        headers.insert("x-api-key", "another-secret".parse().expect("header value"));
+        headers.insert("x-custom", "not-secret".parse().expect("header value"));
+
+        dump_request("https://example.com/v1/chat", &headers, &body, &file_path);
+
+        let contents = std::fs::read_to_string(&file_path).expect("read file");
+        let meta: serde_json::Value =
+            serde_json::from_str(contents.lines().next().expect("meta line")).expect("valid json");
+        assert_eq!(meta["headers"]["authorization"], REDACTED_HEADER_VALUE);
+        assert_eq!(meta["headers"]["x-api-key"], REDACTED_HEADER_VALUE);
+        assert_eq!(meta["headers"]["x-custom"], "not-secret");
+        assert!(
+            !contents.contains("super-secret-key") && !contents.contains("another-secret"),
+            "no secret value may appear anywhere in the dump: {contents:?}"
+        );
+    }
+
+    #[test]
+    fn dump_request_creates_parent_dir_when_missing() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let file_path = temp_dir.path().join("nested/dir/request.jsonl");
         let body = serde_json::json!({"nested": true});
 
-        dump_request_body(&body, &file_path);
+        dump_request(
+            "https://example.com/v1/chat",
+            &reqwest::header::HeaderMap::new(),
+            &body,
+            &file_path,
+        );
 
         assert!(file_path.exists(), "file should have been created");
     }
