@@ -364,6 +364,12 @@ user-facing on-disk contract; this section is the contributor view.
   (`tracing::info!`) — durable persistence of child outcomes is deferred to
   a later phase. Unlike a natural finish, this never re-prompts the root
   (the user explicitly asked to stop).
+- `AgentCommand::Stop` emits `UiUpdate::AgentIdle` when it reaches idle
+  synchronously (including idle, clarify-pending, and approval-pending
+  states). The TUI driver keeps `TuiMode::Aborting` through a pending
+  tool's `ToolError` and routes that idle boundary through
+  `domain_aborting`, so Ctrl-C can quit and Esc can return to idle without
+  depending on a stream-cancellation event.
 - A child's own tool calls go through the exact same `ToolPending` →
   approve/deny pause as the root's — a child is never auto-denied just for
   being a child. Each `AgentLoop` stamps its own `run_id` (`None` for the
@@ -389,9 +395,9 @@ user-facing on-disk contract; this section is the contributor view.
   text }` (merged text and thinking into one buffer — no separate thinking
   bubble for the child), and `UiUpdate::ChildAgentDone { run_id, status,
   result }` marks that child's conversation as finished. The child's own
-  `StreamStarted`/`StreamDone`/`StreamCancelled` lifecycle events are
-  swallowed, not forwarded — they would otherwise corrupt the parent's own
-  `TuiMode`.
+  `StreamStarted`/`StreamDone`/`StreamCancelled`/`AgentIdle` lifecycle
+  events are swallowed, not forwarded — they would otherwise corrupt the
+  parent's own `TuiMode`.
 - `AppState` tracks `active_view: ConversationView` (`Root` or `Child {
   run_id, agent_type, task, label }`, default `Root`), `child_conversations:
   HashMap<Uuid, ChildConversation>` keyed by `run_id` (each entry holds

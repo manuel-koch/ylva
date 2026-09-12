@@ -153,6 +153,9 @@ pub enum UiUpdate {
     StreamStarted,
     StreamDone,
     StreamCancelled,
+    /// The agent is idle after a command or terminal event that did not
+    /// produce a stream or tool-specific completion update.
+    AgentIdle,
     Error {
         message: String,
         /// `None` when this error originates in the root's own loop;
@@ -1633,7 +1636,8 @@ impl AgentLoop {
                             }
                             UiUpdate::StreamStarted
                             | UiUpdate::StreamDone
-                            | UiUpdate::StreamCancelled => {
+                            | UiUpdate::StreamCancelled
+                            | UiUpdate::AgentIdle => {
                                 // Intentionally swallowed — see comment above.
                             }
                             other => {
@@ -2122,6 +2126,9 @@ impl AgentLoop {
                                     }
                                     pending_tools.clear();
                                     mode = AgentMode::Idle;
+                                }
+                                if mode == AgentMode::Idle {
+                                    let _ = ui_tx.send(UiUpdate::AgentIdle).await;
                                 }
                             }
                             AgentCommand::ClearContext => {

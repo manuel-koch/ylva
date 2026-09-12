@@ -583,6 +583,7 @@ pub async fn run_cli_to(
                     );
                 }
             }
+            Some(UiUpdate::AgentIdle) => {}
             Some(UiUpdate::Error { message, run_id }) => {
                 match run_id {
                     None => {

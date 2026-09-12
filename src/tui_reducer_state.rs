@@ -2756,7 +2756,8 @@ impl AppState {
     }
 
     /// Update the tool bubble for `id` to the Error state. If `id` was the
-    /// tool awaiting approval, clear the approval focus and reset mode to Idle.
+    /// tool awaiting approval, clear the approval focus and reset mode to Idle
+    /// unless an abort is waiting for the agent's explicit idle boundary.
     pub fn apply_tool_error(
         &mut self,
         id: Uuid,
@@ -2804,7 +2805,9 @@ impl AppState {
                 message: error.clone(),
             });
         }
-        if matches!(self.focus, Focus::ToolApproval { tool_id, .. } if tool_id == id) {
+        if matches!(self.focus, Focus::ToolApproval { tool_id, .. } if tool_id == id)
+            && !matches!(self.mode, TuiMode::Aborting)
+        {
             self.focus = Focus::MainInput;
             self.mode = TuiMode::Idle;
         }

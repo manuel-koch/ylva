@@ -277,6 +277,65 @@ async fn tool_call_pauses_for_approval_then_reprompts_after_result() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn stopping_pending_tool_emits_idle_after_tool_error() {
+    let registry = Arc::new(default_registry(
+        make_sandbox(),
+        ToolRegistryConfig::default(),
+    ));
+    let interval = Duration::from_millis(5);
+    let provider = MockProvider::with_script(
+        vec![call(
+            "write",
+            0,
+            serde_json::json!({ "path": "out.txt", "content": "hello tool" }),
+        )],
+        interval,
+    );
+    let (mut agent, mut ui_rx) = AgentLoop::new(
+        Arc::new(EngineImpl::new(
+            Arc::new(provider),
+            common::test_engine_config(),
+        )),
+        Arc::clone(&registry),
+    );
+
+    agent
+        .send_command(AgentCommand::Prompt("write it".into()))
+        .await;
+    let handle = agent.run();
+    let pending = collect_until_advancing(&mut ui_rx, interval, is_tool_pending).await;
+    let pending_id = match pending.last() {
+        Some(UiUpdate::ToolPending { id, .. }) => *id,
+        other => panic!("expected a pending tool update, got {other:?}"),
+    };
+
+    agent
+        .send_command(AgentCommand::Stop {
+            reason: "aborted by user".into(),
+        })
+        .await;
+    let stopped = collect_until_advancing(&mut ui_rx, interval, |update| {
+        matches!(update, UiUpdate::AgentIdle)
+    })
+    .await;
+    let error_index = stopped
+        .iter()
+        .position(|update| matches!(update, UiUpdate::ToolError { id, .. } if *id == pending_id))
+        .expect("stopping a pending tool must emit its terminal error");
+    let idle_index = stopped
+        .iter()
+        .position(|update| matches!(update, UiUpdate::AgentIdle))
+        .expect("stopping a pending tool must emit an idle boundary");
+    assert!(error_index < idle_index);
+
+    drop(agent);
+    handle
+        .await
+        .expect("loop task should finish")
+        .expect("context");
+}
+
+#[tokio::test(start_paused = true)]
 async fn two_tool_calls_drain_serially_with_single_reprompt() {
     let dir = TempDir::new().expect("tempdir");
     let a = scratch_file(&dir, "a.txt", "AAAA");

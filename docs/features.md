@@ -333,7 +333,9 @@ module structure (model/presenter/view/driver split).
   the first press shows a per-key hint (`Esc`: cancel only; `Ctrl+C`: cancel
   & quit) and a second press within 2 seconds confirms that key's action;
   while idle, `Ctrl+C` double-press quits and `Esc` immediately clears the
-  input. OS SIGINT stops immediately (no double-press).
+  input. After an interrupt, the TUI waits for the agent's terminal idle
+  update before applying the selected quit-or-stay-open behavior. OS SIGINT
+  stops immediately (no double-press).
 - **Help popup (`F1`):** toggles a centered popup with the full keybinding
   table and build-info values.
 - **Smart auto-scroll:** the chat follows the newest output by default; the

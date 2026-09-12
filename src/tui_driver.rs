@@ -168,7 +168,7 @@ fn app_action_to_tui_event(action: AppAction) -> Option<TuiEvent> {
 }
 
 /// Map a [`UiUpdate`] to a [`DomainEvent`] for the Presenter.
-/// Returns `None` for `ToolError` which is handled directly by the Driver.
+/// Returns `None` for tool updates handled directly by the Driver.
 fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
     match update {
         UiUpdate::StreamStarted => Some(DomainEvent::StreamStarted),
@@ -176,6 +176,7 @@ fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
         UiUpdate::AppendThinking(text) => Some(DomainEvent::StreamThinkingChunk(text.clone())),
         UiUpdate::StreamDone => Some(DomainEvent::StreamDone),
         UiUpdate::StreamCancelled => Some(DomainEvent::StreamCancelled),
+        UiUpdate::AgentIdle => Some(DomainEvent::AgentIdle),
         UiUpdate::SteerQueued { run_id } => Some(DomainEvent::SteerQueued { run_id: *run_id }),
         UiUpdate::SteerApplied { run_id } => Some(DomainEvent::SteerApplied { run_id: *run_id }),
         UiUpdate::ToolPending {
@@ -1546,6 +1547,7 @@ fn install_sigint_relay(action_tx: mpsc::Sender<AppAction>) -> anyhow::Result<()
 mod tests {
     use super::*;
     use crate::llm::engine::DEFAULT_CONTEXT_LENGTH;
+    use crate::tui_reducer_state::{ChatEntry, ToolCallState};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tokio::sync::mpsc;
     use uuid::Uuid;
@@ -1840,6 +1842,128 @@ mod tests {
             matches!(state.mode, TuiMode::Aborting),
             "mode should be Aborting after stop"
         );
+    }
+
+    #[tokio::test]
+    async fn aborting_tool_error_waits_for_idle_before_quitting() {
+        let (mut state, mut textarea, cmd_tx, _cmd_rx) = setup();
+        let tool_id = Uuid::new_v4();
+        state.mode = TuiMode::Aborting;
+        state.aborting_exit = true;
+        state.focus = Focus::ToolApproval {
+            tool_id,
+            tool_name: "bash".to_string(),
+        };
+        state.chat_entries.push(ChatEntry::ToolBubble {
+            id: tool_id,
+            name: "bash".to_string(),
+            state: Box::new(ToolCallState::Pending {
+                arguments: serde_json::json!({"command": "echo test"}),
+                content_sections: vec![],
+                title_arguments: vec![],
+            }),
+            collapsed: false,
+        });
+
+        let textarea_context = textarea_ctx_from(&textarea);
+        let outcome = process_one_update(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            &textarea_context,
+            &UiUpdate::ToolError {
+                id: tool_id,
+                error: "aborted by user".to_string(),
+                duration: Duration::ZERO,
+                content_sections: vec![],
+                run_id: None,
+            },
+            &mut MouseDrag::default(),
+            &mut NoopClipboard,
+            &mut PendingRunIds::default(),
+        )
+        .await;
+
+        assert_eq!(outcome, ActionOutcome::Continue);
+        assert_eq!(
+            state.mode,
+            TuiMode::Aborting,
+            "the terminal tool error must not bypass the aborting state"
+        );
+
+        let idle_outcome = process_one_update(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            &textarea_context,
+            &UiUpdate::AgentIdle,
+            &mut MouseDrag::default(),
+            &mut NoopClipboard,
+            &mut PendingRunIds::default(),
+        )
+        .await;
+        assert_eq!(
+            idle_outcome,
+            ActionOutcome::Quit,
+            "the following idle event should complete a Ctrl-C abort"
+        );
+    }
+
+    #[tokio::test]
+    async fn aborting_tool_error_then_idle_keeps_tui_open_for_escape() {
+        let (mut state, mut textarea, cmd_tx, _cmd_rx) = setup();
+        let tool_id = Uuid::new_v4();
+        state.mode = TuiMode::Aborting;
+        state.focus = Focus::ToolApproval {
+            tool_id,
+            tool_name: "bash".to_string(),
+        };
+        state.chat_entries.push(ChatEntry::ToolBubble {
+            id: tool_id,
+            name: "bash".to_string(),
+            state: Box::new(ToolCallState::Pending {
+                arguments: serde_json::json!({"command": "echo test"}),
+                content_sections: vec![],
+                title_arguments: vec![],
+            }),
+            collapsed: false,
+        });
+
+        let textarea_context = textarea_ctx_from(&textarea);
+        let tool_error_outcome = process_one_update(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            &textarea_context,
+            &UiUpdate::ToolError {
+                id: tool_id,
+                error: "aborted by user".to_string(),
+                duration: Duration::ZERO,
+                content_sections: vec![],
+                run_id: None,
+            },
+            &mut MouseDrag::default(),
+            &mut NoopClipboard,
+            &mut PendingRunIds::default(),
+        )
+        .await;
+        assert_eq!(tool_error_outcome, ActionOutcome::Continue);
+
+        let idle_outcome = process_one_update(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            &textarea_context,
+            &UiUpdate::AgentIdle,
+            &mut MouseDrag::default(),
+            &mut NoopClipboard,
+            &mut PendingRunIds::default(),
+        )
+        .await;
+        assert_eq!(idle_outcome, ActionOutcome::Continue);
+        assert_eq!(state.mode, TuiMode::Idle);
+        assert_eq!(state.focus, Focus::MainInput);
+        assert!(!state.aborting_exit);
     }
 
     #[tokio::test]

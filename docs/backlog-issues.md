@@ -69,7 +69,7 @@
       provider/model when they are spawned; explicit child engine overrides
       retain their own named engine selection.
 
-- [ ] A bash tool call seems to be stuck, I had to abort it with ctrl-c.
+- [x] A bash tool call seems to be stuck, I had to abort it with ctrl-c.
       ```text
       ▶ Bash grep -r "def read" .
       Tool 'bash' was denied by the user. Here is their reason for the denial:
@@ -79,13 +79,18 @@
       But afterwards the TUI was stuck in "Aborting..." and any further ctrl-c
       was not causing it to quit and I had to forcefully kill the running process.
       See tests/e2e/custom/logs/tui_20260912171549.log
+      Resolved: stop completion now emits an explicit idle update even when a
+      pending tool only produces a terminal error. The TUI keeps its Aborting
+      state until that update, so Ctrl-C exits and Esc returns to an
+      interactive idle TUI.
 
 - [ ] Some LLM still seem to trigger bash tool calls with "wait" statements after
       spawning multiple subagents to wait for their results.
       Shortly afterwards LLM replied (thought):
       ```text
       The harness sent an intermediate subagent completion (write.rs analysis) not visible to me as
-      content, just a notice. I should not acknowledge it or produce progress updates. I'll wait for the
+      content, just a notice. I should not acknowledge it or produce progress
+      updates. I'll wait for the
       final continuation when all outstanding children complete. I shouldn't poll or sleep. I'll just
       stop here and wait for the harness continuation. Actually, I already sent a bash sleep which was
       unnecessary — but it's done. Now I should simply not do anything until the harness provides the
