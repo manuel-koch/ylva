@@ -1056,6 +1056,10 @@ fn append_logo(lines: &mut Vec<Line>) {
     lines.push(Line::default());
 }
 
+fn terminal_display_width(text: &str) -> usize {
+    Line::from(text).width()
+}
+
 /// Common visual scaffolding shared by every chat "bubble" renderer
 /// (assistant, user, streaming-assistant, and tool bubbles): a colored
 /// left-border bar, a 2-space margin between the bar and content, and a
@@ -1079,11 +1083,11 @@ impl BubbleStyle {
     }
 
     /// Fills the cells after the last content span so the row's background
-    /// reaches the right edge of the content area. `text_len` is the
-    /// visible character count already written after the bar(1) +
-    /// margin(2) = 3 prefix columns.
-    fn trailing_pad(&self, text_len: usize) -> Span<'static> {
-        let used = 3 + text_len;
+    /// reaches the right edge of the content area. `content_width` is the
+    /// terminal-cell width already written after the bar(1) + margin(2) =
+    /// 3 prefix columns.
+    fn trailing_pad(&self, content_width: usize) -> Span<'static> {
+        let used = 3 + content_width;
         let pad = self.row_width.saturating_sub(used + 1);
         Span::styled(" ".repeat(pad + 1), self.row_bg)
     }
@@ -1112,10 +1116,10 @@ impl BubbleStyle {
     /// how `render_markdown`'s inline styling (bold, inline code, ...) is
     /// preserved through `patch_style`, since `row_bg` only sets `bg`.
     fn content_line(&self, spans: Vec<Span<'static>>, extra_style: Style) -> Line<'static> {
-        let line_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let content_width = Line::from(spans.clone()).width();
         let mut full_spans = vec![self.bar.clone(), self.margin.clone()];
         full_spans.extend(spans);
-        full_spans.push(self.trailing_pad(line_len));
+        full_spans.push(self.trailing_pad(content_width));
         Line::from(full_spans)
             .patch_style(extra_style)
             .patch_style(self.row_bg)
@@ -1441,7 +1445,8 @@ fn append_result_section_lines(
     wrap_width: usize,
 ) {
     let prefix = title.map(|t| format!("{t} ")).unwrap_or_default();
-    let content_wrap_width = wrap_width.saturating_sub(2 + prefix.chars().count()).max(1);
+    let prefix_width = terminal_display_width(&prefix);
+    let content_wrap_width = wrap_width.saturating_sub(2 + prefix_width).max(1);
     // DIM is patched onto each span individually (not passed as `content_line`'s
     // line-level `extra_style`) so it only dims the label/content text —
     // patching it at the line level would also dim the bubble's left-border
@@ -1464,7 +1469,7 @@ fn append_result_section_lines(
             spans.push(Span::styled(label, dim.add_modifier(Modifier::UNDERLINED)));
             spans.push(Span::styled(" ", dim));
         } else if !prefix.is_empty() {
-            spans.push(Span::styled(" ".repeat(prefix.chars().count()), dim));
+            spans.push(Span::styled(" ".repeat(prefix_width), dim));
         }
         // `dim` is the base (fg White + DIM, matching other section titles
         // like "Context:"/"Choices:"); each markdown span's own style (e.g.
@@ -1500,7 +1505,8 @@ fn append_tool_bubble_lines(
     let bar = style.bar.clone();
     let margin = style.margin.clone();
     let row_bg = style.row_bg;
-    let trailing_pad = |text_len: usize| -> Span<'static> { style.trailing_pad(text_len) };
+    let trailing_pad =
+        |content_width: usize| -> Span<'static> { style.trailing_pad(content_width) };
 
     // Format arguments for the title:
     // - primary arg (schema rank 0): value only, rendered in bold.
@@ -1808,8 +1814,14 @@ fn append_tool_bubble_lines(
         if !suffix.is_empty() {
             spans.push(Span::styled(suffix.to_string(), dim_white));
         }
-        let pad_len = total + if truncated { 3 } else { 0 } + suffix.chars().count();
-        spans.push(trailing_pad(pad_len));
+        let content_width = terminal_display_width(line_text)
+            + if truncated {
+                terminal_display_width("...")
+            } else {
+                0
+            }
+            + terminal_display_width(suffix);
+        spans.push(trailing_pad(content_width));
         lines.push(Line::from(spans).patch_style(row_bg));
     };
 
@@ -1887,7 +1899,7 @@ fn append_tool_bubble_lines(
                 dim_white,
             ));
         }
-        first_spans.push(trailing_pad(first_total));
+        first_spans.push(trailing_pad(terminal_display_width(&first_line)));
         lines.push(Line::from(first_spans).patch_style(row_bg));
 
         // Lines 2+: args, hard-broken then width-wrapped.
@@ -1915,8 +1927,8 @@ fn append_tool_bubble_lines(
                     .min(chunk_len);
 
                 let indent = "  ";
-                let indent_len = indent.chars().count();
-                let total_len = indent_len + chunk_len;
+                let indent_width = terminal_display_width(indent);
+                let content_width = indent_width + terminal_display_width(arg_line);
 
                 let mut cont_spans: Vec<Span> = vec![bar.clone(), margin.clone()];
                 cont_spans.push(Span::styled(
@@ -1939,7 +1951,7 @@ fn append_tool_bubble_lines(
                         dim_white,
                     ));
                 }
-                cont_spans.push(trailing_pad(total_len));
+                cont_spans.push(trailing_pad(content_width));
                 lines.push(Line::from(cont_spans).patch_style(row_bg));
 
                 chars_consumed += chunk_len;
@@ -1958,7 +1970,7 @@ fn append_tool_bubble_lines(
         let error_wrap_width = wrap_width.saturating_sub(2).max(1);
         for wrapped in textwrap::wrap(error, error_wrap_width) {
             let error_label = format!("  {wrapped}");
-            let error_len = error_label.chars().count();
+            let error_width = terminal_display_width(&error_label);
             lines.push(
                 Line::from(vec![
                     bar.clone(),
@@ -1967,7 +1979,7 @@ fn append_tool_bubble_lines(
                         error_label,
                         Style::default().fg(Color::Red).bg(TOOL_BUBBLE_BG_COLOR),
                     ),
-                    trailing_pad(error_len),
+                    trailing_pad(error_width),
                 ])
                 .patch_style(row_bg),
             );
@@ -1992,7 +2004,7 @@ fn append_tool_bubble_lines(
                         if show_labels {
                             if let Some(label) = &content_section.label {
                                 let label_str = format!("{label}:");
-                                let label_len = 2 + label_str.chars().count();
+                                let label_width = 2 + terminal_display_width(&label_str);
                                 let dim_style = Style::default()
                                     .fg(Color::White)
                                     .bg(TOOL_BUBBLE_BG_COLOR)
@@ -2006,7 +2018,7 @@ fn append_tool_bubble_lines(
                                             label_str,
                                             dim_style.add_modifier(Modifier::UNDERLINED),
                                         ),
-                                        trailing_pad(label_len),
+                                        trailing_pad(label_width),
                                     ])
                                     .patch_style(row_bg),
                                 );
@@ -2026,18 +2038,14 @@ fn append_tool_bubble_lines(
                                 md_lines.push(Line::from(""));
                             }
                             for md_line in md_lines {
-                                let content_text_len: usize = md_line
-                                    .spans
-                                    .iter()
-                                    .map(|span| span.content.chars().count())
-                                    .sum();
+                                let content_width = md_line.width();
                                 let mut spans: Vec<Span<'static>> = vec![
                                     bar.clone(),
                                     margin.clone(),
                                     Span::styled("  ", Style::default().bg(TOOL_BUBBLE_BG_COLOR)),
                                 ];
                                 spans.extend(md_line.spans);
-                                spans.push(trailing_pad(2 + content_text_len));
+                                spans.push(trailing_pad(2 + content_width));
                                 lines.push(Line::from(spans).patch_style(row_bg));
                             }
                             continue;
@@ -2102,8 +2110,10 @@ fn append_tool_bubble_lines(
                                 }
 
                                 // Convert syntect tokens to ratatui spans.
-                                let content_text_len: usize =
-                                    row_spans.iter().map(|(_, t)| t.chars().count()).sum();
+                                let content_width: usize = row_spans
+                                    .iter()
+                                    .map(|(_, token)| terminal_display_width(token))
+                                    .sum();
                                 for (style, token) in row_spans {
                                     spans.push(syntect_token_to_span(
                                         style,
@@ -2112,7 +2122,7 @@ fn append_tool_bubble_lines(
                                     ));
                                 }
 
-                                spans.push(trailing_pad(gutter_prefix_len + content_text_len));
+                                spans.push(trailing_pad(gutter_prefix_len + content_width));
                                 lines.push(Line::from(spans).patch_style(row_bg));
                             }
                         }
@@ -2122,7 +2132,7 @@ fn append_tool_bubble_lines(
                         if show_labels {
                             if let Some(label) = &diff_section.label {
                                 let label_str = format!("{label}:");
-                                let label_len = 2 + label_str.chars().count();
+                                let label_width = 2 + terminal_display_width(&label_str);
                                 let dim_style = Style::default()
                                     .fg(Color::White)
                                     .bg(TOOL_BUBBLE_BG_COLOR)
@@ -2136,7 +2146,7 @@ fn append_tool_bubble_lines(
                                             label_str,
                                             dim_style.add_modifier(Modifier::UNDERLINED),
                                         ),
-                                        trailing_pad(label_len),
+                                        trailing_pad(label_width),
                                     ])
                                     .patch_style(row_bg),
                                 );
@@ -2174,7 +2184,7 @@ fn append_tool_bubble_lines(
                                 new_line = new_start;
                                 // Render hunk header dim across the full width.
                                 let text_str = format!("  {diff_line}");
-                                let text_len = text_str.chars().count();
+                                let text_width = terminal_display_width(&text_str);
                                 lines.push(
                                     Line::from(vec![
                                         bar.clone(),
@@ -2186,7 +2196,7 @@ fn append_tool_bubble_lines(
                                                 .bg(TOOL_BUBBLE_BG_COLOR)
                                                 .add_modifier(Modifier::DIM),
                                         ),
-                                        trailing_pad(text_len),
+                                        trailing_pad(text_width),
                                     ])
                                     .patch_style(row_bg),
                                 );
@@ -2248,7 +2258,7 @@ fn append_tool_bubble_lines(
                                         format!("  {wrapped_chunk}"),
                                     )
                                 };
-                                let content_len = content_str.chars().count();
+                                let content_width = terminal_display_width(&content_str);
                                 lines.push(
                                     Line::from(vec![
                                         bar.clone(),
@@ -2260,7 +2270,7 @@ fn append_tool_bubble_lines(
                                                 .fg(line_color)
                                                 .bg(TOOL_BUBBLE_BG_COLOR),
                                         ),
-                                        trailing_pad(gutter_len + content_len),
+                                        trailing_pad(gutter_len + content_width),
                                     ])
                                     .patch_style(row_bg),
                                 );
@@ -2272,7 +2282,7 @@ fn append_tool_bubble_lines(
                         // meaningless without the filename, even when there is
                         // only one section.
                         let label_str = format!("  {}:", search_section.file_path);
-                        let label_len = label_str.chars().count();
+                        let label_width = terminal_display_width(&label_str);
                         lines.push(
                             Line::from(vec![
                                 bar.clone(),
@@ -2284,7 +2294,7 @@ fn append_tool_bubble_lines(
                                         .bg(TOOL_BUBBLE_BG_COLOR)
                                         .add_modifier(Modifier::BOLD),
                                 ),
-                                trailing_pad(label_len),
+                                trailing_pad(label_width),
                             ])
                             .patch_style(row_bg),
                         );
@@ -2306,7 +2316,7 @@ fn append_tool_bubble_lines(
                             } else {
                                 format!("  {:>gutter_width$}- ", search_result_line.line_number)
                             };
-                            let prefix_len = prefix.chars().count();
+                            let prefix_len = terminal_display_width(&prefix);
                             let content_width = wrap_width.saturating_sub(prefix_len).max(1);
                             let highlighted_lines = highlighted_lines_cached(
                                 &search_result_line.content,
@@ -2341,9 +2351,9 @@ fn append_tool_bubble_lines(
                                     ));
                                 }
 
-                                let content_text_len: usize = row_spans
+                                let content_width: usize = row_spans
                                     .iter()
-                                    .map(|(_, token)| token.chars().count())
+                                    .map(|(_, token)| terminal_display_width(token))
                                     .sum();
                                 for (style, token) in row_spans {
                                     let fg = Color::Rgb(
@@ -2357,7 +2367,7 @@ fn append_tool_bubble_lines(
                                     ));
                                 }
 
-                                spans.push(trailing_pad(prefix_len + content_text_len));
+                                spans.push(trailing_pad(prefix_len + content_width));
                                 lines.push(Line::from(spans).patch_style(row_bg));
                             }
                         }
@@ -3481,6 +3491,46 @@ mod tests {
             rendered.contains("check logs") && rendered.contains("reproduce it"),
             "expected bullet items in rendered bubble, got: {rendered:?}"
         );
+    }
+
+    #[test]
+    fn assistant_table_stays_inside_bubble_width() {
+        use super::append_assistant_lines;
+
+        let mut lines = Vec::new();
+        append_assistant_lines(
+            &mut lines,
+            "| abc | def |\n|-----|-----|\n| abc | def |",
+            false,
+            8,
+            12,
+        );
+
+        assert!(
+            lines.iter().all(|line| line.width() <= 12),
+            "assistant bubble row exceeded its width: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn assistant_heading_with_emoji_stays_inside_bubble_width() {
+        use super::append_assistant_lines;
+
+        for heading in [
+            "### 🐺 Project Summary: Ylva",
+            "### 📅 Implementation Progress Status",
+        ] {
+            let mut lines = Vec::new();
+            append_assistant_lines(&mut lines, heading, false, 36, 40);
+
+            for line in &lines {
+                assert!(
+                    line.width() <= 40,
+                    "assistant heading {heading:?} row exceeded its width ({width}): {lines:?}",
+                    width = line.width()
+                );
+            }
+        }
     }
 
     #[test]

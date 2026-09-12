@@ -371,10 +371,13 @@ module structure (model/presenter/view/driver split).
   instead of plain wrapped text. Supported: **bold**/*italic*, `inline code`
   (distinct color), fenced code blocks (dim, verbatim, syntax-highlighted
   when a language tag is given), bullet/numbered lists, headings,
-  blockquotes, horizontal rules, and tables. Plain text with no Markdown
-  syntax wraps as plain text. Unsupported syntax (links, images, HTML)
-  degrades to plain text rather than crashing or dropping content. Markdown
-  and syntax highlighting are applied live while a response streams.
+  blockquotes, horizontal rules, and tables. Tables fit the bubble width,
+  including by character-wrapping unbroken cell content when necessary.
+  Styled Markdown rows use terminal display widths, including for wide
+  Unicode glyphs, so content stays inside the bubble. Plain text with no
+  Markdown syntax wraps as plain text. Unsupported syntax (links, images,
+  HTML) degrades to plain text rather than crashing or dropping content.
+  Markdown and syntax highlighting are applied live while a response streams.
 - **Selectable syntax theme:** code blocks and file previews highlight with
   either the `dark` or the `light` theme, chosen with the `theme` key of the
   runtime profile (see [configuration](./configuration.md#profile-file)).

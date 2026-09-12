@@ -4,10 +4,13 @@
       Footer shows "Idle", but the parent agent is still busy ( running
       yet another subagent ).
 
-- [ ] Assistent message bubble renders a markdown table.
+- [x] Assistent message bubble renders a markdown table.
       Renders one char beyond the right edge of the bubble, right up to the
       conversation-list vertical scrollbar. Other bubbles keep 1 char right margin
       to the vertical scrollbar.
+
+- [x] Assistant Markdown headings containing wide Unicode glyphs render one
+      character beyond the right edge of the bubble.
 
 - [ ] LLM keep prefixing `bash` tool scripts with `cd <workspace-root>` although
       CWD==workspace-root is the effective default.
@@ -81,8 +84,9 @@
 - [ ] Subagent tool schema may need some fine-tuning, llm is musing how to
       react on arrival of one of many spawned subagents:
       ```text
-      The user is in a state where multiple subagents are running. The result from one subagent (for the
-      write tool) has arrived. The instruction is to "do not tell the user you'll report back later;
+      The user is in a state where multiple subagents are running. The result from one
+      subagent (for the write tool) has arrived. The instruction is to "do not tell the user
+      you'll report back later;
       either use this result for useful work now, or simply end this turn with no new user-facing text
       and wait for the next automatic re-prompt."
 
