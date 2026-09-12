@@ -1046,7 +1046,7 @@ fn route_mouse(
                         .bubble_title_rows
                         .iter()
                         .find(|(start, end, _)| {
-                            clicked_line == start + 1
+                            clicked_line == *start
                                 || (clicked_col == 0
                                     && clicked_line >= *start
                                     && clicked_line <= *end)
@@ -1108,7 +1108,7 @@ fn route_mouse(
                         .thinking_title_rows
                         .iter()
                         .find(|(start, end, _)| {
-                            clicked_line == start + 1
+                            clicked_line == *start
                                 || (clicked_col == 0
                                     && clicked_line >= *start
                                     && clicked_line <= *end)
@@ -4196,21 +4196,22 @@ mod tests {
             collapsed: true,
             duration: std::time::Duration::from_secs(1),
         });
-        // (start_row=0, end_row=2, entry_index=0) — title row is start + 1 = 1.
+        // (start_row=0, end_row=2, entry_index=0) — title row is start (no
+        // top-padding row separates the bubble start from its title).
         state.conversation.thinking_title_rows = vec![(0, 2, 0)];
         state.conversation.chat_drag_active = true;
         state.conversation.chat_rendered_lines = vec![String::new(), String::new(), String::new()];
         // A zero-width selection at the title row is a plain click, not a drag.
         state.conversation.chat_selection = Some(ChatSelection {
-            anchor_line: 1,
+            anchor_line: 0,
             anchor_col: 3,
-            cursor_line: 1,
+            cursor_line: 0,
             cursor_col: 3,
         });
         let mouse = crossterm::event::MouseEvent {
             kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
             column: 3,
-            row: 1,
+            row: 0,
             modifiers: KeyModifiers::NONE,
         };
         update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
@@ -4226,7 +4227,8 @@ mod tests {
         let mut state = AppState::new();
         state.turn_buffer.partial_thinking_text = "pondering...".to_string();
         state.turn_buffer.partial_thinking_collapsed = false;
-        // (start_row=0, end_row=2, sentinel index) — title row is start + 1 = 1.
+        // (start_row=0, end_row=2, sentinel index) — title row is start (no
+        // top-padding row separates the bubble start from its title).
         state.conversation.thinking_title_rows = vec![(
             0,
             2,
@@ -4236,15 +4238,15 @@ mod tests {
         state.conversation.chat_rendered_lines = vec![String::new(), String::new(), String::new()];
         // A zero-width selection at the title row is a plain click, not a drag.
         state.conversation.chat_selection = Some(ChatSelection {
-            anchor_line: 1,
+            anchor_line: 0,
             anchor_col: 3,
-            cursor_line: 1,
+            cursor_line: 0,
             cursor_col: 3,
         });
         let mouse = crossterm::event::MouseEvent {
             kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
             column: 3,
-            row: 1,
+            row: 0,
             modifiers: KeyModifiers::NONE,
         };
         update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
@@ -4254,8 +4256,9 @@ mod tests {
 
     /// Sets up `state` with a single `spawn_subagent` `ToolBubble` at
     /// `bubble_id`, plus the title-row/rendered-line bookkeeping needed for a
-    /// click at row 1 to resolve to it, and returns a `MouseEvent::Up` click
-    /// at that row.
+    /// click at row 0 (the bubble's title row — there is no top-padding row
+    /// before it) to resolve to it, and returns a `MouseEvent::Up` click at
+    /// that row.
     fn spawn_bubble_click_fixture(
         state: &mut AppState,
         bubble_id: Uuid,
@@ -4271,21 +4274,21 @@ mod tests {
             }),
             collapsed: false,
         });
-        // (start_row=0, end_row=2, bubble_id) — title row is start + 1 = 1.
+        // (start_row=0, end_row=2, bubble_id) — title row is start.
         state.conversation.bubble_title_rows = vec![(0, 2, bubble_id)];
         state.conversation.chat_drag_active = true;
         state.conversation.chat_rendered_lines = vec![String::new(), String::new(), String::new()];
         // A zero-width selection at the title row is a plain click, not a drag.
         state.conversation.chat_selection = Some(ChatSelection {
-            anchor_line: 1,
+            anchor_line: 0,
             anchor_col: 3,
-            cursor_line: 1,
+            cursor_line: 0,
             cursor_col: 3,
         });
         crossterm::event::MouseEvent {
             kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
             column: 3,
-            row: 1,
+            row: 0,
             modifiers: KeyModifiers::NONE,
         }
     }
@@ -4352,9 +4355,9 @@ mod tests {
         // A zero-width selection at the title row is a plain click, not a drag.
         state.conversation.chat_drag_active = true;
         state.conversation.chat_selection = Some(ChatSelection {
-            anchor_line: 1,
+            anchor_line: 0,
             anchor_col: 3,
-            cursor_line: 1,
+            cursor_line: 0,
             cursor_col: 3,
         });
         // Second click, same bubble, well within the double-click window.
@@ -4394,9 +4397,9 @@ mod tests {
         update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
         state.conversation.chat_drag_active = true;
         state.conversation.chat_selection = Some(ChatSelection {
-            anchor_line: 1,
+            anchor_line: 0,
             anchor_col: 3,
-            cursor_line: 1,
+            cursor_line: 0,
             cursor_col: 3,
         });
         update(&mut state, TuiEvent::Mouse(mouse), &empty_textarea());
