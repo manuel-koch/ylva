@@ -47,7 +47,7 @@ pub use agent::tools::{
 pub use agent::{
     AgentCommand, AgentEvent, AgentLoop, AgentMode, AssembledToolCall, AssistantStatus,
     ChildRoleConfig, Context, DeltaChunk, Message, PendingTool, Role, StreamEvent, ToolCallRequest,
-    UiUpdate, UserMessageKind, DEFAULT_SYSTEM_PROMPT, DEFAULT_TOOL_TIMEOUT_SECS,
+    ToolResult, UiUpdate, UserMessageKind, DEFAULT_SYSTEM_PROMPT, DEFAULT_TOOL_TIMEOUT_SECS,
     MAX_TOOL_USE_ITERATIONS, TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
 pub use agent_factory::AgentFactory;

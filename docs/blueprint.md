@@ -2794,60 +2794,48 @@ See reducer-state-handling-plan.md.
 
 ### Phase 8: Session Replay on Resume
 
-- [ ] **Goal:** Resuming a session (`--conversation-id`) reconstructs its prior
+- [x] **Goal:** Resuming a session (`--conversation-id`) reconstructs its prior
       turns instead of starting blank, so both the model and the user see
       continuous history — closing the gap Phase 7 explicitly deferred (§4H
       decision 5's resume model **appends** to the file but does not replay
       it back into `Context` or the TUI).
 
-- [ ] `Store::read_messages` (already shipped in Phase 7) is used on
-      `Store::resume` to hydrate a **new**, silent seam on `Context` — e.g.
-      `Context::hydrate(messages)` — that appends the persisted messages
-      without re-`commit`-ing them to the store a second time (re-recording
-      already-persisted lines would duplicate every prior turn on next
-      resume). The two leading system prompts stay sourced fresh from the
-      running binary (per §4H decision 4's schema-tolerance note) — the
-      hydrated messages are only the committed conversation ones after them.
+- [x] `Context::set_store` reads `Store::read_messages` and hydrates a new
+      context without re-`commit`-ing persisted messages. Hydration is
+      unconditional for fresh and resumed stores; a fresh file simply has no
+      messages to append. The two leading system prompts stay sourced fresh
+      from the running binary (per §4H decision 4's schema-tolerance note).
 
-- [ ] Headless (`ConsoleApp`): a resumed session's hydrated `Context` is
+- [x] Headless (`ConsoleApp`): a resumed session's hydrated `Context` is
       visible to the model on the very next turn (prior turns are part of
       the request payload), matching how a live session behaves.
 
-- [ ] TUI (`TuiApp`/`AppState`): the hydrated messages are projected into
-      `chat_entries` before the first frame renders, so a resumed session
-      shows its prior turns immediately instead of an empty transcript —
-      `Message::User` → `ChatEntry::UserMessage { state: Sent }`,
-      `Message::Assistant` → `ChatEntry::AssistantMessage`, `Message::ToolResult`/
-      `Message::ToolError` → a completed/errored `ChatEntry::ToolBubble` (no
-      `Pending`/`Running` state is ever reconstructed — a tool call that
-      never got a result before the process ended has no result to show and
-      is dropped from the replay, same as it already has no terminal event
-      in the JSONL). The chat view opens scrolled to the bottom of the
-      replayed history (existing auto-scroll behavior, not a new mechanism).
+- [x] TUI (`TuiApp`/`AppState`) projects hydrated messages into `chat_entries`
+      before the first frame and keeps the existing bottom-lock behavior.
+      Explicit user messages, assistant text, completed tool results, and tool
+      errors replay with their persisted state. `Message::ToolResult` and
+      `Message::ToolError` additively persist summary/content-section metadata
+      and tool duration. Assistant tool calls persist their tool-specific title
+      arguments, and tool results persist optional specialized result-section
+      identifiers; all new fields use `#[serde(default)]`, so no schema-version
+      bump is required and older sessions degrade silently. Orphaned generic
+      tool calls become in-memory terminal errors rather than pending/running
+      bubbles.
 
-- [ ] Child-agent transcripts (`parent_session`-linked `.jsonl` files) are
-      **not** rehydrated into the drill-in view in this phase — a resumed
-      session's root transcript replays; a child's own sub-session remains
-      readable directly (`Store::read_messages` on its file) but not wired
-      into `AppState::child_conversations` automatically. Tracked as a
-      follow-up, not blocking this phase's goal.
+- [x] Child-agent replay is included. `ChildStart`/`ChildResult` carry
+      `call_id` (and `ChildStart` carries `label`) with serde defaults. The
+      root `spawn_subagent` bubble is fixed up from lifecycle records to its
+      real completed or interrupted state, and replay-discovered child
+      metadata is made drillable without opening child files eagerly. The
+      child's own transcript is loaded lazily on first drill-in.
 
-- [ ] Tests: `Context` hydration round-trips a written session's messages in
-      order without re-persisting them (a second resume + flush must not
-      double every line); an end-to-end test (extending
-      `tests/store_persistence_e2e.rs`'s spawn-the-binary pattern) resumes a
-      session that already has a completed turn and asserts the **next**
-      request payload includes the earlier turn's content; a TUI-side test
-      (`tests/tui_render_state.rs`/presenter unit tests) asserts
-      `chat_entries` is populated from a hydrated `Context` before the first
-      `draw_frame` call.
+- [x] Tests cover schema compatibility, hydration without duplicate writes,
+      orphaned tool recovery, child lifecycle pairing, full-fidelity TUI
+      projection, lazy child loading, and real-binary headless replay.
 
-- [ ] Documentation: update `docs/persistence.md`'s resume contract (remove
-      the "does not replay" caveat, describe the new hydration behavior and
-      the child-transcript exception above); update `docs/features.md`'s
-      Session Persistence section; add a "Session replay" subsection to
-      `docs/implementation-notes.md` describing the `Context::hydrate` seam
-      and the `Message` → `ChatEntry` projection.
+- [x] Documentation: `docs/persistence.md`, `docs/features.md`, and
+      `docs/implementation-notes.md` describe the replay contract and
+      implementation.
 
 **Key crates:** none new (uses the existing `Store::read_messages`, §4H).
 

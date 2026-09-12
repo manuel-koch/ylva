@@ -159,6 +159,10 @@ impl ToolCall for ClarifyCall {
         u64::MAX
     }
 
+    fn is_body_argument(&self, key: &str) -> bool {
+        matches!(key, "context" | "choices")
+    }
+
     fn argument_order(&self, key: &str) -> usize {
         let tool = ClarifyTool;
         tool.argument_order(key)
@@ -206,6 +210,26 @@ mod tests {
         });
         let result = tool.validate_args(&args);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn title_arguments_only_include_the_question() {
+        let call = ClarifyTool.create_call(
+            uuid::Uuid::new_v4(),
+            serde_json::json!({
+                "question": "Pick one",
+                "context": "Supporting details",
+                "choices": ["a", "b"],
+            }),
+        );
+
+        assert_eq!(
+            call.title_arguments(),
+            vec![(
+                "question".to_string(),
+                serde_json::Value::String("Pick one".to_string())
+            )]
+        );
     }
 
     #[test]

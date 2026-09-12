@@ -194,10 +194,35 @@ Listing sessions takes no lock — it is a pure read.
 - **Discoverability:** on exit, Ylva prints the session id and a
   `ylva --conversation-id <uuid>` command to stderr so the id never has to be
   hunted down in the chats directory. See [Resuming a session](cli-options.md#resuming-a-session).
-
-In Phase 7 a resumed session appends to the existing file but does **not**
-replay the earlier turns back into the in-memory conversation — restoring a
-transcript into the running UI is Phase 8 (Session Replay on Resume) scope.
+- **Replay:** when a store is attached, `Context::set_store` reads the
+  committed messages and `Context::hydrate` appends them after the two system
+  prompts rebuilt by the current binary. Hydration bypasses `Context::commit`,
+  so reading a session never writes its messages back or duplicates them on a
+  later flush. The rule is unconditional for fresh and resumed sessions; a
+  new file simply has no messages to hydrate.
+- **Full-fidelity tool bubbles:** `Message::ToolResult` persists `summary`,
+  `content_sections`, `duration`, and specialized result-section identifiers;
+  `Message::ToolError` persists `content_sections` in addition to its
+  duration. These additive fields use `#[serde(default)]`, so files written
+  before replay support deserialize and show silently degraded (blanker) tool
+  bubbles.
+- Assistant tool calls also persist their tool-specific `title_arguments`,
+  captured from the created tool call before execution. Replay uses this
+  exact projection, so tools such as `write` do not show body content in the
+  bubble title. Calls without title arguments persist an empty list.
+- **Child-run replay:** `ChildStart` and `ChildResult` persist `call_id`, and
+  `ChildStart` also persists `label`. On resume, lifecycle records repair a
+  `spawn_subagent` bubble to the child's actual completed state or to a
+  terminal error when the child has no result. Replay discovers child
+  metadata eagerly, but reads the child's own transcript from the stable
+  run-id session path only on first drill-in. A `ChildStart`/`ChildResult`
+  record without a `call_id` is legacy data: its bubble keeps the persisted
+  running/queued text and is not drillable.
+- **Interrupted tools:** an unanswered non-`spawn_subagent` tool call is
+  synthesized as an in-memory-only `Message::ToolError` with
+  `"Tool call did not complete before the session ended."`. This keeps the
+  next provider payload protocol-valid and renders a visible terminal Error
+  bubble; the synthetic message is never appended to disk.
 
 ## Listing sessions
 

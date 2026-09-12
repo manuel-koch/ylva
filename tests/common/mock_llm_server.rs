@@ -20,7 +20,7 @@
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -164,20 +164,51 @@ pub struct MockLlmServer {
     pub addr: SocketAddr,
     live_connections: Arc<AtomicUsize>,
     cumulative_connections: Arc<AtomicUsize>,
+    request_bodies: Arc<Mutex<Vec<String>>>,
     handle: JoinHandle<()>,
 }
 
 impl MockLlmServer {
     /// Bind and start the accept loop. `config` drives per-connection behavior.
     pub async fn start(config: MockLlmConfig) -> std::io::Result<Self> {
+        Self::start_with_connection_frames(config, Vec::new()).await
+    }
+
+    /// Bind and start the accept loop, optionally replacing the configured
+    /// frames for individual connections. This keeps deterministic
+    /// multi-turn integration tests from needing a second provider server.
+    pub async fn start_with_connection_frames(
+        config: MockLlmConfig,
+        connection_frames: Vec<Vec<String>>,
+    ) -> std::io::Result<Self> {
+        Self::start_with_connection_frame_rules(config, connection_frames, Vec::new()).await
+    }
+
+    /// Bind and start the server with connection frames plus optional
+    /// request-body rules. A matching rule takes precedence over the
+    /// connection-index frame, which keeps concurrent root/child chat
+    /// requests deterministic.
+    pub async fn start_with_connection_frame_rules(
+        config: MockLlmConfig,
+        connection_frames: Vec<Vec<String>>,
+        request_frame_rules: Vec<(String, Vec<String>)>,
+    ) -> std::io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         let live_connections = Arc::new(AtomicUsize::new(0));
         let cumulative_connections = Arc::new(AtomicUsize::new(0));
+        let request_bodies = Arc::new(Mutex::new(Vec::new()));
         let config = Arc::new(config);
+        let connection_frames = Arc::new(connection_frames);
+        let request_frame_rules = Arc::new(request_frame_rules);
+        let chat_request_index = Arc::new(AtomicUsize::new(0));
 
         let live = Arc::clone(&live_connections);
         let cumulative = Arc::clone(&cumulative_connections);
+        let request_bodies_for_accept_loop = Arc::clone(&request_bodies);
+        let connection_frames_for_accept_loop = Arc::clone(&connection_frames);
+        let request_frame_rules_for_accept_loop = Arc::clone(&request_frame_rules);
+        let chat_request_index_for_accept_loop = Arc::clone(&chat_request_index);
         let handle = tokio::spawn(async move {
             let mut position = 0usize;
             loop {
@@ -190,7 +221,19 @@ impl MockLlmServer {
                 let behavior = config.next_behavior(position);
                 position += 1;
                 let live = Arc::clone(&live);
-                tokio::spawn(handle_connection(stream, behavior, live));
+                let request_bodies = Arc::clone(&request_bodies_for_accept_loop);
+                let connection_frames = Arc::clone(&connection_frames_for_accept_loop);
+                let request_frame_rules = Arc::clone(&request_frame_rules_for_accept_loop);
+                let chat_request_index = Arc::clone(&chat_request_index_for_accept_loop);
+                tokio::spawn(handle_connection(
+                    stream,
+                    behavior,
+                    live,
+                    request_bodies,
+                    connection_frames,
+                    request_frame_rules,
+                    chat_request_index,
+                ));
             }
         });
 
@@ -198,6 +241,7 @@ impl MockLlmServer {
             addr,
             live_connections,
             cumulative_connections,
+            request_bodies,
             handle,
         })
     }
@@ -208,6 +252,13 @@ impl MockLlmServer {
 
     pub fn cumulative_connections(&self) -> usize {
         self.cumulative_connections.load(Ordering::SeqCst)
+    }
+
+    pub fn request_bodies(&self) -> Vec<String> {
+        self.request_bodies
+            .lock()
+            .expect("request body lock")
+            .clone()
     }
 
     pub fn live_counter(&self) -> Arc<AtomicUsize> {
@@ -231,17 +282,42 @@ impl MockLlmServer {
 /// non-200 error or a streaming SSE body, then close.
 async fn handle_connection(
     stream: TcpStream,
-    behavior: Behavior,
+    mut behavior: Behavior,
     live_connections: Arc<AtomicUsize>,
+    request_bodies: Arc<Mutex<Vec<String>>>,
+    connection_frames: Arc<Vec<Vec<String>>>,
+    request_frame_rules: Arc<Vec<(String, Vec<String>)>>,
+    chat_request_index: Arc<AtomicUsize>,
 ) {
     let (mut reader, mut writer) = stream.into_split();
-    let request_target = match read_request_head(&mut reader).await {
-        Ok(request_target) => request_target,
+    let (request_target, request_body) = match read_request_head(&mut reader).await {
+        Ok(request) => request,
         Err(_) => {
             live_connections.fetch_sub(1, Ordering::SeqCst);
             return;
         }
     };
+    let request_body = String::from_utf8(request_body)
+        .ok()
+        .filter(|request_body| !request_body.is_empty());
+    if let Some(request_body_text) = &request_body {
+        request_bodies
+            .lock()
+            .expect("request body lock")
+            .push(request_body_text.clone());
+    }
+    if request_target.contains("/chat/completions") {
+        let request_index = chat_request_index.fetch_add(1, Ordering::SeqCst);
+        if let Some((_, frames)) = request_frame_rules.iter().find(|(marker, _)| {
+            request_body
+                .as_deref()
+                .is_some_and(|request_body| request_body.contains(marker))
+        }) {
+            behavior.frames = frames.clone();
+        } else if let Some(frames) = connection_frames.get(request_index) {
+            behavior.frames = frames.clone();
+        }
+    }
 
     // Model listing and details are plain JSON requests, not streams — answer
     // them from the request target rather than streaming SSE at them.
@@ -398,8 +474,11 @@ Content-Length: {}\r\n\
 /// Read the full HTTP request (head + body) so the server never responds
 /// before the client has finished sending it, which would race reqwest's
 /// request-body write. Returns the request target (path) from the request
-/// line, so a caller can distinguish `/chat/completions` from `/models`.
-async fn read_request_head(reader: &mut tokio::net::tcp::OwnedReadHalf) -> std::io::Result<String> {
+/// line and the request body, so callers can distinguish `/chat/completions`
+/// from `/models` and inspect captured chat payloads.
+async fn read_request_head(
+    reader: &mut tokio::net::tcp::OwnedReadHalf,
+) -> std::io::Result<(String, Vec<u8>)> {
     let mut buffer = Vec::with_capacity(MAX_REQUEST_HEADER_BYTES);
     let mut chunk = [0u8; 512];
     let head_end = loop {
@@ -425,12 +504,15 @@ async fn read_request_head(reader: &mut tokio::net::tcp::OwnedReadHalf) -> std::
     // Consume the request body (Content-Length bytes) so a subsequent response
     // never interleaves with the client's still-sending body. Some body bytes
     // may already be buffered after the head.
-    if let Some(content_length) = parse_content_length(&buffer[..head_end]) {
+    let body = if let Some(content_length) = parse_content_length(&buffer[..head_end]) {
         let buffered_body = buffer.len().saturating_sub(head_end);
-        let mut remaining = content_length.saturating_sub(buffered_body);
+        let buffered_body_length = buffered_body.min(content_length);
+        let mut body = buffer[head_end..head_end + buffered_body_length].to_vec();
+        let mut remaining = content_length.saturating_sub(buffered_body_length);
+        let mut body_chunk = [0u8; 512];
         while remaining > 0 {
-            let wanted = remaining.min(chunk.len());
-            let read = reader.read(&mut chunk[..wanted]).await?;
+            let wanted = remaining.min(body_chunk.len());
+            let read = reader.read(&mut body_chunk[..wanted]).await?;
             if read == 0 {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
@@ -438,9 +520,13 @@ async fn read_request_head(reader: &mut tokio::net::tcp::OwnedReadHalf) -> std::
                 ));
             }
             remaining -= read;
+            body.extend_from_slice(&body_chunk[..read]);
         }
-    }
-    Ok(parse_request_target(&buffer[..head_end]))
+        body
+    } else {
+        Vec::new()
+    };
+    Ok((parse_request_target(&buffer[..head_end]), body))
 }
 
 /// Extract the request target from an HTTP request line ("GET /models HTTP/1.1").

@@ -559,7 +559,11 @@ fn unique_engine_name(
 /// under the parent's `project_key`. A failure to
 /// write is logged and swallowed: losing a child transcript must never fail
 /// the run that produced it.
-async fn write_child_transcript(target: &ChildTranscriptTarget, task: &str, context: &Context) {
+async fn write_child_transcript(
+    target: &ChildTranscriptTarget,
+    run_id: uuid::Uuid,
+    context: &Context,
+) {
     let Some(parent_store) = &target.parent_store else {
         return;
     };
@@ -568,7 +572,7 @@ async fn write_child_transcript(target: &ChildTranscriptTarget, task: &str, cont
         .as_ref()
         .map(|config| (config.provider_connection.as_str(), config.model.as_str()));
     match parent_store
-        .write_child_transcript(provider_connection_and_model, task, context.messages())
+        .write_child_transcript_for_run(run_id, provider_connection_and_model, context.messages())
         .await
     {
         Ok(child_session_id) => {
@@ -613,7 +617,6 @@ async fn drive_child_to_completion(
     });
 
     tracing::debug!(%run_id, tool_call_id = %call_id, "run_child: starting child AgentLoop");
-    let task_for_transcript = task.clone();
     let handle = child_loop.run();
     child_loop
         .send_command(crate::agent::AgentCommand::Prompt(task))
@@ -644,7 +647,7 @@ async fn drive_child_to_completion(
 
     match result {
         Ok(Ok(context)) => {
-            write_child_transcript(&transcript_target, &task_for_transcript, &context).await;
+            write_child_transcript(&transcript_target, run_id, &context).await;
             if child_context_called_finish(&context) {
                 // The `agent_finish` tool already sent its own `FinishResult`.
                 tracing::debug!(%run_id, tool_call_id = %call_id, "run_child: agent_finish already reported result, not sending fallback");
@@ -697,7 +700,9 @@ fn child_context_called_finish(context: &Context) -> bool {
     context.messages().iter().any(|message| {
         matches!(
             message,
-            Message::ToolResult { name, .. } if name == crate::agent::tools::agent_finish::AgentFinishTool::NAME
+            Message::ToolResult {
+                value: crate::agent::ToolResult { name, .. },
+            } if name == crate::agent::tools::agent_finish::AgentFinishTool::NAME
         )
     })
 }
@@ -1050,26 +1055,34 @@ mod tests {
     #[test]
     fn child_context_called_finish_detects_finish_tool_result() {
         let mut context = Context::new();
-        context.push_tool_result(
-            Uuid::new_v4(),
-            crate::agent::tools::agent_finish::AgentFinishTool::NAME.to_string(),
-            "{}".to_string(),
-            None,
-            None,
-        );
+        context.push_tool_result(crate::agent::ToolResult {
+            id: Uuid::new_v4(),
+            name: crate::agent::tools::agent_finish::AgentFinishTool::NAME.to_string(),
+            result: "{}".to_string(),
+            result_section_id: None,
+            result_metadata: None,
+            result_metadata_schema: None,
+            summary: vec![],
+            content_sections: vec![],
+            duration: std::time::Duration::ZERO,
+        });
         assert!(child_context_called_finish(&context));
     }
 
     #[test]
     fn child_context_called_finish_is_false_without_finish_tool_result() {
         let mut context = Context::new();
-        context.push_tool_result(
-            Uuid::new_v4(),
-            "read".to_string(),
-            "ok".to_string(),
-            None,
-            None,
-        );
+        context.push_tool_result(crate::agent::ToolResult {
+            id: Uuid::new_v4(),
+            name: "read".to_string(),
+            result: "ok".to_string(),
+            result_section_id: None,
+            result_metadata: None,
+            result_metadata_schema: None,
+            summary: vec![],
+            content_sections: vec![],
+            duration: std::time::Duration::ZERO,
+        });
         assert!(!child_context_called_finish(&context));
     }
 
@@ -1101,6 +1114,7 @@ mod tests {
         )
         .expect("parent store created");
         let mut child_context = Context::new();
+        child_context.push_user("summarize the module".to_string());
         child_context.push_assistant("the child's answer".to_string(), AssistantStatus::Complete);
 
         write_child_transcript(
@@ -1108,7 +1122,7 @@ mod tests {
                 parent_store: Some(parent_store.clone()),
                 engine_config: Some(test_engine_config()),
             },
-            "summarize the module",
+            Uuid::new_v4(),
             &child_context,
         )
         .await;
@@ -1149,7 +1163,7 @@ mod tests {
                 parent_store: None,
                 engine_config: Some(test_engine_config()),
             },
-            "task",
+            Uuid::new_v4(),
             &child_context,
         )
         .await;

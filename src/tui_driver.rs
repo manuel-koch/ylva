@@ -447,11 +447,57 @@ async fn execute_effects(
             // before this function ever sees them).
             Effect::ClearConversation
             | Effect::ShowTools
+            | Effect::LoadChildTranscript { .. }
             | Effect::ListModels { .. }
             | Effect::SwitchModel(_) => {}
         }
     }
     ActionOutcome::Continue
+}
+
+/// Resolve a replay-discovered child transcript before the pure reducer enters
+/// the child view. Live children are already populated and pass through
+/// unchanged.
+fn prepare_child_replay_effects(
+    state: &mut AppState,
+    effects: Vec<Effect>,
+    store: Option<&crate::store::Store>,
+) -> Vec<Effect> {
+    let mut prepared = Vec::with_capacity(effects.len());
+    for effect in effects {
+        match effect {
+            Effect::LoadChildTranscript { run_id } => {
+                if state.child_needs_lazy_load(run_id) {
+                    let messages = match store {
+                        Some(store) => {
+                            let path = crate::store::session_path(
+                                store.chats_root(),
+                                store.project_key(),
+                                run_id,
+                            );
+                            match crate::store::Store::read_messages(&path) {
+                                Ok(messages) => messages,
+                                Err(error) => {
+                                    tracing::warn!(
+                                        %error,
+                                        path = %path.display(),
+                                        %run_id,
+                                        "could not replay child transcript"
+                                    );
+                                    Vec::new()
+                                }
+                            }
+                        }
+                        None => Vec::new(),
+                    };
+                    state.load_child_messages(run_id, &messages);
+                }
+                state.switch_to_child_view(run_id);
+            }
+            other => prepared.push(other),
+        }
+    }
+    prepared
 }
 
 /// How long `/models` waits for the provider's model list before giving up.
@@ -943,6 +989,32 @@ where
     let mut state = AppState::new();
     let mut textarea = TextArea::default();
     configure_textarea(&mut textarea);
+    let replay_store = agent.store();
+    if let Some(store) = replay_store.as_ref() {
+        let messages = match crate::store::Store::read_messages(store.path()) {
+            Ok(messages) => messages,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    path = %store.path().display(),
+                    "could not replay TUI session messages"
+                );
+                Vec::new()
+            }
+        };
+        let child_runs = match crate::store::Store::read_child_runs(store.path()) {
+            Ok(child_runs) => child_runs,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    path = %store.path().display(),
+                    "could not replay child-run lifecycle records"
+                );
+                Vec::new()
+            }
+        };
+        state.replay_messages(&messages, &child_runs);
+    }
     let cmd_tx = agent.command_sender();
     let engine = agent.engine();
     state.engine_display = crate::llm::engine::EngineDisplayInfo::from_engine(engine.as_ref());
@@ -1033,6 +1105,8 @@ where
 
                     let effects =
                         presenter::update(&mut state, TuiEvent::Mouse(mouse), &textarea_ctx);
+                    let effects =
+                        prepare_child_replay_effects(&mut state, effects, replay_store.as_ref());
                     if execute_effects(
                         &mut state, &mut textarea, &cmd_tx, effects, &mut mouse_drag, clipboard,
                         &mut pending_run_ids,
@@ -1051,6 +1125,8 @@ where
                 // Slash-command effects are the only ones needing the engine,
                 // and only key input can produce them.
                 let (slash_effects, effects) = split_slash_effects(effects);
+                let effects =
+                    prepare_child_replay_effects(&mut state, effects, replay_store.as_ref());
                 if execute_effects(
                     &mut state, &mut textarea, &cmd_tx, effects, &mut mouse_drag, clipboard,
                     &mut pending_run_ids,
@@ -1132,6 +1208,8 @@ where
                     TuiEvent::Domain(DomainEvent::ConfirmExpired),
                     &textarea_ctx,
                 );
+                let effects =
+                    prepare_child_replay_effects(&mut state, effects, replay_store.as_ref());
                 execute_effects(
                     &mut state, &mut textarea, &cmd_tx, effects, &mut mouse_drag, clipboard,
                     &mut pending_run_ids,
@@ -1145,6 +1223,8 @@ where
                     TuiEvent::Domain(DomainEvent::BubbleClickWindowExpired),
                     &textarea_ctx,
                 );
+                let effects =
+                    prepare_child_replay_effects(&mut state, effects, replay_store.as_ref());
                 execute_effects(
                     &mut state, &mut textarea, &cmd_tx, effects, &mut mouse_drag, clipboard,
                     &mut pending_run_ids,

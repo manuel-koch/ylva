@@ -138,7 +138,7 @@ pub trait ToolCallResult: Send + Sync + std::fmt::Debug {
 /// Returned by [`ToolCall::pending_content_sections`] and
 /// [`ToolCallResult::content_sections`] to expose structured content (file
 /// text, command output, code) with optional syntax and line-number metadata.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ContentSection {
     /// Optional label for this block. Absent when the call produces only one
     /// section and a label would add no information.
@@ -158,7 +158,7 @@ pub struct ContentSection {
 /// Lines are unified-diff text from the `similar` crate; `+` lines are
 /// additions, `−` lines are removals. Renderers that support colour should
 /// paint additions green and removals red.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DiffSection {
     /// Optional label (e.g. the file path being patched).
     pub label: Option<String>,
@@ -167,7 +167,7 @@ pub struct DiffSection {
 }
 
 /// A single line in a search result — either a match line or a context line.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SearchResultLine {
     /// 1-based line number within the source file.
     pub line_number: usize,
@@ -178,7 +178,7 @@ pub struct SearchResultLine {
 }
 
 /// A block of search results from a single file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SearchResultSection {
     /// Path of the file that was searched (mirrors the form of the `path`
     /// argument: relative when the input was relative, absolute when absolute).
@@ -192,7 +192,7 @@ pub struct SearchResultSection {
 
 /// A content block produced by a tool call — either a rich file / text
 /// section or a unified diff.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Section {
     Content(ContentSection),
     Diff(DiffSection),

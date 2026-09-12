@@ -116,8 +116,12 @@ pub enum StoreEvent {
         created_at: String,
         id: Uuid,
         parent_session: Uuid,
+        #[serde(default)]
+        call_id: Uuid,
         agent_type: String,
         task: String,
+        #[serde(default)]
+        label: String,
     },
     /// A child-agent run finished (§4G *Persistence*).
     ChildResult {
@@ -126,6 +130,8 @@ pub enum StoreEvent {
         completed_at: String,
         id: Uuid,
         parent_session: Uuid,
+        #[serde(default)]
+        call_id: Uuid,
         status: String,
         #[serde(default)]
         result: Option<String>,
@@ -441,8 +447,17 @@ impl Store {
         model: &str,
         parent_session: Option<Uuid>,
     ) -> Result<Store, StoreError> {
+        self.start_new_session_with_id(Uuid::new_v4(), provider_connection, model, parent_session)
+    }
+
+    fn start_new_session_with_id(
+        &self,
+        session_id: Uuid,
+        provider_connection: &str,
+        model: &str,
+        parent_session: Option<Uuid>,
+    ) -> Result<Store, StoreError> {
         let directory = project_directory(&self.inner.chats_root, &self.inner.project_key);
-        let session_id = Uuid::new_v4();
         let path = directory.join(format!("{session_id}.jsonl"));
         let mut file = open_locked_session_file(&path, session_id, false)?;
         let meta = SessionMeta {
@@ -561,14 +576,23 @@ impl Store {
 
     /// Enqueue the `child_start` record written to the **parent** session
     /// before a child run begins (§4G *Persistence*).
-    pub fn record_child_start(&self, run_id: Uuid, agent_type: &str, task: &str) {
+    pub fn record_child_start(
+        &self,
+        run_id: Uuid,
+        call_id: Uuid,
+        agent_type: &str,
+        task: &str,
+        label: &str,
+    ) {
         self.record_event(StoreEvent::ChildStart {
             version: EVENT_VERSION,
             created_at: now_timestamp(),
             id: run_id,
             parent_session: self.inner.session_id,
+            call_id,
             agent_type: agent_type.to_string(),
             task: task.to_string(),
+            label: label.to_string(),
         });
     }
 
@@ -577,6 +601,7 @@ impl Store {
     pub fn record_child_result(
         &self,
         run_id: Uuid,
+        call_id: Uuid,
         status: &str,
         result: Option<String>,
         sources: Vec<String>,
@@ -586,6 +611,7 @@ impl Store {
             completed_at: now_timestamp(),
             id: run_id,
             parent_session: self.inner.session_id,
+            call_id,
             status: status.to_string(),
             result,
             sources,
@@ -594,19 +620,19 @@ impl Store {
 
     /// Write a completed child-agent transcript **once**, into its own
     /// sub-session file under the same `project_key`, with its own `meta`
-    /// header auto-titled from the child's task (§4H decision 9). Child
-    /// transcripts are never streamed live.
+    /// header auto-titled from the first explicit user message in `messages`
+    /// (§4H decision 9). Child transcripts are never streamed live.
     ///
     /// `provider_connection_and_model` is the child's own resolved engine —
     /// which can differ from the parent's. `None` (the child's engine
     /// configuration could not be resolved) falls back to an empty
     /// `meta.provider_connection`/`model`
     /// pair and skips the initial [`StoreEvent::ModelChanged`] record rather
-    /// than persisting a misleading empty one.
+    /// than persisting a misleading empty one. The supplied messages retain
+    /// their order and are persisted as given.
     pub async fn write_child_transcript(
         &self,
         provider_connection_and_model: Option<(&str, &str)>,
-        task: &str,
         messages: &[Message],
     ) -> Result<Uuid, StoreError> {
         let (provider_connection, model) = provider_connection_and_model.unwrap_or(("", ""));
@@ -615,19 +641,40 @@ impl Store {
         if provider_connection_and_model.is_some() {
             child_store.record_model_changed(provider_connection, model);
         }
-        child_store.record_event(StoreEvent::Message {
-            version: EVENT_VERSION,
-            timestamp: now_timestamp(),
-            message: Message::User {
-                content: task.to_string(),
-                kind: UserMessageKind::Explicit,
-            },
-        });
-        for message in messages {
-            child_store.record_message(message);
-        }
+        child_store.record_child_transcript_messages(messages);
         child_store.flush().await;
         Ok(child_store.session_id())
+    }
+
+    /// Write a child transcript using the child run id as its session id.
+    /// Parent `child_start` records already persist that run id, so this stable
+    /// path lets replay locate the transcript without adding another
+    /// cross-file identifier to the parent event schema.
+    pub async fn write_child_transcript_for_run(
+        &self,
+        run_id: Uuid,
+        provider_connection_and_model: Option<(&str, &str)>,
+        messages: &[Message],
+    ) -> Result<Uuid, StoreError> {
+        let (provider_connection, model) = provider_connection_and_model.unwrap_or(("", ""));
+        let child_store = self.start_new_session_with_id(
+            run_id,
+            provider_connection,
+            model,
+            Some(self.inner.session_id),
+        )?;
+        if provider_connection_and_model.is_some() {
+            child_store.record_model_changed(provider_connection, model);
+        }
+        child_store.record_child_transcript_messages(messages);
+        child_store.flush().await;
+        Ok(child_store.session_id())
+    }
+
+    fn record_child_transcript_messages(&self, messages: &[Message]) {
+        for message in messages {
+            self.record_message(message);
+        }
     }
 
     /// Barrier: resolves once every event enqueued before this call has been
@@ -701,6 +748,97 @@ impl Store {
             })
             .collect())
     }
+
+    /// Read child-run lifecycle records from a parent session without
+    /// modifying the file. Legacy records missing correlation metadata remain
+    /// readable through serde defaults, but cannot be joined to a tool bubble.
+    pub fn read_child_runs(path: &Path) -> Result<Vec<ChildRunRecord>, StoreError> {
+        let content = std::fs::read_to_string(path).map_err(|source| StoreError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let mut runs = Vec::new();
+        let mut starts = std::collections::HashMap::<Uuid, usize>::new();
+        for line in content.lines() {
+            let Ok(event) = serde_json::from_str::<StoreEvent>(line) else {
+                continue;
+            };
+            match event {
+                StoreEvent::ChildStart {
+                    created_at,
+                    id,
+                    parent_session,
+                    call_id,
+                    agent_type,
+                    task,
+                    label,
+                    ..
+                } => {
+                    starts.insert(id, runs.len());
+                    runs.push(ChildRunRecord {
+                        run_id: id,
+                        call_id,
+                        parent_session,
+                        agent_type,
+                        task,
+                        label,
+                        created_at,
+                        completed_at: None,
+                        status: None,
+                        result: None,
+                        sources: Vec::new(),
+                        duration: None,
+                    });
+                }
+                StoreEvent::ChildResult {
+                    completed_at,
+                    id,
+                    call_id,
+                    status,
+                    result,
+                    sources,
+                    ..
+                } => {
+                    if let Some(index) = starts.get(&id).copied() {
+                        let run = &mut runs[index];
+                        if run.call_id.is_nil() {
+                            run.call_id = call_id;
+                        }
+                        run.duration = elapsed_duration(&run.created_at, &completed_at);
+                        run.completed_at = Some(completed_at);
+                        run.status = Some(status);
+                        run.result = result;
+                        run.sources = sources;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(runs)
+    }
+}
+
+fn elapsed_duration(started_at: &str, completed_at: &str) -> Option<std::time::Duration> {
+    let started_at = chrono::DateTime::parse_from_rfc3339(started_at).ok()?;
+    let completed_at = chrono::DateTime::parse_from_rfc3339(completed_at).ok()?;
+    completed_at.signed_duration_since(started_at).to_std().ok()
+}
+
+/// Joined child lifecycle metadata reconstructed from a parent session.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChildRunRecord {
+    pub run_id: Uuid,
+    pub call_id: Uuid,
+    pub parent_session: Uuid,
+    pub agent_type: String,
+    pub task: String,
+    pub label: String,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+    pub status: Option<String>,
+    pub result: Option<String>,
+    pub sources: Vec<String>,
+    pub duration: Option<std::time::Duration>,
 }
 
 /// Parse only the first line of `path` as the session's `meta` header.
@@ -1459,9 +1597,16 @@ mod tests {
         let run_id = Uuid::new_v4();
 
         store.record_message(&user_message("delegate this"));
-        store.record_child_start(run_id, "research", "investigate the bug");
+        store.record_child_start(
+            run_id,
+            Uuid::new_v4(),
+            "research",
+            "investigate the bug",
+            "Investigate",
+        );
         store.record_child_result(
             run_id,
+            Uuid::new_v4(),
             "success",
             Some("found it".to_string()),
             vec!["src/agent.rs".to_string()],
@@ -1509,6 +1654,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_child_runs_pairs_finished_and_orphaned_runs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let chats_root = temp.path().join("chats");
+        let store = Store::create(
+            &chats_root,
+            temp.path(),
+            Uuid::new_v4(),
+            "openrouter",
+            "gpt-4o",
+        )
+        .expect("parent store created");
+        let finished_run_id = Uuid::new_v4();
+        let finished_call_id = Uuid::new_v4();
+        let orphaned_run_id = Uuid::new_v4();
+        let orphaned_call_id = Uuid::new_v4();
+
+        store.record_child_start(
+            finished_run_id,
+            finished_call_id,
+            "research",
+            "find the regression",
+            "Find regression",
+        );
+        store.record_child_result(
+            finished_run_id,
+            finished_call_id,
+            "success",
+            Some("found it".to_string()),
+            vec!["src/agent.rs".to_string()],
+        );
+        store.record_child_start(
+            orphaned_run_id,
+            orphaned_call_id,
+            "review",
+            "review the patch",
+            "Review patch",
+        );
+        store.flush().await;
+
+        let runs = Store::read_child_runs(store.path()).expect("child records readable");
+        assert_eq!(runs.len(), 2);
+
+        let finished = runs
+            .iter()
+            .find(|run| run.run_id == finished_run_id)
+            .expect("finished run present");
+        assert_eq!(finished.call_id, finished_call_id);
+        assert_eq!(finished.label, "Find regression");
+        assert_eq!(finished.status.as_deref(), Some("success"));
+        assert_eq!(finished.result.as_deref(), Some("found it"));
+        assert_eq!(finished.sources, vec!["src/agent.rs".to_string()]);
+        assert!(finished.completed_at.is_some());
+        assert!(finished.duration.is_some());
+
+        let orphaned = runs
+            .iter()
+            .find(|run| run.run_id == orphaned_run_id)
+            .expect("orphaned run present");
+        assert_eq!(orphaned.call_id, orphaned_call_id);
+        assert_eq!(orphaned.label, "Review patch");
+        assert!(orphaned.completed_at.is_none());
+        assert!(orphaned.status.is_none());
+        assert!(orphaned.result.is_none());
+        assert!(orphaned.duration.is_none());
+    }
+
+    #[tokio::test]
     async fn child_transcript_is_written_to_its_own_session_file() {
         let temp = tempfile::tempdir().expect("tempdir");
         let chats_root = temp.path().join("chats");
@@ -1520,17 +1732,22 @@ mod tests {
             "gpt-4o",
         )
         .expect("store created");
+        let context_messages = vec![
+            Message::System {
+                content: "SOUL".to_string(),
+            },
+            Message::System {
+                content: "tools schema".to_string(),
+            },
+            Message::System {
+                content: "child briefing".to_string(),
+            },
+            user_message("summarize the module"),
+            assistant_message("done"),
+        ];
 
         let child_session_id = store
-            .write_child_transcript(
-                Some(("ollama", "llama3")),
-                "summarize the module",
-                &[Message::Assistant {
-                    content: "done".to_string(),
-                    status: AssistantStatus::Complete,
-                    tool_calls: vec![],
-                }],
-            )
+            .write_child_transcript(Some(("ollama", "llama3")), &context_messages)
             .await
             .expect("child transcript written");
 
@@ -1558,10 +1775,61 @@ mod tests {
         };
         assert_eq!(provider_connection, "ollama");
         assert_eq!(model, "llama3");
+        let persisted_messages: Vec<Message> = events
+            .into_iter()
+            .filter_map(|event| match event {
+                StoreEvent::Message { message, .. } => Some(message),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(persisted_messages, context_messages);
+    }
+
+    #[tokio::test]
+    async fn child_transcript_does_not_duplicate_task_already_in_context() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let chats_root = temp.path().join("chats");
+        let store = Store::create(
+            &chats_root,
+            temp.path(),
+            Uuid::new_v4(),
+            "openrouter",
+            "gpt-4o",
+        )
+        .expect("store created");
+        let run_id = Uuid::new_v4();
+        let task = "summarize the module";
+        let context_messages = vec![
+            Message::System {
+                content: "SOUL".to_string(),
+            },
+            Message::System {
+                content: "tools schema".to_string(),
+            },
+            Message::System {
+                content: "child briefing".to_string(),
+            },
+            user_message(task),
+            assistant_message("done"),
+        ];
+
+        let child_session_id = store
+            .write_child_transcript_for_run(run_id, Some(("ollama", "llama3")), &context_messages)
+            .await
+            .expect("child transcript written");
+
+        let child_path = session_path(&chats_root, store.project_key(), child_session_id);
+        let persisted_messages: Vec<Message> = read_events(&child_path)
+            .into_iter()
+            .filter_map(|event| match event {
+                StoreEvent::Message { message, .. } => Some(message),
+                _ => None,
+            })
+            .collect();
         assert_eq!(
-            events.len(),
-            4,
-            "meta + model_changed + task + assistant reply: {events:?}"
+            persisted_messages, context_messages,
+            "the child transcript must preserve the Context message order without \
+             prepending a duplicate task"
         );
     }
 

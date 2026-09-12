@@ -238,11 +238,14 @@ pub fn serialize_messages(messages: &[Message]) -> serde_json::Value {
                 value
             }
             Message::ToolResult {
-                id,
-                result,
-                result_metadata,
-                result_metadata_schema,
-                ..
+                value:
+                    crate::agent::ToolResult {
+                        id,
+                        result,
+                        result_metadata,
+                        result_metadata_schema,
+                        ..
+                    },
             } => {
                 let content = ToolEnvelope {
                     ok: true,
@@ -333,7 +336,7 @@ mod tests {
 
     #[test]
     fn serialize_messages_maps_assistant_tool_calls_and_tool_messages() {
-        use crate::agent::{AssistantStatus, ToolCallRequest};
+        use crate::agent::{AssistantStatus, ToolCallRequest, ToolResult};
         let id = uuid::Uuid::new_v4();
         let messages = vec![
             Message::Assistant {
@@ -343,20 +346,28 @@ mod tests {
                     id,
                     name: "read".into(),
                     arguments: serde_json::json!({ "path": "a.txt" }),
+                    persisted_title_arguments: vec![],
                 }],
             },
             Message::ToolResult {
-                id,
-                name: "read".into(),
-                result: "file contents".into(),
-                result_metadata: None,
-                result_metadata_schema: None,
+                value: ToolResult {
+                    id,
+                    name: "read".into(),
+                    result: "file contents".into(),
+                    result_section_id: None,
+                    result_metadata: None,
+                    result_metadata_schema: None,
+                    summary: vec![],
+                    content_sections: vec![],
+                    duration: std::time::Duration::ZERO,
+                },
             },
             Message::ToolError {
                 id,
                 name: "read".into(),
                 error: "boom".into(),
                 duration: std::time::Duration::ZERO,
+                content_sections: vec![],
             },
         ];
         let value = serialize_messages(&messages);

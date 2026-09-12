@@ -198,7 +198,8 @@ async fn tool_call_pauses_for_approval_then_reprompts_after_result() {
     let context = handle.await.expect("loop ok").expect("context");
     assert!(matches!(
         context.messages().iter().find(|m| matches!(m, Message::ToolResult { .. })),
-        Some(Message::ToolResult { name, result, .. }) if name == "write" && result.contains("wrote")
+        Some(Message::ToolResult { value })
+            if value.name == "write" && value.result.contains("wrote")
     ));
 }
 
@@ -272,7 +273,7 @@ async fn two_tool_calls_drain_serially_with_single_reprompt() {
     let mut results: Vec<&str> = messages
         .iter()
         .filter_map(|m| match m {
-            Message::ToolResult { result, .. } => Some(result.as_str()),
+            Message::ToolResult { value } => Some(value.result.as_str()),
             _ => None,
         })
         .collect();
@@ -286,11 +287,9 @@ async fn two_tool_calls_drain_serially_with_single_reprompt() {
         .collect();
     assert_eq!(results.len(), 2);
     for message in results {
-        if let Message::ToolResult {
-            result_metadata, ..
-        } = message
-        {
-            let metadata = result_metadata
+        if let Message::ToolResult { value } = message {
+            let metadata = value
+                .result_metadata
                 .as_ref()
                 .expect("read result must have metadata");
             assert_eq!(metadata["read_bytes"], 4);

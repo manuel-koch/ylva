@@ -170,11 +170,10 @@ reducer with no I/O).
 
 ## Implementation Plan
 
-An implementing agent must flip each `[ ]` to `[x]` immediately after
-completing that step and rewrite this file in place, so progress is
-resumable across sessions.
+Each implementation step is marked `[x]` after completion and this file is
+rewritten in place, so progress is resumable across sessions.
 
-1. [ ] **Make tool content sections serializable.** In
+1. [x] **Make tool content sections serializable.** In
        `src/agent/tools.rs`, add `serde::Serialize, serde::Deserialize` to the
        derive list of `Section` (line ~196), `ContentSection` (line ~142),
        `DiffSection` (line ~162), `SearchResultLine` (line ~171), and
@@ -184,56 +183,63 @@ resumable across sessions.
        needed, this is a mechanical derive addition. Verify with `cargo build`
        that no other trait bound conflicts arise.
 
-2. [ ] **Extend the persisted `Message` schema.** In `src/agent.rs`'s
+2. [x] **Extend the persisted `Message` schema.** In `src/agent.rs`'s
        `Message` enum (line ~374):
        - Add to `Message::ToolResult`: `summary: Vec<(String, String)>`,
-         `content_sections: Vec<crate::agent::tools::Section>`,
-         `duration: std::time::Duration` — each annotated
-         `#[serde(default)]` so old session files (written before this
-         change, lacking these fields) still deserialize.
+       `content_sections: Vec<crate::agent::tools::Section>`,
+       `duration: std::time::Duration` — each annotated
+       `#[serde(default)]` so old session files (written before this
+       change, lacking these fields) still deserialize.
+       `ToolResult` also carries an optional result-section identifier so
+       specialized headings (for example `clarify`'s `user_answer`) survive
+       replay; absent identifiers use the standard `result` section.
+       Assistant `ToolCallRequest` records persist the tool-specific
+       `title_arguments` captured from the created call. Calls without title
+       arguments persist an empty list.
        - Add to `Message::ToolError`: `content_sections:
-         Vec<crate::agent::tools::Section>`, also `#[serde(default)]`.
-         `Message::ToolError` already has a `duration` field; no `summary`
-         field is added here since `ToolCallState::Error`
-         (`src/tui_reducer_state.rs` line ~165) has no `summary` field to
-         populate.
+       Vec<crate::agent::tools::Section>`, also `#[serde(default)]`.
+       `Message::ToolError` already has a `duration` field; no `summary`
+       field is added here since `ToolCallState::Error`
+       (`src/tui_reducer_state.rs` line ~165) has no `summary` field to
+       populate.
        - `std::time::Duration` already round-trips through `serde_json`
-         without extra crates or `#[serde(with = "...")]` (confirmed: it is
-         already used unannotated on `Message::ToolError.duration` today and
-         the crate builds).
+       without extra crates or `#[serde(with = "...")]` (confirmed: it is
+       already used unannotated on `Message::ToolError.duration` today and
+       the crate builds).
 
-3. [ ] **Thread the new data through `Context::push_tool_result` /
+3. [x] **Thread the new data through `Context::push_tool_result` /
        `push_tool_error`.** In `src/agent.rs`:
-       - Extend `push_tool_result`'s signature (line ~562) to accept
-         `summary: Vec<(String, String)>`, `content_sections:
-         Vec<crate::agent::tools::Section>`, `duration: std::time::Duration`,
-         and include them in the constructed `Message::ToolResult`.
+       - Define a canonical serializable `ToolResult` payload containing the
+       tool id, name, result text, metadata, summary, content sections, and
+       duration. Store it as the flattened value of `Message::ToolResult`.
+       `push_tool_result` accepts and forwards this payload unchanged rather
+       than expanding it into another positional argument list.
        - Extend `push_tool_error`'s signature (line ~579) to accept
-         `content_sections: Vec<crate::agent::tools::Section>` and include it
-         in the constructed `Message::ToolError`.
+       `content_sections: Vec<crate::agent::tools::Section>` and include it
+       in the constructed `Message::ToolError`.
        - **Fix the pre-existing `Duration::ZERO` hardcoding** in
-         `push_tool_error`: it currently discards the real duration
-         unconditionally. Change it to accept the real `duration` as a
-         parameter and persist that, instead of always zero. This is tightly
-         coupled to this change (duration only starts mattering once it's
-         used for replay) and must be fixed here, not left as a latent bug.
+       `push_tool_error`: it currently discards the real duration
+       unconditionally. Change it to accept the real `duration` as a
+       parameter and persist that, instead of always zero. This is tightly
+       coupled to this change (duration only starts mattering once it's
+       used for replay) and must be fixed here, not left as a latent bug.
        - Update every call site of `push_tool_result`/`push_tool_error` in
-         `src/agent.rs` (found at lines ~1227, ~1266, ~1652, ~1708, ~1768,
-         ~1882, ~1903, ~1923, ~2102, ~2120, ~2371, plus the
-         `resolve_spawn_subagent` call at ~2120, and test call sites ~2812,
-         ~2853, ~3276) to pass through the real `summary`/`content_sections`/
-         `duration` already in scope at that call site (e.g. the
-         `AgentEvent::ToolDone`/`AgentEvent::ToolError` handlers at ~1213 and
-         ~1266 already have all three values available locally — they are
-         currently only forwarded to the `UiUpdate::ToolDone`/`ToolError`
-         channel send, not to `context.push_tool_result`/`push_tool_error`).
-         Call sites that fail before any tool execution starts (e.g. "Unknown
-         tool" at ~1186, `resolve_spawn_subagent`'s no-`ChildAgentManager`
-         branch) legitimately have no elapsed duration or summary and should
-         pass `Duration::ZERO`/`vec![]`, mirroring what they already send on
-         the `UiUpdate` side.
+       `src/agent.rs` (found at lines ~1227, ~1266, ~1652, ~1708, ~1768,
+       ~1882, ~1903, ~1923, ~2102, ~2120, ~2371, plus the
+       `resolve_spawn_subagent` call at ~2120, and test call sites ~2812,
+       ~2853, ~3276) to pass through the real `summary`/`content_sections`/
+       `duration` already in scope at that call site (e.g. the
+       `AgentEvent::ToolDone`/`AgentEvent::ToolError` handlers at ~1213 and
+       ~1266 already have all three values available locally — they are
+       currently only forwarded to the `UiUpdate::ToolDone`/`ToolError`
+       channel send, not to `context.push_tool_result`/`push_tool_error`).
+       Call sites that fail before any tool execution starts (e.g. "Unknown
+       tool" at ~1186, `resolve_spawn_subagent`'s no-`ChildAgentManager`
+       branch) legitimately have no elapsed duration or summary and should
+       pass `Duration::ZERO`/`vec![]`, mirroring what they already send on
+       the `UiUpdate` side.
 
-4. [ ] **Add `Context::hydrate`.** In `src/agent.rs`, add a method
+4. [x] **Add `Context::hydrate`.** In `src/agent.rs`, add a method
        `pub fn hydrate(&mut self, messages: Vec<Message>)` that appends each
        message directly via `self.messages.push(..)` — **never** through
        `self.commit(..)`, since `commit` (line ~578) is what forwards to the
@@ -242,94 +248,100 @@ resumable across sessions.
        system prompts are already installed and before any other message is
        pushed, and that it is safe to call with an empty `Vec` (a no-op).
 
-5. [ ] **Expose the session file path from `Store`.** Add
+5. [x] **Expose the session file path from `Store`.** Add
        `pub fn path(&self) -> &Path` to `Store` (`src/store.rs`, near line
        ~346), backed by the existing `StoreInner.path` field (line ~331), so
        callers outside `store.rs` can call `Store::read_messages(store.path())`.
 
-6. [ ] **Call hydration unconditionally wherever a `Store` is attached to a
+6. [x] **Call hydration unconditionally wherever a `Store` is attached to a
        `Context`.** No "resumed vs. fresh" flag is threaded through
        `AgentFactory`/`AgentLoop` — a fresh session's file has no prior
        committed messages when hydration runs, so `Store::read_messages`
        returns an empty `Vec` there and hydration is a safe no-op. Update:
        - `AgentLoop::run`'s `tokio::spawn` closure (`src/agent.rs` ~line
-         1028-1031), where `Context::new()` + `context.set_store(store)` runs
-         for the root loop: immediately after `set_store`, read
-         `Store::read_messages(store.path())` and call
-         `context.hydrate(messages)`. On a read error, log a warning
-         (`tracing::warn!`) and continue with an empty hydration rather than
-         failing the whole run — a corrupt/unreadable file should not block
-         startup (mirrors the read-tolerance philosophy of §4H decision 6).
+       1028-1031), where `Context::new()` + `context.set_store(store)` runs
+       for the root loop: immediately after `set_store`, read
+       `Store::read_messages(store.path())` and call
+       `context.hydrate(messages)`. On a read error, log a warning
+       (`tracing::warn!`) and continue with an empty hydration rather than
+       failing the whole run — a corrupt/unreadable file should not block
+       startup (mirrors the read-tolerance philosophy of §4H decision 6).
        - The `/clear`/`/reset` fresh-context path (`src/agent.rs` ~line
-         1943-1951, `fresh_context.set_store(new_store)`): apply the same
-         hydrate-after-set_store call for consistency, even though this path
-         always targets a brand-new file (harmless no-op, keeps one uniform
-         rule instead of a special case).
+       1943-1951, `fresh_context.set_store(new_store)`): apply the same
+       hydrate-after-set_store call for consistency, even though this path
+       always targets a brand-new file (harmless no-op, keeps one uniform
+       rule instead of a special case).
        - Child-agent contexts are unaffected: children are always started via
-         `start_new_session` (§4H decision 9), never resumed from an existing
-         file, so hydration there is always a no-op in practice; no change to
-         the child-context construction path is required beyond whatever
-         `set_store` call it already makes, if a uniform helper is
-         introduced (see Implementation Hints).
+       `start_new_session` (§4H decision 9), never resumed from an existing
+       file, so hydration there is always a no-op in practice; no change to
+       the child-context construction path is required beyond whatever
+       `set_store` call it already makes, if a uniform helper is
+       introduced (see Implementation Hints).
 
-7. [ ] **Headless verification.** `ConsoleApp` (`src/cli_driver.rs`) needs no
+7. [x] **Headless verification.** `ConsoleApp` (`src/cli_driver.rs`) needs no
        structural change beyond step 6 — the hydrated `Context` is already
        what gets sent as the request payload on the next turn — but add an
        assertion-level integration test (see step 12) confirming the behavior
        end-to-end via the real binary, not just the unit level.
 
-8. [ ] **Project hydrated messages into TUI `chat_entries` before first
+8. [x] **Project hydrated messages into TUI `chat_entries` before first
        render.** In `src/tui_reducer_state.rs`, add a function (following the
        existing naming/visibility conventions of nearby `AppState` methods
        such as `push_user_message`/`flush_assistant_message` around lines
        1490-1540) that maps each `Message` to a `ChatEntry`:
        - `Message::User { content, kind: UserMessageKind::Explicit }` →
-         `ChatEntry::UserMessage { text: content, state:
-         UserMessageState::Sent }`.
+       `ChatEntry::UserMessage { text: content, state:
+       UserMessageState::Sent }`.
        - `Message::User { kind: UserMessageKind::ImplicitToolNote, .. }` →
-         **skipped**, no `ChatEntry` produced — these are hidden from the
-         live UI too (see `Context::push_implicit_user`'s doc comment,
-         `src/agent.rs`), so replay must preserve that invisibility. They are
-         still hydrated into `Context.messages` by step 4/6 so the *model*
-         retains them — only the TUI projection drops them.
+       **skipped**, no `ChatEntry` produced — these are hidden from the
+       live UI too (see `Context::push_implicit_user`'s doc comment,
+       `src/agent.rs`), so replay must preserve that invisibility. They are
+       still hydrated into `Context.messages` by step 4/6 so the *model*
+       retains them — only the TUI projection drops them.
        - `Message::Assistant { content, status, .. }` → `ChatEntry::
-         AssistantMessage { text: content, interrupted: matches!(status,
-         AssistantStatus::Interrupted) }` (check `AssistantStatus`'s exact
-         variants near the `Message` enum, `src/agent.rs` ~line 374, and
-         match whatever mapping `flush_assistant_message` already uses live).
+       AssistantMessage { text: content, interrupted: matches!(status,
+       AssistantStatus::Interrupted) }` (check `AssistantStatus`'s exact
+       variants near the `Message` enum, `src/agent.rs` ~line 374, and
+       match whatever mapping `flush_assistant_message` already uses live).
        - `Message::ToolResult { .. }` → a `ChatEntry::ToolBubble` with
-         `state: ToolCallState::Done { arguments, result_section:
-         ResultSection::plain(result), content_sections, summary, duration,
-         title_arguments }`. `content_sections`/`summary`/`duration` come
-         straight from the (now-extended) `Message::ToolResult`; `arguments`/
-         `title_arguments` come from matching the preceding
-         `Message::Assistant.tool_calls` entry with the same `id` (see next
-         bullet).
+       `state: ToolCallState::Done { arguments, result_section:
+       ResultSection::plain(result), content_sections, summary, duration,
+       title_arguments }`. `content_sections`/`summary`/`duration` come
+       straight from the (now-extended) `Message::ToolResult`; `arguments`/
+       `title_arguments` come from matching the preceding
+       `Message::Assistant.tool_calls` entry with the same `id` (see next
+       bullet).
        - `Message::ToolError { .. }` → similarly `ToolCallState::Error {
-         error, title_arguments, duration, content_sections }`.
+       error, title_arguments, duration, content_sections }`.
        - Assistant messages carrying `tool_calls`
-         (`Message::Assistant.tool_calls: Vec<ToolCallRequest>`) are the
-         source of each subsequent `ToolResult`/`ToolError`'s `arguments`/
-         `title_arguments` — match by `ToolCallRequest.id` ==
-         `Message::ToolResult.id`/`Message::ToolError.id`, using
-         `ToolCallRequest::title_arguments()` (`src/agent/tools.rs` ~line
-         234) exactly as `src/presenter.rs`'s `update_tool_bubble_to_done`
-         (~line 2088) already does for the live path.
+       (`Message::Assistant.tool_calls: Vec<ToolCallRequest>`) are the
+       source of each subsequent `ToolResult`/`ToolError`'s `arguments`/
+       `title_arguments` — match by `ToolCallRequest.id` ==
+       `Message::ToolResult.id`/`Message::ToolError.id`, using
+       `ToolCallRequest::title_arguments()` (`src/agent.rs` ~line 365).
+       Production tool-call handling captures the tool-specific projection
+       before execution and persists it on the request, so replay uses the
+       same title arguments as the live path. Calls without title arguments
+       use an empty projection.
+       `ToolResult` also persists an optional result-section identifier, with
+       the standard `result` section as the legacy fallback; this preserves
+       specialized headings such as the `clarify` tool's `user_answer`
+       section.
        - A tool call with no matching `ToolResult`/`ToolError` in the file
-         (process died mid-call) never reconstructs a `Pending`/`Running`
-         state. **Superseded by the child-run replay extension** (steps
-         18-22): `spawn_subagent` calls are cross-referenced against
-         `ChildStart`/`ChildResult` records instead (steps 19-20, `Done` or
-         `Error` depending on whether the child actually finished); every
-         other tool gets an in-memory-only synthesized `Message::ToolError`
-         during `Context::hydrate` (step 22), which this projection then
-         renders as a normal, visible Error bubble like any other
-         `ToolError` — no bare tool call is ever left with no `ChatEntry`.
+       (process died mid-call) never reconstructs a `Pending`/`Running`
+       state. **Superseded by the child-run replay extension** (steps
+       18-22): `spawn_subagent` calls are cross-referenced against
+       `ChildStart`/`ChildResult` records instead (steps 19-20, `Done` or
+       `Error` depending on whether the child actually finished); every
+       other tool gets an in-memory-only synthesized `Message::ToolError`
+       during `Context::hydrate` (step 22), which this projection then
+       renders as a normal, visible Error bubble like any other
+       `ToolError` — no bare tool call is ever left with no `ChatEntry`.
        - `Message::System` is never projected to a `ChatEntry` (system
-         prompts/briefings are not shown in the chat transcript live
-         either).
+       prompts/briefings are not shown in the chat transcript live
+       either).
 
-9. [ ] **Call the TUI projection before the first frame.** Find where
+9. [x] **Call the TUI projection before the first frame.** Find where
        `TuiApp::new`/`TuiApp::run` (`src/app.rs`) constructs its initial
        `AppState` and call the new projection function from step 8
        immediately after construction — driven off `Context::messages()`
@@ -341,7 +353,7 @@ resumable across sessions.
        unconditionally like step 6's hydration — a fresh session yields an
        empty `chat_entries` seed, which is exactly today's starting state.
 
-10. [ ] **Update `docs/blueprint.md`'s Phase 8 section** (lines ~2795-2853):
+10. [x] **Update `docs/blueprint.md`'s Phase 8 section** (lines ~2795-2853):
         amend bullet 2 (currently describing only `Context::hydrate` as a
         pure in-memory seam with "no new crates") to state that
         `Message::ToolResult`/`ToolError` are additively extended with
@@ -355,7 +367,7 @@ resumable across sessions.
         with `StoreEvent::ChildStart`/`ChildResult` additively extended with
         `call_id`/`label` for the correlation this requires (steps 18-23).
 
-11. [ ] **Update `docs/persistence.md`.** Remove the "In Phase 7 a resumed
+11. [x] **Update `docs/persistence.md`.** Remove the "In Phase 7 a resumed
         session appends to the existing file but does **not** replay the
         earlier turns..." paragraph at the end of the "Resume contract"
         section (~line 198) and replace it with a description of the new
@@ -379,7 +391,7 @@ resumable across sessions.
         `call_id` cannot be correlated and that bubble keeps its originally-
         persisted `running`/`queued` text, undrillable.
 
-12. [ ] **Update `docs/features.md`.** In the Session Persistence section
+12. [x] **Update `docs/features.md`.** In the Session Persistence section
         (~line 66-78), update the "Every start begins a fresh session..."
         area and the resume description to state that resuming now restores
         the prior transcript into both the headless request payload and the
@@ -387,7 +399,7 @@ resumable across sessions.
         conversation (loaded lazily on first drill-in) — linking to
         `docs/persistence.md`'s updated Resume contract for detail.
 
-13. [ ] **Update `docs/implementation-notes.md`.** Add a "Session replay"
+13. [x] **Update `docs/implementation-notes.md`.** Add a "Session replay"
         subsection (near the existing `Store::resume`-related notes around
         lines 206-247) describing: the `Context::hydrate` seam and why it
         bypasses `commit`; that hydration runs unconditionally (no
@@ -405,7 +417,7 @@ resumable across sessions.
         lazy rather than eager); and the legacy-session degraded-replay
         behavior for both the tool-bubble fields and the child-run fields.
 
-14. [ ] **Tests — schema round-trip.** Add/extend unit tests in
+14. [x] **Tests — schema round-trip.** Add/extend unit tests in
         `src/agent.rs`'s test module (near `push_tool_result_and_error_append_messages`,
         line ~2812) asserting that a `Message::ToolResult`/`ToolError` built
         with non-empty `summary`/`content_sections`/`duration` serializes to
@@ -414,7 +426,7 @@ resumable across sessions.
         successfully with empty/zero defaults (proves the `#[serde(default)]`
         backward-compatibility contract).
 
-15. [ ] **Tests — `Context` hydration round-trip.** Add a unit test (near
+15. [x] **Tests — `Context` hydration round-trip.** Add a unit test (near
         `messages_returns_immutable_read_back_slice`, `src/agent.rs` ~line
         2904, or alongside the store's own `Context`-based tests in
         `src/store.rs` ~lines 1157/1201/1230) asserting: (a) hydrated
@@ -424,7 +436,7 @@ resumable across sessions.
         existing store tests already use) — a second flush/resume must not
         double every line.
 
-16. [ ] **Tests — end-to-end replay.** Extend
+16. [x] **Tests — end-to-end replay.** Extend
         `tests/store_persistence_e2e.rs` (which already spawns the real
         compiled binary, see `spawn_ylva` at line ~94) with a test that: (a)
         runs the binary once to produce a session with one completed turn
@@ -439,7 +451,7 @@ resumable across sessions.
         session file is reread, each line from the first run still appears
         exactly once (no duplication from hydration).
 
-17. [ ] **Tests — TUI projection.** Add a presenter/reducer-level unit test
+17. [x] **Tests — TUI projection.** Add a presenter/reducer-level unit test
         in `tests/tui_render_state.rs` (or alongside existing `AppState`
         tests in `src/tui_reducer_state.rs`'s test module — check which
         location the existing convention for this kind of state-shape test
@@ -460,7 +472,7 @@ scope" in Context). These steps must land together with steps 1-17 in the
 same phase — step 19's fix depends on step 18's schema addition, and steps
 21-23 depend on step 19's corrected bubble state existing first.
 
-18. [ ] **Persist `call_id` and `label` on `ChildStart`/`ChildResult`.** In
+18. [x] **Persist `call_id` and `label` on `ChildStart`/`ChildResult`.** In
         `src/store.rs`: add `call_id: Uuid` to `StoreEvent::ChildStart` and
         `StoreEvent::ChildResult`, and `label: String` to `ChildStart` only
         (mirrors where `SpawnRequest.label` already lives) — both
@@ -475,7 +487,7 @@ same phase — step 19's fix depends on step 18's schema addition, and steps
         already in scope) — this is a mechanical plumbing change, no new
         control flow.
 
-19. [ ] **Fix up the root `spawn_subagent` bubble's terminal state on
+19. [x] **Fix up the root `spawn_subagent` bubble's terminal state on
         replay.** Add a `Store` read function (e.g.
         `Store::read_child_runs(path) -> Vec<ChildRunRecord>`, alongside
         `read_messages`) that re-parses the file's raw `StoreEvent`s (not
@@ -492,20 +504,20 @@ same phase — step 19's fix depends on step 18's schema addition, and steps
         `{"status":...,"run_id":...}`) in the `read_child_runs` output
         instead of trusting the stale persisted `status` text, and project:
         - a matching record **with** a `status`/`result` (i.e. `ChildResult`
-          existed) → `ToolCallState::Done` with `summary: [("status",
-          status)]`, `content_sections` rebuilt the same way
-          `FinishResult::content_sections` renders them (reuse that method
-          by constructing an equivalent `FinishResult`-shaped value from the
-          record, or factor a shared helper), and the computed `duration`;
+        existed) → `ToolCallState::Done` with `summary: [("status",
+        status)]`, `content_sections` rebuilt the same way
+        `FinishResult::content_sections` renders them (reuse that method
+        by constructing an equivalent `FinishResult`-shaped value from the
+        record, or factor a shared helper), and the computed `duration`;
         - a matching record **without** a `ChildResult` (orphaned — process
-          died mid-child) → `ToolCallState::Error` (step 20) instead of
-          `Done`;
+        died mid-child) → `ToolCallState::Error` (step 20) instead of
+        `Done`;
         - no matching record at all (e.g. a legacy file predating step 18's
-          `call_id`, so correlation is impossible) → fall back to today's
-          plain projection of the persisted (stale) `Message::ToolResult`
-          content, per the legacy-degrade acceptance criterion.
+        `call_id`, so correlation is impossible) → fall back to today's
+        plain projection of the persisted (stale) `Message::ToolResult`
+        content, per the legacy-degrade acceptance criterion.
 
-20. [ ] **Orphaned child → Error, not Running.** In the same projection
+20. [x] **Orphaned child → Error, not Running.** In the same projection
         branch as step 19: when a `spawn_subagent`'s `run_id` has a
         `ChildStart` but no `ChildResult`, project it as
         `ToolCallState::Error { error: "Subagent did not finish before the \
@@ -514,7 +526,7 @@ same phase — step 19's fix depends on step 18's schema addition, and steps
         `Pending`/`Running`, consistent with the plan's existing rule for
         orphaned tool calls in general.
 
-21. [ ] **Eagerly populate `ChildRunInfo` (not transcripts) at root hydration
+21. [x] **Eagerly populate `ChildRunInfo` (not transcripts) at root hydration
         time.** In the step 9 call site (before the first frame), for every
         record `read_child_runs` returned with a resolvable `call_id`,
         insert a `ChildConversation` into `AppState.child_conversations`
@@ -528,7 +540,7 @@ same phase — step 19's fix depends on step 18's schema addition, and steps
         bubble is simply not drillable, per the legacy-degrade acceptance
         criterion.
 
-22. [ ] **Synthesize a visible `Message::ToolError` for orphaned generic
+22. [x] **Synthesize a visible `Message::ToolError` for orphaned generic
         tool calls during `Context::hydrate`.** After appending all
         hydrated messages (step 4), scan for any `Message::Assistant.tool_calls`
         entry whose `id` has no later `Message::ToolResult`/`ToolError` in
@@ -548,7 +560,7 @@ same phase — step 19's fix depends on step 18's schema addition, and steps
         for them like any other `ToolError` — no separate special-case is
         needed in the projection itself, only in `hydrate`.
 
-23. [ ] **Lazy per-child transcript loading on first drill-in.** Add
+23. [x] **Lazy per-child transcript loading on first drill-in.** Add
         `needs_lazy_load: bool` to `ChildConversation`
         (`src/tui_reducer_state.rs`): `false` for `start_child_run`'s
         live-creation path (unconditionally — live children never need
@@ -568,7 +580,7 @@ same phase — step 19's fix depends on step 18's schema addition, and steps
         transcript rather than failing the click, mirroring step 6's
         read-tolerance for root hydration.
 
-24. [ ] **Tests — child-run replay extension.** Extend the step 14-17 test
+24. [x] **Tests — child-run replay extension.** Extend the step 14-17 test
         additions with: (a) a `Store`-level unit test for
         `read_child_runs` pairing `ChildStart`/`ChildResult` by id,
         including the no-`ChildResult` (orphaned) case; (b) a TUI-projection
@@ -634,11 +646,12 @@ same phase — step 19's fix depends on step 18's schema addition, and steps
   types; `AppState.chat_entries: Vec<ChatEntry>` (~line 1243) is the flat,
   session-lifetime list the presenter renders.
 - `ToolCallRequest` (`src/agent.rs` ~line 346: `id: Uuid, name: String,
-  arguments: Value`) is carried on `Message::Assistant.tool_calls`; its
-  `title_arguments()` method (trait impl, `src/agent/tools.rs` ~line 234) is
-  the existing derivation used everywhere else a bubble's title fields are
-  populated (e.g. `src/agent.rs` ~lines 1615, 2058, 2348, 2368, 2433) — reuse
-  it rather than re-deriving title fields ad hoc.
+  arguments: Value, persisted_title_arguments`) is carried on
+  `Message::Assistant.tool_calls`; its `title_arguments()` method
+  (`src/agent.rs` ~line 365) returns the exact tool-specific projection
+  captured when the call was created. Calls without title arguments carry an
+  empty persisted projection. Reuse it rather than re-deriving title fields
+  ad hoc.
 - `src/llm.rs`'s `serialize_messages` (~line 199) already destructures every
   `Message` variant with `..`, so the new `Message::ToolResult`/`ToolError`
   fields need no change there and never leak into the LLM wire payload.

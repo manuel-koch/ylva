@@ -184,6 +184,44 @@ user-facing on-disk contract; this section is the contributor view.
   This upholds the blueprint §4C ownership rule: only the outer loop mutates
   `Context`, so no streaming task can ever write. `AgentLoop::with_store`
   attaches the store to the `Context` the loop creates.
+- **Session replay.** `Context::set_store` reads the attached session through
+  `Store::read_messages` and calls `Context::hydrate`, which appends directly
+  to the in-memory message list instead of using `commit`; this prevents
+  already-persisted lines from being written again. The rule is unconditional
+  for fresh and resumed stores because a fresh file reads as an empty
+  transcript. `hydrate` also synthesizes an in-memory `ToolError` for an
+  unanswered generic tool call, keeping the next provider payload valid
+  without creating a new disk event.
+- **Replay projection.** `tui_reducer_state::project_messages` maps persisted
+  `Message` values to terminal-free `ChatEntry` values before the first TUI
+  frame. `ToolResult`/`ToolError` carry persisted `summary`,
+  `content_sections`, and `duration`, and `ToolResult` also carries an
+  optional result-section identifier for tools such as `clarify`. This keeps
+  the resumed result heading identical to the live bubble; absent identifiers
+  fall back to the standard result section. `push_tool_error` preserves the
+  actual duration instead of hard-coding zero. Assistant tool calls persist the
+  tool-specific `title_arguments` captured when the call is created, so
+  `clarify` keeps only its question inline while its context and choices remain
+  body sections, and
+  replayed bubbles use the same title projection as live bubbles; calls
+  without title arguments use an empty title projection.
+  System messages and implicit harness notes remain model-only.
+- **Tool-result payload.** `Message::ToolResult` carries a serializable
+  `ToolResult` payload as its flattened value, and
+  `Context::push_tool_result` forwards that value unchanged. This keeps the
+  persisted JSON shape stable while avoiding a positional argument list for
+  the complete result.
+- **Child replay and lazy loading.** `ChildStart`/`ChildResult` carry
+  `call_id` (plus `label` on `ChildStart`) so `Store::read_child_runs` can
+  repair a replayed `spawn_subagent` bubble to a finished or interrupted
+  state. `replay_messages` creates `ChildConversation` metadata with
+  `needs_lazy_load`; `tui_driver` reads
+  `Store::session_path(store.chats_root(), store.project_key(), run_id)` only
+  on the first drill-in, then caches the projected child messages. Production
+  child transcripts use the run id as their session id through
+  `Store::write_child_transcript_for_run`, avoiding a second path-correlation
+  field. Legacy records missing correlation fields remain readable but
+  undrillable/degraded.
 - **Every event carries a millisecond-precision timestamp.** `now_timestamp()`
   formats RFC 3339 at `SecondsFormat::Millis`, and every `StoreEvent` variant
   has a timestamp field: `meta.created_at`, `message.timestamp`,
@@ -229,14 +267,16 @@ user-facing on-disk contract; this section is the contributor view.
   and writes `child_start` (from `start`) and `child_result` (from
   `record_child_result`, called by `AgentLoop::run`'s `finish_rx` arm). The
   child's own transcript is written once at completion by
-  `agent_factory::write_child_transcript` via `Store::write_child_transcript`,
-  which opens a fresh sub-session in the same project directory and passes its
-  own `session_id` as the child's `meta.parent_session`, so the parent link is
+  `agent_factory::write_child_transcript` via
+  `Store::write_child_transcript_for_run`, which opens a fresh sub-session
+  under the same project directory using the child run id and passes the
+  parent's session id as `meta.parent_session`. The parent link is therefore
   discoverable from the child file too, not just top-down via the parent's
-  `child_start`/`child_result` events. `Store::start_new_session` takes an
+  lifecycle events. The older general-purpose
+  `Store::write_child_transcript` helper remains available for callers that
+  need a newly generated child session id. `Store::start_new_session` takes an
   explicit `parent_session: Option<Uuid>` for exactly this reason — `/clear`
-  passes `None` (a rollover is a fresh session, not a child run) while
-  `write_child_transcript` passes `Some(self.inner.session_id)`.
+  passes `None` (a rollover is a fresh session, not a child run).
 - **Testing seam.** `chats_root` is an explicit parameter on `Store::create`,
   `Store::resume`, and `Store::list_sessions`; only `main.rs` resolves the real
   `~/.ylva/chats` through `default_chats_root()`. Unit tests pass a `TempDir`

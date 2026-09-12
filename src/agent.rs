@@ -347,6 +347,50 @@ pub struct ToolCallRequest {
     pub id: Uuid,
     pub name: String,
     pub arguments: Value,
+    /// Tool-specific title arguments captured when the call is created.
+    ///
+    /// An empty list means that the call has no title arguments.
+    #[serde(rename = "title_arguments", default)]
+    pub persisted_title_arguments: Vec<(String, Value)>,
+}
+
+impl ToolCallRequest {
+    /// Return the captured tool-specific title arguments.
+    pub fn title_arguments(&self) -> Vec<(String, Value)> {
+        self.persisted_title_arguments.clone()
+    }
+}
+
+/// Persisted data for one completed tool call.
+///
+/// This is the payload of [`Message::ToolResult`] so callers can pass the
+/// complete result through the context without expanding it into another
+/// positional argument list.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ToolResult {
+    pub id: Uuid,
+    pub name: String,
+    pub result: String,
+    /// Optional UI result-section identifier. `None` means the standard
+    /// plain-result section; specialized tools such as `clarify` use a
+    /// different identifier so replay can preserve the live rendering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_section_id: Option<String>,
+    /// Structured metadata emitted by the tool for this specific result.
+    #[serde(default)]
+    pub result_metadata: Option<serde_json::Value>,
+    /// JSON Schema for the fields present in `result_metadata`.
+    #[serde(default)]
+    pub result_metadata_schema: Option<serde_json::Value>,
+    /// Key/value metadata displayed in the completed tool title.
+    #[serde(default)]
+    pub summary: Vec<(String, String)>,
+    /// Structured content rendered in the completed tool bubble.
+    #[serde(default)]
+    pub content_sections: Vec<crate::agent::tools::Section>,
+    /// Elapsed execution time displayed in the completed tool title.
+    #[serde(default)]
+    pub duration: std::time::Duration,
 }
 
 /// Distinguishes user messages that were typed explicitly by the user from
@@ -387,15 +431,8 @@ pub enum Message {
         tool_calls: Vec<ToolCallRequest>,
     },
     ToolResult {
-        id: Uuid,
-        name: String,
-        result: String,
-        /// Structured metadata emitted by the tool for this specific result.
-        #[serde(default)]
-        result_metadata: Option<serde_json::Value>,
-        /// JSON Schema for the fields present in `result_metadata`.
-        #[serde(default)]
-        result_metadata_schema: Option<serde_json::Value>,
+        #[serde(flatten)]
+        value: ToolResult,
     },
     ToolError {
         id: Uuid,
@@ -403,6 +440,9 @@ pub enum Message {
         error: String,
         #[serde(default)]
         duration: std::time::Duration,
+        /// Structured content produced before the tool failed.
+        #[serde(default)]
+        content_sections: Vec<crate::agent::tools::Section>,
     },
 }
 
@@ -479,7 +519,55 @@ impl Context {
     /// not persisted: they are rebuilt from the running binary on every
     /// resume, so storing them would pin a stale copy into the transcript.
     pub fn set_store(&mut self, store: Store) {
+        match Store::read_messages(store.path()) {
+            Ok(messages) => self.hydrate(messages),
+            Err(error) => tracing::warn!(
+                %error,
+                path = %store.path().display(),
+                "could not replay persisted messages"
+            ),
+        }
         self.store = Some(store);
+    }
+
+    /// Load committed messages into this context without writing them back.
+    /// Existing context messages remain at the front; persisted messages are
+    /// appended in store order. Malformed store lines are handled by the store's
+    /// tolerant read path.
+    pub fn hydrate(&mut self, messages: Vec<Message>) {
+        self.messages.extend(messages);
+
+        let mut completed_tool_calls = std::collections::HashSet::new();
+        let mut tool_calls = Vec::new();
+        for message in &self.messages {
+            match message {
+                Message::Assistant {
+                    tool_calls: calls, ..
+                } => {
+                    tool_calls.extend(calls.iter().map(|call| (call.id, call.name.clone())));
+                }
+                Message::ToolResult { value } => {
+                    completed_tool_calls.insert(value.id);
+                }
+                Message::ToolError { id, .. } => {
+                    completed_tool_calls.insert(*id);
+                }
+                _ => {}
+            }
+        }
+        for (id, name) in tool_calls {
+            if !completed_tool_calls.contains(&id)
+                && name != tools::spawn_subagent::SpawnSubagentTool::NAME
+            {
+                self.messages.push(Message::ToolError {
+                    id,
+                    name,
+                    error: "Tool call did not complete before the session ended.".to_string(),
+                    duration: std::time::Duration::ZERO,
+                    content_sections: vec![],
+                });
+            }
+        }
     }
 
     /// The session store this context currently appends to, when persistence
@@ -559,21 +647,8 @@ impl Context {
         });
     }
 
-    pub fn push_tool_result(
-        &mut self,
-        id: Uuid,
-        name: String,
-        result: String,
-        result_metadata: Option<serde_json::Value>,
-        result_metadata_schema: Option<serde_json::Value>,
-    ) {
-        self.commit(Message::ToolResult {
-            id,
-            name,
-            result,
-            result_metadata,
-            result_metadata_schema,
-        });
+    pub fn push_tool_result(&mut self, value: ToolResult) {
+        self.commit(Message::ToolResult { value });
     }
 
     pub fn push_tool_error(
@@ -582,6 +657,8 @@ impl Context {
         name: String,
         error: String,
         partial_output: Option<&str>,
+        duration: std::time::Duration,
+        content_sections: Vec<crate::agent::tools::Section>,
     ) {
         let llm_error = match partial_output.filter(|s| !s.is_empty()) {
             Some(output) => format!(
@@ -594,7 +671,8 @@ impl Context {
             id,
             name,
             error: llm_error,
-            duration: std::time::Duration::ZERO,
+            duration,
+            content_sections,
         });
     }
 
@@ -1155,25 +1233,23 @@ impl AgentLoop {
                                     .await;
                             }
                             AgentEvent::ToolCall { calls } => {
-                                let requests = calls
-                                    .iter()
-                                    .map(|call| ToolCallRequest {
-                                        id: call.id,
-                                        name: call.name.clone(),
-                                        arguments: call.arguments.clone(),
-                                    })
-                                    .collect();
-                                context.push_assistant_tool_call(
-                                    String::new(),
-                                    AssistantStatus::Complete,
-                                    requests,
-                                );
+                                let mut requests = Vec::with_capacity(calls.len());
                                 for assembled in calls {
-                                    match registry.create_call(
+                                    let pending_call = registry.create_call(
                                         &assembled.name,
                                         assembled.id,
                                         assembled.arguments.clone(),
-                                    ) {
+                                    );
+                                    let persisted_title_arguments = pending_call
+                                        .as_ref()
+                                        .map_or_else(Vec::new, |call| call.title_arguments());
+                                    requests.push(ToolCallRequest {
+                                        id: assembled.id,
+                                        name: assembled.name.clone(),
+                                        arguments: assembled.arguments.clone(),
+                                        persisted_title_arguments,
+                                    });
+                                    match pending_call {
                                         Some(call) => {
                                             pending_tools.push_back(PendingTool { call });
                                         }
@@ -1193,6 +1269,11 @@ impl AgentLoop {
                                         }
                                     }
                                 }
+                                context.push_assistant_tool_call(
+                                    String::new(),
+                                    AssistantStatus::Complete,
+                                    requests,
+                                );
                                 mode = AgentMode::ToolPending;
                                 advance_tool_queue(
                                     &mut pending_tools,
@@ -1224,7 +1305,19 @@ impl AgentLoop {
                                 // cap) — the tool itself already reported the
                                 // outcome to the parent via `finish_tx`.
                                 let is_finish = name == tools::agent_finish::AgentFinishTool::NAME;
-                                context.push_tool_result(id, name.clone(), result.clone(), result_metadata, result_metadata_schema);
+                                context.push_tool_result(
+                                    ToolResult {
+                                        id,
+                                        name: name.clone(),
+                                        result: result.clone(),
+                                        result_section_id: None,
+                                        result_metadata,
+                                        result_metadata_schema,
+                                        summary: summary.clone(),
+                                        content_sections: content_sections.clone(),
+                                        duration,
+                                    },
+                                );
                                 let _ = ui_tx
                                     .send(UiUpdate::ToolDone {
                                         id,
@@ -1263,7 +1356,14 @@ impl AgentLoop {
                             }
                             AgentEvent::ToolError { id, name, error, partial_output, duration, content_sections } => {
                                 current_tool_cancel = None;
-                                context.push_tool_error(id, name, error.clone(), partial_output.as_deref());
+                                context.push_tool_error(
+                                    id,
+                                    name,
+                                    error.clone(),
+                                    partial_output.as_deref(),
+                                    duration,
+                                    content_sections.clone(),
+                                );
                                 let _ = ui_tx.send(UiUpdate::ToolError {
                                     id,
                                     error,
@@ -1649,7 +1749,14 @@ impl AgentLoop {
                                             ". Here is their reason for the denial:\n\n{reason}"
                                         ));
                                     }
-                                    context.push_tool_error(call_id, name.clone(), error.clone(), None);
+                                    context.push_tool_error(
+                                        call_id,
+                                        name.clone(),
+                                        error.clone(),
+                                        None,
+                                        std::time::Duration::ZERO,
+                                        vec![],
+                                    );
                                     // When the user supplied a reason, also push a
                                     // `user` role message so the model reads the
                                     // correction through the authoritative instruction
@@ -1705,17 +1812,26 @@ impl AgentLoop {
                                         tools::clarify::ClarifyTool::answer_display_sections(
                                             pending.call.arguments(),
                                         );
-                                    context.push_tool_result(
-                                        call_id,
-                                        tools::clarify::ClarifyTool::NAME.to_string(),
-                                        answer.clone(),
-                                        None,
-                                        None,
-                                    );
                                     let duration = clarify_started_at
                                         .take()
                                         .map(|started| started.elapsed())
                                         .unwrap_or(std::time::Duration::ZERO);
+                                    context.push_tool_result(
+                                        ToolResult {
+                                            id: call_id,
+                                            name: tools::clarify::ClarifyTool::NAME.to_string(),
+                                            result: answer.clone(),
+                                            result_section_id: Some(
+                                                crate::tui_reducer_state::result_section_ids::USER_ANSWER
+                                                    .to_string(),
+                                            ),
+                                            result_metadata: None,
+                                            result_metadata_schema: None,
+                                            summary: vec![],
+                                            content_sections: choices_sections.clone(),
+                                            duration,
+                                        },
+                                    );
                                     let _ = ui_tx
                                         .send(UiUpdate::ToolDone {
                                             id: call_id,
@@ -1770,6 +1886,8 @@ impl AgentLoop {
                                         tools::clarify::ClarifyTool::NAME.to_string(),
                                         error.clone(),
                                         None,
+                                        std::time::Duration::ZERO,
+                                        vec![],
                                     );
                                     let _ = ui_tx
                                         .send(UiUpdate::ToolError {
@@ -1879,7 +1997,14 @@ impl AgentLoop {
                                                 ". Here is their reason for the denial:\n\n{reason}"
                                             ));
                                         }
-                                        context.push_tool_error(id, name, error.clone(), None);
+                                        context.push_tool_error(
+                                            id,
+                                            name,
+                                            error.clone(),
+                                            None,
+                                            std::time::Duration::ZERO,
+                                            vec![],
+                                        );
                                         let _ = ui_tx
                                             .send(UiUpdate::ToolError {
                                                 id,
@@ -1900,7 +2025,14 @@ impl AgentLoop {
                                                 ". Here is their reason for the denial:\n\n{reason}"
                                             ));
                                         }
-                                        context.push_tool_error(id, name, error, None);
+                                        context.push_tool_error(
+                                            id,
+                                            name,
+                                            error,
+                                            None,
+                                            std::time::Duration::ZERO,
+                                            vec![],
+                                        );
                                     }
                                     pending_tools.clear();
                                     mode = AgentMode::Idle;
@@ -1920,7 +2052,14 @@ impl AgentLoop {
                                                 ". Here is their reason for the denial:\n\n{reason}"
                                             ));
                                         }
-                                        context.push_tool_error(id, name, error.clone(), None);
+                                        context.push_tool_error(
+                                            id,
+                                            name,
+                                            error.clone(),
+                                            None,
+                                            std::time::Duration::ZERO,
+                                            vec![],
+                                        );
                                         if first {
                                             let _ = ui_tx
                                                 .send(UiUpdate::ToolError {
@@ -2099,7 +2238,14 @@ async fn resolve_spawn_subagent(
             let error =
                 "spawn_subagent is unavailable: this agent cannot spawn children".to_string();
             tracing::error!(tool_call_id = %call_id, "spawn_subagent resolved with no ChildAgentManager wired");
-            context.push_tool_error(call_id, name.clone(), error.clone(), None);
+            context.push_tool_error(
+                call_id,
+                name.clone(),
+                error.clone(),
+                None,
+                std::time::Duration::ZERO,
+                vec![],
+            );
             let _ = ui_tx
                 .send(UiUpdate::ToolError {
                     id: call_id,
@@ -2117,7 +2263,20 @@ async fn resolve_spawn_subagent(
     tracing::info!(tool_call_id = %call_id, status = status_text, %run_id, "spawn_subagent resolved");
     let result_value = serde_json::json!({ "status": status_text, "run_id": run_id.to_string() });
     let result_text = serde_json::to_string(&result_value).unwrap_or_default();
-    context.push_tool_result(call_id, name, result_text, None, None);
+    context.push_tool_result(ToolResult {
+        id: call_id,
+        name,
+        result: result_text,
+        result_section_id: None,
+        result_metadata: None,
+        result_metadata_schema: None,
+        summary: vec![],
+        content_sections: spawn_content_sections
+            .get(&call_id)
+            .cloned()
+            .unwrap_or_default(),
+        duration: std::time::Duration::ZERO,
+    });
     // No `ToolDone` here: `ChildAgentManager::spawn` already reported the
     // "running"/"queued" status via `UiUpdate::ToolProgress`. The bubble
     // stays `Running` until the child truly finishes.
@@ -2368,7 +2527,14 @@ async fn advance_tool_queue(
                         let title_arguments = pending.call.title_arguments();
                         let content_sections = pending.call.pending_content_sections();
                         tracing::info!(tool = %name, tool_call_id = %call_id, %reason, "tool auto-denied");
-                        context.push_tool_error(call_id, name.clone(), reason.clone(), None);
+                        context.push_tool_error(
+                            call_id,
+                            name.clone(),
+                            reason.clone(),
+                            None,
+                            std::time::Duration::ZERO,
+                            vec![],
+                        );
                         let _ = ui_tx
                             .send(UiUpdate::ToolAutoDenied {
                                 id: call_id,
@@ -2688,17 +2854,24 @@ mod tests {
             tool_calls: Vec::new(),
         };
         let tool_result = Message::ToolResult {
-            id: Uuid::new_v4(),
-            name: "tool".into(),
-            result: "ok".into(),
-            result_metadata: None,
-            result_metadata_schema: None,
+            value: ToolResult {
+                id: Uuid::new_v4(),
+                name: "tool".into(),
+                result: "ok".into(),
+                result_section_id: None,
+                result_metadata: None,
+                result_metadata_schema: None,
+                summary: vec![],
+                content_sections: vec![],
+                duration: std::time::Duration::ZERO,
+            },
         };
         let tool_error = Message::ToolError {
             id: Uuid::new_v4(),
             name: "tool".into(),
             error: "err".into(),
             duration: std::time::Duration::ZERO,
+            content_sections: vec![],
         };
         assert!(matches!(system, Message::System { .. }));
         assert!(matches!(user, Message::User { .. }));
@@ -2714,10 +2887,36 @@ mod tests {
             id,
             name: "search".into(),
             arguments: serde_json::json!({ "query": "rust" }),
+            persisted_title_arguments: vec![],
         };
         assert_eq!(request.id, id);
         assert_eq!(request.name, "search");
         assert_eq!(request.arguments, serde_json::json!({ "query": "rust" }));
+    }
+
+    #[test]
+    fn tool_call_request_preserves_tool_specific_title_arguments() {
+        let id = Uuid::new_v4();
+        let title_arguments = vec![(
+            "path".to_string(),
+            serde_json::Value::String("src/example.rs".to_string()),
+        )];
+        let request = ToolCallRequest {
+            id,
+            name: "write".to_string(),
+            arguments: serde_json::json!({
+                "path": "src/example.rs",
+                "content": "fn main() {}",
+            }),
+            persisted_title_arguments: title_arguments.clone(),
+        };
+
+        assert_eq!(request.title_arguments(), title_arguments);
+        let serialized = serde_json::to_value(&request).expect("request serializes");
+        assert_eq!(
+            serialized["title_arguments"],
+            serde_json::json!(title_arguments)
+        );
     }
 
     #[test]
@@ -2792,6 +2991,7 @@ mod tests {
                 id,
                 name: "read".into(),
                 arguments: serde_json::json!({ "path": "a.txt" }),
+                persisted_title_arguments: vec![],
             }],
         );
         assert_eq!(
@@ -2803,6 +3003,7 @@ mod tests {
                     id,
                     name: "read".into(),
                     arguments: serde_json::json!({ "path": "a.txt" }),
+                    persisted_title_arguments: vec![],
                 }],
             }
         );
@@ -2812,16 +3013,39 @@ mod tests {
     fn push_tool_result_and_error_append_messages() {
         let mut context = Context::new();
         let id = Uuid::new_v4();
-        context.push_tool_result(id, "read".into(), "contents".into(), None, None);
-        context.push_tool_error(id, "write".into(), "denied".into(), None);
+        context.push_tool_result(ToolResult {
+            id,
+            name: "read".into(),
+            result: "contents".into(),
+            result_section_id: None,
+            result_metadata: None,
+            result_metadata_schema: None,
+            summary: vec![],
+            content_sections: vec![],
+            duration: std::time::Duration::ZERO,
+        });
+        context.push_tool_error(
+            id,
+            "write".into(),
+            "denied".into(),
+            None,
+            std::time::Duration::ZERO,
+            vec![],
+        );
         assert_eq!(
             context.messages()[2],
             Message::ToolResult {
-                id,
-                name: "read".into(),
-                result: "contents".into(),
-                result_metadata: None,
-                result_metadata_schema: None,
+                value: ToolResult {
+                    id,
+                    name: "read".into(),
+                    result: "contents".into(),
+                    result_section_id: None,
+                    result_metadata: None,
+                    result_metadata_schema: None,
+                    summary: vec![],
+                    content_sections: vec![],
+                    duration: std::time::Duration::ZERO,
+                },
             }
         );
         assert_eq!(
@@ -2831,8 +3055,183 @@ mod tests {
                 name: "write".into(),
                 error: "denied".into(),
                 duration: std::time::Duration::ZERO,
+                content_sections: vec![],
             }
         );
+    }
+
+    #[test]
+    fn tool_messages_round_trip_replay_metadata_and_legacy_defaults() {
+        let id = Uuid::new_v4();
+        let content_section =
+            crate::agent::tools::Section::Content(crate::agent::tools::ContentSection {
+                label: Some("Output".to_string()),
+                content: "contents".to_string(),
+                file_extension: Some("txt".to_string()),
+                line_number_offset: Some(4),
+            });
+        let result = Message::ToolResult {
+            value: ToolResult {
+                id,
+                name: "read".to_string(),
+                result: "contents".to_string(),
+                result_section_id: None,
+                result_metadata: Some(serde_json::json!({"bytes": 8})),
+                result_metadata_schema: Some(serde_json::json!({"type": "object"})),
+                summary: vec![("path".to_string(), "README.md".to_string())],
+                content_sections: vec![content_section.clone()],
+                duration: std::time::Duration::from_millis(37),
+            },
+        };
+        let error = Message::ToolError {
+            id,
+            name: "write".to_string(),
+            error: "denied".to_string(),
+            duration: std::time::Duration::from_millis(11),
+            content_sections: vec![content_section],
+        };
+
+        let serialized_result =
+            serde_json::to_value(&result).expect("tool result serializes to a value");
+        assert_eq!(serialized_result["role"], "tool_result");
+        assert_eq!(serialized_result["id"], serde_json::json!(id));
+        assert_eq!(serialized_result["result"], "contents");
+        assert!(
+            serialized_result.get("value").is_none(),
+            "the canonical payload must remain flattened in the persisted schema"
+        );
+
+        for message in [result.clone(), error.clone()] {
+            let serialized = serde_json::to_string(&message).expect("message serializes");
+            let restored =
+                serde_json::from_str::<Message>(&serialized).expect("message deserializes");
+            assert_eq!(restored, message);
+        }
+
+        let legacy_result = serde_json::json!({
+            "role": "tool_result",
+            "id": id,
+            "name": "read",
+            "result": "old contents",
+            "result_metadata": null,
+            "result_metadata_schema": null,
+        });
+        assert_eq!(
+            serde_json::from_value::<Message>(legacy_result).expect("legacy result deserializes"),
+            Message::ToolResult {
+                value: ToolResult {
+                    id,
+                    name: "read".to_string(),
+                    result: "old contents".to_string(),
+                    result_section_id: None,
+                    result_metadata: None,
+                    result_metadata_schema: None,
+                    summary: vec![],
+                    content_sections: vec![],
+                    duration: std::time::Duration::ZERO,
+                },
+            }
+        );
+
+        let legacy_error = serde_json::json!({
+            "role": "tool_error",
+            "id": id,
+            "name": "write",
+            "error": "old error",
+            "duration": { "secs": 1, "nanos": 2 },
+        });
+        assert_eq!(
+            serde_json::from_value::<Message>(legacy_error).expect("legacy error deserializes"),
+            Message::ToolError {
+                id,
+                name: "write".to_string(),
+                error: "old error".to_string(),
+                duration: std::time::Duration::new(1, 2),
+                content_sections: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn hydrate_appends_after_system_prompts_and_synthesizes_orphaned_tool_error() {
+        let id = Uuid::new_v4();
+        let mut context = Context::new();
+        context.hydrate(vec![
+            Message::User {
+                content: "resume this".to_string(),
+                kind: UserMessageKind::Explicit,
+            },
+            Message::Assistant {
+                content: String::new(),
+                status: AssistantStatus::Complete,
+                tool_calls: vec![ToolCallRequest {
+                    id,
+                    name: "read".to_string(),
+                    arguments: serde_json::json!({"path": "README.md"}),
+                    persisted_title_arguments: vec![],
+                }],
+            },
+        ]);
+
+        assert!(matches!(context.messages()[0], Message::System { .. }));
+        assert!(matches!(context.messages()[1], Message::System { .. }));
+        assert!(matches!(
+            context.messages()[2],
+            Message::User { ref content, .. } if content == "resume this"
+        ));
+        assert!(matches!(
+            context.messages().last(),
+            Some(Message::ToolError { id: error_id, name, error, duration, content_sections })
+                if *error_id == id
+                    && name == "read"
+                    && error == "Tool call did not complete before the session ended."
+                    && *duration == std::time::Duration::ZERO
+                    && content_sections.is_empty()
+        ));
+
+        let wire_payload = crate::llm::serialize_messages(context.messages());
+        assert!(wire_payload
+            .as_array()
+            .expect("wire payload is an array")
+            .iter()
+            .any(|message| {
+                let content = message["content"]
+                    .as_str()
+                    .and_then(|content| serde_json::from_str::<serde_json::Value>(content).ok());
+                message["role"] == "tool"
+                    && message["tool_call_id"] == id.to_string()
+                    && content.is_some_and(|content| content["ok"] == false)
+            }));
+    }
+
+    #[tokio::test]
+    async fn attaching_a_store_hydrates_without_recommitting_messages() {
+        let temporary_directory = tempfile::tempdir().expect("temporary directory");
+        let store = crate::store::Store::create(
+            &temporary_directory.path().join("chats"),
+            temporary_directory.path(),
+            Uuid::new_v4(),
+            "mock",
+            "test-model",
+        )
+        .expect("store created");
+        store.record_message(&Message::User {
+            content: "persisted once".to_string(),
+            kind: UserMessageKind::Explicit,
+        });
+        store.flush().await;
+
+        let mut context = Context::new();
+        context.set_store(store.clone());
+        store.flush().await;
+
+        let messages = crate::store::Store::read_messages(store.path()).expect("messages readable");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(context.messages().len(), 3);
+        assert!(matches!(
+            &context.messages()[2],
+            Message::User { content, .. } if content == "persisted once"
+        ));
     }
 
     #[test]
@@ -2850,13 +3249,17 @@ mod tests {
         // message (the root's "running" reply) already in between.
         let mut context = Context::new();
         let id = Uuid::new_v4();
-        context.push_tool_result(
+        context.push_tool_result(ToolResult {
             id,
-            "spawn_subagent".into(),
-            "{\"status\":\"spawned\"}".into(),
-            None,
-            None,
-        );
+            name: "spawn_subagent".into(),
+            result: "{\"status\":\"spawned\"}".into(),
+            result_section_id: None,
+            result_metadata: None,
+            result_metadata_schema: None,
+            summary: vec![],
+            content_sections: vec![],
+            duration: std::time::Duration::ZERO,
+        });
         context.push_assistant(
             "I have spawned the child, standing by.".into(),
             AssistantStatus::Complete,
@@ -2869,7 +3272,16 @@ mod tests {
         let tool_result_count = context
             .messages()
             .iter()
-            .filter(|message| matches!(message, Message::ToolResult { id: message_id, .. } if *message_id == id))
+            .filter(|message| {
+                matches!(
+                    message,
+                    Message::ToolResult {
+                        value: ToolResult {
+                            id: message_id, ..
+                        },
+                    } if *message_id == id
+                )
+            })
             .count();
         assert_eq!(
             tool_result_count,
@@ -2880,11 +3292,17 @@ mod tests {
         assert_eq!(
             context.messages()[2],
             Message::ToolResult {
-                id,
-                name: "spawn_subagent".into(),
-                result: "{\"status\":\"spawned\"}".into(),
-                result_metadata: None,
-                result_metadata_schema: None,
+                value: ToolResult {
+                    id,
+                    name: "spawn_subagent".into(),
+                    result: "{\"status\":\"spawned\"}".into(),
+                    result_section_id: None,
+                    result_metadata: None,
+                    result_metadata_schema: None,
+                    summary: vec![],
+                    content_sections: vec![],
+                    duration: std::time::Duration::ZERO,
+                },
             },
             "the provisional result must never be rewritten"
         );
@@ -3273,13 +3691,17 @@ mod tests {
         let (ui_tx, mut ui_rx) = mpsc::channel(4);
         let (agent_tx, _agent_rx) = mpsc::channel(1);
         let mut context = Context::new();
-        context.push_tool_result(
-            Uuid::new_v4(),
-            "write".to_string(),
-            "ok".to_string(),
-            None,
-            None,
-        );
+        context.push_tool_result(ToolResult {
+            id: Uuid::new_v4(),
+            name: "write".to_string(),
+            result: "ok".to_string(),
+            result_section_id: None,
+            result_metadata: None,
+            result_metadata_schema: None,
+            summary: vec![],
+            content_sections: vec![],
+            duration: std::time::Duration::ZERO,
+        });
         let mut mode = AgentMode::ToolPending;
         let mut current_cancel = None;
         let mut current_tool_cancel = None;
@@ -3503,9 +3925,12 @@ mod tests {
             .expect("run() should not return an error");
 
         assert!(
-            context.messages().iter().any(
-                |message| matches!(message, Message::ToolResult { name, .. } if name == tools::agent_finish::AgentFinishTool::NAME)
-            ),
+            context.messages().iter().any(|message| matches!(
+                message,
+                Message::ToolResult {
+                    value: ToolResult { name, .. },
+                } if name == tools::agent_finish::AgentFinishTool::NAME
+            )),
             "context should carry the finish tool's result"
         );
         assert!(
@@ -3742,7 +4167,10 @@ mod tests {
             .iter()
             .find_map(|message| match message {
                 Message::ToolResult {
-                    id, name, result, ..
+                    value:
+                        ToolResult {
+                            id, name, result, ..
+                        },
                 } if *id == call_id && name == "spawn_subagent" => Some(result.clone()),
                 _ => None,
             })

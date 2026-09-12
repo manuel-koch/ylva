@@ -249,6 +249,7 @@ impl ChildAgentManager {
         };
         store.record_child_result(
             finish_result.run_id,
+            finish_result.call_id,
             &finish_result.status,
             finish_result
                 .result
@@ -354,7 +355,13 @@ impl ChildAgentManager {
             title_arguments: spawn_progress_title_arguments("running", run_id),
         });
         if let Some(store) = &self.store {
-            store.record_child_start(run_id, &request.agent_type, &request.task);
+            store.record_child_start(
+                run_id,
+                call_id,
+                &request.agent_type,
+                &request.task,
+                &request.label,
+            );
         }
         let cancel = CancellationToken::new();
         let outcome = (self.spawn_fn)(request, cancel.clone(), self.subagent_ui_tx.clone());

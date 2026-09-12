@@ -65,8 +65,13 @@ intact.
   directory, so the same checkout always lands in the same folder.
 - Every start begins a **fresh** session: Ylva never auto-resumes and shows no
   startup picker.
-- `--conversation-id <uuid>` re-attaches an existing session and appends to it;
-  an unknown id is an error rather than a silent fresh session.
+- `--conversation-id <uuid>` re-attaches an existing session, replays its
+  prior transcript into the next headless request and the TUI chat view, and
+  appends the new turn; an unknown id is an error rather than a silent fresh
+  session. Tool bubbles retain their persisted metadata, and completed or
+  interrupted subagent runs remain drillable; a child's own transcript is
+  loaded lazily on first drill-in. See the [resume contract](persistence.md#resume-contract)
+  for compatibility and orphan-recovery details.
 - A session is exclusively locked while open, so a second Ylva cannot
   interleave writes into the same file.
 - Child-agent runs record a start/result pair in the parent session and write

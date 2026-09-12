@@ -42,7 +42,7 @@ use std::process::Command;
 
 use tempfile::TempDir;
 use uuid::Uuid;
-use ylva::{project_key, SessionSummary, Store, StoreEvent};
+use ylva::{project_key, session_path, SessionSummary, Store, StoreEvent};
 
 mod common;
 
@@ -96,12 +96,21 @@ fn spawn_ylva(
     provider_env: &[(String, String)],
     extra_args: &[&str],
 ) -> PersistenceRun {
+    spawn_ylva_with_prompt(ylva_home, provider_env, extra_args, TEST_PROMPT)
+}
+
+fn spawn_ylva_with_prompt(
+    ylva_home: TempDir,
+    provider_env: &[(String, String)],
+    extra_args: &[&str],
+    prompt: &str,
+) -> PersistenceRun {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ylva"));
     command
         .env_clear()
         .current_dir(ylva_home.path())
         .env(ylva::YLVA_HOME_ENVIRONMENT_VARIABLE, ylva_home.path())
-        .args(["--no-tui", "--prompt", TEST_PROMPT])
+        .args(["--no-tui", "--prompt", prompt])
         .args(extra_args);
     // Only variable the binary needs beyond its own: resolving executables it
     // may spawn. Every other startup path reads either `YLVA_HOME` or a
@@ -291,6 +300,273 @@ async fn conversation_id_appends_to_the_existing_session_instead_of_overwriting_
     assert_eq!(
         user_turns, 2,
         "both runs' user turns are present: {events:?}"
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resumed_headless_request_replays_the_prior_transcript_once() {
+    let server = MockLlmServer::start_with_connection_frames(
+        MockLlmConfig {
+            frames: vec![content_frame("fallback answer")],
+            end_after_frames: true,
+            ..MockLlmConfig::default()
+        },
+        vec![
+            vec![common::mock_llm_server::tool_call_frame(
+                0,
+                "glob",
+                r#"{"pattern":"Cargo.toml","only_files":true}"#,
+            )],
+            vec![content_frame("first answer")],
+            vec![content_frame("second answer")],
+        ],
+    )
+    .await
+    .expect("mock server starts");
+    let provider_env = vec![("OLLAMA_BASE_URL".to_string(), server.base_url())];
+    let first = tokio::task::spawn_blocking({
+        let provider_env = provider_env.clone();
+        move || {
+            spawn_ylva_with_prompt(
+                TempDir::new().expect("tempdir"),
+                &provider_env,
+                &[],
+                "first prompt",
+            )
+        }
+    })
+    .await
+    .expect("the first run completes");
+    assert!(
+        first.output.status.success(),
+        "the first run succeeds; stderr:\n{}",
+        first.stderr()
+    );
+
+    let session_id = first.sessions()[0].session_id;
+    let first_events = read_events(&first.sessions()[0].path);
+    assert!(first_events.iter().any(|event| {
+        matches!(
+            event,
+            StoreEvent::Message {
+                message: ylva::Message::ToolResult {
+                    value: ylva::ToolResult { name, .. },
+                },
+                ..
+            } if name == "glob"
+        )
+    }));
+
+    let resumed = tokio::task::spawn_blocking({
+        let provider_env = provider_env.clone();
+        move || {
+            spawn_ylva_with_prompt(
+                first.ylva_home,
+                &provider_env,
+                &["--conversation-id", &session_id.to_string()],
+                "second prompt",
+            )
+        }
+    })
+    .await
+    .expect("the resumed run completes");
+    assert!(
+        resumed.output.status.success(),
+        "the resumed run succeeds; stderr:\n{}",
+        resumed.stderr()
+    );
+
+    let request_bodies = server.request_bodies();
+    let second_request = request_bodies
+        .iter()
+        .filter_map(|body| serde_json::from_str::<serde_json::Value>(body).ok())
+        .filter(|body| body["messages"].is_array())
+        .nth(2)
+        .expect("the resumed chat request was captured");
+    let messages = second_request["messages"]
+        .as_array()
+        .expect("chat request contains messages");
+    assert!(messages
+        .iter()
+        .any(|message| { message["role"] == "user" && message["content"] == "first prompt" }));
+    assert!(messages
+        .iter()
+        .any(|message| { message["role"] == "assistant" && message["content"] == "first answer" }));
+    assert!(messages.iter().any(|message| {
+        message["role"] == "tool"
+            && message["tool_call_id"].is_string()
+            && message["content"].as_str().is_some_and(|content| {
+                serde_json::from_str::<serde_json::Value>(content)
+                    .ok()
+                    .is_some_and(|envelope| envelope["ok"] == true)
+            })
+    }));
+    assert!(messages
+        .iter()
+        .any(|message| { message["role"] == "user" && message["content"] == "second prompt" }));
+
+    let resumed_events = read_events(&resumed.sessions()[0].path);
+    let first_prompt_count = resumed_events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                StoreEvent::Message {
+                    message: ylva::Message::User { content, .. },
+                    ..
+                } if content == "first prompt"
+            )
+        })
+        .count();
+    let first_answer_count = resumed_events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                StoreEvent::Message {
+                    message: ylva::Message::Assistant { content, .. },
+                    ..
+                } if content == "first answer"
+            )
+        })
+        .count();
+    assert_eq!(first_prompt_count, 1);
+    assert_eq!(first_answer_count, 1);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compiled_binary_persists_and_resumes_child_run_transcripts() {
+    let server = MockLlmServer::start_with_connection_frame_rules(
+        MockLlmConfig {
+            frames: vec![content_frame("fallback answer")],
+            end_after_frames: true,
+            ..MockLlmConfig::default()
+        },
+        vec![
+            vec![common::mock_llm_server::tool_call_frame(
+                0,
+                "spawn_subagent",
+                r#"{"label":"Inspect repository","task":"Inspect the repository and report a child result."}"#,
+            )],
+            vec![content_frame("parent answer")],
+            vec![content_frame("resumed parent answer")],
+        ],
+        vec![(
+            "agent_finish".to_string(),
+            vec![common::mock_llm_server::tool_call_frame(
+                0,
+                "agent_finish",
+                r#"{"status":"success","result":"child completed","sources":["src/lib.rs"]}"#,
+            )],
+        )],
+    )
+    .await
+    .expect("mock server starts");
+    let provider_env = vec![("OLLAMA_BASE_URL".to_string(), server.base_url())];
+    let first = tokio::task::spawn_blocking({
+        let provider_env = provider_env.clone();
+        move || {
+            spawn_ylva_with_prompt(
+                TempDir::new().expect("tempdir"),
+                &provider_env,
+                &["--auto-approve-spawn"],
+                "Delegate a repository inspection to a child.",
+            )
+        }
+    })
+    .await
+    .expect("the child run completes");
+    assert!(
+        first.output.status.success(),
+        "the child run succeeds; stderr:\n{}",
+        first.stderr()
+    );
+
+    let root_session = first
+        .sessions()
+        .into_iter()
+        .find(|session| session.parent_session.is_none())
+        .expect("the parent session is listed");
+    let root_events = read_events(&root_session.path);
+    let child_run_id = root_events
+        .iter()
+        .find_map(|event| match event {
+            StoreEvent::ChildStart { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("the parent records the child start");
+    let child_runs = Store::read_child_runs(&root_session.path).expect("child runs are readable");
+    let child_run = child_runs
+        .iter()
+        .find(|run| run.run_id == child_run_id)
+        .expect("the child lifecycle is paired");
+    assert_eq!(child_run.status.as_deref(), Some("success"));
+    assert_eq!(child_run.result.as_deref(), Some("child completed"));
+    assert!(child_run.duration.is_some());
+
+    let child_transcript_path = session_path(&first.chats_root(), &first.project_key, child_run_id);
+    assert!(
+        child_transcript_path.is_file(),
+        "the child transcript uses the stable run-id path"
+    );
+    let child_messages =
+        Store::read_messages(&child_transcript_path).expect("child transcript is readable");
+    assert!(child_messages.iter().any(|message| {
+        matches!(
+            message,
+            ylva::Message::User { content, .. }
+                if content == "Inspect the repository and report a child result."
+        )
+    }));
+    assert!(child_messages.iter().any(|message| {
+        matches!(
+            message,
+            ylva::Message::ToolResult {
+                value: ylva::ToolResult { name, result, .. },
+            } if name == "agent_finish" && result.contains("Reported success")
+        )
+    }));
+
+    let resumed = tokio::task::spawn_blocking({
+        let provider_env = provider_env.clone();
+        let session_id = root_session.session_id;
+        move || {
+            spawn_ylva_with_prompt(
+                first.ylva_home,
+                &provider_env,
+                &[
+                    "--auto-approve-spawn",
+                    "--conversation-id",
+                    &session_id.to_string(),
+                ],
+                "Resume the parent conversation.",
+            )
+        }
+    })
+    .await
+    .expect("the resumed parent run completes");
+    assert!(
+        resumed.output.status.success(),
+        "the resumed parent run succeeds; stderr:\n{}",
+        resumed.stderr()
+    );
+    let resumed_root = resumed
+        .sessions()
+        .into_iter()
+        .find(|session| session.session_id == root_session.session_id)
+        .expect("the resumed parent session remains addressable");
+    let resumed_child_run = Store::read_child_runs(&resumed_root.path)
+        .expect("resumed child lifecycle is readable")
+        .into_iter()
+        .find(|run| run.run_id == child_run_id)
+        .expect("the resumed parent still exposes the child bubble metadata");
+    assert_eq!(resumed_child_run.status.as_deref(), Some("success"));
+    assert_eq!(resumed_child_run.result.as_deref(), Some("child completed"));
+    assert!(
+        session_path(&resumed.chats_root(), &resumed.project_key, child_run_id).is_file(),
+        "the resumed parent can still locate the child drill-in transcript"
     );
     server.abort();
 }
