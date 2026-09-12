@@ -24,7 +24,9 @@
 use ratatui::Frame;
 use ratatui_textarea::TextArea;
 
-use crate::tui_reducer_state::{AppState, BannerDragSelection, ChatEntry, ConversationView, Focus};
+use crate::tui_reducer_state::{
+    ActiveSubagentCounts, AppState, BannerDragSelection, ChatEntry, ConversationView, Focus,
+};
 use crate::tui_render_state::TuiState;
 use crate::tui_widgets::{self, ButtonAreas};
 
@@ -83,6 +85,11 @@ fn project_for_draw(state: &AppState) -> TuiState {
     let showing_child_run_id = match &state.active_view {
         ConversationView::Child { run_id, .. } => Some(*run_id),
         ConversationView::Root => None,
+    };
+    let active_subagent_counts = if showing_child_run_id.is_some() {
+        ActiveSubagentCounts::default()
+    } else {
+        state.active_subagent_counts()
     };
     let (
         chat_entries,
@@ -145,6 +152,7 @@ fn project_for_draw(state: &AppState) -> TuiState {
     TuiState {
         parent_agent_mode,
         agent_mode,
+        active_subagent_counts,
         engine_display,
         chat_entries,
         partial_assistant_text,
@@ -342,6 +350,68 @@ mod tests {
             matches!(&projected.chat_entries[0], ChatEntry::AssistantMessage { text, .. } if text == "root reply")
         );
         assert!(projected.child_view.child_view_bubble.is_none());
+    }
+
+    #[test]
+    fn project_for_draw_counts_active_root_subagents_but_not_finished_or_child_view_runs() {
+        let mut state = AppState::new();
+        let running_bubble_id = Uuid::new_v4();
+        let queued_bubble_id = Uuid::new_v4();
+        for (bubble_id, status) in [(running_bubble_id, "running"), (queued_bubble_id, "queued")] {
+            state.chat_entries.push(ChatEntry::ToolBubble {
+                id: bubble_id,
+                name: crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
+                state: Box::new(ToolCallState::Running {
+                    arguments: serde_json::json!({}),
+                    content_sections: vec![],
+                    title_arguments: vec![],
+                    progress_arguments: vec![(
+                        "status".to_string(),
+                        serde_json::Value::String(status.to_string()),
+                    )],
+                }),
+                collapsed: true,
+            });
+        }
+        state.chat_entries.push(ChatEntry::ToolBubble {
+            id: Uuid::new_v4(),
+            name: crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
+            state: Box::new(ToolCallState::Done {
+                arguments: serde_json::json!({}),
+                result_section: crate::tui_reducer_state::ResultSection::plain("finished"),
+                content_sections: vec![],
+                summary: vec![],
+                duration: std::time::Duration::ZERO,
+                title_arguments: vec![],
+            }),
+            collapsed: true,
+        });
+
+        let root_projection = project_for_draw(&state);
+        assert_eq!(
+            root_projection.active_subagent_counts,
+            ActiveSubagentCounts {
+                running: 1,
+                queued: 1,
+            }
+        );
+
+        let run_id = Uuid::new_v4();
+        state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id: running_bubble_id,
+            agent_type: "reviewer".to_string(),
+            task: "inspect the change".to_string(),
+            label: "Inspect change".to_string(),
+        });
+        state.switch_to_child_view(run_id);
+
+        let child_projection = project_for_draw(&state);
+        assert_eq!(
+            child_projection.active_subagent_counts,
+            ActiveSubagentCounts::default(),
+            "the main-conversation count must not be shown in a child transcript"
+        );
     }
 
     #[test]

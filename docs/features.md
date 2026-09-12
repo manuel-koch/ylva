@@ -298,7 +298,11 @@ module structure (model/presenter/view/driver split).
   mode/hint row also shows the
   active `provider-connection/model` identity for the transcript on screen,
   including an explicit reasoning effort in parentheses and the selected child
-  while drilled in. No sidebar.
+  while drilled in. In the main conversation it also shows separate counts
+  for running and queued subagents in a compact `Subagents: <running> running,
+  <queued> queued` label; finished subagents are excluded, zero-valued
+  categories are omitted, and the counts are hidden while viewing a child
+  transcript. No sidebar.
 - **Input always active:** the input box is never disabled. `Enter` sends
   unconditionally — while the model is streaming, the message is queued as a
   pending steer (shown dimmed, then committed once the model has seen it),

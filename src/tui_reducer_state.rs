@@ -211,6 +211,58 @@ pub enum ToolCallState {
     },
 }
 
+/// Counts root-conversation subagent calls that have not reached a terminal
+/// state. Finished calls are represented by `Done`/`Error`/`Killed` bubbles
+/// and are deliberately excluded.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ActiveSubagentCounts {
+    pub running: usize,
+    pub queued: usize,
+}
+
+impl ActiveSubagentCounts {
+    /// Count active `spawn_subagent` bubbles in a root transcript.
+    ///
+    /// A running bubble without interim status metadata is treated as running;
+    /// this covers the short interval between creating the bubble and receiving
+    /// the scheduler's first `ToolProgress` update.
+    pub fn from_entries(entries: &[ChatEntry]) -> Self {
+        let mut counts = Self::default();
+
+        for entry in entries {
+            let ChatEntry::ToolBubble {
+                name,
+                state: bubble_state,
+                ..
+            } = entry
+            else {
+                continue;
+            };
+            if name != crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME {
+                continue;
+            }
+
+            let ToolCallState::Running {
+                progress_arguments, ..
+            } = bubble_state.as_ref()
+            else {
+                continue;
+            };
+            let status = progress_arguments
+                .iter()
+                .find_map(|(key, value)| (key == "status").then(|| value.as_str()))
+                .flatten();
+            if status == Some("queued") {
+                counts.queued += 1;
+            } else {
+                counts.running += 1;
+            }
+        }
+
+        counts
+    }
+}
+
 /// One entry in the scrollable chat history area.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatEntry {
@@ -2607,6 +2659,15 @@ impl AppState {
         }
     }
 
+    /// Return the active child-agent counts for the root conversation.
+    ///
+    /// This is derived from the root transcript rather than
+    /// `child_conversations`, which intentionally retains finished
+    /// conversations for drill-in navigation.
+    pub fn active_subagent_counts(&self) -> ActiveSubagentCounts {
+        ActiveSubagentCounts::from_entries(&self.chat_entries)
+    }
+
     /// Returns `true` if any `ChatEntry::ToolBubble` is currently in the
     /// `Running` state, i.e. a tool call has started but not yet finished
     /// (`Done`/`Error`/`Denied`/`Killed`). Used by `agent_mode` to
@@ -3401,6 +3462,51 @@ mod tests {
     fn agent_mode_reports_idle_when_no_tool_bubble_is_running() {
         let state = AppState::new();
         assert_eq!(state.agent_mode(), AgentMode::Idle);
+    }
+
+    #[test]
+    fn active_subagent_counts_include_running_and_queued_bubbles_only() {
+        let mut state = AppState::new();
+        let push_running_subagent = |state: &mut AppState, status: &str| {
+            state.chat_entries.push(ChatEntry::ToolBubble {
+                id: Uuid::new_v4(),
+                name: crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
+                state: Box::new(ToolCallState::Running {
+                    arguments: serde_json::json!({}),
+                    content_sections: vec![],
+                    title_arguments: vec![],
+                    progress_arguments: vec![(
+                        "status".to_string(),
+                        serde_json::Value::String(status.to_string()),
+                    )],
+                }),
+                collapsed: true,
+            });
+        };
+
+        push_running_subagent(&mut state, "running");
+        push_running_subagent(&mut state, "queued");
+        state.chat_entries.push(ChatEntry::ToolBubble {
+            id: Uuid::new_v4(),
+            name: crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
+            state: Box::new(ToolCallState::Done {
+                arguments: serde_json::json!({}),
+                result_section: ResultSection::plain("finished"),
+                content_sections: vec![],
+                summary: vec![],
+                duration: Duration::ZERO,
+                title_arguments: vec![],
+            }),
+            collapsed: true,
+        });
+
+        assert_eq!(
+            state.active_subagent_counts(),
+            ActiveSubagentCounts {
+                running: 1,
+                queued: 1,
+            }
+        );
     }
 
     #[test]

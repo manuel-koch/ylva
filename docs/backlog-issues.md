@@ -13,14 +13,17 @@
       Use separator glyph " · " between multiple keybinding hints.
       E.g. like "enter send · esc cancel · ctrl-c cancel & quit · F1 help"
 
-- [ ] Main conversation footer should indicate number of running
+- [x] Main conversation footer should indicate number of running
       or queued subagents.
       But not the total number of (finished) subagents !
+
+- [ ] In footer use separator " → " between provider-connection and selected
+      model-id instead of "/".
 
 - [ ] Don't render the "run_id" within the title of a subagent bubble,
       neither in main conversation, nor in subagent conversation.
       This seems to be noise for user and only relevant for the
-      agent harness or the LLM we are tatlking to.
+      agent harness internally or the LLM we are talking to.
 
 - [ ] Automatic column width sizing while rendering markdown tables seems
       too simple, resulting in very uneven distribution of column widths

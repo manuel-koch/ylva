@@ -981,6 +981,42 @@ fn footer_says_subagent_working_while_child_is_only_streaming() {
 }
 
 #[test]
+fn footer_shows_running_and_queued_subagent_counts() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_widgets;
+    use ylva::{ActiveSubagentCounts, TuiState};
+
+    let backend = TestBackend::new(80, 20);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    let mut state = TuiState {
+        active_subagent_counts: ActiveSubagentCounts {
+            running: 2,
+            queued: 1,
+        },
+        ..TuiState::new()
+    };
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("draw");
+
+    let buffer = terminal.backend().buffer().clone();
+    let rendered: String = (0..20u16)
+        .flat_map(|row| (0..80u16).map(move |column| (column, row)))
+        .map(|(column, row)| buffer.cell((column, row)).unwrap().symbol().to_string())
+        .collect();
+    assert!(
+        rendered.contains(" · Subagents: 2 running, 1 queued"),
+        "subagent counts should follow the busy indicator with a middle-dot separator: {rendered:?}"
+    );
+}
+
+#[test]
 fn footer_shows_the_active_provider_and_model() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;

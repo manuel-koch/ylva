@@ -2529,7 +2529,9 @@ layer, not a core architectural change.
       (applied steer), DarkGray = Cancelled.
       Colors are named constants, ready to be extracted into a `Theme` struct.
 
-- [x] 2-row footer: mode indicator + steer count (row 1); key hints (row 2).
+- [x] 2-row footer: mode indicator plus compact active running/queued subagent
+      and steer counts (row 1); key hints (row 2). Finished subagents are
+      excluded.
 
 - [x] Install `ctrlc` handler that sends `AgentCommand::Stop` via channel immediately — no
       double-press required for OS-level SIGINT.

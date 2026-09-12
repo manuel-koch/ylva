@@ -473,6 +473,14 @@ user-facing on-disk contract; this section is the contributor view.
   child engine, so they follow the transcript currently on screen. The effort
   is shown in parentheses only when it is not the provider default. Root model
   switches refresh the label before the next frame.
+- The main-conversation footer derives separate running and queued subagent
+  counts from root `spawn_subagent` bubbles. A `Running` bubble with
+  `status=queued` in its interim progress arguments contributes to the queued
+  count; other active `Running` bubbles contribute to the running count.
+  Terminal bubbles and the retained `child_conversations` history are not
+  counted. The compact label is rendered as `Subagents: <running> running,
+  <queued> queued`, omitting zero-valued categories. The counts are omitted
+  from the drilled-in child footer.
 - Footer keybinding hints are represented as structured key/action entries
   rather than one formatted string, so `tui_widgets` can render the key in
   bold, the action in normal text, and ` · ` between entries.

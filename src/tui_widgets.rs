@@ -33,8 +33,9 @@ use crate::agent::AgentMode;
 use crate::build_info::BUILD_INFO;
 use crate::markdown::render_markdown;
 use crate::tui_reducer_state::{
-    matching_model_indices, model_picker_row_entries, slash_overlay_text_rows, BannerDragSelection,
-    ChatEntry, SlashOverlay, SlashOverlayLayout, ToolCallState, UserMessageState,
+    matching_model_indices, model_picker_row_entries, slash_overlay_text_rows,
+    ActiveSubagentCounts, BannerDragSelection, ChatEntry, SlashOverlay, SlashOverlayLayout,
+    ToolCallState, UserMessageState,
 };
 use crate::tui_render_state::TuiState;
 
@@ -2676,22 +2677,50 @@ fn draw_normal_footer(
     };
     let row_1_text = if let Some(hint) = hint {
         hint.to_string()
-    } else if state.steer_indicator {
-        let queued_count = state.queued_steer_texts.len();
-        // "Queued" is the state the user actually cares about (not yet seen
-        // by the LLM); "steer" is internal jargon for how such a message
-        // reaches the model, so it's kept out of user-facing text.
-        let queued_label = if queued_count == 1 {
-            "1 message queued".to_string()
-        } else {
-            format!("{queued_count} messages queued")
-        };
-        format!(" {spinner_prefix}{mode_word} ⋮ {queued_label}")
     } else {
-        format!(" {spinner_prefix}{mode_word}")
+        let mut row_1_text = format!(" {spinner_prefix}{mode_word}");
+        if let Some(active_subagent_label) =
+            active_subagent_footer_label(state.active_subagent_counts)
+        {
+            row_1_text.push_str(" · ");
+            row_1_text.push_str(&active_subagent_label);
+        }
+        if state.steer_indicator {
+            let queued_count = state.queued_steer_texts.len();
+            // "Queued" is the state the user actually cares about (not yet seen
+            // by the LLM); "steer" is internal jargon for how such a message
+            // reaches the model, so it's kept out of user-facing text.
+            let queued_label = format!(
+                "{queued_count} {} queued",
+                plural_noun(queued_count, "message", "messages")
+            );
+            row_1_text.push_str(" ⋮ ");
+            row_1_text.push_str(&queued_label);
+        }
+        row_1_text
     };
     draw_footer_row(frame, row_1, &row_1_text, Color::Yellow, state);
     draw_footer_hints(frame, row_2, footer_hints);
+}
+
+fn active_subagent_footer_label(counts: ActiveSubagentCounts) -> Option<String> {
+    let mut status_labels = Vec::with_capacity(2);
+    if counts.running > 0 {
+        status_labels.push(format!("{} running", counts.running));
+    }
+    if counts.queued > 0 {
+        status_labels.push(format!("{} queued", counts.queued));
+    }
+
+    (!status_labels.is_empty()).then(|| format!("Subagents: {}", status_labels.join(", ")))
+}
+
+fn plural_noun<'a>(count: usize, singular_noun: &'a str, plural_noun: &'a str) -> &'a str {
+    if count == 1 {
+        singular_noun
+    } else {
+        plural_noun
+    }
 }
 
 fn draw_footer_hints(frame: &mut Frame, area: Rect, hints: &[FooterHint]) {
@@ -3385,8 +3414,7 @@ fn draw_help_popup(frame: &mut Frame, state: &mut TuiState) {
 
 #[cfg(test)]
 mod tests {
-    use super::apply_selection_highlight_to_line;
-    use super::compute_scrollbar_thumb;
+    use super::{apply_selection_highlight_to_line, compute_scrollbar_thumb, plural_noun};
     use ratatui::style::Color;
     use ratatui::text::{Line, Span};
 
@@ -3394,6 +3422,13 @@ mod tests {
 
     fn plain_line(text: &str) -> Line<'static> {
         Line::from(vec![Span::raw(text.to_owned())])
+    }
+
+    #[test]
+    fn plural_noun_uses_singular_only_for_one() {
+        assert_eq!(plural_noun(1, "message", "messages"), "message");
+        assert_eq!(plural_noun(0, "message", "messages"), "messages");
+        assert_eq!(plural_noun(2, "message", "messages"), "messages");
     }
 
     fn highlighted_in(line: &Line<'_>) -> String {

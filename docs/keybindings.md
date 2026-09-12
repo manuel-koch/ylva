@@ -6,6 +6,10 @@ Footer hints render each keybinding in bold and its action in normal text.
 Multiple hints are separated by ` · `, for example:
 `enter send · esc cancel · ctrl-c cancel & quit · F1 help`.
 
+While the main conversation is shown, the footer also reports separate
+running and queued subagent counts in a compact label such as
+`Subagents: 1 running, 1 queued`; finished subagents are not included.
+
 ## TUI keybindings (Phase 4)
 
 | Key | Context | Action |

@@ -26,8 +26,8 @@ use std::time::Instant;
 use crate::agent::AgentMode;
 use crate::llm::engine::EngineDisplayInfo;
 use crate::tui_reducer_state::{
-    BannerDragSelection, ChatEntry, ChatSelection, InputArea, SlashOverlay, SlashOverlayLayout,
-    ToolCallState,
+    ActiveSubagentCounts, BannerDragSelection, ChatEntry, ChatSelection, InputArea, SlashOverlay,
+    SlashOverlayLayout, ToolCallState,
 };
 
 // ─── Per-area sub-structs ──────────────────────────────────────────────────────
@@ -165,6 +165,10 @@ pub struct TuiState {
     /// so the footer can still report parent activity separately.
     pub parent_agent_mode: AgentMode,
     pub agent_mode: AgentMode,
+    /// Active child-agent counts from the root conversation. This is empty
+    /// while a drilled-in child transcript is displayed because the footer
+    /// indicator belongs to the main conversation.
+    pub active_subagent_counts: ActiveSubagentCounts,
     /// Provider/model identity for the transcript currently being rendered.
     pub engine_display: EngineDisplayInfo,
     pub chat_entries: Vec<ChatEntry>,
@@ -253,6 +257,7 @@ impl TuiState {
         TuiState {
             parent_agent_mode: AgentMode::Idle,
             agent_mode: AgentMode::Idle,
+            active_subagent_counts: ActiveSubagentCounts::default(),
             engine_display: EngineDisplayInfo::default(),
             chat_entries: Vec::new(),
             partial_assistant_text: String::new(),
