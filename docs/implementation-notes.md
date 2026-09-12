@@ -487,8 +487,19 @@ user-facing on-disk contract; this section is the contributor view.
   send` is omitted entirely while viewing a running child), not via a
   separate overlay on the input box, since keystrokes are still buffered
   normally either way.
-- The spawn-bubble uses the same `Color::Magenta` border as every other tool
-  bubble — no separate color styling was introduced for it.
+- The spawn-bubble uses the same `TOOL_BUBBLE_BORDER_COLOR` border as every
+  other tool bubble — no separate color styling was introduced for it.
+- `tui_widgets::draw`'s header-to-chat divider (rendered only while the
+  header bubble, i.e. the child view, is showing), its chat-to-input divider
+  (rendered unconditionally, gated per-frame on
+  `TuiState::child_view.child_view_bubble.is_some()`), and the conversation
+  scrollbar (`render_chat_scrollbar`'s `color` parameter, threaded through
+  from the same per-frame check) are all tinted `CHILD_VIEW_SEPARATOR_COLOR`
+  (an alias of `TOOL_BUBBLE_BORDER_COLOR`, so it always matches whatever
+  color tool bubbles are themed with) instead of the root conversation's
+  neutral `SEPARATOR_LINE_COLOR`/`CHAT_SCROLLBAR_COLOR` while drilled into a
+  child — a persistent cue to distinguish subagent conversation from main
+  conversation.
 - The footer/header spinner glyph is driven by `AppState.spinner_frame`,
   incremented once per tick in `tui_driver`'s event loop — gated by
   `spinner_should_tick()`, which checks `agent_mode() != AgentMode::Idle`

@@ -90,6 +90,14 @@ const CLARIFY_BANNER_SELECTION_FG_COLOR: Color = Color::Black;
 const CLARIFY_BANNER_SCROLL_INDICATOR_COLOR: Color = Color::DarkGray;
 
 const SEPARATOR_LINE_COLOR: Color = Color::White;
+// While viewing a subagent's drill-in transcript, the divider above (between
+// the header bubble and the chat area) and below (between the chat area and
+// the input/footer panel) it are tinted with the same pinkish/magenta hue as
+// the `spawn_subagent` tool bubble's own border, rather than the neutral
+// `SEPARATOR_LINE_COLOR` used for the root conversation — a persistent cue
+// that survives scrolling, unlike the indent approach tried and discarded
+// earlier (it read as visually odd alongside the bubble chrome).
+const CHILD_VIEW_SEPARATOR_COLOR: Color = TOOL_BUBBLE_BORDER_COLOR;
 // Single hue used for all parts of the conversation-list scrollbar, matching
 // the horizontal divider between the conversation list and input/footer.
 // The track and inactive arrows use the same colour with Modifier::DIM so the
@@ -401,7 +409,9 @@ pub fn draw(
         frame.render_widget(paragraph, header_content_area);
 
         // Show the scroll indicators/scrollbar only when the bubble's full
-        // content overflows the clamped header height.
+        // content overflows the clamped header height. Tinted
+        // `CHILD_VIEW_SEPARATOR_COLOR` — this scrollbar only ever renders
+        // while the header bubble (i.e. the child view) is showing.
         if total_lines > visible {
             render_chat_scrollbar(
                 frame,
@@ -410,19 +420,22 @@ pub fn draw(
                 max_offset,
                 total_lines,
                 visible,
+                CHILD_VIEW_SEPARATOR_COLOR,
             );
         }
 
         // Separator between the header bubble and the chat area below it —
         // mirrors the separator between the chat area and the input/footer
         // panel, so the header never reads as part of the scrollable
-        // conversation-list.
+        // conversation-list. Tinted `CHILD_VIEW_SEPARATOR_COLOR` (always the
+        // case here — this branch only runs while a header bubble, i.e. the
+        // child view, is showing) rather than the neutral root-view color.
         let header_separator_line = "─".repeat(header_separator_area.width as usize);
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 header_separator_line,
                 Style::default()
-                    .fg(SEPARATOR_LINE_COLOR)
+                    .fg(CHILD_VIEW_SEPARATOR_COLOR)
                     .add_modifier(Modifier::DIM),
             ))),
             header_separator_area,
@@ -434,12 +447,22 @@ pub fn draw(
     draw_chat(frame, chat_area, state);
 
     // Thin solid line separating the conversation area from the lower panel.
+    // Tinted the same pinkish/magenta as the header separator while viewing a
+    // subagent's drill-in transcript, so the cue survives scrolling even once
+    // the (non-scrolling) header bubble is out of view — the neutral color is
+    // reserved for the root conversation.
+    let in_child_view = state.child_view.child_view_bubble.is_some();
+    let separator_color = if in_child_view {
+        CHILD_VIEW_SEPARATOR_COLOR
+    } else {
+        SEPARATOR_LINE_COLOR
+    };
     let separator_line = "─".repeat(separator_area.width as usize);
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             separator_line,
             Style::default()
-                .fg(SEPARATOR_LINE_COLOR)
+                .fg(separator_color)
                 .add_modifier(Modifier::DIM),
         ))),
         separator_area,
@@ -644,6 +667,17 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
 
     // Save the content rect so the event loop can hit-test mouse events.
     state.conversation.chat_area = content_area;
+
+    // While viewing a subagent's drill-in transcript, the conversation
+    // scrollbar is tinted the same pinkish/magenta as the chat/input
+    // dividers and the `spawn_subagent` bubble's own border, instead of the
+    // root conversation's neutral scrollbar color.
+    let in_child_view = state.child_view.child_view_bubble.is_some();
+    let scrollbar_color = if in_child_view {
+        CHILD_VIEW_SEPARATOR_COLOR
+    } else {
+        CHAT_SCROLLBAR_COLOR
+    };
 
     // row_width is the full column count of content_area; bubble helpers pad
     // lines to this width so the background fills every cell on each row.
@@ -948,6 +982,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
             max_offset,
             total_lines,
             visible,
+            scrollbar_color,
         );
     }
 }
@@ -991,6 +1026,7 @@ fn render_chat_scrollbar(
     max_offset: usize,
     total_lines: usize,
     visible: usize,
+    color: Color,
 ) {
     let height = scrollbar_area.height as usize;
     if height == 0 {
@@ -1008,11 +1044,9 @@ fn render_chat_scrollbar(
     for row in 0..track_height {
         let is_thumb = row >= thumb_top && row < thumb_top + thumb_size;
         let style = if is_thumb {
-            Style::default().fg(CHAT_SCROLLBAR_COLOR)
+            Style::default().fg(color)
         } else {
-            Style::default()
-                .fg(CHAT_SCROLLBAR_COLOR)
-                .add_modifier(Modifier::DIM)
+            Style::default().fg(color).add_modifier(Modifier::DIM)
         };
         let symbol = if is_thumb { "┃" } else { "│" };
         frame.render_widget(
@@ -1022,10 +1056,8 @@ fn render_chat_scrollbar(
     }
 
     if has_arrows {
-        let arrow_active = Style::default().fg(CHAT_SCROLLBAR_COLOR);
-        let arrow_dim = Style::default()
-            .fg(CHAT_SCROLLBAR_COLOR)
-            .add_modifier(Modifier::DIM);
+        let arrow_active = Style::default().fg(color);
+        let arrow_dim = Style::default().fg(color).add_modifier(Modifier::DIM);
         frame.render_widget(
             Paragraph::new("↑").style(if row_offset > 0 {
                 arrow_active
@@ -2905,6 +2937,7 @@ fn draw_slash_overlay(
             max_first_visible,
             rows.len(),
             content_height as usize,
+            CHAT_SCROLLBAR_COLOR,
         );
     }
 }

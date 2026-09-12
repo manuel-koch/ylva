@@ -291,6 +291,10 @@ streaming/running tools in the background:
   Typing while merely *watching* a running child is a no-op rather than
   silently steering the wrong agent (root vs. child) — the footer omits
   `enter send` in that state to make this clear.
+- Both the header-to-chat divider and the chat-to-input divider, plus the
+  conversation scrollbar (track/thumb/arrows), are tinted to match the
+  `spawn_subagent` bubble's own border color while drilled in, instead of
+  the root conversation's neutral divider/scrollbar color.
 - A child's transcript remains browsable after it finishes — nothing is
   discarded when a subagent completes.
 - The footer/header spinner keeps animating for as long as the subagent's

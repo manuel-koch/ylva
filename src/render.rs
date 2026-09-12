@@ -506,6 +506,176 @@ mod tests {
     }
 
     #[test]
+    fn drilled_in_view_tints_chat_dividers_with_the_subagent_bubble_color() {
+        // The header-to-chat and chat-to-input divider lines are tinted the
+        // same pinkish/magenta as the `spawn_subagent` bubble's own border
+        // while drilled into a child, unlike the root conversation's neutral
+        // dividers — a persistent cue that survives scrolling (an indentation
+        // approach was tried first but discarded as visually odd alongside
+        // the bubble chrome; see docs/features.md's drill-in section).
+        use ratatui::backend::TestBackend;
+        use ratatui::style::Color;
+        use ratatui::Terminal;
+        use ratatui_textarea::TextArea;
+
+        fn divider_colors(state: &AppState) -> Vec<Color> {
+            let mut projected = project_for_draw(state);
+            let backend = TestBackend::new(60, 20);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            let mut textarea = TextArea::default();
+            terminal
+                .draw(|frame| {
+                    crate::tui_widgets::draw(frame, &mut projected, &mut textarea, None, None);
+                })
+                .expect("draw");
+            let buffer = terminal.backend().buffer().clone();
+            let mut colors = Vec::new();
+            for row in 0..20u16 {
+                let mut row_is_divider = true;
+                let mut row_color = None;
+                for column in 0..60u16 {
+                    let cell = buffer.cell((column, row)).unwrap();
+                    if cell.symbol() != "─" {
+                        row_is_divider = false;
+                        break;
+                    }
+                    row_color = cell.style().fg;
+                }
+                if row_is_divider {
+                    colors.push(row_color.expect("divider row must set an fg color"));
+                }
+            }
+            colors
+        }
+
+        let root_state = AppState::new();
+        assert_eq!(
+            divider_colors(&root_state),
+            vec![Color::White],
+            "root view has a single, neutral chat/input divider"
+        );
+
+        let mut child_state = AppState::new();
+        let run_id = Uuid::new_v4();
+        let bubble_id = Uuid::new_v4();
+        push_spawn_bubble(
+            &mut child_state,
+            bubble_id,
+            "reviewer",
+            "look into flaky test",
+        );
+        child_state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id,
+            agent_type: "reviewer".to_string(),
+            task: "look into flaky test".to_string(),
+            label: "Investigate flaky test".to_string(),
+        });
+        child_state.switch_to_child_view(run_id);
+
+        let child_colors = divider_colors(&child_state);
+        assert_eq!(
+            child_colors.len(),
+            2,
+            "child view has both a header-to-chat and a chat-to-input divider: {child_colors:?}"
+        );
+        assert!(
+            child_colors.iter().all(|color| *color == Color::Magenta),
+            "both dividers must be tinted like the subagent bubble border while drilled in: {child_colors:?}"
+        );
+    }
+
+    #[test]
+    fn drilled_in_view_tints_the_chat_scrollbar_with_the_subagent_bubble_color() {
+        // The conversation scrollbar (track/thumb/arrows) picks up the same
+        // pinkish/magenta tint as the chat dividers while drilled into a
+        // child, instead of the root conversation's neutral scrollbar color.
+        use ratatui::backend::TestBackend;
+        use ratatui::style::Color;
+        use ratatui::Terminal;
+        use ratatui_textarea::TextArea;
+
+        fn scrollbar_colors(state: &AppState) -> Vec<Color> {
+            let mut projected = project_for_draw(state);
+            let backend = TestBackend::new(60, 20);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            let mut textarea = TextArea::default();
+            terminal
+                .draw(|frame| {
+                    crate::tui_widgets::draw(frame, &mut projected, &mut textarea, None, None);
+                })
+                .expect("draw");
+            let buffer = terminal.backend().buffer().clone();
+            let mut colors = Vec::new();
+            for row in 0..20u16 {
+                for column in 0..60u16 {
+                    let cell = buffer.cell((column, row)).unwrap();
+                    if matches!(cell.symbol(), "┃" | "│" | "↑" | "↓") {
+                        if let Some(color) = cell.style().fg {
+                            colors.push(color);
+                        }
+                    }
+                }
+            }
+            colors
+        }
+
+        // Enough messages to overflow a 20-row terminal and force the
+        // scrollbar to actually render.
+        let mut root_state = AppState::new();
+        for index in 0..30 {
+            root_state.chat_entries.push(ChatEntry::AssistantMessage {
+                text: format!("root reply {index}"),
+                interrupted: false,
+            });
+        }
+        let root_colors = scrollbar_colors(&root_state);
+        assert!(
+            !root_colors.is_empty(),
+            "root scrollbar must render once content overflows the viewport"
+        );
+        assert!(
+            root_colors.iter().all(|color| *color == Color::White),
+            "root scrollbar must stay the neutral color: {root_colors:?}"
+        );
+
+        let mut child_state = AppState::new();
+        let run_id = Uuid::new_v4();
+        let bubble_id = Uuid::new_v4();
+        push_spawn_bubble(
+            &mut child_state,
+            bubble_id,
+            "reviewer",
+            "look into flaky test",
+        );
+        child_state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id,
+            agent_type: "reviewer".to_string(),
+            task: "look into flaky test".to_string(),
+            label: "Investigate flaky test".to_string(),
+        });
+        let conversation = child_state.child_conversations.get_mut(&run_id).unwrap();
+        for index in 0..30 {
+            conversation.messages.push(ChatEntry::AssistantMessage {
+                text: format!("child reply {index}"),
+                interrupted: false,
+            });
+        }
+        child_state.switch_to_child_view(run_id);
+
+        let child_colors = scrollbar_colors(&child_state);
+        assert!(
+            !child_colors.is_empty(),
+            "child scrollbar must render once content overflows the viewport"
+        );
+        assert!(
+            child_colors.iter().all(|color| *color == Color::Magenta),
+            "child scrollbar must be tinted like the subagent bubble border while drilled in: {child_colors:?}"
+        );
+    }
+
+    #[test]
     fn project_for_draw_flags_pending_approval_belonging_to_a_subagent() {
         let mut state = AppState::new();
         let tool_id = Uuid::new_v4();
