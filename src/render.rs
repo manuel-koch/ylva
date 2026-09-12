@@ -129,18 +129,21 @@ fn project_for_draw(state: &AppState) -> TuiState {
             _ => None,
         })
     });
-    // The drilled-into child's own streaming/tool-running/idle status, not
-    // the root's — see `AppState::agent_mode_for_child` for why `agent_mode()`
-    // alone is wrong here (it would gate the child's in-flight thinking/
-    // response bubble on the root's `TuiMode` instead of the child's).
+    // Keep the root/parent status separately: the drilled-into child's own
+    // streaming/tool-running/idle status, not the root's — see
+    // `AppState::agent_mode_for_child` for why `agent_mode()` alone is wrong
+    // here (it would gate the child's in-flight thinking/response bubble on
+    // the root's `TuiMode` instead of the child's).
+    let parent_agent_mode = state.agent_mode();
     let agent_mode = match &state.active_view {
         ConversationView::Child { run_id, .. } => state.agent_mode_for_child(*run_id),
-        ConversationView::Root => state.agent_mode(),
+        ConversationView::Root => parent_agent_mode,
     };
     let engine_display = showing_child_run_id
         .and_then(|run_id| state.child_engine_displays.get(&run_id).cloned())
         .unwrap_or_else(|| state.engine_display.clone());
     TuiState {
+        parent_agent_mode,
         agent_mode,
         engine_display,
         chat_entries,
@@ -555,6 +558,72 @@ mod tests {
         let projected = project_for_draw(&state);
 
         assert_eq!(projected.agent_mode, crate::agent::AgentMode::Idle);
+    }
+
+    #[test]
+    fn footer_reports_parent_activity_when_viewing_finished_child_with_running_sibling() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        use ratatui_textarea::TextArea;
+
+        let mut state = AppState::new();
+        let finished_run_id = Uuid::new_v4();
+        let finished_bubble_id = Uuid::new_v4();
+        state.chat_entries.push(ChatEntry::ToolBubble {
+            id: finished_bubble_id,
+            name: crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
+            state: Box::new(ToolCallState::Done {
+                arguments: serde_json::json!({}),
+                result_section: crate::tui_reducer_state::ResultSection::plain("finished"),
+                content_sections: vec![],
+                summary: vec![],
+                duration: std::time::Duration::ZERO,
+                title_arguments: vec![],
+            }),
+            collapsed: false,
+        });
+        state.start_child_run(ChildRunInfo {
+            run_id: finished_run_id,
+            bubble_id: finished_bubble_id,
+            agent_type: "reviewer".to_string(),
+            task: "finished task".to_string(),
+            label: "Finished task".to_string(),
+        });
+
+        let running_run_id = Uuid::new_v4();
+        let running_bubble_id = Uuid::new_v4();
+        push_spawn_bubble(&mut state, running_bubble_id, "reviewer", "running task");
+        state.start_child_run(ChildRunInfo {
+            run_id: running_run_id,
+            bubble_id: running_bubble_id,
+            agent_type: "reviewer".to_string(),
+            task: "running task".to_string(),
+            label: "Running task".to_string(),
+        });
+        state.switch_to_child_view(finished_run_id);
+
+        assert_eq!(state.agent_mode(), crate::agent::AgentMode::ToolRunning);
+        let mut projected = project_for_draw(&state);
+        assert_eq!(projected.agent_mode, crate::agent::AgentMode::Idle);
+
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut textarea = TextArea::default();
+        terminal
+            .draw(|frame| {
+                crate::tui_widgets::draw(frame, &mut projected, &mut textarea, None, None);
+            })
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer().clone();
+        let rendered: String = (0..20u16)
+            .flat_map(|row| (0..60u16).map(move |column| (column, row)))
+            .map(|(column, row)| buffer.cell((column, row)).unwrap().symbol().to_string())
+            .collect();
+        assert!(
+            rendered.contains("Subagent done, parent working"),
+            "footer must report the running sibling parent instead of Idle: {rendered:?}"
+        );
     }
 
     #[test]

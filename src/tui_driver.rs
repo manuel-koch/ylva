@@ -890,6 +890,7 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
     let chat_area_rect = app.layout.chat_area.rect;
     let slash_overlay_drag = app.slash_overlay_drag_selection();
     TuiState {
+        parent_agent_mode: agent_mode,
         agent_mode,
         chat_entries: app.chat_entries,
         partial_assistant_text: app.turn_buffer.partial_assistant_text,

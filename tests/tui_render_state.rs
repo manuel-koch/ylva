@@ -1696,6 +1696,7 @@ fn footer_indicates_subagent_done_while_parent_still_busy() {
     let mut terminal = Terminal::new(backend).expect("terminal");
 
     let mut state = ylva::TuiState {
+        parent_agent_mode: AgentMode::Streaming,
         agent_mode: AgentMode::Streaming,
         child_view: ylva::tui_render_state::ChildViewState {
             child_view_bubble: Some((
@@ -1732,6 +1733,7 @@ fn footer_indicates_subagent_done_while_parent_still_busy() {
 
     // Once the root also goes idle, the plain "Idle" word is unambiguous —
     // no special-casing needed (nothing is left "working" to disambiguate).
+    state.parent_agent_mode = AgentMode::Idle;
     state.agent_mode = AgentMode::Idle;
     terminal
         .draw(|frame| {

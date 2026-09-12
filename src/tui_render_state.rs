@@ -160,6 +160,10 @@ impl Default for ConversationListState {
 }
 
 pub struct TuiState {
+    /// Status of the root/parent agent loop. While a child transcript is
+    /// displayed, [`Self::agent_mode`] describes that visible child instead,
+    /// so the footer can still report parent activity separately.
+    pub parent_agent_mode: AgentMode,
     pub agent_mode: AgentMode,
     /// Provider/model identity for the transcript currently being rendered.
     pub engine_display: EngineDisplayInfo,
@@ -247,6 +251,7 @@ pub struct TuiState {
 impl TuiState {
     pub fn new() -> Self {
         TuiState {
+            parent_agent_mode: AgentMode::Idle,
             agent_mode: AgentMode::Idle,
             engine_display: EngineDisplayInfo::default(),
             chat_entries: Vec::new(),

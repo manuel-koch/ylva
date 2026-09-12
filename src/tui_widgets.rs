@@ -527,6 +527,7 @@ fn footer_keybinding_hint(state: &TuiState, input_is_empty: bool) -> &'static st
         }
         SlashOverlay::Hidden => {
             let in_child_view = state.child_view.child_view_bubble.is_some();
+            let parent_agent_is_busy = state.parent_agent_mode != AgentMode::Idle;
             if state.clarify_banner_state.pending_clarify.is_some() {
                 " enter: answer  click choice  ctrl-c/esc: cancel  F1: help"
             } else if in_child_view && !input_is_empty {
@@ -538,7 +539,7 @@ fn footer_keybinding_hint(state: &TuiState, input_is_empty: bool) -> &'static st
             } else if in_child_view {
                 // Esc with an empty draft navigates back to the root
                 // conversation instead of acting on the root agent's turn.
-                if state.agent_mode != AgentMode::Idle {
+                if parent_agent_is_busy {
                     " esc: back to conversation  ctrl-c: cancel & quit  F1: help"
                 } else {
                     " esc: back to conversation  ctrl-c: quit  F1: help"
@@ -2519,18 +2520,17 @@ fn draw_normal_footer(
         AgentMode::ClarifyPending => "Waiting for answer…",
         AgentMode::Aborting => "Aborting…",
     };
-    // While drilled into a subagent's transcript, `agent_mode` always
-    // reflects the *root* loop's `TuiMode` (see `AppState::agent_mode`), not
-    // the child's — so once the child bubble reaches a terminal state
-    // (Done/Error/Denied/Killed) but the root is still busy (e.g. producing
-    // its final reply from the child's result), the plain mode word would
-    // misleadingly read "Streaming…" as if the *subagent* were still
-    // running. Override with an explicit "done, but parent busy" message in
-    // that case; once the root also goes `Idle`, the plain `mode_word` above
-    // is already correct and unambiguous, so no override is needed then.
+    // While drilled into a subagent's transcript, `agent_mode` follows the
+    // visible child and `parent_agent_mode` retains the root loop's status.
+    // Once the child bubble reaches a terminal state (Done/Error/Denied/
+    // Killed) but the root is still busy (e.g. producing its final reply or
+    // running another child), the plain mode word would misleadingly read
+    // "Idle" or "Streaming…" without saying which agent is active. Override
+    // with an explicit "done, but parent busy" message in that case; once the
+    // root also goes `Idle`, the plain `mode_word` above is unambiguous.
     let mode_word = match &state.child_view.child_view_bubble {
         Some((_, _, bubble_state, _))
-            if state.agent_mode != AgentMode::Idle
+            if state.parent_agent_mode != AgentMode::Idle
                 && matches!(
                     bubble_state,
                     ToolCallState::Done { .. }
@@ -2578,10 +2578,15 @@ fn draw_normal_footer(
         }
         _ => mode_word,
     };
-    let spinner_prefix = if state.agent_mode == AgentMode::ClarifyPending {
+    let spinner_mode = if state.agent_mode == AgentMode::Idle {
+        state.parent_agent_mode
+    } else {
+        state.agent_mode
+    };
+    let spinner_prefix = if spinner_mode == AgentMode::ClarifyPending {
         let index = state.spinner_frame as usize % CLARIFY_FRAMES.len();
         format!("{} ", CLARIFY_FRAMES[index])
-    } else if state.agent_mode != AgentMode::Idle {
+    } else if spinner_mode != AgentMode::Idle {
         let index = state.spinner_frame as usize % SPINNER_FRAMES.len();
         format!("{} ", SPINNER_FRAMES[index])
     } else {

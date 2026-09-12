@@ -680,13 +680,13 @@ which is why `/tools` needs no I/O.
   scrolling up to view an earlier subagent bubble (or a plain scroll-back in
   a long conversation) would get yanked back to the bottom the moment the
   current response finished.
-- **Footer mode-word disambiguation:** the plain mode word
-  (`"Streaming…"`/`"Running tool…"`/etc.) always reflects the *root* loop's
-  own `TuiMode`, never a drilled-into child's. Once the child's
-  `spawn_subagent` bubble reaches a terminal state while the root is still
-  busy producing its final reply, the footer overrides the word with
-  `"Subagent done, parent working…"` instead of the misleading root word.
-  While drilled into a live child, the root's `agent_mode()` would report
+- **Footer mode-word disambiguation:** `TuiState::agent_mode` follows the
+  transcript currently shown, while `TuiState::parent_agent_mode` retains the
+  root loop's status. Once a viewed child's `spawn_subagent` bubble reaches a
+  terminal state while the root is still busy producing its final reply or
+  running another child, the footer overrides the word with `"Subagent done,
+  parent working…"` instead of the misleading `"Idle"`/root status. While
+  drilled into a live child, the root's `agent_mode()` would report
   `"Running tool…"` for as long as the `spawn_subagent` bubble is `Running`
   — correct for the root footer but misleading for the child's own
   transcript — so the footer instead inspects the child's own `TurnBuffer`

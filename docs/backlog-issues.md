@@ -1,6 +1,6 @@
 # Backlog of issues discovered while testing
 
-- [ ] Viewing a subagent conversation that is done.
+- [x] Viewing a subagent conversation that is done.
       Footer shows "Idle", but the parent agent is still busy ( running
       yet another subagent ).
 
