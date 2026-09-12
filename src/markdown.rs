@@ -594,6 +594,61 @@ fn normalize_lang_ext(lang: &str) -> String {
     }
 }
 
+/// Distributes `total` units across `weights.len()` buckets proportionally
+/// to `weights`, using the largest-remainder method so the allocation sums
+/// exactly to `min(total, sum(caps))`. Each bucket is capped at the
+/// corresponding entry in `caps`. Used to shrink table columns so that
+/// narrow columns keep a fair share of the available width instead of being
+/// crowded out by a single very wide column (see docs/backlog-issues.md).
+fn distribute_proportional(weights: &[usize], total: usize, caps: &[usize]) -> Vec<usize> {
+    let count = weights.len();
+    if count == 0 {
+        return Vec::new();
+    }
+    let cap_sum: u128 = caps.iter().map(|&cap| cap as u128).sum();
+    let target = if cap_sum < total as u128 {
+        cap_sum as usize
+    } else {
+        total
+    };
+    let weight_sum: usize = weights.iter().sum();
+    let mut allocation = vec![0usize; count];
+    let mut remainders = vec![0u128; count];
+    if weight_sum > 0 {
+        for index in 0..count {
+            let numerator = weights[index] as u128 * target as u128;
+            let floor_value = (numerator / weight_sum as u128) as usize;
+            allocation[index] = floor_value.min(caps[index]);
+            remainders[index] = numerator % weight_sum as u128;
+        }
+    }
+    // Hand out the remainder (from flooring, or the whole target when every
+    // weight is zero) to the buckets with the largest fractional remainder
+    // first, cycling until the target is met or every cap is exhausted.
+    let mut leftover = target.saturating_sub(allocation.iter().sum());
+    if leftover > 0 {
+        let mut order: Vec<usize> = (0..count).collect();
+        order.sort_by(|&a, &b| remainders[b].cmp(&remainders[a]));
+        loop {
+            let mut progressed = false;
+            for &index in &order {
+                if leftover == 0 {
+                    break;
+                }
+                if allocation[index] < caps[index] {
+                    allocation[index] += 1;
+                    leftover -= 1;
+                    progressed = true;
+                }
+            }
+            if leftover == 0 || !progressed {
+                break;
+            }
+        }
+    }
+    allocation
+}
+
 /// Renders all accumulated table rows as column-aligned lines.
 /// Two-pass: compute natural per-column max widths, then shrink them to fit
 /// `width` (minimum 1 char per column). Long cells are word-wrapped to the
@@ -631,25 +686,30 @@ fn flush_table(out: &mut Vec<Line<'static>>, rows: &[(bool, Vec<Vec<Word>>)], wi
         let budget = width.saturating_sub(separator_overhead).max(col_count);
         let minimum_sum: usize = col_min_widths.iter().sum();
         let natural_widths = col_widths.clone();
-        let lower_bounds = if minimum_sum <= budget {
-            col_min_widths.clone()
+        if minimum_sum >= budget {
+            // Not even the per-word minimums fit: distribute the budget
+            // proportionally to natural width, floor 1 per column.
+            col_widths = distribute_proportional(&natural_widths, budget, &natural_widths)
+                .into_iter()
+                .map(|w| w.max(1))
+                .collect();
         } else {
-            vec![1; col_count]
-        };
-        col_widths = lower_bounds;
-
-        let mut remaining = budget.saturating_sub(col_widths.iter().sum());
-        while remaining > 0 {
-            let Some((column_index, _)) = col_widths
+            // Every column keeps its minimum width; the remaining budget is
+            // then handed out proportionally to how much more each column's
+            // natural width wants, so narrow columns aren't crowded out by
+            // a single very wide column (see docs/backlog-issues.md).
+            let extra_budget = budget - minimum_sum;
+            let wants: Vec<usize> = natural_widths
                 .iter()
-                .enumerate()
-                .filter(|(index, width)| **width < natural_widths[*index].max(1))
-                .max_by_key(|(index, width)| natural_widths[*index].max(1) - **width)
-            else {
-                break;
-            };
-            col_widths[column_index] += 1;
-            remaining -= 1;
+                .zip(&col_min_widths)
+                .map(|(natural, min_width)| natural.saturating_sub(*min_width))
+                .collect();
+            let extra = distribute_proportional(&wants, extra_budget, &wants);
+            col_widths = col_min_widths
+                .iter()
+                .zip(&extra)
+                .map(|(min_width, extra)| min_width + extra)
+                .collect();
         }
     }
     let separator_style = Style::default().fg(MARKDOWN_DIM_FG);
@@ -973,5 +1033,26 @@ mod tests {
                 "table row exceeds requested width: {rendered:?}"
             );
         }
+    }
+
+    #[test]
+    fn table_column_shrink_is_proportional_not_winner_take_all() {
+        // Regression for docs/backlog-issues.md: a narrow column must keep a
+        // fair share of the available width instead of being crowded down to
+        // near its bare minimum by one very wide column.
+        let md = "| Area | Files |\n|------|-------|\n\
+            | Core tool layer | src/agent/tools.rs , src/agent.rs , src/agent_factory.rs , src/agent/child_agent_manager.rs |\n\
+            | Built-in tools | bash.rs , read.rs , write.rs , edit.rs , glob.rs , search.rs , clarify.rs , spawn_subagent.rs , agent_finish.rs |\n\
+            | Security / LLM / config | src/sandbox.rs , src/llm.rs , src/config.rs , src/config/profile.rs , src/config/agent.rs |";
+        let lines = render_markdown(md, 103);
+        let header = plain_text(&lines[0]);
+        let col1_width = header.find('│').expect("separator glyph") - 1;
+        // The first column's natural width (longest cell: "Security / LLM /
+        // config") is 24; it must not be crushed down to its bare per-word
+        // minimum (8, from "Built-in"/"Security") to feed the wide column.
+        assert!(
+            col1_width >= 18,
+            "narrow column shrunk far below its fair share: width {col1_width} in {header:?}"
+        );
     }
 }

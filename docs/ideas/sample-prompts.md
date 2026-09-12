@@ -172,6 +172,8 @@ Run the following task in a subagent and let it report its findings back:
 Analyze the `src/agent/child_agent_manager.rs` functionality
 and write a brief summary of its implementation.
 
+Use markdown table to structure your findings.
+
 ---
 
 Run each the following task(s) in subagent(s) and let them report their findings back:
@@ -222,7 +224,8 @@ its current content.
 
 Discover the project structure related to agent tool implementations.
 Provide a 2-3 sentence summary for every source file.
-Run the summary task on each file in separate subagent and let it report its findings back as structure JSON:
+Run the summary task on each file in separate subagent and let it
+report its findings back as structure JSON:
 
 ```json
 {

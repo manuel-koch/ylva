@@ -104,3 +104,46 @@
       call, but the LLM was slipping around it via `bash`. The `bash` tool
       description now explicitly forbids using it to sleep, poll, or wait for a
       spawned subagent, reinforcing the existing `spawn_subagent` guidance.
+
+- [ ] LLM triggered strange search query assuming a simple OR/AND syntax:
+      ```text
+      ▼ Thought for 6.893s
+      Okay, I need to analyze the source code to understand and list the implemented TUI (Text-based User
+      Interface) functionalities. This requires searching the codebase for relevant files and patterns related
+      to TUI, UI elements, or display logic.
+
+      I will start by using the search tool to look for files that likely contain TUI implementation details.
+      I'll search for terms like "tui", "ui", "interface", or specific TUI library names, if any seem common,
+      but for a general analysis, just these terms should suffice. Given I don't know the structure, I'll use
+      a broad search pattern first.
+      
+      Since I want to analyze the implementation , I will start with a pattern search that is likely to hit
+      the source logic.
+      
+      My plan:
+      
+      1. Use search to find files containing patterns related to TUI/UI.
+      2. Review the results to identify critical files.
+      3. Read the relevant files and analyze the code to list features.
+      4. Compile the features into a descriptive table.
+      
+      Let's start with step 1. I'll look for files containing "tui" or "ui".
+      ```
+      The result tool calls where:
+      - ▶ Search TUI OR UI → matching_files=0 matching_lines=0
+      - ▶ Search cli OR interface OR display OR render → matching_files=0 matching_lines=0
+      Afterwards LLM mused:
+      ```text
+      ▼ Thought for 4.076s
+      The initial search for "TUI OR UI" and "cli OR interface OR display OR render" both resulted in zero
+      matches (matching_files: 0).
+      
+      This strongly suggests that either:
+      
+      1. The codebase I am searching does not contain the functionality I am looking for (TUI/CLI).
+      2. The keywords I used are not accurate for the codebase's abstraction layer.
+      
+      I should try a broader search to see if there are any related files or functionality, such as common UI
+      libraries or entry points. I will use ls -R via bash to explore the file structure and then search for
+      more specific clues.
+      ```
