@@ -144,6 +144,11 @@ tool declares its own path-like argument keys via
 
 ## `bash` tool process-group cleanup
 
+The shell inherits the process's current working directory, which is the
+workspace launch directory in normal runtime. Bash commands should therefore
+use relative paths directly rather than starting with a redundant `cd` to the
+workspace root.
+
 On timeout or cancellation the entire process group is killed via `SIGKILL`
 (Unix) using `nix::sys::signal::killpg` — grandchildren spawned by the script
 are also cleaned up. Default timeout is `DEFAULT_BASH_TIMEOUT_SECS` (30s).

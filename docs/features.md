@@ -167,9 +167,11 @@ affect sandbox approval checks. See
   `matches` are set in result metadata. Optional `only_count`
   returns only the match count via `matches` in metadata; content is empty.
   Paths inside the workspace are auto-approved; paths outside are denied by the sandbox.
-- **bash**: Execute a shell command via `bash -c`. Requires explicit human approval
-  before execution. stdout and stderr are merged in true
-  arrival order. Output is capped at 100 KB
+- **bash**: Execute a shell command or multi-line script via `bash -c` from the
+  current working directory, which is the workspace root in normal runtime.
+  Use relative paths directly; do not prefix commands with a redundant `cd` to
+  the workspace root. Requires explicit human approval before execution. stdout
+  and stderr are merged in true arrival order. Output is capped at 100 KB
   (`truncated` / `truncated_at_bytes` fields present in result metadata when
   capped). Default timeout: 30 s. On timeout or cancellation the entire
   process (including any child processes it spawned) is killed. See

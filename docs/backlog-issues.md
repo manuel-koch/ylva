@@ -12,9 +12,11 @@
 - [x] Assistant Markdown headings containing wide Unicode glyphs render one
       character beyond the right edge of the bubble.
 
-- [ ] LLM keep prefixing `bash` tool scripts with `cd <workspace-root>` although
+- [x] LLM keep prefixing `bash` tool scripts with `cd <workspace-root>` although
       CWD==workspace-root is the effective default.
-      Do we need to refine the `bash` schema description to help LLM ?
+      The `bash` tool description and `command` schema now state that commands
+      start in the workspace root, should use relative paths directly, and
+      should only use `cd` when intentionally changing directories.
 
 - [x] Resumed session: `clarify` bubble in a live session has content-sections for
       the result. Resumed session clarify bubble doesn't have those sections, nor
@@ -104,6 +106,11 @@
 - [ ] Main conversation footer should indicate number of running
       or queued subagents.
       But not the total number of (finished) subagents !
+
+- [ ] Don't render the "run_id" within the title of a subagent bubble,
+      neither in main conversation, nor in subagent conversation.
+      This seems to be noise for user and only relevant for the
+      agent harness or the LLM we are tatlking to.
 
 - [ ] Automatic column width sizing while rendering markdown tables seems
       too simple, resulting in very uneven distribution of column widths

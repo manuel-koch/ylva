@@ -58,8 +58,12 @@ pub const BASH_OUTPUT_LIMIT_BYTES: usize = 100 * 1024;
 /// Arguments accepted by the `bash` tool.
 #[derive(Debug, Clone, JsonSchema, Deserialize)]
 pub struct BashInputArgs {
-    /// Command/script passed verbatim to `bash -c`; multi-line scripts preserve
-    /// newlines. Runs in a new process group; stdout+stderr merged into one stream.
+    /// Shell command or multi-line script passed verbatim to `bash -c` and
+    /// executed from the current working directory, which is the workspace
+    /// root. Use relative paths directly; do not prefix the command with a
+    /// redundant `cd` to the workspace root. Use `cd` only when intentionally
+    /// changing directories. Runs in a new process group; stdout+stderr merged
+    /// into one stream.
     pub command: String,
 }
 
@@ -220,9 +224,12 @@ pub struct BashTool {
 /// Build the LLM-facing description string from the concrete timeout and output cap.
 fn build_description(timeout_secs: u64) -> String {
     format!(
-        "Execute a shell command via `bash -c`; stdout/stderr merged in arrival order. \
-         Output capped at {} KB (excess discarded). Times out after {} s, killing the \
-         whole process group.",
+        "Execute a shell command or multi-line script via `bash -c` from the current \
+         working directory, which is the workspace root. Use relative paths directly; \
+         do not prefix the command with a redundant `cd` to the workspace root. Use \
+         `cd` only when intentionally changing directories. stdout/stderr merged in \
+         arrival order. Output capped at {} KB (excess discarded). Times out after {} \
+         s, killing the whole process group.",
         BASH_OUTPUT_LIMIT_BYTES / 1024,
         timeout_secs,
     )
@@ -533,6 +540,16 @@ mod tests {
     }
 
     #[test]
+    fn bash_tool_description_explains_workspace_working_directory() {
+        let tool = BashTool::default();
+        let description = tool.description();
+        assert!(description.contains("current working directory"));
+        assert!(description.contains("workspace root"));
+        assert!(description.contains("do not prefix"));
+        assert!(description.contains("Use relative paths directly"));
+    }
+
+    #[test]
     fn bash_tool_with_timeout_description_reflects_custom_timeout() {
         let tool = BashTool::with_timeout(
             60,
@@ -708,5 +725,18 @@ mod tests {
     fn bash_input_args_all_properties_have_descriptions() {
         let schema = BashTool::default().input_schema();
         super::super::assert_all_properties_have_descriptions(&schema, "BashInputArgs");
+    }
+
+    #[test]
+    fn bash_input_schema_explains_workspace_working_directory() {
+        let schema = BashTool::default().input_schema();
+        let schema = serde_json::to_value(schema).expect("schema serializes");
+        let description = schema["properties"]["command"]["description"]
+            .as_str()
+            .expect("command schema has a description");
+        assert!(description.contains("current working directory"));
+        assert!(description.contains("workspace root"));
+        assert!(description.contains("do not prefix"));
+        assert!(description.contains("Use relative paths directly"));
     }
 }
