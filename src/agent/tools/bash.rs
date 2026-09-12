@@ -229,7 +229,10 @@ fn build_description(timeout_secs: u64) -> String {
          do not prefix the command with a redundant `cd` to the workspace root. Use \
          `cd` only when intentionally changing directories. stdout/stderr merged in \
          arrival order. Output capped at {} KB (excess discarded). Times out after {} \
-         s, killing the whole process group.",
+         s, killing the whole process group. Never use this tool to sleep, poll, or \
+         otherwise wait for a spawned subagent to finish (e.g. `sleep`, `wait`, status- \
+         polling loops) — the harness delivers each subagent's completion automatically \
+         once it is ready.",
         BASH_OUTPUT_LIMIT_BYTES / 1024,
         timeout_secs,
     )

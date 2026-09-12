@@ -84,7 +84,7 @@
       state until that update, so Ctrl-C exits and Esc returns to an
       interactive idle TUI.
 
-- [ ] Some LLM still seem to trigger bash tool calls with "wait" statements after
+- [x] Some LLM still seem to trigger bash tool calls with "wait" statements after
       spawning multiple subagents to wait for their results.
       Shortly afterwards LLM replied (thought):
       ```text
@@ -96,3 +96,7 @@
       unnecessary — but it's done. Now I should simply not do anything until the harness provides the
       terminal continuation.
       ```
+      Resolved: `spawn_subagent`'s description already forbade inventing a wait
+      call, but the LLM was slipping around it via `bash`. The `bash` tool
+      description now explicitly forbids using it to sleep, poll, or wait for a
+      spawned subagent, reinforcing the existing `spawn_subagent` guidance.

@@ -177,6 +177,9 @@ affect sandbox approval checks. See
   capped). Default timeout: 30 s. On timeout or cancellation the entire
   process (including any child processes it spawned) is killed. See
   [implementation notes](./implementation-notes.md#bash-tool-process-group-cleanup).
+  The tool description explicitly tells the model never to use it to sleep,
+  poll, or otherwise wait for a spawned subagent — the harness delivers each
+  subagent's completion automatically.
 - **search**: Search file contents using a regular-expression `pattern` within a
   directory tree (defaults to cwd when `path` is omitted). Respects `.gitignore`.
   Binary files are skipped. Results formatted in grep style: `filepath:lineno: content` for matches
