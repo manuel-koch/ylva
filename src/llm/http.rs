@@ -65,12 +65,11 @@ pub(crate) async fn post_json(
 ///
 /// `headers` carries any provider-specific auth (and other) request headers;
 /// it is applied on every attempt. `request_dump_path` is computed once by
-/// the caller (via [`build_request_dump_path`] with a shared
-/// [`current_dump_timestamp`]) rather than inside this function so the
-/// caller can derive a paired response-dump path (via
-/// [`build_response_dump_path`]) using that exact same timestamp —
-/// computing the timestamp twice could otherwise land the request and its
-/// streamed response in differently-named files.
+/// the caller (via [`build_request_dump_path`] with a shared timestamp and
+/// dump ID) rather than inside this function so the caller can derive a
+/// paired response-dump path (via [`build_response_dump_path`]) using those
+/// exact same values — computing either value twice could otherwise land the
+/// request and its streamed response in differently-named files.
 pub(crate) async fn post_with_retry(
     client: &reqwest::Client,
     url: &str,
@@ -298,33 +297,31 @@ pub(crate) fn append_response_dump_line(line: &str, file_path: &Path) {
 
 /// Derive the dump file path for the outgoing request (metadata + body, as
 /// two JSON Lines — see [`dump_request`]) from the `YLVA_REQUEST_DUMP_PATH`
-/// environment variable, embedding `timestamp` (see [`current_dump_timestamp`])
-/// so it can be paired with a response dump built from the same `timestamp`
-/// via [`build_response_dump_path`].
+/// environment variable, embedding `timestamp` and the per-request `dump_id`
+/// so it can be paired with a response dump built from the same values via
+/// [`build_response_dump_path`].
 ///
 /// Returns `None` when the envvar is unset, empty, or whitespace-only.
 /// Delegates path construction to [`build_dump_path_from_template`].
-pub(crate) fn build_request_dump_path(timestamp: &str) -> Option<PathBuf> {
+pub(crate) fn build_request_dump_path(timestamp: &str, dump_id: &str) -> Option<PathBuf> {
     let template = std::env::var("YLVA_REQUEST_DUMP_PATH").ok()?;
-    build_dump_path_from_template(&template, timestamp, "request", "jsonl")
+    build_dump_path_from_template(&template, timestamp, dump_id, "request", "jsonl")
 }
 
 /// Derive the dump file path for the raw SSE transcript of a streamed
 /// response from the `YLVA_REQUEST_DUMP_PATH` environment variable, embedding
-/// `timestamp` (see [`current_dump_timestamp`]) so it can be paired with the
-/// request dump built from the same `timestamp` via [`build_request_dump_path`].
+/// `timestamp` and the per-request `dump_id` so it can be paired with the
+/// request dump built from the same values via [`build_request_dump_path`].
 ///
 /// Returns `None` when the envvar is unset, empty, or whitespace-only.
 /// Delegates path construction to [`build_dump_path_from_template`].
-pub(crate) fn build_response_dump_path(timestamp: &str) -> Option<PathBuf> {
+pub(crate) fn build_response_dump_path(timestamp: &str, dump_id: &str) -> Option<PathBuf> {
     let template = std::env::var("YLVA_REQUEST_DUMP_PATH").ok()?;
-    build_dump_path_from_template(&template, timestamp, "response", "jsonl")
+    build_dump_path_from_template(&template, timestamp, dump_id, "response", "jsonl")
 }
 
-/// A shared `<unix_seconds>_<millis>` timestamp component, computed once per
-/// chat exchange and embedded in both [`build_request_dump_path`] and
-/// [`build_response_dump_path`] so the request and its paired streamed
-/// response land in matching, easy-to-find filenames.
+/// A human-readable `<unix_seconds>_<millis>` timestamp component, computed
+/// once per chat exchange and embedded in both dump paths for easy sorting.
 pub(crate) fn current_dump_timestamp() -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -344,6 +341,7 @@ pub(crate) fn current_dump_timestamp() -> String {
 fn build_dump_path_from_template(
     template: &str,
     timestamp: &str,
+    dump_id: &str,
     kind: &str,
     extension: &str,
 ) -> Option<PathBuf> {
@@ -376,7 +374,7 @@ fn build_dump_path_from_template(
         .filter(|name| !name.is_empty())
         .unwrap_or("ylva_req");
 
-    let file_name = format!("{stem}_{timestamp}_{kind}.{extension}");
+    let file_name = format!("{stem}_{timestamp}_{dump_id}_{kind}.{extension}");
     Some(dump_dir.join(file_name))
 }
 
@@ -565,9 +563,14 @@ mod tests {
 
     #[test]
     fn build_dump_path_strips_extension_from_template() {
-        let path =
-            build_dump_path_from_template("/tmp/dumps/ylva.json", "1_002", "request", "json")
-                .expect("path");
+        let path = build_dump_path_from_template(
+            "/tmp/dumps/ylva.json",
+            "1_002",
+            "dump-a",
+            "request",
+            "json",
+        )
+        .expect("path");
         let file_name = path.file_name().and_then(|n| n.to_str()).expect("name");
         assert!(
             file_name.starts_with("ylva_"),
@@ -577,17 +580,23 @@ mod tests {
             !file_name.contains(".json_"),
             "extension must not appear mid-name: {file_name}"
         );
-        assert_eq!(file_name, "ylva_1_002_request.json");
+        assert_eq!(file_name, "ylva_1_002_dump-a_request.json");
     }
 
     #[test]
     fn build_dump_path_uses_stem_and_absolute_dir() {
-        let path = build_dump_path_from_template("/tmp/dumps/my_req", "1_002", "response", "jsonl")
-            .expect("path");
+        let path = build_dump_path_from_template(
+            "/tmp/dumps/my_req",
+            "1_002",
+            "dump-a",
+            "response",
+            "jsonl",
+        )
+        .expect("path");
         let parent = path.parent().expect("parent");
         let file_name = path.file_name().and_then(|n| n.to_str()).expect("name");
         assert_eq!(parent, Path::new("/tmp/dumps"));
-        assert_eq!(file_name, "my_req_1_002_response.jsonl");
+        assert_eq!(file_name, "my_req_1_002_dump-a_response.jsonl");
     }
 
     #[test]
@@ -597,26 +606,29 @@ mod tests {
         if std::env::var("YLVA_REQUEST_DUMP_PATH").is_ok() {
             return; // var happens to be set in this process — skip rather than flake
         }
-        assert!(build_request_dump_path("1_002").is_none());
+        assert!(build_request_dump_path("1_002", "dump-a").is_none());
     }
 
     #[test]
     fn build_dump_path_returns_none_when_template_is_whitespace_only() {
-        assert!(build_dump_path_from_template("   ", "1_002", "request", "json").is_none());
+        assert!(
+            build_dump_path_from_template("   ", "1_002", "dump-a", "request", "json").is_none()
+        );
     }
 
     #[test]
     fn build_dump_path_falls_back_to_default_stem_when_template_has_no_stem() {
-        let path = build_dump_path_from_template("/", "1_002", "request", "json").expect("path");
+        let path =
+            build_dump_path_from_template("/", "1_002", "dump-a", "request", "json").expect("path");
         let file_name = path.file_name().and_then(|n| n.to_str()).expect("name");
-        assert_eq!(file_name, "ylva_req_1_002_request.json");
+        assert_eq!(file_name, "ylva_req_1_002_dump-a_request.json");
     }
 
     #[test]
     fn build_dump_path_resolves_relative_template_against_cwd() {
         let cwd = std::env::current_dir().expect("cwd");
-        let path =
-            build_dump_path_from_template("sub/req", "1_002", "request", "json").expect("path");
+        let path = build_dump_path_from_template("sub/req", "1_002", "dump-a", "request", "json")
+            .expect("path");
         assert!(
             path.starts_with(cwd.join("sub")),
             "expected path under CWD/sub, got {path:?}"
@@ -708,21 +720,54 @@ mod tests {
     #[test]
     fn build_request_and_response_dump_paths_share_timestamp_and_differ_by_kind_and_extension() {
         let timestamp = "1_002";
-        let request_path =
-            build_dump_path_from_template("/tmp/dumps/ylva_req", timestamp, "request", "json")
-                .expect("request path");
-        let response_path =
-            build_dump_path_from_template("/tmp/dumps/ylva_req", timestamp, "response", "jsonl")
-                .expect("response path");
+        let dump_id = "dump-a";
+        let request_path = build_dump_path_from_template(
+            "/tmp/dumps/ylva_req",
+            timestamp,
+            dump_id,
+            "request",
+            "json",
+        )
+        .expect("request path");
+        let response_path = build_dump_path_from_template(
+            "/tmp/dumps/ylva_req",
+            timestamp,
+            dump_id,
+            "response",
+            "jsonl",
+        )
+        .expect("response path");
 
         assert_eq!(
             request_path,
-            Path::new("/tmp/dumps/ylva_req_1_002_request.json")
+            Path::new("/tmp/dumps/ylva_req_1_002_dump-a_request.json")
         );
         assert_eq!(
             response_path,
-            Path::new("/tmp/dumps/ylva_req_1_002_response.jsonl")
+            Path::new("/tmp/dumps/ylva_req_1_002_dump-a_response.jsonl")
         );
+    }
+
+    #[test]
+    fn dump_ids_keep_same_timestamp_paths_distinct() {
+        let first_path = build_dump_path_from_template(
+            "/tmp/dumps/ylva_req",
+            "1_002",
+            "dump-a",
+            "request",
+            "jsonl",
+        )
+        .expect("first path");
+        let second_path = build_dump_path_from_template(
+            "/tmp/dumps/ylva_req",
+            "1_002",
+            "dump-b",
+            "request",
+            "jsonl",
+        )
+        .expect("second path");
+
+        assert_ne!(first_path, second_path);
     }
 
     #[test]

@@ -18,6 +18,7 @@ use futures::StreamExt;
 use reqwest::header::{HeaderMap, AUTHORIZATION};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use crate::agent::{DeltaChunk, Message, StreamEvent};
 use crate::llm::engine::{EngineRuntimeConfig, EngineRuntimeConfigHandle, DEFAULT_CONTEXT_LENGTH};
@@ -210,6 +211,11 @@ impl Provider for OpenAiCompatibleProvider {
                 let authorization = format!("{} {}", "Bearer", value);
                 headers.insert(AUTHORIZATION, authorization.parse()?);
             }
+            let dump_id = Uuid::new_v4().simple().to_string();
+            let dump_timestamp = super::http::current_dump_timestamp();
+            let request_dump_path = super::http::build_request_dump_path(&dump_timestamp, &dump_id);
+            let response_dump_path =
+                super::http::build_response_dump_path(&dump_timestamp, &dump_id);
             // Log the effective request snapshot, never request headers (which
             // carry the Authorization/API-key value) or the request body.
             tracing::debug!(
@@ -219,22 +225,16 @@ impl Provider for OpenAiCompatibleProvider {
                 temperature = ?runtime_config.temperature,
                 effective_context_length = runtime_config.context_length,
                 reasoning_effort = ?runtime_config.reasoning_effort,
+                dump_id = %dump_id,
                 "chat request started"
             );
-            // Computed once (rather than inside `build_request_dump_path`/
-            // `build_response_dump_path`) so the request and its paired
-            // response dump share the exact same `<epoch>_<millis>` timestamp
-            // component.
-            let dump_timestamp = super::http::current_dump_timestamp();
-            let request_dump_path = super::http::build_request_dump_path(&dump_timestamp);
-            let response_dump_path = super::http::build_response_dump_path(&dump_timestamp);
             // Logged once, upfront, alongside the request dump's own
             // "dumped request body" log line (emitted inside
             // `post_with_retry`) — together they let a request/response pair
             // be found from a log timestamp without guessing the paired
             // filename from the request dump path alone.
             if let Some(path) = &response_dump_path {
-                tracing::debug!(path = %path.display(), "response dump path resolved");
+                tracing::debug!(dump_id = %dump_id, path = %path.display(), "response dump path resolved");
             }
             let response = super::http::post_with_retry(
                 &client,
@@ -600,6 +600,7 @@ mod tests {
         assert!(log.contains("temperature=Some(0.25)"));
         assert!(log.contains("effective_context_length=64000"));
         assert!(log.contains("reasoning_effort=Some(\"high\")"));
+        assert!(log.contains("dump_id="));
         assert!(!log.contains("test-api-key"));
         assert!(!log.contains("request-body-secret"));
     }
