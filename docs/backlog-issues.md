@@ -105,7 +105,7 @@
       description now explicitly forbids using it to sleep, poll, or wait for a
       spawned subagent, reinforcing the existing `spawn_subagent` guidance.
 
-- [ ] LLM triggered strange search query assuming a simple OR/AND syntax:
+- [x] LLM triggered strange search query assuming a simple OR/AND syntax:
       ```text
       ▼ Thought for 6.893s
       Okay, I need to analyze the source code to understand and list the implemented TUI (Text-based User

@@ -47,7 +47,9 @@ const BINARY_PROBE_BYTES: usize = 8 * 1024;
 /// Arguments accepted by the `search` tool.
 #[derive(Debug, Clone, JsonSchema, Deserialize)]
 pub struct SearchInputArgs {
-    /// Regular expression pattern to search for.
+    /// Regular expression to search for. Alternation uses `|`, not English
+    /// words: `foo|bar` matches "foo" or "bar"; the literal text "foo OR bar"
+    /// only matches that exact phrase.
     pub pattern: String,
     /// Directory or file to search within (default: cwd).
     pub path: Option<String>,
@@ -303,7 +305,9 @@ impl Tool for SearchTool {
 
     fn description(&self) -> &str {
         "Search files under a directory tree for a regex `pattern` (grep-style: \
-        `filepath:lineno: content` matches, `filepath-lineno- content` context). Binary files \
+        `filepath:lineno: content` matches, `filepath-lineno- content` context). Alternation is \
+        `|`, e.g. `foo|bar` (not the English words `OR`/`AND`, which are matched as literal \
+        text). Binary files \
         skipped; output capped at 100 KB. `glob` (e.g. `**/*.rs`) restricts searched files. \
         `files_with_matches: true` returns only file paths. `only_matches: true` returns only \
         matched substrings, like `grep -o`. `files_with_matches`/`only_matches` are mutually \
