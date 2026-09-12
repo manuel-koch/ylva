@@ -300,7 +300,7 @@ pub async fn run_cli_to(
     let mut thinking_started_at: Option<std::time::Instant> = None;
     // Headless mode has nobody to keep the process alive after the visible
     // conversation turn ends, unlike the TUI. A `spawn_subagent` call
-    // resolves immediately with `{"status": "running"/"queued"}` (see
+    // resolves immediately with a structured admission event (see
     // `resolve_spawn_subagent`), so the parent can go idle (`StreamDone`)
     // while its child is still running — the child's real outcome only
     // arrives later, tied to the same call id, as either a `ToolDone` (the
@@ -309,16 +309,17 @@ pub async fn run_cli_to(
     // fail-safe case where no `ChildAgentManager` is wired, a `ToolError`.
     // Ending the loop on the first `StreamDone` would drop the agent
     // (closing `cmd_tx`) before that terminal event ever fires, silently
-    // discarding the child's result. Worse, if the parent was idle when the
-    // child finishes, `AgentLoop` re-prompts it immediately (see the
-    // `finish_rx` arm in `AgentLoop::run`) so it can react to the result —
-    // guaranteeing a further `StreamStarted`/`StreamDone` round that must
-    // not be raced past either. So finalizing is deferred entirely to the
+    // discarding the child's result. Once the final outstanding child
+    // finishes while the parent is idle, `AgentLoop` re-prompts it once (see
+    // the `finish_rx` arm in `AgentLoop::run`) so it can aggregate the
+    // results — guaranteeing a further `StreamStarted`/`StreamDone` round
+    // that must not be raced past either. So finalizing is deferred entirely to the
     // `StreamDone`/`StreamCancelled` arms below, gated on every spawned call
     // id (tracked by id, not just a count, so any of
     // `ToolDone`/`ToolError`/`ToolKilled` reliably clears it) having
     // reported back — if any are still outstanding at that point, the loop
-    // keeps waiting for the guaranteed follow-up round instead of exiting.
+    // keeps waiting for the eventual aggregate continuation instead of
+    // exiting.
     let mut pending_spawn_call_ids: std::collections::HashSet<uuid::Uuid> =
         std::collections::HashSet::new();
     while !response_finished {

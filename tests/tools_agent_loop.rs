@@ -14,21 +14,24 @@
 
 mod common;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::future::BoxFuture;
 use schemars::schema::RootSchema;
 use schemars::{schema_for, JsonSchema};
 use serde::Deserialize;
 use serde_json::Value;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use ylva::{
     default_registry, AgentCommand, AgentLoop, ApprovalCheck, AssistantStatus, DeltaChunk,
-    EngineImpl, Message, MockEvent, MockProvider, Sandbox, Tool, ToolCall, ToolCallResult,
-    ToolError, ToolRegistry, ToolRegistryConfig, UiUpdate, UserMessageKind,
-    MAX_TOOL_USE_ITERATIONS,
+    EngineImpl, Message, MockEvent, MockProvider, Provider, Sandbox, StreamEvent, Tool, ToolCall,
+    ToolCallResult, ToolError, ToolRegistry, ToolRegistryConfig, ToolSchema, UiUpdate,
+    UserMessageKind, MAX_TOOL_USE_ITERATIONS,
 };
 
 /// Build a `MockEvent::Delta` carrying a complete tool call for `index`.
@@ -46,10 +49,10 @@ fn call(name: &str, index: usize, args: Value) -> MockEvent {
 async fn collect_until_advancing<F>(
     ui_rx: &mut mpsc::Receiver<UiUpdate>,
     interval: Duration,
-    predicate: F,
+    mut predicate: F,
 ) -> Vec<UiUpdate>
 where
-    F: Fn(&UiUpdate) -> bool,
+    F: FnMut(&UiUpdate) -> bool,
 {
     let mut collected = Vec::new();
     loop {
@@ -136,6 +139,76 @@ fn scratch_file(dir: &TempDir, name: &str, content: &str) -> String {
 
 fn make_sandbox() -> std::sync::Arc<std::sync::RwLock<Sandbox>> {
     std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new()))
+}
+
+struct SequencedMockProvider {
+    phases: Vec<Vec<MockEvent>>,
+    interval: Duration,
+    calls: AtomicUsize,
+}
+
+impl SequencedMockProvider {
+    fn new(phases: Vec<Vec<MockEvent>>, interval: Duration) -> Self {
+        Self {
+            phases,
+            interval,
+            calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Provider for SequencedMockProvider {
+    fn chat<'a>(
+        &'a self,
+        _messages: Vec<Message>,
+        _tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        let phase_index = self.calls.fetch_add(1, Ordering::SeqCst);
+        let script = self
+            .phases
+            .get(phase_index)
+            .or_else(|| self.phases.last())
+            .cloned()
+            .unwrap_or_default();
+        let interval = self.interval;
+        Box::pin(async move {
+            let (tx, rx) = mpsc::channel(16);
+            tokio::spawn(async move {
+                let last_index = script.len().saturating_sub(1);
+                for (index, event) in script.into_iter().enumerate() {
+                    let stream_event = match event {
+                        MockEvent::Text(text) => StreamEvent::Text(text),
+                        MockEvent::Thinking(text) => StreamEvent::Thinking(text),
+                        MockEvent::Delta(delta) => StreamEvent::Delta(delta),
+                    };
+                    if tx.send(stream_event).await.is_err() {
+                        return;
+                    }
+                    if index == last_index {
+                        break;
+                    }
+                    tokio::select! {
+                        _ = cancel.cancelled() => {
+                            let _ = tx.send(StreamEvent::Cancelled).await;
+                            return;
+                        }
+                        _ = tokio::time::sleep(interval) => {}
+                    }
+                }
+                let _ = tx.send(StreamEvent::Done).await;
+            });
+            Ok(rx)
+        })
+    }
+
+    fn name(&self) -> &str {
+        "sequenced-mock"
+    }
+
+    fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ylva::ModelInfo>>> {
+        Box::pin(async { Ok(vec![]) })
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -677,6 +750,219 @@ async fn iteration_guard_stops_after_max_reprompts() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn intermediate_subagent_completion_does_not_reprompt_until_all_children_finish() {
+    use std::sync::Mutex;
+
+    use ylva::child_agent_manager::{ChildAgentManager, FinishResult, SpawnFn};
+
+    let registry = Arc::new(default_registry(
+        make_sandbox(),
+        ToolRegistryConfig {
+            include_spawn_subagent: true,
+            auto_approve_spawn: true,
+            ..ToolRegistryConfig::default()
+        },
+    ));
+    let interval = Duration::from_millis(5);
+    let provider = SequencedMockProvider::new(
+        vec![
+            vec![
+                call(
+                    "spawn_subagent",
+                    0,
+                    serde_json::json!({
+                        "label": "First child",
+                        "task": "first task"
+                    }),
+                ),
+                call(
+                    "spawn_subagent",
+                    1,
+                    serde_json::json!({
+                        "label": "Second child",
+                        "task": "second task"
+                    }),
+                ),
+            ],
+            vec![MockEvent::Text("working".to_string())],
+            vec![MockEvent::Text("combined answer".to_string())],
+        ],
+        interval,
+    );
+    let (mut agent, mut ui_rx) = AgentLoop::new(
+        Arc::new(EngineImpl::new(
+            Arc::new(provider),
+            common::test_engine_config(),
+        )),
+        Arc::clone(&registry),
+    );
+
+    let (finish_tx, finish_rx) = mpsc::channel(4);
+    let (subagent_ui_tx, subagent_ui_rx) = mpsc::channel(16);
+    let spawned_runs = Arc::new(Mutex::new(Vec::new()));
+    let spawned_runs_clone = Arc::clone(&spawned_runs);
+    let spawn_fn: SpawnFn = Box::new(move |request, _cancel, _ui_tx| {
+        spawned_runs_clone
+            .lock()
+            .unwrap()
+            .push((request.run_id, request.call_id, request.label));
+        ylva::child_agent_manager::SpawnOutcome {
+            command_sender: None,
+            handle: tokio::spawn(async {}),
+        }
+    });
+    let manager = ChildAgentManager::new(subagent_ui_tx, spawn_fn);
+    agent = agent.with_child_agent_manager(manager, finish_rx, subagent_ui_rx);
+
+    agent
+        .send_command(AgentCommand::Prompt("delegate twice".to_string()))
+        .await;
+    let handle = agent.run();
+
+    let mut stream_start_count = 0;
+    let initial_updates = collect_until_advancing(&mut ui_rx, interval, |update| {
+        if matches!(update, UiUpdate::StreamStarted) {
+            stream_start_count += 1;
+        }
+        stream_start_count == 2 && matches!(update, UiUpdate::AppendText(text) if text == "working")
+    })
+    .await;
+    let stream_starts_before_completion = initial_updates
+        .iter()
+        .filter(|update| matches!(update, UiUpdate::StreamStarted))
+        .count();
+    let (running_run_id, running_call_id) = initial_updates
+        .iter()
+        .find_map(|update| match update {
+            UiUpdate::ChildAgentStarted {
+                run_id, call_id, ..
+            } => Some((*run_id, *call_id)),
+            _ => None,
+        })
+        .expect("one child should have started");
+    let (second_call_id, second_run_id) = initial_updates
+        .iter()
+        .find_map(|update| match update {
+            UiUpdate::ToolProgress {
+                id,
+                title_arguments,
+            } if title_arguments
+                .iter()
+                .any(|(key, value)| key == "status" && value == "queued") =>
+            {
+                let run_id = title_arguments
+                    .iter()
+                    .find(|(key, _)| key == "run_id")
+                    .and_then(|(_, value)| value.as_str())
+                    .and_then(|value| value.parse().ok())?;
+                Some((*id, run_id))
+            }
+            _ => None,
+        })
+        .expect("one child should be queued");
+    assert_ne!(running_call_id, second_call_id);
+    assert_eq!(spawned_runs.lock().unwrap().len(), 1);
+
+    finish_tx
+        .send(FinishResult {
+            run_id: running_run_id,
+            call_id: running_call_id,
+            status: "success".to_string(),
+            result: Some("first result".to_string()),
+            error: None,
+            sources: vec![],
+        })
+        .await
+        .expect("first child completion should be accepted");
+    let first_done_updates = collect_until_advancing(&mut ui_rx, interval, |update| {
+        matches!(
+            update,
+            UiUpdate::ToolDone { id, name, .. }
+                if *id == running_call_id && name == "spawn_subagent"
+        )
+    })
+    .await;
+
+    let mut updates_after_first = first_done_updates;
+    for _ in 0..5 {
+        tokio::time::advance(interval).await;
+        tokio::task::yield_now().await;
+        while let Ok(update) = ui_rx.try_recv() {
+            updates_after_first.push(update);
+        }
+    }
+    assert!(
+        !updates_after_first
+            .iter()
+            .any(|update| matches!(update, UiUpdate::StreamStarted)),
+        "an intermediate completion must not start a parent continuation"
+    );
+
+    finish_tx
+        .send(FinishResult {
+            run_id: second_run_id,
+            call_id: second_call_id,
+            status: "success".to_string(),
+            result: Some("second result".to_string()),
+            error: None,
+            sources: vec![],
+        })
+        .await
+        .expect("second child completion should be accepted");
+    let final_updates = collect_until_advancing(&mut ui_rx, interval, |update| {
+        matches!(update, UiUpdate::StreamStarted)
+    })
+    .await;
+    assert_eq!(
+        final_updates
+            .iter()
+            .filter(|update| matches!(update, UiUpdate::StreamStarted))
+            .count(),
+        1,
+        "the final completion should trigger one parent continuation"
+    );
+    assert_eq!(
+        stream_starts_before_completion + 1,
+        initial_updates
+            .iter()
+            .filter(|update| matches!(update, UiUpdate::StreamStarted))
+            .count()
+            + final_updates
+                .iter()
+                .filter(|update| matches!(update, UiUpdate::StreamStarted))
+                .count(),
+        "only the final completion may add a parent stream"
+    );
+
+    let _ = collect_until_advancing(&mut ui_rx, interval, |update| {
+        matches!(update, UiUpdate::StreamDone)
+    })
+    .await;
+    drop(agent);
+    let context = handle.await.expect("loop ok").expect("context");
+    let completion_notices: Vec<&str> = context
+        .messages()
+        .iter()
+        .filter_map(|message| match message {
+            Message::User {
+                content,
+                kind: UserMessageKind::ImplicitToolNote,
+            } if content.contains("\"event\":\"subagent_completed\"") => Some(content.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(completion_notices.len(), 2);
+    assert!(completion_notices[0].contains("\"all_done\":false"));
+    assert!(completion_notices[1].contains("\"all_done\":true"));
+    assert!(completion_notices
+        .iter()
+        .any(|notice| notice.contains("\"label\":\"First child\"")));
+    assert!(completion_notices
+        .iter()
+        .any(|notice| notice.contains("\"label\":\"Second child\"")));
+}
+
+#[tokio::test(start_paused = true)]
 async fn iteration_guard_also_stops_a_runaway_spawn_subagent_finish_reprompt_loop() {
     // Regression test: a child that resolves near-instantly (finishes via
     // `finish_tx` essentially as soon as it's spawned) drives the root
@@ -945,7 +1231,10 @@ async fn stop_while_spawn_subagent_is_running_resolves_it_to_cancelled_tool_done
         matches!(
             message,
             Message::User { content, kind: UserMessageKind::ImplicitToolNote }
-                if content.contains("spawn_subagent") && content.contains("cancelled")
+                if content.contains("spawn_subagent")
+                    && content.contains("\"event\":\"subagent_completed\"")
+                    && content.contains("\"status\":\"cancelled\"")
+                    && content.contains("\"all_done\":true")
         )
     });
     assert!(

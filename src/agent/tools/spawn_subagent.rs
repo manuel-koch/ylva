@@ -50,10 +50,12 @@ fn default_agent_type() -> String {
 #[derive(Debug, Clone, JsonSchema, Deserialize)]
 pub struct SpawnSubagentArgs {
     /// 3-6 word label for what the child is doing, e.g. "Refactor auth token validation".
-    /// Shown in the (possibly collapsed) tool-call bubble title.
+    /// Shown in the (possibly collapsed) tool-call bubble title and included in
+    /// the later completion event so the parent can correlate results without
+    /// relying on completion order.
     pub label: String,
-    /// Self-contained instruction for the child — it has no knowledge of this
-    /// conversation beyond `briefing`.
+    /// Self-contained instruction and expected deliverable for the child — it
+    /// has no knowledge of this conversation beyond `briefing`.
     pub task: String,
     /// Optional context/background injected ahead of `task` in the child's own
     /// conversation, so it need not be repeated in `task`.
@@ -87,15 +89,18 @@ impl Tool for SpawnSubagentTool {
     }
 
     fn description(&self) -> &str {
-        "Delegate a self-contained task to a concurrent child agent. Returns immediately with \
-         status (`\"running\"`/`\"queued\"`) and `run_id` — never invent a tool call just to \
-         pass time while it runs (no `bash sleep`, no `echo`/status-only commands, no polling \
-         of any kind): you are re-prompted automatically the instant the child finishes, so \
-         there is nothing to gain by calling any tool merely to wait. If there's genuinely \
-         other work to do, do it now; otherwise end your turn with a short text update and no \
-         tool call at all — that is a normal, complete turn, not a stall. The child's final \
-         outcome later arrives as a separate `system` message referencing this call's \
-         `tool_call_id` — treat that as the authoritative report."
+        "Delegate a self-contained task to a background child agent. The immediate tool result \
+         is admission only, not the child's answer: it has the JSON shape \
+         {\"event\":\"subagent_accepted\",\"status\":\"running\"|\"queued\",\"run_id\":\"...\", \
+         \"outstanding_count\":N,\"all_done\":false}. Never invent a tool call merely to wait \
+         (no sleep, status-only command, or polling). A terminal completion is delivered later \
+         as a hidden harness notice, not as a second tool result; it contains the child's \
+         run_id, tool_call_id, label, status, result/error/sources, outstanding_count, and \
+         all_done. Completion order is not a reliable ordering signal. Do not acknowledge an \
+         intermediate completion or tell the user to wait. Use a result only when it helps with \
+         genuinely useful work; when all_done is true, combine the terminal results and answer \
+         the user. The harness handles the continuation, so never claim a child completed from \
+         the admission result alone."
     }
 
     fn input_schema(&self) -> schemars::schema::RootSchema {

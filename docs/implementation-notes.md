@@ -160,8 +160,8 @@ until every spawned/queued child call has reported a terminal outcome
 structurally-unreachable no-`ChildAgentManager` fail-safe) — otherwise the
 one-shot process would exit as soon as the parent goes idle, silently
 discarding the child's result since `spawn_subagent` resolves immediately
-with `{"status": "running"/"queued"}` while the child keeps running
-concurrently. Without `--auto-approve-spawn`, `spawn_subagent` is denied
+with an admission event (`event: "subagent_accepted"`) while the child keeps
+running concurrently. Without `--auto-approve-spawn`, `spawn_subagent` is denied
 outright in CLI mode (`UserApprovalRequired` has no approval path headless),
 so this only matters when that flag is used.
 
@@ -302,24 +302,28 @@ user-facing on-disk contract; this section is the contributor view.
   `AgentLoop` whose resolved `AgentConfig::can_spawn` is `true`; children are
   constructed via the same factory (`Role::Child(ChildRoleConfig { .. })`)
   and never receive `spawn_subagent` themselves.
-- At most one child runs at a time; further `spawn_subagent` calls are
-  queued in an unbounded FIFO and started automatically as each preceding
-  child finishes.
-- A child's outcome — success, failure, or an "unstructured" fallback — is
-  injected into the parent's conversation as a new trailing `system` message
-  referencing the original `spawn_subagent` call's `tool_call_id`, never by
-  rewriting or duplicating that call's provisional tool result; the
+- The current scheduler runs at most one child at a time; further
+  `spawn_subagent` calls are queued in an unbounded FIFO and started
+  automatically as each preceding child finishes. The model-facing lifecycle
+  contract does not expose that scheduling detail, so a future concurrent
+  scheduler can deliver completions out of order without changing the
+  protocol.
+- The immediate `spawn_subagent` tool result is an admission event, not a child
+  outcome. It includes `event: "subagent_accepted"`, `run_id`, `tool_call_id`,
+  `label`, `status`, `outstanding_count`, and `all_done: false`.
+- A child's outcome — success, failure, cancellation, or an "unstructured"
+  fallback — is injected into the parent's conversation as a hidden harness
+  notice containing `event: "subagent_completed"`, the correlation fields,
+  `status`, `result`/`error`, `sources`, `outstanding_count`, and `all_done`.
+  It never rewrites or duplicates the provisional tool result; the
   tool-calling wire protocol only permits one tool-result message per
-  `tool_call_id`. That system message also tells the root that the result is
-  already shown to the user verbatim (the tool bubble's Result/Error/Sources
-  sections), so it should not repeat/quote it back — only add new analysis,
-  a decision, or a next step. If the root agent is otherwise idle at that
-  moment (no stream or tool in flight), this immediately re-prompts the root
-  LLM with the updated context so it reacts to the result without waiting for
-  a new user message (essential for one-shot headless sessions, which never
-  get a "next turn" otherwise); if the root is still busy with unrelated work
-  (mid-stream or running its own tool round), the result is picked up once
-  that work's own queue-drain/`StreamDone` re-prompt happens next.
+  `tool_call_id`. The notice also tells the root that the result is already
+  shown to the user verbatim in the tool bubble's Result/Error/Sources
+  sections, so it should not repeat or quote it back. Intermediate completion
+  notices do not force an acknowledgement turn. When `all_done` becomes true,
+  the root is re-prompted once (immediately if idle, or after its current
+  stream/tool round) so it can aggregate the results without waiting for a
+  new user message.
 - `AgentCommand::Stop` on the parent cancels the running child (and drains
   the queue) via `ChildAgentManager::cancel_all`; each cancelled/queued call
   is resolved to a terminal `ToolDone` (`status: "cancelled"`) and logged

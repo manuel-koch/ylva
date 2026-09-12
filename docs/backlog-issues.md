@@ -81,32 +81,42 @@
       What else could we change to render it differently, to highlight
       that this is the subagent's conversation ?
 
-- [ ] Subagent tool schema may need some fine-tuning, llm is musing how to
-      react on arrival of one of many spawned subagents:
-      ```text
-      The user is in a state where multiple subagents are running. The result from one
-      subagent (for the write tool) has arrived. The instruction is to "do not tell the user
-      you'll report back later;
-      either use this result for useful work now, or simply end this turn with no new user-facing text
-      and wait for the next automatic re-prompt."
+- [x] Define the asynchronous `spawn_subagent` admission/completion contract.
+      The immediate tool result is explicitly an admission event, not a child
+      outcome. It includes `run_id`, `tool_call_id`, `label`, `status`,
+      `outstanding_count`, and `all_done`. Each later terminal outcome is a
+      structured hidden harness event with the same correlation fields plus
+      `status`, `result`/`error`, `sources`, `outstanding_count`, and
+      `all_done`. Intermediate completions are recorded without forcing the
+      model to emit an impossible empty turn; the parent receives one
+      continuation after the final outstanding result so it can aggregate.
+      The current one-running-child/FIFO scheduler remains an implementation
+      constraint and is not encoded as a permanent ordering guarantee.
+      Regression coverage verifies correlation, intermediate-completion
+      suppression, and final aggregation behavior.
 
-      Since I cannot complete the full task (which requires all three analyses) without the remaining
-      results, and the instruction is to not add unnecessary text, I must wait for the next prompt
-      containing the other results. I should not generate a user-facing response.
-      
-      However, since I must output a response, and I cannot output nothing, I must assume the system
-      requires me to process the incoming information. The information is merely a waiting signal from
-      the system's perspective. Since I cannot act on it without the other results, and I cannot wait in
-      a way that doesn't generate text, I must conclude that my action for this turn is waiting. I will
-      generate a minimal, non-committal response, or, ideally, no text, which is impossible for the
-      model. I will assume the system environment allows me to wait if I conclude the turn without a tool
-      call or text. Since the system requires an output, I will simply acknowledge the input was parsed
-      and wait.
-      
-      Given the strict constraint "Do not tell the user you'll report back later; either use this result
-      for useful work now, or simply end this turn with no new user-facing text and wait for the next
-      automatic re-prompt," and since I have no other tools to use and no work to do yet, I will end the
-      turn without generating a response. (In a real system, this would be an implicit wait state.) Since
-      I must output JSON or text, I will output a null-equivalent status to signify waiting, which is not
-      possible. I must choose the most neutral action. I will stop after parsing the input.
+- [ ] Refactor rendering of keybinding hints in footer.
+      Render the keybinding in bold ("enter", "esc", "ctrl-c", ...),
+      and the hint in normal font ("send", "cancel").
+      Use separator glyph " · " between multiple keybinding hints.
+      E.g. like "enter send · esc cancel · ctrl-c cancel & quit · F1 help"
+
+- [ ] Main conversation footer should indicate number of running
+      or queued subagents.
+      But not the total number of (finished) subagents !
+
+- [ ] Automatic column width sizing while rendering markdown tables seems
+      too simple, resulting in very uneven distribution of column widths
+      based on the content within the columns. E.g. here the 1st column
+      is very small while the 2nd column is wide.
+      ```text
+      Area     │ Files
+      ─────────────────────────────────────────────────────────────────────────────────────────────────────
+      Core too │ src/agent/tools.rs , src/agent.rs , src/agent_factory.rs , src/agent/child_agent_manager.r
+      l layer  │ s
+      Built-in │ bash.rs , read.rs , write.rs , edit.rs , glob.rs , search.rs , clarify.rs , spawn_subagent
+      tools    │ .rs , agent_finish.rs
+      Security │ src/sandbox.rs , src/llm.rs , src/config.rs , src/config/profile.rs , src/config/agent.rs
+      / LLM /  │
+      config   │
       ```

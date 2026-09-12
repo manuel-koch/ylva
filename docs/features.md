@@ -201,17 +201,21 @@ affect sandbox approval checks. See
   is shown as the tool-call bubble's primary title text — including while
   collapsed. Only available to agents allowed to spawn children (no nesting —
   delegation is one level deep). Requires user approval unless
-  `--auto-approve-spawn` is set. The call resolves immediately with a
-  `running`/`queued` status — at most one child runs at a time, further
-  spawns queue automatically. The child's eventual outcome (success, failure,
-  or cancellation) arrives later as a separate message once the child
-  finishes, is cancelled, or hits its iteration cap. See
+  `--auto-approve-spawn` is set. The call resolves immediately with an
+  admission event containing the `run_id`, `tool_call_id`, `label`, and
+  outstanding-run count; this is not the child's outcome. A terminal
+  completion event later carries the same correlation fields plus
+  `status`, `result`/`error`, `sources`, `outstanding_count`, and `all_done`.
+  Completion order is not a reliable ordering signal. The current scheduler
+  runs at most one child at a time and queues further spawns, but that is an
+  implementation constraint rather than part of the model-facing contract.
+  See
   [Child-agent delegation](#child-agent-delegation).
 - **agent_finish**: Only available to child agents (a root agent never sees
   it). Reports `status` (`"success"` or `"failure"`), an optional `result` /
   `error`, and optional `sources`, then ends the child's turn. The parent
-  receives this as the `spawn_subagent` call's outcome — it never sees the
-  child's own conversation, only the `result`/`error` string, so a child
+  receives this through the `spawn_subagent` lifecycle event — it never sees
+  the child's own conversation, only the `result`/`error` string, so a child
   should make its `result` self-contained rather than referencing
   "earlier"/"above" content the parent cannot see. If a child goes idle
   without calling `agent_finish`, the parent instead receives a synthesized
@@ -226,12 +230,15 @@ One level of agent delegation lets a root agent hand off a self-contained
 task to a child agent that runs **concurrently** with the parent — the
 parent keeps processing its own messages and tools while the child works.
 
-- At most one child runs at a time; further `spawn_subagent` calls queue and
-  start automatically as each preceding child finishes.
-- The child's outcome (success, failure, or cancellation) is reported back
-  to the parent as a new message once it's known, re-prompting the parent
-  immediately if it was otherwise idle, so it reacts without waiting for a
-  new user message.
+- The current scheduler runs at most one child at a time; further
+  `spawn_subagent` calls queue and start automatically as each preceding child
+  finishes. This is not a model-facing ordering guarantee, so callers correlate
+  results by `run_id`, `tool_call_id`, and `label`.
+- Each child's outcome (success, failure, or cancellation) is reported back
+  to the parent as a structured hidden harness event. Intermediate events are
+  recorded without forcing an acknowledgement turn; once `all_done` is true,
+  the parent receives one continuation so it can aggregate the results without
+  waiting for a new user message.
 - Stopping the parent (`Ctrl+C`/`Esc`) also cancels any running/queued
   children.
 - A child's own tool calls go through the same approval flow as the

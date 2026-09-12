@@ -1134,10 +1134,11 @@ impl AgentLoop {
             let mut pending_tools: VecDeque<PendingTool> = VecDeque::new();
             let mut iterations = 0usize;
             let mut clarify_started_at: Option<std::time::Instant> = None;
-            // Set by the `finish_rx` arm when a child's result lands while the
-            // root is mid-stream (`mode != Idle`): the result is already in
-            // `context` (see the `finish_rx` arm's comment), but the root
-            // can't react to it until its *own* in-flight turn completes.
+            // Set by the `finish_rx` arm when the final outstanding child's
+            // result lands while the root is mid-stream (`mode != Idle`): the
+            // result is already in `context` (see the `finish_rx` arm's
+            // comment), but the root can't react to it until its *own*
+            // in-flight turn completes.
             // `StreamDone` below is that turn's completion point, so it must
             // check this flag and force a re-prompt — otherwise the root goes
             // Idle believing its just-streamed text is the final answer, the
@@ -1415,69 +1416,66 @@ impl AgentLoop {
                         // `resolve_spawn_subagent`). So the child's *real*
                         // outcome, arriving asynchronously and possibly after
                         // further assistant turns, is appended as a brand-new
-                        // `system` message instead of rewriting/duplicating
+                        // hidden harness notice instead of rewriting/duplicating
                         // that earlier tool result — this keeps history
                         // append-only (an honest record of what was known
                         // when) and avoids the duplicate-`tool_call_id`
                         // protocol violation entirely, rather than papering
-                        // over it by mutating a past message in place. If the
-                        // root is otherwise idle (no stream/tool in flight),
-                        // this is the "next iteration" the ReAct loop picks it
-                        // up on (blueprint §4G) — reprompt immediately so the
-                        // root LLM actually reacts to the child's result
-                        // instead of leaving the conversation stalled until a
-                        // new user prompt arrives (headless CLI sessions
-                        // never get one). If the root is mid-stream/mid-tool
-                        // for unrelated work, the result still lands in
-                        // context and is picked up naturally once that work's
-                        // own queue-drain/`StreamDone` re-prompt happens.
+                        // over it by mutating a past message in place. A
+                        // completion is appended to context immediately, but
+                        // the root is re-prompted only after all currently
+                        // outstanding child runs are terminal. This avoids
+                        // acknowledgement turns for intermediate results
+                        // while preserving a single continuation point for
+                        // the aggregate answer.
                         let run_id = finish_result.run_id;
                         let call_id = finish_result.call_id;
                         let status = finish_result.status.clone();
-                        // The LLM-facing notice stays structured JSON (the model
-                        // reads `status`/`result`/`error`/`sources` as fields); only the
-                        // TUI bubble renders `result`/`error`/`sources` as Markdown
-                        // content sections instead, via `FinishResult::content_sections`.
+                        let label = child_agent_manager
+                            .as_ref()
+                            .and_then(|manager| manager.label_for(run_id))
+                            .unwrap_or_default()
+                            .to_string();
+                        let outstanding_count = child_agent_manager
+                            .as_ref()
+                            .map(|manager| manager.outstanding_count_after_completion(run_id))
+                            .unwrap_or(0);
+                        let all_done = outstanding_count == 0;
+                        // The LLM-facing notice stays structured JSON (the
+                        // model reads correlation/lifecycle fields as well as
+                        // `status`/`result`/`error`/`sources`); only the TUI
+                        // bubble renders result content as Markdown sections.
                         let result_text =
-                            serde_json::to_string(&finish_result.to_json()).unwrap_or_default();
+                            serde_json::to_string(&finish_result.to_completion_json(
+                                &label,
+                                outstanding_count,
+                            ))
+                            .unwrap_or_default();
                         let mut content_sections = spawn_content_sections
                             .remove(&call_id)
                             .unwrap_or_default();
                         content_sections.extend(finish_result.content_sections());
                         tracing::info!(%run_id, tool_call_id = %call_id, %status, "child agent finished");
-                        // Computed before `on_child_finished` pops the queue: how many
-                        // more subagents will still run after this one. This tells the
-                        // model definitively whether to keep waiting or finalize now,
-                        // rather than leaving it to guess — a headless session gets no
-                        // follow-up user message to nudge a stalled "I'll report back
-                        // later" turn, so the model must never rely on one arriving.
-                        let remaining_after_this = child_agent_manager
-                            .as_ref()
-                            .map(|manager| manager.queue_len())
-                            .unwrap_or(0);
-                        let next_step_note = if remaining_after_this > 0 {
+                        let next_step_note = if !all_done {
                             format!(
-                                "{remaining_after_this} more subagent(s) are still running or \
-                                 queued. No user message is coming to nudge you — you will be \
-                                 automatically re-prompted the instant each one finishes, with its \
-                                 result appended the same way this one was. Do not tell the user \
-                                 you'll report back later; either use this result for useful work \
-                                 now, or simply end this turn with no new user-facing text and wait \
-                                 for the next automatic re-prompt."
+                                "{outstanding_count} other subagent run(s) remain outstanding. \
+                                 This is an intermediate completion; do not produce an \
+                                 acknowledgement or a user-facing progress update solely for \
+                                 this event. The harness will provide one continuation after \
+                                 all outstanding child results are available."
                             )
                         } else {
-                            "This was the last outstanding subagent — no more results are coming. \
-                             Combine it with any earlier subagent results already in this \
-                             conversation and produce your final answer for the user now."
+                            "All spawned subagent runs are now terminal. Combine this result with \
+                             earlier completion events in the conversation and produce the \
+                             answer for the user."
                                 .to_string()
                         };
                         context.push_async_harness_notice(format!(
-                            "The subagent spawned via `{tool_name}` (tool_call_id={call_id}) has finished. \
-                             Its final result:\n{result_text}\n\
-                             This result is already shown to the user verbatim (as the tool result's \
-                             Result/Error/Sources sections) — do not repeat or quote it back. \
+                            "Subagent completion event; the structured JSON is harness metadata, \
+                             not a user-facing message. The child result is already shown to the \
+                             user in the tool bubble's Result/Error/Sources sections; do not \
+                             repeat or quote it. Do not quote the JSON verbatim:\n{result_text}\n\
                              {next_step_note}",
-                            tool_name = tools::spawn_subagent::SpawnSubagentTool::NAME,
                         ));
                         // Computed before `on_child_finished` clears the running slot.
                         let duration = child_agent_manager
@@ -1515,7 +1513,7 @@ impl AgentLoop {
                             mode = ?mode,
                             "finish_rx: deciding whether to reprompt root after child result"
                         );
-                        if mode == AgentMode::Idle {
+                        if all_done && mode == AgentMode::Idle {
                             // Same iteration budget as any other re-prompt
                             // (`advance_tool_queue`'s queue-empty branch) —
                             // without this guard a model that just keeps
@@ -1551,12 +1549,19 @@ impl AgentLoop {
                                     own_run_id,
                                 ));
                             }
-                        } else {
+                        } else if all_done {
                             pending_child_finish_reprompt = true;
                             tracing::debug!(
                                 tool_call_id = %call_id,
                                 mode = ?mode,
                                 "finish_rx: root not idle, deferring to its own queue-drain re-prompt"
+                            );
+                        } else {
+                            tracing::debug!(
+                                tool_call_id = %call_id,
+                                outstanding_count,
+                                mode = ?mode,
+                                "finish_rx: intermediate child result recorded without reprompt"
                             );
                         }
                     }
@@ -1931,7 +1936,9 @@ impl AgentLoop {
                                     "stop command received"
                                 );
                                 if let Some(manager) = child_agent_manager.as_mut() {
-                                    for cancelled in manager.cancel_all() {
+                                    let cancelled_spawns = manager.cancel_all();
+                                    let cancelled_count = cancelled_spawns.len();
+                                    for (index, cancelled) in cancelled_spawns.into_iter().enumerate() {
                                         // Store integration (child_result JSONL
                                         // record) lands in Phase 6.11; for now
                                         // the cancellation is only logged, but
@@ -1954,16 +1961,33 @@ impl AgentLoop {
                                                 line_number_offset: None,
                                             },
                                         ));
-                                        let result_text = serde_json::to_string(&serde_json::json!({
-                                            "status": "cancelled",
-                                            "run_id": cancelled.run_id.to_string(),
-                                        }))
+                                        let cancellation_result = crate::child_agent_manager::FinishResult {
+                                            run_id: cancelled.run_id,
+                                            call_id: cancelled.call_id,
+                                            status: "cancelled".to_string(),
+                                            result: None,
+                                            error: Some(
+                                                "The parent agent stopped before the child finished."
+                                                    .to_string(),
+                                            ),
+                                            sources: vec![],
+                                        };
+                                        let outstanding_count =
+                                            cancelled_count.saturating_sub(index + 1);
+                                        let result_text = serde_json::to_string(
+                                            &cancellation_result.to_completion_json(
+                                                &cancelled.label,
+                                                outstanding_count,
+                                            ),
+                                        )
                                         .unwrap_or_default();
                                         context.push_async_harness_notice(format!(
-                                            "The subagent spawned via `{tool_name}` (tool_call_id={call_id}) was cancelled \
-                                             before finishing. Its terminal status:\n{result_text}",
+                                            "Subagent completion event for \
+                                             `{tool_name}`; the structured JSON is harness \
+                                             metadata, not a user-facing message. The parent \
+                                             stop cancelled this child, so no continuation will \
+                                             be started:\n{result_text}",
                                             tool_name = tools::spawn_subagent::SpawnSubagentTool::NAME,
-                                            call_id = cancelled.call_id,
                                         ));
                                         let _ = ui_tx
                                             .send(UiUpdate::ToolDone {
@@ -2175,9 +2199,9 @@ fn log_tool_approval_request(call: &dyn ToolCall) {
 /// Resolve an approved `spawn_subagent` call immediately against
 /// `child_agent_manager`: unlike ordinary tools, spawning never executes the
 /// call's own `ToolCall::run` (which has no access to the manager) — it
-/// starts (or enqueues) the child directly and pushes the `"running"`/
-/// `"queued"` status as the call's tool result right away. This is *not*
-/// the call finishing: `ChildAgentManager::spawn` reports that status as a
+/// starts (or enqueues) the child directly and pushes a structured admission
+/// event as the call's tool result right away. This is *not* the call
+/// finishing: `ChildAgentManager::spawn` reports that status as a
 /// `UiUpdate::ToolProgress` (bubble stays `Running`), and `content_sections`
 /// (the task/briefing shown to the user) are stashed in
 /// `spawn_content_sections` so the eventual real `ToolDone` — sent only
@@ -2226,11 +2250,16 @@ async fn resolve_spawn_subagent(
         .unwrap_or_default()
         .to_string();
 
-    let (status_text, run_id) = match child_agent_manager.as_mut() {
-        Some(manager) => match manager.spawn(task, briefing, agent_type, label, call_id) {
-            crate::child_agent_manager::SpawnStatus::Started(run_id) => ("running", run_id),
-            crate::child_agent_manager::SpawnStatus::Queued(run_id) => ("queued", run_id),
-        },
+    let (status_text, run_id, outstanding_count) = match child_agent_manager.as_mut() {
+        Some(manager) => {
+            let status = manager.spawn(task, briefing, agent_type, label.clone(), call_id);
+            let outstanding_count = manager.outstanding_count();
+            let (status_text, run_id) = match status {
+                crate::child_agent_manager::SpawnStatus::Started(run_id) => ("running", run_id),
+                crate::child_agent_manager::SpawnStatus::Queued(run_id) => ("queued", run_id),
+            };
+            (status_text, run_id, outstanding_count)
+        }
         None => {
             // Structurally unreachable: `spawn_subagent` is only ever
             // registered when a `ChildAgentManager` is wired. Fail safe
@@ -2261,7 +2290,15 @@ async fn resolve_spawn_subagent(
 
     spawn_content_sections.insert(call_id, content_sections);
     tracing::info!(tool_call_id = %call_id, status = status_text, %run_id, "spawn_subagent resolved");
-    let result_value = serde_json::json!({ "status": status_text, "run_id": run_id.to_string() });
+    let result_value = serde_json::json!({
+        "event": "subagent_accepted",
+        "tool_call_id": call_id.to_string(),
+        "label": label,
+        "status": status_text,
+        "run_id": run_id.to_string(),
+        "outstanding_count": outstanding_count,
+        "all_done": false,
+    });
     let result_text = serde_json::to_string(&result_value).unwrap_or_default();
     context.push_tool_result(ToolResult {
         id: call_id,
@@ -3847,7 +3884,7 @@ mod tests {
         );
         assert!(
             context.messages().iter().any(
-                |message| matches!(message, Message::User { content, kind: UserMessageKind::ImplicitToolNote } if content.contains("has finished"))
+                |message| matches!(message, Message::User { content, kind: UserMessageKind::ImplicitToolNote } if content.contains("Subagent completion event") && content.contains("\"event\":\"subagent_completed\""))
             ),
             "the child's finish result must be recorded in context as an implicit user message"
         );
@@ -4119,7 +4156,11 @@ mod tests {
         let tool = SpawnSubagentTool::new(true);
         let call = tool.create_call(
             call_id,
-            serde_json::json!({ "task": "do the thing", "briefing": "context" }),
+            serde_json::json!({
+                "label": "Do the thing",
+                "task": "do the thing",
+                "briefing": "context"
+            }),
         );
         let pending = PendingTool { call };
 
@@ -4176,7 +4217,12 @@ mod tests {
             })
             .expect("spawn_subagent tool result should be pushed into context");
         let parsed: serde_json::Value = serde_json::from_str(&tool_result).unwrap();
+        assert_eq!(parsed["event"], "subagent_accepted");
+        assert_eq!(parsed["tool_call_id"], call_id.to_string());
+        assert_eq!(parsed["label"], "Do the thing");
         assert_eq!(parsed["status"], "running");
+        assert_eq!(parsed["outstanding_count"], 1);
+        assert_eq!(parsed["all_done"], false);
 
         // Only `ToolStart` comes back on the caller's own `ui_tx` — resolving
         // the spawn is not the call finishing, so no `ToolDone` is sent here.

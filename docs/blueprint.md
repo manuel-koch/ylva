@@ -1459,11 +1459,11 @@ impl AgentFactory {
 }
 ```
 
-**One child at a time.** A root runs in parallel with at most one child. The
-root cannot spawn a second child while the first is still running. This
-prevents resource contention and keeps the UX predictable. If the root LLM
-calls `spawn_subagent` while a child is active, the call is queued or returns
-an error (configurable).
+**Current scheduling constraint.** The current scheduler runs a root in
+parallel with at most one child and queues additional child requests. This
+keeps the present UX predictable, but it is not part of the model-facing
+lifecycle contract; a later scheduler may run several children concurrently
+and deliver their terminal events out of order.
 
 **No nesting.** Children are forbidden from calling `spawn_subagent`. The
 maximum delegation depth is one. This is enforced **structurally**: a `Child`'s
@@ -1478,8 +1478,9 @@ The LLM triggers a child agent via a standard tool call:
 ```rust
 #[derive(JsonSchema, Deserialize)]
 struct SpawnSubagentArgs {
+    label: String,        // short display/correlation label
     task: String,       // concise description of what to do
-    briefing: String,   // curated context extracted from the root conversation
+    briefing: Option<String>, // curated context extracted from the root conversation
     #[serde(default = "default_agent_type")]
     agent_type: String, // e.g. "research", "code_edit"
 }
@@ -1502,8 +1503,12 @@ The child is a fully independent ReAct agent with:
 - Its own `subagent_ui_tx` channel for live updates to the TUI sidebar
 
 When the child finishes (via `agent_finish` tool, timeout, or user cancellation),
-it sends `AgentEvent::ToolDone` back to the root agent loop via `agent_rx`.
-The root loop appends the result to its own `Context` and re-prompts.
+it sends a terminal completion event to the root agent loop. The event carries
+the child `run_id`, originating `tool_call_id`, `label`, terminal status,
+result/error/sources, and `outstanding_count`/`all_done` aggregation metadata.
+The root loop appends each event to its own `Context` and re-prompts once the
+final outstanding child result is available, rather than forcing an
+acknowledgement turn for every intermediate completion.
 
 **Channel isolation:** the child's live events flow through `subagent_ui_tx`
 (a dedicated MPSC channel created by `ChildAgentManager`). The TUI's
@@ -3134,7 +3139,7 @@ where they are documented in the body of this document.
 | **Agent types**                 | Single pool; profile-driven with global behavior + local engine assignment                                                                                                                     | §4G Agent Types & Delegation                  |
 | **Child-agent briefing**        | Hybrid system + user message; curated by root agent                                                                                                                                           | §4G Agent Types & Delegation                  |
 | **Child-agent nesting**         | Forbidden; one level only (structural: `Child` role strips `spawn_subagent`)                                                                                                                   | §4G Agent Types & Delegation                  |
-| **Child-agent execution**       | One child at a time; runs **in parallel** with the root agent, which never blocks                                                                                                               | §4G Agent Types & Delegation                  |
+| **Child-agent execution**       | Current scheduler runs one child at a time in parallel with the root; lifecycle protocol supports future concurrent, out-of-order completion                                                                                                               | §4G Agent Types & Delegation                  |
 | **Child-agent steering**        | Root steer queues and injects at the next natural point; child finishes naturally in the background                                                                                            | §4G Agent Types & Delegation                  |
 | **Child-agent result**          | Tool-based `agent_finish` with unstructured fallback                                                                                                                                                | §4G Child-Agent Lifecycle                    |
 | **Agent-type tools**            | Global agent files define whitelist; profiles can override                                                                                                                                      | §4G Agent-Type File Formats                  |
