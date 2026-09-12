@@ -448,7 +448,7 @@ user-facing on-disk contract; this section is the contributor view.
   draft is a no-op instead of silently steering the *root* agent — the
   previous behavior queued a steer for `Root` while the user was looking at
   the child's transcript, with no visual indication of which conversation
-  the message actually went to. This is called out in the footer (`enter:
+  the message actually went to. This is called out in the footer (`enter
   send` is omitted entirely while viewing a running child), not via a
   separate overlay on the input box, since keystrokes are still buffered
   normally either way.
@@ -473,6 +473,9 @@ user-facing on-disk contract; this section is the contributor view.
   child engine, so they follow the transcript currently on screen. The effort
   is shown in parentheses only when it is not the provider default. Root model
   switches refresh the label before the next frame.
+- Footer keybinding hints are represented as structured key/action entries
+  rather than one formatted string, so `tui_widgets` can render the key in
+  bold, the action in normal text, and ` · ` between entries.
 - A thin separator line (the same dim `─` rule used between the chat area
   and the input/footer panel) is rendered directly below the child-view
   header bubble, so it never reads as part of the scrollable
@@ -618,7 +621,7 @@ next per-action `refresh_slash_overlay` recompute reopen the very overlay
 just dismissed.
 Model rows identify reasoning as unavailable, at the default, or adjustable
 with a `⚙` marker. The user-facing fixed value is rendered as `default`. The
-footer switches from the normal `enter: send` hint to the controls for the
+footer switches from the normal `enter send` hint to the controls for the
 active command overlay, including the model picker's reasoning, switch, and
 cancel keys.
 Left-dragging within any visible slash-command overlay row selects its

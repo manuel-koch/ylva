@@ -7,7 +7,7 @@
       What else could we change to render it differently, to highlight
       that this is the subagent's conversation ?
 
-- [ ] Refactor rendering of keybinding hints in footer.
+- [x] Refactor rendering of keybinding hints in footer.
       Render the keybinding in bold ("enter", "esc", "ctrl-c", ...),
       and the hint in normal font ("send", "cancel").
       Use separator glyph " · " between multiple keybinding hints.

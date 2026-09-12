@@ -1039,6 +1039,85 @@ fn footer_shows_the_active_provider_and_model() {
 }
 
 #[test]
+fn footer_renders_bold_keys_with_normal_action_text_and_separators() {
+    use ratatui::backend::TestBackend;
+    use ratatui::style::Modifier;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_widgets;
+    use ylva::{AgentMode, TuiState};
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
+    let mut state = TuiState {
+        agent_mode: AgentMode::Streaming,
+        ..TuiState::new()
+    };
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("draw");
+
+    let buffer = terminal.backend().buffer().clone();
+    let footer_row = (0..20u16)
+        .find(|row| {
+            let line: String = (0..80u16)
+                .map(|column| buffer.cell((column, *row)).unwrap().symbol().to_string())
+                .collect();
+            line.contains("enter send · esc cancel · ctrl-c cancel & quit · F1 help")
+        })
+        .expect("keybinding footer row");
+    let line: String = (0..80u16)
+        .map(|column| {
+            buffer
+                .cell((column, footer_row))
+                .unwrap()
+                .symbol()
+                .to_string()
+        })
+        .collect();
+    let enter_start = line.find("enter").expect("enter keybinding") as u16;
+    let send_start = enter_start + "enter ".chars().count() as u16;
+    let separator_start = line.find(" · ").expect("separator") as u16;
+
+    for column in enter_start..enter_start + "enter".chars().count() as u16 {
+        assert!(
+            buffer
+                .cell((column, footer_row))
+                .expect("enter cell")
+                .style()
+                .add_modifier
+                .contains(Modifier::BOLD),
+            "key cell at column {column} should be bold"
+        );
+    }
+    for column in send_start..send_start + "send".chars().count() as u16 {
+        assert!(
+            !buffer
+                .cell((column, footer_row))
+                .expect("send cell")
+                .style()
+                .add_modifier
+                .contains(Modifier::BOLD),
+            "action cell at column {column} should not be bold"
+        );
+    }
+    for column in separator_start..separator_start + " · ".chars().count() as u16 {
+        assert!(
+            !buffer
+                .cell((column, footer_row))
+                .expect("separator cell")
+                .style()
+                .add_modifier
+                .contains(Modifier::BOLD),
+            "separator cell at column {column} should not be bold"
+        );
+    }
+}
+
+#[test]
 fn model_picker_footer_shows_picker_controls_instead_of_send() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -1084,15 +1163,15 @@ fn model_picker_footer_shows_picker_controls_instead_of_send() {
         .map(|(column, row)| buffer.cell((column, row)).unwrap().symbol().to_string())
         .collect();
     assert!(
-        rendered.contains("←/→: effort"),
+        rendered.contains("←/→ effort"),
         "rendered footer: {rendered:?}"
     );
     assert!(
-        rendered.contains("enter: switch"),
+        rendered.contains("enter switch"),
         "rendered footer: {rendered:?}"
     );
     assert!(
-        rendered.contains("esc: cancel"),
+        rendered.contains("esc cancel"),
         "rendered footer: {rendered:?}"
     );
     assert!(
@@ -1104,7 +1183,7 @@ fn model_picker_footer_shows_picker_controls_instead_of_send() {
         "model picker title must not duplicate footer controls: {rendered:?}"
     );
     assert!(
-        !rendered.contains("enter: send"),
+        !rendered.contains("enter send"),
         "model picker must not advertise sending: {rendered:?}"
     );
 }

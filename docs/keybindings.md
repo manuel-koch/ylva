@@ -2,6 +2,10 @@
 
 Reference for Ylva's TUI keybindings.
 
+Footer hints render each keybinding in bold and its action in normal text.
+Multiple hints are separated by ` · `, for example:
+`enter send · esc cancel · ctrl-c cancel & quit · F1 help`.
+
 ## TUI keybindings (Phase 4)
 
 | Key | Context | Action |
@@ -47,7 +51,7 @@ Reference for Ylva's TUI keybindings.
 | Double-click on a `spawn_subagent` tool bubble's title | Any | Drill in to the subagent's conversation view (manual navigation; does not auto-return; still works after the subagent has finished) |
 | `esc` (input empty) | Subagent drill-in view | Go back to the root conversation (does not cancel/interrupt the root agent's turn); restores the scroll position from before drilling in |
 | `esc` (input non-empty) | Subagent drill-in view | Clear the input field (same as elsewhere; does not navigate back) |
-| `enter` | Subagent drill-in view | No-op; the subagent conversation doesn't accept input and Enter no longer steers the root agent from here (footer omits `enter: send`) |
+| `enter` | Subagent drill-in view | No-op; the subagent conversation doesn't accept input and Enter no longer steers the root agent from here (footer omits `enter send`) |
 
 ## Slash-command overlay
 

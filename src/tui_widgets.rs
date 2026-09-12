@@ -124,6 +124,89 @@ pub struct ButtonAreas {
     pub deny: Rect,
 }
 
+struct FooterHint {
+    key: Option<&'static str>,
+    description: &'static str,
+}
+
+impl FooterHint {
+    const fn key(key: &'static str, description: &'static str) -> Self {
+        Self {
+            key: Some(key),
+            description,
+        }
+    }
+
+    const fn text(description: &'static str) -> Self {
+        Self {
+            key: None,
+            description,
+        }
+    }
+}
+
+const SUGGESTION_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("↑/↓", "select"),
+    FooterHint::key("tab", "complete"),
+    FooterHint::key("enter", "run"),
+    FooterHint::key("esc", "close"),
+    FooterHint::key("F1", "help"),
+];
+const LOADING_MODELS_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::text("loading models…"),
+    FooterHint::key("esc", "close"),
+    FooterHint::key("F1", "help"),
+];
+const MODEL_PICKER_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("↑/↓", "select"),
+    FooterHint::key("←/→", "effort"),
+    FooterHint::key("enter", "switch"),
+    FooterHint::key("esc", "cancel"),
+    FooterHint::key("F1", "help"),
+];
+const CLARIFY_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("enter", "answer"),
+    FooterHint::key("click", "choice"),
+    FooterHint::key("ctrl-c/esc", "cancel"),
+    FooterHint::key("F1", "help"),
+];
+const CHILD_VIEW_DRAFT_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("ctrl-c/esc", "clear draft"),
+    FooterHint::key("F1", "help"),
+];
+const CHILD_VIEW_BUSY_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("esc", "back to conversation"),
+    FooterHint::key("ctrl-c", "cancel & quit"),
+    FooterHint::key("F1", "help"),
+];
+const CHILD_VIEW_IDLE_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("esc", "back to conversation"),
+    FooterHint::key("ctrl-c", "quit"),
+    FooterHint::key("F1", "help"),
+];
+const BUSY_DRAFT_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("enter", "send"),
+    FooterHint::key("ctrl-c/esc", "clear draft"),
+    FooterHint::key("F1", "help"),
+];
+const BUSY_EMPTY_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("enter", "send"),
+    FooterHint::key("esc", "cancel"),
+    FooterHint::key("ctrl-c", "cancel & quit"),
+    FooterHint::key("F1", "help"),
+];
+const IDLE_DRAFT_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("enter", "send"),
+    FooterHint::key("esc", "clear draft"),
+    FooterHint::key("ctrl-c", "quit"),
+    FooterHint::key("F1", "help"),
+];
+const IDLE_EMPTY_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("enter", "send"),
+    FooterHint::key("ctrl-c", "quit"),
+    FooterHint::key("F1", "help"),
+];
+
 /// Draw the full TUI frame. Returns `Some(ButtonAreas)` when in tool approval
 /// sub-mode (`pending_approval` is `Some`), `None` otherwise.
 ///
@@ -491,15 +574,8 @@ pub fn draw(
             hint,
         )
     } else {
-        let keybinding_hint = footer_keybinding_hint(state, input_is_empty);
-        draw_normal_footer(
-            frame,
-            footer_row_1,
-            footer_row_2,
-            state,
-            keybinding_hint,
-            hint,
-        );
+        let footer_hints = footer_keybinding_hints(state, input_is_empty);
+        draw_normal_footer(frame, footer_row_1, footer_row_2, state, footer_hints, hint);
         None
     };
 
@@ -516,45 +592,41 @@ pub fn draw(
     button_areas
 }
 
-fn footer_keybinding_hint(state: &TuiState, input_is_empty: bool) -> &'static str {
+fn footer_keybinding_hints(state: &TuiState, input_is_empty: bool) -> &'static [FooterHint] {
     match &state.slash_overlay {
-        SlashOverlay::Suggestions { .. } => {
-            " ↑/↓: select  tab: complete  enter: run  esc: close  F1: help"
-        }
-        SlashOverlay::LoadingModels => " loading models…  esc: close  F1: help",
-        SlashOverlay::ModelPicker { .. } => {
-            " ↑/↓: select  ←/→: effort  enter: switch  esc: cancel  F1: help"
-        }
+        SlashOverlay::Suggestions { .. } => SUGGESTION_FOOTER_HINTS,
+        SlashOverlay::LoadingModels => LOADING_MODELS_FOOTER_HINTS,
+        SlashOverlay::ModelPicker { .. } => MODEL_PICKER_FOOTER_HINTS,
         SlashOverlay::Hidden => {
             let in_child_view = state.child_view.child_view_bubble.is_some();
             let parent_agent_is_busy = state.parent_agent_mode != AgentMode::Idle;
             if state.clarify_banner_state.pending_clarify.is_some() {
-                " enter: answer  click choice  ctrl-c/esc: cancel  F1: help"
+                CLARIFY_FOOTER_HINTS
             } else if in_child_view && !input_is_empty {
-                // Viewing a subagent's drill-in transcript: `enter: send` is
+                // Viewing a subagent's drill-in transcript: `enter send` is
                 // omitted entirely — the child conversation doesn't accept
                 // input (only one agent loop is driven at a time), and Enter
                 // no longer steers the root agent from here either.
-                " ctrl-c/esc: clear draft  F1: help"
+                CHILD_VIEW_DRAFT_FOOTER_HINTS
             } else if in_child_view {
                 // Esc with an empty draft navigates back to the root
                 // conversation instead of acting on the root agent's turn.
                 if parent_agent_is_busy {
-                    " esc: back to conversation  ctrl-c: cancel & quit  F1: help"
+                    CHILD_VIEW_BUSY_FOOTER_HINTS
                 } else {
-                    " esc: back to conversation  ctrl-c: quit  F1: help"
+                    CHILD_VIEW_IDLE_FOOTER_HINTS
                 }
             } else if state.agent_mode != AgentMode::Idle && !input_is_empty {
-                " enter: send  ctrl-c/esc: clear draft  F1: help"
+                BUSY_DRAFT_FOOTER_HINTS
             } else if state.agent_mode != AgentMode::Idle {
                 // Busy with an empty draft: Esc stops the turn, while Ctrl-C
                 // stops the turn and quits the TUI.
-                " enter: send  esc: cancel  ctrl-c: cancel & quit  F1: help"
+                BUSY_EMPTY_FOOTER_HINTS
             } else if !input_is_empty {
                 // Idle with a draft: Esc clears it; Ctrl-C quits on confirm.
-                " enter: send  esc: clear draft  ctrl-c: quit  F1: help"
+                IDLE_DRAFT_FOOTER_HINTS
             } else {
-                " enter: send  ctrl-c: quit  F1: help"
+                IDLE_EMPTY_FOOTER_HINTS
             }
         }
     }
@@ -2512,7 +2584,7 @@ fn draw_normal_footer(
     row_1: Rect,
     row_2: Rect,
     state: &TuiState,
-    keybinding_hint: &str,
+    footer_hints: &[FooterHint],
     hint: Option<&str>,
 ) {
     let mode_word = match state.agent_mode {
@@ -2619,13 +2691,29 @@ fn draw_normal_footer(
         format!(" {spinner_prefix}{mode_word}")
     };
     draw_footer_row(frame, row_1, &row_1_text, Color::Yellow, state);
-    frame.render_widget(
-        Paragraph::new(Line::styled(
-            keybinding_hint.to_string(),
-            Style::default().fg(Color::DarkGray),
-        )),
-        row_2,
-    );
+    draw_footer_hints(frame, row_2, footer_hints);
+}
+
+fn draw_footer_hints(frame: &mut Frame, area: Rect, hints: &[FooterHint]) {
+    let normal_style = Style::default().fg(Color::DarkGray);
+    let key_style = normal_style.add_modifier(Modifier::BOLD);
+    let mut spans = Vec::with_capacity(hints.len() * 4 + 1);
+    spans.push(Span::styled(" ", normal_style));
+
+    for (index, hint) in hints.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" · ", normal_style));
+        }
+        if let Some(key) = hint.key {
+            spans.push(Span::styled(key, key_style));
+            if !hint.description.is_empty() {
+                spans.push(Span::styled(" ", normal_style));
+            }
+        }
+        spans.push(Span::styled(hint.description, normal_style));
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 /// Draw the slash-command overlay as a floating panel whose bottom edge sits

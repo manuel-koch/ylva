@@ -270,7 +270,7 @@ streaming/running tools in the background:
   `spawn_subagent` bubble (task/label/agent type) so context isn't lost.
   Typing while merely *watching* a running child is a no-op rather than
   silently steering the wrong agent (root vs. child) — the footer omits
-  `enter: send` in that state to make this clear.
+  `enter send` in that state to make this clear.
 - A child's transcript remains browsable after it finishes — nothing is
   discarded when a subagent completes.
 - The footer/header spinner keeps animating for as long as the subagent's
@@ -293,7 +293,9 @@ module structure (model/presenter/view/driver split).
 
 - **Layout:** a scrollable chat-history area, a variable-height input box
   (capped at 1/3 of the terminal height), a `─` separator line, and a 2-row
-  footer (mode/hint row and key-hints row). The mode/hint row also shows the
+  footer (mode/hint row and key-hints row). Key names in the key-hints row are
+  bold, action text is normal, and multiple hints use a ` · ` separator. The
+  mode/hint row also shows the
   active `provider-connection/model` identity for the transcript on screen,
   including an explicit reasoning effort in parentheses and the selected child
   while drilled in. No sidebar.
