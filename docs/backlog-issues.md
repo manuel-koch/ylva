@@ -20,7 +20,7 @@
 - [x] In footer use separator " → " between provider-connection and selected
       model-id instead of "/".
 
-- [ ] Don't render the "run_id" within the title of a subagent bubble,
+- [x] Don't render the "run_id" within the title of a subagent bubble,
       neither in main conversation, nor in subagent conversation.
       This seems to be noise for user and only relevant for the
       agent harness internally or the LLM we are talking to.
@@ -40,3 +40,28 @@
       / LLM /  │
       config   │
       ```
+
+- [ ] Some LLM seem to muse past the initial task/briefing when generating the
+      final result, causing additional internal "thinking" to be fed back to
+      parent agent.
+      Can we improve the subagent tool schema description to guid LLM on NOT
+      doing such paraphrasing ?
+      Here is an example of such additional appendum from LLM:
+      ```text
+      ─────────────────────────────────────────────────────────────────────────────────────────────────────
+      Self-Correction/Review: The request asked for a brief markdown description list, grounded in the
+      code, covering all specified points (parameters, validation, error handling, encoding/binary, limits,
+      limits, integration/tests).
+      
+      The analysis is complete and the information is sufficiently dense to form the final output. I will
+      use agent_finish .
+      ```
+
+- [ ] Switched LLM model in main agent conversation. This should change the
+      "default" engine (provider/model) too, if main agent is configured to use
+      the "default" engine.
+      Currently a later spawned subagent is still using the original
+      provider/model that was active after startup ( before the manual switch ).
+      Any agent spawned after a model switch should use its engine (provider/model)
+      active at that moment ( if it is referring to a named engine like
+      "default" ).

@@ -177,11 +177,14 @@ pub enum ToolCallState {
         title_arguments: Vec<(String, serde_json::Value)>,
         /// Interim status key/value pairs patched in by `ToolProgress` (e.g.
         /// `spawn_subagent` reporting `status=spawned`/`queued` + `run_id`),
-        /// shown alongside `title_arguments` while running. Deliberately
+        /// used alongside `title_arguments` while running. Deliberately
         /// **not** carried forward into `Done` (which has no equivalent
         /// field) — once the call truly finishes, `Done`'s own `summary`
         /// is the single source of truth for its final status, so a stale
         /// in-flight value here can never linger into the terminal bubble.
+        /// Internal progress values such as `status` and `run_id` are retained
+        /// for rendering and routing but omitted from the rendered subagent
+        /// title.
         progress_arguments: Vec<(String, serde_json::Value)>,
     },
     /// Completed successfully.

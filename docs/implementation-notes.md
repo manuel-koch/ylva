@@ -714,7 +714,11 @@ which is why `/tools` needs no I/O.
   thinking…"`/`"Subagent streaming…"`/`"Subagent working…"` as appropriate.
 - **Queued subagent bubbles:** show a static `≡` glyph instead of the
   animated spinner while `status=queued` (waiting for the running slot to
-  free up); the spinner only appears once `status=running`.
+  free up); the spinner only appears once `status=running`. The internal
+  `run_id` used to correlate child lifecycle events is omitted from the
+  rendered title in both the root and child conversation views, and live
+  `status=running`/`queued` values are communicated by the indicator and
+  footer rather than rendered as title properties.
 - **Shift+Enter / Alt+Enter:** insert a newline via the terminal's
   modified-key encoding. The driver enables the kitty keyboard protocol
   (`DISAMBIGUATE_ESCAPE_CODES`) for terminals that support it; terminals that

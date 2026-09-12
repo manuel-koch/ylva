@@ -1586,7 +1586,7 @@ fn append_tool_bubble_lines(
     // - remaining args: `key=value` pairs, rendered dim.
     // - body arguments (declared by the tool) are omitted from the title.
     // `Running`'s interim `progress_arguments` (e.g. `spawn_subagent`
-    // reporting `status=running`/`queued` + `run_id`) are appended after the
+    // reporting `status=running`/`queued` + `run_id`) are combined with the
     // call's real `title_arguments` — kept as a separate owned buffer here
     // since `Done` has no equivalent field, so once the call truly finishes
     // these interim values are naturally gone rather than lingering stale.
@@ -1614,7 +1614,18 @@ fn append_tool_bubble_lines(
         } => title_arguments.clone(),
         _ => vec![],
     };
-    let title_arguments = combined_title_arguments.as_slice();
+    let is_subagent = name == crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME;
+    let is_queued_subagent = is_subagent
+        && combined_title_arguments
+            .iter()
+            .any(|(key, value)| key == "status" && value == "queued");
+    // Keep the child status and run identifier in state for rendering and
+    // routing, but do not expose these internal values in the title.
+    let title_arguments: Vec<(String, serde_json::Value)> = combined_title_arguments
+        .into_iter()
+        .filter(|(key, _)| !is_subagent || (key != "run_id" && key != "status"))
+        .collect();
+    let title_arguments = title_arguments.as_slice();
     // Only strings and numbers qualify as the bare (keyless) primary arg.
     // Booleans need their key name to be meaningful, so they stay in props.
     let scalar_primary = |v: &serde_json::Value| -> Option<String> {
@@ -1816,10 +1827,6 @@ fn append_tool_bubble_lines(
         .fg(Color::White)
         .bg(TOOL_BUBBLE_BG_COLOR)
         .add_modifier(Modifier::BOLD);
-
-    let is_queued_subagent = title_arguments
-        .iter()
-        .any(|(key, value)| key == "status" && value == "queued");
 
     let spinner_or_margin: Span = if is_queued_subagent {
         // Queued (not yet actually running): a static glyph, not the
@@ -3693,6 +3700,10 @@ mod tests {
             rendered.contains('≡'),
             "expected static queued glyph, got: {rendered:?}"
         );
+        assert!(
+            !rendered.contains("status=queued"),
+            "queued state should be communicated by the glyph, not the title: {rendered:?}"
+        );
         for spinner_char in super::SPINNER_FRAMES {
             assert!(
                 !rendered.contains(*spinner_char),
@@ -3741,6 +3752,57 @@ mod tests {
         assert!(
             !rendered.contains('≡'),
             "running bubble must not show the static queued glyph, got: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn subagent_bubble_hides_run_id_from_title() {
+        use super::{append_tool_bubble_lines, ToolBubbleArgs};
+        use crate::tui_reducer_state::ToolCallState;
+
+        let run_id = uuid::Uuid::new_v4();
+        let state = ToolCallState::Running {
+            arguments: serde_json::json!({"label": "Inspect change"}),
+            content_sections: vec![],
+            title_arguments: vec![("label".to_string(), serde_json::json!("Inspect change"))],
+            progress_arguments: vec![
+                ("status".to_string(), serde_json::json!("running")),
+                ("run_id".to_string(), serde_json::json!(run_id.to_string())),
+            ],
+        };
+        let mut lines: Vec<Line<'static>> = vec![];
+        let mut bubble_title_rows = vec![];
+        append_tool_bubble_lines(
+            &mut lines,
+            ToolBubbleArgs {
+                id: uuid::Uuid::new_v4(),
+                name: "spawn_subagent",
+                state: &state,
+                collapsed: true,
+                spinner_frame: 0,
+                display_title_override: None,
+            },
+            &mut bubble_title_rows,
+            80,
+            100,
+        );
+
+        let rendered: String = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(
+            rendered.contains("Inspect change"),
+            "the subagent label should remain visible: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("status=running"),
+            "the live subagent status should be communicated by the indicator, not the title: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("run_id") && !rendered.contains(&run_id.to_string()),
+            "the internal run identifier must not appear in the title: {rendered:?}"
         );
     }
 

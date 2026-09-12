@@ -351,7 +351,11 @@ module structure (model/presenter/view/driver split).
   streaming…"`, or `"Subagent done, parent working…"`) so it's never
   ambiguous which agent — parent or child — is doing what.
 - **Queued subagent bubbles** show a static `≡` glyph instead of the animated
-  spinner while waiting for the one running-child slot to free up.
+  spinner while waiting for the one running-child slot to free up. The
+  internal `run_id` used to correlate child lifecycle events is omitted from
+  the bubble title in both the root and child conversation views, and live
+  `running`/`queued` state is communicated by the indicator and footer rather
+  than a `status=...` title property.
 - **Input as a message:** the input box renders like a sent user message — a
   colored left border, no full frame and no `"Input"` title. Long text
   word-wraps inside the box, and the box grows with its content up to the
