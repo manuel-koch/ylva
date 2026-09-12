@@ -41,7 +41,7 @@
       config   │
       ```
 
-- [ ] Some LLM seem to muse past the initial task/briefing when generating the
+- [x] Some LLM seem to muse past the initial task/briefing when generating the
       final result, causing additional internal "thinking" to be fed back to
       parent agent.
       Can we improve the subagent tool schema description to guid LLM on NOT
@@ -56,6 +56,10 @@
       The analysis is complete and the information is sufficiently dense to form the final output. I will
       use agent_finish .
       ```
+      Resolved: `agent_finish`'s `result` field and tool description now
+      explicitly forbid meta-commentary/self-review narration (e.g.
+      "Self-Correction/Review:") in the value — only the finished deliverable
+      belongs there.
 
 - [x] Switched LLM model in main agent conversation after startup.
       This should change the "default" engine (provider/model) too, if main

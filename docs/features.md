@@ -226,7 +226,10 @@ affect sandbox approval checks. See
   receives this through the `spawn_subagent` lifecycle event — it never sees
   the child's own conversation, only the `result`/`error` string, so a child
   should make its `result` self-contained rather than referencing
-  "earlier"/"above" content the parent cannot see. If a child goes idle
+  "earlier"/"above" content the parent cannot see, and must not fold in
+  meta-commentary or self-review narration about its own process (e.g.
+  "Self-Correction/Review:") — only the finished deliverable belongs there.
+  If a child goes idle
   without calling `agent_finish`, the parent instead receives a synthesized
   result built from the child's last assistant message; if the child hits
   its max-tool-iterations cap first, the parent receives a clear failure
