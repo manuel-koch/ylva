@@ -1048,8 +1048,12 @@ fn footer_shows_the_active_provider_and_model() {
         .map(|(column, row)| buffer.cell((column, row)).unwrap().symbol().to_string())
         .collect();
     assert!(
-        rendered.contains("ollama/llama3.2 (max)"),
+        rendered.contains("ollama → llama3.2 (max)"),
         "footer must show the active provider/model identity: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("ollama/llama3.2"),
+        "footer must separate the provider connection and model with an arrow: {rendered:?}"
     );
 
     state.engine_display.reasoning_effort = None;
@@ -1065,11 +1069,11 @@ fn footer_shows_the_active_provider_and_model() {
         .map(|(column, row)| buffer.cell((column, row)).unwrap().symbol().to_string())
         .collect();
     assert!(
-        rendered_without_reasoning.contains("ollama/llama3.2"),
+        rendered_without_reasoning.contains("ollama → llama3.2"),
         "footer must retain the active provider/model identity: {rendered_without_reasoning:?}"
     );
     assert!(
-        !rendered_without_reasoning.contains("ollama/llama3.2 ("),
+        !rendered_without_reasoning.contains("ollama → llama3.2 ("),
         "footer must omit the default reasoning effort: {rendered_without_reasoning:?}"
     );
 }

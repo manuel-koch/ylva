@@ -2527,7 +2527,7 @@ fn draw_footer_row(
         state.engine_display.model.as_str(),
     ) {
         (provider, model) if !provider.is_empty() && !model.is_empty() => {
-            format!("{provider}/{model}")
+            format!("{provider} → {model}")
         }
         (provider, _) if !provider.is_empty() => provider.to_string(),
         (_, model) if !model.is_empty() => model.to_string(),

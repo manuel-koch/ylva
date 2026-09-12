@@ -17,7 +17,7 @@
       or queued subagents.
       But not the total number of (finished) subagents !
 
-- [ ] In footer use separator " → " between provider-connection and selected
+- [x] In footer use separator " → " between provider-connection and selected
       model-id instead of "/".
 
 - [ ] Don't render the "run_id" within the title of a subagent bubble,

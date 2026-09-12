@@ -468,11 +468,11 @@ user-facing on-disk contract; this section is the contributor view.
   paused for its own inner tool approval, since that only sets
   `Focus::ToolApproval` and never touches the root `spawn_subagent` bubble's
   `Running` state.
-- The footer's right-aligned `provider-connection/model` identity and explicit
-  reasoning effort are projected from the live root engine or the configured
-  child engine, so they follow the transcript currently on screen. The effort
-  is shown in parentheses only when it is not the provider default. Root model
-  switches refresh the label before the next frame.
+- The footer's right-aligned `provider-connection → model-id` identity and
+  explicit reasoning effort are projected from the live root engine or the
+  configured child engine, so they follow the transcript currently on screen.
+  The effort is shown in parentheses only when it is not the provider default.
+  Root model switches refresh the label before the next frame.
 - The main-conversation footer derives separate running and queued subagent
   counts from root `spawn_subagent` bubbles. A `Running` bubble with
   `status=queued` in its interim progress arguments contributes to the queued

@@ -296,9 +296,9 @@ module structure (model/presenter/view/driver split).
   footer (mode/hint row and key-hints row). Key names in the key-hints row are
   bold, action text is normal, and multiple hints use a ` · ` separator. The
   mode/hint row also shows the
-  active `provider-connection/model` identity for the transcript on screen,
-  including an explicit reasoning effort in parentheses and the selected child
-  while drilled in. In the main conversation it also shows separate counts
+  active `provider-connection → selected model-id` identity for the transcript
+  on screen, including an explicit reasoning effort in parentheses and the
+  selected child while drilled in. In the main conversation it also shows separate counts
   for running and queued subagents in a compact `Subagents: <running> running,
   <queued> queued` label; finished subagents are excluded, zero-valued
   categories are omitted, and the counts are hidden while viewing a child
