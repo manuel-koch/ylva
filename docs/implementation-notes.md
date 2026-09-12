@@ -21,6 +21,14 @@ logic and is not sent as an OpenAI request parameter. `reasoning_effort` is
 translated into the provider-specific request field when it is explicit;
 `None` leaves the provider's own default behavior in place.
 
+Each routed chat request emits a safe structured selection event containing
+the named engine, provider connection, and model. The provider emits the
+request-start event with the exact runtime snapshot used for that request:
+provider connection, model, temperature, effective context length, and
+reasoning effort. These events intentionally exclude API keys, authorization
+headers, and request bodies; the surrounding `agent_stream` span supplies the
+root or child run correlation.
+
 `OpenRouterProvider` reuses that transport for both chat and OpenRouter's
 metadata-rich `/models` catalog. Its selected effort is sent as
 `reasoning.effort`. `OllamaProvider` accepts the Ollama server origin as its
@@ -57,6 +65,22 @@ connection, queries each connection once and concurrently for `/models`, and
 switches the active connection only after it successfully accepts the
 selected model. Connection settings remain owned by each underlying engine;
 switching connections does not mutate another connection's configuration.
+
+When constructing a child, `AgentFactory` compares the child's resolved engine
+name with the root's resolved name. Matching names reuse the root engine
+router, so the child's provider/model display and first requests reflect the
+root's active selection at spawn time. A different resolved engine name builds
+the child from its own configured engine instead of inheriting the root's
+active selection.
+
+`AgentConfig.engine` is a complete-engine selection, not a property-override
+layer. There is no per-agent merge of `EngineConfig` fields: specialized
+model, sampling, context, reasoning, or connection settings require a
+separate named engine. Agents sharing one named engine also share its mutable
+runtime selection, including model and reasoning-effort changes. Each
+in-flight `Engine::chat` request uses the provider/model snapshot captured when
+that request started; a later switch affects the next request, even when it is
+another request in the same child run after a tool call.
 
 The `/models` slash command normalizes the draft to `/models <filter>` and
 fetches the full catalog once via `Effect::ListModels { filter }`, storing
@@ -307,6 +331,11 @@ user-facing on-disk contract; this section is the contributor view.
   `AgentLoop` whose resolved `AgentConfig::can_spawn` is `true`; children are
   constructed via the same factory (`Role::Child(ChildRoleConfig { .. })`)
   and never receive `spawn_subagent` themselves.
+- A root's `spawn_subagent` tool is built with a sorted catalog of every
+  configured agent type and its optional `description`. The catalog is
+  serialized in the tool description sent with each model request, so it
+  remains available whenever the model can select `agent_type` without adding
+  unrelated system-prompt state.
 - The current scheduler runs at most one child at a time; further
   `spawn_subagent` calls are queued in an unbounded FIFO and started
   automatically as each preceding child finishes. The model-facing lifecycle
@@ -468,11 +497,14 @@ user-facing on-disk contract; this section is the contributor view.
   paused for its own inner tool approval, since that only sets
   `Focus::ToolApproval` and never touches the root `spawn_subagent` bubble's
   `Running` state.
-- The footer's right-aligned `provider-connection → model-id` identity and
-  explicit reasoning effort are projected from the live root engine or the
-  configured child engine, so they follow the transcript currently on screen.
-  The effort is shown in parentheses only when it is not the provider default.
-  Root model switches refresh the label before the next frame.
+- The footer's right-aligned `named-engine → model-id` identity and explicit
+  reasoning effort are projected from the live root engine or the configured
+  child engine, so they follow the transcript currently on screen. The named
+  engine distinguishes agents that share one provider connection. The provider
+  connection remains available in the display snapshot for runtime diagnostics,
+  but is intentionally omitted from the compact footer. The effort is shown in
+  parentheses only when it is not the provider default. Root model or provider
+  switches refresh the label before the next frame.
 - The main-conversation footer derives separate running and queued subagent
   counts from root `spawn_subagent` bubbles. A `Running` bubble with
   `status=queued` in its interim progress arguments contributes to the queued

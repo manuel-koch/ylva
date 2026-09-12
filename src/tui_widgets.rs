@@ -2521,7 +2521,7 @@ fn parse_hunk_range(s: &str) -> Option<(usize, usize)> {
 }
 
 /// Render a footer row with the status text on the left and the active
-/// provider-connection/model identity aligned to the right.
+/// named-engine/model identity aligned to the right.
 fn draw_footer_row(
     frame: &mut Frame,
     area: Rect,
@@ -2529,16 +2529,13 @@ fn draw_footer_row(
     left_color: Color,
     state: &TuiState,
 ) {
-    let engine_identity = match (
-        state.engine_display.provider_connection.as_str(),
-        state.engine_display.model.as_str(),
-    ) {
-        (provider, model) if !provider.is_empty() && !model.is_empty() => {
-            format!("{provider} → {model}")
-        }
-        (provider, _) if !provider.is_empty() => provider.to_string(),
-        (_, model) if !model.is_empty() => model.to_string(),
-        _ => String::new(),
+    let model_identity = state.engine_display.model.clone();
+    let engine_identity = if state.engine_display.engine_name.is_empty() {
+        model_identity
+    } else if model_identity.is_empty() {
+        state.engine_display.engine_name.clone()
+    } else {
+        format!("{} → {}", state.engine_display.engine_name, model_identity)
     };
     if engine_identity.is_empty() || area.width == 0 {
         frame.render_widget(

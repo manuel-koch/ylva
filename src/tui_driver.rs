@@ -955,14 +955,14 @@ fn draw_frame<B>(
     terminal: &mut Terminal<B>,
     state: &mut AppState,
     textarea: &mut TextArea<'_>,
-    engine: &Arc<dyn Engine>,
+    agent: &AgentLoop,
     mouse_pos: Option<(u16, u16)>,
 ) -> anyhow::Result<()>
 where
     B: Backend,
     B::Error: std::error::Error + Send + Sync + 'static,
 {
-    state.engine_display = crate::llm::engine::EngineDisplayInfo::from_engine(engine.as_ref());
+    state.engine_display = agent.engine_display_info();
     let hint = confirm_hint(state);
     terminal.draw(|frame| {
         render::render(frame, state, textarea, hint.as_deref(), mouse_pos);
@@ -1020,7 +1020,7 @@ where
     }
     let cmd_tx = agent.command_sender();
     let engine = agent.engine();
-    state.engine_display = crate::llm::engine::EngineDisplayInfo::from_engine(engine.as_ref());
+    state.engine_display = agent.engine_display_info();
     // Sorted once here so `/tools` output is stable — the registry is a
     // `HashMap`, whose iteration order is not.
     let mut available_tool_names = agent.registry().names();
@@ -1047,7 +1047,7 @@ where
     }
 
     loop {
-        draw_frame(terminal, &mut state, &mut textarea, &engine, mouse_pos)?;
+        draw_frame(terminal, &mut state, &mut textarea, &agent, mouse_pos)?;
 
         let textarea_ctx = TextareaContext {
             is_empty: textarea.lines() == [""],

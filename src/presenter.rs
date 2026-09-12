@@ -4035,6 +4035,7 @@ mod tests {
             TuiEvent::Domain(DomainEvent::ChildAgentEngineConfigured {
                 run_id,
                 engine: crate::llm::engine::EngineDisplayInfo {
+                    engine_name: "ollama/local2".to_string(),
                     provider_connection: "ollama".to_string(),
                     model: "child-model".to_string(),
                     reasoning_effort: None,
@@ -4046,6 +4047,7 @@ mod tests {
         assert_eq!(
             state.child_engine_displays.get(&run_id),
             Some(&crate::llm::engine::EngineDisplayInfo {
+                engine_name: "ollama/local2".to_string(),
                 provider_connection: "ollama".to_string(),
                 model: "child-model".to_string(),
                 reasoning_effort: None,

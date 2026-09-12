@@ -15,17 +15,19 @@
 mod common;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
 use tempfile::TempDir;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tokio_util::sync::CancellationToken;
 
 use ylva::{
-    cli_driver::run_cli_to, default_registry, AgentLoop, DeltaChunk, EngineImpl, Message,
-    MockEvent, Provider, Sandbox, StreamEvent, ToolRegistry, ToolRegistryConfig, ToolSchema,
+    cli_driver::run_cli_to, default_registry, AgentCommand, AgentConfig, AgentLoop, DeltaChunk,
+    Engine, EngineConfig, EngineImpl, Message, MockEvent, ModelInfo, ProfileConfig, Provider,
+    ProviderModelOption, Role, Sandbox, StreamEvent, ToolRegistry, ToolRegistryConfig, ToolSchema,
+    UiUpdate,
 };
 
 /// A provider that emits `phase_one` on the first `chat()` call and
@@ -108,6 +110,203 @@ fn write_scratch(dir: &TempDir, name: &str, content: &str) -> String {
     path.display().to_string()
 }
 
+struct SwitchableTestEngine {
+    config: std::sync::RwLock<EngineConfig>,
+    calls: AtomicUsize,
+    child_calls: AtomicUsize,
+    spawn_agent_type: String,
+    chat_records: Mutex<Vec<ChatRecord>>,
+    child_request_barrier: Option<Arc<ChildRequestBarrier>>,
+}
+
+struct ChildRequestBarrier {
+    first_request_started: Notify,
+    release_first_request: Notify,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ChatRecord {
+    model: String,
+    is_child: bool,
+}
+
+impl SwitchableTestEngine {
+    fn new(provider_connection: &str, model: &str) -> Arc<Self> {
+        Self::new_with_spawn_agent_type(provider_connection, model, "default")
+    }
+
+    fn new_with_spawn_agent_type(
+        provider_connection: &str,
+        model: &str,
+        spawn_agent_type: &str,
+    ) -> Arc<Self> {
+        Self::new_with_options(provider_connection, model, spawn_agent_type, None)
+    }
+
+    fn new_with_child_request_barrier(
+        provider_connection: &str,
+        model: &str,
+    ) -> (Arc<Self>, Arc<ChildRequestBarrier>) {
+        let barrier = Arc::new(ChildRequestBarrier {
+            first_request_started: Notify::new(),
+            release_first_request: Notify::new(),
+        });
+        let engine = Self::new_with_options(
+            provider_connection,
+            model,
+            "default",
+            Some(Arc::clone(&barrier)),
+        );
+        (engine, barrier)
+    }
+
+    fn new_with_options(
+        provider_connection: &str,
+        model: &str,
+        spawn_agent_type: &str,
+        child_request_barrier: Option<Arc<ChildRequestBarrier>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            config: std::sync::RwLock::new(EngineConfig {
+                provider_connection: provider_connection.to_string(),
+                model: model.to_string(),
+                temperature: None,
+                context_length: None,
+                api_base_url: None,
+                api_key: None,
+                reasoning: None,
+            }),
+            calls: AtomicUsize::new(0),
+            child_calls: AtomicUsize::new(0),
+            spawn_agent_type: spawn_agent_type.to_string(),
+            chat_records: Mutex::new(Vec::new()),
+            child_request_barrier,
+        })
+    }
+
+    async fn wait_for_child_chats(&self, expected_count: usize) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let records = self.chat_records();
+                let child_chat_count = records.iter().filter(|record| record.is_child).count();
+                if child_chat_count >= expected_count {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "expected child chat request starts; records={:?}",
+                self.chat_records()
+            )
+        });
+    }
+
+    fn chat_records(&self) -> Vec<ChatRecord> {
+        self.chat_records
+            .lock()
+            .expect("test chat records lock")
+            .clone()
+    }
+
+    fn child_chat_records(&self) -> Vec<ChatRecord> {
+        self.chat_records()
+            .into_iter()
+            .filter(|record| record.is_child)
+            .collect()
+    }
+}
+
+impl Engine for SwitchableTestEngine {
+    fn chat<'a>(
+        &'a self,
+        _messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        _cancel: CancellationToken,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        let is_child = tools.iter().any(|tool| tool.name == "agent_finish");
+        let model = self.config().model;
+        let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
+        let child_call_index = is_child.then(|| self.child_calls.fetch_add(1, Ordering::SeqCst));
+        self.chat_records
+            .lock()
+            .expect("test chat records lock")
+            .push(ChatRecord { model, is_child });
+        let spawn_agent_type = self.spawn_agent_type.clone();
+        let child_request_barrier = if child_call_index == Some(0) {
+            self.child_request_barrier.clone()
+        } else {
+            None
+        };
+        let event = if is_child && child_call_index == Some(0) && child_request_barrier.is_some() {
+            StreamEvent::Delta(DeltaChunk {
+                tool_call_index: 0,
+                tool_call_id: None,
+                function_name: Some("read".to_string()),
+                arguments_fragment: Some(
+                    serde_json::json!({
+                        "path": "Cargo.toml",
+                    })
+                    .to_string(),
+                ),
+            })
+        } else if is_child {
+            StreamEvent::Text("child result".to_string())
+        } else if call_index == 0 {
+            StreamEvent::Delta(DeltaChunk {
+                tool_call_index: 0,
+                tool_call_id: None,
+                function_name: Some("spawn_subagent".to_string()),
+                arguments_fragment: Some(
+                    serde_json::json!({
+                        "label": "Inspect engine",
+                        "task": "inspect the active engine",
+                        "agent_type": spawn_agent_type,
+                    })
+                    .to_string(),
+                ),
+            })
+        } else {
+            StreamEvent::Text("root result".to_string())
+        };
+        Box::pin(async move {
+            let (sender, receiver) = mpsc::channel(2);
+            sender.send(event).await.expect("test stream receiver open");
+            if let Some(barrier) = child_request_barrier {
+                barrier.first_request_started.notify_one();
+                barrier.release_first_request.notified().await;
+            }
+            sender
+                .send(StreamEvent::Done)
+                .await
+                .expect("test stream receiver open");
+            Ok(receiver)
+        })
+    }
+
+    fn config(&self) -> EngineConfig {
+        self.config.read().expect("test engine config lock").clone()
+    }
+
+    fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
+        let model = self.config().model;
+        Box::pin(async move {
+            Ok(vec![ModelInfo {
+                id: model,
+                context_length: None,
+                reasoning_efforts: None,
+            }])
+        })
+    }
+
+    fn switch_model(&self, model: &str) -> anyhow::Result<()> {
+        self.config.write().expect("test engine config lock").model = model.to_string();
+        Ok(())
+    }
+}
+
 #[tokio::test]
 async fn run_cli_streams_user_and_assistant_and_history() {
     let provider = Arc::new(MockProviderWithScript {
@@ -138,6 +337,293 @@ async fn run_cli_streams_user_and_assistant_and_history() {
         output.contains("\"role\":\"assistant\""),
         "output: {output}"
     );
+}
+
+#[tokio::test]
+async fn child_spawn_after_root_model_switch_uses_the_root_active_engine() {
+    let default_engine = SwitchableTestEngine::new("default-provider", "default-model");
+    let alternate_engine = SwitchableTestEngine::new("alternate-provider", "alternate-model");
+    let factory = ylva::AgentFactory::new(std::collections::HashMap::from([
+        ("default".to_string(), default_engine as Arc<dyn Engine>),
+        ("alternate".to_string(), alternate_engine as Arc<dyn Engine>),
+    ]))
+    .with_auto_approve_spawn();
+    let profile = ProfileConfig {
+        default_engine: "default".to_string(),
+        agents: std::collections::HashMap::from([(
+            "default".to_string(),
+            AgentConfig {
+                engine: None,
+                description: None,
+                allowed_tools: None,
+                timeout_secs: None,
+                persona: None,
+                can_spawn: true,
+            },
+        )]),
+        ..ProfileConfig::default()
+    };
+    let (mut root, mut ui_rx) = factory
+        .create(&profile, "default", Role::Root)
+        .expect("factory creates the root agent");
+
+    root.engine()
+        .switch_model_option(&ProviderModelOption {
+            provider_connection: "alternate-provider".to_string(),
+            model: ModelInfo {
+                id: "alternate-model".to_string(),
+                context_length: None,
+                reasoning_efforts: None,
+            },
+            reasoning_effort: None,
+        })
+        .expect("root model switch succeeds");
+    assert_eq!(
+        root.engine().config().provider_connection,
+        "alternate-provider"
+    );
+    assert_eq!(root.engine().config().model, "alternate-model");
+
+    let handle = root.run();
+    root.send_command(AgentCommand::Prompt("delegate the inspection".to_string()))
+        .await;
+    let configured_engine = tokio::time::timeout(Duration::from_secs(1), async {
+        while let Some(update) = ui_rx.recv().await {
+            match update {
+                UiUpdate::ToolPending { id, name, .. } if name == "spawn_subagent" => {
+                    root.send_command(AgentCommand::ApproveTool { id }).await;
+                }
+                UiUpdate::ChildAgentEngineConfigured { engine, .. } => return engine,
+                _ => {}
+            }
+        }
+        panic!("root UI channel closed before child engine configuration");
+    })
+    .await
+    .expect("child engine configuration arrives");
+
+    root.send_command(AgentCommand::Stop {
+        reason: "end regression test".to_string(),
+    })
+    .await;
+    drop(root);
+    tokio::time::timeout(Duration::from_secs(1), handle)
+        .await
+        .expect("root agent shuts down")
+        .expect("root agent task joins")
+        .expect("root agent returns a context");
+
+    assert_eq!(
+        configured_engine.provider_connection, "alternate-provider",
+        "a child resolving the default engine must follow the root's active provider"
+    );
+    assert_eq!(
+        configured_engine.model, "alternate-model",
+        "a child resolving the default engine must follow the root's active model"
+    );
+}
+
+#[tokio::test]
+async fn running_child_uses_a_shared_engine_switch_on_its_next_request() {
+    let (default_engine, child_request_barrier) =
+        SwitchableTestEngine::new_with_child_request_barrier("default-provider", "default-model");
+    let alternate_engine = SwitchableTestEngine::new("alternate-provider", "alternate-model");
+    let factory = ylva::AgentFactory::new(std::collections::HashMap::from([
+        (
+            "default".to_string(),
+            default_engine.clone() as Arc<dyn Engine>,
+        ),
+        (
+            "alternate".to_string(),
+            alternate_engine.clone() as Arc<dyn Engine>,
+        ),
+    ]))
+    .with_auto_approve_spawn();
+    let profile = ProfileConfig {
+        default_engine: "default".to_string(),
+        agents: std::collections::HashMap::from([(
+            "default".to_string(),
+            AgentConfig {
+                engine: None,
+                description: None,
+                allowed_tools: None,
+                timeout_secs: None,
+                persona: None,
+                can_spawn: true,
+            },
+        )]),
+        ..ProfileConfig::default()
+    };
+    let (mut root, mut ui_rx) = factory
+        .create(&profile, "default", Role::Root)
+        .expect("factory creates the root agent");
+
+    let handle = root.run();
+    root.send_command(AgentCommand::Prompt("delegate the inspection".to_string()))
+        .await;
+    let (run_id, configured_engine) = tokio::time::timeout(Duration::from_secs(1), async {
+        while let Some(update) = ui_rx.recv().await {
+            if let UiUpdate::ChildAgentEngineConfigured { run_id, engine } = update {
+                return (run_id, engine);
+            }
+        }
+        panic!("root UI channel closed before child engine configuration");
+    })
+    .await
+    .expect("child engine configuration arrives");
+    assert_eq!(configured_engine.model, "default-model");
+
+    default_engine.wait_for_child_chats(1).await;
+    child_request_barrier.first_request_started.notified().await;
+    root.engine()
+        .switch_model_option(&ProviderModelOption {
+            provider_connection: "alternate-provider".to_string(),
+            model: ModelInfo {
+                id: "alternate-model".to_string(),
+                context_length: None,
+                reasoning_efforts: None,
+            },
+            reasoning_effort: None,
+        })
+        .expect("root model switch succeeds");
+    root.send_command(AgentCommand::ForChild {
+        run_id,
+        command: Box::new(AgentCommand::Prompt(
+            "continue after the model switch".to_string(),
+        )),
+    })
+    .await;
+    child_request_barrier.release_first_request.notify_one();
+
+    alternate_engine.wait_for_child_chats(1).await;
+    assert_eq!(
+        alternate_engine.child_chat_records(),
+        vec![ChatRecord {
+            model: "alternate-model".to_string(),
+            is_child: true,
+        }]
+    );
+
+    root.send_command(AgentCommand::Stop {
+        reason: "end shared-engine test".to_string(),
+    })
+    .await;
+    drop(root);
+    tokio::time::timeout(Duration::from_secs(1), handle)
+        .await
+        .expect("root agent shuts down")
+        .expect("root agent task joins")
+        .expect("root agent returns a context");
+}
+
+#[tokio::test]
+async fn child_with_explicit_engine_override_keeps_its_named_engine() {
+    let default_engine = SwitchableTestEngine::new_with_spawn_agent_type(
+        "default-provider",
+        "default-model",
+        "research",
+    );
+    let alternate_engine = SwitchableTestEngine::new_with_spawn_agent_type(
+        "alternate-provider",
+        "alternate-model",
+        "research",
+    );
+    let specialized_engine = SwitchableTestEngine::new("special-provider", "special-model");
+    let factory = ylva::AgentFactory::new(std::collections::HashMap::from([
+        (
+            "default".to_string(),
+            default_engine.clone() as Arc<dyn Engine>,
+        ),
+        (
+            "alternate".to_string(),
+            alternate_engine.clone() as Arc<dyn Engine>,
+        ),
+        (
+            "specialized".to_string(),
+            specialized_engine.clone() as Arc<dyn Engine>,
+        ),
+    ]))
+    .with_auto_approve_spawn();
+    let profile = ProfileConfig {
+        default_engine: "default".to_string(),
+        agents: std::collections::HashMap::from([
+            (
+                "default".to_string(),
+                AgentConfig {
+                    engine: None,
+                    description: None,
+                    allowed_tools: None,
+                    timeout_secs: None,
+                    persona: None,
+                    can_spawn: true,
+                },
+            ),
+            (
+                "research".to_string(),
+                AgentConfig {
+                    engine: Some("specialized".to_string()),
+                    description: Some("Handles specialized tasks.".to_string()),
+                    allowed_tools: None,
+                    timeout_secs: None,
+                    persona: None,
+                    can_spawn: false,
+                },
+            ),
+        ]),
+        ..ProfileConfig::default()
+    };
+    let (mut root, mut ui_rx) = factory
+        .create(&profile, "default", Role::Root)
+        .expect("factory creates the root agent");
+
+    root.engine()
+        .switch_model_option(&ProviderModelOption {
+            provider_connection: "alternate-provider".to_string(),
+            model: ModelInfo {
+                id: "alternate-model".to_string(),
+                context_length: None,
+                reasoning_efforts: None,
+            },
+            reasoning_effort: None,
+        })
+        .expect("root model switch succeeds");
+
+    let handle = root.run();
+    root.send_command(AgentCommand::Prompt("delegate the research".to_string()))
+        .await;
+    let configured_engine = tokio::time::timeout(Duration::from_secs(1), async {
+        while let Some(update) = ui_rx.recv().await {
+            if let UiUpdate::ChildAgentEngineConfigured { engine, .. } = update {
+                return engine;
+            }
+        }
+        panic!("root UI channel closed before child engine configuration");
+    })
+    .await
+    .expect("child engine configuration arrives");
+
+    specialized_engine.wait_for_child_chats(1).await;
+    assert_eq!(configured_engine.engine_name, "specialized");
+    assert_eq!(configured_engine.provider_connection, "special-provider");
+    assert_eq!(configured_engine.model, "special-model");
+    assert_eq!(
+        specialized_engine.chat_records(),
+        vec![ChatRecord {
+            model: "special-model".to_string(),
+            is_child: true,
+        }]
+    );
+
+    root.send_command(AgentCommand::Stop {
+        reason: "end explicit-engine test".to_string(),
+    })
+    .await;
+    drop(root);
+    tokio::time::timeout(Duration::from_secs(1), handle)
+        .await
+        .expect("root agent shuts down")
+        .expect("root agent task joins")
+        .expect("root agent returns a context");
 }
 
 #[tokio::test]
@@ -478,6 +964,7 @@ async fn console_app_reacts_to_child_finish_through_real_agent_factory_and_run_c
             "default".to_string(),
             ylva::AgentConfig {
                 engine: None,
+                description: None,
                 allowed_tools: None,
                 timeout_secs: None,
                 persona: None,
@@ -643,6 +1130,7 @@ async fn spawned_child_bash_approval_is_routed_to_the_child_not_the_root() {
             "default".to_string(),
             ylva::AgentConfig {
                 engine: None,
+                description: None,
                 allowed_tools: None,
                 timeout_secs: None,
                 persona: None,

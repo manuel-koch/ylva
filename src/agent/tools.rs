@@ -562,6 +562,9 @@ pub struct ToolRegistryConfig {
     /// agents whose `AgentConfig::can_spawn` is `true`; structurally absent
     /// otherwise (never gated by `allowed_tools`).
     pub include_spawn_subagent: bool,
+    /// Agent types and model-facing descriptions advertised by
+    /// `spawn_subagent`, when that tool is registered.
+    pub spawn_agent_types: Vec<spawn_subagent::AgentTypeInfo>,
     /// Present only for `Role::Child` agents: registers `agent_finish`, wired to
     /// send its result through this config's channel/ids.
     pub agent_finish: Option<agent_finish::AgentFinishToolConfig>,
@@ -576,6 +579,7 @@ impl Default for ToolRegistryConfig {
             auto_approve_spawn: false,
             allowed_tools: DEFAULT_CLI_TOOLS.iter().map(|s| s.to_string()).collect(),
             include_spawn_subagent: false,
+            spawn_agent_types: Vec::new(),
             agent_finish: None,
         }
     }
@@ -649,9 +653,10 @@ pub fn default_registry(
     // former is structural (present only when the agent can spawn children),
     // the latter is injected only into `Role::Child` registries.
     if config.include_spawn_subagent {
-        registry.register(Arc::new(spawn_subagent::SpawnSubagentTool::new(
-            config.auto_approve_spawn,
-        )));
+        registry.register(Arc::new(
+            spawn_subagent::SpawnSubagentTool::new(config.auto_approve_spawn)
+                .with_agent_types(config.spawn_agent_types),
+        ));
     }
     if let Some(agent_finish_config) = config.agent_finish.clone() {
         registry.register(Arc::new(agent_finish::AgentFinishTool::new(

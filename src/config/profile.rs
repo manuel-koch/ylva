@@ -72,6 +72,17 @@ fn default_engine_name() -> String {
     DEFAULT_PROFILE_NAME.to_string()
 }
 
+fn default_agent_config() -> AgentConfig {
+    AgentConfig {
+        engine: None,
+        description: None,
+        allowed_tools: None,
+        timeout_secs: None,
+        persona: None,
+        can_spawn: true,
+    }
+}
+
 impl Default for ProfileConfig {
     /// The in-code default profile: one `default` agent type that may spawn
     /// children, no configured engines (the caller supplies its
@@ -85,16 +96,7 @@ impl Default for ProfileConfig {
             default_model: None,
             theme: ThemeName::default(),
             keybindings: HashMap::new(),
-            agents: HashMap::from([(
-                DEFAULT_PROFILE_NAME.to_string(),
-                AgentConfig {
-                    engine: None,
-                    allowed_tools: None,
-                    timeout_secs: None,
-                    persona: None,
-                    can_spawn: true,
-                },
-            )]),
+            agents: HashMap::from([(DEFAULT_PROFILE_NAME.to_string(), default_agent_config())]),
         }
     }
 }
@@ -194,9 +196,11 @@ impl ProfileConfig {
                     source,
                 })?;
         profile.apply_default_model();
-        if profile.agents.is_empty() {
-            profile.agents = ProfileConfig::default().agents;
-        }
+        // Specialized agent tables do not replace the built-in root agent.
+        profile
+            .agents
+            .entry(DEFAULT_PROFILE_NAME.to_string())
+            .or_insert_with(default_agent_config);
         tracing::info!(
             path = %path.display(),
             provider_connections = profile.provider_connections.len(),
@@ -356,6 +360,7 @@ reasoning = "xhigh"
 
 [agents.default]
 engine = "fast"
+description = "General-purpose agent for ordinary tasks."
 allowed_tools = ["read", "glob"]
 can_spawn = true
 
@@ -409,6 +414,10 @@ persona = "You explore code."
 
         let default_agent = profile.agents.get("default").expect("the default agent");
         assert_eq!(default_agent.engine.as_deref(), Some("fast"));
+        assert_eq!(
+            default_agent.description.as_deref(),
+            Some("General-purpose agent for ordinary tasks.")
+        );
         assert!(default_agent.can_spawn);
         let explorer = profile.agents.get("explorer").expect("the explorer agent");
         assert_eq!(explorer.timeout_secs, Some(120));
@@ -555,6 +564,59 @@ api_key = "${MISSING_API_KEY}"
     }
 
     #[test]
+    fn a_config_file_with_specialized_agents_still_gets_a_spawn_capable_default_agent() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "specialized",
+            r#"
+[agents.local-discovery]
+engine = "ollama/local"
+"#,
+        );
+
+        let profile = ProfileConfig::load(temp.path(), "specialized").expect("the fixture loads");
+        let default_agent = profile
+            .agents
+            .get(DEFAULT_PROFILE_NAME)
+            .expect("the implicit default agent type");
+        assert!(default_agent.can_spawn);
+        assert_eq!(
+            profile
+                .agents
+                .get("local-discovery")
+                .and_then(|agent| agent.engine.as_deref()),
+            Some("ollama/local")
+        );
+    }
+
+    #[test]
+    fn an_explicit_default_agent_config_is_not_replaced_by_implicit_defaults() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "custom-default",
+            r#"
+[agents.default]
+can_spawn = false
+
+[agents.local-discovery]
+engine = "ollama/local"
+"#,
+        );
+
+        let profile =
+            ProfileConfig::load(temp.path(), "custom-default").expect("the fixture loads");
+        assert!(
+            !profile
+                .agents
+                .get(DEFAULT_PROFILE_NAME)
+                .expect("the configured default agent type")
+                .can_spawn
+        );
+    }
+
+    #[test]
     fn compact_engine_falls_back_to_the_default_engine() {
         let profile = ProfileConfig {
             default_engine: "main".to_string(),
@@ -573,6 +635,7 @@ api_key = "${MISSING_API_KEY}"
                 "main".to_string(),
                 AgentConfig {
                     engine: Some("fast".to_string()),
+                    description: None,
                     allowed_tools: Some(vec!["bash".to_string()]),
                     timeout_secs: Some(120),
                     persona: Some("You are a helpful assistant.".to_string()),
@@ -603,6 +666,7 @@ api_key = "${MISSING_API_KEY}"
     fn agent_config_defaults_to_no_engine_override() {
         let agent_config = AgentConfig {
             engine: None,
+            description: None,
             allowed_tools: None,
             timeout_secs: None,
             persona: None,

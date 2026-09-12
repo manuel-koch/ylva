@@ -19,11 +19,12 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::tools::agent_finish::AgentFinishToolConfig;
+use crate::agent::tools::spawn_subagent::AgentTypeInfo;
 use crate::agent::tools::{default_registry, ToolRegistryConfig, DEFAULT_CLI_TOOLS};
 use crate::agent::{AgentLoop, ChildRoleConfig, Context, Message, Role, UiUpdate};
 use crate::child_agent_manager::{ChildAgentManager, FinishResult, SpawnRequest};
 use crate::config::ProfileConfig;
-use crate::llm::engine::{Engine, EngineConfig, EngineDisplayInfo, EngineRouter};
+use crate::llm::engine::{Engine, EngineConfig, EngineRouter};
 use crate::llm::ProviderRegistry;
 use crate::sandbox::Sandbox;
 use crate::store::Store;
@@ -198,6 +199,12 @@ impl AgentFactory {
     /// Returns `Err` when the resolved engine name is not registered in
     /// `self.engines`.
     ///
+    /// A child spawned by a root agent may inherit the root's active engine
+    /// when both agents resolve the same named engine. This keeps provider and
+    /// model switches made through `/models` effective for children spawned
+    /// afterwards, while a child with a different engine override uses its own
+    /// configured engine.
+    ///
     /// A `Role::Root` agent whose `agent_type` resolves `can_spawn: true` is
     /// additionally wired with a [`ChildAgentManager`]; a `Role::Child` agent
     /// is wired via [`AgentLoop::with_child_role`] and has `agent_finish` (not
@@ -218,6 +225,7 @@ impl AgentFactory {
             agent_type,
             role,
             self.store.clone(),
+            None,
         )
     }
 
@@ -237,13 +245,16 @@ impl AgentFactory {
         agent_type: &str,
         role: Role,
         store: Option<Store>,
+        inherited_engine: Option<Arc<dyn Engine>>,
     ) -> anyhow::Result<(AgentLoop, mpsc::Receiver<UiUpdate>)> {
         let engine_name = resolve_engine_name(profile, agent_type);
 
         let configured_engine = engines
             .get(engine_name)
             .ok_or_else(|| anyhow::anyhow!("unknown engine: {engine_name}"))?;
-        let engine: Arc<dyn Engine> = if engines.len() == 1 {
+        let engine: Arc<dyn Engine> = if let Some(inherited_engine) = inherited_engine {
+            inherited_engine
+        } else if engines.len() == 1 {
             configured_engine.clone()
         } else {
             Arc::new(EngineRouter::new(engines.clone(), engine_name)?)
@@ -261,6 +272,11 @@ impl AgentFactory {
                 .get(agent_type)
                 .map(|agent_config| agent_config.can_spawn)
                 .unwrap_or(false);
+        let spawn_agent_types = if can_spawn {
+            configured_agent_types(profile)
+        } else {
+            Vec::new()
+        };
 
         let agent_finish_config = child_role_config
             .as_ref()
@@ -291,10 +307,12 @@ impl AgentFactory {
                 auto_approve_spawn,
                 allowed_tools: configured_allowed_tools,
                 include_spawn_subagent: can_spawn,
+                spawn_agent_types,
                 agent_finish: agent_finish_config,
             },
         ));
-        let (mut agent_loop, ui_rx) = AgentLoop::new(Arc::clone(&engine), registry);
+        let (agent_loop, ui_rx) = AgentLoop::new(Arc::clone(&engine), registry);
+        let mut agent_loop = agent_loop.with_configured_engine_name(engine_name);
 
         if let Some(child_role_config) = child_role_config {
             agent_loop = agent_loop.with_child_role(child_role_config);
@@ -307,6 +325,8 @@ impl AgentFactory {
                 auto_approve_spawn,
                 profile.clone(),
                 store.clone(),
+                engine.clone(),
+                engine_name.to_string(),
             );
             if let Some(store) = store.clone() {
                 manager.manager = manager.manager.with_store(store);
@@ -336,6 +356,11 @@ impl AgentFactory {
     /// through `finish_tx` — unless the child's own `agent_finish` tool already
     /// did so (checked from the child's final `Context`), or the child was
     /// cancelled by the parent (checked via the per-child `CancellationToken`).
+    ///
+    /// The root engine and its resolved name are captured so a child using the
+    /// same named engine shares the root's active router; children resolving a
+    /// different name still use their configured engine selection.
+    #[expect(clippy::too_many_arguments)]
     fn build_child_agent_manager(
         engines: HashMap<String, Arc<dyn Engine>>,
         allowed_tools: Vec<String>,
@@ -344,6 +369,8 @@ impl AgentFactory {
         auto_approve_spawn: bool,
         profile: ProfileConfig,
         parent_store: Option<Store>,
+        parent_engine: Arc<dyn Engine>,
+        parent_engine_name: String,
     ) -> BuiltChildAgentManager {
         let (finish_tx, finish_rx) = mpsc::channel::<FinishResult>(16);
         let (subagent_ui_tx, subagent_ui_rx) = mpsc::channel::<UiUpdate>(100);
@@ -357,16 +384,14 @@ impl AgentFactory {
                 let profile = profile.clone();
                 let finish_tx = finish_tx.clone();
                 let parent_store = parent_store.clone();
+                let parent_engine = parent_engine.clone();
+                let parent_engine_name = parent_engine_name.clone();
                 let child_engine_name =
                     resolve_engine_name(&profile, &request.agent_type).to_string();
-                let child_engine_config = engines
-                    .get(&child_engine_name)
-                    .map(|engine| engine.config());
-                let child_engine_display = engines
-                    .get(&child_engine_name)
-                    .map(|engine| EngineDisplayInfo::from_engine(engine.as_ref()));
                 let run_id = request.run_id;
                 let call_id = request.call_id;
+                let inherited_engine =
+                    (child_engine_name == parent_engine_name).then_some(parent_engine);
 
                 let child_role_config = ChildRoleConfig {
                     run_id,
@@ -395,6 +420,7 @@ impl AgentFactory {
                     &request.agent_type,
                     Role::Child(child_role_config),
                     None,
+                    inherited_engine,
                 );
                 let (child_loop, child_ui_rx) = match built {
                     Ok(built) => built,
@@ -421,10 +447,13 @@ impl AgentFactory {
                     }
                 };
 
-                if let Some(engine) = child_engine_display {
-                    let _ = forward_ui_tx
-                        .try_send(UiUpdate::ChildAgentEngineConfigured { run_id, engine });
-                }
+                let child_engine = child_loop.engine();
+                let child_engine_config = Some(child_engine.config());
+                let child_engine_display = child_loop.engine_display_info();
+                let _ = forward_ui_tx.try_send(UiUpdate::ChildAgentEngineConfigured {
+                    run_id,
+                    engine: child_engine_display,
+                });
 
                 let command_sender = child_loop.command_sender();
                 let task = request.task.clone();
@@ -598,6 +627,31 @@ fn resolve_engine_name<'profile>(
         .unwrap_or(profile.default_engine.as_str())
 }
 
+/// Return the deterministic catalog shown to a root model when it can spawn
+/// children. The built-in `default` type remains available even for profiles
+/// constructed in memory without an explicit `[agents.default]` table.
+fn configured_agent_types(profile: &ProfileConfig) -> Vec<AgentTypeInfo> {
+    let mut agent_types: Vec<_> = profile
+        .agents
+        .iter()
+        .map(|(name, config)| AgentTypeInfo {
+            name: name.clone(),
+            description: config.description.clone(),
+        })
+        .collect();
+    if !agent_types
+        .iter()
+        .any(|agent_type| agent_type.name == crate::config::DEFAULT_PROFILE_NAME)
+    {
+        agent_types.push(AgentTypeInfo {
+            name: crate::config::DEFAULT_PROFILE_NAME.to_string(),
+            description: None,
+        });
+    }
+    agent_types.sort_by(|left, right| left.name.cmp(&right.name));
+    agent_types
+}
+
 #[expect(clippy::too_many_arguments)]
 async fn drive_child_to_completion(
     mut child_loop: AgentLoop,
@@ -755,6 +809,7 @@ mod tests {
                 "default".to_string(),
                 AgentConfig {
                     engine: None,
+                    description: None,
                     allowed_tools: None,
                     timeout_secs: None,
                     persona: None,
@@ -779,6 +834,41 @@ mod tests {
         assert!(!ui_rx.is_closed(), "UiUpdate receiver should be open");
     }
 
+    #[test]
+    fn root_spawn_tool_advertises_configured_agent_type_descriptions() {
+        let (factory, mut profile) = make_factory();
+        profile.agents.insert(
+            "local-discovery".to_string(),
+            AgentConfig {
+                engine: None,
+                description: Some(
+                    "Read-only repository exploration without file modifications.".to_string(),
+                ),
+                allowed_tools: None,
+                timeout_secs: None,
+                persona: None,
+                can_spawn: false,
+            },
+        );
+
+        let (agent, _ui_rx) = factory
+            .create(&profile, "default", Role::Root)
+            .expect("factory creates the root agent");
+        let spawn_schema = agent
+            .registry()
+            .schemas()
+            .into_iter()
+            .find(|schema| schema.name == "spawn_subagent")
+            .expect("root agent should expose spawn_subagent");
+
+        assert!(spawn_schema.description.contains(
+            "- local-discovery: Read-only repository exploration without file modifications."
+        ));
+        assert!(spawn_schema
+            .description
+            .contains("- default: No description provided."));
+    }
+
     /// A profile with two mock engines: `main` and `fast`.
     fn two_engine_profile() -> ProfileConfig {
         let engine_config = |model: &str| EngineConfig {
@@ -801,6 +891,7 @@ mod tests {
                     "default".to_string(),
                     AgentConfig {
                         engine: None,
+                        description: None,
                         allowed_tools: None,
                         timeout_secs: None,
                         persona: None,
@@ -811,6 +902,7 @@ mod tests {
                     "quick".to_string(),
                     AgentConfig {
                         engine: Some("fast".to_string()),
+                        description: None,
                         allowed_tools: None,
                         timeout_secs: None,
                         persona: None,
@@ -991,6 +1083,7 @@ mod tests {
                 "myagent".to_string(),
                 AgentConfig {
                     engine: Some("custom".to_string()),
+                    description: None,
                     allowed_tools: None,
                     timeout_secs: None,
                     persona: None,
@@ -1031,6 +1124,7 @@ mod tests {
             "restricted".to_string(),
             AgentConfig {
                 engine: None,
+                description: None,
                 allowed_tools: Some(vec!["read".to_string()]),
                 timeout_secs: None,
                 persona: None,
@@ -1188,6 +1282,7 @@ mod tests {
                 "default".to_string(),
                 AgentConfig {
                     engine: None,
+                    description: None,
                     allowed_tools: None,
                     timeout_secs: None,
                     persona: None,
@@ -1228,6 +1323,7 @@ mod tests {
             &profile,
             &request.agent_type,
             Role::Child(child_role_config),
+            None,
             None,
         )
         .expect("child agent should construct successfully");

@@ -98,8 +98,9 @@ Currently the following AI model providers are supported:
 
 Named provider connections are constructed independently, so multiple
 connections can use the same implementation (for example, local Ollama and
-Ollama Cloud). The active connection is shown in the conversation footer, and
-`/models` queries each connection once and lists
+Ollama Cloud). The conversation footer shows the active named engine and model
+when a profile engine name is available; direct unnamed engines show only the
+model. `/models` queries each connection once and lists
 `provider_connection/model` entries so a selection can change both connection
 and model.
 
@@ -210,7 +211,10 @@ affect sandbox approval checks. See
   `status`, `result`/`error`, `sources`, `outstanding_count`, and `all_done`.
   Completion order is not a reliable ordering signal. The current scheduler
   runs at most one child at a time and queues further spawns, but that is an
-  implementation constraint rather than part of the model-facing contract.
+  implementation constraint rather than part of the model-facing contract. Its
+  description lists every configured agent type and its optional
+  model-facing `description`, so the parent can choose a suitable type instead
+  of guessing names.
   See
   [Child-agent delegation](#child-agent-delegation).
 - **agent_finish**: Only available to child agents (a root agent never sees
@@ -247,6 +251,16 @@ parent keeps processing its own messages and tools while the child works.
   parent's — a child is never auto-denied just for being a child.
 - Use `--auto-approve-spawn` to skip the human-approval prompt for
   `spawn_subagent` calls (mirrors `--auto-approve-edit` / `--auto-approve-write`).
+- A child spawned after a root `/models` switch uses the root's active
+  provider/model when it resolves the same named engine. An explicit engine
+  override for that child uses its own named engine selection.
+- Agent configuration selects a complete named engine; it cannot override
+  individual engine properties. Define a specialized named engine when a
+  child needs different model, temperature, context, reasoning, or connection
+  settings.
+- A change to a shared engine applies to the next LLM request, not to a
+  request that is already streaming. A child can therefore use the new
+  selection on a later request in the same run.
 
 See [implementation notes](./implementation-notes.md#child-agent-delegation-internals)
 for the full mechanics.
@@ -296,8 +310,8 @@ module structure (model/presenter/view/driver split).
   footer (mode/hint row and key-hints row). Key names in the key-hints row are
   bold, action text is normal, and multiple hints use a ` · ` separator. The
   mode/hint row also shows the
-  active `provider-connection → selected model-id` identity for the transcript
-  on screen, including an explicit reasoning effort in parentheses and the
+  active `named-engine → selected model-id` identity for the transcript on
+  screen, including an explicit reasoning effort in parentheses and the
   selected child while drilled in. In the main conversation it also shows separate counts
   for running and queued subagents in a compact `Subagents: <running> running,
   <queued> queued` label; finished subagents are excluded, zero-valued
@@ -427,12 +441,18 @@ See [configuration](./configuration.md) for all available fields.
 
 ### Runtime profiles
 
-A profile groups a default engine with optional per-agent overrides. This is the
-groundwork for Phase 6 child agents, which will let different agent types run against
-different engines automatically.
+A profile groups a default engine with optional per-agent overrides. Each agent
+type may also define a model-facing `description`; root agents that can spawn
+children receive all configured agent types and descriptions in the
+`spawn_subagent` tool definition.
 
 Profiles are read from `~/.ylva/profiles/<name>/config.toml`; see
 [configuration](./configuration.md#profile-file) for the supported keys.
+The `default` agent type is always available; when `[agents.default]` is
+omitted, it uses the built-in root configuration with child spawning enabled.
+Defining other agent types, such as `local-discovery`, does not disable the
+default agent. If `[agents.default]` is defined, its settings replace the
+built-in defaults.
 
 ## Slash commands
 

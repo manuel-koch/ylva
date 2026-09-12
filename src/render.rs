@@ -418,6 +418,7 @@ mod tests {
     fn project_for_draw_selects_the_identity_of_the_visible_conversation() {
         let mut state = AppState::new();
         state.engine_display = crate::llm::engine::EngineDisplayInfo {
+            engine_name: "openrouter".to_string(),
             provider_connection: "openrouter".to_string(),
             model: "root-model".to_string(),
             reasoning_effort: None,
@@ -443,6 +444,7 @@ mod tests {
         state.child_engine_displays.insert(
             run_id,
             crate::llm::engine::EngineDisplayInfo {
+                engine_name: "ollama/local2".to_string(),
                 provider_connection: "ollama".to_string(),
                 model: "child-model".to_string(),
                 reasoning_effort: None,

@@ -189,6 +189,26 @@ ONLY use "bash" tool to search for relevant files!
 
 ---
 
+Which subagent types can you use to delegate tasks ?
+
+---
+
+Run each the following task(s) in subagent(s) ( type = local-discovery )
+and let them report their findings back:
+
+- Analyze the `read` tool functionality implemented in source code
+  and list currently implemented features in a brief markdown descriptions.
+
+---
+
+Run each the following task(s) in subagent(s) ( choose least invasive subagent
+type ) and let them report their findings back:
+
+- Analyze the `read` tool functionality implemented in source code
+  and list currently implemented features in a brief markdown descriptions.
+
+---
+
 Discover the project structure related to agent tool implementations.
 Provide a 2-3 sentence summary for every source file.
 Run the summary task on each file in separate subagent and let it report its findings back.
@@ -200,11 +220,9 @@ its current content.
 
 ---
 
-Run the follow task in a subagent and let it report its findings back as structure JSON:
-
-Analyze the TUI functionality implemented in source code
-and list currently implemented features in a table with brief descriptions.
-Format result in structured JSON:
+Discover the project structure related to agent tool implementations.
+Provide a 2-3 sentence summary for every source file.
+Run the summary task on each file in separate subagent and let it report its findings back as structure JSON:
 
 ```json
 {

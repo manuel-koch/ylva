@@ -21,6 +21,11 @@ pub struct AgentConfig {
     /// `ProfileConfig::default_engine`.
     #[serde(default)]
     pub engine: Option<String>,
+    /// Optional model-facing summary of the tasks this agent type is suited
+    /// for. The root agent receives this in the `spawn_subagent` tool
+    /// description when choosing a child type.
+    #[serde(default)]
+    pub description: Option<String>,
     /// Subset of tool names the agent is permitted to invoke. When `None`, all
     /// registered tools are available. Tool filtering is implemented in Phase 6.
     #[serde(default)]

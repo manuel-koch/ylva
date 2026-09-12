@@ -1017,7 +1017,7 @@ fn footer_shows_running_and_queued_subagent_counts() {
 }
 
 #[test]
-fn footer_shows_the_active_provider_and_model() {
+fn footer_shows_the_active_named_engine_and_model() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use ratatui_textarea::TextArea;
@@ -1028,6 +1028,7 @@ fn footer_shows_the_active_provider_and_model() {
     let mut terminal = Terminal::new(backend).expect("terminal");
     let mut state = TuiState {
         engine_display: EngineDisplayInfo {
+            engine_name: "ollama/local".to_string(),
             provider_connection: "ollama".to_string(),
             model: "llama3.2".to_string(),
             reasoning_effort: Some("max".to_string()),
@@ -1048,12 +1049,12 @@ fn footer_shows_the_active_provider_and_model() {
         .map(|(column, row)| buffer.cell((column, row)).unwrap().symbol().to_string())
         .collect();
     assert!(
-        rendered.contains("ollama → llama3.2 (max)"),
-        "footer must show the active provider/model identity: {rendered:?}"
+        rendered.contains("ollama/local → llama3.2 (max)"),
+        "footer must show the active named-engine/model identity: {rendered:?}"
     );
     assert!(
-        !rendered.contains("ollama/llama3.2"),
-        "footer must separate the provider connection and model with an arrow: {rendered:?}"
+        !rendered.contains(" → ollama → "),
+        "footer must omit the provider connection identity: {rendered:?}"
     );
 
     state.engine_display.reasoning_effort = None;
@@ -1069,11 +1070,11 @@ fn footer_shows_the_active_provider_and_model() {
         .map(|(column, row)| buffer.cell((column, row)).unwrap().symbol().to_string())
         .collect();
     assert!(
-        rendered_without_reasoning.contains("ollama → llama3.2"),
-        "footer must retain the active provider/model identity: {rendered_without_reasoning:?}"
+        rendered_without_reasoning.contains("ollama/local → llama3.2"),
+        "footer must retain the active named-engine/model identity: {rendered_without_reasoning:?}"
     );
     assert!(
-        !rendered_without_reasoning.contains("ollama → llama3.2 ("),
+        !rendered_without_reasoning.contains("ollama/local → llama3.2 ("),
         "footer must omit the default reasoning effort: {rendered_without_reasoning:?}"
     );
 }

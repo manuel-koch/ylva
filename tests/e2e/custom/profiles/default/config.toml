@@ -18,6 +18,10 @@ api_key = "${OPENROUTER_API_KEY}"
 provider_connection = "ollama-local"
 model = "gemma4:e4b-mlx"
 
+[engines.local-discovery]
+provider_connection = "ollama-local"
+model = "gemma4:e4b-mlx"
+
 [engines."ollama/cloud"]
 provider_connection = "ollama-cloud"
 model = "gemma4:31b-cloud"
@@ -27,3 +31,9 @@ provider_connection = "openrouter"
 model = "deepseek/deepseek-v4-flash-0731"
 context_length = "265kb"
 reasoning = "max"
+
+[agents.local-discovery]
+description = "An agent that can perform read-only discovery tasks in workspace solely using builtin tools and a local AI-Model."
+engine = "local-discovery"
+# TODO: allowed_tools not yet supported !
+allowed_tools = ["read", "glob", "search"]

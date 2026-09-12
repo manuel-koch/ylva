@@ -910,6 +910,9 @@ pub struct ChildRoleConfig {
 /// task returns the final committed `Context` from `handle.await`.
 pub struct AgentLoop {
     engine: Arc<dyn Engine>,
+    /// The configured profile engine name for a directly constructed engine.
+    /// Routers report their current active name dynamically instead.
+    configured_engine_name: Option<String>,
     registry: Arc<ToolRegistry>,
     cmd_tx: mpsc::Sender<AgentCommand>,
     cmd_rx: Option<mpsc::Receiver<AgentCommand>>,
@@ -979,6 +982,7 @@ impl AgentLoop {
         let (agent_tx, agent_rx) = mpsc::channel::<AgentEvent>(10);
         let agent = AgentLoop {
             engine,
+            configured_engine_name: None,
             registry,
             cmd_tx,
             cmd_rx: Some(cmd_rx),
@@ -994,6 +998,13 @@ impl AgentLoop {
             store: None,
         };
         (agent, ui_rx)
+    }
+
+    /// Record the profile engine name for display when this loop wraps a
+    /// directly constructed (non-router) engine.
+    pub fn with_configured_engine_name(mut self, engine_name: impl Into<String>) -> Self {
+        self.configured_engine_name = Some(engine_name.into());
+        self
     }
 
     /// Wires this loop as a `Role::Child` agent: `config.parent_cancel`
@@ -1040,6 +1051,18 @@ impl AgentLoop {
     /// queries (the model list) without reaching through the factory.
     pub fn engine(&self) -> Arc<dyn Engine> {
         self.engine.clone()
+    }
+
+    /// Snapshot the engine identity currently used by this agent.
+    ///
+    /// A router's active named engine takes precedence over the configured
+    /// initial name so a `/models` connection switch is reflected immediately.
+    pub fn engine_display_info(&self) -> crate::llm::EngineDisplayInfo {
+        let mut display = crate::llm::EngineDisplayInfo::from_engine(self.engine.as_ref());
+        if display.engine_name.is_empty() {
+            display.engine_name = self.configured_engine_name.clone().unwrap_or_default();
+        }
+        display
     }
 
     /// Enables persistence for this loop: every message the outer loop
