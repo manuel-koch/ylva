@@ -25,7 +25,7 @@
       This seems to be noise for user and only relevant for the
       agent harness internally or the LLM we are talking to.
 
-- [ ] Automatic column width sizing while rendering markdown tables seems
+- [x] Automatic column width sizing while rendering markdown tables seems
       too simple, resulting in very uneven distribution of column widths
       based on the content within the columns. E.g. here the 1st column
       is very small while the 2nd column is wide.
