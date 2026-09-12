@@ -79,12 +79,13 @@ Pressing the other key instead starts that key's own fresh confirm window
 that `ctrl-c`, and `ctrl-c` then `esc` never quits on that `esc`; each key's
 first press must be repeated to confirm its own action.
 
-`shift-enter` / `alt-enter` rely on the kitty keyboard protocol: the TUI
-enables `DISAMBIGUATE_ESCAPE_CODES` on startup (pushed with the alternate
-screen and popped on exit) so terminals that support it (ZED, iTerm2, kitty,
-WezTerm, …) send distinguishable CSI-u sequences. Unsupported terminals simply
-ignore the flag; there `shift-enter`/`alt-enter` may fall back to a plain
-`enter` and send the message.
+`shift-enter` / `alt-enter` rely on terminal-specific modified-key encodings.
+The TUI enables the kitty keyboard protocol's `DISAMBIGUATE_ESCAPE_CODES` on
+startup (pushed with the alternate screen and popped on exit) so terminals
+that support it (iTerm2, kitty, WezTerm, …) send distinguishable CSI-u
+sequences. Terminals that encode `shift-enter` as a line feed (such as Zed's
+terminal) are normalized to the same newline action. Other unsupported
+terminals may fall back to a plain `enter` and send the message.
 
 ## Build info
 

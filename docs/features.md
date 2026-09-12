@@ -357,9 +357,10 @@ module structure (model/presenter/view/driver split).
   visible text in the slash-command overlay and copies it to the clipboard on
   release. `read`/`glob` tool status lines and approval buttons remain
   mouse-clickable.
-- **Shift+Enter / Alt+Enter:** insert a newline in terminals that support the
-  kitty keyboard protocol (ZED, iTerm2, kitty, WezTerm), so the modifier is
-  not mistaken for send.
+- **Shift+Enter / Alt+Enter:** insert a newline through the terminal's
+  modified-key encoding. Kitty keyboard protocol terminals (iTerm2, kitty,
+  WezTerm) report the modifier directly; terminals that encode Shift+Enter as
+  a line feed (such as Zed's terminal) are normalized to the same action.
 - **Message dedenting:** submitted messages are automatically dedented —
   common leading whitespace is stripped and leading/trailing blank-only lines
   are removed. This makes pasting indented code snippets or quoted text send

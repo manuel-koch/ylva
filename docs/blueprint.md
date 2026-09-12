@@ -2606,11 +2606,12 @@ Decisions recorded during implementation:
 - **Mouse capture is enabled.** `EnableMouseCapture`/`DisableMouseCapture` are part of the
   enter/leave sequences; without them the wheel and clickable approval buttons would never receive
   events.
-- **Kitty keyboard protocol for modified keys.** `run_tui_on_stdout` pushes
+- **Modified Enter compatibility.** `run_tui_on_stdout` pushes
   `KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES` (and pops it in the terminal guard) so
-  supporting terminals (ZED, iTerm2, kitty, WezTerm) report `Shift+Enter`/`Alt+Enter` as
-  distinguishable CSI-u sequences; `Shift+Enter`/`Alt+Enter` then insert a newline instead of
-  being mistaken for a bare `Enter`. Unsupported terminals ignore the flag.
+  supporting terminals (iTerm2, kitty, WezTerm) report `Shift+Enter`/`Alt+Enter` as
+  distinguishable CSI-u sequences. Terminals that encode `Shift+Enter` as a line feed, such as
+  Zed's terminal, are normalized before routing; unsupported terminals may still fall back to a
+  bare `Enter`.
 - **Mouse click/drag in the input box.** A left-click places the cursor at the clicked character
   (word-wrapping accounted for); a left-drag selects text. The input box's on-screen rect is
   written to `TuiState` each frame for hit-testing.

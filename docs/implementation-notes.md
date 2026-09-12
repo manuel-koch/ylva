@@ -707,10 +707,11 @@ which is why `/tools` needs no I/O.
 - **Queued subagent bubbles:** show a static `≡` glyph instead of the
   animated spinner while `status=queued` (waiting for the running slot to
   free up); the spinner only appears once `status=running`.
-- **Shift+Enter / Alt+Enter:** insert a newline via the kitty keyboard
-  protocol (`DISAMBIGUATE_ESCAPE_CODES`), so terminals that support it (ZED,
-  iTerm2, kitty, WezTerm) report the modifier and the newline is not
-  mistaken for send.
+- **Shift+Enter / Alt+Enter:** insert a newline via the terminal's
+  modified-key encoding. The driver enables the kitty keyboard protocol
+  (`DISAMBIGUATE_ESCAPE_CODES`) for terminals that support it; terminals that
+  encode Shift+Enter as a line feed (such as Zed's terminal) are normalized
+  before presenter routing.
 - **Message dedenting:** submitted messages are automatically dedented —
   common leading whitespace is stripped (via `textwrap::dedent`) and
   leading/trailing blank-only lines are removed.

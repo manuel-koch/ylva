@@ -1573,6 +1573,68 @@ mod tests {
         (AppState::new(), textarea, cmd_tx, cmd_rx)
     }
 
+    #[tokio::test]
+    async fn modified_enter_inserts_a_newline_into_the_textarea() {
+        for modifier in [KeyModifiers::SHIFT, KeyModifiers::ALT] {
+            let (mut state, _initial_textarea, cmd_tx, _cmd_rx) = setup();
+            let mut textarea = TextArea::from(vec!["first line".to_string()]);
+            configure_textarea(&mut textarea);
+            textarea.move_cursor(ratatui_textarea::CursorMove::End);
+            let key_event = KeyEvent::new(KeyCode::Enter, modifier);
+            let effects = presenter::update(
+                &mut state,
+                TuiEvent::Input(InputEvent::KeyInput(key_event)),
+                &textarea_ctx_from(&textarea),
+            );
+
+            execute_effects(
+                &mut state,
+                &mut textarea,
+                &cmd_tx,
+                effects,
+                &mut MouseDrag::default(),
+                &mut NoopClipboard,
+                &mut PendingRunIds::default(),
+            )
+            .await;
+
+            assert_eq!(
+                textarea.lines(),
+                &["first line", ""],
+                "modifier {modifier:?} should insert a newline"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_shift_enter_encoding_inserts_a_newline_into_the_textarea() {
+        let (mut state, _initial_textarea, cmd_tx, _cmd_rx) = setup();
+        let mut textarea = TextArea::from(vec!["first line".to_string()]);
+        configure_textarea(&mut textarea);
+        textarea.move_cursor(ratatui_textarea::CursorMove::End);
+
+        let action = crate::events::map_event(crossterm::event::Event::Key(KeyEvent::new(
+            KeyCode::Char('j'),
+            KeyModifiers::CONTROL,
+        )))
+        .expect("line-feed key event should be mapped");
+        let event = app_action_to_tui_event(action).expect("key action should become a TUI event");
+        let effects = presenter::update(&mut state, event, &textarea_ctx_from(&textarea));
+
+        execute_effects(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            effects,
+            &mut MouseDrag::default(),
+            &mut NoopClipboard,
+            &mut PendingRunIds::default(),
+        )
+        .await;
+
+        assert_eq!(textarea.lines(), &["first line", ""]);
+    }
+
     #[test]
     fn spinner_ticks_while_root_is_idle_but_a_spawned_child_is_still_running() {
         // Regression: the root loop's own `TuiMode` can settle to `Idle` while
