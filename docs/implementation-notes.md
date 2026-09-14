@@ -153,6 +153,24 @@ and covers only the fields actually populated for that result — the schema
 can never drift from the data. Each tool description sent in the `tools`
 array includes its argument schema.
 
+The `glob` result metadata contains flat `files`, `directories`, and `total`
+counts, with `total` always equal to `files + directories`, plus a required
+boolean `truncated`. `truncated` is `false` when all matching paths are
+returned and `true` when `limit` omits additional paths; the omission count is
+intentionally not reported. The supplied search root is never a match and is
+excluded from returned paths and every count, regardless of the pattern or
+option flags. `limit` is optional; omitting it requests no result-count limit,
+while arbitrary large values do not represent a separate unlimited mode.
+`git_ignore` applies `.gitignore` rules only; it does not
+suppress the `.git` directory or other dot-prefixed paths. `dot_ignore`
+controls those paths independently and defaults to `false`.
+CLI/TUI summaries are a separate tool-provided projection of result metadata,
+so tools can omit default-valued properties without changing the complete
+metadata sent to the LLM/API. `glob` omits zero-valued `files` and
+`directories`, `truncated=false`, and `total` when either type count is zero,
+because that total is inferable, except that an empty result displays
+`total=0`.
+
 ## Path-like argument normalization
 
 Path-like arguments (`read`/`write`/`edit`/`search`'s `path`, `glob`'s
@@ -241,7 +259,8 @@ user-facing on-disk contract; this section is the contributor view.
   `clarify` keeps only its question inline while its context and choices remain
   body sections, and
   replayed bubbles use the same title projection as live bubbles; calls
-  without title arguments use an empty title projection.
+  without title arguments use an empty title projection. The projection is
+  schema-based, so unknown input keys are omitted from CLI/TUI titles.
   System messages and implicit harness notes remain model-only.
 - **Tool-result payload.** `Message::ToolResult` carries a serializable
   `ToolResult` payload as its flattened value, and

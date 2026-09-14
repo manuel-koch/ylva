@@ -107,12 +107,36 @@ pub trait ToolCallResult: Send + Sync + std::fmt::Debug {
 
     /// Structured metadata for this result.
     ///
-    /// All keys are rendered as `key=value` in the TUI/CLI tool bubble and
-    /// embedded in the `result_metadata` field of the tool-response envelope.
+    /// The complete value is embedded in the `result_metadata` field of the
+    /// tool-response envelope. The CLI/TUI projection is provided separately
+    /// by [`display_summary`](Self::display_summary).
     ///
     /// Returns `None` for tools whose text already captures everything relevant.
     fn metadata(&self) -> Option<serde_json::Value> {
         None
+    }
+
+    /// Properties to render in the CLI/TUI tool summary.
+    ///
+    /// The default renders every property from [`metadata`](Self::metadata).
+    /// Tools may omit default-valued properties here without changing the
+    /// complete structured metadata sent to the LLM/API.
+    fn display_summary(&self) -> Vec<(String, String)> {
+        self.metadata()
+            .and_then(|metadata| metadata.as_object().cloned())
+            .map(|metadata| {
+                metadata
+                    .into_iter()
+                    .map(|(key, value)| {
+                        let display = match value {
+                            serde_json::Value::String(value) => value,
+                            other => other.to_string(),
+                        };
+                        (key, display)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// JSON Schema describing the fields that are actually present in
@@ -230,14 +254,17 @@ pub trait ToolCall: Send + Sync {
     /// schema's field order.
     fn argument_order(&self, key: &str) -> usize;
 
-    /// Non-content-section, non-null arguments sorted by schema-defined rank.
+    /// Non-content-section, non-null arguments supported by the tool schema,
+    /// sorted by schema-defined rank. Unknown input keys are not displayed.
     fn title_arguments(&self) -> Vec<(String, serde_json::Value)> {
         let mut args: Vec<(String, serde_json::Value)> = self
             .arguments()
             .as_object()
             .into_iter()
             .flat_map(|map| map.iter())
-            .filter(|(k, v)| !v.is_null() && !self.is_body_argument(k))
+            .filter(|(k, v)| {
+                !v.is_null() && !self.is_body_argument(k) && self.argument_order(k) != usize::MAX
+            })
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         args.sort_by_key(|(k, _)| self.argument_order(k));
@@ -335,7 +362,8 @@ pub trait Tool: Send + Sync {
     /// primary (inline) one. Ranks are derived from the tool's schema property
     /// order, which reflects the argument **struct's declaration order** (via
     /// schemars `preserve_order`), so no per-tool ordering needs to be
-    /// hand-written. Unknown keys sort last.
+    /// hand-written. Unknown keys return `usize::MAX` and are omitted from
+    /// invocation titles.
     ///
     /// Handles schemas produced by `#[serde(flatten)]` on a tagged enum, where
     /// schemars emits the outer struct's properties inside an `allOf` branch
@@ -846,6 +874,34 @@ mod tests {
         );
         assert_eq!(registry.names().len(), 7);
         assert!(registry.get(clarify::ClarifyTool::NAME).is_some());
+    }
+
+    #[test]
+    fn registered_tool_titles_omit_unknown_arguments() {
+        let sandbox = std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new()));
+        let config = ToolRegistryConfig {
+            allowed_tools: DEFAULT_TUI_TOOLS
+                .iter()
+                .map(|name| name.to_string())
+                .collect(),
+            include_spawn_subagent: true,
+            ..ToolRegistryConfig::default()
+        };
+        let registry = default_registry(sandbox, config);
+
+        for tool_name in registry.names() {
+            let call = registry
+                .create_call(
+                    &tool_name,
+                    uuid::Uuid::new_v4(),
+                    serde_json::json!({ "unknown_argument": "not supported" }),
+                )
+                .expect("registered tool call");
+            assert!(
+                call.title_arguments().is_empty(),
+                "{tool_name} displayed an unsupported argument"
+            );
+        }
     }
 
     #[test]

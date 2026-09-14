@@ -773,28 +773,7 @@ impl PendingTool {
                                 .and_then(|schema| serde_json::to_value(schema).ok())
                         });
                         let result = tool_output.text();
-                        // All metadata keys become the UI summary (key=value).
-                        let summary: Vec<(String, String)> = result_metadata
-                            .as_ref()
-                            .and_then(|m| {
-                                if let serde_json::Value::Object(obj) = m {
-                                    Some(obj)
-                                } else {
-                                    None
-                                }
-                            })
-                            .map(|obj| {
-                                obj.iter()
-                                    .map(|(k, v)| {
-                                        let display = match v {
-                                            serde_json::Value::String(s) => s.clone(),
-                                            other => other.to_string(),
-                                        };
-                                        (k.clone(), display)
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
+                        let summary = tool_output.display_summary();
                         let content_sections = tool_output.content_sections();
                         let _ = agent_tx
                             .send(AgentEvent::ToolDone {

@@ -51,6 +51,13 @@ __EOT__
 seperator
 
 ylva << '__EOT__'
+Search for files/directories in the project root (recursive).
+Clamp on 50 matched paths.
+__EOT__
+
+seperator
+
+ylva << '__EOT__'
 How many files are in project ( incl. git ignored files and hidden files) ?
 __EOT__
 

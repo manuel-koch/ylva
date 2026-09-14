@@ -170,14 +170,28 @@ affect sandbox approval checks. See
   and context line is annotated with its position in the old and/or new file.
   Requires user approval by default.
 - **glob**: Search for paths using a glob `pattern`, including wildcards like `*`, `?`, `**`, `[...]`.
-  Hidden files (dot-prefixed names) are **included by default**, matching `find . -type f` behaviour.
-  Optional `dot_ignore` (default `false`); set to `true` to exclude any path component that starts
-  with `.`. Optional `git_ignore` (default `true`) skips gitignored paths;
-  set to `false` to use plain glob matching without gitignore rules. Optional `only_files` /
-  `only_dirs` filters restrict results to files or directories only (mutually exclusive; both `true`
-  returns an error). Optional `limit` caps the result count; when capped, `ignored_matches` and
-  `matches` are set in result metadata. Optional `only_count`
-  returns only the match count via `matches` in metadata; content is empty.
+  Patterns are resolved relative to cwd unless absolute; to search beneath a sub-directory, include
+  that directory in the pattern (for example, `docs/**/*.md`). There is no separate `path`
+  argument. Bare `**` matches directories; use `**/*` to match files and directories recursively.
+  The search root is never a match and is always excluded from returned paths and all
+  counts, regardless of the pattern or option flags; only descendants are eligible. Hidden files
+  (dot-prefixed names) are **included by default**, matching `find . -type f` behaviour. Optional
+  `dot_ignore` (default `false`); set to `true` to exclude any path component that starts with `.`.
+  Optional `git_ignore` (default `true`) skips paths matched by `.gitignore` rules; it does not
+  exclude the `.git` directory or other dot-prefixed paths. Set `dot_ignore` to `true` to exclude
+  them. Set `git_ignore` to `false` to use plain glob matching without gitignore rules. Optional
+  `only_files` / `only_dirs` filters restrict results to files or directories only (mutually
+  exclusive; both `true` returns an error). Optional `limit` caps the result count; omit it for
+  no result-count limit rather than using an arbitrary large value.
+  Result metadata contains flat `files`, `directories`, and `total` counts, where `total` is the
+  sum of the other two fields, plus a boolean `truncated`. `truncated` is `false` when all
+  matching paths are returned and `true` when `limit` omits additional paths; it does not report
+  an omission count. Optional `only_count` returns no paths and exposes the same counts; the result
+  text retains the matching total.
+  CLI/TUI summaries use a tool-provided display projection: `glob` omits zero-valued `files` and
+  `directories` and `truncated=false`. It omits `total` when either type count is zero, because
+  the total is then inferable, except that an empty result displays `total=0`; the complete
+  metadata remains available to the LLM/API.
   Paths inside the workspace are auto-approved; paths outside are denied by the sandbox.
 - **bash**: Execute a shell command or multi-line script via `bash -c` from the
   current working directory, which is the workspace root in normal runtime.

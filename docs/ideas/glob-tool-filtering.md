@@ -1,28 +1,51 @@
 # Glob tool filtering
 
+Patterns are resolved relative to cwd unless absolute. To search beneath a
+sub-directory, include that directory in the pattern (for example,
+`docs/**/*.md`); there is no separate `path` argument.
+Bare `**` matches directories; use `**/*` to match files and directories
+recursively.
+
 Additional properties for the `glob` tool exposed to AI models:
 
-- `git_ignore`: boolean (default false). When true, applies git-ignore rules
-  when searching for matching files.
+- `git_ignore`: boolean (default true). When true, applies git-ignore rules
+  when searching for matching files. It does not exclude the `.git` directory
+  or other dot-prefixed paths.
+- `dot_ignore`: boolean (default false). When true, excludes paths with a
+  dot-prefixed component.
 - `only_count`: boolean (default false). When true, returns only the match count,
   not the matched paths.
-- `limit`: integer. Caps the number of results returned.
+- `limit`: integer. Caps the number of results returned. Omit it for no
+  result-count limit rather than using an arbitrary large value.
 - `only_files`: boolean (default false). When true, returns only files.
 - `only_dirs`: boolean (default false). When true, returns only directories.
 
+The supplied search root is never a match and is always excluded from returned
+paths and all counts, regardless of the pattern or option flags. Only
+descendants of the search root are eligible.
+
 ## Structured result metadata
 
-Add a `metadata` field (`serde_json::Value`) to `ToolCallResult` so tools
-can return structured attributes alongside their text content. The metadata is
-serialized into the tool-role message sent to the LLM.
+The result metadata contains flat `files`, `directories`, and `total` fields,
+where `total` is the sum of the other two fields, plus a required boolean
+`truncated`. `truncated` is `false` when all matching paths are returned and
+`true` when `limit` omits additional paths, without reporting an omission
+count:
 
-Useful cases:
+```json
+{
+  "files": 42,
+  "directories": 3,
+  "total": 45,
+  "truncated": false
+}
+```
 
-- **Truncation signalling** — when `limit` caps the result, metadata can carry
-  `{"truncated": true, "total_matches": 500, "shown": 20}` so the LLM knows
-  it hasn't seen the full set.
-- **Aggregates replacing verbose output** — when `only_count` is set, metadata
-  carries `{"matched_count": 42}` instead of a file list.
+The counts describe matching descendants returned after type filters and
+`limit`. With `only_count`, no paths are listed, but the same counts are
+returned and the result text retains the matching total.
 
-A bare count on an untruncated result adds no information the LLM cannot derive
-itself; metadata is most valuable when the content is intentionally incomplete.
+CLI/TUI summaries omit default-valued `files`, `directories`, and `truncated`
+properties. They also omit `total` when either type count is zero because it is
+inferable, except that an empty result displays `total=0`; the complete metadata
+remains available to the LLM/API.

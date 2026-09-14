@@ -206,13 +206,14 @@ named glob rule (last match wins):
 | Rule | Verdict | Notes |
 |---|---|---|
 | `outside_workspace` | `AutoDenied` | Any path that normalizes outside the workspace root. |
-| `dot_path` | `AutoDenied` | Any path whose relative-to-root form has a component starting with `.` (dot-files/dot-directories). |
+| `dot_path` | `AutoDenied` | Any content-tool path whose relative-to-root form has a component starting with `.` (dot-files/dot-directories). `glob` enumeration may inspect dot-prefixed paths inside the workspace. |
 
 **WIP:** These two rules are not yet configurable — Phase 9 is expected to load
 per-tool `[tool.*]` rule lists (including `outside_workspace`/`dot_path`
-overrides) from the layered TOML config; until then the defaults above apply to
-every tool uniformly. `search`'s `path: None` (cwd, never leaves the
+overrides) from the layered TOML config; until then the defaults above apply
+uniformly to content tools. `search`'s `path: None` (cwd, never leaves the
 workspace by construction) skips the sandbox check entirely and is
 auto-approved; when a `path` is given, it goes through the same
-`check_path`/`dot_path`/`outside_workspace` evaluation as `read`, `write`,
-`edit`, and `glob`.
+`check_path`/`dot_path`/`outside_workspace` evaluation as `read`, `write`, and
+`edit`. `glob` uses the same workspace boundary and named-rule checks but
+allows dot-prefixed paths because it only enumerates paths.

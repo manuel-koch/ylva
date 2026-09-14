@@ -264,6 +264,21 @@ impl SandboxContext {
     /// 3. Named glob rules (from `self.rules`) are evaluated last; last match wins.
     /// 4. If nothing fires → `None` (sandbox abstains).
     pub fn check_path(&self, path: &Path) -> Option<ApprovalCheck> {
+        self.check_path_with_dot_path_access(path, false)
+    }
+
+    /// Check whether an in-workspace enumeration may traverse `path`,
+    /// allowing dot-prefixed components while retaining workspace and named
+    /// rule enforcement.
+    pub fn check_path_allowing_dot_paths(&self, path: &Path) -> Option<ApprovalCheck> {
+        self.check_path_with_dot_path_access(path, true)
+    }
+
+    fn check_path_with_dot_path_access(
+        &self,
+        path: &Path,
+        allow_dot_paths: bool,
+    ) -> Option<ApprovalCheck> {
         let workspace_root = {
             let guard = self.sandbox.read().expect("sandbox lock poisoned");
             guard.workspace_root.clone()
@@ -294,7 +309,7 @@ impl SandboxContext {
             // examined, not system directories embedded in the workspace path itself.
             // TODO: make this configurable via named rule `dot_path`.
             if let Ok(relative) = effective.strip_prefix(&workspace_root) {
-                if Self::is_dot_path(relative) {
+                if !allow_dot_paths && Self::is_dot_path(relative) {
                     verdict = Some(ApprovalCheck::AutoDenied {
                         reason: "Access denied by security policy: \
                                  dot-files and dot-directories are not accessible"
@@ -385,6 +400,20 @@ mod tests {
                 Some(ApprovalCheck::AutoDenied { .. })
             ),
             "dot-directory relative to workspace should be Some(AutoDenied)"
+        );
+    }
+
+    #[test]
+    fn check_path_allowing_dot_paths_abstains_inside_workspace() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let workspace = temporary_dir.path().to_path_buf();
+        let sandbox = make_sandbox(&workspace);
+        let context = SandboxContext::new(Arc::clone(&sandbox));
+        let dot_dir_path = workspace.join(".git/config");
+        assert_eq!(
+            context.check_path_allowing_dot_paths(&dot_dir_path),
+            None,
+            "dot-directory enumeration inside the workspace should abstain"
         );
     }
 

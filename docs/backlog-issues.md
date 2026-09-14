@@ -26,3 +26,9 @@
       ```
       Resolved: omitted `mode` now defaults to `lines`; use `mode: "bytes"` for
       explicit byte ranges.
+
+- [ ] Very long lines of LLM thinking/streaming are not wrapped at TUI right
+      bubble edge.
+      e.g. a long JSON line output by LLM that has no linebreak is just
+      rendered as a very long line where the right portion of the line is
+      beyond the right edge of the bubble and not visible.
