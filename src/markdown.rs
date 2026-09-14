@@ -315,8 +315,9 @@ fn push_words(buffer: &mut Vec<Word>, text: &str, style: InlineStyle) {
 }
 
 /// Greedily wraps `words` into lines of at most `width` columns, one space
-/// between words.
+/// between words, splitting oversized words at display-width boundaries.
 fn wrap_words(words: &[Word], width: usize) -> Vec<Vec<Word>> {
+    let width = width.max(1);
     let mut lines: Vec<Vec<Word>> = Vec::new();
     let mut current: Vec<Word> = Vec::new();
     let mut current_len: usize = 0;
@@ -326,6 +327,31 @@ fn wrap_words(words: &[Word], width: usize) -> Vec<Vec<Word>> {
         if !current.is_empty() && current_len + extra_space + word_len > width {
             lines.push(std::mem::take(&mut current));
             current_len = 0;
+        }
+        if word_len > width {
+            let mut remaining = word.text.as_str();
+            while !remaining.is_empty() {
+                let (chunk, consumed_bytes) = take_display_width_prefix(remaining, width);
+                if !current.is_empty() {
+                    lines.push(std::mem::take(&mut current));
+                    current_len = 0;
+                }
+                let chunk_width = terminal_display_width(&chunk);
+                if consumed_bytes == remaining.len() {
+                    current.push(Word {
+                        text: chunk,
+                        style: word.style,
+                    });
+                    current_len = chunk_width;
+                } else {
+                    lines.push(vec![Word {
+                        text: chunk,
+                        style: word.style,
+                    }]);
+                }
+                remaining = &remaining[consumed_bytes..];
+            }
+            continue;
         }
         if !current.is_empty() {
             current_len += 1;
@@ -806,6 +832,20 @@ mod tests {
                 assert_eq!(span.style, Style::default());
             }
         }
+    }
+
+    #[test]
+    fn unbreakable_inline_text_wraps_without_exceeding_requested_width() {
+        let text = "abcdefghijklmnop";
+        let width = 12;
+        let lines = render_markdown(text, width);
+        let rendered: Vec<String> = lines.iter().map(plain_text).collect();
+
+        assert!(
+            lines.iter().all(|line| line.width() <= width),
+            "unbreakable inline text exceeded width {width}: {rendered:?}"
+        );
+        assert_eq!(rendered.concat(), text);
     }
 
     #[test]

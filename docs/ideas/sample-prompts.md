@@ -73,6 +73,9 @@ Create a 50 word sentence ( without newline ) and save it too `../logs/long-line
 
 Create a 50 word sentence ( without newline ) and save it too `logs/long-line.md`.
 
+Create a 50 word sentence ( without newline, use "-" to join words )
+and save it too `logs/long-words-line.md`.
+
 Use search tool to find markdown files that contain the case-insensitive word `tool`.
 
 Use search tool to find Rust source files that contain the case-sensitive word `SearchTool`,
