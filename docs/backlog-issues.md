@@ -1,6 +1,6 @@
 # Backlog of issues discovered while testing
 
-- [ ] Drill-in a subagent conversation in TUI should be refactored, one might
+- [x] Drill-in a subagent conversation in TUI should be refactored, one might
       misread the conversation and assume it is from the main conversation,
       scrolled so that the subagent bubble appears at top of view.
       Maybe re-using the subagent bubble is not a good idea ?
