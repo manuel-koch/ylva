@@ -1040,7 +1040,7 @@ enum MessageTier {
 }
 
 struct Context {
-    messages: Vec<Message>,  // Phase 1: simple Vec.  Phase 10 adds TieredMessage + token_count.
+    messages: Vec<Message>,  // Phase 1: simple Vec.  Phase 11 adds TieredMessage + token_count.
 }
 
 impl Context {
@@ -1060,7 +1060,7 @@ impl Context {
         &self.messages
     }
     // Phase 3 adds: push_tool_result, push_tool_error, descope_pending_tools
-    // Phase 10 adds: push_system, push_initial_context, maybe_compact, token counting
+    // Phase 11 adds: push_system, push_initial_context, maybe_compact, token counting
 }
 ```
 
@@ -1068,23 +1068,23 @@ impl Context {
 
 - `Context::new()` seeds the initial system message `Message::System { content:
   "You are Ylva, a helpful agent with tool capabilities." }` (SSOT constant for
-  Phase 1; Phase 9 sources this from a customizable **SOUL.md**,
+  Phase 1; Phase 10 sources this from a customizable **SOUL.md**,
   see §4G).
 - `push_user(text)` → `Message::User { content: text }`
 - `push_assistant(content, status, tool_calls)` →
   `Message::Assistant { content, status, tool_calls }`
 
-**Phase 10 (future):** Replace `Vec<Message>` with `Vec<TieredMessage>`, add
+**Phase 11 (future):** Replace `Vec<Message>` with `Vec<TieredMessage>`, add
 `push_system`, `push_initial_context`, `push_compacted`, `maybe_compact`,
 `find_oldest_droppable`, and `find_oversized_result`.
 
 **Context ownership rule (HARD):** The outer agent loop is the **sole writer** to `Context`.
 
-**Compaction (Phase 10 future):**
+**Compaction (Phase 11 future):**
 
 Phase 1 does not implement compaction or token counting. The full algorithm
 (`maybe_compact`, `find_oldest_droppable`, `find_oversized_result`) is deferred
-until Phase 10 when `TieredMessage` and `tiktoken-rs` are introduced.
+until Phase 11 when `TieredMessage` and `tiktoken-rs` are introduced.
 
 **Compaction trigger and target:** `maybe_compact` uses a **hysteresis** model
 with a single control, `compact_target_ratio` (fraction of `context_length`):
@@ -1105,7 +1105,7 @@ with a single control, `compact_target_ratio` (fraction of `context_length`):
   in practice over-discards, add `max_drop_ratio` ("never drop more than X% of
   current in one pass") then.
 
-**Tool-result truncation (Phase 10 future):** Tool results are **truncated at
+**Tool-result truncation (Phase 11 future):** Tool results are **truncated at
 insertion** to a configurable cap (default ~8–16 KB / engine-tunable), with a
 clear marker such as `… [truncated M of K chars]`. Combined with
 `maybe_compact` preferring oversized results, a large result neither swallows
@@ -1113,7 +1113,7 @@ the window nor forces many older turns to be dropped. If the model needs more
 of a file, it re-calls `read`/`edit` with `offset`/`limit` — the
 existing tool contract.
 
-**Phase 10 (future):** Replace `find_oldest_droppable` + `remove` with a
+**Phase 11 (future):** Replace `find_oldest_droppable` + `remove` with a
 summarization pass: collect K oldest `Recent` messages, spawn a background
 summarizer model, and replace them with one `Compacted` system message.
 
@@ -1163,7 +1163,7 @@ generation is reserved for the explicit interrupt (`Ctrl+C` / `Esc`).
 **Token counting:** Use `tiktoken-rs` for OpenAI-compatible models and a byte-length
 heuristic (4 chars ≈ 1 token) for Ollama as a cheap fallback. Maintain a rolling
 window that trims the oldest user/assistant pairs (never the system prompt) when
-the total exceeds the model limit. For a more advanced solution (Phase 10), summarise
+the total exceeds the model limit. For a more advanced solution (Phase 11), summarise
 dropped messages via a cheap summariser model call and prepend a system message
 with the summary.
 
@@ -1568,7 +1568,7 @@ a chat (the root agent's persona) follows the same scopes, expressed as a
 built-in default. It resolves through the same three-layer fallback chain
 below. Phase 1 hard-codes the default message (`"You are Ylva, a helpful agent
 with tool capabilities."`) as an SSOT constant; the SOUL.md loader replaces
-that constant's source in the config phase (§4C, §7 Phase 9).
+that constant's source in the config phase (§4C, §7 Phase 10).
 
 **Three-layer fallback chain**, resolved per-file with **whole-layer replace**
 (highest layer that defines a file wins; lower layers ignored for that file):
@@ -1610,7 +1610,7 @@ already-exported environment variable taking precedence over the `.env`
 value. TOML string values can reference the merged environment with
 `${ENV_VAR}`. Missing variables are startup errors, and secret values are
 never logged. Project-scoped `.env` loading and the `ylva init --project`-
-managed `.gitignore` remain Phase 9 work.
+managed `.gitignore` remain Phase 10 work.
 
 **Global agent types** (`~/.ylva/agents/`) define *behavior*: tools,
 prompts, max iterations, timeouts, `can_spawn`. They are fully self-contained
@@ -1749,7 +1749,8 @@ explicit `<role>_engine` → `default_engine` → hard error.
 
 ```toml
 # Future roles, added when the corresponding feature is implemented:
-compact_engine = "openrouter_small"   # context compaction summarizer (Phase 10)
+utility_engine = "openrouter_small"  # session title generator (Phase 9)
+compact_engine = "openrouter_small"   # context compaction summarizer (Phase 11)
 # curator_engine = "openrouter_small" # reserved for a future curator child agent
 ```
 
@@ -1890,7 +1891,8 @@ store (see §4H). Two JSONL record shapes are written per parent session file:
 - The parent-session link is explicit (`parent_session`, `parent_message_index`).
 - The full child conversation is stored as its **own session file** under
   the same `project_key` (its own `<sub-session_id>.jsonl`) with its own
-  `meta` header (auto-title = the child `task`), mirroring §4H layout —
+  `meta` header whose title is generated from the child's task and first
+  reply by the Phase 9 utility flow, mirroring §4H layout —
   so child reasoning stays inspectable and audit-able without a
   relational table. Per §4H decision 9, this sub-session is written **once at
   completion**, not streamed live. Its own `meta` header also carries
@@ -2065,14 +2067,15 @@ stored.
 8. **Findability — no index file; the session abstract is the grep surface:**
    - **No separate per-project index/`.index` file** and no runtime browsing
      built-in.
-   - Every session's `meta` header carries an **auto-generated title**: the
-     first explicit user message, truncated to a configurable length (e.g.
-     first 40–80 chars, on one line). The header itself is written to disk
+   - Every session's `meta` header carries an **auto-generated title** produced
+     by a dedicated utility (`utility_engine`) conversation. The utility
+     conversation receives the first explicit user message and the first
+     completed assistant reply, then returns a concise title rather than
+     copying either source verbatim. The header itself is written to disk
      immediately (empty title) when the session is created, so no event is
-     ever held only in memory waiting on it; the title is filled in once,
-     by an atomic rewrite of just that first line, when the first
-     conversation turn completes (the first assistant reply) — never by
-     delaying the durability of anything committed before then.
+     ever held only in memory waiting on title generation; the generated title
+     is persisted once by an atomic rewrite of just that first line after the
+     first conversation turn completes.
    - The **sidecar — a file that is the session's abstract**: a small,
      human-readable, always-plaintext summary record per session that carries
      the session's discoverable essence (title, meta fields, status, size,
@@ -2098,8 +2101,9 @@ stored.
      begins (crash evidence even if the run dies), then a single
      `child_result` line at completion — see §4G `Persistence`.
    - The full child-agent transcript is written **once, at completion**, to its
-     own `<sub-session>.jsonl` (same `project_key`, own `meta` header with an
-     auto-title = child-agent `task`). Not streamed live.
+     own `<sub-session>.jsonl` (same `project_key`, with its `meta` title
+     generated from the child's task and first reply by the Phase 9 utility
+     flow). Not streamed live.
    - Rationale: child agents are short and loss-tolerant (their result is already
      summarized into the parent context by `agent_finish`); avoiding a second live
      flocked append stream per child agent keeps the machinery simple. A
@@ -2319,9 +2323,12 @@ draft input, to avoid triggering inside pasted code. Phase 7 ships `/models`,
 interactive command surface. Anything outside the allowlist is ordinary chat
 text.
 
-**Conversation titles:** The `meta` header carries an auto-generated title —
-the first user message, truncated and single-line (see §4H decision 8) — so
-headless runs are easy to find later via `rg '"type":"meta"' ~/.ylva/chats/`.
+**Conversation titles:** The `meta` header carries an auto-generated title
+returned by a dedicated utility (`utility_engine`) conversation. That
+temporary conversation receives the first user message and the first assistant
+reply and returns a concise, single-line title (see §4H decision 8), so
+headless runs are easy to find later via
+`rg '"type":"meta"' ~/.ylva/chats/`.
 
 **Persistence:** Always persists to a JSONL session file (§4H); there is no `--no-persist` flag.
 Every run leaves a trace
@@ -2787,7 +2794,7 @@ See reducer-state-handling-plan.md.
       three-layer fallback chain (project `.ylva/` → home `~/.ylva/` → embedded
       `config/`), `ylva init`/`ylva init --project` distribution, `SOUL.md`
       persona loading, and global `agents/*.md` type files are **out of scope
-      for Phase 7** — see Phase 9 below. Profile-scoped `.env` loading is
+      for Phase 7** — see Phase 10 below. Profile-scoped `.env` loading is
       implemented for the provider environment.
 
 - [x] `/commands` in input box, recognised only when `/` is the first character
@@ -2853,7 +2860,56 @@ See reducer-state-handling-plan.md.
 
 **Key crates:** none new (uses the existing `Store::read_messages`, §4H).
 
-### Phase 9: Full Configuration & Persona System
+### Phase 9: Automatic Session Title Generation
+
+- [ ] **Goal:** Make persisted sessions discoverable by generating a concise
+      title from the first explicit user message and the first completed LLM
+      reply, using a dedicated utility engine rather than copying the user's
+      message into the `meta` header.
+
+- [ ] Add the profile-level `utility_engine` setting alongside `default_engine`
+      and `compact_engine`; when unset, resolve `utility_engine` to
+      `default_engine`. Resolve it independently of the active conversation
+      engine and the context-compaction `compact_engine`. The utility request
+      must not change the active engine or its runtime model settings.
+
+- [ ] After the first conversation turn completes, capture the first explicit
+      user message and the first completed assistant reply. Do not trigger title
+      generation for implicit harness messages, incomplete/interrupted replies,
+      or sessions that never commit a user turn and a reply.
+
+- [ ] Start an explicit temporary utility conversation with no session store,
+      no visible UI updates, and no tools. Send a strict title-generation
+      prompt containing both source messages in clearly delimited sections:
+      return only a concise title, with no explanation, markdown, or quotation
+      marks.
+
+- [ ] Validate and normalize the utility response to one non-empty line within
+      the session-title length limit. A failed, empty, or malformed utility
+      response must not fall back to copying the first user message; report the
+      failure and leave the title pending for a later retry.
+
+- [ ] Persist the generated title to the current session through an explicit
+      store operation that atomically rewrites only the `meta` header line.
+      Keep the user and assistant events durable in their original order and
+      ensure the temporary utility conversation never appears in the current
+      session transcript or session listing.
+
+- [ ] On resume, detect a completed first turn whose title is still empty and
+      retry the same utility conversation from the persisted user/assistant
+      messages. Apply the same flow to child transcripts, using the child's
+      first task message and first reply as its title inputs.
+
+- [ ] Add seam-level tests for utility-engine selection, the exact prompt
+      inputs, isolation from the current store/UI, validation and retry
+      behavior, atomic title persistence, resume recovery, and metadata-only
+      session discovery.
+
+**Key crates:** none new (extends the existing `Engine` abstraction and JSONL
+`Store`; add the configured `utility_engine` slot alongside
+`compact_engine`).
+
+### Phase 10: Full Configuration & Persona System
 
 - [ ] **Goal:** Replace Phase 7's single flat config file with the complete `§4G`
       config-driven-types system, so behavior (agent types, persona) and
@@ -2901,7 +2957,7 @@ See reducer-state-handling-plan.md.
 **Key crates:** `toml` (already added in Phase 7); evaluate `dirs`/`directories`
 for home-directory resolution when this phase starts.
 
-### Phase 10: Context Compaction & Token Budgeting
+### Phase 11: Context Compaction & Token Budgeting
 
 - [ ] **Goal:** Keep the context window bounded for long-running conversations
       without losing the most valuable context (§4C).
@@ -2924,13 +2980,13 @@ for home-directory resolution when this phase starts.
 - [ ] Tool-result truncation at insertion (default ~8–16 KB, engine-tunable),
       with a `"… [truncated M of K chars]"` marker
 
-- [ ] Phase 10 extension: replace "drop" with on-the-fly summarization via a
+- [ ] Phase 11 extension: replace "drop" with on-the-fly summarization via a
       cheap local model (engine = `compact_engine`, §4G/§4G config, wired in
-      Phase 9)
+      Phase 10)
 
 **Key crates:** `tiktoken-rs`
 
-### Phase 11: CLI Surface
+### Phase 12: CLI Surface
 
 **Decision:** Headless mode already works from Phase 1. This phase adds the full `clap` CLI interface
 for scripting and automation.
@@ -3123,7 +3179,7 @@ where they are documented in the body of this document.
 | **TUI event loop**             | `spawn_blocking` for crossterm + `select!` on `ui_rx` + `subagent_ui_rx` + `event_rx`                                                                                                          | §4B ReAct Loop                               |
 | **TUI async context**          | `main.rs` uses `rt.block_on` for the TUI loop                                                                                                                                                  | §4B ReAct Loop                               |
 | **Token counting**             | `tiktoken-rs` for OpenAI; byte heuristic for Ollama; cached per `TieredMessage`. Counts are **approximate/advisory** (encoding is model-family dependent); rely on `context_length × 0.9` margin | §4C Context State Machine                    |
-| **Context tiers**              | `System` (never drop), `InitialContext` (never drop), `Recent` (drop oldest), `Compacted` (summarize in Phase 10)                                                                               | §4C Context State Machine                    |
+| **Context tiers**              | `System` (never drop), `InitialContext` (never drop), `Recent` (drop oldest), `Compacted` (summarize in Phase 11)                                                                               | §4C Context State Machine                    |
 | **Ollama tools**               | Dedicated Ollama provider reusing the unified raw `reqwest` streaming transport for `/v1/chat/completions`; model discovery uses native `/api/tags` and `/api/show`; no separate `ollama-rs` crate | §2 Crate Ecosystem, §5 OpenRouter vs Ollama  |
 | **OS signals**                 | `ctrlc` handler mapped to `AgentCommand::Stop`                                                                                                                                                 | §1 Vision, §2 Crate Ecosystem                |
 | **Tool binary checks**         | Lazy check at invocation with graceful fallback                                                                                                                                                | §4D Tool Registry                            |
@@ -3132,7 +3188,7 @@ where they are documented in the body of this document.
 | **Headless mode**              | Full CLI with `--prompt`, `--format`, `--conversation-id`, granular `--auto-approve-*`, exit codes `0–4`                                                                                       | §7 CLI Surface                               |
 | **Output streams**             | Split stdout (content) / stderr (status); `--quiet` flag; buffer and emit at end                                                                                                               | §7 CLI Surface                               |
 | **Headless safety**            | Mutating tools require `--auto-approve-*`; exit code `4` if denied                                                                                                                             | §4E Safety, §7 CLI Surface                   |
-| **Conversation titles**        | Auto-generated from first user message, truncated single-line in the `meta` header (§4H decision 8)                                                                                                     | §7 CLI Surface, §4H decision 8               |
+| **Conversation titles**        | Utility-engine conversation generates a concise title from the first user message and first assistant reply, then atomically persists a single-line value in the `meta` header (§4H decision 8) | §7 Phase 9, §4H decision 8                   |
 | **Model switching**            | Supported mid-conversation via `/models`, which queries each configured provider connection once and switches the selected connection/model through `EngineRouter`; the `SwitchModel` command placeholder was dropped | §4B ReAct Loop, §6 Commands |
 | **App state**                  | Dumb view model; agent loop owns state machine                                                                                                                                                 | §4B ReAct Loop                               |
 | **Config format**              | TOML for all config files; YAML explicitly rejected                                                                                                                                            | §2 Crate Ecosystem, §4G Agent Types & Delegation |
