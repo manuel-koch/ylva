@@ -712,6 +712,10 @@ async fn run_cli_closes_thinking_section_before_tool_call() {
         thinking_at < footer_at && footer_at < tool_at,
         "output not in expected order: {output}"
     );
+    assert!(
+        output[..tool_at].ends_with("\n\n"),
+        "tool output should have a spacer line: {output}"
+    );
     // The follow-up round's response ("ok") reuses the plain "Assistant"
     // header, not a separate "Response" label.
     let response_header_at = output
@@ -757,6 +761,10 @@ async fn run_cli_auto_approves_read_and_runs_it() {
 
     // read needs no approval → approved and executed.
     assert!(output.contains("[tool] Read"), "output: {output}");
+    assert!(
+        output.contains("\n\n[tool] Read"),
+        "tool output should have a spacer line: {output}"
+    );
     assert!(output.contains("done"), "output: {output}");
 }
 

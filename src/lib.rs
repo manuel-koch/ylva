@@ -28,6 +28,7 @@ pub mod render;
 pub mod sandbox;
 pub mod slash_command;
 pub mod store;
+pub(crate) mod theme;
 pub mod tui_driver;
 pub mod tui_reducer_state;
 pub mod tui_render_state;
@@ -54,7 +55,7 @@ pub use agent_factory::AgentFactory;
 pub use app::App;
 pub use build_info::{BuildInfo, BUILD_INFO};
 pub use child_agent_manager::{ChildAgentManager, FinishResult, SpawnRequest, SpawnStatus};
-pub use cli_driver::{run_cli, run_cli_to, ConsoleApp};
+pub use cli_driver::{run_cli, run_cli_to, run_cli_to_with_options, CliOutputOptions, ConsoleApp};
 pub use config::{
     default_profiles_root, load_profile_environment, profile_config_path, profile_env_path,
     AgentConfig, ConfigError, ProfileConfig, ProviderConfig, ProviderConnectionConfig,

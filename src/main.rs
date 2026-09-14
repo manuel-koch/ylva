@@ -26,6 +26,61 @@ use ylva::{
 /// the initial user turn.
 const DEFAULT_DEMO_PROMPT: &str = "What makes the sky look blue?";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CliColorMode {
+    Auto,
+    No,
+    Yes,
+}
+
+/// Decide whether headless CLI status lines may use ANSI colors.
+///
+/// This is intentionally evaluated only for the CLI path. The TUI keeps its
+/// existing ratatui palette regardless of the selected CLI color mode.
+fn should_use_cli_color(
+    stdout_is_terminal: bool,
+    color_mode: CliColorMode,
+    terminal_name: Option<&str>,
+    no_color_environment: bool,
+) -> bool {
+    match color_mode {
+        CliColorMode::Yes => true,
+        CliColorMode::No => false,
+        CliColorMode::Auto => {
+            stdout_is_terminal
+                && !no_color_environment
+                && !terminal_name.is_some_and(|name| name.eq_ignore_ascii_case("dumb"))
+        }
+    }
+}
+
+/// Parse the CLI color mode. The last `--color=<mode>` flag wins.
+fn color_mode_from_args(args: &[String]) -> Result<CliColorMode, String> {
+    let mut color_mode = CliColorMode::Auto;
+    for argument in args {
+        if argument == "--no-color" {
+            return Err("--no-color was replaced by --color=no".to_string());
+        }
+        if argument == "--color" {
+            return Err("--color requires one of: auto, no, yes (use --color=<mode>)".to_string());
+        }
+        let Some(mode) = argument.strip_prefix("--color=") else {
+            continue;
+        };
+        color_mode = match mode.to_ascii_lowercase().as_str() {
+            "auto" => CliColorMode::Auto,
+            "no" => CliColorMode::No,
+            "yes" => CliColorMode::Yes,
+            _ => {
+                return Err(format!(
+                    "invalid --color mode '{mode}': expected auto, no, or yes"
+                ));
+            }
+        };
+    }
+    Ok(color_mode)
+}
+
 fn main() {
     if std::env::args().any(|arg| arg == "--version") {
         println!("{}", ylva::BUILD_INFO.render());
@@ -33,6 +88,13 @@ fn main() {
     }
 
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let cli_color_mode = match color_mode_from_args(&args) {
+        Ok(color_mode) => color_mode,
+        Err(message) => {
+            eprintln!("error: {message}");
+            std::process::exit(2);
+        }
+    };
     let log_config = match logging_from_args(&args) {
         Ok(config) => config,
         Err(message) => {
@@ -51,7 +113,15 @@ fn main() {
         }
     };
 
-    let use_tui = std::io::stdout().is_terminal() && !args.contains(&"--no-tui".to_string());
+    let stdout_is_terminal = std::io::stdout().is_terminal();
+    let use_tui = stdout_is_terminal && !args.contains(&"--no-tui".to_string());
+    let cli_color_output = !use_tui
+        && should_use_cli_color(
+            stdout_is_terminal,
+            cli_color_mode,
+            std::env::var("TERM").ok().as_deref(),
+            std::env::var_os("NO_COLOR").is_some(),
+        );
     tracing::info!(
         version = ylva::BUILD_INFO.version,
         commit = ylva::BUILD_INFO.git_commit,
@@ -191,6 +261,7 @@ fn main() {
                 prompt,
                 Box::new(std::io::stdout()),
             )
+            .with_color_output(cli_color_output)
             .run()
             .await
         };
@@ -818,5 +889,87 @@ mod tests {
             explicit_prompt(vec!["--prompt".to_string(), "  hi  ".to_string()]),
             Some("hi".to_string())
         );
+    }
+
+    #[test]
+    fn color_mode_defaults_to_auto_and_parses_supported_modes() {
+        assert_eq!(color_mode_from_args(&[]), Ok(CliColorMode::Auto));
+        assert_eq!(
+            color_mode_from_args(&["--color=auto".to_string()]),
+            Ok(CliColorMode::Auto)
+        );
+        assert_eq!(
+            color_mode_from_args(&["--color=no".to_string()]),
+            Ok(CliColorMode::No)
+        );
+        assert_eq!(
+            color_mode_from_args(&["--color=yes".to_string()]),
+            Ok(CliColorMode::Yes)
+        );
+        assert_eq!(
+            color_mode_from_args(&["--color=NO".to_string()]),
+            Ok(CliColorMode::No)
+        );
+    }
+
+    #[test]
+    fn color_mode_rejects_removed_and_invalid_syntax() {
+        assert!(color_mode_from_args(&["--no-color".to_string()])
+            .expect_err("removed flag should be rejected")
+            .contains("--no-color was replaced by --color=no"));
+        assert!(color_mode_from_args(&["--color".to_string()])
+            .expect_err("missing mode should be rejected")
+            .contains("use --color=<mode>"));
+        assert!(color_mode_from_args(&["--color=maybe".to_string()])
+            .expect_err("unknown mode should be rejected")
+            .contains("expected auto, no, or yes"));
+    }
+
+    #[test]
+    fn later_color_mode_flags_override_earlier_modes() {
+        assert_eq!(
+            color_mode_from_args(&["--color=no".to_string(), "--color=yes".to_string()]),
+            Ok(CliColorMode::Yes)
+        );
+    }
+
+    #[test]
+    fn cli_colors_follow_the_selected_mode_and_environment() {
+        assert!(should_use_cli_color(
+            true,
+            CliColorMode::Auto,
+            Some("xterm-256color"),
+            false
+        ));
+        assert!(!should_use_cli_color(
+            false,
+            CliColorMode::Auto,
+            Some("xterm-256color"),
+            false
+        ));
+        assert!(!should_use_cli_color(
+            true,
+            CliColorMode::No,
+            Some("xterm-256color"),
+            false
+        ));
+        assert!(!should_use_cli_color(
+            true,
+            CliColorMode::Auto,
+            Some("dumb"),
+            false
+        ));
+        assert!(!should_use_cli_color(
+            true,
+            CliColorMode::Auto,
+            Some("xterm-256color"),
+            true
+        ));
+        assert!(should_use_cli_color(
+            false,
+            CliColorMode::Yes,
+            Some("dumb"),
+            true
+        ));
     }
 }

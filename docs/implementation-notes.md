@@ -194,6 +194,14 @@ running concurrently. Without `--auto-approve-spawn`, `spawn_subagent` is denied
 outright in CLI mode (`UserApprovalRequired` has no approval path headless),
 so this only matters when that flag is used.
 
+Fixed UI colors are centralized in `theme.rs`, including message roles,
+controls, overlays, and Markdown rendering colors. `tui_widgets.rs` and
+`markdown.rs` consume that palette, so a future theme switch has one
+color-definition module to update. ANSI styling is enabled only when the
+headless output writes to a terminal that is not `TERM=dumb` and `NO_COLOR` is
+unset in `--color=auto` mode. `--color=no` and `--color=yes` explicitly
+disable or enable ANSI styling for that output path.
+
 ## Store & persistence
 
 Implemented in `src/store.rs`. See [persistence](./persistence.md) for the

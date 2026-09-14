@@ -18,6 +18,7 @@
 use std::io::Write;
 use std::sync::Arc;
 
+use ratatui::style::Color;
 use tokio::sync::mpsc;
 
 use crate::agent::tools::clarify::ClarifyTool;
@@ -30,6 +31,10 @@ use crate::config::ProfileConfig;
 use crate::llm::engine::{EngineConfig, EngineImpl};
 use crate::llm::Provider;
 use crate::sandbox::{ApprovalCheck, Sandbox};
+use crate::theme::{
+    ASSISTANT_STREAM_BORDER_COLOR, ERROR_COLOR, INTERRUPTED_COLOR, THINKING_BORDER_COLOR,
+    TOOL_BUBBLE_BORDER_COLOR, USER_MESSAGE_BORDER_COLOR,
+};
 use crate::ToolRegistry;
 
 fn capitalize_first(s: &str) -> String {
@@ -168,6 +173,7 @@ pub struct ConsoleApp {
     agent_type: String,
     prompt: String,
     writer: Box<dyn Write + Send>,
+    output_options: CliOutputOptions,
 }
 
 impl ConsoleApp {
@@ -184,7 +190,14 @@ impl ConsoleApp {
             agent_type,
             prompt,
             writer,
+            output_options: CliOutputOptions::plain(),
         }
+    }
+
+    /// Enable or disable ANSI colors for the CLI status/header lines.
+    pub fn with_color_output(mut self, color: bool) -> Self {
+        self.output_options = CliOutputOptions::new(color);
+        self
     }
 }
 
@@ -195,9 +208,16 @@ impl App for ConsoleApp {
         let (agent, ui_rx) = self
             .factory
             .create(&self.profile, &self.agent_type, Role::Root)?;
-        run_cli_to(agent, ui_rx, registry, self.prompt, &mut *self.writer)
-            .await
-            .map(|_| 0u8)
+        run_cli_to_with_options(
+            agent,
+            ui_rx,
+            registry,
+            self.prompt,
+            &mut *self.writer,
+            self.output_options,
+        )
+        .await
+        .map(|_| 0u8)
     }
 }
 
@@ -243,23 +263,102 @@ enum StreamSection {
     Response,
 }
 
-/// Close an open `Thinking` section, printing its elapsed duration footer
-/// (mirrors `AppState::flush_partial_thinking_message`). No-op for `None` /
-/// `Response`. Leaves `current_section` at `None` either way — callers that
-/// need a header for what comes next (e.g. `AppendText`) print it themselves,
-/// since the header text depends on what section is opening, not on what
-/// just closed.
-fn flush_thinking_section(
+/// Presentation options for the headless CLI output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CliOutputOptions {
+    color: bool,
+}
+
+impl CliOutputOptions {
+    /// Create output options with or without ANSI colors.
+    pub const fn new(color: bool) -> Self {
+        Self { color }
+    }
+
+    /// Disable ANSI colors. This is the default for the explicit-writer
+    /// helper so tests and callers that capture output remain plain.
+    pub const fn plain() -> Self {
+        Self::new(false)
+    }
+
+    const fn color_enabled(self) -> bool {
+        self.color
+    }
+}
+
+fn ansi_foreground_code(color: Color) -> String {
+    match color {
+        Color::Reset => "39".to_string(),
+        Color::Black => "30".to_string(),
+        Color::Red => "31".to_string(),
+        Color::Green => "32".to_string(),
+        Color::Yellow => "33".to_string(),
+        Color::Blue => "34".to_string(),
+        Color::Magenta => "35".to_string(),
+        Color::Cyan => "36".to_string(),
+        Color::Gray => "37".to_string(),
+        Color::DarkGray => "90".to_string(),
+        Color::LightRed => "91".to_string(),
+        Color::LightGreen => "92".to_string(),
+        Color::LightYellow => "93".to_string(),
+        Color::LightBlue => "94".to_string(),
+        Color::LightMagenta => "95".to_string(),
+        Color::LightCyan => "96".to_string(),
+        Color::White => "97".to_string(),
+        Color::Rgb(red, green, blue) => format!("38;2;{red};{green};{blue}"),
+        Color::Indexed(index) => format!("38;5;{index}"),
+    }
+}
+
+fn write_cli_styled_line(
+    out: &mut (dyn Write + Send),
+    text: &str,
+    color: Color,
+    dim: bool,
+    options: CliOutputOptions,
+) -> anyhow::Result<()> {
+    if !options.color_enabled() {
+        writeln!(out, "{text}")?;
+        return Ok(());
+    }
+
+    let foreground_code = ansi_foreground_code(color);
+    if dim {
+        writeln!(out, "\x1b[2;{foreground_code}m{text}\x1b[0m")?;
+    } else {
+        writeln!(out, "\x1b[{foreground_code}m{text}\x1b[0m")?;
+    }
+    Ok(())
+}
+
+/// Close the current assistant output section. Thinking sections get an
+/// elapsed-duration footer; response sections get their terminating newline.
+/// Leaves `current_section` at `None` so callers can open the next section.
+fn flush_stream_section(
     out: &mut (dyn Write + Send),
     current_section: &mut StreamSection,
     thinking_started_at: &mut Option<std::time::Instant>,
+    output_options: CliOutputOptions,
 ) -> anyhow::Result<()> {
-    if *current_section == StreamSection::Thinking {
-        let elapsed = thinking_started_at
-            .take()
-            .map(|started_at| started_at.elapsed())
-            .unwrap_or_default();
-        writeln!(out, "\n[thought for {:.3}s]", elapsed.as_secs_f64())?;
+    match *current_section {
+        StreamSection::Thinking => {
+            let elapsed = thinking_started_at
+                .take()
+                .map(|started_at| started_at.elapsed())
+                .unwrap_or_default();
+            writeln!(out)?;
+            write_cli_styled_line(
+                out,
+                &format!("[thought for {:.3}s]", elapsed.as_secs_f64()),
+                THINKING_BORDER_COLOR,
+                true,
+                output_options,
+            )?;
+        }
+        StreamSection::Response => {
+            writeln!(out)?;
+        }
+        StreamSection::None => {}
     }
     *current_section = StreamSection::None;
     Ok(())
@@ -270,17 +369,43 @@ fn flush_thinking_section(
 #[doc(hidden)]
 pub async fn run_cli_to(
     agent: AgentLoop,
+    ui_rx: mpsc::Receiver<UiUpdate>,
+    registry: Arc<ToolRegistry>,
+    initial_prompt: String,
+    out: &mut (dyn Write + Send),
+) -> anyhow::Result<()> {
+    run_cli_to_with_options(
+        agent,
+        ui_rx,
+        registry,
+        initial_prompt,
+        out,
+        CliOutputOptions::plain(),
+    )
+    .await
+}
+
+/// [`run_cli_to`] with explicit terminal-output options.
+pub async fn run_cli_to_with_options(
+    agent: AgentLoop,
     mut ui_rx: mpsc::Receiver<UiUpdate>,
     registry: Arc<ToolRegistry>,
     initial_prompt: String,
     out: &mut (dyn Write + Send),
+    output_options: CliOutputOptions,
 ) -> anyhow::Result<()> {
     let mut agent = agent;
 
     // Echo the user's turn before sending the request, so it appears even
     // while the provider is still connecting / retrying (the "Assistant:"
     // prefix is printed when the stream actually starts).
-    writeln!(out, "---[ User ]---")?;
+    write_cli_styled_line(
+        out,
+        "---[ User ]---",
+        USER_MESSAGE_BORDER_COLOR,
+        false,
+        output_options,
+    )?;
     writeln!(out, "{initial_prompt}")?;
     agent
         .send_command(AgentCommand::Prompt(initial_prompt))
@@ -341,7 +466,14 @@ pub async fn run_cli_to(
                     // when it happens to be thinking (merged with the
                     // "Assistant" label, since there's no separate response
                     // section yet to distinguish it from).
-                    writeln!(out, "\n---[ Assistant Thinking ]---")?;
+                    writeln!(out)?;
+                    write_cli_styled_line(
+                        out,
+                        "---[ Assistant Thinking ]---",
+                        THINKING_BORDER_COLOR,
+                        true,
+                        output_options,
+                    )?;
                     thinking_started_at = Some(std::time::Instant::now());
                     current_section = StreamSection::Thinking;
                 }
@@ -350,14 +482,26 @@ pub async fn run_cli_to(
             }
             Some(UiUpdate::AppendText(text)) => {
                 if current_section == StreamSection::Thinking {
-                    flush_thinking_section(out, &mut current_section, &mut thinking_started_at)?;
+                    flush_stream_section(
+                        out,
+                        &mut current_section,
+                        &mut thinking_started_at,
+                        output_options,
+                    )?;
                 }
                 if current_section != StreamSection::Response {
                     // Prints once per round: either this is the very first
                     // chunk (no thinking preceded it) or a thinking segment
                     // was just flushed above — either way the response
                     // section is opening for the first time.
-                    writeln!(out, "\n---[ Assistant ]---")?;
+                    writeln!(out)?;
+                    write_cli_styled_line(
+                        out,
+                        "---[ Assistant ]---",
+                        ASSISTANT_STREAM_BORDER_COLOR,
+                        false,
+                        output_options,
+                    )?;
                 }
                 current_section = StreamSection::Response;
                 write!(out, "{text}")?;
@@ -373,7 +517,13 @@ pub async fn run_cli_to(
             }) => {
                 // A tool call always closes whatever thinking/response
                 // segment preceded it, mirroring `flush_partial_assistant_message`.
-                flush_thinking_section(out, &mut current_section, &mut thinking_started_at)?;
+                flush_stream_section(
+                    out,
+                    &mut current_section,
+                    &mut thinking_started_at,
+                    output_options,
+                )?;
+                writeln!(out)?;
                 current_section = StreamSection::None;
                 let title = registry
                     .get(&name)
@@ -387,7 +537,13 @@ pub async fn run_cli_to(
                     .unwrap_or(ApprovalCheck::UserApprovalRequired);
                 match approval_check {
                     ApprovalCheck::AutoApproved => {
-                        writeln!(out, "[tool] {invocation}")?;
+                        write_cli_styled_line(
+                            out,
+                            &format!("[tool] {invocation}"),
+                            TOOL_BUBBLE_BORDER_COLOR,
+                            false,
+                            output_options,
+                        )?;
                         render_content_sections(out, &content_sections)?;
                         agent
                             .send_command(route_command(run_id, AgentCommand::ApproveTool { id }))
@@ -401,7 +557,13 @@ pub async fn run_cli_to(
                             .collect();
                         let denied_invocation =
                             render_invocation_from_title_arguments(&title, &short_args);
-                        writeln!(out, "[tool] {denied_invocation} → auto-denied: {reason}")?;
+                        write_cli_styled_line(
+                            out,
+                            &format!("[tool] {denied_invocation} → auto-denied: {reason}"),
+                            ERROR_COLOR,
+                            false,
+                            output_options,
+                        )?;
                         render_content_sections(out, &content_sections)?;
                         denied_tool_ids.insert(id);
                         agent
@@ -420,7 +582,13 @@ pub async fn run_cli_to(
                             .collect();
                         let denied_invocation =
                             render_invocation_from_title_arguments(&title, &short_args);
-                        writeln!(out, "[tool] {denied_invocation} → denied: {reason}")?;
+                        write_cli_styled_line(
+                            out,
+                            &format!("[tool] {denied_invocation} → denied: {reason}"),
+                            ERROR_COLOR,
+                            false,
+                            output_options,
+                        )?;
                         render_content_sections(out, &content_sections)?;
                         denied_tool_ids.insert(id);
                         agent
@@ -441,13 +609,24 @@ pub async fn run_cli_to(
                 run_id,
                 ..
             }) => {
-                flush_thinking_section(out, &mut current_section, &mut thinking_started_at)?;
+                flush_stream_section(
+                    out,
+                    &mut current_section,
+                    &mut thinking_started_at,
+                    output_options,
+                )?;
+                writeln!(out)?;
                 current_section = StreamSection::None;
                 let clarify_title = ClarifyTool.title();
                 let clarify_name = ClarifyTool::NAME;
-                writeln!(
+                write_cli_styled_line(
                     out,
-                    "[tool] {clarify_title} [question={question}] → denied: {clarify_name} is not available in CLI mode"
+                    &format!(
+                        "[tool] {clarify_title} [question={question}] → denied: {clarify_name} is not available in CLI mode"
+                    ),
+                    ERROR_COLOR,
+                    false,
+                    output_options,
                 )?;
                 denied_tool_ids.insert(id);
                 let _ = id;
@@ -469,7 +648,13 @@ pub async fn run_cli_to(
                 // approval step, so no prior `ToolPending`): flush any
                 // thinking/response text accumulated before it, mirroring
                 // `update_tool_bubble_to_running`'s flush for the same case.
-                flush_thinking_section(out, &mut current_section, &mut thinking_started_at)?;
+                flush_stream_section(
+                    out,
+                    &mut current_section,
+                    &mut thinking_started_at,
+                    output_options,
+                )?;
+                writeln!(out)?;
                 current_section = StreamSection::None;
                 let title = registry
                     .get(&name)
@@ -477,7 +662,13 @@ pub async fn run_cli_to(
                     .unwrap_or_else(|| capitalize_first(&name));
                 let invocation = render_invocation_from_title_arguments(&title, &title_arguments);
                 pending_invocations.insert(id, invocation.clone());
-                writeln!(out, "[tool] {invocation}")?;
+                write_cli_styled_line(
+                    out,
+                    &format!("[tool] {invocation}"),
+                    TOOL_BUBBLE_BORDER_COLOR,
+                    false,
+                    output_options,
+                )?;
                 render_content_sections(out, &content_sections)?;
                 if name == SpawnSubagentTool::NAME {
                     pending_spawn_call_ids.insert(id);
@@ -510,7 +701,13 @@ pub async fn run_cli_to(
                         summary.iter().map(|(k, v)| format!("{k}={v}")).collect();
                     format!(" {}", parts.join(" "))
                 };
-                writeln!(out, "[tool] {title} done ({duration_s:.3}s){summary_str}")?;
+                write_cli_styled_line(
+                    out,
+                    &format!("[tool] {title} done ({duration_s:.3}s){summary_str}"),
+                    TOOL_BUBBLE_BORDER_COLOR,
+                    false,
+                    output_options,
+                )?;
                 render_content_sections(out, &content_sections)?;
                 if pending_spawn_call_ids.remove(&id) {
                     tracing::debug!(
@@ -522,7 +719,13 @@ pub async fn run_cli_to(
             }
             Some(UiUpdate::ToolError { id, error, .. }) => {
                 if !denied_tool_ids.remove(&id) {
-                    writeln!(out, "[tool] error: {error}")?;
+                    write_cli_styled_line(
+                        out,
+                        &format!("[tool] error: {error}"),
+                        ERROR_COLOR,
+                        false,
+                        output_options,
+                    )?;
                 }
                 if pending_spawn_call_ids.remove(&id) {
                     tracing::debug!(
@@ -533,12 +736,30 @@ pub async fn run_cli_to(
                 }
             }
             Some(UiUpdate::ToolAutoDenied { name, reason, .. }) => {
-                flush_thinking_section(out, &mut current_section, &mut thinking_started_at)?;
+                flush_stream_section(
+                    out,
+                    &mut current_section,
+                    &mut thinking_started_at,
+                    output_options,
+                )?;
+                writeln!(out)?;
                 current_section = StreamSection::None;
-                writeln!(out, "[tool] auto-denied '{name}': {reason}")?;
+                write_cli_styled_line(
+                    out,
+                    &format!("[tool] auto-denied '{name}': {reason}"),
+                    ERROR_COLOR,
+                    false,
+                    output_options,
+                )?;
             }
             Some(UiUpdate::ToolKilled { id, .. }) => {
-                writeln!(out, "[tool] killed")?;
+                write_cli_styled_line(
+                    out,
+                    "[tool] killed",
+                    INTERRUPTED_COLOR,
+                    false,
+                    output_options,
+                )?;
                 if pending_spawn_call_ids.remove(&id) {
                     tracing::debug!(
                         tool_call_id = %id,
@@ -554,8 +775,16 @@ pub async fn run_cli_to(
             // prints the real outcome once the child actually finishes.
             Some(UiUpdate::ToolProgress { .. }) => {}
             Some(UiUpdate::StreamDone) => {
-                flush_thinking_section(out, &mut current_section, &mut thinking_started_at)?;
-                writeln!(out)?;
+                let previous_section = current_section;
+                flush_stream_section(
+                    out,
+                    &mut current_section,
+                    &mut thinking_started_at,
+                    output_options,
+                )?;
+                if previous_section != StreamSection::Response {
+                    writeln!(out)?;
+                }
                 if pending_spawn_call_ids.is_empty() {
                     tracing::debug!(
                         "cli_driver: StreamDone with no pending spawns, ending conversation"
@@ -569,8 +798,19 @@ pub async fn run_cli_to(
                 }
             }
             Some(UiUpdate::StreamCancelled) => {
-                flush_thinking_section(out, &mut current_section, &mut thinking_started_at)?;
-                writeln!(out, "---[ Interrupted ]---")?;
+                flush_stream_section(
+                    out,
+                    &mut current_section,
+                    &mut thinking_started_at,
+                    output_options,
+                )?;
+                write_cli_styled_line(
+                    out,
+                    "---[ Interrupted ]---",
+                    INTERRUPTED_COLOR,
+                    false,
+                    output_options,
+                )?;
                 if pending_spawn_call_ids.is_empty() {
                     tracing::debug!(
                         "cli_driver: StreamCancelled with no pending spawns, ending conversation"
@@ -587,12 +827,20 @@ pub async fn run_cli_to(
             Some(UiUpdate::Error { message, run_id }) => {
                 match run_id {
                     None => {
-                        flush_thinking_section(
+                        flush_stream_section(
                             out,
                             &mut current_section,
                             &mut thinking_started_at,
+                            output_options,
                         )?;
-                        writeln!(out, "---[ Error ]---\n{message}")?;
+                        write_cli_styled_line(
+                            out,
+                            "---[ Error ]---",
+                            ERROR_COLOR,
+                            false,
+                            output_options,
+                        )?;
+                        writeln!(out, "{message}")?;
                         response_finished = true;
                     }
                     // A child's own stream-level error (e.g. its max-tool-use-
@@ -603,7 +851,13 @@ pub async fn run_cli_to(
                     // transcript to render into, so just surface it tagged,
                     // without ending the response.
                     Some(run_id) => {
-                        writeln!(out, "[child {run_id}] error: {message}")?;
+                        write_cli_styled_line(
+                            out,
+                            &format!("[child {run_id}] error: {message}"),
+                            ERROR_COLOR,
+                            false,
+                            output_options,
+                        )?;
                     }
                 }
             }
@@ -619,7 +873,15 @@ pub async fn run_cli_to(
                 | UiUpdate::ChildAgentToken { .. }
                 | UiUpdate::ChildAgentDone { .. },
             ) => {}
-            None => response_finished = true,
+            None => {
+                flush_stream_section(
+                    out,
+                    &mut current_section,
+                    &mut thinking_started_at,
+                    output_options,
+                )?;
+                response_finished = true;
+            }
         }
     }
 
@@ -785,5 +1047,55 @@ mod tests {
             &[("label".to_string(), serde_json::json!("Refactor"))],
         );
         assert_eq!(rendered, "Spawn Subagent Refactor");
+    }
+
+    #[test]
+    fn styled_cli_line_stays_plain_when_colors_are_disabled() {
+        let mut output = Vec::new();
+
+        write_cli_styled_line(
+            &mut output,
+            "---[ User ]---",
+            USER_MESSAGE_BORDER_COLOR,
+            false,
+            CliOutputOptions::plain(),
+        )
+        .expect("plain output succeeds");
+
+        assert_eq!(output, b"---[ User ]---\n");
+    }
+
+    #[test]
+    fn styled_cli_line_uses_the_shared_tui_color_and_resets_ansi_state() {
+        let mut output = Vec::new();
+
+        write_cli_styled_line(
+            &mut output,
+            "---[ Assistant Thinking ]---",
+            THINKING_BORDER_COLOR,
+            true,
+            CliOutputOptions::new(true),
+        )
+        .expect("colored output succeeds");
+
+        assert_eq!(output, b"\x1b[2;34m---[ Assistant Thinking ]---\x1b[0m\n");
+    }
+
+    #[test]
+    fn flushing_response_writes_its_terminating_newline() {
+        let mut output = Vec::new();
+        let mut current_section = StreamSection::Response;
+        let mut thinking_started_at = None;
+
+        flush_stream_section(
+            &mut output,
+            &mut current_section,
+            &mut thinking_started_at,
+            CliOutputOptions::plain(),
+        )
+        .expect("response flush succeeds");
+
+        assert_eq!(output, b"\n");
+        assert!(current_section == StreamSection::None);
     }
 }

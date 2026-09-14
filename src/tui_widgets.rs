@@ -28,6 +28,20 @@ use std::time::Instant;
 use crate::highlight::{
     active_theme, highlighted_lines_cached, syntect_fg_span, wrap_highlighted_line,
 };
+use crate::theme::{
+    APPROVE_BACKGROUND_COLOR, APPROVE_HOVER_BACKGROUND_COLOR, ASSISTANT_STREAM_BORDER_COLOR,
+    BUILD_INFO_COLOR, BUTTON_TEXT_COLOR, CHAT_SCROLLBAR_COLOR, CHAT_SELECTION_BG,
+    CHILD_VIEW_SEPARATOR_COLOR, CLARIFY_BANNER_FG_COLOR, CLARIFY_BANNER_SCROLL_INDICATOR_COLOR,
+    CLARIFY_BANNER_SELECTION_FG_COLOR, CONTENT_COLOR, DENY_BACKGROUND_COLOR,
+    DENY_HOVER_BACKGROUND_COLOR, DIFF_ADDED_COLOR, DIFF_CONTEXT_COLOR, DIFF_REMOVED_COLOR,
+    ERROR_COLOR, FOOTER_STATUS_COLOR, HELP_POPUP_BORDER_COLOR, HELP_POPUP_HEADING_COLOR,
+    INPUT_BORDER_COLOR, INTERRUPTED_COLOR, LIST_BORDER_COLOR, LIST_SELECTION_BACKGROUND_COLOR,
+    LIST_SELECTION_FOREGROUND_COLOR, LIST_TEXT_COLOR, LOGO_COLOR, MUTED_TEXT_COLOR, NOTICE_COLOR,
+    OVERLAY_SELECTION_COLOR, SEPARATOR_LINE_COLOR, THINKING_BORDER_COLOR, TOAST_BG_COLOR,
+    TOAST_FG_COLOR, TOOL_BUBBLE_BORDER_COLOR, USER_MESSAGE_BG_COLOR, USER_MESSAGE_BORDER_COLOR,
+    USER_MESSAGE_CANCELLED_BORDER_COLOR, USER_MESSAGE_QUEUED_BORDER_COLOR,
+    USER_MESSAGE_STEERED_BORDER_COLOR,
+};
 
 use crate::agent::AgentMode;
 use crate::build_info::BUILD_INFO;
@@ -39,73 +53,10 @@ use crate::tui_reducer_state::{
 };
 use crate::tui_render_state::TuiState;
 
-// User message border colors — extract into Theme struct in a later phase.
-const USER_MESSAGE_BORDER_COLOR: Color = Color::Green;
-// Pending steer: same border color as Sent, but rendered dimmed (see the
-// `dim` flag in `append_user_lines`) so a queued-not-yet-injected message
-// reads as a dimmed version of a normal sent message, not an unrelated hue.
-const USER_MESSAGE_QUEUED_BORDER_COLOR: Color = USER_MESSAGE_BORDER_COLOR;
-// Applied steer: once injected, the LLM has seen it just like a normal Sent
-// message, and that's the only distinction that matters to the user — so
-// this renders identically to Sent (same color, not dimmed). Kept as its own
-// constant (rather than reusing USER_MESSAGE_BORDER_COLOR directly) so a
-// future color theme can still distinguish steers from turn-starting
-// messages without touching call sites.
-const USER_MESSAGE_STEERED_BORDER_COLOR: Color = USER_MESSAGE_BORDER_COLOR;
-const USER_MESSAGE_CANCELLED_BORDER_COLOR: Color = Color::DarkGray;
-// Soft background shade applied to the input compose field only — chat
-// bubbles (including committed user messages) render with no background
-// fill; see `BubbleStyle`.
-const USER_MESSAGE_BG_COLOR: Color = Color::Rgb(20, 20, 40);
 /// The user-message input field grows with content but is capped at this
 /// fraction of the terminal height (e.g. 3 → one-third).  Adjust here to
 /// change the maximum visible height of the input area.
 const USER_MESSAGE_INPUT_HEIGHT_TERMINAL_FRACTION: u16 = 3;
-// The input field's border reuses the (Sent) user-message border color,
-// dimmed, so it reads as "this will become a user-message bubble" rather
-// than introducing an unrelated hue.
-const INPUT_BORDER_COLOR: Color = USER_MESSAGE_BORDER_COLOR;
-
-// Assistant streaming bubble border color. Bubbles render with no
-// background fill (see `BubbleStyle`), so only the left-border color is
-// tracked here.
-const ASSISTANT_STREAM_BORDER_COLOR: Color = Color::Blue;
-// Tool bubble left-border color.
-const TOOL_BUBBLE_BORDER_COLOR: Color = Color::Magenta;
-
-// Thinking bubble border color — same blue family as the assistant-response
-// bubble (dimmed via the bubble's own Modifier::DIM text styling) so the two
-// read as related, rather than the previous cyan which was too close to the
-// input field's border color.
-const THINKING_BORDER_COLOR: Color = Color::Blue;
-
-// Help popup border, title, section headings, and scroll-indicator color.
-const HELP_POPUP_BORDER_COLOR: Color = Color::Blue;
-// Section heading foreground color inside the help popup content area.
-const HELP_POPUP_HEADING_COLOR: Color = Color::Blue;
-
-// Clarify banner colors.
-const CLARIFY_BANNER_FG_COLOR: Color = Color::Yellow;
-// Inverted selection: selected text rendered as black-on-yellow.
-const CLARIFY_BANNER_SELECTION_FG_COLOR: Color = Color::Black;
-const CLARIFY_BANNER_SCROLL_INDICATOR_COLOR: Color = Color::DarkGray;
-
-const SEPARATOR_LINE_COLOR: Color = Color::White;
-// While viewing a subagent's drill-in transcript, the divider above (between
-// the header bubble and the chat area) and below (between the chat area and
-// the input/footer panel) it are tinted with the same pinkish/magenta hue as
-// the `spawn_subagent` tool bubble's own border, rather than the neutral
-// `SEPARATOR_LINE_COLOR` used for the root conversation — a persistent cue
-// that survives scrolling, unlike the indent approach tried and discarded
-// earlier (it read as visually odd alongside the bubble chrome).
-const CHILD_VIEW_SEPARATOR_COLOR: Color = TOOL_BUBBLE_BORDER_COLOR;
-// Single hue used for all parts of the conversation-list scrollbar, matching
-// the horizontal divider between the conversation list and input/footer.
-// The track and inactive arrows use the same colour with Modifier::DIM so the
-// thumb and active arrows stand out without introducing a second colour.
-const CHAT_SCROLLBAR_COLOR: Color = SEPARATOR_LINE_COLOR;
-const TOAST_BG_COLOR: Color = Color::Blue;
-const TOAST_FG_COLOR: Color = Color::White;
 
 /// Braille spinner animation frames, cycled while the agent is busy.
 const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -549,7 +500,7 @@ pub fn draw(
             Paragraph::new(Line::styled(
                 "Enter reason for denial here…",
                 Style::default()
-                    .fg(Color::DarkGray)
+                    .fg(MUTED_TEXT_COLOR)
                     .bg(USER_MESSAGE_BG_COLOR),
             )),
             placeholder_area,
@@ -777,7 +728,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
                     } else {
                         format!("      {}", wrapped)
                     };
-                    lines.push(Line::styled(display, Style::default().fg(Color::Red)));
+                    lines.push(Line::styled(display, Style::default().fg(ERROR_COLOR)));
                 }
             }
             ChatEntry::Notice { text } => {
@@ -794,7 +745,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
                         } else {
                             format!("     {}", wrapped)
                         };
-                        lines.push(Line::styled(display, Style::default().fg(Color::Cyan)));
+                        lines.push(Line::styled(display, Style::default().fg(NOTICE_COLOR)));
                     }
                 }
             }
@@ -911,7 +862,6 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
     state.conversation.chat_rendered_line_chrome_widths = chrome_widths;
 
     // Apply selection highlight to lines in the selected range.
-    const CHAT_SELECTION_BG: Color = Color::Rgb(60, 80, 120);
     if let Some(sel) = state.conversation.chat_selection {
         if !sel.is_empty() {
             let (start_line, start_col, end_line, end_col) = sel.normalized();
@@ -1138,9 +1088,7 @@ fn apply_selection_highlight_to_line(
 fn append_logo(lines: &mut Vec<Line>) {
     lines.push(Line::default());
     lines.push(Line::default());
-    let style = Style::default()
-        .fg(Color::Blue)
-        .add_modifier(Modifier::BOLD);
+    let style = Style::default().fg(LOGO_COLOR).add_modifier(Modifier::BOLD);
     for row in LOGO {
         lines.push(Line::styled(row.to_string(), style).alignment(Alignment::Center));
     }
@@ -1148,7 +1096,7 @@ fn append_logo(lines: &mut Vec<Line>) {
     lines.push(Line::default());
     let build_info_text = format!("v{}  {}", BUILD_INFO.version, BUILD_INFO.git_commit);
     lines.push(
-        Line::styled(build_info_text, Style::default().fg(Color::DarkGray))
+        Line::styled(build_info_text, Style::default().fg(BUILD_INFO_COLOR))
             .alignment(Alignment::Center),
     );
     // A blank spacer separates the wordmark block from the conversation.
@@ -1234,13 +1182,13 @@ fn append_assistant_lines(
     width: usize,
 ) {
     let border_color = if interrupted {
-        Color::DarkGray
+        INTERRUPTED_COLOR
     } else {
         ASSISTANT_STREAM_BORDER_COLOR
     };
     let style = BubbleStyle::new(border_color);
     let text_style = if interrupted {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(INTERRUPTED_COLOR)
     } else {
         Style::default()
     };
@@ -1249,7 +1197,10 @@ fn append_assistant_lines(
     if interrupted {
         let ellipsis = "…";
         lines.push(style.content_line(
-            vec![Span::styled(ellipsis, Style::default().fg(Color::DarkGray))],
+            vec![Span::styled(
+                ellipsis,
+                Style::default().fg(INTERRUPTED_COLOR),
+            )],
             Style::default(),
         ));
     }
@@ -1437,7 +1388,9 @@ fn append_user_lines(
         lines.push(style.content_line(
             vec![Span::styled(
                 label,
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+                Style::default()
+                    .fg(INTERRUPTED_COLOR)
+                    .add_modifier(Modifier::DIM),
             )],
             Style::default(),
         ));
@@ -1496,7 +1449,7 @@ fn append_result_section_lines(
     // bar, since unset modifiers are unioned in, not overridden, when a span
     // has no modifier of its own.
     let dim = Style::default()
-        .fg(Color::White)
+        .fg(CONTENT_COLOR)
         .add_modifier(Modifier::DIM);
     let mut md_lines = render_markdown(content, content_wrap_width);
     if md_lines.is_empty() {
@@ -1731,7 +1684,7 @@ fn append_tool_bubble_lines(
     let bubble_start_row = lines.len();
 
     let dim_white = Style::default()
-        .fg(Color::White)
+        .fg(CONTENT_COLOR)
         .add_modifier(Modifier::DIM);
 
     // ── Title rendering ─────────────────────────────────────────────────────
@@ -1786,7 +1739,7 @@ fn append_tool_bubble_lines(
     };
 
     let bold_white = Style::default()
-        .fg(Color::White)
+        .fg(CONTENT_COLOR)
         .add_modifier(Modifier::BOLD);
 
     let spinner_or_margin: Span = if is_queued_subagent {
@@ -1988,7 +1941,7 @@ fn append_tool_bubble_lines(
             lines.push(Line::from(vec![
                 bar.clone(),
                 margin.clone(),
-                Span::styled(error_label, Style::default().fg(Color::Red)),
+                Span::styled(error_label, Style::default().fg(ERROR_COLOR)),
             ]));
         }
     }
@@ -2009,7 +1962,7 @@ fn append_tool_bubble_lines(
                             if let Some(label) = &content_section.label {
                                 let label_str = format!("{label}:");
                                 let dim_style = Style::default()
-                                    .fg(Color::White)
+                                    .fg(CONTENT_COLOR)
                                     .add_modifier(Modifier::DIM);
                                 lines.push(Line::from(vec![
                                     bar.clone(),
@@ -2086,7 +2039,7 @@ fn append_tool_bubble_lines(
                                         let gutter_str = format!("  {line_num:>digits$}: ");
                                         spans.push(Span::styled(
                                             gutter_str,
-                                            Style::default().fg(Color::DarkGray),
+                                            Style::default().fg(MUTED_TEXT_COLOR),
                                         ));
                                     } else {
                                         spans.push(Span::styled("  ", Style::default()));
@@ -2112,7 +2065,7 @@ fn append_tool_bubble_lines(
                             if let Some(label) = &diff_section.label {
                                 let label_str = format!("{label}:");
                                 let dim_style = Style::default()
-                                    .fg(Color::White)
+                                    .fg(CONTENT_COLOR)
                                     .add_modifier(Modifier::DIM);
                                 lines.push(Line::from(vec![
                                     bar.clone(),
@@ -2163,7 +2116,7 @@ fn append_tool_bubble_lines(
                                     Span::styled(
                                         text_str,
                                         Style::default()
-                                            .fg(Color::DarkGray)
+                                            .fg(MUTED_TEXT_COLOR)
                                             .add_modifier(Modifier::DIM),
                                     ),
                                 ]));
@@ -2173,17 +2126,17 @@ fn append_tool_bubble_lines(
                             let (line_color, left_num, right_num) = if diff_line.starts_with('+') {
                                 let n = new_line;
                                 new_line += 1;
-                                (Color::Green, None, Some(n))
+                                (DIFF_ADDED_COLOR, None, Some(n))
                             } else if diff_line.starts_with('-') {
                                 let n = old_line;
                                 old_line += 1;
-                                (Color::Red, Some(n), None)
+                                (DIFF_REMOVED_COLOR, Some(n), None)
                             } else {
                                 let o = old_line;
                                 let n = new_line;
                                 old_line += 1;
                                 new_line += 1;
-                                (Color::DarkGray, Some(o), Some(n))
+                                (DIFF_CONTEXT_COLOR, Some(o), Some(n))
                             };
 
                             let left_str = left_num
@@ -2210,7 +2163,7 @@ fn append_tool_bubble_lines(
                                     (
                                         Span::styled(
                                             gutter_str.clone(),
-                                            Style::default().fg(Color::DarkGray),
+                                            Style::default().fg(MUTED_TEXT_COLOR),
                                         ),
                                         format!("{prefix} {wrapped_chunk}"),
                                     )
@@ -2240,7 +2193,7 @@ fn append_tool_bubble_lines(
                             Span::styled(
                                 label_str,
                                 Style::default()
-                                    .fg(Color::White)
+                                    .fg(CONTENT_COLOR)
                                     .add_modifier(Modifier::BOLD),
                             ),
                         ]));
@@ -2280,10 +2233,10 @@ fn append_tool_bubble_lines(
 
                                 if row_index == 0 {
                                     let prefix_style = if search_result_line.is_match {
-                                        Style::default().fg(Color::DarkGray)
+                                        Style::default().fg(MUTED_TEXT_COLOR)
                                     } else {
                                         Style::default()
-                                            .fg(Color::DarkGray)
+                                            .fg(MUTED_TEXT_COLOR)
                                             .add_modifier(Modifier::DIM)
                                     };
                                     spans.push(Span::styled(prefix.clone(), prefix_style));
@@ -2429,7 +2382,7 @@ fn draw_footer_row(
     frame.render_widget(
         Paragraph::new(Line::styled(
             identity_text,
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(MUTED_TEXT_COLOR),
         ))
         .alignment(Alignment::Right),
         identity_area,
@@ -2555,7 +2508,7 @@ fn draw_normal_footer(
         }
         row_1_text
     };
-    draw_footer_row(frame, row_1, &row_1_text, Color::Yellow, state);
+    draw_footer_row(frame, row_1, &row_1_text, FOOTER_STATUS_COLOR, state);
     draw_footer_hints(frame, row_2, footer_hints);
 }
 
@@ -2580,7 +2533,7 @@ fn plural_noun<'a>(count: usize, singular_noun: &'a str, plural_noun: &'a str) -
 }
 
 fn draw_footer_hints(frame: &mut Frame, area: Rect, hints: &[FooterHint]) {
-    let normal_style = Style::default().fg(Color::DarkGray);
+    let normal_style = Style::default().fg(MUTED_TEXT_COLOR);
     let key_style = normal_style.add_modifier(Modifier::BOLD);
     let mut spans = Vec::with_capacity(hints.len() * 4 + 1);
     spans.push(Span::styled(" ", normal_style));
@@ -2696,18 +2649,18 @@ fn draw_slash_overlay(
             let Some(_) = entry_index else {
                 return Line::styled(
                     "─".repeat(content_width),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(MUTED_TEXT_COLOR),
                 );
             };
             let entry = &entries[row_index];
             let is_selected = selected_row == Some(row_index);
             let style = if is_selected {
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
+                    .fg(LIST_SELECTION_FOREGROUND_COLOR)
+                    .bg(LIST_SELECTION_BACKGROUND_COLOR)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Gray)
+                Style::default().fg(LIST_TEXT_COLOR)
             };
             let marker = if is_selected { "▸ " } else { "  " };
             Line::styled(format!("{marker}{entry}"), style)
@@ -2717,7 +2670,7 @@ fn draw_slash_overlay(
     frame.render_widget(Clear, panel_area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(Style::default().fg(LIST_BORDER_COLOR))
         .title(title);
     let inner_area = block.inner(panel_area);
     frame.render_widget(block, panel_area);
@@ -2744,7 +2697,12 @@ fn draw_slash_overlay(
             } else {
                 usize::MAX
             };
-            apply_selection_highlight_to_line(line, column_start, column_end, Color::Yellow);
+            apply_selection_highlight_to_line(
+                line,
+                column_start,
+                column_end,
+                OVERLAY_SELECTION_COLOR,
+            );
         }
     }
     frame.render_widget(Paragraph::new(lines), content_area);
@@ -2991,7 +2949,7 @@ fn draw_approval_footer(
     } else {
         format!(" Tool '{tool_name}' requests your approval:")
     };
-    draw_footer_row(frame, row_1, &row_1_text, Color::Yellow, state);
+    draw_footer_row(frame, row_1, &row_1_text, FOOTER_STATUS_COLOR, state);
 
     // When the user is typing a denial reason, Enter will deny rather than
     // approve — reflect this by disabling the Approve button and adding
@@ -3028,23 +2986,27 @@ fn draw_approval_footer(
     // typed a denial reason — pressing Enter at that point denies instead.
     let approve_style = if !input_is_empty {
         Style::default()
-            .fg(Color::DarkGray)
+            .fg(MUTED_TEXT_COLOR)
             .add_modifier(Modifier::DIM)
     } else if approve_hovered {
         Style::default()
-            .fg(Color::Black)
-            .bg(Color::LightGreen)
+            .fg(BUTTON_TEXT_COLOR)
+            .bg(APPROVE_HOVER_BACKGROUND_COLOR)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Black).bg(Color::Green)
+        Style::default()
+            .fg(BUTTON_TEXT_COLOR)
+            .bg(APPROVE_BACKGROUND_COLOR)
     };
     let deny_style = if deny_hovered {
         Style::default()
-            .fg(Color::Black)
-            .bg(Color::LightRed)
+            .fg(BUTTON_TEXT_COLOR)
+            .bg(DENY_HOVER_BACKGROUND_COLOR)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Black).bg(Color::Red)
+        Style::default()
+            .fg(BUTTON_TEXT_COLOR)
+            .bg(DENY_BACKGROUND_COLOR)
     };
 
     frame.render_widget(
@@ -3272,10 +3234,8 @@ fn draw_help_popup(frame: &mut Frame, state: &mut TuiState) {
 #[cfg(test)]
 mod tests {
     use super::{apply_selection_highlight_to_line, compute_scrollbar_thumb, plural_noun};
-    use ratatui::style::Color;
+    use crate::theme::CHAT_SELECTION_BG;
     use ratatui::text::{Line, Span};
-
-    const SEL_BG: Color = Color::Rgb(60, 80, 120);
 
     fn plain_line(text: &str) -> Line<'static> {
         Line::from(vec![Span::raw(text.to_owned())])
@@ -3291,7 +3251,7 @@ mod tests {
     fn highlighted_in(line: &Line<'_>) -> String {
         line.spans
             .iter()
-            .filter(|s| s.style.bg == Some(SEL_BG))
+            .filter(|s| s.style.bg == Some(CHAT_SELECTION_BG))
             .map(|s| s.content.as_ref())
             .collect()
     }
@@ -3299,16 +3259,18 @@ mod tests {
     #[test]
     fn selection_highlight_highlights_middle_chars_only() {
         let mut line = plain_line("Hello, world!");
-        apply_selection_highlight_to_line(&mut line, 7, 12, SEL_BG);
+        apply_selection_highlight_to_line(&mut line, 7, 12, CHAT_SELECTION_BG);
         assert_eq!(highlighted_in(&line), "world");
     }
 
     #[test]
     fn selection_highlight_empty_range_leaves_line_unchanged() {
         let mut line = plain_line("Hello");
-        apply_selection_highlight_to_line(&mut line, 3, 3, SEL_BG);
+        apply_selection_highlight_to_line(&mut line, 3, 3, CHAT_SELECTION_BG);
         assert!(
-            line.spans.iter().all(|s| s.style.bg != Some(SEL_BG)),
+            line.spans
+                .iter()
+                .all(|s| s.style.bg != Some(CHAT_SELECTION_BG)),
             "no span should be highlighted for an empty range"
         );
     }
@@ -3316,7 +3278,7 @@ mod tests {
     #[test]
     fn selection_highlight_max_col_end_highlights_to_end_of_line() {
         let mut line = plain_line("Hello");
-        apply_selection_highlight_to_line(&mut line, 2, usize::MAX, SEL_BG);
+        apply_selection_highlight_to_line(&mut line, 2, usize::MAX, CHAT_SELECTION_BG);
         assert_eq!(highlighted_in(&line), "llo");
     }
 
@@ -3327,7 +3289,7 @@ mod tests {
             Span::raw("bar".to_owned()),
         ]);
         // Select "ob" spanning both spans: cols 2..4.
-        apply_selection_highlight_to_line(&mut line, 2, 4, SEL_BG);
+        apply_selection_highlight_to_line(&mut line, 2, 4, CHAT_SELECTION_BG);
         assert_eq!(highlighted_in(&line), "ob");
     }
 

@@ -34,6 +34,15 @@ CLI prints the identifier of the persisted session on exit via `stderr`.
 
 Selected automatically when stdout is not a terminal, or forced via `--no-tui`.
 
+When CLI stdout is a color-capable terminal, section headers and tool status
+lines use the same semantic colors as their TUI bubbles. Colors are disabled
+for non-terminal output, `TERM=dumb`, or `NO_COLOR` in `--color=auto` mode.
+Use `--color=no` to force plain output or `--color=yes` to force colors;
+these modes affect CLI output only and do not affect the TUI.
+Tool-call status blocks are separated from preceding assistant output by a
+blank line, while each call's completion status remains adjacent to its
+invocation.
+
 Initial user turn resolution: `--prompt <text>`, else piped stdin read to EOF
 (only when stdin is not a terminal) — e.g. `echo '…' | ylva`.
 

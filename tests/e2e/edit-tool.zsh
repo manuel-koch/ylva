@@ -23,24 +23,31 @@ __POEM__
     LOG_PATH="${PREFIX_TIMESTAMPED}.log"
     OUT_PATH="${PREFIX_TIMESTAMPED}.txt"
     export YLVA_REQUEST_DUMP_PATH=${PREFIX_TIMESTAMPED}.json
-    ${YLVA} --no-tui \
+    ${YLVA} --no-tui --color=yes \
             --log-file ${LOG_PATH} \
             --log-level TRACE --log-format ${LOG_FORMAT} \
             --auto-approve-edit \
             | tee ${OUT_PATH}
 }
 
-echo "----------------------------------------------------------"
+function seperator() {
+    echo
+    echo "----------------------------------------------------------"
+    echo
+}
+
 ylva << '__EOT__'
 Replace all occurance of "lamp" in `logs/poem.md` by "frog" using the `edit` tool!
 __EOT__
 
-echo "----------------------------------------------------------"
+seperator
+
 ylva << '__EOT__'
 Replace first occurance of "lamp" in `logs/poem.md` by "frog" using the `edit` tool!
 __EOT__
 
-echo "----------------------------------------------------------"
+seperator
+
 ylva << '__EOT__'
 Replace line 2+3 in `logs/poem.md` by one line "hello world" using the `edit` tool!
 __EOT__

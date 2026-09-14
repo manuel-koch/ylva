@@ -17,14 +17,19 @@ function ylva() {
     LOG_PATH="${PREFIX_TIMESTAMPED}.log"
     OUT_PATH="${PREFIX_TIMESTAMPED}.txt"
     export YLVA_REQUEST_DUMP_PATH=${PREFIX_TIMESTAMPED}.json
-    ${YLVA} --no-tui \
+    ${YLVA} --no-tui --color=yes \
             --log-file ${LOG_PATH} \
             --log-level TRACE --log-format ${LOG_FORMAT} \
             --auto-approve-write \
             | tee ${OUT_PATH}
 }
 
-echo "----------------------------------------------------------"
+function seperator() {
+    echo
+    echo "----------------------------------------------------------"
+    echo
+}
+
 ylva << '__EOT__'
 Create file `logs/poem.md` with the following content:
 

@@ -12,17 +12,13 @@
 //! or dropping content.
 
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::highlight::{
     active_theme, highlighted_lines_cached, syntect_fg_span, wrap_highlighted_line,
 };
-
-/// Foreground color used for `inline code` spans.
-pub const INLINE_CODE_FG: Color = Color::Rgb(224, 168, 82);
-/// Foreground color used for blockquote `│` prefixes and fenced code blocks.
-pub const MARKDOWN_DIM_FG: Color = Color::DarkGray;
+use crate::theme::{INLINE_CODE_FG, MARKDOWN_DIM_FG};
 
 /// The inline formatting in effect for a run of text: bold/italic modifiers
 /// and whether it originates from an inline code span (distinct color).
