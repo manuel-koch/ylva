@@ -28,9 +28,9 @@ invocation.
 ## CLI Runtime
 
 Non-interactive, one-shot session: the initial user turn is sent to the
-agent, the assistant response is streamed to stdout as it arrives, and the
-final committed conversation history is printed as JSONL on exit — one JSON
-object per message, in the same wire shape the provider sees.
+agent, and the assistant response is streamed to stdout as it arrives. The
+committed session is persisted incrementally.
+CLI prints the identifier of the persisted session on exit via `stderr`.
 
 Selected automatically when stdout is not a terminal, or forced via `--no-tui`.
 

@@ -2380,7 +2380,8 @@ top of a proven agent loop.
 - [x] **Interrupt test:** Send `Stop` mid-stream → verify `StreamCancelled`, partial
       flushed as `Assistant { status: Interrupted, … }`, pending steers cleared.
 
-- [x] **Print final conversation history** to verify state transitions.
+- [x] **Persist committed conversation history** in the session store; the CLI
+      does not dump it again when the process exits.
 
 - [x] **Build provenance surfaced via `--version`:** `ylva --version` prints
       `Version` / `Commit` / `Built` / `Profile` (from the `BUILD_INFO` const in

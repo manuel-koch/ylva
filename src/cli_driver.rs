@@ -28,7 +28,7 @@ use crate::agent_factory::AgentFactory;
 use crate::app::App;
 use crate::config::ProfileConfig;
 use crate::llm::engine::{EngineConfig, EngineImpl};
-use crate::llm::{serialize_messages, Provider};
+use crate::llm::Provider;
 use crate::sandbox::{ApprovalCheck, Sandbox};
 use crate::ToolRegistry;
 
@@ -623,31 +623,13 @@ pub async fn run_cli_to(
         }
     }
 
-    // Dropping the AgentLoop closes cmd_tx, which makes the outer loop
-    // return the final committed history from `handle`.
+    // Dropping the AgentLoop closes cmd_tx and lets the agent task finish.
     drop(agent);
 
-    let final_context = handle
+    handle
         .await
         .expect("agent loop task panicked")
         .expect("agent loop returned an error");
-    writeln!(
-        out,
-        "\n---[ Conversation history of {} messages ]---",
-        final_context.messages().len()
-    )?;
-    // Emit the committed history as JSONL (one JSON object per message) in
-    // the same wire shape the provider sees, rather than Rust's Debug
-    // rendering. A blank line separates the header from the JSONL payload.
-    if let Some(array) = serialize_messages(final_context.messages()).as_array() {
-        for message in array {
-            writeln!(
-                out,
-                "{}",
-                serde_json::to_string(message).expect("message serializes to JSON")
-            )?;
-        }
-    }
     Ok(())
 }
 

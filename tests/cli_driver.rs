@@ -308,7 +308,7 @@ impl Engine for SwitchableTestEngine {
 }
 
 #[tokio::test]
-async fn run_cli_streams_user_and_assistant_and_history() {
+async fn run_cli_streams_user_and_assistant_without_history_dump() {
     let provider = Arc::new(MockProviderWithScript {
         phase_one: vec![
             MockEvent::Text("hello ".into()),
@@ -331,11 +331,13 @@ async fn run_cli_streams_user_and_assistant_and_history() {
     assert!(output.contains("greet me"), "output: {output}");
     assert!(output.contains("---[ Assistant ]---"), "output: {output}");
     assert!(output.contains("hello world"), "output: {output}");
-    assert!(output.contains("Conversation history"), "output: {output}");
-    assert!(output.contains("\"role\":\"user\""), "output: {output}");
     assert!(
-        output.contains("\"role\":\"assistant\""),
-        "output: {output}"
+        !output.contains("Conversation history"),
+        "the CLI should not dump the persisted history at shutdown: {output}"
+    );
+    assert!(
+        !output.contains("\"role\":\"user\"") && !output.contains("\"role\":\"assistant\""),
+        "the CLI output should not contain a serialized message history: {output}"
     );
 }
 

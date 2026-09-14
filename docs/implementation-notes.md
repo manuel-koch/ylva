@@ -648,9 +648,10 @@ runtime mode, selected by `main.rs` based on whether stdout is a terminal.
 InputEvent` and `UiUpdate → DomainEvent`, calls `update()`, then executes the
 returned `Vec<Effect>` via `execute_effects()`.
 
-`cli_driver.rs` consumes `UiUpdate` events from the agent, streams the
-assistant response to stdout, and prints the final conversation as JSONL on
-exit.
+`cli_driver.rs` consumes `UiUpdate` events from the agent and streams the
+assistant response to stdout. The session store remains the canonical
+conversation record; `main.rs` prints only the session resume hint to stderr
+after the run.
 
 ## Slash commands
 
