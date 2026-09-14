@@ -963,20 +963,17 @@ mod tests {
                 "limit": 10,
             }),
         );
-        assert_eq!(
-            rendered,
-            "Read some/document.md [mode=lines, offset=88, limit=10]"
-        );
+        assert_eq!(rendered, "Read some/document.md [offset=88, limit=10]");
     }
 
     #[test]
     fn render_suppresses_default_valued_args() {
-        // mode=bytes and offset=0 are defaults and must be suppressed.
+        // mode=lines and offset=0 are defaults and must be suppressed.
         let rendered = render_tool_invocation(
             read_tool().as_ref(),
             &serde_json::json!({
                 "path": "some/document.md",
-                "mode": "bytes",
+                "mode": "lines",
                 "offset": 0,
                 "limit": 32,
             }),

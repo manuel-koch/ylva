@@ -150,8 +150,10 @@ affect sandbox approval checks. See
 **WIP:** `read` and `write` currently only support UTF-8 code points via lossy decode.
 
 - **read**: Read file content from given `path` using `mode`/`offset`/`limit`.
-  Mode can be `bytes`/`chars`/`lines`.
-  Offset and limit are 0-based!
+  Mode can be `bytes`/`chars`/`lines` and defaults to `lines` for every call.
+  In `lines` mode, `offset` is a 0-based line index and `limit` is a line
+  count. Use `chars` for character counts or set `bytes` explicitly for byte
+  ranges and binary data. Offset and limit are 0-based within the selected mode.
 - **write**: Write `content` to file at given `path`. Requires user approval before
   execution (approval-gated). Use to create new files or overwrite existing ones.
 - **edit**: Patch an existing file in-place. The file must already exist (use `write`

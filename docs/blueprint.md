@@ -1175,23 +1175,28 @@ Never hand-write JSON schemas. Use `schemars` to derive them from structs.
 use schemars::{schema_for, JsonSchema};
 use serde::Deserialize;
 
-#[derive(JsonSchema, Deserialize, Default)]
+#[derive(JsonSchema, Deserialize)]
 enum ReadMode {
-    #[default]
-    Bytes, // default; byte offset/limit, binary-safe
-    Lines, // lossy-decode, then line offset/limit
-    Chars, // UTF-8 code points (lossy decode)
+    Lines, // default for all reads; line offset/limit
+    Bytes, // explicit byte ranges/binary data
+    Chars, // explicit character counts; UTF-8 code points (lossy decode)
+}
+
+impl Default for ReadMode {
+    fn default() -> Self {
+        Self::Lines
+    }
 }
 
 #[derive(JsonSchema, Deserialize)]
 struct ReadFileArgs {
     path: String,
     #[serde(default)]
-    mode: ReadMode,          // default Bytes (see ReadMode); model chooses the unit
+    mode: ReadMode,          // defaults to Lines for every call
     #[serde(default)]
-    offset: Option<usize>,   // 0-based index of the first unit; line 1 is offset 0
+    offset: Option<usize>,   // 0-based index of the selected unit; line 1 is offset 0 in Lines mode
     #[serde(default)]
-    limit: Option<usize>,
+    limit: Option<usize>,    // number of selected units
 }
 
 #[derive(JsonSchema, Deserialize)]

@@ -324,7 +324,7 @@ pub trait Tool: Send + Sync {
 
     /// Whether an argument value equals the tool's semantic default, so a host
     /// can suppress it from an invocation summary. Defaults to `false`; tools
-    /// override for optional arguments (e.g. `read`'s `mode: bytes`,
+    /// override for optional arguments (e.g. `read`'s `mode: lines`,
     /// `offset: 0`/`null`, `limit: null`).
     fn is_default_argument(&self, _key: &str, _value: &Value) -> bool {
         false
