@@ -56,8 +56,9 @@ pub enum AppAction {
 ///
 /// Only `KeyEventKind::Press` events are considered; release/repeat are
 /// ignored. `Ctrl+C`, `Esc`, and `F1` are lifted into dedicated variants so
-/// the main task can branch on intent rather than raw key codes; every other
-/// key and every mouse event is forwarded verbatim.
+/// the main task can branch on intent rather than raw key codes. Terminal
+/// encodings of modified Enter are normalized before other key events are
+/// forwarded.
 pub fn map_event(event: Event) -> Option<AppAction> {
     match event {
         Event::Key(key) => map_key_event(key),
@@ -72,6 +73,7 @@ fn map_key_event(key: KeyEvent) -> Option<AppAction> {
     if key.kind != KeyEventKind::Press {
         return None;
     }
+    let key = normalize_modified_enter(key);
     match key.code {
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(AppAction::CtrlC)
@@ -80,6 +82,16 @@ fn map_key_event(key: KeyEvent) -> Option<AppAction> {
         KeyCode::F(1) => Some(AppAction::ShowHelp),
         _ => Some(AppAction::KeyInput(key)),
     }
+}
+
+fn normalize_modified_enter(mut key: KeyEvent) -> KeyEvent {
+    if key.code == KeyCode::Char('j') && key.modifiers == KeyModifiers::CONTROL {
+        key.code = KeyCode::Enter;
+        key.modifiers = KeyModifiers::SHIFT;
+    } else if key.code == KeyCode::Char('\n') && key.modifiers.contains(KeyModifiers::SHIFT) {
+        key.code = KeyCode::Enter;
+    }
+    key
 }
 
 /// Spawn a blocking thread that reads `crossterm::event::read()` in a tight
@@ -154,6 +166,25 @@ mod tests {
         let key = press(KeyCode::Char('a'), KeyModifiers::NONE);
         let action = map_event(Event::Key(key));
         assert_eq!(action, Some(AppAction::KeyInput(key)));
+    }
+
+    #[test]
+    fn line_feed_from_shift_enter_maps_to_a_modified_enter() {
+        // Zed's terminal encodes Shift+Enter as LF. In crossterm raw mode,
+        // LF is decoded as Ctrl+J, so normalize that terminal-specific representation
+        // before context-dependent key routing.
+        for key in [
+            press(KeyCode::Char('j'), KeyModifiers::CONTROL),
+            press(KeyCode::Char('\n'), KeyModifiers::SHIFT),
+        ] {
+            assert_eq!(
+                map_event(Event::Key(key)),
+                Some(AppAction::KeyInput(press(
+                    KeyCode::Enter,
+                    KeyModifiers::SHIFT
+                )))
+            );
+        }
     }
 
     #[test]

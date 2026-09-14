@@ -1175,23 +1175,28 @@ Never hand-write JSON schemas. Use `schemars` to derive them from structs.
 use schemars::{schema_for, JsonSchema};
 use serde::Deserialize;
 
-#[derive(JsonSchema, Deserialize, Default)]
+#[derive(JsonSchema, Deserialize)]
 enum ReadMode {
-    #[default]
-    Bytes, // default; byte offset/limit, binary-safe
-    Lines, // lossy-decode, then line offset/limit
-    Chars, // UTF-8 code points (lossy decode)
+    Lines, // default for all reads; line offset/limit
+    Bytes, // explicit byte ranges/binary data
+    Chars, // explicit character counts; UTF-8 code points (lossy decode)
+}
+
+impl Default for ReadMode {
+    fn default() -> Self {
+        Self::Lines
+    }
 }
 
 #[derive(JsonSchema, Deserialize)]
 struct ReadFileArgs {
     path: String,
     #[serde(default)]
-    mode: ReadMode,          // default Bytes (see ReadMode); model chooses the unit
+    mode: ReadMode,          // defaults to Lines for every call
     #[serde(default)]
-    offset: Option<usize>,   // 0-based index of the first unit; line 1 is offset 0
+    offset: Option<usize>,   // 0-based index of the selected unit; line 1 is offset 0 in Lines mode
     #[serde(default)]
-    limit: Option<usize>,
+    limit: Option<usize>,    // number of selected units
 }
 
 #[derive(JsonSchema, Deserialize)]
@@ -1459,11 +1464,11 @@ impl AgentFactory {
 }
 ```
 
-**One child at a time.** A root runs in parallel with at most one child. The
-root cannot spawn a second child while the first is still running. This
-prevents resource contention and keeps the UX predictable. If the root LLM
-calls `spawn_subagent` while a child is active, the call is queued or returns
-an error (configurable).
+**Current scheduling constraint.** The current scheduler runs a root in
+parallel with at most one child and queues additional child requests. This
+keeps the present UX predictable, but it is not part of the model-facing
+lifecycle contract; a later scheduler may run several children concurrently
+and deliver their terminal events out of order.
 
 **No nesting.** Children are forbidden from calling `spawn_subagent`. The
 maximum delegation depth is one. This is enforced **structurally**: a `Child`'s
@@ -1478,8 +1483,9 @@ The LLM triggers a child agent via a standard tool call:
 ```rust
 #[derive(JsonSchema, Deserialize)]
 struct SpawnSubagentArgs {
+    label: String,        // short display/correlation label
     task: String,       // concise description of what to do
-    briefing: String,   // curated context extracted from the root conversation
+    briefing: Option<String>, // curated context extracted from the root conversation
     #[serde(default = "default_agent_type")]
     agent_type: String, // e.g. "research", "code_edit"
 }
@@ -1502,8 +1508,12 @@ The child is a fully independent ReAct agent with:
 - Its own `subagent_ui_tx` channel for live updates to the TUI sidebar
 
 When the child finishes (via `agent_finish` tool, timeout, or user cancellation),
-it sends `AgentEvent::ToolDone` back to the root agent loop via `agent_rx`.
-The root loop appends the result to its own `Context` and re-prompts.
+it sends a terminal completion event to the root agent loop. The event carries
+the child `run_id`, originating `tool_call_id`, `label`, terminal status,
+result/error/sources, and `outstanding_count`/`all_done` aggregation metadata.
+The root loop appends each event to its own `Context` and re-prompts once the
+final outstanding child result is available, rather than forcing an
+acknowledgement turn for every intermediate completion.
 
 **Channel isolation:** the child's live events flow through `subagent_ui_tx`
 (a dedicated MPSC channel created by `ChildAgentManager`). The TUI's
@@ -2375,7 +2385,8 @@ top of a proven agent loop.
 - [x] **Interrupt test:** Send `Stop` mid-stream → verify `StreamCancelled`, partial
       flushed as `Assistant { status: Interrupted, … }`, pending steers cleared.
 
-- [x] **Print final conversation history** to verify state transitions.
+- [x] **Persist committed conversation history** in the session store; the CLI
+      does not dump it again when the process exits.
 
 - [x] **Build provenance surfaced via `--version`:** `ylva --version` prints
       `Version` / `Commit` / `Built` / `Profile` (from the `BUILD_INFO` const in
@@ -2524,7 +2535,9 @@ layer, not a core architectural change.
       (applied steer), DarkGray = Cancelled.
       Colors are named constants, ready to be extracted into a `Theme` struct.
 
-- [x] 2-row footer: mode indicator + steer count (row 1); key hints (row 2).
+- [x] 2-row footer: mode indicator plus compact active running/queued subagent
+      and steer counts (row 1); key hints (row 2). Finished subagents are
+      excluded.
 
 - [x] Install `ctrlc` handler that sends `AgentCommand::Stop` via channel immediately — no
       double-press required for OS-level SIGINT.
@@ -2601,11 +2614,12 @@ Decisions recorded during implementation:
 - **Mouse capture is enabled.** `EnableMouseCapture`/`DisableMouseCapture` are part of the
   enter/leave sequences; without them the wheel and clickable approval buttons would never receive
   events.
-- **Kitty keyboard protocol for modified keys.** `run_tui_on_stdout` pushes
+- **Modified Enter compatibility.** `run_tui_on_stdout` pushes
   `KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES` (and pops it in the terminal guard) so
-  supporting terminals (ZED, iTerm2, kitty, WezTerm) report `Shift+Enter`/`Alt+Enter` as
-  distinguishable CSI-u sequences; `Shift+Enter`/`Alt+Enter` then insert a newline instead of
-  being mistaken for a bare `Enter`. Unsupported terminals ignore the flag.
+  supporting terminals (iTerm2, kitty, WezTerm) report `Shift+Enter`/`Alt+Enter` as
+  distinguishable CSI-u sequences. Terminals that encode `Shift+Enter` as a line feed, such as
+  Zed's terminal, are normalized before routing; unsupported terminals may still fall back to a
+  bare `Enter`.
 - **Mouse click/drag in the input box.** A left-click places the cursor at the clicked character
   (word-wrapping accounted for); a left-drag selects text. The input box's on-screen rect is
   written to `TuiState` each frame for hit-testing.
@@ -2794,60 +2808,48 @@ See reducer-state-handling-plan.md.
 
 ### Phase 8: Session Replay on Resume
 
-- [ ] **Goal:** Resuming a session (`--conversation-id`) reconstructs its prior
+- [x] **Goal:** Resuming a session (`--conversation-id`) reconstructs its prior
       turns instead of starting blank, so both the model and the user see
       continuous history — closing the gap Phase 7 explicitly deferred (§4H
       decision 5's resume model **appends** to the file but does not replay
       it back into `Context` or the TUI).
 
-- [ ] `Store::read_messages` (already shipped in Phase 7) is used on
-      `Store::resume` to hydrate a **new**, silent seam on `Context` — e.g.
-      `Context::hydrate(messages)` — that appends the persisted messages
-      without re-`commit`-ing them to the store a second time (re-recording
-      already-persisted lines would duplicate every prior turn on next
-      resume). The two leading system prompts stay sourced fresh from the
-      running binary (per §4H decision 4's schema-tolerance note) — the
-      hydrated messages are only the committed conversation ones after them.
+- [x] `Context::set_store` reads `Store::read_messages` and hydrates a new
+      context without re-`commit`-ing persisted messages. Hydration is
+      unconditional for fresh and resumed stores; a fresh file simply has no
+      messages to append. The two leading system prompts stay sourced fresh
+      from the running binary (per §4H decision 4's schema-tolerance note).
 
-- [ ] Headless (`ConsoleApp`): a resumed session's hydrated `Context` is
+- [x] Headless (`ConsoleApp`): a resumed session's hydrated `Context` is
       visible to the model on the very next turn (prior turns are part of
       the request payload), matching how a live session behaves.
 
-- [ ] TUI (`TuiApp`/`AppState`): the hydrated messages are projected into
-      `chat_entries` before the first frame renders, so a resumed session
-      shows its prior turns immediately instead of an empty transcript —
-      `Message::User` → `ChatEntry::UserMessage { state: Sent }`,
-      `Message::Assistant` → `ChatEntry::AssistantMessage`, `Message::ToolResult`/
-      `Message::ToolError` → a completed/errored `ChatEntry::ToolBubble` (no
-      `Pending`/`Running` state is ever reconstructed — a tool call that
-      never got a result before the process ended has no result to show and
-      is dropped from the replay, same as it already has no terminal event
-      in the JSONL). The chat view opens scrolled to the bottom of the
-      replayed history (existing auto-scroll behavior, not a new mechanism).
+- [x] TUI (`TuiApp`/`AppState`) projects hydrated messages into `chat_entries`
+      before the first frame and keeps the existing bottom-lock behavior.
+      Explicit user messages, assistant text, completed tool results, and tool
+      errors replay with their persisted state. `Message::ToolResult` and
+      `Message::ToolError` additively persist summary/content-section metadata
+      and tool duration. Assistant tool calls persist their tool-specific title
+      arguments, and tool results persist optional specialized result-section
+      identifiers; all new fields use `#[serde(default)]`, so no schema-version
+      bump is required and older sessions degrade silently. Orphaned generic
+      tool calls become in-memory terminal errors rather than pending/running
+      bubbles.
 
-- [ ] Child-agent transcripts (`parent_session`-linked `.jsonl` files) are
-      **not** rehydrated into the drill-in view in this phase — a resumed
-      session's root transcript replays; a child's own sub-session remains
-      readable directly (`Store::read_messages` on its file) but not wired
-      into `AppState::child_conversations` automatically. Tracked as a
-      follow-up, not blocking this phase's goal.
+- [x] Child-agent replay is included. `ChildStart`/`ChildResult` carry
+      `call_id` (and `ChildStart` carries `label`) with serde defaults. The
+      root `spawn_subagent` bubble is fixed up from lifecycle records to its
+      real completed or interrupted state, and replay-discovered child
+      metadata is made drillable without opening child files eagerly. The
+      child's own transcript is loaded lazily on first drill-in.
 
-- [ ] Tests: `Context` hydration round-trips a written session's messages in
-      order without re-persisting them (a second resume + flush must not
-      double every line); an end-to-end test (extending
-      `tests/store_persistence_e2e.rs`'s spawn-the-binary pattern) resumes a
-      session that already has a completed turn and asserts the **next**
-      request payload includes the earlier turn's content; a TUI-side test
-      (`tests/tui_render_state.rs`/presenter unit tests) asserts
-      `chat_entries` is populated from a hydrated `Context` before the first
-      `draw_frame` call.
+- [x] Tests cover schema compatibility, hydration without duplicate writes,
+      orphaned tool recovery, child lifecycle pairing, full-fidelity TUI
+      projection, lazy child loading, and real-binary headless replay.
 
-- [ ] Documentation: update `docs/persistence.md`'s resume contract (remove
-      the "does not replay" caveat, describe the new hydration behavior and
-      the child-transcript exception above); update `docs/features.md`'s
-      Session Persistence section; add a "Session replay" subsection to
-      `docs/implementation-notes.md` describing the `Context::hydrate` seam
-      and the `Message` → `ChatEntry` projection.
+- [x] Documentation: `docs/persistence.md`, `docs/features.md`, and
+      `docs/implementation-notes.md` describe the replay contract and
+      implementation.
 
 **Key crates:** none new (uses the existing `Store::read_messages`, §4H).
 
@@ -3146,7 +3148,7 @@ where they are documented in the body of this document.
 | **Agent types**                 | Single pool; profile-driven with global behavior + local engine assignment                                                                                                                     | §4G Agent Types & Delegation                  |
 | **Child-agent briefing**        | Hybrid system + user message; curated by root agent                                                                                                                                           | §4G Agent Types & Delegation                  |
 | **Child-agent nesting**         | Forbidden; one level only (structural: `Child` role strips `spawn_subagent`)                                                                                                                   | §4G Agent Types & Delegation                  |
-| **Child-agent execution**       | One child at a time; runs **in parallel** with the root agent, which never blocks                                                                                                               | §4G Agent Types & Delegation                  |
+| **Child-agent execution**       | Current scheduler runs one child at a time in parallel with the root; lifecycle protocol supports future concurrent, out-of-order completion                                                                                                               | §4G Agent Types & Delegation                  |
 | **Child-agent steering**        | Root steer queues and injects at the next natural point; child finishes naturally in the background                                                                                            | §4G Agent Types & Delegation                  |
 | **Child-agent result**          | Tool-based `agent_finish` with unstructured fallback                                                                                                                                                | §4G Child-Agent Lifecycle                    |
 | **Agent-type tools**            | Global agent files define whitelist; profiles can override                                                                                                                                      | §4G Agent-Type File Formats                  |

@@ -47,34 +47,41 @@ fn require_string_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, Approva
     }
 }
 
-/// The unit that `ReadFileArgs::offset`/`limit` count, chosen by the model.
+/// The unit that `ReadFileArgs::offset`/`limit` count.
 ///
-/// `Bytes` is the default and the only meaningful mode for binary files; an
-/// encoding must be known before a "char"/line can be defined, so `Lines`/
-/// `Chars` lossy-decode UTF-8 first (no encoding detection is done — out of
-/// scope for Phase 3). `Chars` counts UTF-8 code points.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, JsonSchema, Deserialize)]
+/// `Lines` is the default for all reads, including ranged reads. Use `Chars`
+/// for character counts and `Bytes` explicitly for byte ranges or binary data.
+/// An encoding must be known before a char/line can be defined, so `Lines`/
+/// `Chars` lossy-decode UTF-8 first (no encoding detection is done). `Chars`
+/// counts UTF-8 code points.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReadMode {
-    #[default]
-    Bytes,
     Lines,
+    Bytes,
     Chars,
 }
 
-/// `read` arguments: a path plus an optional `mode` (unit selector) and
-/// `offset`/`limit` that count that unit.
+#[expect(clippy::derivable_impls)]
+impl Default for ReadMode {
+    fn default() -> Self {
+        Self::Lines
+    }
+}
+
+/// `read` arguments: a path plus a `mode` (unit selector) and `offset`/`limit`
+/// that count that unit. When `mode` is omitted, it defaults to `lines`.
 #[derive(Debug, Clone, JsonSchema, Deserialize)]
 pub struct ReadFileArgs {
     /// Absolute or workspace-relative path of the file to read.
     pub path: String,
     #[serde(default)]
     pub mode: ReadMode,
-    /// 0-based index of the first unit (byte/line/char) to read; line 1 is
-    /// `offset: 0`.
+    /// 0-based index of the first selected unit to read; in `lines` mode,
+    /// line 1 is `offset: 0`.
     #[serde(default)]
     pub offset: Option<usize>,
-    /// Max units (bytes/lines/chars) to read from `offset`. Omit to read to EOF.
+    /// Max selected units to read from `offset`. Omit to read to EOF.
     #[serde(default)]
     pub limit: Option<usize>,
 }
@@ -231,8 +238,11 @@ impl Tool for ReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read a file's contents. `offset`/`limit` count the unit chosen by `mode`: `bytes` \
-        (default, binary-safe), `lines`, or `chars` (UTF-8 code points). `offset` is 0-based."
+        "Read a file's contents. `mode` defaults to `lines` for every call, including when \
+        `offset` or `limit` is set. In `lines` mode, `offset` is a 0-based line index and \
+        `limit` is a line count. Use `chars` for character counts or set `bytes` explicitly \
+        for byte ranges and binary data. `offset`/`limit` count the selected unit; omit both \
+        to read the whole file."
     }
 
     fn input_schema(&self) -> RootSchema {
@@ -272,7 +282,7 @@ impl Tool for ReadTool {
 
     fn is_default_argument(&self, key: &str, value: &Value) -> bool {
         match (key, value) {
-            ("mode", Value::String(mode)) => mode == "bytes",
+            ("mode", Value::String(mode)) => mode == "lines",
             ("offset", Value::Null) => true,
             ("offset", Value::Number(number)) => number.as_u64() == Some(0),
             ("limit", Value::Null) => true,
@@ -454,7 +464,7 @@ mod tests {
             .as_array()
             .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
             .expect("mode enum present");
-        assert_eq!(variants, vec!["bytes", "lines", "chars"]);
+        assert_eq!(variants, vec!["lines", "bytes", "chars"]);
     }
 
     #[test]
@@ -468,6 +478,55 @@ mod tests {
             offset_description.contains("0-based"),
             "offset schema must state its 0-based convention, got: {offset_description}"
         );
+    }
+
+    #[test]
+    fn read_schema_explains_default_mode_selection() {
+        let tool = ReadTool::default();
+        assert!(tool
+            .description()
+            .contains("`mode` defaults to `lines` for every call"));
+        assert!(tool.description().contains("set `bytes` explicitly"));
+
+        let schema = serde_json::to_value(tool.input_schema()).expect("schema serializes");
+        let mode_description = schema["definitions"]["ReadMode"]["description"]
+            .as_str()
+            .expect("mode schema description");
+        assert!(mode_description.contains("`Lines` is the default for all reads"));
+    }
+
+    #[test]
+    fn read_args_default_to_lines_without_an_explicit_mode() {
+        let tool = ReadTool::default();
+        let arguments = serde_json::json!({
+            "path": "source.txt",
+            "offset": 32,
+            "limit": 2,
+        });
+        assert!(tool.validate_args(&arguments).is_ok());
+
+        let parsed: ReadFileArgs =
+            serde_json::from_value(arguments).expect("arguments deserialize");
+        assert_eq!(parsed.mode, ReadMode::Lines);
+    }
+
+    #[test]
+    fn read_omitted_mode_uses_lines_for_ranges() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            let path = dir.path().join("a.txt");
+            std::fs::write(&path, "one\ntwo\nthree\nfour").expect("write");
+            let arguments = serde_json::json!({
+                "path": path.display().to_string(),
+                "offset": 1,
+                "limit": 2,
+            });
+            let result =
+                read_file(serde_json::from_value(arguments).expect("arguments deserialize"))
+                    .await
+                    .expect("read ok");
+            assert_eq!(result.text(), "two\nthree");
+        });
     }
 
     #[test]
@@ -563,8 +622,8 @@ mod tests {
         let tool = ReadTool::default();
         assert_eq!(tool.argument_order("path"), 0);
         assert!(tool.argument_order("mode") < tool.argument_order("offset"));
-        assert!(tool.is_default_argument("mode", &Value::from("bytes")));
-        assert!(!tool.is_default_argument("mode", &Value::from("lines")));
+        assert!(tool.is_default_argument("mode", &Value::from("lines")));
+        assert!(!tool.is_default_argument("mode", &Value::from("bytes")));
         assert!(tool.is_default_argument("offset", &Value::Null));
         assert!(tool.is_default_argument("offset", &Value::from(0)));
         assert!(!tool.is_default_argument("offset", &Value::from(3)));
@@ -577,7 +636,7 @@ mod tests {
         let tool = ReadTool::default();
         let args = serde_json::json!({
             "path": "a.txt",
-            "mode": "bytes",
+            "mode": "lines",
             "offset": 0,
             "limit": 3,
         });
@@ -655,7 +714,7 @@ mod tests {
         let tool = ReadTool::default();
         let arguments = serde_json::json!({
             "path": "a.txt",
-            "mode": "bytes",
+            "mode": "lines",
             "offset": 0,
             "limit": serde_json::Value::Null,
         });

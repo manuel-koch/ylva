@@ -32,9 +32,10 @@ use crossterm::event::KeyEvent;
 use ratatui::layout::Rect;
 use uuid::Uuid;
 
-use crate::agent::AgentMode;
+use crate::agent::{AgentMode, AssistantStatus, Message, UserMessageKind};
 use crate::llm::engine::{EngineDisplayInfo, ProviderModelOption};
 use crate::slash_command::{slash_command_suggestions, SlashCommandInfo};
+use crate::store::ChildRunRecord;
 
 // ─── Duration constant ───────────────────────────────────────────────────────
 
@@ -176,11 +177,14 @@ pub enum ToolCallState {
         title_arguments: Vec<(String, serde_json::Value)>,
         /// Interim status key/value pairs patched in by `ToolProgress` (e.g.
         /// `spawn_subagent` reporting `status=spawned`/`queued` + `run_id`),
-        /// shown alongside `title_arguments` while running. Deliberately
+        /// used alongside `title_arguments` while running. Deliberately
         /// **not** carried forward into `Done` (which has no equivalent
         /// field) — once the call truly finishes, `Done`'s own `summary`
         /// is the single source of truth for its final status, so a stale
         /// in-flight value here can never linger into the terminal bubble.
+        /// Internal progress values such as `status` and `run_id` are retained
+        /// for rendering and routing but omitted from the rendered subagent
+        /// title.
         progress_arguments: Vec<(String, serde_json::Value)>,
     },
     /// Completed successfully.
@@ -208,6 +212,58 @@ pub enum ToolCallState {
         content_sections: Vec<crate::agent::tools::Section>,
         title_arguments: Vec<(String, serde_json::Value)>,
     },
+}
+
+/// Counts root-conversation subagent calls that have not reached a terminal
+/// state. Finished calls are represented by `Done`/`Error`/`Killed` bubbles
+/// and are deliberately excluded.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ActiveSubagentCounts {
+    pub running: usize,
+    pub queued: usize,
+}
+
+impl ActiveSubagentCounts {
+    /// Count active `spawn_subagent` bubbles in a root transcript.
+    ///
+    /// A running bubble without interim status metadata is treated as running;
+    /// this covers the short interval between creating the bubble and receiving
+    /// the scheduler's first `ToolProgress` update.
+    pub fn from_entries(entries: &[ChatEntry]) -> Self {
+        let mut counts = Self::default();
+
+        for entry in entries {
+            let ChatEntry::ToolBubble {
+                name,
+                state: bubble_state,
+                ..
+            } = entry
+            else {
+                continue;
+            };
+            if name != crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME {
+                continue;
+            }
+
+            let ToolCallState::Running {
+                progress_arguments, ..
+            } = bubble_state.as_ref()
+            else {
+                continue;
+            };
+            let status = progress_arguments
+                .iter()
+                .find_map(|(key, value)| (key == "status").then(|| value.as_str()))
+                .flatten();
+            if status == Some("queued") {
+                counts.queued += 1;
+            } else {
+                counts.running += 1;
+            }
+        }
+
+        counts
+    }
 }
 
 /// One entry in the scrollable chat history area.
@@ -398,6 +454,7 @@ pub struct ChildConversation {
     pub info: ChildRunInfo,
     pub messages: Vec<ChatEntry>,
     pub turn_buffer: TurnBuffer,
+    pub needs_lazy_load: bool,
 }
 
 impl ChildConversation {
@@ -406,8 +463,273 @@ impl ChildConversation {
             info,
             messages: Vec::new(),
             turn_buffer: TurnBuffer::default(),
+            needs_lazy_load: false,
         }
     }
+
+    pub(crate) fn new_replay(info: ChildRunInfo) -> Self {
+        ChildConversation {
+            info,
+            messages: Vec::new(),
+            turn_buffer: TurnBuffer::default(),
+            needs_lazy_load: true,
+        }
+    }
+}
+
+/// Project persisted domain messages into the same terminal-free chat model
+/// used by live presenter updates.
+pub fn project_messages(messages: &[Message]) -> Vec<ChatEntry> {
+    project_messages_with_child_runs(messages, &[])
+}
+
+fn project_messages_with_child_runs(
+    messages: &[Message],
+    child_runs: &[ChildRunRecord],
+) -> Vec<ChatEntry> {
+    let tool_calls = messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::Assistant { tool_calls, .. } => Some(tool_calls),
+            _ => None,
+        })
+        .flatten()
+        .map(|call| {
+            (
+                call.id,
+                (
+                    call.name.clone(),
+                    call.arguments.clone(),
+                    call.title_arguments(),
+                ),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let mut entries = Vec::new();
+
+    for message in messages {
+        match message {
+            Message::User {
+                content,
+                kind: UserMessageKind::Explicit,
+            } => entries.push(ChatEntry::UserMessage {
+                text: content.clone(),
+                state: UserMessageState::Sent,
+            }),
+            Message::User {
+                kind: UserMessageKind::ImplicitToolNote,
+                ..
+            }
+            | Message::System { .. } => {}
+            Message::Assistant {
+                content,
+                status,
+                tool_calls,
+            } => {
+                if !content.trim().is_empty() {
+                    entries.push(ChatEntry::AssistantMessage {
+                        text: content.clone(),
+                        interrupted: matches!(status, AssistantStatus::Interrupted),
+                    });
+                }
+                for call in tool_calls {
+                    entries.push(ChatEntry::ToolBubble {
+                        id: call.id,
+                        name: call.name.clone(),
+                        state: Box::new(ToolCallState::Running {
+                            arguments: call.arguments.clone(),
+                            content_sections: vec![],
+                            title_arguments: call.title_arguments(),
+                            progress_arguments: vec![],
+                        }),
+                        collapsed: call.name != crate::agent::tools::clarify::ClarifyTool::NAME,
+                    });
+                }
+            }
+            Message::ToolResult {
+                value:
+                    crate::agent::ToolResult {
+                        id,
+                        name,
+                        result,
+                        result_section_id,
+                        summary,
+                        content_sections,
+                        duration,
+                        ..
+                    },
+            } => {
+                let (arguments, title_arguments) = tool_calls
+                    .get(id)
+                    .map(|(_, arguments, title_arguments)| {
+                        (arguments.clone(), title_arguments.clone())
+                    })
+                    .unwrap_or((serde_json::Value::Null, vec![]));
+                replace_or_append_tool_bubble(
+                    &mut entries,
+                    *id,
+                    name,
+                    ToolCallState::Done {
+                        arguments,
+                        result_section: ResultSection {
+                            id: result_section_id
+                                .as_deref()
+                                .unwrap_or(result_section_ids::RESULT)
+                                .to_string(),
+                            content: result.clone(),
+                        },
+                        content_sections: content_sections.clone(),
+                        summary: summary.clone(),
+                        duration: *duration,
+                        title_arguments,
+                    },
+                );
+            }
+            Message::ToolError {
+                id,
+                name,
+                error,
+                duration,
+                content_sections,
+            } => {
+                let (arguments, title_arguments) = tool_calls
+                    .get(id)
+                    .map(|(_, arguments, title_arguments)| {
+                        (arguments.clone(), title_arguments.clone())
+                    })
+                    .unwrap_or((serde_json::Value::Null, vec![]));
+                replace_or_append_tool_bubble(
+                    &mut entries,
+                    *id,
+                    name,
+                    ToolCallState::Error {
+                        error: error.clone(),
+                        title_arguments,
+                        duration: *duration,
+                        content_sections: content_sections.clone(),
+                    },
+                );
+                let _ = arguments;
+            }
+        }
+    }
+
+    for child_run in child_runs {
+        if child_run.call_id.is_nil() {
+            continue;
+        }
+        let (name, arguments, title_arguments) = tool_calls
+            .get(&child_run.call_id)
+            .cloned()
+            .unwrap_or_else(|| {
+                (
+                    crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
+                    serde_json::Value::Null,
+                    vec![],
+                )
+            });
+        let mut preserved_content_sections = entries
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                ChatEntry::ToolBubble { id, state, .. } if *id == child_run.call_id => {
+                    match state.as_ref() {
+                        ToolCallState::Pending {
+                            content_sections, ..
+                        }
+                        | ToolCallState::Running {
+                            content_sections, ..
+                        }
+                        | ToolCallState::Done {
+                            content_sections, ..
+                        }
+                        | ToolCallState::Error {
+                            content_sections, ..
+                        }
+                        | ToolCallState::Denied {
+                            content_sections, ..
+                        } => Some(content_sections.clone()),
+                        ToolCallState::Killed => None,
+                    }
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+        let child_state = match (&child_run.status, &child_run.completed_at) {
+            (Some(status), Some(_)) => {
+                let finish_result = crate::agent::child_agent_manager::FinishResult {
+                    run_id: child_run.run_id,
+                    call_id: child_run.call_id,
+                    status: status.clone(),
+                    result: if status == "failure" {
+                        None
+                    } else {
+                        child_run.result.clone()
+                    },
+                    error: if status == "failure" {
+                        child_run.result.clone()
+                    } else {
+                        None
+                    },
+                    sources: child_run.sources.clone(),
+                };
+                preserved_content_sections.extend(finish_result.content_sections());
+                ToolCallState::Done {
+                    arguments,
+                    result_section: ResultSection::plain(String::new()),
+                    content_sections: preserved_content_sections,
+                    summary: vec![("status".to_string(), status.clone())],
+                    duration: child_run.duration.unwrap_or_default(),
+                    title_arguments,
+                }
+            }
+            _ => ToolCallState::Error {
+                error: "Subagent did not finish before the session ended.".to_string(),
+                title_arguments,
+                duration: duration_since_timestamp(&child_run.created_at),
+                content_sections: vec![],
+            },
+        };
+        replace_or_append_tool_bubble(&mut entries, child_run.call_id, &name, child_state);
+    }
+
+    entries
+}
+
+fn replace_or_append_tool_bubble(
+    entries: &mut Vec<ChatEntry>,
+    id: Uuid,
+    name: &str,
+    state: ToolCallState,
+) {
+    if let Some(entry) = entries.iter_mut().rev().find(
+        |entry| matches!(entry, ChatEntry::ToolBubble { id: entry_id, .. } if *entry_id == id),
+    ) {
+        if let ChatEntry::ToolBubble {
+            state: bubble_state,
+            ..
+        } = entry
+        {
+            **bubble_state = state;
+        }
+        return;
+    }
+    entries.push(ChatEntry::ToolBubble {
+        id,
+        name: name.to_string(),
+        state: Box::new(state),
+        collapsed: true,
+    });
+}
+
+fn duration_since_timestamp(timestamp: &str) -> Duration {
+    let Ok(started_at) = chrono::DateTime::parse_from_rfc3339(timestamp) else {
+        return Duration::ZERO;
+    };
+    chrono::Utc::now()
+        .signed_duration_since(started_at)
+        .to_std()
+        .unwrap_or_default()
 }
 
 /// Which conversation transcript is currently rendered in the main chat area.
@@ -990,6 +1312,8 @@ pub enum Effect {
     ClearConversation,
     /// `/tools` — show the tools the running agent may call.
     ShowTools,
+    /// Read a replay-discovered child transcript before entering its view.
+    LoadChildTranscript { run_id: Uuid },
     /// `/models` — fetch the provider's model list for the picker,
     /// optionally narrowed by a typed model filter.
     ListModels { filter: Option<String> },
@@ -1442,6 +1766,59 @@ impl AppState {
             saved_root_scroll_bubble: None,
             pending_scroll_to_bubble: None,
         }
+    }
+
+    /// Replace the root view-model with a projection of a hydrated session.
+    /// Persisted user messages also seed input history, while implicit
+    /// harness notes remain model-only and are omitted by the projection.
+    pub fn replay_messages(&mut self, messages: &[Message], child_runs: &[ChildRunRecord]) {
+        self.chat_entries = project_messages_with_child_runs(messages, child_runs);
+        self.input_history = messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User {
+                    content,
+                    kind: UserMessageKind::Explicit,
+                } => Some(content.clone()),
+                _ => None,
+            })
+            .collect();
+        self.history_index = None;
+        self.child_conversations.clear();
+        for child_run in child_runs {
+            if child_run.call_id.is_nil() {
+                continue;
+            }
+            self.child_conversations.insert(
+                child_run.run_id,
+                ChildConversation::new_replay(ChildRunInfo {
+                    run_id: child_run.run_id,
+                    bubble_id: child_run.call_id,
+                    agent_type: child_run.agent_type.clone(),
+                    task: child_run.task.clone(),
+                    label: child_run.label.clone(),
+                }),
+            );
+        }
+        self.conversation.scroll_locked = true;
+        self.conversation.scroll_offset = 0;
+    }
+
+    /// Replace a replay-discovered child's empty transcript after its first
+    /// drill-in read. Repeated drill-ins keep the loaded transcript.
+    pub fn load_child_messages(&mut self, run_id: Uuid, messages: &[Message]) {
+        if let Some(conversation) = self.child_conversations.get_mut(&run_id) {
+            if conversation.needs_lazy_load {
+                conversation.messages = project_messages(messages);
+                conversation.needs_lazy_load = false;
+            }
+        }
+    }
+
+    pub fn child_needs_lazy_load(&self, run_id: Uuid) -> bool {
+        self.child_conversations
+            .get(&run_id)
+            .is_some_and(|conversation| conversation.needs_lazy_load)
     }
 
     /// Returns `true` if a toast is active and has not yet expired.
@@ -2285,6 +2662,15 @@ impl AppState {
         }
     }
 
+    /// Return the active child-agent counts for the root conversation.
+    ///
+    /// This is derived from the root transcript rather than
+    /// `child_conversations`, which intentionally retains finished
+    /// conversations for drill-in navigation.
+    pub fn active_subagent_counts(&self) -> ActiveSubagentCounts {
+        ActiveSubagentCounts::from_entries(&self.chat_entries)
+    }
+
     /// Returns `true` if any `ChatEntry::ToolBubble` is currently in the
     /// `Running` state, i.e. a tool call has started but not yet finished
     /// (`Done`/`Error`/`Denied`/`Killed`). Used by `agent_mode` to
@@ -2370,7 +2756,8 @@ impl AppState {
     }
 
     /// Update the tool bubble for `id` to the Error state. If `id` was the
-    /// tool awaiting approval, clear the approval focus and reset mode to Idle.
+    /// tool awaiting approval, clear the approval focus and reset mode to Idle
+    /// unless an abort is waiting for the agent's explicit idle boundary.
     pub fn apply_tool_error(
         &mut self,
         id: Uuid,
@@ -2418,7 +2805,9 @@ impl AppState {
                 message: error.clone(),
             });
         }
-        if matches!(self.focus, Focus::ToolApproval { tool_id, .. } if tool_id == id) {
+        if matches!(self.focus, Focus::ToolApproval { tool_id, .. } if tool_id == id)
+            && !matches!(self.mode, TuiMode::Aborting)
+        {
             self.focus = Focus::MainInput;
             self.mode = TuiMode::Idle;
         }
@@ -2506,6 +2895,248 @@ impl Default for AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::ToolCallRequest;
+
+    #[test]
+    fn replay_projection_restores_full_fidelity_tool_bubble() {
+        let tool_id = Uuid::new_v4();
+        let content_section =
+            crate::agent::tools::Section::Content(crate::agent::tools::ContentSection {
+                label: Some("Output".to_string()),
+                content: "file contents".to_string(),
+                file_extension: Some("txt".to_string()),
+                line_number_offset: Some(2),
+            });
+        let messages = vec![
+            Message::User {
+                content: "read the file".to_string(),
+                kind: UserMessageKind::Explicit,
+            },
+            Message::Assistant {
+                content: String::new(),
+                status: AssistantStatus::Complete,
+                tool_calls: vec![ToolCallRequest {
+                    id: tool_id,
+                    name: "read".to_string(),
+                    arguments: serde_json::json!({"path": "README.md"}),
+                    persisted_title_arguments: vec![(
+                        "path".to_string(),
+                        serde_json::json!("README.md"),
+                    )],
+                }],
+            },
+            Message::ToolResult {
+                value: crate::agent::ToolResult {
+                    id: tool_id,
+                    name: "read".to_string(),
+                    result: "file contents".to_string(),
+                    result_section_id: None,
+                    result_metadata: None,
+                    result_metadata_schema: None,
+                    summary: vec![("path".to_string(), "README.md".to_string())],
+                    content_sections: vec![content_section.clone()],
+                    duration: Duration::from_millis(37),
+                },
+            },
+        ];
+
+        let entries = project_messages(&messages);
+        assert!(matches!(
+            entries.first(),
+            Some(ChatEntry::UserMessage { text, state: UserMessageState::Sent })
+                if text == "read the file"
+        ));
+        assert!(matches!(
+            entries.get(1),
+            Some(ChatEntry::ToolBubble { id, state, collapsed: true, .. })
+                if *id == tool_id && matches!(
+                    state.as_ref(),
+                    ToolCallState::Done {
+                        arguments,
+                        result_section,
+                        content_sections,
+                        summary,
+                        duration,
+                        title_arguments,
+                    } if arguments == &serde_json::json!({"path": "README.md"})
+                        && result_section == &ResultSection::plain("file contents")
+                        && content_sections == &vec![content_section]
+                        && summary == &vec![("path".to_string(), "README.md".to_string())]
+                        && *duration == Duration::from_millis(37)
+                        && title_arguments == &vec![("path".to_string(), serde_json::json!("README.md"))]
+                )
+        ));
+    }
+
+    #[test]
+    fn replay_projection_replaces_spawn_result_with_finished_or_orphaned_child_state() {
+        let finished_call_id = Uuid::new_v4();
+        let orphaned_call_id = Uuid::new_v4();
+        let finished_run_id = Uuid::new_v4();
+        let orphaned_run_id = Uuid::new_v4();
+        let spawn_call = |id| ToolCallRequest {
+            id,
+            name: crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
+            arguments: serde_json::json!({"task": "inspect the patch"}),
+            persisted_title_arguments: vec![],
+        };
+        let messages = vec![Message::Assistant {
+            content: String::new(),
+            status: AssistantStatus::Complete,
+            tool_calls: vec![spawn_call(finished_call_id), spawn_call(orphaned_call_id)],
+        }];
+        let child_runs = vec![
+            ChildRunRecord {
+                run_id: finished_run_id,
+                call_id: finished_call_id,
+                parent_session: Uuid::new_v4(),
+                agent_type: "research".to_string(),
+                task: "inspect the patch".to_string(),
+                label: "Inspect patch".to_string(),
+                created_at: "2026-01-01T00:00:00.000Z".to_string(),
+                completed_at: Some("2026-01-01T00:00:01.000Z".to_string()),
+                status: Some("success".to_string()),
+                result: Some("patch is safe".to_string()),
+                sources: vec!["src/lib.rs".to_string()],
+                duration: Some(Duration::from_secs(1)),
+            },
+            ChildRunRecord {
+                run_id: orphaned_run_id,
+                call_id: orphaned_call_id,
+                parent_session: Uuid::new_v4(),
+                agent_type: "review".to_string(),
+                task: "inspect the patch".to_string(),
+                label: "Inspect patch".to_string(),
+                created_at: "2026-01-01T00:00:00.000Z".to_string(),
+                completed_at: None,
+                status: None,
+                result: None,
+                sources: vec![],
+                duration: None,
+            },
+        ];
+
+        let entries = project_messages_with_child_runs(&messages, &child_runs);
+        let finished_entry = entries
+            .iter()
+            .find(|entry| {
+                matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == finished_call_id)
+            })
+            .expect("finished child bubble");
+        assert!(matches!(
+            finished_entry,
+            ChatEntry::ToolBubble {
+                state,
+                ..
+            } if matches!(
+                state.as_ref(),
+                ToolCallState::Done {
+                    summary,
+                    content_sections,
+                    duration,
+                    ..
+                } if summary == &vec![("status".to_string(), "success".to_string())]
+                    && content_sections.len() == 2
+                    && *duration == Duration::from_secs(1)
+            )
+        ));
+
+        let orphaned_entry = entries
+            .iter()
+            .find(|entry| {
+                matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == orphaned_call_id)
+            })
+            .expect("orphaned child bubble");
+        assert!(matches!(
+            orphaned_entry,
+            ChatEntry::ToolBubble {
+                state,
+                ..
+            } if matches!(
+                state.as_ref(),
+                ToolCallState::Error { error, .. }
+                    if error == "Subagent did not finish before the session ended."
+            )
+        ));
+    }
+
+    #[test]
+    fn replay_child_transcripts_load_once_on_drill_in() {
+        let run_id = Uuid::new_v4();
+        let call_id = Uuid::new_v4();
+        let child_runs = vec![ChildRunRecord {
+            run_id,
+            call_id,
+            parent_session: Uuid::new_v4(),
+            agent_type: "research".to_string(),
+            task: "inspect the patch".to_string(),
+            label: "Inspect patch".to_string(),
+            created_at: "2026-01-01T00:00:00.000Z".to_string(),
+            completed_at: Some("2026-01-01T00:00:01.000Z".to_string()),
+            status: Some("success".to_string()),
+            result: Some("done".to_string()),
+            sources: vec![],
+            duration: Some(Duration::from_secs(1)),
+        }];
+        let root_messages = vec![Message::Assistant {
+            content: String::new(),
+            status: AssistantStatus::Complete,
+            tool_calls: vec![ToolCallRequest {
+                id: call_id,
+                name: crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
+                arguments: serde_json::json!({"task": "inspect the patch"}),
+                persisted_title_arguments: vec![],
+            }],
+        }];
+        let child_messages = vec![
+            Message::User {
+                content: "inspect the patch".to_string(),
+                kind: UserMessageKind::Explicit,
+            },
+            Message::Assistant {
+                content: "done".to_string(),
+                status: AssistantStatus::Complete,
+                tool_calls: vec![],
+            },
+        ];
+
+        let mut state = AppState::new();
+        state.replay_messages(&root_messages, &child_runs);
+        assert!(state.child_needs_lazy_load(run_id));
+        assert!(state
+            .child_conversations
+            .get(&run_id)
+            .expect("replayed child")
+            .messages
+            .is_empty());
+
+        state.load_child_messages(run_id, &child_messages);
+        let loaded_messages = state
+            .child_conversations
+            .get(&run_id)
+            .expect("replayed child")
+            .messages
+            .clone();
+        assert!(!state.child_needs_lazy_load(run_id));
+        assert_eq!(loaded_messages.len(), 2);
+
+        state.load_child_messages(
+            run_id,
+            &[Message::Assistant {
+                content: "should not replace the cached transcript".to_string(),
+                status: AssistantStatus::Complete,
+                tool_calls: vec![],
+            }],
+        );
+        assert_eq!(
+            state
+                .child_conversations
+                .get(&run_id)
+                .expect("replayed child")
+                .messages,
+            loaded_messages
+        );
+    }
 
     #[test]
     fn matching_model_indices_requires_every_filter_word_in_any_order() {
@@ -2837,6 +3468,51 @@ mod tests {
     fn agent_mode_reports_idle_when_no_tool_bubble_is_running() {
         let state = AppState::new();
         assert_eq!(state.agent_mode(), AgentMode::Idle);
+    }
+
+    #[test]
+    fn active_subagent_counts_include_running_and_queued_bubbles_only() {
+        let mut state = AppState::new();
+        let push_running_subagent = |state: &mut AppState, status: &str| {
+            state.chat_entries.push(ChatEntry::ToolBubble {
+                id: Uuid::new_v4(),
+                name: crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
+                state: Box::new(ToolCallState::Running {
+                    arguments: serde_json::json!({}),
+                    content_sections: vec![],
+                    title_arguments: vec![],
+                    progress_arguments: vec![(
+                        "status".to_string(),
+                        serde_json::Value::String(status.to_string()),
+                    )],
+                }),
+                collapsed: true,
+            });
+        };
+
+        push_running_subagent(&mut state, "running");
+        push_running_subagent(&mut state, "queued");
+        state.chat_entries.push(ChatEntry::ToolBubble {
+            id: Uuid::new_v4(),
+            name: crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
+            state: Box::new(ToolCallState::Done {
+                arguments: serde_json::json!({}),
+                result_section: ResultSection::plain("finished"),
+                content_sections: vec![],
+                summary: vec![],
+                duration: Duration::ZERO,
+                title_arguments: vec![],
+            }),
+            collapsed: true,
+        });
+
+        assert_eq!(
+            state.active_subagent_counts(),
+            ActiveSubagentCounts {
+                running: 1,
+                queued: 1,
+            }
+        );
     }
 
     #[test]

@@ -981,7 +981,43 @@ fn footer_says_subagent_working_while_child_is_only_streaming() {
 }
 
 #[test]
-fn footer_shows_the_active_provider_and_model() {
+fn footer_shows_running_and_queued_subagent_counts() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_widgets;
+    use ylva::{ActiveSubagentCounts, TuiState};
+
+    let backend = TestBackend::new(80, 20);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    let mut state = TuiState {
+        active_subagent_counts: ActiveSubagentCounts {
+            running: 2,
+            queued: 1,
+        },
+        ..TuiState::new()
+    };
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("draw");
+
+    let buffer = terminal.backend().buffer().clone();
+    let rendered: String = (0..20u16)
+        .flat_map(|row| (0..80u16).map(move |column| (column, row)))
+        .map(|(column, row)| buffer.cell((column, row)).unwrap().symbol().to_string())
+        .collect();
+    assert!(
+        rendered.contains(" · Subagents: 2 running, 1 queued"),
+        "subagent counts should follow the busy indicator with a middle-dot separator: {rendered:?}"
+    );
+}
+
+#[test]
+fn footer_shows_the_active_named_engine_and_model() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use ratatui_textarea::TextArea;
@@ -992,6 +1028,7 @@ fn footer_shows_the_active_provider_and_model() {
     let mut terminal = Terminal::new(backend).expect("terminal");
     let mut state = TuiState {
         engine_display: EngineDisplayInfo {
+            engine_name: "ollama/local".to_string(),
             provider_connection: "ollama".to_string(),
             model: "llama3.2".to_string(),
             reasoning_effort: Some("max".to_string()),
@@ -1012,8 +1049,12 @@ fn footer_shows_the_active_provider_and_model() {
         .map(|(column, row)| buffer.cell((column, row)).unwrap().symbol().to_string())
         .collect();
     assert!(
-        rendered.contains("ollama/llama3.2 (max)"),
-        "footer must show the active provider/model identity: {rendered:?}"
+        rendered.contains("ollama/local → llama3.2 (max)"),
+        "footer must show the active named-engine/model identity: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains(" → ollama → "),
+        "footer must omit the provider connection identity: {rendered:?}"
     );
 
     state.engine_display.reasoning_effort = None;
@@ -1029,13 +1070,92 @@ fn footer_shows_the_active_provider_and_model() {
         .map(|(column, row)| buffer.cell((column, row)).unwrap().symbol().to_string())
         .collect();
     assert!(
-        rendered_without_reasoning.contains("ollama/llama3.2"),
-        "footer must retain the active provider/model identity: {rendered_without_reasoning:?}"
+        rendered_without_reasoning.contains("ollama/local → llama3.2"),
+        "footer must retain the active named-engine/model identity: {rendered_without_reasoning:?}"
     );
     assert!(
-        !rendered_without_reasoning.contains("ollama/llama3.2 ("),
+        !rendered_without_reasoning.contains("ollama/local → llama3.2 ("),
         "footer must omit the default reasoning effort: {rendered_without_reasoning:?}"
     );
+}
+
+#[test]
+fn footer_renders_bold_keys_with_normal_action_text_and_separators() {
+    use ratatui::backend::TestBackend;
+    use ratatui::style::Modifier;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_widgets;
+    use ylva::{AgentMode, TuiState};
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
+    let mut state = TuiState {
+        agent_mode: AgentMode::Streaming,
+        ..TuiState::new()
+    };
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("draw");
+
+    let buffer = terminal.backend().buffer().clone();
+    let footer_row = (0..20u16)
+        .find(|row| {
+            let line: String = (0..80u16)
+                .map(|column| buffer.cell((column, *row)).unwrap().symbol().to_string())
+                .collect();
+            line.contains("enter send · esc cancel · ctrl-c cancel & quit · F1 help")
+        })
+        .expect("keybinding footer row");
+    let line: String = (0..80u16)
+        .map(|column| {
+            buffer
+                .cell((column, footer_row))
+                .unwrap()
+                .symbol()
+                .to_string()
+        })
+        .collect();
+    let enter_start = line.find("enter").expect("enter keybinding") as u16;
+    let send_start = enter_start + "enter ".chars().count() as u16;
+    let separator_start = line.find(" · ").expect("separator") as u16;
+
+    for column in enter_start..enter_start + "enter".chars().count() as u16 {
+        assert!(
+            buffer
+                .cell((column, footer_row))
+                .expect("enter cell")
+                .style()
+                .add_modifier
+                .contains(Modifier::BOLD),
+            "key cell at column {column} should be bold"
+        );
+    }
+    for column in send_start..send_start + "send".chars().count() as u16 {
+        assert!(
+            !buffer
+                .cell((column, footer_row))
+                .expect("send cell")
+                .style()
+                .add_modifier
+                .contains(Modifier::BOLD),
+            "action cell at column {column} should not be bold"
+        );
+    }
+    for column in separator_start..separator_start + " · ".chars().count() as u16 {
+        assert!(
+            !buffer
+                .cell((column, footer_row))
+                .expect("separator cell")
+                .style()
+                .add_modifier
+                .contains(Modifier::BOLD),
+            "separator cell at column {column} should not be bold"
+        );
+    }
 }
 
 #[test]
@@ -1084,15 +1204,15 @@ fn model_picker_footer_shows_picker_controls_instead_of_send() {
         .map(|(column, row)| buffer.cell((column, row)).unwrap().symbol().to_string())
         .collect();
     assert!(
-        rendered.contains("←/→: effort"),
+        rendered.contains("←/→ effort"),
         "rendered footer: {rendered:?}"
     );
     assert!(
-        rendered.contains("enter: switch"),
+        rendered.contains("enter switch"),
         "rendered footer: {rendered:?}"
     );
     assert!(
-        rendered.contains("esc: cancel"),
+        rendered.contains("esc cancel"),
         "rendered footer: {rendered:?}"
     );
     assert!(
@@ -1104,7 +1224,7 @@ fn model_picker_footer_shows_picker_controls_instead_of_send() {
         "model picker title must not duplicate footer controls: {rendered:?}"
     );
     assert!(
-        !rendered.contains("enter: send"),
+        !rendered.contains("enter send"),
         "model picker must not advertise sending: {rendered:?}"
     );
 }
@@ -1696,6 +1816,7 @@ fn footer_indicates_subagent_done_while_parent_still_busy() {
     let mut terminal = Terminal::new(backend).expect("terminal");
 
     let mut state = ylva::TuiState {
+        parent_agent_mode: AgentMode::Streaming,
         agent_mode: AgentMode::Streaming,
         child_view: ylva::tui_render_state::ChildViewState {
             child_view_bubble: Some((
@@ -1732,6 +1853,7 @@ fn footer_indicates_subagent_done_while_parent_still_busy() {
 
     // Once the root also goes idle, the plain "Idle" word is unambiguous —
     // no special-casing needed (nothing is left "working" to disambiguate).
+    state.parent_agent_mode = AgentMode::Idle;
     state.agent_mode = AgentMode::Idle;
     terminal
         .draw(|frame| {

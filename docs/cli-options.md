@@ -8,6 +8,7 @@ Reference for Ylva's command-line interface.
 | --- | --- | --- | --- | --- |
 | `--version` | none | — | — | Print build provenance (`Version`, `Commit`, `Built`, `Profile`) and exit. Takes precedence over all other arguments. |
 | `--no-tui` | none | — | — | Force headless (CLI) mode even when stdout is a terminal. Useful for scripting or debugging without the TUI. |
+| `--color=<mode>` | enum | `auto`, `no`, `yes` | `auto` | Select CLI color behavior: detect terminal support, force no colors, or force colors. Has no effect on TUI rendering. |
 | `--prompt <text>` | string | any text | *none* | Initial user turn sent to the agent. Resolved with the precedence described below. |
 | `--profile <name>` | string | any profile directory name | `default` | Load `~/.ylva/profiles/<name>/config.toml`. When `--profile` is given explicitly, a missing file is a hard error (exit code `2`) naming the profile — the user asked for that specific profile, so it is never silently substituted. With no `--profile` flag at all (the implicit `default` profile), a missing file falls back to the in-code default profile instead, so Ylva still runs out of the box. A malformed file is always an error, named or not. See `docs/configuration.md`. |
 | `--log-file <path>` | path | any writable file path | *none* | Write logs to this file. The file is opened in truncate/overwrite mode on each start, so logs never accumulate across runs. |
@@ -18,10 +19,17 @@ Reference for Ylva's command-line interface.
 | `--auto-approve-write` | none | — | — | Skip the human-approval prompt for `write` tool calls. |
 | `--auto-approve-spawn` | none | — | — | Skip the human-approval prompt for `spawn_subagent` tool calls. See `can_spawn` in `docs/configuration.md` and "Child-agent delegation" in `docs/features.md`. |
 
-An invalid `--log-level`, `--log-format`, or `--conversation-id` value, a flag
-missing its required value, or a `--log-file` that cannot be opened (for example, its containing
-directory does not exist) prints a usage error to stderr and exits with code
-`2` — the error names the attempted path.
+An invalid `--color`, `--log-level`, `--log-format`, or `--conversation-id`
+value, a flag missing its required value, or a `--log-file` that cannot be
+opened (for example, its containing directory does not exist) prints a usage
+error to stderr and exits with code `2` — the error names the attempted path.
+
+When the CLI writes to a terminal, its section headers and tool status lines
+use the same semantic colors as the TUI. Colors are disabled automatically for
+non-terminal output, `TERM=dumb`, or when the standard `NO_COLOR` environment
+variable is set when `--color=auto` is selected. Use `--color=no` to disable
+them explicitly, or `--color=yes` to force them even for non-terminal output,
+`TERM=dumb`, or `NO_COLOR`. The flag only affects CLI output, not the TUI.
 
 ## Resuming a session
 
@@ -86,4 +94,4 @@ environment values are never written to logs.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `YLVA_REQUEST_DUMP_PATH` | — | When set, each outgoing HTTP request is written to a timestamped JSON Lines file, and the paired streamed response is written alongside it as a raw SSE transcript. The value is a path template: the directory and filename stem are extracted and the request is written as `<stem>_<timestamp>_request.jsonl` — line 1 is the request's `scheme`/`host`/`path`/`headers` (any `Authorization`/`Cookie`/API-key-style header value is redacted as `<REDACTED>`), line 2 is the compact JSON body; the response is written as `<stem>_<timestamp>_response.jsonl` (one line per SSE `data:` payload, or a `[transport] ...` marker for non-payload events such as cancellation or a transport error), sharing the exact same `<unix_seconds>_<millis>` `<timestamp>` as its request so the pair can be found together. A relative directory is resolved against the process working directory. Used by `make build-debug-and-run-with-logs`. |
+| `YLVA_REQUEST_DUMP_PATH` | — | When set, each outgoing HTTP request is written to a timestamped JSON Lines file, and the paired streamed response is written alongside it as a raw SSE transcript. The value is a path template: the directory and filename stem are extracted and the request is written as `<stem>_<timestamp>_<dump_id>_request.jsonl` — line 1 is the request's `scheme`/`host`/`path`/`headers` (any `Authorization`/`Cookie`/API-key-style header value is redacted as `<REDACTED>`), line 2 is the compact JSON body; the response is written as `<stem>_<timestamp>_<dump_id>_response.jsonl` (one line per SSE `data:` payload, or a `[transport] ...` marker for non-payload events such as cancellation or a transport error), sharing the exact same timestamp and per-request `<dump_id>` as its request so concurrent requests cannot overwrite each other's dumps. A relative directory is resolved against the process working directory. Used by `make build-debug-and-run-with-logs`. |

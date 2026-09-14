@@ -18,6 +18,7 @@ use futures::StreamExt;
 use reqwest::header::{HeaderMap, AUTHORIZATION};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use crate::agent::{DeltaChunk, Message, StreamEvent};
 use crate::llm::engine::{EngineRuntimeConfig, EngineRuntimeConfigHandle, DEFAULT_CONTEXT_LENGTH};
@@ -181,6 +182,8 @@ impl Provider for OpenAiCompatibleProvider {
             Err(error) => return Box::pin(async move { Err(error) }),
         };
         let model = runtime_config.model.clone();
+        let provider_connection = self.name.clone();
+        let completions_url = self.completions_url();
         let api_key = self.api_key.clone();
         let client = self.client.clone();
         let request_body_customizer = self.request_body_customizer;
@@ -203,29 +206,35 @@ impl Provider for OpenAiCompatibleProvider {
                 request_body["tools"] = serde_json::Value::Array(tools);
                 request_body["tool_choice"] = serde_json::json!("auto");
             }
-            let completions_url = self.completions_url();
             let mut headers = HeaderMap::new();
             if let Some(value) = &api_key {
                 let authorization = format!("{} {}", "Bearer", value);
                 headers.insert(AUTHORIZATION, authorization.parse()?);
             }
-            // Only the URL and model are logged — never the request headers
-            // (which carry the `Authorization`/API-key value) or the body.
-            tracing::debug!(url = %completions_url, model = %model, "chat request started");
-            // Computed once (rather than inside `build_request_dump_path`/
-            // `build_response_dump_path`) so the request and its paired
-            // response dump share the exact same `<epoch>_<millis>` timestamp
-            // component.
+            let dump_id = Uuid::new_v4().simple().to_string();
             let dump_timestamp = super::http::current_dump_timestamp();
-            let request_dump_path = super::http::build_request_dump_path(&dump_timestamp);
-            let response_dump_path = super::http::build_response_dump_path(&dump_timestamp);
+            let request_dump_path = super::http::build_request_dump_path(&dump_timestamp, &dump_id);
+            let response_dump_path =
+                super::http::build_response_dump_path(&dump_timestamp, &dump_id);
+            // Log the effective request snapshot, never request headers (which
+            // carry the Authorization/API-key value) or the request body.
+            tracing::debug!(
+                provider_connection = %provider_connection,
+                url = %completions_url,
+                model = %runtime_config.model,
+                temperature = ?runtime_config.temperature,
+                effective_context_length = runtime_config.context_length,
+                reasoning_effort = ?runtime_config.reasoning_effort,
+                dump_id = %dump_id,
+                "chat request started"
+            );
             // Logged once, upfront, alongside the request dump's own
             // "dumped request body" log line (emitted inside
             // `post_with_retry`) — together they let a request/response pair
             // be found from a log timestamp without guessing the paired
             // filename from the request dump path alone.
             if let Some(path) = &response_dump_path {
-                tracing::debug!(path = %path.display(), "response dump path resolved");
+                tracing::debug!(dump_id = %dump_id, path = %path.display(), "response dump path resolved");
             }
             let response = super::http::post_with_retry(
                 &client,
@@ -461,6 +470,9 @@ fn parse_reasoning_efforts(entry: &serde_json::Value) -> Option<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
     use super::*;
 
     macro_rules! fixture {
@@ -522,6 +534,75 @@ mod tests {
                 None,
             ]
         );
+    }
+
+    #[test]
+    fn provider_logs_effective_runtime_snapshot_without_sensitive_request_data() {
+        let log = crate::test_support::capture_logs(async {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind local test server");
+            let address = listener.local_addr().expect("local test server address");
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("accept provider request");
+                let response_body = "data: [DONE]\n\n";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\n\
+                     Content-Type: text/event-stream\r\n\
+                     Content-Length: {}\r\n\
+                     Connection: close\r\n\
+                     \r\n\
+                     {}",
+                    response_body.len(),
+                    response_body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write streaming response");
+            });
+
+            let provider = OpenAiCompatibleProvider::new(
+                "test-connection".to_string(),
+                format!("http://{address}"),
+                "runtime-model".to_string(),
+                Some("test-api-key".to_string()),
+            );
+            {
+                let mut runtime_config = provider
+                    .runtime_config
+                    .write()
+                    .expect("runtime config lock");
+                runtime_config.temperature = Some(0.25);
+                runtime_config.context_length = 64_000;
+                runtime_config.reasoning_effort = Some("high".to_string());
+            }
+
+            let mut receiver = provider
+                .chat(
+                    Vec::new(),
+                    vec![ToolSchema {
+                        name: "request-body-secret".to_string(),
+                        description: "request-body-secret".to_string(),
+                        parameters: serde_json::json!({}),
+                    }],
+                    CancellationToken::new(),
+                )
+                .await
+                .expect("mock server response");
+            while receiver.recv().await.is_some() {}
+            server.await.expect("test server task");
+        });
+
+        assert!(log.contains("chat request started"));
+        assert!(log.contains("provider_connection=test-connection"));
+        assert!(log.contains("model=runtime-model"));
+        assert!(log.contains("temperature=Some(0.25)"));
+        assert!(log.contains("effective_context_length=64000"));
+        assert!(log.contains("reasoning_effort=Some(\"high\")"));
+        assert!(log.contains("dump_id="));
+        assert!(!log.contains("test-api-key"));
+        assert!(!log.contains("request-body-secret"));
     }
 
     #[test]

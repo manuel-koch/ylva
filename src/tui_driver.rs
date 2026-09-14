@@ -168,7 +168,7 @@ fn app_action_to_tui_event(action: AppAction) -> Option<TuiEvent> {
 }
 
 /// Map a [`UiUpdate`] to a [`DomainEvent`] for the Presenter.
-/// Returns `None` for `ToolError` which is handled directly by the Driver.
+/// Returns `None` for tool updates handled directly by the Driver.
 fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
     match update {
         UiUpdate::StreamStarted => Some(DomainEvent::StreamStarted),
@@ -176,6 +176,7 @@ fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
         UiUpdate::AppendThinking(text) => Some(DomainEvent::StreamThinkingChunk(text.clone())),
         UiUpdate::StreamDone => Some(DomainEvent::StreamDone),
         UiUpdate::StreamCancelled => Some(DomainEvent::StreamCancelled),
+        UiUpdate::AgentIdle => Some(DomainEvent::AgentIdle),
         UiUpdate::SteerQueued { run_id } => Some(DomainEvent::SteerQueued { run_id: *run_id }),
         UiUpdate::SteerApplied { run_id } => Some(DomainEvent::SteerApplied { run_id: *run_id }),
         UiUpdate::ToolPending {
@@ -447,11 +448,57 @@ async fn execute_effects(
             // before this function ever sees them).
             Effect::ClearConversation
             | Effect::ShowTools
+            | Effect::LoadChildTranscript { .. }
             | Effect::ListModels { .. }
             | Effect::SwitchModel(_) => {}
         }
     }
     ActionOutcome::Continue
+}
+
+/// Resolve a replay-discovered child transcript before the pure reducer enters
+/// the child view. Live children are already populated and pass through
+/// unchanged.
+fn prepare_child_replay_effects(
+    state: &mut AppState,
+    effects: Vec<Effect>,
+    store: Option<&crate::store::Store>,
+) -> Vec<Effect> {
+    let mut prepared = Vec::with_capacity(effects.len());
+    for effect in effects {
+        match effect {
+            Effect::LoadChildTranscript { run_id } => {
+                if state.child_needs_lazy_load(run_id) {
+                    let messages = match store {
+                        Some(store) => {
+                            let path = crate::store::session_path(
+                                store.chats_root(),
+                                store.project_key(),
+                                run_id,
+                            );
+                            match crate::store::Store::read_messages(&path) {
+                                Ok(messages) => messages,
+                                Err(error) => {
+                                    tracing::warn!(
+                                        %error,
+                                        path = %path.display(),
+                                        %run_id,
+                                        "could not replay child transcript"
+                                    );
+                                    Vec::new()
+                                }
+                            }
+                        }
+                        None => Vec::new(),
+                    };
+                    state.load_child_messages(run_id, &messages);
+                }
+                state.switch_to_child_view(run_id);
+            }
+            other => prepared.push(other),
+        }
+    }
+    prepared
 }
 
 /// How long `/models` waits for the provider's model list before giving up.
@@ -843,8 +890,11 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
     let input_area_rect = app.layout.input_area.rect;
     let chat_area_rect = app.layout.chat_area.rect;
     let slash_overlay_drag = app.slash_overlay_drag_selection();
+    let active_subagent_counts = app.active_subagent_counts();
     TuiState {
+        parent_agent_mode: agent_mode,
         agent_mode,
+        active_subagent_counts,
         chat_entries: app.chat_entries,
         partial_assistant_text: app.turn_buffer.partial_assistant_text,
         partial_thinking_text: app.turn_buffer.partial_thinking_text,
@@ -906,14 +956,14 @@ fn draw_frame<B>(
     terminal: &mut Terminal<B>,
     state: &mut AppState,
     textarea: &mut TextArea<'_>,
-    engine: &Arc<dyn Engine>,
+    agent: &AgentLoop,
     mouse_pos: Option<(u16, u16)>,
 ) -> anyhow::Result<()>
 where
     B: Backend,
     B::Error: std::error::Error + Send + Sync + 'static,
 {
-    state.engine_display = crate::llm::engine::EngineDisplayInfo::from_engine(engine.as_ref());
+    state.engine_display = agent.engine_display_info();
     let hint = confirm_hint(state);
     terminal.draw(|frame| {
         render::render(frame, state, textarea, hint.as_deref(), mouse_pos);
@@ -943,9 +993,35 @@ where
     let mut state = AppState::new();
     let mut textarea = TextArea::default();
     configure_textarea(&mut textarea);
+    let replay_store = agent.store();
+    if let Some(store) = replay_store.as_ref() {
+        let messages = match crate::store::Store::read_messages(store.path()) {
+            Ok(messages) => messages,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    path = %store.path().display(),
+                    "could not replay TUI session messages"
+                );
+                Vec::new()
+            }
+        };
+        let child_runs = match crate::store::Store::read_child_runs(store.path()) {
+            Ok(child_runs) => child_runs,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    path = %store.path().display(),
+                    "could not replay child-run lifecycle records"
+                );
+                Vec::new()
+            }
+        };
+        state.replay_messages(&messages, &child_runs);
+    }
     let cmd_tx = agent.command_sender();
     let engine = agent.engine();
-    state.engine_display = crate::llm::engine::EngineDisplayInfo::from_engine(engine.as_ref());
+    state.engine_display = agent.engine_display_info();
     // Sorted once here so `/tools` output is stable — the registry is a
     // `HashMap`, whose iteration order is not.
     let mut available_tool_names = agent.registry().names();
@@ -972,7 +1048,7 @@ where
     }
 
     loop {
-        draw_frame(terminal, &mut state, &mut textarea, &engine, mouse_pos)?;
+        draw_frame(terminal, &mut state, &mut textarea, &agent, mouse_pos)?;
 
         let textarea_ctx = TextareaContext {
             is_empty: textarea.lines() == [""],
@@ -1033,6 +1109,8 @@ where
 
                     let effects =
                         presenter::update(&mut state, TuiEvent::Mouse(mouse), &textarea_ctx);
+                    let effects =
+                        prepare_child_replay_effects(&mut state, effects, replay_store.as_ref());
                     if execute_effects(
                         &mut state, &mut textarea, &cmd_tx, effects, &mut mouse_drag, clipboard,
                         &mut pending_run_ids,
@@ -1051,6 +1129,8 @@ where
                 // Slash-command effects are the only ones needing the engine,
                 // and only key input can produce them.
                 let (slash_effects, effects) = split_slash_effects(effects);
+                let effects =
+                    prepare_child_replay_effects(&mut state, effects, replay_store.as_ref());
                 if execute_effects(
                     &mut state, &mut textarea, &cmd_tx, effects, &mut mouse_drag, clipboard,
                     &mut pending_run_ids,
@@ -1132,6 +1212,8 @@ where
                     TuiEvent::Domain(DomainEvent::ConfirmExpired),
                     &textarea_ctx,
                 );
+                let effects =
+                    prepare_child_replay_effects(&mut state, effects, replay_store.as_ref());
                 execute_effects(
                     &mut state, &mut textarea, &cmd_tx, effects, &mut mouse_drag, clipboard,
                     &mut pending_run_ids,
@@ -1145,6 +1227,8 @@ where
                     TuiEvent::Domain(DomainEvent::BubbleClickWindowExpired),
                     &textarea_ctx,
                 );
+                let effects =
+                    prepare_child_replay_effects(&mut state, effects, replay_store.as_ref());
                 execute_effects(
                     &mut state, &mut textarea, &cmd_tx, effects, &mut mouse_drag, clipboard,
                     &mut pending_run_ids,
@@ -1463,6 +1547,7 @@ fn install_sigint_relay(action_tx: mpsc::Sender<AppAction>) -> anyhow::Result<()
 mod tests {
     use super::*;
     use crate::llm::engine::DEFAULT_CONTEXT_LENGTH;
+    use crate::tui_reducer_state::{ChatEntry, ToolCallState};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tokio::sync::mpsc;
     use uuid::Uuid;
@@ -1490,6 +1575,68 @@ mod tests {
         let mut textarea = TextArea::default();
         configure_textarea(&mut textarea);
         (AppState::new(), textarea, cmd_tx, cmd_rx)
+    }
+
+    #[tokio::test]
+    async fn modified_enter_inserts_a_newline_into_the_textarea() {
+        for modifier in [KeyModifiers::SHIFT, KeyModifiers::ALT] {
+            let (mut state, _initial_textarea, cmd_tx, _cmd_rx) = setup();
+            let mut textarea = TextArea::from(vec!["first line".to_string()]);
+            configure_textarea(&mut textarea);
+            textarea.move_cursor(ratatui_textarea::CursorMove::End);
+            let key_event = KeyEvent::new(KeyCode::Enter, modifier);
+            let effects = presenter::update(
+                &mut state,
+                TuiEvent::Input(InputEvent::KeyInput(key_event)),
+                &textarea_ctx_from(&textarea),
+            );
+
+            execute_effects(
+                &mut state,
+                &mut textarea,
+                &cmd_tx,
+                effects,
+                &mut MouseDrag::default(),
+                &mut NoopClipboard,
+                &mut PendingRunIds::default(),
+            )
+            .await;
+
+            assert_eq!(
+                textarea.lines(),
+                &["first line", ""],
+                "modifier {modifier:?} should insert a newline"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_shift_enter_encoding_inserts_a_newline_into_the_textarea() {
+        let (mut state, _initial_textarea, cmd_tx, _cmd_rx) = setup();
+        let mut textarea = TextArea::from(vec!["first line".to_string()]);
+        configure_textarea(&mut textarea);
+        textarea.move_cursor(ratatui_textarea::CursorMove::End);
+
+        let action = crate::events::map_event(crossterm::event::Event::Key(KeyEvent::new(
+            KeyCode::Char('j'),
+            KeyModifiers::CONTROL,
+        )))
+        .expect("line-feed key event should be mapped");
+        let event = app_action_to_tui_event(action).expect("key action should become a TUI event");
+        let effects = presenter::update(&mut state, event, &textarea_ctx_from(&textarea));
+
+        execute_effects(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            effects,
+            &mut MouseDrag::default(),
+            &mut NoopClipboard,
+            &mut PendingRunIds::default(),
+        )
+        .await;
+
+        assert_eq!(textarea.lines(), &["first line", ""]);
     }
 
     #[test]
@@ -1695,6 +1842,128 @@ mod tests {
             matches!(state.mode, TuiMode::Aborting),
             "mode should be Aborting after stop"
         );
+    }
+
+    #[tokio::test]
+    async fn aborting_tool_error_waits_for_idle_before_quitting() {
+        let (mut state, mut textarea, cmd_tx, _cmd_rx) = setup();
+        let tool_id = Uuid::new_v4();
+        state.mode = TuiMode::Aborting;
+        state.aborting_exit = true;
+        state.focus = Focus::ToolApproval {
+            tool_id,
+            tool_name: "bash".to_string(),
+        };
+        state.chat_entries.push(ChatEntry::ToolBubble {
+            id: tool_id,
+            name: "bash".to_string(),
+            state: Box::new(ToolCallState::Pending {
+                arguments: serde_json::json!({"command": "echo test"}),
+                content_sections: vec![],
+                title_arguments: vec![],
+            }),
+            collapsed: false,
+        });
+
+        let textarea_context = textarea_ctx_from(&textarea);
+        let outcome = process_one_update(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            &textarea_context,
+            &UiUpdate::ToolError {
+                id: tool_id,
+                error: "aborted by user".to_string(),
+                duration: Duration::ZERO,
+                content_sections: vec![],
+                run_id: None,
+            },
+            &mut MouseDrag::default(),
+            &mut NoopClipboard,
+            &mut PendingRunIds::default(),
+        )
+        .await;
+
+        assert_eq!(outcome, ActionOutcome::Continue);
+        assert_eq!(
+            state.mode,
+            TuiMode::Aborting,
+            "the terminal tool error must not bypass the aborting state"
+        );
+
+        let idle_outcome = process_one_update(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            &textarea_context,
+            &UiUpdate::AgentIdle,
+            &mut MouseDrag::default(),
+            &mut NoopClipboard,
+            &mut PendingRunIds::default(),
+        )
+        .await;
+        assert_eq!(
+            idle_outcome,
+            ActionOutcome::Quit,
+            "the following idle event should complete a Ctrl-C abort"
+        );
+    }
+
+    #[tokio::test]
+    async fn aborting_tool_error_then_idle_keeps_tui_open_for_escape() {
+        let (mut state, mut textarea, cmd_tx, _cmd_rx) = setup();
+        let tool_id = Uuid::new_v4();
+        state.mode = TuiMode::Aborting;
+        state.focus = Focus::ToolApproval {
+            tool_id,
+            tool_name: "bash".to_string(),
+        };
+        state.chat_entries.push(ChatEntry::ToolBubble {
+            id: tool_id,
+            name: "bash".to_string(),
+            state: Box::new(ToolCallState::Pending {
+                arguments: serde_json::json!({"command": "echo test"}),
+                content_sections: vec![],
+                title_arguments: vec![],
+            }),
+            collapsed: false,
+        });
+
+        let textarea_context = textarea_ctx_from(&textarea);
+        let tool_error_outcome = process_one_update(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            &textarea_context,
+            &UiUpdate::ToolError {
+                id: tool_id,
+                error: "aborted by user".to_string(),
+                duration: Duration::ZERO,
+                content_sections: vec![],
+                run_id: None,
+            },
+            &mut MouseDrag::default(),
+            &mut NoopClipboard,
+            &mut PendingRunIds::default(),
+        )
+        .await;
+        assert_eq!(tool_error_outcome, ActionOutcome::Continue);
+
+        let idle_outcome = process_one_update(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            &textarea_context,
+            &UiUpdate::AgentIdle,
+            &mut MouseDrag::default(),
+            &mut NoopClipboard,
+            &mut PendingRunIds::default(),
+        )
+        .await;
+        assert_eq!(idle_outcome, ActionOutcome::Continue);
+        assert_eq!(state.mode, TuiMode::Idle);
+        assert_eq!(state.focus, Focus::MainInput);
+        assert!(!state.aborting_exit);
     }
 
     #[tokio::test]

@@ -12,17 +12,13 @@
 //! or dropping content.
 
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::highlight::{
     active_theme, highlighted_lines_cached, syntect_fg_span, wrap_highlighted_line,
 };
-
-/// Foreground color used for `inline code` spans.
-pub const INLINE_CODE_FG: Color = Color::Rgb(224, 168, 82);
-/// Foreground color used for blockquote `│` prefixes and fenced code blocks.
-pub const MARKDOWN_DIM_FG: Color = Color::DarkGray;
+use crate::theme::{INLINE_CODE_FG, MARKDOWN_DIM_FG};
 
 /// The inline formatting in effect for a run of text: bold/italic modifiers
 /// and whether it originates from an inline code span (distinct color).
@@ -56,6 +52,20 @@ impl InlineStyle {
 struct Word {
     text: String,
     style: InlineStyle,
+}
+
+/// A table-cell word or word fragment. Unlike [`Word`], this records whether
+/// a space is needed before the fragment so an unbreakable word can be split
+/// across rows without inserting spaces into its content.
+#[derive(Clone)]
+struct TableWord {
+    text: String,
+    style: InlineStyle,
+    space_before: bool,
+}
+
+fn terminal_display_width(text: &str) -> usize {
+    Line::from(text).width()
 }
 
 /// Tracks the counter for an in-progress list so nested items number/bullet
@@ -279,11 +289,15 @@ fn list_item_prefix(list_stack: &mut [ListKind]) -> (String, usize) {
     match list_stack.last_mut() {
         Some(ListKind::Ordered(n)) => {
             let prefix = format!("{n}. ");
-            let indent = prefix.chars().count();
+            let indent = terminal_display_width(&prefix);
             *n += 1;
             (prefix, indent)
         }
-        Some(ListKind::Bullet) => ("• ".to_string(), 2),
+        Some(ListKind::Bullet) => {
+            let prefix = "• ".to_string();
+            let indent = terminal_display_width(&prefix);
+            (prefix, indent)
+        }
         None => (String::new(), 0),
     }
 }
@@ -301,17 +315,43 @@ fn push_words(buffer: &mut Vec<Word>, text: &str, style: InlineStyle) {
 }
 
 /// Greedily wraps `words` into lines of at most `width` columns, one space
-/// between words.
+/// between words, splitting oversized words at display-width boundaries.
 fn wrap_words(words: &[Word], width: usize) -> Vec<Vec<Word>> {
+    let width = width.max(1);
     let mut lines: Vec<Vec<Word>> = Vec::new();
     let mut current: Vec<Word> = Vec::new();
     let mut current_len: usize = 0;
     for word in words {
-        let word_len = word.text.chars().count();
+        let word_len = terminal_display_width(&word.text);
         let extra_space = usize::from(!current.is_empty());
         if !current.is_empty() && current_len + extra_space + word_len > width {
             lines.push(std::mem::take(&mut current));
             current_len = 0;
+        }
+        if word_len > width {
+            let mut remaining = word.text.as_str();
+            while !remaining.is_empty() {
+                let (chunk, consumed_bytes) = take_display_width_prefix(remaining, width);
+                if !current.is_empty() {
+                    lines.push(std::mem::take(&mut current));
+                    current_len = 0;
+                }
+                let chunk_width = terminal_display_width(&chunk);
+                if consumed_bytes == remaining.len() {
+                    current.push(Word {
+                        text: chunk,
+                        style: word.style,
+                    });
+                    current_len = chunk_width;
+                } else {
+                    lines.push(vec![Word {
+                        text: chunk,
+                        style: word.style,
+                    }]);
+                }
+                remaining = &remaining[consumed_bytes..];
+            }
+            continue;
         }
         if !current.is_empty() {
             current_len += 1;
@@ -323,6 +363,82 @@ fn wrap_words(words: &[Word], width: usize) -> Vec<Vec<Word>> {
         lines.push(current);
     }
     lines
+}
+
+/// Wraps table-cell words to `width`, splitting an unbreakable word when
+/// necessary. Spaces between original words are preserved, while fragments
+/// from the same word remain adjacent.
+fn wrap_table_words(words: &[Word], width: usize) -> Vec<Vec<TableWord>> {
+    let width = width.max(1);
+    let mut lines: Vec<Vec<TableWord>> = Vec::new();
+    let mut current: Vec<TableWord> = Vec::new();
+    let mut current_len = 0usize;
+
+    for word in words {
+        let mut remaining = word.text.as_str();
+        let mut needs_space = !current.is_empty();
+
+        while !remaining.is_empty() {
+            let space_len = usize::from(needs_space && !current.is_empty());
+            if !current.is_empty() && current_len + space_len >= width {
+                lines.push(std::mem::take(&mut current));
+                current_len = 0;
+                needs_space = false;
+            }
+
+            let space_len = usize::from(needs_space && !current.is_empty());
+            let available = width.saturating_sub(current_len + space_len).max(1);
+            let (chunk, consumed_bytes) = take_display_width_prefix(remaining, available);
+
+            let space_before = needs_space && !current.is_empty();
+            let chunk_width = terminal_display_width(&chunk);
+            current.push(TableWord {
+                text: chunk,
+                style: word.style,
+                space_before,
+            });
+            current_len += space_len + chunk_width;
+            needs_space = false;
+            remaining = &remaining[consumed_bytes..];
+
+            if !remaining.is_empty() {
+                lines.push(std::mem::take(&mut current));
+                current_len = 0;
+            }
+        }
+    }
+
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+fn take_display_width_prefix(text: &str, width: usize) -> (String, usize) {
+    let mut consumed_bytes = 0usize;
+    let mut consumed_width = 0usize;
+
+    for (byte_offset, character) in text.char_indices() {
+        let character_width = terminal_display_width(&character.to_string());
+        if consumed_bytes > 0 && consumed_width + character_width > width {
+            break;
+        }
+        consumed_bytes = byte_offset + character.len_utf8();
+        consumed_width += character_width;
+        if consumed_width >= width {
+            break;
+        }
+    }
+
+    if consumed_bytes == 0 {
+        let character = text
+            .chars()
+            .next()
+            .expect("take_display_width_prefix requires non-empty text");
+        (character.to_string(), character.len_utf8())
+    } else {
+        (text[..consumed_bytes].to_string(), consumed_bytes)
+    }
 }
 
 /// Flushes `buffer` (the inline text accumulated since the last block
@@ -343,12 +459,12 @@ fn flush_buffer(
     }
 
     let quote_prefix = "│ ".repeat(quote_depth);
-    let quote_prefix_len = quote_prefix.chars().count();
+    let quote_prefix_len = terminal_display_width(&quote_prefix);
 
     let heading_prefix = heading_level
         .map(|level| format!("{} ", "#".repeat(level)))
         .unwrap_or_default();
-    let heading_prefix_len = heading_prefix.chars().count();
+    let heading_prefix_len = terminal_display_width(&heading_prefix);
 
     // First-line prefix combines quote + heading + list-item markers; the
     // continuation-line indent replaces the list marker with matching blanks
@@ -356,7 +472,7 @@ fn flush_buffer(
     let first_prefix_extra = heading_prefix_len
         + pending_item_prefix
             .as_ref()
-            .map(|p| p.chars().count())
+            .map(|prefix| terminal_display_width(prefix))
             .unwrap_or(0);
     let cont_prefix_extra = heading_prefix_len + item_continuation_indent;
 
@@ -500,11 +616,67 @@ fn normalize_lang_ext(lang: &str) -> String {
     }
 }
 
+/// Distributes `total` units across `weights.len()` buckets proportionally
+/// to `weights`, using the largest-remainder method so the allocation sums
+/// exactly to `min(total, sum(caps))`. Each bucket is capped at the
+/// corresponding entry in `caps`. Used to shrink table columns so that
+/// narrow columns keep a fair share of the available width instead of being
+/// crowded out by a single very wide column (see docs/backlog-issues.md).
+fn distribute_proportional(weights: &[usize], total: usize, caps: &[usize]) -> Vec<usize> {
+    let count = weights.len();
+    if count == 0 {
+        return Vec::new();
+    }
+    let cap_sum: u128 = caps.iter().map(|&cap| cap as u128).sum();
+    let target = if cap_sum < total as u128 {
+        cap_sum as usize
+    } else {
+        total
+    };
+    let weight_sum: usize = weights.iter().sum();
+    let mut allocation = vec![0usize; count];
+    let mut remainders = vec![0u128; count];
+    if weight_sum > 0 {
+        for index in 0..count {
+            let numerator = weights[index] as u128 * target as u128;
+            let floor_value = (numerator / weight_sum as u128) as usize;
+            allocation[index] = floor_value.min(caps[index]);
+            remainders[index] = numerator % weight_sum as u128;
+        }
+    }
+    // Hand out the remainder (from flooring, or the whole target when every
+    // weight is zero) to the buckets with the largest fractional remainder
+    // first, cycling until the target is met or every cap is exhausted.
+    let mut leftover = target.saturating_sub(allocation.iter().sum());
+    if leftover > 0 {
+        let mut order: Vec<usize> = (0..count).collect();
+        order.sort_by(|&a, &b| remainders[b].cmp(&remainders[a]));
+        loop {
+            let mut progressed = false;
+            for &index in &order {
+                if leftover == 0 {
+                    break;
+                }
+                if allocation[index] < caps[index] {
+                    allocation[index] += 1;
+                    leftover -= 1;
+                    progressed = true;
+                }
+            }
+            if leftover == 0 || !progressed {
+                break;
+            }
+        }
+    }
+    allocation
+}
+
 /// Renders all accumulated table rows as column-aligned lines.
-/// Two-pass: compute natural per-column max widths, then shrink proportionally
-/// if the total exceeds `width` (minimum 1 char per column). Long cells are
-/// word-wrapped to the capped column width, producing multi-terminal-line rows
-/// so that no content is ever clipped.
+/// Two-pass: compute natural per-column max widths, then shrink them to fit
+/// `width` (minimum 1 char per column). Long cells are word-wrapped to the
+/// capped column width, and unbreakable words are split when necessary,
+/// producing multi-terminal-line rows so that no content is ever clipped or
+/// rendered beyond `width`.
 /// Header rows are rendered bold and followed by a separator line.
 fn flush_table(out: &mut Vec<Line<'static>>, rows: &[(bool, Vec<Vec<Word>>)], width: usize) {
     if rows.is_empty() {
@@ -515,33 +687,55 @@ fn flush_table(out: &mut Vec<Line<'static>>, rows: &[(bool, Vec<Vec<Word>>)], wi
         return;
     }
     // Pass 1: natural column widths, and the minimum width imposed by each
-    // column's longest unbreakable word (whitespace is the only wrap point;
-    // see `wrap_words`).
+    // column's longest unbreakable word when whitespace wrapping is enough.
     let mut col_widths = vec![0usize; col_count];
     let mut col_min_widths = vec![1usize; col_count];
     for (_, cells) in rows {
         for (col_idx, cell) in cells.iter().enumerate() {
             col_widths[col_idx] = col_widths[col_idx].max(cell_display_width(cell));
             for word in cell {
-                col_min_widths[col_idx] = col_min_widths[col_idx].max(word.text.chars().count());
+                col_min_widths[col_idx] =
+                    col_min_widths[col_idx].max(terminal_display_width(&word.text));
             }
         }
     }
-    // Shrink proportionally when columns overflow the available width, but
-    // never below a column's longest unbreakable word — otherwise that word
-    // is wider than its padded cell, and every column after it in that row
-    // shifts out of alignment with the rest of the table.
+    // Shrink columns to the available width. When the minimum widths of
+    // unbreakable words do not fit, table cells are character-wrapped below,
+    // so preserving those minimums would make the table overflow its bubble.
     let separator_overhead = col_count.saturating_sub(1) * 3;
     let total_natural: usize = col_widths.iter().sum::<usize>() + separator_overhead;
     if total_natural > width {
         let budget = width.saturating_sub(separator_overhead).max(col_count);
-        let total_original: usize = col_widths.iter().sum::<usize>().max(1);
-        for (w, min_w) in col_widths.iter_mut().zip(col_min_widths.iter()) {
-            *w = (*w * budget / total_original).max(*min_w);
+        let minimum_sum: usize = col_min_widths.iter().sum();
+        let natural_widths = col_widths.clone();
+        if minimum_sum >= budget {
+            // Not even the per-word minimums fit: distribute the budget
+            // proportionally to natural width, floor 1 per column.
+            col_widths = distribute_proportional(&natural_widths, budget, &natural_widths)
+                .into_iter()
+                .map(|w| w.max(1))
+                .collect();
+        } else {
+            // Every column keeps its minimum width; the remaining budget is
+            // then handed out proportionally to how much more each column's
+            // natural width wants, so narrow columns aren't crowded out by
+            // a single very wide column (see docs/backlog-issues.md).
+            let extra_budget = budget - minimum_sum;
+            let wants: Vec<usize> = natural_widths
+                .iter()
+                .zip(&col_min_widths)
+                .map(|(natural, min_width)| natural.saturating_sub(*min_width))
+                .collect();
+            let extra = distribute_proportional(&wants, extra_budget, &wants);
+            col_widths = col_min_widths
+                .iter()
+                .zip(&extra)
+                .map(|(min_width, extra)| min_width + extra)
+                .collect();
         }
     }
     let separator_style = Style::default().fg(MARKDOWN_DIM_FG);
-    let empty_words: Vec<Word> = Vec::new();
+    let empty_table_words: Vec<TableWord> = Vec::new();
     for (is_header, cells) in rows {
         let extra = if *is_header {
             Style::default().add_modifier(Modifier::BOLD)
@@ -549,10 +743,10 @@ fn flush_table(out: &mut Vec<Line<'static>>, rows: &[(bool, Vec<Vec<Word>>)], wi
             Style::default()
         };
         // Pass 2: wrap each cell to its (possibly capped) column width.
-        let wrapped_cells: Vec<Vec<Vec<Word>>> = (0..col_count)
+        let wrapped_cells: Vec<Vec<Vec<TableWord>>> = (0..col_count)
             .map(|col_idx| {
                 let cell = cells.get(col_idx).map(Vec::as_slice).unwrap_or(&[]);
-                wrap_words(cell, col_widths[col_idx].max(1))
+                wrap_table_words(cell, col_widths[col_idx].max(1))
             })
             .collect();
         let row_height = wrapped_cells
@@ -568,10 +762,13 @@ fn flush_table(out: &mut Vec<Line<'static>>, rows: &[(bool, Vec<Vec<Word>>)], wi
                     spans.push(Span::styled(" │ ", separator_style));
                 }
                 let cell_lines = wrapped_cells[col_idx].as_slice();
-                let line_words = cell_lines.get(line_idx).unwrap_or(&empty_words);
-                let cell_len = cell_display_width(line_words);
-                for (word_idx, word) in line_words.iter().enumerate() {
-                    if word_idx > 0 {
+                let line_words = cell_lines.get(line_idx).unwrap_or(&empty_table_words);
+                let cell_len = line_words
+                    .iter()
+                    .map(|word| usize::from(word.space_before) + terminal_display_width(&word.text))
+                    .sum::<usize>();
+                for word in line_words {
+                    if word.space_before {
                         spans.push(Span::raw(" "));
                     }
                     spans.push(Span::styled(
@@ -602,7 +799,7 @@ fn cell_display_width(words: &[Word]) -> usize {
     words
         .iter()
         .enumerate()
-        .map(|(i, w)| (if i > 0 { 1 } else { 0 }) + w.text.chars().count())
+        .map(|(i, word)| (if i > 0 { 1 } else { 0 }) + terminal_display_width(&word.text))
         .sum()
 }
 
@@ -635,6 +832,20 @@ mod tests {
                 assert_eq!(span.style, Style::default());
             }
         }
+    }
+
+    #[test]
+    fn unbreakable_inline_text_wraps_without_exceeding_requested_width() {
+        let text = "abcdefghijklmnop";
+        let width = 12;
+        let lines = render_markdown(text, width);
+        let rendered: Vec<String> = lines.iter().map(plain_text).collect();
+
+        assert!(
+            lines.iter().all(|line| line.width() <= width),
+            "unbreakable inline text exceeded width {width}: {rendered:?}"
+        );
+        assert_eq!(rendered.concat(), text);
     }
 
     #[test]
@@ -750,6 +961,16 @@ mod tests {
     }
 
     #[test]
+    fn wide_unicode_heading_respects_terminal_display_width() {
+        let lines = render_markdown("### 📅 Implementation Progress Status", 36);
+
+        assert!(
+            lines.iter().all(|line| line.width() <= 36),
+            "heading row exceeded its width: {lines:?}"
+        );
+    }
+
+    #[test]
     fn blockquote_gets_dim_prefix() {
         let lines = render_markdown("> quoted text", 80);
         let prefix_span = &lines[0].spans[0];
@@ -834,5 +1055,40 @@ mod tests {
             .find(|s| s.content.as_ref() == "val")
             .expect("inline code span in table cell");
         assert_eq!(code_span.style.fg, Some(INLINE_CODE_FG));
+    }
+
+    #[test]
+    fn table_rows_never_exceed_requested_width() {
+        let md = "| abc | def |\n|-----|-----|\n| abc | def |";
+        let lines = render_markdown(md, 8);
+
+        for line in lines {
+            let rendered = plain_text(&line);
+            assert!(
+                rendered.chars().count() <= 8,
+                "table row exceeds requested width: {rendered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn table_column_shrink_is_proportional_not_winner_take_all() {
+        // Regression for docs/backlog-issues.md: a narrow column must keep a
+        // fair share of the available width instead of being crowded down to
+        // near its bare minimum by one very wide column.
+        let md = "| Area | Files |\n|------|-------|\n\
+            | Core tool layer | src/agent/tools.rs , src/agent.rs , src/agent_factory.rs , src/agent/child_agent_manager.rs |\n\
+            | Built-in tools | bash.rs , read.rs , write.rs , edit.rs , glob.rs , search.rs , clarify.rs , spawn_subagent.rs , agent_finish.rs |\n\
+            | Security / LLM / config | src/sandbox.rs , src/llm.rs , src/config.rs , src/config/profile.rs , src/config/agent.rs |";
+        let lines = render_markdown(md, 103);
+        let header = plain_text(&lines[0]);
+        let col1_width = header.find('│').expect("separator glyph") - 1;
+        // The first column's natural width (longest cell: "Security / LLM /
+        // config") is 24; it must not be crushed down to its bare per-word
+        // minimum (8, from "Built-in"/"Security") to feed the wide column.
+        assert!(
+            col1_width >= 18,
+            "narrow column shrunk far below its fair share: width {col1_width} in {header:?}"
+        );
     }
 }

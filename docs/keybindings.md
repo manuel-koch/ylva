@@ -2,6 +2,14 @@
 
 Reference for Ylva's TUI keybindings.
 
+Footer hints render each keybinding in bold and its action in normal text.
+Multiple hints are separated by ` · `, for example:
+`enter send · esc cancel · ctrl-c cancel & quit · F1 help`.
+
+While the main conversation is shown, the footer also reports separate
+running and queued subagent counts in a compact label such as
+`Subagents: 1 running, 1 queued`; finished subagents are not included.
+
 ## TUI keybindings (Phase 4)
 
 | Key | Context | Action |
@@ -47,7 +55,7 @@ Reference for Ylva's TUI keybindings.
 | Double-click on a `spawn_subagent` tool bubble's title | Any | Drill in to the subagent's conversation view (manual navigation; does not auto-return; still works after the subagent has finished) |
 | `esc` (input empty) | Subagent drill-in view | Go back to the root conversation (does not cancel/interrupt the root agent's turn); restores the scroll position from before drilling in |
 | `esc` (input non-empty) | Subagent drill-in view | Clear the input field (same as elsewhere; does not navigate back) |
-| `enter` | Subagent drill-in view | No-op; the subagent conversation doesn't accept input and Enter no longer steers the root agent from here (footer omits `enter: send`) |
+| `enter` | Subagent drill-in view | No-op; the subagent conversation doesn't accept input and Enter no longer steers the root agent from here (footer omits `enter send`) |
 
 ## Slash-command overlay
 
@@ -75,12 +83,13 @@ Pressing the other key instead starts that key's own fresh confirm window
 that `ctrl-c`, and `ctrl-c` then `esc` never quits on that `esc`; each key's
 first press must be repeated to confirm its own action.
 
-`shift-enter` / `alt-enter` rely on the kitty keyboard protocol: the TUI
-enables `DISAMBIGUATE_ESCAPE_CODES` on startup (pushed with the alternate
-screen and popped on exit) so terminals that support it (ZED, iTerm2, kitty,
-WezTerm, …) send distinguishable CSI-u sequences. Unsupported terminals simply
-ignore the flag; there `shift-enter`/`alt-enter` may fall back to a plain
-`enter` and send the message.
+`shift-enter` / `alt-enter` rely on terminal-specific modified-key encodings.
+The TUI enables the kitty keyboard protocol's `DISAMBIGUATE_ESCAPE_CODES` on
+startup (pushed with the alternate screen and popped on exit) so terminals
+that support it (iTerm2, kitty, WezTerm, …) send distinguishable CSI-u
+sequences. Terminals that encode `shift-enter` as a line feed (such as Zed's
+terminal) are normalized to the same newline action. Other unsupported
+terminals may fall back to a plain `enter` and send the message.
 
 ## Build info
 

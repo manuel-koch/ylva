@@ -17,19 +17,25 @@ function ylva() {
     LOG_PATH="${PREFIX_TIMESTAMPED}.log"
     OUT_PATH="${PREFIX_TIMESTAMPED}.txt"
     export YLVA_REQUEST_DUMP_PATH=${PREFIX_TIMESTAMPED}.json
-    ${YLVA} --no-tui \
+    ${YLVA} --no-tui --color=yes \
             --log-file ${LOG_PATH} \
             --log-level TRACE --log-format ${LOG_FORMAT} \
             | tee ${OUT_PATH}
 }
 
-echo "----------------------------------------------------------"
+function seperator() {
+    echo
+    echo "----------------------------------------------------------"
+    echo
+}
+
 ylva << '__EOT__'
 Run `python3` to find out which version it is and where the python interpreter
 is located.
 __EOT__
 
-echo "----------------------------------------------------------"
+seperator
+
 ylva << '__EOT__'
 Run the following command exactly like given (as-is, don't re-write/collapse linebreaks ) in bash:
 ```shell

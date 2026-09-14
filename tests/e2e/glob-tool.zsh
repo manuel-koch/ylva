@@ -17,56 +17,76 @@ function ylva() {
     LOG_PATH="${PREFIX_TIMESTAMPED}.log"
     OUT_PATH="${PREFIX_TIMESTAMPED}.txt"
     export YLVA_REQUEST_DUMP_PATH=${PREFIX_TIMESTAMPED}.json
-    ${YLVA} --no-tui \
+    ${YLVA} --no-tui --color=yes \
             --log-file ${LOG_PATH} \
             --log-level TRACE --log-format ${LOG_FORMAT} \
             | tee ${OUT_PATH}
 }
 
-echo "----------------------------------------------------------"
+function seperator() {
+    echo
+    echo "----------------------------------------------------------"
+    echo
+}
+
 ylva << '__EOT__'
 Search for markdown files in the docs directory (non-recursive).
 Report one found path per line!
 __EOT__
 
-echo "----------------------------------------------------------"
+seperator
+
 ylva << '__EOT__'
 Search for markdown files in the docs directory (recursive).
 Report one found path per line!
 __EOT__
 
-echo "----------------------------------------------------------"
+seperator
+
 ylva << '__EOT__'
 Search for files in the project root (non-recursive).
 Count the number of found files!
 __EOT__
 
-echo "----------------------------------------------------------"
+seperator
+
+ylva << '__EOT__'
+Search for files/directories in the project root (recursive).
+Clamp on 50 matched paths.
+__EOT__
+
+seperator
+
 ylva << '__EOT__'
 How many files are in project ( incl. git ignored files and hidden files) ?
 __EOT__
 
-echo "----------------------------------------------------------"
+seperator
+
 ylva << '__EOT__'
 How many files are in project ( excl. git ignored files and hidden files ) ?
 __EOT__
 
-echo "----------------------------------------------------------"
+seperator
+
 ylva << '__EOT__'
 How many directories are in project ( incl. git ignored dirs and hidden dirs ) ?
 __EOT__
 
-echo "----------------------------------------------------------"
+seperator
+
 ylva << '__EOT__'
 How many directories are in project ( excl. git ignored dirs and hidden dirs ) ?
 __EOT__
 
-echo "----------------------------------------------------------"
+seperator
+
 ylva << '__EOT__'
 How many files/directories are in project ( incl. git ignored paths and hidden paths ) ?
 __EOT__
 
-echo "----------------------------------------------------------"
+seperator
+
 ylva << '__EOT__'
 How many files/directories are in project ( excl. git ignored paths and hidden paths ) ?
 __EOT__

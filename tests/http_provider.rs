@@ -21,9 +21,10 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use ylva::llm::ProviderRegistry;
 use ylva::{
-    AgentCommand, AgentLoop, AssistantStatus, EngineConfig, EngineImpl, Message, OllamaProvider,
-    OpenAiCompatibleProvider, OpenRouterProvider, Provider, ProviderConnectionConfig, StreamEvent,
-    ToolRegistry, UiUpdate, UserMessageKind, DEFAULT_SYSTEM_PROMPT, TOOL_PROTOCOL_SYSTEM_PROMPT,
+    AgentCommand, AgentLoop, AssistantStatus, Engine, EngineConfig, EngineImpl, Message,
+    OllamaProvider, OpenAiCompatibleProvider, OpenRouterProvider, Provider,
+    ProviderConnectionConfig, StreamEvent, ToolRegistry, UiUpdate, UserMessageKind,
+    DEFAULT_SYSTEM_PROMPT, TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
 
 use common::collect_until;
@@ -230,6 +231,75 @@ async fn set_model_changes_the_model_sent_on_the_next_request() {
         .expect("chat should still succeed after the switch");
     let texts = drain_text_until_done(&mut rx).await;
     assert_eq!(texts, vec!["ok"]);
+}
+
+#[tokio::test]
+async fn switching_model_during_stream_keeps_in_flight_request_on_original_model() {
+    let config = MockLlmConfig {
+        frames: vec![content_frame("first response")],
+        end_after_frames: true,
+        ..Default::default()
+    };
+    let server = MockLlmServer::start(config).await.expect("bind failed");
+    let provider = Arc::new(OpenAiCompatibleProvider::new(
+        "test".to_string(),
+        server.base_url(),
+        "initial-model".to_string(),
+        None,
+    ));
+    let engine = EngineImpl::new(
+        provider,
+        EngineConfig {
+            provider_connection: "test".to_string(),
+            model: "initial-model".to_string(),
+            temperature: None,
+            context_length: None,
+            api_base_url: Some(server.base_url()),
+            api_key: None,
+            reasoning: None,
+        },
+    );
+
+    let mut first_stream = engine
+        .chat(
+            Vec::new(),
+            Vec::new(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("first chat request should start");
+    engine
+        .switch_model("switched-model")
+        .expect("the engine supports model switching");
+    let first_texts = drain_text_until_done(&mut first_stream).await;
+
+    let mut second_stream = engine
+        .chat(
+            Vec::new(),
+            Vec::new(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("second chat request should start");
+    let second_texts = drain_text_until_done(&mut second_stream).await;
+
+    let request_models = server
+        .request_bodies()
+        .into_iter()
+        .map(|body| {
+            serde_json::from_str::<serde_json::Value>(&body).expect("mock request body is JSON")
+                ["model"]
+                .as_str()
+                .expect("chat request includes a model")
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(first_texts, vec!["first response"]);
+    assert_eq!(second_texts, vec!["first response"]);
+    assert_eq!(
+        request_models,
+        vec!["initial-model".to_string(), "switched-model".to_string()]
+    );
 }
 
 #[tokio::test]

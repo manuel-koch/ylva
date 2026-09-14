@@ -66,9 +66,14 @@ provider_connection = "ollama-cloud"
 model = "gemma4:31b-cloud"
 temperature = 0.2
 
-[agents.default]
+# Implicit default agent config
+# [agents.default]
+# engine = "default"
+# can_spawn = true
+
+[agents.local-discovery]
+description = "Read-only repository exploration: locate relevant files and symbols without modifying files."
 engine = "ollama/local"
-can_spawn = true
 ```
 
 | Key | Type | Description |
@@ -94,6 +99,11 @@ profile's `default_engine` is initially active.
 Referencing an engine name that no table defines (from `default_engine`,
 `compact_engine`, or an agent override) is a hard error rather than a silent
 fallback.
+
+When the root agent changes its active provider connection or model through
+`/models`, a child spawned afterwards that resolves the same named engine uses
+that active engine. A child whose agent configuration names a different engine
+uses that named engine instead of inheriting the root's active selection.
 
 An engine's `provider_connection` refers to the map key under
 `[provider_connections.*]`; the connection's `provider` field is the
@@ -152,10 +162,33 @@ A profile groups engine selection and per-agent settings for a runtime session.
 | Field | Type | Description |
 |---|---|---|
 | `engine` | `Option<String>` | Override the engine for this agent type. When absent, `ProfileConfig::default_engine` is used. |
+| `description` | `Option<String>` | Model-facing summary of the tasks this agent type is suited for. The root agent receives it in the `spawn_subagent` tool description. |
 | `allowed_tools` | `Option<Vec<String>>` | Restrict which tool names this agent may invoke. `None` falls back to the caller's flat default tool list (`AgentFactory::with_allowed_tools`, or `DEFAULT_CLI_TOOLS`/`DEFAULT_TUI_TOOLS` when unset). `Some(names)` is honored per `agent_type` by `AgentFactory::build`, so a distinct `agent_type` — including one used only for spawned children — can be restricted to a genuinely different tool set than the root or any other agent type. |
 | `timeout_secs` | `Option<u64>` | Maximum wall-clock seconds before the agent is cancelled. `None` means no timeout. |
 | `persona` | `Option<String>` | Optional persona instruction prepended to the system prompt. |
 | `can_spawn` | `bool` | When `true` (and this is a `Role::Root` agent), `AgentFactory::create` registers the `spawn_subagent` tool and wires a `ChildAgentManager` so this agent may delegate self-contained tasks to a concurrently-running `Role::Child` agent (one level deep; children cannot spawn further children). Use `--auto-approve-spawn` to skip the human-approval prompt for `spawn_subagent` calls. See "Child-agent delegation" in `docs/features.md`. |
+
+Every loaded profile has a `default` agent type. If `[agents.default]` is
+absent, Ylva supplies the built-in default configuration: it uses
+`default_engine`, the normal tool set, and `can_spawn = true` for the root
+agent. A present `[agents.default]` table replaces that built-in
+configuration, so set `can_spawn = true` there when customizing the default
+agent and retaining child-agent delegation. Other agent-type tables do not
+remove the implicit `default` agent.
+
+`AgentConfig.engine` selects a complete named engine; it is not a
+field-by-field override layer. An agent cannot adjust that engine's model,
+temperature, context length, reasoning settings, or provider connection
+independently. If an agent needs specialized engine settings, define another
+`[engines.<name>]` entry and select that engine for the agent type.
+
+Agents that resolve the same named engine share its runtime selection. A
+provider/model or reasoning-effort change made through `/models` therefore
+applies to every agent using that engine, including already-running children.
+The change does not alter an in-flight LLM request; it is observed by the
+agent's next request, which may be another request in the same child run after
+a tool call. The selection is dynamic rather than pinned at spawn time. Use
+separate named engines when the root and a child must remain independent.
 
 ## Sandbox (`Sandbox` / `SandboxContext`)
 
@@ -173,13 +206,14 @@ named glob rule (last match wins):
 | Rule | Verdict | Notes |
 |---|---|---|
 | `outside_workspace` | `AutoDenied` | Any path that normalizes outside the workspace root. |
-| `dot_path` | `AutoDenied` | Any path whose relative-to-root form has a component starting with `.` (dot-files/dot-directories). |
+| `dot_path` | `AutoDenied` | Any content-tool path whose relative-to-root form has a component starting with `.` (dot-files/dot-directories). `glob` enumeration may inspect dot-prefixed paths inside the workspace. |
 
 **WIP:** These two rules are not yet configurable — Phase 9 is expected to load
 per-tool `[tool.*]` rule lists (including `outside_workspace`/`dot_path`
-overrides) from the layered TOML config; until then the defaults above apply to
-every tool uniformly. `search`'s `path: None` (cwd, never leaves the
+overrides) from the layered TOML config; until then the defaults above apply
+uniformly to content tools. `search`'s `path: None` (cwd, never leaves the
 workspace by construction) skips the sandbox check entirely and is
 auto-approved; when a `path` is given, it goes through the same
-`check_path`/`dot_path`/`outside_workspace` evaluation as `read`, `write`,
-`edit`, and `glob`.
+`check_path`/`dot_path`/`outside_workspace` evaluation as `read`, `write`, and
+`edit`. `glob` uses the same workspace boundary and named-rule checks but
+allows dot-prefixed paths because it only enumerates paths.

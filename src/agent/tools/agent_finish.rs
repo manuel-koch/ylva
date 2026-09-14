@@ -58,6 +58,10 @@ pub struct AgentFinishArgs {
     /// Final answer for the parent when `status` is `"success"`. Must be
     /// self-contained — the parent never sees prior turns, tool output, or
     /// reasoning; inline the actual findings/content here, never "see above".
+    /// Contains only the deliverable itself — no meta-commentary, self-review,
+    /// or narration about your process (e.g. "Self-Correction/Review:", "I
+    /// will now use agent_finish"). Keep such reasoning in your own turns,
+    /// never in this field.
     #[serde(default)]
     pub result: Option<String>,
     /// What went wrong, when `status` is `"failure"`.
@@ -115,7 +119,9 @@ impl Tool for AgentFinishTool {
          only when the task is complete (success or failure); ends your run immediately — \
          call no other tool afterwards. Only `result`/`error` reach the parent, never prior \
          messages or reasoning — `result` must fully restate every finding, not merely refer \
-         back to earlier turns."
+         back to earlier turns. Do not paraphrase your reasoning process or add self-review/ \
+         self-correction commentary before calling this tool or inside its arguments — only \
+         the finished deliverable belongs in `result`/`error`."
     }
 
     fn input_schema(&self) -> schemars::schema::RootSchema {

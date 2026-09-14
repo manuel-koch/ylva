@@ -17,31 +17,39 @@ function ylva() {
     LOG_PATH="${PREFIX_TIMESTAMPED}.log"
     OUT_PATH="${PREFIX_TIMESTAMPED}.txt"
     export YLVA_REQUEST_DUMP_PATH=${PREFIX_TIMESTAMPED}.json
-    ${YLVA} --no-tui \
+    ${YLVA} --no-tui --color=yes \
             --log-file ${LOG_PATH} \
             --log-level TRACE --log-format ${LOG_FORMAT} \
             | tee ${OUT_PATH}
 }
 
-echo "----------------------------------------------------------"
+function seperator() {
+    echo
+    echo "----------------------------------------------------------"
+    echo
+}
+
 ylva << '__EOT__'
-Read lines 27 to 29 of (big file!) tests/e2e/read-tool.zsh and do a spell check.
+Read lines 33 to 34 of (big file!) tests/e2e/read-tool.zsh and do a spell check.
 Repoort only the findiings. Do not chaange anything!
 __EOT__
 
-echo "----------------------------------------------------------"
+seperator
+
 ylva << '__EOT__'
 Read the first 10 characters of tests/e2e/read-tool.zsh.
 Report only the plain read text snippet as-is.
 __EOT__
 
-echo "----------------------------------------------------------"
+seperator
+
 ylva << '__EOT__'
 Read the first 32 bytes of tests/e2e/read-tool.zsh.
 Report only the plain read data snippet as-is.
 __EOT__
 
-echo "----------------------------------------------------------"
+seperator
+
 ylva << '__EOT__'
 What content does `.rumdl.toml` have ?
 __EOT__

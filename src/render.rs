@@ -24,7 +24,9 @@
 use ratatui::Frame;
 use ratatui_textarea::TextArea;
 
-use crate::tui_reducer_state::{AppState, BannerDragSelection, ChatEntry, ConversationView, Focus};
+use crate::tui_reducer_state::{
+    ActiveSubagentCounts, AppState, BannerDragSelection, ChatEntry, ConversationView, Focus,
+};
 use crate::tui_render_state::TuiState;
 use crate::tui_widgets::{self, ButtonAreas};
 
@@ -84,6 +86,11 @@ fn project_for_draw(state: &AppState) -> TuiState {
         ConversationView::Child { run_id, .. } => Some(*run_id),
         ConversationView::Root => None,
     };
+    let active_subagent_counts = if showing_child_run_id.is_some() {
+        ActiveSubagentCounts::default()
+    } else {
+        state.active_subagent_counts()
+    };
     let (
         chat_entries,
         partial_assistant_text,
@@ -129,19 +136,23 @@ fn project_for_draw(state: &AppState) -> TuiState {
             _ => None,
         })
     });
-    // The drilled-into child's own streaming/tool-running/idle status, not
-    // the root's — see `AppState::agent_mode_for_child` for why `agent_mode()`
-    // alone is wrong here (it would gate the child's in-flight thinking/
-    // response bubble on the root's `TuiMode` instead of the child's).
+    // Keep the root/parent status separately: the drilled-into child's own
+    // streaming/tool-running/idle status, not the root's — see
+    // `AppState::agent_mode_for_child` for why `agent_mode()` alone is wrong
+    // here (it would gate the child's in-flight thinking/response bubble on
+    // the root's `TuiMode` instead of the child's).
+    let parent_agent_mode = state.agent_mode();
     let agent_mode = match &state.active_view {
         ConversationView::Child { run_id, .. } => state.agent_mode_for_child(*run_id),
-        ConversationView::Root => state.agent_mode(),
+        ConversationView::Root => parent_agent_mode,
     };
     let engine_display = showing_child_run_id
         .and_then(|run_id| state.child_engine_displays.get(&run_id).cloned())
         .unwrap_or_else(|| state.engine_display.clone());
     TuiState {
+        parent_agent_mode,
         agent_mode,
+        active_subagent_counts,
         engine_display,
         chat_entries,
         partial_assistant_text,
@@ -342,9 +353,72 @@ mod tests {
     }
 
     #[test]
+    fn project_for_draw_counts_active_root_subagents_but_not_finished_or_child_view_runs() {
+        let mut state = AppState::new();
+        let running_bubble_id = Uuid::new_v4();
+        let queued_bubble_id = Uuid::new_v4();
+        for (bubble_id, status) in [(running_bubble_id, "running"), (queued_bubble_id, "queued")] {
+            state.chat_entries.push(ChatEntry::ToolBubble {
+                id: bubble_id,
+                name: crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
+                state: Box::new(ToolCallState::Running {
+                    arguments: serde_json::json!({}),
+                    content_sections: vec![],
+                    title_arguments: vec![],
+                    progress_arguments: vec![(
+                        "status".to_string(),
+                        serde_json::Value::String(status.to_string()),
+                    )],
+                }),
+                collapsed: true,
+            });
+        }
+        state.chat_entries.push(ChatEntry::ToolBubble {
+            id: Uuid::new_v4(),
+            name: crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
+            state: Box::new(ToolCallState::Done {
+                arguments: serde_json::json!({}),
+                result_section: crate::tui_reducer_state::ResultSection::plain("finished"),
+                content_sections: vec![],
+                summary: vec![],
+                duration: std::time::Duration::ZERO,
+                title_arguments: vec![],
+            }),
+            collapsed: true,
+        });
+
+        let root_projection = project_for_draw(&state);
+        assert_eq!(
+            root_projection.active_subagent_counts,
+            ActiveSubagentCounts {
+                running: 1,
+                queued: 1,
+            }
+        );
+
+        let run_id = Uuid::new_v4();
+        state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id: running_bubble_id,
+            agent_type: "reviewer".to_string(),
+            task: "inspect the change".to_string(),
+            label: "Inspect change".to_string(),
+        });
+        state.switch_to_child_view(run_id);
+
+        let child_projection = project_for_draw(&state);
+        assert_eq!(
+            child_projection.active_subagent_counts,
+            ActiveSubagentCounts::default(),
+            "the main-conversation count must not be shown in a child transcript"
+        );
+    }
+
+    #[test]
     fn project_for_draw_selects_the_identity_of_the_visible_conversation() {
         let mut state = AppState::new();
         state.engine_display = crate::llm::engine::EngineDisplayInfo {
+            engine_name: "openrouter".to_string(),
             provider_connection: "openrouter".to_string(),
             model: "root-model".to_string(),
             reasoning_effort: None,
@@ -370,6 +444,7 @@ mod tests {
         state.child_engine_displays.insert(
             run_id,
             crate::llm::engine::EngineDisplayInfo {
+                engine_name: "ollama/local2".to_string(),
                 provider_connection: "ollama".to_string(),
                 model: "child-model".to_string(),
                 reasoning_effort: None,
@@ -427,6 +502,176 @@ mod tests {
         assert!(
             !collapsed,
             "must mirror the root bubble's own collapsed state"
+        );
+    }
+
+    #[test]
+    fn drilled_in_view_tints_chat_dividers_with_the_subagent_bubble_color() {
+        // The header-to-chat and chat-to-input divider lines are tinted the
+        // same pinkish/magenta as the `spawn_subagent` bubble's own border
+        // while drilled into a child, unlike the root conversation's neutral
+        // dividers — a persistent cue that survives scrolling (an indentation
+        // approach was tried first but discarded as visually odd alongside
+        // the bubble chrome; see docs/features.md's drill-in section).
+        use ratatui::backend::TestBackend;
+        use ratatui::style::Color;
+        use ratatui::Terminal;
+        use ratatui_textarea::TextArea;
+
+        fn divider_colors(state: &AppState) -> Vec<Color> {
+            let mut projected = project_for_draw(state);
+            let backend = TestBackend::new(60, 20);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            let mut textarea = TextArea::default();
+            terminal
+                .draw(|frame| {
+                    crate::tui_widgets::draw(frame, &mut projected, &mut textarea, None, None);
+                })
+                .expect("draw");
+            let buffer = terminal.backend().buffer().clone();
+            let mut colors = Vec::new();
+            for row in 0..20u16 {
+                let mut row_is_divider = true;
+                let mut row_color = None;
+                for column in 0..60u16 {
+                    let cell = buffer.cell((column, row)).unwrap();
+                    if cell.symbol() != "─" {
+                        row_is_divider = false;
+                        break;
+                    }
+                    row_color = cell.style().fg;
+                }
+                if row_is_divider {
+                    colors.push(row_color.expect("divider row must set an fg color"));
+                }
+            }
+            colors
+        }
+
+        let root_state = AppState::new();
+        assert_eq!(
+            divider_colors(&root_state),
+            vec![Color::White],
+            "root view has a single, neutral chat/input divider"
+        );
+
+        let mut child_state = AppState::new();
+        let run_id = Uuid::new_v4();
+        let bubble_id = Uuid::new_v4();
+        push_spawn_bubble(
+            &mut child_state,
+            bubble_id,
+            "reviewer",
+            "look into flaky test",
+        );
+        child_state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id,
+            agent_type: "reviewer".to_string(),
+            task: "look into flaky test".to_string(),
+            label: "Investigate flaky test".to_string(),
+        });
+        child_state.switch_to_child_view(run_id);
+
+        let child_colors = divider_colors(&child_state);
+        assert_eq!(
+            child_colors.len(),
+            2,
+            "child view has both a header-to-chat and a chat-to-input divider: {child_colors:?}"
+        );
+        assert!(
+            child_colors.iter().all(|color| *color == Color::Magenta),
+            "both dividers must be tinted like the subagent bubble border while drilled in: {child_colors:?}"
+        );
+    }
+
+    #[test]
+    fn drilled_in_view_tints_the_chat_scrollbar_with_the_subagent_bubble_color() {
+        // The conversation scrollbar (track/thumb/arrows) picks up the same
+        // pinkish/magenta tint as the chat dividers while drilled into a
+        // child, instead of the root conversation's neutral scrollbar color.
+        use ratatui::backend::TestBackend;
+        use ratatui::style::Color;
+        use ratatui::Terminal;
+        use ratatui_textarea::TextArea;
+
+        fn scrollbar_colors(state: &AppState) -> Vec<Color> {
+            let mut projected = project_for_draw(state);
+            let backend = TestBackend::new(60, 20);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            let mut textarea = TextArea::default();
+            terminal
+                .draw(|frame| {
+                    crate::tui_widgets::draw(frame, &mut projected, &mut textarea, None, None);
+                })
+                .expect("draw");
+            let buffer = terminal.backend().buffer().clone();
+            let mut colors = Vec::new();
+            for row in 0..20u16 {
+                for column in 0..60u16 {
+                    let cell = buffer.cell((column, row)).unwrap();
+                    if matches!(cell.symbol(), "┃" | "│" | "↑" | "↓") {
+                        if let Some(color) = cell.style().fg {
+                            colors.push(color);
+                        }
+                    }
+                }
+            }
+            colors
+        }
+
+        // Enough messages to overflow a 20-row terminal and force the
+        // scrollbar to actually render.
+        let mut root_state = AppState::new();
+        for index in 0..30 {
+            root_state.chat_entries.push(ChatEntry::AssistantMessage {
+                text: format!("root reply {index}"),
+                interrupted: false,
+            });
+        }
+        let root_colors = scrollbar_colors(&root_state);
+        assert!(
+            !root_colors.is_empty(),
+            "root scrollbar must render once content overflows the viewport"
+        );
+        assert!(
+            root_colors.iter().all(|color| *color == Color::White),
+            "root scrollbar must stay the neutral color: {root_colors:?}"
+        );
+
+        let mut child_state = AppState::new();
+        let run_id = Uuid::new_v4();
+        let bubble_id = Uuid::new_v4();
+        push_spawn_bubble(
+            &mut child_state,
+            bubble_id,
+            "reviewer",
+            "look into flaky test",
+        );
+        child_state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id,
+            agent_type: "reviewer".to_string(),
+            task: "look into flaky test".to_string(),
+            label: "Investigate flaky test".to_string(),
+        });
+        let conversation = child_state.child_conversations.get_mut(&run_id).unwrap();
+        for index in 0..30 {
+            conversation.messages.push(ChatEntry::AssistantMessage {
+                text: format!("child reply {index}"),
+                interrupted: false,
+            });
+        }
+        child_state.switch_to_child_view(run_id);
+
+        let child_colors = scrollbar_colors(&child_state);
+        assert!(
+            !child_colors.is_empty(),
+            "child scrollbar must render once content overflows the viewport"
+        );
+        assert!(
+            child_colors.iter().all(|color| *color == Color::Magenta),
+            "child scrollbar must be tinted like the subagent bubble border while drilled in: {child_colors:?}"
         );
     }
 
@@ -555,6 +800,72 @@ mod tests {
         let projected = project_for_draw(&state);
 
         assert_eq!(projected.agent_mode, crate::agent::AgentMode::Idle);
+    }
+
+    #[test]
+    fn footer_reports_parent_activity_when_viewing_finished_child_with_running_sibling() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        use ratatui_textarea::TextArea;
+
+        let mut state = AppState::new();
+        let finished_run_id = Uuid::new_v4();
+        let finished_bubble_id = Uuid::new_v4();
+        state.chat_entries.push(ChatEntry::ToolBubble {
+            id: finished_bubble_id,
+            name: crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
+            state: Box::new(ToolCallState::Done {
+                arguments: serde_json::json!({}),
+                result_section: crate::tui_reducer_state::ResultSection::plain("finished"),
+                content_sections: vec![],
+                summary: vec![],
+                duration: std::time::Duration::ZERO,
+                title_arguments: vec![],
+            }),
+            collapsed: false,
+        });
+        state.start_child_run(ChildRunInfo {
+            run_id: finished_run_id,
+            bubble_id: finished_bubble_id,
+            agent_type: "reviewer".to_string(),
+            task: "finished task".to_string(),
+            label: "Finished task".to_string(),
+        });
+
+        let running_run_id = Uuid::new_v4();
+        let running_bubble_id = Uuid::new_v4();
+        push_spawn_bubble(&mut state, running_bubble_id, "reviewer", "running task");
+        state.start_child_run(ChildRunInfo {
+            run_id: running_run_id,
+            bubble_id: running_bubble_id,
+            agent_type: "reviewer".to_string(),
+            task: "running task".to_string(),
+            label: "Running task".to_string(),
+        });
+        state.switch_to_child_view(finished_run_id);
+
+        assert_eq!(state.agent_mode(), crate::agent::AgentMode::ToolRunning);
+        let mut projected = project_for_draw(&state);
+        assert_eq!(projected.agent_mode, crate::agent::AgentMode::Idle);
+
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let mut textarea = TextArea::default();
+        terminal
+            .draw(|frame| {
+                crate::tui_widgets::draw(frame, &mut projected, &mut textarea, None, None);
+            })
+            .expect("draw");
+
+        let buffer = terminal.backend().buffer().clone();
+        let rendered: String = (0..20u16)
+            .flat_map(|row| (0..60u16).map(move |column| (column, row)))
+            .map(|(column, row)| buffer.cell((column, row)).unwrap().symbol().to_string())
+            .collect();
+        assert!(
+            rendered.contains("Subagent done, parent working"),
+            "footer must report the running sibling parent instead of Idle: {rendered:?}"
+        );
     }
 
     #[test]

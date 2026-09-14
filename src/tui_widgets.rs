@@ -26,76 +26,37 @@ use ratatui_textarea::TextArea;
 use std::time::Instant;
 
 use crate::highlight::{
-    active_theme, highlighted_lines_cached, syntect_token_to_span, wrap_highlighted_line,
+    active_theme, highlighted_lines_cached, syntect_fg_span, wrap_highlighted_line,
+};
+use crate::theme::{
+    APPROVE_BACKGROUND_COLOR, APPROVE_HOVER_BACKGROUND_COLOR, ASSISTANT_STREAM_BORDER_COLOR,
+    BUILD_INFO_COLOR, BUTTON_TEXT_COLOR, CHAT_SCROLLBAR_COLOR, CHAT_SELECTION_BG,
+    CHILD_VIEW_SEPARATOR_COLOR, CLARIFY_BANNER_FG_COLOR, CLARIFY_BANNER_SCROLL_INDICATOR_COLOR,
+    CLARIFY_BANNER_SELECTION_FG_COLOR, CONTENT_COLOR, DENY_BACKGROUND_COLOR,
+    DENY_HOVER_BACKGROUND_COLOR, DIFF_ADDED_COLOR, DIFF_CONTEXT_COLOR, DIFF_REMOVED_COLOR,
+    ERROR_COLOR, FOOTER_STATUS_COLOR, HELP_POPUP_BORDER_COLOR, HELP_POPUP_HEADING_COLOR,
+    INPUT_BORDER_COLOR, INTERRUPTED_COLOR, LIST_BORDER_COLOR, LIST_SELECTION_BACKGROUND_COLOR,
+    LIST_SELECTION_FOREGROUND_COLOR, LIST_TEXT_COLOR, LOGO_COLOR, MUTED_TEXT_COLOR, NOTICE_COLOR,
+    OVERLAY_SELECTION_COLOR, SEPARATOR_LINE_COLOR, THINKING_BORDER_COLOR, TOAST_BG_COLOR,
+    TOAST_FG_COLOR, TOOL_BUBBLE_BORDER_COLOR, USER_MESSAGE_BG_COLOR, USER_MESSAGE_BORDER_COLOR,
+    USER_MESSAGE_CANCELLED_BORDER_COLOR, USER_MESSAGE_QUEUED_BORDER_COLOR,
+    USER_MESSAGE_STEERED_BORDER_COLOR,
 };
 
 use crate::agent::AgentMode;
 use crate::build_info::BUILD_INFO;
 use crate::markdown::render_markdown;
 use crate::tui_reducer_state::{
-    matching_model_indices, model_picker_row_entries, slash_overlay_text_rows, BannerDragSelection,
-    ChatEntry, SlashOverlay, SlashOverlayLayout, ToolCallState, UserMessageState,
+    matching_model_indices, model_picker_row_entries, slash_overlay_text_rows,
+    ActiveSubagentCounts, BannerDragSelection, ChatEntry, SlashOverlay, SlashOverlayLayout,
+    ToolCallState, UserMessageState,
 };
 use crate::tui_render_state::TuiState;
 
-// User message border colors — extract into Theme struct in a later phase.
-const USER_MESSAGE_BORDER_COLOR: Color = Color::Green;
-// Pending steer: same border color as Sent, but rendered dimmed (see the
-// `dim` flag in `append_user_lines`) so a queued-not-yet-injected message
-// reads as a dimmed version of a normal sent message, not an unrelated hue.
-const USER_MESSAGE_QUEUED_BORDER_COLOR: Color = USER_MESSAGE_BORDER_COLOR;
-// Applied steer: once injected, the LLM has seen it just like a normal Sent
-// message, and that's the only distinction that matters to the user — so
-// this renders identically to Sent (same color, not dimmed). Kept as its own
-// constant (rather than reusing USER_MESSAGE_BORDER_COLOR directly) so a
-// future color theme can still distinguish steers from turn-starting
-// messages without touching call sites.
-const USER_MESSAGE_STEERED_BORDER_COLOR: Color = USER_MESSAGE_BORDER_COLOR;
-const USER_MESSAGE_CANCELLED_BORDER_COLOR: Color = Color::DarkGray;
-// Soft background shade applied to all user message blocks.
-const USER_MESSAGE_BG_COLOR: Color = Color::Rgb(20, 20, 40);
 /// The user-message input field grows with content but is capped at this
 /// fraction of the terminal height (e.g. 3 → one-third).  Adjust here to
 /// change the maximum visible height of the input area.
 const USER_MESSAGE_INPUT_HEIGHT_TERMINAL_FRACTION: u16 = 3;
-// The input field's border reuses the (Sent) user-message border color,
-// dimmed, so it reads as "this will become a user-message bubble" rather
-// than introducing an unrelated hue.
-const INPUT_BORDER_COLOR: Color = USER_MESSAGE_BORDER_COLOR;
-
-// Assistant streaming bubble colors.
-const ASSISTANT_STREAM_BORDER_COLOR: Color = Color::Blue;
-const ASSISTANT_STREAM_BG_COLOR: Color = Color::Rgb(15, 20, 35);
-// Tool bubble colors — magenta left border, dark magenta background tint.
-const TOOL_BUBBLE_BORDER_COLOR: Color = Color::Magenta;
-const TOOL_BUBBLE_BG_COLOR: Color = Color::Rgb(30, 0, 30);
-
-// Thinking bubble colors — same blue family as the assistant-response bubble
-// (dimmed via the bubble's own Modifier::DIM text styling) so the two read
-// as related, rather than the previous cyan which was too close to the
-// input field's border color.
-const THINKING_BORDER_COLOR: Color = Color::Blue;
-const THINKING_BG_COLOR: Color = ASSISTANT_STREAM_BG_COLOR;
-
-// Help popup border, title, section headings, and scroll-indicator color.
-const HELP_POPUP_BORDER_COLOR: Color = Color::Blue;
-// Section heading foreground color inside the help popup content area.
-const HELP_POPUP_HEADING_COLOR: Color = Color::Blue;
-
-// Clarify banner colors.
-const CLARIFY_BANNER_FG_COLOR: Color = Color::Yellow;
-// Inverted selection: selected text rendered as black-on-yellow.
-const CLARIFY_BANNER_SELECTION_FG_COLOR: Color = Color::Black;
-const CLARIFY_BANNER_SCROLL_INDICATOR_COLOR: Color = Color::DarkGray;
-
-const SEPARATOR_LINE_COLOR: Color = Color::White;
-// Single hue used for all parts of the conversation-list scrollbar, matching
-// the horizontal divider between the conversation list and input/footer.
-// The track and inactive arrows use the same colour with Modifier::DIM so the
-// thumb and active arrows stand out without introducing a second colour.
-const CHAT_SCROLLBAR_COLOR: Color = SEPARATOR_LINE_COLOR;
-const TOAST_BG_COLOR: Color = Color::Blue;
-const TOAST_FG_COLOR: Color = Color::White;
 
 /// Braille spinner animation frames, cycled while the agent is busy.
 const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -123,6 +84,89 @@ pub struct ButtonAreas {
     pub approve: Rect,
     pub deny: Rect,
 }
+
+struct FooterHint {
+    key: Option<&'static str>,
+    description: &'static str,
+}
+
+impl FooterHint {
+    const fn key(key: &'static str, description: &'static str) -> Self {
+        Self {
+            key: Some(key),
+            description,
+        }
+    }
+
+    const fn text(description: &'static str) -> Self {
+        Self {
+            key: None,
+            description,
+        }
+    }
+}
+
+const SUGGESTION_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("↑/↓", "select"),
+    FooterHint::key("tab", "complete"),
+    FooterHint::key("enter", "run"),
+    FooterHint::key("esc", "close"),
+    FooterHint::key("F1", "help"),
+];
+const LOADING_MODELS_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::text("loading models…"),
+    FooterHint::key("esc", "close"),
+    FooterHint::key("F1", "help"),
+];
+const MODEL_PICKER_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("↑/↓", "select"),
+    FooterHint::key("←/→", "effort"),
+    FooterHint::key("enter", "switch"),
+    FooterHint::key("esc", "cancel"),
+    FooterHint::key("F1", "help"),
+];
+const CLARIFY_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("enter", "answer"),
+    FooterHint::key("click", "choice"),
+    FooterHint::key("ctrl-c/esc", "cancel"),
+    FooterHint::key("F1", "help"),
+];
+const CHILD_VIEW_DRAFT_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("ctrl-c/esc", "clear draft"),
+    FooterHint::key("F1", "help"),
+];
+const CHILD_VIEW_BUSY_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("esc", "back to conversation"),
+    FooterHint::key("ctrl-c", "cancel & quit"),
+    FooterHint::key("F1", "help"),
+];
+const CHILD_VIEW_IDLE_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("esc", "back to conversation"),
+    FooterHint::key("ctrl-c", "quit"),
+    FooterHint::key("F1", "help"),
+];
+const BUSY_DRAFT_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("enter", "send"),
+    FooterHint::key("ctrl-c/esc", "clear draft"),
+    FooterHint::key("F1", "help"),
+];
+const BUSY_EMPTY_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("enter", "send"),
+    FooterHint::key("esc", "cancel"),
+    FooterHint::key("ctrl-c", "cancel & quit"),
+    FooterHint::key("F1", "help"),
+];
+const IDLE_DRAFT_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("enter", "send"),
+    FooterHint::key("esc", "clear draft"),
+    FooterHint::key("ctrl-c", "quit"),
+    FooterHint::key("F1", "help"),
+];
+const IDLE_EMPTY_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("enter", "send"),
+    FooterHint::key("ctrl-c", "quit"),
+    FooterHint::key("F1", "help"),
+];
 
 /// Draw the full TUI frame. Returns `Some(ButtonAreas)` when in tool approval
 /// sub-mode (`pending_approval` is `Some`), `None` otherwise.
@@ -170,7 +214,6 @@ pub fn draw(
             },
             &mut discarded_title_rows,
             header_row_width.saturating_sub(4).max(1),
-            header_row_width,
         );
     }
     let (header_area, area) = if header_lines.is_empty() {
@@ -317,7 +360,9 @@ pub fn draw(
         frame.render_widget(paragraph, header_content_area);
 
         // Show the scroll indicators/scrollbar only when the bubble's full
-        // content overflows the clamped header height.
+        // content overflows the clamped header height. Tinted
+        // `CHILD_VIEW_SEPARATOR_COLOR` — this scrollbar only ever renders
+        // while the header bubble (i.e. the child view) is showing.
         if total_lines > visible {
             render_chat_scrollbar(
                 frame,
@@ -326,19 +371,22 @@ pub fn draw(
                 max_offset,
                 total_lines,
                 visible,
+                CHILD_VIEW_SEPARATOR_COLOR,
             );
         }
 
         // Separator between the header bubble and the chat area below it —
         // mirrors the separator between the chat area and the input/footer
         // panel, so the header never reads as part of the scrollable
-        // conversation-list.
+        // conversation-list. Tinted `CHILD_VIEW_SEPARATOR_COLOR` (always the
+        // case here — this branch only runs while a header bubble, i.e. the
+        // child view, is showing) rather than the neutral root-view color.
         let header_separator_line = "─".repeat(header_separator_area.width as usize);
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 header_separator_line,
                 Style::default()
-                    .fg(SEPARATOR_LINE_COLOR)
+                    .fg(CHILD_VIEW_SEPARATOR_COLOR)
                     .add_modifier(Modifier::DIM),
             ))),
             header_separator_area,
@@ -350,12 +398,22 @@ pub fn draw(
     draw_chat(frame, chat_area, state);
 
     // Thin solid line separating the conversation area from the lower panel.
+    // Tinted the same pinkish/magenta as the header separator while viewing a
+    // subagent's drill-in transcript, so the cue survives scrolling even once
+    // the (non-scrolling) header bubble is out of view — the neutral color is
+    // reserved for the root conversation.
+    let in_child_view = state.child_view.child_view_bubble.is_some();
+    let separator_color = if in_child_view {
+        CHILD_VIEW_SEPARATOR_COLOR
+    } else {
+        SEPARATOR_LINE_COLOR
+    };
     let separator_line = "─".repeat(separator_area.width as usize);
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             separator_line,
             Style::default()
-                .fg(SEPARATOR_LINE_COLOR)
+                .fg(separator_color)
                 .add_modifier(Modifier::DIM),
         ))),
         separator_area,
@@ -442,7 +500,7 @@ pub fn draw(
             Paragraph::new(Line::styled(
                 "Enter reason for denial here…",
                 Style::default()
-                    .fg(Color::DarkGray)
+                    .fg(MUTED_TEXT_COLOR)
                     .bg(USER_MESSAGE_BG_COLOR),
             )),
             placeholder_area,
@@ -491,15 +549,8 @@ pub fn draw(
             hint,
         )
     } else {
-        let keybinding_hint = footer_keybinding_hint(state, input_is_empty);
-        draw_normal_footer(
-            frame,
-            footer_row_1,
-            footer_row_2,
-            state,
-            keybinding_hint,
-            hint,
-        );
+        let footer_hints = footer_keybinding_hints(state, input_is_empty);
+        draw_normal_footer(frame, footer_row_1, footer_row_2, state, footer_hints, hint);
         None
     };
 
@@ -516,44 +567,41 @@ pub fn draw(
     button_areas
 }
 
-fn footer_keybinding_hint(state: &TuiState, input_is_empty: bool) -> &'static str {
+fn footer_keybinding_hints(state: &TuiState, input_is_empty: bool) -> &'static [FooterHint] {
     match &state.slash_overlay {
-        SlashOverlay::Suggestions { .. } => {
-            " ↑/↓: select  tab: complete  enter: run  esc: close  F1: help"
-        }
-        SlashOverlay::LoadingModels => " loading models…  esc: close  F1: help",
-        SlashOverlay::ModelPicker { .. } => {
-            " ↑/↓: select  ←/→: effort  enter: switch  esc: cancel  F1: help"
-        }
+        SlashOverlay::Suggestions { .. } => SUGGESTION_FOOTER_HINTS,
+        SlashOverlay::LoadingModels => LOADING_MODELS_FOOTER_HINTS,
+        SlashOverlay::ModelPicker { .. } => MODEL_PICKER_FOOTER_HINTS,
         SlashOverlay::Hidden => {
             let in_child_view = state.child_view.child_view_bubble.is_some();
+            let parent_agent_is_busy = state.parent_agent_mode != AgentMode::Idle;
             if state.clarify_banner_state.pending_clarify.is_some() {
-                " enter: answer  click choice  ctrl-c/esc: cancel  F1: help"
+                CLARIFY_FOOTER_HINTS
             } else if in_child_view && !input_is_empty {
-                // Viewing a subagent's drill-in transcript: `enter: send` is
+                // Viewing a subagent's drill-in transcript: `enter send` is
                 // omitted entirely — the child conversation doesn't accept
                 // input (only one agent loop is driven at a time), and Enter
                 // no longer steers the root agent from here either.
-                " ctrl-c/esc: clear draft  F1: help"
+                CHILD_VIEW_DRAFT_FOOTER_HINTS
             } else if in_child_view {
                 // Esc with an empty draft navigates back to the root
                 // conversation instead of acting on the root agent's turn.
-                if state.agent_mode != AgentMode::Idle {
-                    " esc: back to conversation  ctrl-c: cancel & quit  F1: help"
+                if parent_agent_is_busy {
+                    CHILD_VIEW_BUSY_FOOTER_HINTS
                 } else {
-                    " esc: back to conversation  ctrl-c: quit  F1: help"
+                    CHILD_VIEW_IDLE_FOOTER_HINTS
                 }
             } else if state.agent_mode != AgentMode::Idle && !input_is_empty {
-                " enter: send  ctrl-c/esc: clear draft  F1: help"
+                BUSY_DRAFT_FOOTER_HINTS
             } else if state.agent_mode != AgentMode::Idle {
                 // Busy with an empty draft: Esc stops the turn, while Ctrl-C
                 // stops the turn and quits the TUI.
-                " enter: send  esc: cancel  ctrl-c: cancel & quit  F1: help"
+                BUSY_EMPTY_FOOTER_HINTS
             } else if !input_is_empty {
                 // Idle with a draft: Esc clears it; Ctrl-C quits on confirm.
-                " enter: send  esc: clear draft  ctrl-c: quit  F1: help"
+                IDLE_DRAFT_FOOTER_HINTS
             } else {
-                " enter: send  ctrl-c: quit  F1: help"
+                IDLE_EMPTY_FOOTER_HINTS
             }
         }
     }
@@ -570,6 +618,17 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
 
     // Save the content rect so the event loop can hit-test mouse events.
     state.conversation.chat_area = content_area;
+
+    // While viewing a subagent's drill-in transcript, the conversation
+    // scrollbar is tinted the same pinkish/magenta as the chat/input
+    // dividers and the `spawn_subagent` bubble's own border, instead of the
+    // root conversation's neutral scrollbar color.
+    let in_child_view = state.child_view.child_view_bubble.is_some();
+    let scrollbar_color = if in_child_view {
+        CHILD_VIEW_SEPARATOR_COLOR
+    } else {
+        CHAT_SCROLLBAR_COLOR
+    };
 
     // row_width is the full column count of content_area; bubble helpers pad
     // lines to this width so the background fills every cell on each row.
@@ -606,11 +665,11 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
                 // User bubbles carry a 1-char left border bar plus a 2-char
                 // margin, so wrap to a narrower width to keep lines on-screen.
                 let user_width = bubble_row_width.saturating_sub(4).max(1);
-                append_user_lines(&mut lines, text, *state, user_width, bubble_row_width);
+                append_user_lines(&mut lines, text, *state, user_width);
             }
             ChatEntry::AssistantMessage { text, interrupted } => {
                 let msg_width = bubble_row_width.saturating_sub(4).max(1);
-                append_assistant_lines(&mut lines, text, *interrupted, msg_width, bubble_row_width);
+                append_assistant_lines(&mut lines, text, *interrupted, msg_width);
             }
             ChatEntry::ThinkingMessage {
                 text,
@@ -626,7 +685,6 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
                     entry_index,
                     &mut thinking_title_rows_out,
                     msg_width,
-                    bubble_row_width,
                 );
             }
             ChatEntry::ToolBubble {
@@ -658,7 +716,6 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
                     },
                     &mut bubble_title_rows_out,
                     bubble_row_width.saturating_sub(4).max(1),
-                    bubble_row_width,
                 );
             }
             ChatEntry::ErrorLine { message } => {
@@ -671,7 +728,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
                     } else {
                         format!("      {}", wrapped)
                     };
-                    lines.push(Line::styled(display, Style::default().fg(Color::Red)));
+                    lines.push(Line::styled(display, Style::default().fg(ERROR_COLOR)));
                 }
             }
             ChatEntry::Notice { text } => {
@@ -688,7 +745,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
                         } else {
                             format!("     {}", wrapped)
                         };
-                        lines.push(Line::styled(display, Style::default().fg(Color::Cyan)));
+                        lines.push(Line::styled(display, Style::default().fg(NOTICE_COLOR)));
                     }
                 }
             }
@@ -717,7 +774,6 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
             state.partial_thinking_collapsed,
             &mut thinking_title_rows_out,
             stream_width,
-            bubble_row_width,
         );
         lines.push(Line::default());
     }
@@ -731,7 +787,6 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
             &mut lines,
             &state.partial_assistant_text.clone(),
             stream_width,
-            bubble_row_width,
         );
         // Match the blank separator that the committed-entry loop appends so
         // the gap between the bubble and the input field is consistent whether
@@ -749,7 +804,6 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
             queued_text,
             UserMessageState::Queued,
             user_width,
-            bubble_row_width,
         );
         lines.push(Line::default());
     }
@@ -769,7 +823,6 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
             },
             &mut bubble_title_rows_out,
             bubble_row_width.saturating_sub(4).max(1),
-            bubble_row_width,
         );
         lines.push(Line::default());
     }
@@ -809,7 +862,6 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
     state.conversation.chat_rendered_line_chrome_widths = chrome_widths;
 
     // Apply selection highlight to lines in the selected range.
-    const CHAT_SELECTION_BG: Color = Color::Rgb(60, 80, 120);
     if let Some(sel) = state.conversation.chat_selection {
         if !sel.is_empty() {
             let (start_line, start_col, end_line, end_col) = sel.normalized();
@@ -874,6 +926,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
             max_offset,
             total_lines,
             visible,
+            scrollbar_color,
         );
     }
 }
@@ -917,6 +970,7 @@ fn render_chat_scrollbar(
     max_offset: usize,
     total_lines: usize,
     visible: usize,
+    color: Color,
 ) {
     let height = scrollbar_area.height as usize;
     if height == 0 {
@@ -934,11 +988,9 @@ fn render_chat_scrollbar(
     for row in 0..track_height {
         let is_thumb = row >= thumb_top && row < thumb_top + thumb_size;
         let style = if is_thumb {
-            Style::default().fg(CHAT_SCROLLBAR_COLOR)
+            Style::default().fg(color)
         } else {
-            Style::default()
-                .fg(CHAT_SCROLLBAR_COLOR)
-                .add_modifier(Modifier::DIM)
+            Style::default().fg(color).add_modifier(Modifier::DIM)
         };
         let symbol = if is_thumb { "┃" } else { "│" };
         frame.render_widget(
@@ -948,10 +1000,8 @@ fn render_chat_scrollbar(
     }
 
     if has_arrows {
-        let arrow_active = Style::default().fg(CHAT_SCROLLBAR_COLOR);
-        let arrow_dim = Style::default()
-            .fg(CHAT_SCROLLBAR_COLOR)
-            .add_modifier(Modifier::DIM);
+        let arrow_active = Style::default().fg(color);
+        let arrow_dim = Style::default().fg(color).add_modifier(Modifier::DIM);
         frame.render_widget(
             Paragraph::new("↑").style(if row_offset > 0 {
                 arrow_active
@@ -1038,9 +1088,7 @@ fn apply_selection_highlight_to_line(
 fn append_logo(lines: &mut Vec<Line>) {
     lines.push(Line::default());
     lines.push(Line::default());
-    let style = Style::default()
-        .fg(Color::Blue)
-        .add_modifier(Modifier::BOLD);
+    let style = Style::default().fg(LOGO_COLOR).add_modifier(Modifier::BOLD);
     for row in LOGO {
         lines.push(Line::styled(row.to_string(), style).alignment(Alignment::Center));
     }
@@ -1048,76 +1096,56 @@ fn append_logo(lines: &mut Vec<Line>) {
     lines.push(Line::default());
     let build_info_text = format!("v{}  {}", BUILD_INFO.version, BUILD_INFO.git_commit);
     lines.push(
-        Line::styled(build_info_text, Style::default().fg(Color::DarkGray))
+        Line::styled(build_info_text, Style::default().fg(BUILD_INFO_COLOR))
             .alignment(Alignment::Center),
     );
     // A blank spacer separates the wordmark block from the conversation.
     lines.push(Line::default());
 }
 
+fn terminal_display_width(text: &str) -> usize {
+    Line::from(text).width()
+}
+
 /// Common visual scaffolding shared by every chat "bubble" renderer
 /// (assistant, user, streaming-assistant, and tool bubbles): a colored
-/// left-border bar, a 2-space margin between the bar and content, and a
-/// background style so each row's background fills to the right edge of the
-/// content area via [`BubbleStyle::trailing_pad`].
+/// left-border bar and a 2-space margin between the bar and content.
+/// Bubbles are rendered with no background fill and no top/bottom padding
+/// row, so the conversation reads as a condensed, neutral list of entries
+/// distinguished only by their left-border color.
 struct BubbleStyle {
     bar: Span<'static>,
     margin: Span<'static>,
-    row_bg: Style,
-    row_width: usize,
 }
 
 impl BubbleStyle {
-    fn new(border_color: Color, bg_color: Color, row_width: usize) -> Self {
+    fn new(border_color: Color) -> Self {
         Self {
-            bar: Span::styled("▌", Style::default().fg(border_color).bg(bg_color)),
-            margin: Span::styled("  ", Style::default().bg(bg_color)),
-            row_bg: Style::default().bg(bg_color),
-            row_width,
+            bar: Span::styled("▌", Style::default().fg(border_color)),
+            margin: Span::raw("  "),
         }
     }
 
-    /// Fills the cells after the last content span so the row's background
-    /// reaches the right edge of the content area. `text_len` is the
-    /// visible character count already written after the bar(1) +
-    /// margin(2) = 3 prefix columns.
-    fn trailing_pad(&self, text_len: usize) -> Span<'static> {
-        let used = 3 + text_len;
-        let pad = self.row_width.saturating_sub(used + 1);
-        Span::styled(" ".repeat(pad + 1), self.row_bg)
+    /// Pushes a blank bar-only row, used as a separator between distinct
+    /// sections within a bubble's body (e.g. between a tool call's arguments
+    /// and its result). `extra_style` is patched the same way as
+    /// [`BubbleStyle::content_line`] so separator rows stay visually
+    /// consistent with the bubble's content rows (e.g. both dimmed for a
+    /// queued/cancelled message).
+    fn push_separator_line(&self, lines: &mut Vec<Line<'static>>, extra_style: Style) {
+        lines
+            .push(Line::from(vec![self.bar.clone(), self.margin.clone()]).patch_style(extra_style));
     }
 
-    /// Pushes a blank bar-only row, used for the 1-char top/bottom padding
-    /// that separates a bubble from neighboring entries. `extra_style` is
-    /// patched the same way as [`BubbleStyle::content_line`] so padding rows
-    /// stay visually consistent with the bubble's content rows (e.g. both
-    /// dimmed for a queued/cancelled message).
-    fn push_padding_line(&self, lines: &mut Vec<Line<'static>>, extra_style: Style) {
-        lines.push(
-            Line::from(vec![
-                self.bar.clone(),
-                self.margin.clone(),
-                self.trailing_pad(0),
-            ])
-            .patch_style(extra_style)
-            .patch_style(self.row_bg),
-        );
-    }
-
-    /// Assembles one content row: bar + margin + `spans` + trailing pad.
-    /// `extra_style` is patched onto the assembled line before `row_bg`, so
-    /// it can override foreground/modifiers (e.g. dim for queued/cancelled
-    /// messages) while `row_bg` still fills in the background — mirroring
-    /// how `render_markdown`'s inline styling (bold, inline code, ...) is
-    /// preserved through `patch_style`, since `row_bg` only sets `bg`.
+    /// Assembles one content row: bar + margin + `spans`. `extra_style` is
+    /// patched onto the assembled line so it can override
+    /// foreground/modifiers (e.g. dim for queued/cancelled messages) while
+    /// preserving each span's own inline styling (bold, inline code, ...),
+    /// since `patch_style` only overrides unset style attributes.
     fn content_line(&self, spans: Vec<Span<'static>>, extra_style: Style) -> Line<'static> {
-        let line_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
         let mut full_spans = vec![self.bar.clone(), self.margin.clone()];
         full_spans.extend(spans);
-        full_spans.push(self.trailing_pad(line_len));
-        Line::from(full_spans)
-            .patch_style(extra_style)
-            .patch_style(self.row_bg)
+        Line::from(full_spans).patch_style(extra_style)
     }
 
     /// Renders `text` as Markdown wrapped to `width`, pushing one
@@ -1152,48 +1180,36 @@ fn append_assistant_lines(
     text: &str,
     interrupted: bool,
     width: usize,
-    row_width: usize,
 ) {
     let border_color = if interrupted {
-        Color::DarkGray
+        INTERRUPTED_COLOR
     } else {
         ASSISTANT_STREAM_BORDER_COLOR
     };
-    let style = BubbleStyle::new(border_color, ASSISTANT_STREAM_BG_COLOR, row_width);
+    let style = BubbleStyle::new(border_color);
     let text_style = if interrupted {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(INTERRUPTED_COLOR)
     } else {
         Style::default()
     };
 
-    style.push_padding_line(lines, Style::default());
     style.push_markdown_lines(lines, text, width, text_style);
     if interrupted {
         let ellipsis = "…";
         lines.push(style.content_line(
-            vec![Span::styled(ellipsis, Style::default().fg(Color::DarkGray))],
+            vec![Span::styled(
+                ellipsis,
+                Style::default().fg(INTERRUPTED_COLOR),
+            )],
             Style::default(),
         ));
     }
-    style.push_padding_line(lines, Style::default());
 }
 
-/// `row_width` is the full content-area column count; every row is padded with
 /// Render in-progress assistant text as a blue-bordered bubble with a blinking
 /// cursor on the last line. Mirrors the layout of `append_user_lines`.
-fn append_streaming_lines(
-    lines: &mut Vec<Line<'static>>,
-    text: &str,
-    width: usize,
-    row_width: usize,
-) {
-    let style = BubbleStyle::new(
-        ASSISTANT_STREAM_BORDER_COLOR,
-        ASSISTANT_STREAM_BG_COLOR,
-        row_width,
-    );
-
-    style.push_padding_line(lines, Style::default());
+fn append_streaming_lines(lines: &mut Vec<Line<'static>>, text: &str, width: usize) {
+    let style = BubbleStyle::new(ASSISTANT_STREAM_BORDER_COLOR);
 
     let mut wrapped = render_markdown(text, width);
     if wrapped.is_empty() {
@@ -1213,8 +1229,6 @@ fn append_streaming_lines(
         }
         lines.push(style.content_line(spans, Style::default()));
     }
-
-    style.push_padding_line(lines, Style::default());
 }
 
 /// Render a committed thinking bubble (extended-thinking/reasoning output),
@@ -1226,7 +1240,6 @@ fn append_streaming_lines(
 /// Records the bubble's absolute row range in `thinking_title_rows` (keyed by
 /// `entry_index`, since `ChatEntry::ThinkingMessage` carries no `Uuid`) so
 /// mouse clicks can route to `AppState::toggle_thinking_collapsed`.
-#[expect(clippy::too_many_arguments)]
 fn append_thinking_lines(
     lines: &mut Vec<Line<'static>>,
     text: &str,
@@ -1235,14 +1248,12 @@ fn append_thinking_lines(
     entry_index: usize,
     thinking_title_rows: &mut Vec<(usize, usize, usize)>,
     width: usize,
-    row_width: usize,
 ) {
-    let style = BubbleStyle::new(THINKING_BORDER_COLOR, THINKING_BG_COLOR, row_width);
+    let style = BubbleStyle::new(THINKING_BORDER_COLOR);
     let dim = Style::default().add_modifier(Modifier::DIM);
     let title_text = format!("Thought for {:.3}s", duration.as_secs_f64());
 
     let bubble_start_row = lines.len();
-    style.push_padding_line(lines, dim);
 
     if collapsed {
         let summary = format!("▶ {title_text}");
@@ -1276,7 +1287,6 @@ fn append_thinking_lines(
         }
     }
 
-    style.push_padding_line(lines, dim);
     let bubble_end_row = lines.len().saturating_sub(1);
     thinking_title_rows.push((bubble_start_row, bubble_end_row, entry_index));
 }
@@ -1297,9 +1307,8 @@ fn append_streaming_thinking_lines(
     collapsed: bool,
     thinking_title_rows: &mut Vec<(usize, usize, usize)>,
     width: usize,
-    row_width: usize,
 ) {
-    let style = BubbleStyle::new(THINKING_BORDER_COLOR, THINKING_BG_COLOR, row_width);
+    let style = BubbleStyle::new(THINKING_BORDER_COLOR);
     let dim = Style::default().add_modifier(Modifier::DIM);
     let elapsed = thinking_started_at
         .map(|started_at| started_at.elapsed())
@@ -1307,7 +1316,6 @@ fn append_streaming_thinking_lines(
     let title_text = format!("Thinking... ({:.1}s)", elapsed.as_secs_f64());
 
     let bubble_start_row = lines.len();
-    style.push_padding_line(lines, dim);
 
     if collapsed {
         let summary = format!("▶ {title_text}");
@@ -1346,7 +1354,6 @@ fn append_streaming_thinking_lines(
         }
     }
 
-    style.push_padding_line(lines, dim);
     let bubble_end_row = lines.len().saturating_sub(1);
     thinking_title_rows.push((
         bubble_start_row,
@@ -1355,14 +1362,11 @@ fn append_streaming_thinking_lines(
     ));
 }
 
-/// trailing spaces to that width so the `USER_MESSAGE_BG_COLOR` background
-/// fills the entire terminal row — not just the cells that contain characters.
 fn append_user_lines(
     lines: &mut Vec<Line<'static>>,
     text: &str,
     state: UserMessageState,
     width: usize,
-    row_width: usize,
 ) {
     let (border_color, dim) = match state {
         UserMessageState::Sent => (USER_MESSAGE_BORDER_COLOR, false),
@@ -1370,15 +1374,12 @@ fn append_user_lines(
         UserMessageState::Steered => (USER_MESSAGE_STEERED_BORDER_COLOR, false),
         UserMessageState::Cancelled => (USER_MESSAGE_CANCELLED_BORDER_COLOR, true),
     };
-    let style = BubbleStyle::new(border_color, USER_MESSAGE_BG_COLOR, row_width);
+    let style = BubbleStyle::new(border_color);
     let text_style = if dim {
         Style::default().add_modifier(Modifier::DIM)
     } else {
         Style::default()
     };
-
-    // 1-char top padding keeps the bubble from crowding the entry above.
-    style.push_padding_line(lines, text_style);
 
     style.push_markdown_lines(lines, text, width, text_style);
 
@@ -1387,13 +1388,13 @@ fn append_user_lines(
         lines.push(style.content_line(
             vec![Span::styled(
                 label,
-                Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+                Style::default()
+                    .fg(INTERRUPTED_COLOR)
+                    .add_modifier(Modifier::DIM),
             )],
             Style::default(),
         ));
     }
-    // 1-char bottom padding separates the bubble from the entry below.
-    style.push_padding_line(lines, text_style);
 }
 
 /// Per-bubble inputs for [`append_tool_bubble_lines`].
@@ -1440,14 +1441,15 @@ fn append_result_section_lines(
     wrap_width: usize,
 ) {
     let prefix = title.map(|t| format!("{t} ")).unwrap_or_default();
-    let content_wrap_width = wrap_width.saturating_sub(2 + prefix.chars().count()).max(1);
+    let prefix_width = terminal_display_width(&prefix);
+    let content_wrap_width = wrap_width.saturating_sub(2 + prefix_width).max(1);
     // DIM is patched onto each span individually (not passed as `content_line`'s
     // line-level `extra_style`) so it only dims the label/content text —
     // patching it at the line level would also dim the bubble's left-border
     // bar, since unset modifiers are unioned in, not overridden, when a span
     // has no modifier of its own.
     let dim = Style::default()
-        .fg(Color::White)
+        .fg(CONTENT_COLOR)
         .add_modifier(Modifier::DIM);
     let mut md_lines = render_markdown(content, content_wrap_width);
     if md_lines.is_empty() {
@@ -1463,7 +1465,7 @@ fn append_result_section_lines(
             spans.push(Span::styled(label, dim.add_modifier(Modifier::UNDERLINED)));
             spans.push(Span::styled(" ", dim));
         } else if !prefix.is_empty() {
-            spans.push(Span::styled(" ".repeat(prefix.chars().count()), dim));
+            spans.push(Span::styled(" ".repeat(prefix_width), dim));
         }
         // `dim` is the base (fg White + DIM, matching other section titles
         // like "Context:"/"Choices:"); each markdown span's own style (e.g.
@@ -1485,7 +1487,6 @@ fn append_tool_bubble_lines(
     bubble: ToolBubbleArgs<'_>,
     bubble_title_rows: &mut Vec<(usize, usize, uuid::Uuid)>,
     wrap_width: usize,
-    row_width: usize,
 ) {
     let ToolBubbleArgs {
         id: bubble_id,
@@ -1495,18 +1496,16 @@ fn append_tool_bubble_lines(
         spinner_frame,
         display_title_override,
     } = bubble;
-    let style = BubbleStyle::new(TOOL_BUBBLE_BORDER_COLOR, TOOL_BUBBLE_BG_COLOR, row_width);
+    let style = BubbleStyle::new(TOOL_BUBBLE_BORDER_COLOR);
     let bar = style.bar.clone();
     let margin = style.margin.clone();
-    let row_bg = style.row_bg;
-    let trailing_pad = |text_len: usize| -> Span<'static> { style.trailing_pad(text_len) };
 
     // Format arguments for the title:
     // - primary arg (schema rank 0): value only, rendered in bold.
     // - remaining args: `key=value` pairs, rendered dim.
     // - body arguments (declared by the tool) are omitted from the title.
     // `Running`'s interim `progress_arguments` (e.g. `spawn_subagent`
-    // reporting `status=running`/`queued` + `run_id`) are appended after the
+    // reporting `status=running`/`queued` + `run_id`) are combined with the
     // call's real `title_arguments` — kept as a separate owned buffer here
     // since `Done` has no equivalent field, so once the call truly finishes
     // these interim values are naturally gone rather than lingering stale.
@@ -1534,7 +1533,18 @@ fn append_tool_bubble_lines(
         } => title_arguments.clone(),
         _ => vec![],
     };
-    let title_arguments = combined_title_arguments.as_slice();
+    let is_subagent = name == crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME;
+    let is_queued_subagent = is_subagent
+        && combined_title_arguments
+            .iter()
+            .any(|(key, value)| key == "status" && value == "queued");
+    // Keep the child status and run identifier in state for rendering and
+    // routing, but do not expose these internal values in the title.
+    let title_arguments: Vec<(String, serde_json::Value)> = combined_title_arguments
+        .into_iter()
+        .filter(|(key, _)| !is_subagent || (key != "run_id" && key != "status"))
+        .collect();
+    let title_arguments = title_arguments.as_slice();
     // Only strings and numbers qualify as the bare (keyless) primary arg.
     // Booleans need their key name to be meaningful, so they stay in props.
     let scalar_primary = |v: &serde_json::Value| -> Option<String> {
@@ -1670,15 +1680,11 @@ fn append_tool_bubble_lines(
     // Build the indicator + tool-name prefix.
     let title_prefix = format!("{expand_indicator} {display_title}");
 
-    // Record the bubble's start row (top-padding line) before pushing.
+    // Record the bubble's start row (title line) before pushing.
     let bubble_start_row = lines.len();
 
-    // Top padding.
-    lines.push(Line::from(vec![bar.clone(), margin.clone(), trailing_pad(0)]).patch_style(row_bg));
-
     let dim_white = Style::default()
-        .fg(Color::White)
-        .bg(TOOL_BUBBLE_BG_COLOR)
+        .fg(CONTENT_COLOR)
         .add_modifier(Modifier::DIM);
 
     // ── Title rendering ─────────────────────────────────────────────────────
@@ -1733,31 +1739,19 @@ fn append_tool_bubble_lines(
     };
 
     let bold_white = Style::default()
-        .fg(Color::White)
-        .bg(TOOL_BUBBLE_BG_COLOR)
+        .fg(CONTENT_COLOR)
         .add_modifier(Modifier::BOLD);
-
-    let is_queued_subagent = title_arguments
-        .iter()
-        .any(|(key, value)| key == "status" && value == "queued");
 
     let spinner_or_margin: Span = if is_queued_subagent {
         // Queued (not yet actually running): a static glyph, not the
         // animated spinner, since nothing is actively executing yet — the
         // child is only waiting for the currently running one to finish.
-        Span::styled(
-            "≡ ",
-            Style::default()
-                .fg(TOOL_BUBBLE_BORDER_COLOR)
-                .bg(TOOL_BUBBLE_BG_COLOR),
-        )
+        Span::styled("≡ ", Style::default().fg(TOOL_BUBBLE_BORDER_COLOR))
     } else if matches!(state, ToolCallState::Running { .. }) {
         let spinner_char = SPINNER_FRAMES[spinner_frame as usize % SPINNER_FRAMES.len()];
         Span::styled(
             format!("{spinner_char} "),
-            Style::default()
-                .fg(TOOL_BUBBLE_BORDER_COLOR)
-                .bg(TOOL_BUBBLE_BG_COLOR),
+            Style::default().fg(TOOL_BUBBLE_BORDER_COLOR),
         )
     } else {
         margin.clone()
@@ -1784,9 +1778,7 @@ fn append_tool_bubble_lines(
         if pe > 0 {
             spans.push(Span::styled(
                 chars[..pe].iter().collect::<String>(),
-                Style::default()
-                    .fg(TOOL_BUBBLE_BORDER_COLOR)
-                    .bg(TOOL_BUBBLE_BG_COLOR),
+                Style::default().fg(TOOL_BUBBLE_BORDER_COLOR),
             ));
         }
         if ae > pe {
@@ -1807,9 +1799,7 @@ fn append_tool_bubble_lines(
         if !suffix.is_empty() {
             spans.push(Span::styled(suffix.to_string(), dim_white));
         }
-        let pad_len = total + if truncated { 3 } else { 0 } + suffix.chars().count();
-        spans.push(trailing_pad(pad_len));
-        lines.push(Line::from(spans).patch_style(row_bg));
+        lines.push(Line::from(spans));
     };
 
     if collapsed {
@@ -1875,9 +1865,7 @@ fn append_tool_bubble_lines(
         if pe > 0 {
             first_spans.push(Span::styled(
                 first_chars[..pe].iter().collect::<String>(),
-                Style::default()
-                    .fg(TOOL_BUBBLE_BORDER_COLOR)
-                    .bg(TOOL_BUBBLE_BG_COLOR),
+                Style::default().fg(TOOL_BUBBLE_BORDER_COLOR),
             ));
         }
         if first_total > pe {
@@ -1886,8 +1874,7 @@ fn append_tool_bubble_lines(
                 dim_white,
             ));
         }
-        first_spans.push(trailing_pad(first_total));
-        lines.push(Line::from(first_spans).patch_style(row_bg));
+        lines.push(Line::from(first_spans));
 
         // Lines 2+: args, hard-broken then width-wrapped.
         if !args_after_prefix.is_empty() {
@@ -1914,14 +1901,9 @@ fn append_tool_bubble_lines(
                     .min(chunk_len);
 
                 let indent = "  ";
-                let indent_len = indent.chars().count();
-                let total_len = indent_len + chunk_len;
 
                 let mut cont_spans: Vec<Span> = vec![bar.clone(), margin.clone()];
-                cont_spans.push(Span::styled(
-                    indent,
-                    Style::default().bg(TOOL_BUBBLE_BG_COLOR),
-                ));
+                cont_spans.push(Span::styled(indent, Style::default()));
                 if primary_end_in_chunk > 0 {
                     cont_spans.push(Span::styled(
                         chunk_chars[..primary_end_in_chunk]
@@ -1938,8 +1920,7 @@ fn append_tool_bubble_lines(
                         dim_white,
                     ));
                 }
-                cont_spans.push(trailing_pad(total_len));
-                lines.push(Line::from(cont_spans).patch_style(row_bg));
+                lines.push(Line::from(cont_spans));
 
                 chars_consumed += chunk_len;
             }
@@ -1957,19 +1938,11 @@ fn append_tool_bubble_lines(
         let error_wrap_width = wrap_width.saturating_sub(2).max(1);
         for wrapped in textwrap::wrap(error, error_wrap_width) {
             let error_label = format!("  {wrapped}");
-            let error_len = error_label.chars().count();
-            lines.push(
-                Line::from(vec![
-                    bar.clone(),
-                    margin.clone(),
-                    Span::styled(
-                        error_label,
-                        Style::default().fg(Color::Red).bg(TOOL_BUBBLE_BG_COLOR),
-                    ),
-                    trailing_pad(error_len),
-                ])
-                .patch_style(row_bg),
-            );
+            lines.push(Line::from(vec![
+                bar.clone(),
+                margin.clone(),
+                Span::styled(error_label, Style::default().fg(ERROR_COLOR)),
+            ]));
         }
     }
 
@@ -1981,34 +1954,25 @@ fn append_tool_bubble_lines(
                 // Empty line before every section; separates sections from each
                 // other and from the title area above the body.
                 let _ = section_index;
-                lines.push(
-                    Line::from(vec![bar.clone(), margin.clone(), trailing_pad(0)])
-                        .patch_style(row_bg),
-                );
+                lines.push(Line::from(vec![bar.clone(), margin.clone()]));
                 match section {
                     crate::agent::tools::Section::Content(content_section) => {
                         // Label header (only when multiple sections).
                         if show_labels {
                             if let Some(label) = &content_section.label {
                                 let label_str = format!("{label}:");
-                                let label_len = 2 + label_str.chars().count();
                                 let dim_style = Style::default()
-                                    .fg(Color::White)
-                                    .bg(TOOL_BUBBLE_BG_COLOR)
+                                    .fg(CONTENT_COLOR)
                                     .add_modifier(Modifier::DIM);
-                                lines.push(
-                                    Line::from(vec![
-                                        bar.clone(),
-                                        margin.clone(),
-                                        Span::styled("  ", dim_style),
-                                        Span::styled(
-                                            label_str,
-                                            dim_style.add_modifier(Modifier::UNDERLINED),
-                                        ),
-                                        trailing_pad(label_len),
-                                    ])
-                                    .patch_style(row_bg),
-                                );
+                                lines.push(Line::from(vec![
+                                    bar.clone(),
+                                    margin.clone(),
+                                    Span::styled("  ", dim_style),
+                                    Span::styled(
+                                        label_str,
+                                        dim_style.add_modifier(Modifier::UNDERLINED),
+                                    ),
+                                ]));
                             }
                         }
 
@@ -2025,19 +1989,13 @@ fn append_tool_bubble_lines(
                                 md_lines.push(Line::from(""));
                             }
                             for md_line in md_lines {
-                                let content_text_len: usize = md_line
-                                    .spans
-                                    .iter()
-                                    .map(|span| span.content.chars().count())
-                                    .sum();
                                 let mut spans: Vec<Span<'static>> = vec![
                                     bar.clone(),
                                     margin.clone(),
-                                    Span::styled("  ", Style::default().bg(TOOL_BUBBLE_BG_COLOR)),
+                                    Span::styled("  ", Style::default()),
                                 ];
                                 spans.extend(md_line.spans);
-                                spans.push(trailing_pad(2 + content_text_len));
-                                lines.push(Line::from(spans).patch_style(row_bg));
+                                lines.push(Line::from(spans));
                             }
                             continue;
                         }
@@ -2081,38 +2039,23 @@ fn append_tool_bubble_lines(
                                         let gutter_str = format!("  {line_num:>digits$}: ");
                                         spans.push(Span::styled(
                                             gutter_str,
-                                            Style::default()
-                                                .fg(Color::DarkGray)
-                                                .bg(TOOL_BUBBLE_BG_COLOR),
+                                            Style::default().fg(MUTED_TEXT_COLOR),
                                         ));
                                     } else {
-                                        spans.push(Span::styled(
-                                            "  ",
-                                            Style::default().bg(TOOL_BUBBLE_BG_COLOR),
-                                        ));
+                                        spans.push(Span::styled("  ", Style::default()));
                                     }
                                 } else {
                                     // Continuation row: blank gutter placeholder.
                                     let indent = " ".repeat(gutter_prefix_len);
-                                    spans.push(Span::styled(
-                                        indent,
-                                        Style::default().bg(TOOL_BUBBLE_BG_COLOR),
-                                    ));
+                                    spans.push(Span::styled(indent, Style::default()));
                                 }
 
                                 // Convert syntect tokens to ratatui spans.
-                                let content_text_len: usize =
-                                    row_spans.iter().map(|(_, t)| t.chars().count()).sum();
                                 for (style, token) in row_spans {
-                                    spans.push(syntect_token_to_span(
-                                        style,
-                                        token,
-                                        TOOL_BUBBLE_BG_COLOR,
-                                    ));
+                                    spans.push(syntect_fg_span(style, token));
                                 }
 
-                                spans.push(trailing_pad(gutter_prefix_len + content_text_len));
-                                lines.push(Line::from(spans).patch_style(row_bg));
+                                lines.push(Line::from(spans));
                             }
                         }
                     }
@@ -2121,24 +2064,18 @@ fn append_tool_bubble_lines(
                         if show_labels {
                             if let Some(label) = &diff_section.label {
                                 let label_str = format!("{label}:");
-                                let label_len = 2 + label_str.chars().count();
                                 let dim_style = Style::default()
-                                    .fg(Color::White)
-                                    .bg(TOOL_BUBBLE_BG_COLOR)
+                                    .fg(CONTENT_COLOR)
                                     .add_modifier(Modifier::DIM);
-                                lines.push(
-                                    Line::from(vec![
-                                        bar.clone(),
-                                        margin.clone(),
-                                        Span::styled("  ", dim_style),
-                                        Span::styled(
-                                            label_str,
-                                            dim_style.add_modifier(Modifier::UNDERLINED),
-                                        ),
-                                        trailing_pad(label_len),
-                                    ])
-                                    .patch_style(row_bg),
-                                );
+                                lines.push(Line::from(vec![
+                                    bar.clone(),
+                                    margin.clone(),
+                                    Span::styled("  ", dim_style),
+                                    Span::styled(
+                                        label_str,
+                                        dim_style.add_modifier(Modifier::UNDERLINED),
+                                    ),
+                                ]));
                             }
                         }
 
@@ -2173,39 +2110,33 @@ fn append_tool_bubble_lines(
                                 new_line = new_start;
                                 // Render hunk header dim across the full width.
                                 let text_str = format!("  {diff_line}");
-                                let text_len = text_str.chars().count();
-                                lines.push(
-                                    Line::from(vec![
-                                        bar.clone(),
-                                        margin.clone(),
-                                        Span::styled(
-                                            text_str,
-                                            Style::default()
-                                                .fg(Color::DarkGray)
-                                                .bg(TOOL_BUBBLE_BG_COLOR)
-                                                .add_modifier(Modifier::DIM),
-                                        ),
-                                        trailing_pad(text_len),
-                                    ])
-                                    .patch_style(row_bg),
-                                );
+                                lines.push(Line::from(vec![
+                                    bar.clone(),
+                                    margin.clone(),
+                                    Span::styled(
+                                        text_str,
+                                        Style::default()
+                                            .fg(MUTED_TEXT_COLOR)
+                                            .add_modifier(Modifier::DIM),
+                                    ),
+                                ]));
                                 continue;
                             }
 
                             let (line_color, left_num, right_num) = if diff_line.starts_with('+') {
                                 let n = new_line;
                                 new_line += 1;
-                                (Color::Green, None, Some(n))
+                                (DIFF_ADDED_COLOR, None, Some(n))
                             } else if diff_line.starts_with('-') {
                                 let n = old_line;
                                 old_line += 1;
-                                (Color::Red, Some(n), None)
+                                (DIFF_REMOVED_COLOR, Some(n), None)
                             } else {
                                 let o = old_line;
                                 let n = new_line;
                                 old_line += 1;
                                 new_line += 1;
-                                (Color::DarkGray, Some(o), Some(n))
+                                (DIFF_CONTEXT_COLOR, Some(o), Some(n))
                             };
 
                             let left_str = left_num
@@ -2232,37 +2163,22 @@ fn append_tool_bubble_lines(
                                     (
                                         Span::styled(
                                             gutter_str.clone(),
-                                            Style::default()
-                                                .fg(Color::DarkGray)
-                                                .bg(TOOL_BUBBLE_BG_COLOR),
+                                            Style::default().fg(MUTED_TEXT_COLOR),
                                         ),
                                         format!("{prefix} {wrapped_chunk}"),
                                     )
                                 } else {
                                     (
-                                        Span::styled(
-                                            " ".repeat(gutter_len),
-                                            Style::default().bg(TOOL_BUBBLE_BG_COLOR),
-                                        ),
+                                        Span::styled(" ".repeat(gutter_len), Style::default()),
                                         format!("  {wrapped_chunk}"),
                                     )
                                 };
-                                let content_len = content_str.chars().count();
-                                lines.push(
-                                    Line::from(vec![
-                                        bar.clone(),
-                                        margin.clone(),
-                                        gutter_span,
-                                        Span::styled(
-                                            content_str,
-                                            Style::default()
-                                                .fg(line_color)
-                                                .bg(TOOL_BUBBLE_BG_COLOR),
-                                        ),
-                                        trailing_pad(gutter_len + content_len),
-                                    ])
-                                    .patch_style(row_bg),
-                                );
+                                lines.push(Line::from(vec![
+                                    bar.clone(),
+                                    margin.clone(),
+                                    gutter_span,
+                                    Span::styled(content_str, Style::default().fg(line_color)),
+                                ]));
                             }
                         }
                     }
@@ -2271,22 +2187,16 @@ fn append_tool_bubble_lines(
                         // meaningless without the filename, even when there is
                         // only one section.
                         let label_str = format!("  {}:", search_section.file_path);
-                        let label_len = label_str.chars().count();
-                        lines.push(
-                            Line::from(vec![
-                                bar.clone(),
-                                margin.clone(),
-                                Span::styled(
-                                    label_str,
-                                    Style::default()
-                                        .fg(Color::White)
-                                        .bg(TOOL_BUBBLE_BG_COLOR)
-                                        .add_modifier(Modifier::BOLD),
-                                ),
-                                trailing_pad(label_len),
-                            ])
-                            .patch_style(row_bg),
-                        );
+                        lines.push(Line::from(vec![
+                            bar.clone(),
+                            margin.clone(),
+                            Span::styled(
+                                label_str,
+                                Style::default()
+                                    .fg(CONTENT_COLOR)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                        ]));
 
                         let gutter_width = search_section
                             .lines
@@ -2305,7 +2215,7 @@ fn append_tool_bubble_lines(
                             } else {
                                 format!("  {:>gutter_width$}- ", search_result_line.line_number)
                             };
-                            let prefix_len = prefix.chars().count();
+                            let prefix_len = terminal_display_width(&prefix);
                             let content_width = wrap_width.saturating_sub(prefix_len).max(1);
                             let highlighted_lines = highlighted_lines_cached(
                                 &search_result_line.content,
@@ -2323,41 +2233,30 @@ fn append_tool_bubble_lines(
 
                                 if row_index == 0 {
                                     let prefix_style = if search_result_line.is_match {
-                                        Style::default()
-                                            .fg(Color::DarkGray)
-                                            .bg(TOOL_BUBBLE_BG_COLOR)
+                                        Style::default().fg(MUTED_TEXT_COLOR)
                                     } else {
                                         Style::default()
-                                            .fg(Color::DarkGray)
-                                            .bg(TOOL_BUBBLE_BG_COLOR)
+                                            .fg(MUTED_TEXT_COLOR)
                                             .add_modifier(Modifier::DIM)
                                     };
                                     spans.push(Span::styled(prefix.clone(), prefix_style));
                                 } else {
                                     spans.push(Span::styled(
                                         " ".repeat(prefix_len),
-                                        Style::default().bg(TOOL_BUBBLE_BG_COLOR),
+                                        Style::default(),
                                     ));
                                 }
 
-                                let content_text_len: usize = row_spans
-                                    .iter()
-                                    .map(|(_, token)| token.chars().count())
-                                    .sum();
                                 for (style, token) in row_spans {
                                     let fg = Color::Rgb(
                                         style.foreground.r,
                                         style.foreground.g,
                                         style.foreground.b,
                                     );
-                                    spans.push(Span::styled(
-                                        token,
-                                        Style::default().fg(fg).bg(TOOL_BUBBLE_BG_COLOR),
-                                    ));
+                                    spans.push(Span::styled(token, Style::default().fg(fg)));
                                 }
 
-                                spans.push(trailing_pad(prefix_len + content_text_len));
-                                lines.push(Line::from(spans).patch_style(row_bg));
+                                lines.push(Line::from(spans));
                             }
                         }
                     }
@@ -2369,7 +2268,7 @@ fn append_tool_bubble_lines(
             if let ToolCallState::Done { result_section, .. } = state {
                 if let Some(title) = result_section_title(name, &result_section.id) {
                     if !result_section.content.is_empty() {
-                        style.push_padding_line(lines, Style::default());
+                        style.push_separator_line(lines, Style::default());
                         append_result_section_lines(
                             lines,
                             &style,
@@ -2395,9 +2294,6 @@ fn append_tool_bubble_lines(
             }
         }
     }
-
-    // Bottom padding.
-    lines.push(Line::from(vec![bar, margin, trailing_pad(0)]).patch_style(row_bg));
 
     // Register the full row span for click-to-toggle: any click in
     // [bubble_start_row, end_row] at column 0 (border bar) toggles the bubble,
@@ -2430,7 +2326,7 @@ fn parse_hunk_range(s: &str) -> Option<(usize, usize)> {
 }
 
 /// Render a footer row with the status text on the left and the active
-/// provider-connection/model identity aligned to the right.
+/// named-engine/model identity aligned to the right.
 fn draw_footer_row(
     frame: &mut Frame,
     area: Rect,
@@ -2438,16 +2334,13 @@ fn draw_footer_row(
     left_color: Color,
     state: &TuiState,
 ) {
-    let engine_identity = match (
-        state.engine_display.provider_connection.as_str(),
-        state.engine_display.model.as_str(),
-    ) {
-        (provider, model) if !provider.is_empty() && !model.is_empty() => {
-            format!("{provider}/{model}")
-        }
-        (provider, _) if !provider.is_empty() => provider.to_string(),
-        (_, model) if !model.is_empty() => model.to_string(),
-        _ => String::new(),
+    let model_identity = state.engine_display.model.clone();
+    let engine_identity = if state.engine_display.engine_name.is_empty() {
+        model_identity
+    } else if model_identity.is_empty() {
+        state.engine_display.engine_name.clone()
+    } else {
+        format!("{} → {}", state.engine_display.engine_name, model_identity)
     };
     if engine_identity.is_empty() || area.width == 0 {
         frame.render_widget(
@@ -2489,7 +2382,7 @@ fn draw_footer_row(
     frame.render_widget(
         Paragraph::new(Line::styled(
             identity_text,
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(MUTED_TEXT_COLOR),
         ))
         .alignment(Alignment::Right),
         identity_area,
@@ -2501,7 +2394,7 @@ fn draw_normal_footer(
     row_1: Rect,
     row_2: Rect,
     state: &TuiState,
-    keybinding_hint: &str,
+    footer_hints: &[FooterHint],
     hint: Option<&str>,
 ) {
     let mode_word = match state.agent_mode {
@@ -2519,18 +2412,17 @@ fn draw_normal_footer(
         AgentMode::ClarifyPending => "Waiting for answer…",
         AgentMode::Aborting => "Aborting…",
     };
-    // While drilled into a subagent's transcript, `agent_mode` always
-    // reflects the *root* loop's `TuiMode` (see `AppState::agent_mode`), not
-    // the child's — so once the child bubble reaches a terminal state
-    // (Done/Error/Denied/Killed) but the root is still busy (e.g. producing
-    // its final reply from the child's result), the plain mode word would
-    // misleadingly read "Streaming…" as if the *subagent* were still
-    // running. Override with an explicit "done, but parent busy" message in
-    // that case; once the root also goes `Idle`, the plain `mode_word` above
-    // is already correct and unambiguous, so no override is needed then.
+    // While drilled into a subagent's transcript, `agent_mode` follows the
+    // visible child and `parent_agent_mode` retains the root loop's status.
+    // Once the child bubble reaches a terminal state (Done/Error/Denied/
+    // Killed) but the root is still busy (e.g. producing its final reply or
+    // running another child), the plain mode word would misleadingly read
+    // "Idle" or "Streaming…" without saying which agent is active. Override
+    // with an explicit "done, but parent busy" message in that case; once the
+    // root also goes `Idle`, the plain `mode_word` above is unambiguous.
     let mode_word = match &state.child_view.child_view_bubble {
         Some((_, _, bubble_state, _))
-            if state.agent_mode != AgentMode::Idle
+            if state.parent_agent_mode != AgentMode::Idle
                 && matches!(
                     bubble_state,
                     ToolCallState::Done { .. }
@@ -2578,10 +2470,15 @@ fn draw_normal_footer(
         }
         _ => mode_word,
     };
-    let spinner_prefix = if state.agent_mode == AgentMode::ClarifyPending {
+    let spinner_mode = if state.agent_mode == AgentMode::Idle {
+        state.parent_agent_mode
+    } else {
+        state.agent_mode
+    };
+    let spinner_prefix = if spinner_mode == AgentMode::ClarifyPending {
         let index = state.spinner_frame as usize % CLARIFY_FRAMES.len();
         format!("{} ", CLARIFY_FRAMES[index])
-    } else if state.agent_mode != AgentMode::Idle {
+    } else if spinner_mode != AgentMode::Idle {
         let index = state.spinner_frame as usize % SPINNER_FRAMES.len();
         format!("{} ", SPINNER_FRAMES[index])
     } else {
@@ -2589,28 +2486,72 @@ fn draw_normal_footer(
     };
     let row_1_text = if let Some(hint) = hint {
         hint.to_string()
-    } else if state.steer_indicator {
-        let queued_count = state.queued_steer_texts.len();
-        // "Queued" is the state the user actually cares about (not yet seen
-        // by the LLM); "steer" is internal jargon for how such a message
-        // reaches the model, so it's kept out of user-facing text.
-        let queued_label = if queued_count == 1 {
-            "1 message queued".to_string()
-        } else {
-            format!("{queued_count} messages queued")
-        };
-        format!(" {spinner_prefix}{mode_word} ⋮ {queued_label}")
     } else {
-        format!(" {spinner_prefix}{mode_word}")
+        let mut row_1_text = format!(" {spinner_prefix}{mode_word}");
+        if let Some(active_subagent_label) =
+            active_subagent_footer_label(state.active_subagent_counts)
+        {
+            row_1_text.push_str(" · ");
+            row_1_text.push_str(&active_subagent_label);
+        }
+        if state.steer_indicator {
+            let queued_count = state.queued_steer_texts.len();
+            // "Queued" is the state the user actually cares about (not yet seen
+            // by the LLM); "steer" is internal jargon for how such a message
+            // reaches the model, so it's kept out of user-facing text.
+            let queued_label = format!(
+                "{queued_count} {} queued",
+                plural_noun(queued_count, "message", "messages")
+            );
+            row_1_text.push_str(" ⋮ ");
+            row_1_text.push_str(&queued_label);
+        }
+        row_1_text
     };
-    draw_footer_row(frame, row_1, &row_1_text, Color::Yellow, state);
-    frame.render_widget(
-        Paragraph::new(Line::styled(
-            keybinding_hint.to_string(),
-            Style::default().fg(Color::DarkGray),
-        )),
-        row_2,
-    );
+    draw_footer_row(frame, row_1, &row_1_text, FOOTER_STATUS_COLOR, state);
+    draw_footer_hints(frame, row_2, footer_hints);
+}
+
+fn active_subagent_footer_label(counts: ActiveSubagentCounts) -> Option<String> {
+    let mut status_labels = Vec::with_capacity(2);
+    if counts.running > 0 {
+        status_labels.push(format!("{} running", counts.running));
+    }
+    if counts.queued > 0 {
+        status_labels.push(format!("{} queued", counts.queued));
+    }
+
+    (!status_labels.is_empty()).then(|| format!("Subagents: {}", status_labels.join(", ")))
+}
+
+fn plural_noun<'a>(count: usize, singular_noun: &'a str, plural_noun: &'a str) -> &'a str {
+    if count == 1 {
+        singular_noun
+    } else {
+        plural_noun
+    }
+}
+
+fn draw_footer_hints(frame: &mut Frame, area: Rect, hints: &[FooterHint]) {
+    let normal_style = Style::default().fg(MUTED_TEXT_COLOR);
+    let key_style = normal_style.add_modifier(Modifier::BOLD);
+    let mut spans = Vec::with_capacity(hints.len() * 4 + 1);
+    spans.push(Span::styled(" ", normal_style));
+
+    for (index, hint) in hints.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" · ", normal_style));
+        }
+        if let Some(key) = hint.key {
+            spans.push(Span::styled(key, key_style));
+            if !hint.description.is_empty() {
+                spans.push(Span::styled(" ", normal_style));
+            }
+        }
+        spans.push(Span::styled(hint.description, normal_style));
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 /// Draw the slash-command overlay as a floating panel whose bottom edge sits
@@ -2708,18 +2649,18 @@ fn draw_slash_overlay(
             let Some(_) = entry_index else {
                 return Line::styled(
                     "─".repeat(content_width),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(MUTED_TEXT_COLOR),
                 );
             };
             let entry = &entries[row_index];
             let is_selected = selected_row == Some(row_index);
             let style = if is_selected {
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
+                    .fg(LIST_SELECTION_FOREGROUND_COLOR)
+                    .bg(LIST_SELECTION_BACKGROUND_COLOR)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Gray)
+                Style::default().fg(LIST_TEXT_COLOR)
             };
             let marker = if is_selected { "▸ " } else { "  " };
             Line::styled(format!("{marker}{entry}"), style)
@@ -2729,7 +2670,7 @@ fn draw_slash_overlay(
     frame.render_widget(Clear, panel_area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(Style::default().fg(LIST_BORDER_COLOR))
         .title(title);
     let inner_area = block.inner(panel_area);
     frame.render_widget(block, panel_area);
@@ -2756,7 +2697,12 @@ fn draw_slash_overlay(
             } else {
                 usize::MAX
             };
-            apply_selection_highlight_to_line(line, column_start, column_end, Color::Yellow);
+            apply_selection_highlight_to_line(
+                line,
+                column_start,
+                column_end,
+                OVERLAY_SELECTION_COLOR,
+            );
         }
     }
     frame.render_widget(Paragraph::new(lines), content_area);
@@ -2769,6 +2715,7 @@ fn draw_slash_overlay(
             max_first_visible,
             rows.len(),
             content_height as usize,
+            CHAT_SCROLLBAR_COLOR,
         );
     }
 }
@@ -3002,7 +2949,7 @@ fn draw_approval_footer(
     } else {
         format!(" Tool '{tool_name}' requests your approval:")
     };
-    draw_footer_row(frame, row_1, &row_1_text, Color::Yellow, state);
+    draw_footer_row(frame, row_1, &row_1_text, FOOTER_STATUS_COLOR, state);
 
     // When the user is typing a denial reason, Enter will deny rather than
     // approve — reflect this by disabling the Approve button and adding
@@ -3039,23 +2986,27 @@ fn draw_approval_footer(
     // typed a denial reason — pressing Enter at that point denies instead.
     let approve_style = if !input_is_empty {
         Style::default()
-            .fg(Color::DarkGray)
+            .fg(MUTED_TEXT_COLOR)
             .add_modifier(Modifier::DIM)
     } else if approve_hovered {
         Style::default()
-            .fg(Color::Black)
-            .bg(Color::LightGreen)
+            .fg(BUTTON_TEXT_COLOR)
+            .bg(APPROVE_HOVER_BACKGROUND_COLOR)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Black).bg(Color::Green)
+        Style::default()
+            .fg(BUTTON_TEXT_COLOR)
+            .bg(APPROVE_BACKGROUND_COLOR)
     };
     let deny_style = if deny_hovered {
         Style::default()
-            .fg(Color::Black)
-            .bg(Color::LightRed)
+            .fg(BUTTON_TEXT_COLOR)
+            .bg(DENY_HOVER_BACKGROUND_COLOR)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Black).bg(Color::Red)
+        Style::default()
+            .fg(BUTTON_TEXT_COLOR)
+            .bg(DENY_BACKGROUND_COLOR)
     };
 
     frame.render_widget(
@@ -3282,21 +3233,25 @@ fn draw_help_popup(frame: &mut Frame, state: &mut TuiState) {
 
 #[cfg(test)]
 mod tests {
-    use super::apply_selection_highlight_to_line;
-    use super::compute_scrollbar_thumb;
-    use ratatui::style::Color;
+    use super::{apply_selection_highlight_to_line, compute_scrollbar_thumb, plural_noun};
+    use crate::theme::CHAT_SELECTION_BG;
     use ratatui::text::{Line, Span};
-
-    const SEL_BG: Color = Color::Rgb(60, 80, 120);
 
     fn plain_line(text: &str) -> Line<'static> {
         Line::from(vec![Span::raw(text.to_owned())])
     }
 
+    #[test]
+    fn plural_noun_uses_singular_only_for_one() {
+        assert_eq!(plural_noun(1, "message", "messages"), "message");
+        assert_eq!(plural_noun(0, "message", "messages"), "messages");
+        assert_eq!(plural_noun(2, "message", "messages"), "messages");
+    }
+
     fn highlighted_in(line: &Line<'_>) -> String {
         line.spans
             .iter()
-            .filter(|s| s.style.bg == Some(SEL_BG))
+            .filter(|s| s.style.bg == Some(CHAT_SELECTION_BG))
             .map(|s| s.content.as_ref())
             .collect()
     }
@@ -3304,16 +3259,18 @@ mod tests {
     #[test]
     fn selection_highlight_highlights_middle_chars_only() {
         let mut line = plain_line("Hello, world!");
-        apply_selection_highlight_to_line(&mut line, 7, 12, SEL_BG);
+        apply_selection_highlight_to_line(&mut line, 7, 12, CHAT_SELECTION_BG);
         assert_eq!(highlighted_in(&line), "world");
     }
 
     #[test]
     fn selection_highlight_empty_range_leaves_line_unchanged() {
         let mut line = plain_line("Hello");
-        apply_selection_highlight_to_line(&mut line, 3, 3, SEL_BG);
+        apply_selection_highlight_to_line(&mut line, 3, 3, CHAT_SELECTION_BG);
         assert!(
-            line.spans.iter().all(|s| s.style.bg != Some(SEL_BG)),
+            line.spans
+                .iter()
+                .all(|s| s.style.bg != Some(CHAT_SELECTION_BG)),
             "no span should be highlighted for an empty range"
         );
     }
@@ -3321,7 +3278,7 @@ mod tests {
     #[test]
     fn selection_highlight_max_col_end_highlights_to_end_of_line() {
         let mut line = plain_line("Hello");
-        apply_selection_highlight_to_line(&mut line, 2, usize::MAX, SEL_BG);
+        apply_selection_highlight_to_line(&mut line, 2, usize::MAX, CHAT_SELECTION_BG);
         assert_eq!(highlighted_in(&line), "llo");
     }
 
@@ -3332,7 +3289,7 @@ mod tests {
             Span::raw("bar".to_owned()),
         ]);
         // Select "ob" spanning both spans: cols 2..4.
-        apply_selection_highlight_to_line(&mut line, 2, 4, SEL_BG);
+        apply_selection_highlight_to_line(&mut line, 2, 4, CHAT_SELECTION_BG);
         assert_eq!(highlighted_in(&line), "ob");
     }
 
@@ -3450,7 +3407,6 @@ mod tests {
             },
             &mut bubble_title_rows,
             80,
-            100,
         );
 
         let rendered: String = lines
@@ -3479,6 +3435,45 @@ mod tests {
     }
 
     #[test]
+    fn assistant_table_stays_inside_bubble_width() {
+        use super::append_assistant_lines;
+
+        let mut lines = Vec::new();
+        append_assistant_lines(
+            &mut lines,
+            "| abc | def |\n|-----|-----|\n| abc | def |",
+            false,
+            8,
+        );
+
+        assert!(
+            lines.iter().all(|line| line.width() <= 12),
+            "assistant bubble row exceeded its width: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn assistant_heading_with_emoji_stays_inside_bubble_width() {
+        use super::append_assistant_lines;
+
+        for heading in [
+            "### 🐺 Project Summary: Ylva",
+            "### 📅 Implementation Progress Status",
+        ] {
+            let mut lines = Vec::new();
+            append_assistant_lines(&mut lines, heading, false, 36);
+
+            for line in &lines {
+                assert!(
+                    line.width() <= 40,
+                    "assistant heading {heading:?} row exceeded its width ({width}): {lines:?}",
+                    width = line.width()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn queued_subagent_bubble_shows_static_glyph_not_spinner() {
         use super::{append_tool_bubble_lines, ToolBubbleArgs};
         use crate::tui_reducer_state::ToolCallState;
@@ -3503,7 +3498,6 @@ mod tests {
             },
             &mut bubble_title_rows,
             80,
-            100,
         );
 
         let rendered: String = lines
@@ -3514,6 +3508,10 @@ mod tests {
         assert!(
             rendered.contains('≡'),
             "expected static queued glyph, got: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("status=queued"),
+            "queued state should be communicated by the glyph, not the title: {rendered:?}"
         );
         for spinner_char in super::SPINNER_FRAMES {
             assert!(
@@ -3548,7 +3546,6 @@ mod tests {
             },
             &mut bubble_title_rows,
             80,
-            100,
         );
 
         let rendered: String = lines
@@ -3563,6 +3560,56 @@ mod tests {
         assert!(
             !rendered.contains('≡'),
             "running bubble must not show the static queued glyph, got: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn subagent_bubble_hides_run_id_from_title() {
+        use super::{append_tool_bubble_lines, ToolBubbleArgs};
+        use crate::tui_reducer_state::ToolCallState;
+
+        let run_id = uuid::Uuid::new_v4();
+        let state = ToolCallState::Running {
+            arguments: serde_json::json!({"label": "Inspect change"}),
+            content_sections: vec![],
+            title_arguments: vec![("label".to_string(), serde_json::json!("Inspect change"))],
+            progress_arguments: vec![
+                ("status".to_string(), serde_json::json!("running")),
+                ("run_id".to_string(), serde_json::json!(run_id.to_string())),
+            ],
+        };
+        let mut lines: Vec<Line<'static>> = vec![];
+        let mut bubble_title_rows = vec![];
+        append_tool_bubble_lines(
+            &mut lines,
+            ToolBubbleArgs {
+                id: uuid::Uuid::new_v4(),
+                name: "spawn_subagent",
+                state: &state,
+                collapsed: true,
+                spinner_frame: 0,
+                display_title_override: None,
+            },
+            &mut bubble_title_rows,
+            80,
+        );
+
+        let rendered: String = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(
+            rendered.contains("Inspect change"),
+            "the subagent label should remain visible: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("status=running"),
+            "the live subagent status should be communicated by the indicator, not the title: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("run_id") && !rendered.contains(&run_id.to_string()),
+            "the internal run identifier must not appear in the title: {rendered:?}"
         );
     }
 
@@ -3597,7 +3644,6 @@ mod tests {
             },
             &mut bubble_title_rows,
             80,
-            100,
         );
 
         let rendered: String = lines

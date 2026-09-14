@@ -43,9 +43,9 @@ pub struct SpawnRequest {
     /// Identifies this child run; distinct from `call_id`.
     pub run_id: Uuid,
     /// The `spawn_subagent` tool-call id this run is tied to. The eventual
-    /// `FinishResult` is injected into the parent conversation as a trailing
-    /// `system` message referencing this id — not a second `role:"tool"`
-    /// message, since exactly one is allowed per `tool_call_id`.
+    /// `FinishResult` is injected into the parent conversation as a hidden
+    /// harness notice referencing this id — not a second `role:"tool"` message,
+    /// since exactly one is allowed per `tool_call_id`.
     pub call_id: Uuid,
     /// The task description sent to the child as its initial user turn.
     pub task: String,
@@ -81,6 +81,24 @@ impl FinishResult {
             "result": self.result,
             "error": self.error,
             "sources": self.sources,
+        })
+    }
+
+    /// Render the structured hidden harness event used by the parent model to
+    /// correlate this terminal outcome and decide whether aggregation is
+    /// complete.
+    pub fn to_completion_json(&self, label: &str, outstanding_count: usize) -> serde_json::Value {
+        serde_json::json!({
+            "event": "subagent_completed",
+            "run_id": self.run_id.to_string(),
+            "tool_call_id": self.call_id.to_string(),
+            "label": label,
+            "status": self.status,
+            "result": self.result,
+            "error": self.error,
+            "sources": self.sources,
+            "outstanding_count": outstanding_count,
+            "all_done": outstanding_count == 0,
         })
     }
 
@@ -169,6 +187,7 @@ pub struct SpawnOutcome {
 struct RunningChild {
     run_id: Uuid,
     call_id: Uuid,
+    label: String,
     cancel: CancellationToken,
     /// When this child actually started (i.e. when `start` ran, not when the
     /// original `spawn` call was made — queued requests don't start the
@@ -186,11 +205,12 @@ struct RunningChild {
 /// Identifies one child run/spawn-call pair that `cancel_all` tore down —
 /// either the actively running child or one still waiting in the queue.
 /// Callers use `call_id` to resolve the corresponding tool-bubble/context
-/// entry to a terminal state instead of leaving it stuck mid-flight.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// entry to a terminal state and `label` to correlate its lifecycle event.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CancelledSpawn {
     pub run_id: Uuid,
     pub call_id: Uuid,
+    pub label: String,
 }
 
 /// Schedules and tracks at most one concurrently running child agent, with
@@ -249,6 +269,7 @@ impl ChildAgentManager {
         };
         store.record_child_result(
             finish_result.run_id,
+            finish_result.call_id,
             &finish_result.status,
             finish_result
                 .result
@@ -281,6 +302,28 @@ impl ChildAgentManager {
         self.queue.len()
     }
 
+    /// Number of child runs that have not reached a terminal outcome.
+    ///
+    /// This deliberately describes lifecycle state rather than the current
+    /// scheduler implementation: today it is the running child plus queued
+    /// requests, while a future scheduler may have several active children.
+    pub fn outstanding_count(&self) -> usize {
+        usize::from(self.running.is_some()) + self.queue.len()
+    }
+
+    /// Number of child runs that would remain after the specified run reaches
+    /// a terminal outcome. Unknown or already-terminal run ids leave the
+    /// current count unchanged.
+    pub fn outstanding_count_after_completion(&self, run_id: Uuid) -> usize {
+        let tracked = self
+            .running
+            .as_ref()
+            .is_some_and(|child| child.run_id == run_id)
+            || self.queue.iter().any(|request| request.run_id == run_id);
+        self.outstanding_count()
+            .saturating_sub(usize::from(tracked))
+    }
+
     /// `run_id` of the currently running child, if any. At most one child
     /// runs at a time, so this unambiguously identifies whose
     /// `AppendText`/`AppendThinking` fragments arriving on `subagent_ui_tx`
@@ -301,6 +344,20 @@ impl ChildAgentManager {
             .as_ref()
             .filter(|running| running.run_id == run_id)
             .and_then(|running| running.command_sender.clone())
+    }
+
+    /// Return the display label associated with a child run that has not
+    /// reached a terminal outcome. The lookup covers both active and queued
+    /// runs so completion notices can correlate results without depending on
+    /// execution order.
+    pub fn label_for(&self, run_id: Uuid) -> Option<&str> {
+        if let Some(running) = self.running.as_ref().filter(|child| child.run_id == run_id) {
+            return Some(running.label.as_str());
+        }
+        self.queue
+            .iter()
+            .find(|request| request.run_id == run_id)
+            .map(|request| request.label.as_str())
     }
 
     /// Start `task`/`briefing`/`agent_type` as a new child run tied to
@@ -342,6 +399,7 @@ impl ChildAgentManager {
     fn start(&mut self, request: SpawnRequest) {
         let run_id = request.run_id;
         let call_id = request.call_id;
+        let label = request.label.clone();
         let _ = self.subagent_ui_tx.try_send(UiUpdate::ChildAgentStarted {
             run_id,
             call_id,
@@ -354,13 +412,20 @@ impl ChildAgentManager {
             title_arguments: spawn_progress_title_arguments("running", run_id),
         });
         if let Some(store) = &self.store {
-            store.record_child_start(run_id, &request.agent_type, &request.task);
+            store.record_child_start(
+                run_id,
+                call_id,
+                &request.agent_type,
+                &request.task,
+                &request.label,
+            );
         }
         let cancel = CancellationToken::new();
         let outcome = (self.spawn_fn)(request, cancel.clone(), self.subagent_ui_tx.clone());
         self.running = Some(RunningChild {
             run_id,
             call_id,
+            label,
             cancel,
             started_at: std::time::Instant::now(),
             command_sender: outcome.command_sender,
@@ -372,19 +437,23 @@ impl ChildAgentManager {
     /// arrives. Clears the running slot (ignoring stale/mismatched ids) and
     /// starts the next queued request, if any (which reports its own
     /// `"running"` progress update via `start`, above).
-    pub fn on_child_finished(&mut self, run_id: Uuid) {
+    ///
+    /// Returns the number of child runs still awaiting a terminal outcome
+    /// after this result has been applied.
+    pub fn on_child_finished(&mut self, run_id: Uuid) -> usize {
         let matches_running = self.running.as_ref().is_some_and(|r| r.run_id == run_id);
         if !matches_running {
-            return;
+            return self.outstanding_count();
         }
         self.running = None;
         if let Some(next) = self.queue.pop_front() {
             self.start(next);
         }
+        self.outstanding_count()
     }
 
     /// Cancel the running child (if any) and drain the queue. Called when
-    /// the parent agent stops. Returns every cancelled run/call-id pair
+    /// the parent agent stops. Returns every cancelled run/call-id/label tuple
     /// (the running child, if any, followed by all drained queue entries in
     /// FIFO order) so the caller can resolve each one's tool bubble/context
     /// entry to a terminal state instead of leaving it stuck mid-flight.
@@ -395,11 +464,13 @@ impl ChildAgentManager {
             cancelled.push(CancelledSpawn {
                 run_id: running.run_id,
                 call_id: running.call_id,
+                label: running.label,
             });
         }
         cancelled.extend(self.queue.drain(..).map(|request| CancelledSpawn {
             run_id: request.run_id,
             call_id: request.call_id,
+            label: request.label,
         }));
         cancelled
     }
@@ -568,18 +639,27 @@ mod tests {
             "first".to_string(),
             None,
             "default".to_string(),
-            "label".to_string(),
+            "first label".to_string(),
             Uuid::new_v4(),
         );
         let second = manager.spawn(
             "second".to_string(),
             None,
             "default".to_string(),
-            "label".to_string(),
+            "second label".to_string(),
             Uuid::new_v4(),
         );
-        assert!(matches!(first, SpawnStatus::Started(_)));
-        assert!(matches!(second, SpawnStatus::Queued(_)));
+        let SpawnStatus::Started(first_run_id) = first else {
+            panic!("expected first spawn to start immediately")
+        };
+        let SpawnStatus::Queued(second_run_id) = second else {
+            panic!("expected second spawn to be queued")
+        };
+        assert_eq!(manager.outstanding_count(), 2);
+        assert_eq!(manager.outstanding_count_after_completion(first_run_id), 1);
+        assert_eq!(manager.outstanding_count_after_completion(second_run_id), 1);
+        assert_eq!(manager.label_for(first_run_id), Some("first label"));
+        assert_eq!(manager.label_for(second_run_id), Some("second label"));
         assert_eq!(manager.queue_len(), 1);
         // Only the first request actually started a task.
         assert_eq!(calls.lock().unwrap().len(), 1);
@@ -894,6 +974,32 @@ mod tests {
         assert_eq!(json["result"], "done");
         assert!(json["error"].is_null());
         assert_eq!(json["sources"], serde_json::json!(["a.txt"]));
+    }
+
+    #[test]
+    fn finish_result_completion_json_carries_correlation_and_aggregation_fields() {
+        let run_id = Uuid::new_v4();
+        let call_id = Uuid::new_v4();
+        let result = FinishResult {
+            run_id,
+            call_id,
+            status: "failure".to_string(),
+            result: None,
+            error: Some("failed".to_string()),
+            sources: vec!["a.txt".to_string()],
+        };
+
+        let json = result.to_completion_json("Inspect files", 2);
+
+        assert_eq!(json["event"], "subagent_completed");
+        assert_eq!(json["run_id"], run_id.to_string());
+        assert_eq!(json["tool_call_id"], call_id.to_string());
+        assert_eq!(json["label"], "Inspect files");
+        assert_eq!(json["status"], "failure");
+        assert_eq!(json["error"], "failed");
+        assert_eq!(json["sources"], serde_json::json!(["a.txt"]));
+        assert_eq!(json["outstanding_count"], 2);
+        assert_eq!(json["all_done"], false);
     }
 
     fn content_section_text(section: &crate::agent::tools::Section) -> (&str, &str, &str) {

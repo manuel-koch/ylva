@@ -17,32 +17,40 @@ function ylva() {
     LOG_PATH="${PREFIX_TIMESTAMPED}.log"
     OUT_PATH="${PREFIX_TIMESTAMPED}.txt"
     export YLVA_REQUEST_DUMP_PATH=${PREFIX_TIMESTAMPED}.json
-    ${YLVA} --no-tui \
+    ${YLVA} --no-tui --color=yes \
             --log-file ${LOG_PATH} \
             --log-level TRACE --log-format ${LOG_FORMAT} \
             | tee ${OUT_PATH}
 }
 
-echo "----------------------------------------------------------"
+function seperator() {
+    echo
+    echo "----------------------------------------------------------"
+    echo
+}
+
 ylva << '__EOT__'
 Use search tool to find markdown files that contain the
 case-insensitive word `tool`.
 __EOT__
 
-echo "----------------------------------------------------------"
+seperator
+
 ylva << '__EOT__'
 Use search tool to find Rust source files that contain the
 case-sensitive word `SearchTool`, provide 4 lines of context for each match.
 __EOT__
 
-echo "----------------------------------------------------------"
+seperator
+
 ylva << '__EOT__'
 Use search tool to find Rust source files that contain the
 case-sensitive word `BashTool`.
 Report only the paths that matched.
 __EOT__
 
-echo "----------------------------------------------------------"
+seperator
+
 ylva << '__EOT__'
 Use search tool to find Rust source files that contain the
 case-sensitive regexp `\w+Tool`.

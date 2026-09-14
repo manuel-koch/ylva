@@ -17,14 +17,19 @@ function ylva() {
     LOG_PATH="${PREFIX_TIMESTAMPED}.log"
     OUT_PATH="${PREFIX_TIMESTAMPED}.txt"
     export YLVA_REQUEST_DUMP_PATH=${PREFIX_TIMESTAMPED}.json
-    ${YLVA} --no-tui \
+    ${YLVA} --no-tui --color=yes \
             --log-file ${LOG_PATH} \
             --log-level TRACE --log-format ${LOG_FORMAT} \
             --auto-approve-spawn \
             | tee ${OUT_PATH}
 }
 
-echo "----------------------------------------------------------"
+function seperator() {
+    echo
+    echo "----------------------------------------------------------"
+    echo
+}
+
 ylva << '__EOT__'
 Run the follow task in a subagent and let it report its findings back:
 
@@ -32,7 +37,8 @@ Analyze the TUI functionality implemented in source code
 and list currently implemented features in a table with brief descriptions.
 __EOT__
 
-echo "----------------------------------------------------------"
+seperator
+
 ylva << '__EOT__'
 Run the follow task in a subagent and let it report its findings back:
 
@@ -41,7 +47,8 @@ and list currently implemented features in a table with brief descriptions.
 ONLY use "bash" tool to search for relevant files!
 __EOT__
 
-echo "----------------------------------------------------------"
+seperator
+
 ylva << '__EOT__'
 Run the follow task in a subagent and let it report its findings back:
 
@@ -65,7 +72,8 @@ Format result as structured JSON:
 }
 __EOT__
 
-echo "----------------------------------------------------------"
+seperator
+
 ylva << '__EOT__'
 Discover the project structure related to agent tool implementations.
 Provide a 2-3 sentence summary for every source file.

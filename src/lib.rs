@@ -28,6 +28,7 @@ pub mod render;
 pub mod sandbox;
 pub mod slash_command;
 pub mod store;
+pub(crate) mod theme;
 pub mod tui_driver;
 pub mod tui_reducer_state;
 pub mod tui_render_state;
@@ -41,20 +42,20 @@ pub use logging::{init_logging, LogConfig, LogFormat, LogGuards};
 
 pub use agent::child_agent_manager;
 pub use agent::tools::{
-    default_registry, Tool, ToolCall, ToolCallResult, ToolError, ToolRegistry, ToolRegistryConfig,
-    DEFAULT_CLI_TOOLS, DEFAULT_TUI_TOOLS,
+    default_registry, spawn_subagent::AgentTypeInfo, Tool, ToolCall, ToolCallResult, ToolError,
+    ToolRegistry, ToolRegistryConfig, DEFAULT_CLI_TOOLS, DEFAULT_TUI_TOOLS,
 };
 pub use agent::{
     AgentCommand, AgentEvent, AgentLoop, AgentMode, AssembledToolCall, AssistantStatus,
     ChildRoleConfig, Context, DeltaChunk, Message, PendingTool, Role, StreamEvent, ToolCallRequest,
-    UiUpdate, UserMessageKind, DEFAULT_SYSTEM_PROMPT, DEFAULT_TOOL_TIMEOUT_SECS,
+    ToolResult, UiUpdate, UserMessageKind, DEFAULT_SYSTEM_PROMPT, DEFAULT_TOOL_TIMEOUT_SECS,
     MAX_TOOL_USE_ITERATIONS, TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
 pub use agent_factory::AgentFactory;
 pub use app::App;
 pub use build_info::{BuildInfo, BUILD_INFO};
 pub use child_agent_manager::{ChildAgentManager, FinishResult, SpawnRequest, SpawnStatus};
-pub use cli_driver::{run_cli, run_cli_to, ConsoleApp};
+pub use cli_driver::{run_cli, run_cli_to, run_cli_to_with_options, CliOutputOptions, ConsoleApp};
 pub use config::{
     default_profiles_root, load_profile_environment, profile_config_path, profile_env_path,
     AgentConfig, ConfigError, ProfileConfig, ProviderConfig, ProviderConnectionConfig,
@@ -83,9 +84,9 @@ pub use store::{
 };
 pub use tui_driver::TuiApp;
 pub use tui_reducer_state::{
-    AppLayout, AppState, ChatArea, ChatEntry, ChatSelection, DomainEvent, Effect, Focus,
-    HelpPopupLayout, InputAreaLayout, InputEvent, SlashOverlayLayout, ToolCallState, TuiMode,
-    UserMessageState,
+    ActiveSubagentCounts, AppLayout, AppState, ChatArea, ChatEntry, ChatSelection, DomainEvent,
+    Effect, Focus, HelpPopupLayout, InputAreaLayout, InputEvent, SlashOverlayLayout, ToolCallState,
+    TuiMode, UserMessageState,
 };
 pub use tui_render_state::TuiState;
 pub use ylva_home::{ylva_root, YLVA_HOME_ENVIRONMENT_VARIABLE};

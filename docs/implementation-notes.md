@@ -21,6 +21,14 @@ logic and is not sent as an OpenAI request parameter. `reasoning_effort` is
 translated into the provider-specific request field when it is explicit;
 `None` leaves the provider's own default behavior in place.
 
+Each routed chat request emits a safe structured selection event containing
+the named engine, provider connection, and model. The provider emits the
+request-start event with the exact runtime snapshot used for that request:
+provider connection, model, temperature, effective context length, and
+reasoning effort. These events intentionally exclude API keys, authorization
+headers, and request bodies; the surrounding `agent_stream` span supplies the
+root or child run correlation.
+
 `OpenRouterProvider` reuses that transport for both chat and OpenRouter's
 metadata-rich `/models` catalog. Its selected effort is sent as
 `reasoning.effort`. `OllamaProvider` accepts the Ollama server origin as its
@@ -57,6 +65,22 @@ connection, queries each connection once and concurrently for `/models`, and
 switches the active connection only after it successfully accepts the
 selected model. Connection settings remain owned by each underlying engine;
 switching connections does not mutate another connection's configuration.
+
+When constructing a child, `AgentFactory` compares the child's resolved engine
+name with the root's resolved name. Matching names reuse the root engine
+router, so the child's provider/model display and first requests reflect the
+root's active selection at spawn time. A different resolved engine name builds
+the child from its own configured engine instead of inheriting the root's
+active selection.
+
+`AgentConfig.engine` is a complete-engine selection, not a property-override
+layer. There is no per-agent merge of `EngineConfig` fields: specialized
+model, sampling, context, reasoning, or connection settings require a
+separate named engine. Agents sharing one named engine also share its mutable
+runtime selection, including model and reasoning-effort changes. Each
+in-flight `Engine::chat` request uses the provider/model snapshot captured when
+that request started; a later switch affects the next request, even when it is
+another request in the same child run after a tool call.
 
 The `/models` slash command normalizes the draft to `/models <filter>` and
 fetches the full catalog once via `Effect::ListModels { filter }`, storing
@@ -129,6 +153,24 @@ and covers only the fields actually populated for that result — the schema
 can never drift from the data. Each tool description sent in the `tools`
 array includes its argument schema.
 
+The `glob` result metadata contains flat `files`, `directories`, and `total`
+counts, with `total` always equal to `files + directories`, plus a required
+boolean `truncated`. `truncated` is `false` when all matching paths are
+returned and `true` when `limit` omits additional paths; the omission count is
+intentionally not reported. The supplied search root is never a match and is
+excluded from returned paths and every count, regardless of the pattern or
+option flags. `limit` is optional; omitting it requests no result-count limit,
+while arbitrary large values do not represent a separate unlimited mode.
+`git_ignore` applies `.gitignore` rules only; it does not
+suppress the `.git` directory or other dot-prefixed paths. `dot_ignore`
+controls those paths independently and defaults to `false`.
+CLI/TUI summaries are a separate tool-provided projection of result metadata,
+so tools can omit default-valued properties without changing the complete
+metadata sent to the LLM/API. `glob` omits zero-valued `files` and
+`directories`, `truncated=false`, and `total` when either type count is zero,
+because that total is inferable, except that an empty result displays
+`total=0`.
+
 ## Path-like argument normalization
 
 Path-like arguments (`read`/`write`/`edit`/`search`'s `path`, `glob`'s
@@ -143,6 +185,11 @@ tool declares its own path-like argument keys via
 `Tool::path_like_arguments()`.
 
 ## `bash` tool process-group cleanup
+
+The shell inherits the process's current working directory, which is the
+workspace launch directory in normal runtime. Bash commands should therefore
+use relative paths directly rather than starting with a redundant `cd` to the
+workspace root.
 
 On timeout or cancellation the entire process group is killed via `SIGKILL`
 (Unix) using `nix::sys::signal::killpg` — grandchildren spawned by the script
@@ -160,10 +207,18 @@ until every spawned/queued child call has reported a terminal outcome
 structurally-unreachable no-`ChildAgentManager` fail-safe) — otherwise the
 one-shot process would exit as soon as the parent goes idle, silently
 discarding the child's result since `spawn_subagent` resolves immediately
-with `{"status": "running"/"queued"}` while the child keeps running
-concurrently. Without `--auto-approve-spawn`, `spawn_subagent` is denied
+with an admission event (`event: "subagent_accepted"`) while the child keeps
+running concurrently. Without `--auto-approve-spawn`, `spawn_subagent` is denied
 outright in CLI mode (`UserApprovalRequired` has no approval path headless),
 so this only matters when that flag is used.
+
+Fixed UI colors are centralized in `theme.rs`, including message roles,
+controls, overlays, and Markdown rendering colors. `tui_widgets.rs` and
+`markdown.rs` consume that palette, so a future theme switch has one
+color-definition module to update. ANSI styling is enabled only when the
+headless output writes to a terminal that is not `TERM=dumb` and `NO_COLOR` is
+unset in `--color=auto` mode. `--color=no` and `--color=yes` explicitly
+disable or enable ANSI styling for that output path.
 
 ## Store & persistence
 
@@ -184,6 +239,45 @@ user-facing on-disk contract; this section is the contributor view.
   This upholds the blueprint §4C ownership rule: only the outer loop mutates
   `Context`, so no streaming task can ever write. `AgentLoop::with_store`
   attaches the store to the `Context` the loop creates.
+- **Session replay.** `Context::set_store` reads the attached session through
+  `Store::read_messages` and calls `Context::hydrate`, which appends directly
+  to the in-memory message list instead of using `commit`; this prevents
+  already-persisted lines from being written again. The rule is unconditional
+  for fresh and resumed stores because a fresh file reads as an empty
+  transcript. `hydrate` also synthesizes an in-memory `ToolError` for an
+  unanswered generic tool call, keeping the next provider payload valid
+  without creating a new disk event.
+- **Replay projection.** `tui_reducer_state::project_messages` maps persisted
+  `Message` values to terminal-free `ChatEntry` values before the first TUI
+  frame. `ToolResult`/`ToolError` carry persisted `summary`,
+  `content_sections`, and `duration`, and `ToolResult` also carries an
+  optional result-section identifier for tools such as `clarify`. This keeps
+  the resumed result heading identical to the live bubble; absent identifiers
+  fall back to the standard result section. `push_tool_error` preserves the
+  actual duration instead of hard-coding zero. Assistant tool calls persist the
+  tool-specific `title_arguments` captured when the call is created, so
+  `clarify` keeps only its question inline while its context and choices remain
+  body sections, and
+  replayed bubbles use the same title projection as live bubbles; calls
+  without title arguments use an empty title projection. The projection is
+  schema-based, so unknown input keys are omitted from CLI/TUI titles.
+  System messages and implicit harness notes remain model-only.
+- **Tool-result payload.** `Message::ToolResult` carries a serializable
+  `ToolResult` payload as its flattened value, and
+  `Context::push_tool_result` forwards that value unchanged. This keeps the
+  persisted JSON shape stable while avoiding a positional argument list for
+  the complete result.
+- **Child replay and lazy loading.** `ChildStart`/`ChildResult` carry
+  `call_id` (plus `label` on `ChildStart`) so `Store::read_child_runs` can
+  repair a replayed `spawn_subagent` bubble to a finished or interrupted
+  state. `replay_messages` creates `ChildConversation` metadata with
+  `needs_lazy_load`; `tui_driver` reads
+  `Store::session_path(store.chats_root(), store.project_key(), run_id)` only
+  on the first drill-in, then caches the projected child messages. Production
+  child transcripts use the run id as their session id through
+  `Store::write_child_transcript_for_run`, avoiding a second path-correlation
+  field. Legacy records missing correlation fields remain readable but
+  undrillable/degraded.
 - **Every event carries a millisecond-precision timestamp.** `now_timestamp()`
   formats RFC 3339 at `SecondsFormat::Millis`, and every `StoreEvent` variant
   has a timestamp field: `meta.created_at`, `message.timestamp`,
@@ -229,14 +323,16 @@ user-facing on-disk contract; this section is the contributor view.
   and writes `child_start` (from `start`) and `child_result` (from
   `record_child_result`, called by `AgentLoop::run`'s `finish_rx` arm). The
   child's own transcript is written once at completion by
-  `agent_factory::write_child_transcript` via `Store::write_child_transcript`,
-  which opens a fresh sub-session in the same project directory and passes its
-  own `session_id` as the child's `meta.parent_session`, so the parent link is
+  `agent_factory::write_child_transcript` via
+  `Store::write_child_transcript_for_run`, which opens a fresh sub-session
+  under the same project directory using the child run id and passes the
+  parent's session id as `meta.parent_session`. The parent link is therefore
   discoverable from the child file too, not just top-down via the parent's
-  `child_start`/`child_result` events. `Store::start_new_session` takes an
+  lifecycle events. The older general-purpose
+  `Store::write_child_transcript` helper remains available for callers that
+  need a newly generated child session id. `Store::start_new_session` takes an
   explicit `parent_session: Option<Uuid>` for exactly this reason — `/clear`
-  passes `None` (a rollover is a fresh session, not a child run) while
-  `write_child_transcript` passes `Some(self.inner.session_id)`.
+  passes `None` (a rollover is a fresh session, not a child run).
 - **Testing seam.** `chats_root` is an explicit parameter on `Store::create`,
   `Store::resume`, and `Store::list_sessions`; only `main.rs` resolves the real
   `~/.ylva/chats` through `default_chats_root()`. Unit tests pass a `TempDir`
@@ -262,30 +358,45 @@ user-facing on-disk contract; this section is the contributor view.
   `AgentLoop` whose resolved `AgentConfig::can_spawn` is `true`; children are
   constructed via the same factory (`Role::Child(ChildRoleConfig { .. })`)
   and never receive `spawn_subagent` themselves.
-- At most one child runs at a time; further `spawn_subagent` calls are
-  queued in an unbounded FIFO and started automatically as each preceding
-  child finishes.
-- A child's outcome — success, failure, or an "unstructured" fallback — is
-  injected into the parent's conversation as a new trailing `system` message
-  referencing the original `spawn_subagent` call's `tool_call_id`, never by
-  rewriting or duplicating that call's provisional tool result; the
+- A root's `spawn_subagent` tool is built with a sorted catalog of every
+  configured agent type and its optional `description`. The catalog is
+  serialized in the tool description sent with each model request, so it
+  remains available whenever the model can select `agent_type` without adding
+  unrelated system-prompt state.
+- The current scheduler runs at most one child at a time; further
+  `spawn_subagent` calls are queued in an unbounded FIFO and started
+  automatically as each preceding child finishes. The model-facing lifecycle
+  contract does not expose that scheduling detail, so a future concurrent
+  scheduler can deliver completions out of order without changing the
+  protocol.
+- The immediate `spawn_subagent` tool result is an admission event, not a child
+  outcome. It includes `event: "subagent_accepted"`, `run_id`, `tool_call_id`,
+  `label`, `status`, `outstanding_count`, and `all_done: false`.
+- A child's outcome — success, failure, cancellation, or an "unstructured"
+  fallback — is injected into the parent's conversation as a hidden harness
+  notice containing `event: "subagent_completed"`, the correlation fields,
+  `status`, `result`/`error`, `sources`, `outstanding_count`, and `all_done`.
+  It never rewrites or duplicates the provisional tool result; the
   tool-calling wire protocol only permits one tool-result message per
-  `tool_call_id`. That system message also tells the root that the result is
-  already shown to the user verbatim (the tool bubble's Result/Error/Sources
-  sections), so it should not repeat/quote it back — only add new analysis,
-  a decision, or a next step. If the root agent is otherwise idle at that
-  moment (no stream or tool in flight), this immediately re-prompts the root
-  LLM with the updated context so it reacts to the result without waiting for
-  a new user message (essential for one-shot headless sessions, which never
-  get a "next turn" otherwise); if the root is still busy with unrelated work
-  (mid-stream or running its own tool round), the result is picked up once
-  that work's own queue-drain/`StreamDone` re-prompt happens next.
+  `tool_call_id`. The notice also tells the root that the result is already
+  shown to the user verbatim in the tool bubble's Result/Error/Sources
+  sections, so it should not repeat or quote it back. Intermediate completion
+  notices do not force an acknowledgement turn. When `all_done` becomes true,
+  the root is re-prompted once (immediately if idle, or after its current
+  stream/tool round) so it can aggregate the results without waiting for a
+  new user message.
 - `AgentCommand::Stop` on the parent cancels the running child (and drains
   the queue) via `ChildAgentManager::cancel_all`; each cancelled/queued call
   is resolved to a terminal `ToolDone` (`status: "cancelled"`) and logged
   (`tracing::info!`) — durable persistence of child outcomes is deferred to
   a later phase. Unlike a natural finish, this never re-prompts the root
   (the user explicitly asked to stop).
+- `AgentCommand::Stop` emits `UiUpdate::AgentIdle` when it reaches idle
+  synchronously (including idle, clarify-pending, and approval-pending
+  states). The TUI driver keeps `TuiMode::Aborting` through a pending
+  tool's `ToolError` and routes that idle boundary through
+  `domain_aborting`, so Ctrl-C can quit and Esc can return to idle without
+  depending on a stream-cancellation event.
 - A child's own tool calls go through the exact same `ToolPending` →
   approve/deny pause as the root's — a child is never auto-denied just for
   being a child. Each `AgentLoop` stamps its own `run_id` (`None` for the
@@ -311,9 +422,9 @@ user-facing on-disk contract; this section is the contributor view.
   text }` (merged text and thinking into one buffer — no separate thinking
   bubble for the child), and `UiUpdate::ChildAgentDone { run_id, status,
   result }` marks that child's conversation as finished. The child's own
-  `StreamStarted`/`StreamDone`/`StreamCancelled` lifecycle events are
-  swallowed, not forwarded — they would otherwise corrupt the parent's own
-  `TuiMode`.
+  `StreamStarted`/`StreamDone`/`StreamCancelled`/`AgentIdle` lifecycle
+  events are swallowed, not forwarded — they would otherwise corrupt the
+  parent's own `TuiMode`.
 - `AppState` tracks `active_view: ConversationView` (`Root` or `Child {
   run_id, agent_type, task, label }`, default `Root`), `child_conversations:
   HashMap<Uuid, ChildConversation>` keyed by `run_id` (each entry holds
@@ -399,12 +510,23 @@ user-facing on-disk contract; this section is the contributor view.
   draft is a no-op instead of silently steering the *root* agent — the
   previous behavior queued a steer for `Root` while the user was looking at
   the child's transcript, with no visual indication of which conversation
-  the message actually went to. This is called out in the footer (`enter:
+  the message actually went to. This is called out in the footer (`enter
   send` is omitted entirely while viewing a running child), not via a
   separate overlay on the input box, since keystrokes are still buffered
   normally either way.
-- The spawn-bubble uses the same `Color::Magenta` border as every other tool
-  bubble — no separate color styling was introduced for it.
+- The spawn-bubble uses the same `TOOL_BUBBLE_BORDER_COLOR` border as every
+  other tool bubble — no separate color styling was introduced for it.
+- `tui_widgets::draw`'s header-to-chat divider (rendered only while the
+  header bubble, i.e. the child view, is showing), its chat-to-input divider
+  (rendered unconditionally, gated per-frame on
+  `TuiState::child_view.child_view_bubble.is_some()`), and the conversation
+  scrollbar (`render_chat_scrollbar`'s `color` parameter, threaded through
+  from the same per-frame check) are all tinted `CHILD_VIEW_SEPARATOR_COLOR`
+  (an alias of `TOOL_BUBBLE_BORDER_COLOR`, so it always matches whatever
+  color tool bubbles are themed with) instead of the root conversation's
+  neutral `SEPARATOR_LINE_COLOR`/`CHAT_SCROLLBAR_COLOR` while drilled into a
+  child — a persistent cue to distinguish subagent conversation from main
+  conversation.
 - The footer/header spinner glyph is driven by `AppState.spinner_frame`,
   incremented once per tick in `tui_driver`'s event loop — gated by
   `spinner_should_tick()`, which checks `agent_mode() != AgentMode::Idle`
@@ -419,11 +541,25 @@ user-facing on-disk contract; this section is the contributor view.
   paused for its own inner tool approval, since that only sets
   `Focus::ToolApproval` and never touches the root `spawn_subagent` bubble's
   `Running` state.
-- The footer's right-aligned `provider-connection/model` identity and explicit
+- The footer's right-aligned `named-engine → model-id` identity and explicit
   reasoning effort are projected from the live root engine or the configured
-  child engine, so they follow the transcript currently on screen. The effort
-  is shown in parentheses only when it is not the provider default. Root model
+  child engine, so they follow the transcript currently on screen. The named
+  engine distinguishes agents that share one provider connection. The provider
+  connection remains available in the display snapshot for runtime diagnostics,
+  but is intentionally omitted from the compact footer. The effort is shown in
+  parentheses only when it is not the provider default. Root model or provider
   switches refresh the label before the next frame.
+- The main-conversation footer derives separate running and queued subagent
+  counts from root `spawn_subagent` bubbles. A `Running` bubble with
+  `status=queued` in its interim progress arguments contributes to the queued
+  count; other active `Running` bubbles contribute to the running count.
+  Terminal bubbles and the retained `child_conversations` history are not
+  counted. The compact label is rendered as `Subagents: <running> running,
+  <queued> queued`, omitting zero-valued categories. The counts are omitted
+  from the drilled-in child footer.
+- Footer keybinding hints are represented as structured key/action entries
+  rather than one formatted string, so `tui_widgets` can render the key in
+  bold, the action in normal text, and ` · ` between entries.
 - A thin separator line (the same dim `─` rule used between the chat area
   and the input/footer panel) is rendered directly below the child-view
   header bubble, so it never reads as part of the scrollable
@@ -539,9 +675,10 @@ runtime mode, selected by `main.rs` based on whether stdout is a terminal.
 InputEvent` and `UiUpdate → DomainEvent`, calls `update()`, then executes the
 returned `Vec<Effect>` via `execute_effects()`.
 
-`cli_driver.rs` consumes `UiUpdate` events from the agent, streams the
-assistant response to stdout, and prints the final conversation as JSONL on
-exit.
+`cli_driver.rs` consumes `UiUpdate` events from the agent and streams the
+assistant response to stdout. The session store remains the canonical
+conversation record; `main.rs` prints only the session resume hint to stderr
+after the run.
 
 ## Slash commands
 
@@ -569,7 +706,7 @@ next per-action `refresh_slash_overlay` recompute reopen the very overlay
 just dismissed.
 Model rows identify reasoning as unavailable, at the default, or adjustable
 with a `⚙` marker. The user-facing fixed value is rendered as `default`. The
-footer switches from the normal `enter: send` hint to the controls for the
+footer switches from the normal `enter send` hint to the controls for the
 active command overlay, including the model picker's reasoning, switch, and
 cancel keys.
 Left-dragging within any visible slash-command overlay row selects its
@@ -640,13 +777,13 @@ which is why `/tools` needs no I/O.
   scrolling up to view an earlier subagent bubble (or a plain scroll-back in
   a long conversation) would get yanked back to the bottom the moment the
   current response finished.
-- **Footer mode-word disambiguation:** the plain mode word
-  (`"Streaming…"`/`"Running tool…"`/etc.) always reflects the *root* loop's
-  own `TuiMode`, never a drilled-into child's. Once the child's
-  `spawn_subagent` bubble reaches a terminal state while the root is still
-  busy producing its final reply, the footer overrides the word with
-  `"Subagent done, parent working…"` instead of the misleading root word.
-  While drilled into a live child, the root's `agent_mode()` would report
+- **Footer mode-word disambiguation:** `TuiState::agent_mode` follows the
+  transcript currently shown, while `TuiState::parent_agent_mode` retains the
+  root loop's status. Once a viewed child's `spawn_subagent` bubble reaches a
+  terminal state while the root is still busy producing its final reply or
+  running another child, the footer overrides the word with `"Subagent done,
+  parent working…"` instead of the misleading `"Idle"`/root status. While
+  drilled into a live child, the root's `agent_mode()` would report
   `"Running tool…"` for as long as the `spawn_subagent` bubble is `Running`
   — correct for the root footer but misleading for the child's own
   transcript — so the footer instead inspects the child's own `TurnBuffer`
@@ -654,11 +791,16 @@ which is why `/tools` needs no I/O.
   thinking…"`/`"Subagent streaming…"`/`"Subagent working…"` as appropriate.
 - **Queued subagent bubbles:** show a static `≡` glyph instead of the
   animated spinner while `status=queued` (waiting for the running slot to
-  free up); the spinner only appears once `status=running`.
-- **Shift+Enter / Alt+Enter:** insert a newline via the kitty keyboard
-  protocol (`DISAMBIGUATE_ESCAPE_CODES`), so terminals that support it (ZED,
-  iTerm2, kitty, WezTerm) report the modifier and the newline is not
-  mistaken for send.
+  free up); the spinner only appears once `status=running`. The internal
+  `run_id` used to correlate child lifecycle events is omitted from the
+  rendered title in both the root and child conversation views, and live
+  `status=running`/`queued` values are communicated by the indicator and
+  footer rather than rendered as title properties.
+- **Shift+Enter / Alt+Enter:** insert a newline via the terminal's
+  modified-key encoding. The driver enables the kitty keyboard protocol
+  (`DISAMBIGUATE_ESCAPE_CODES`) for terminals that support it; terminals that
+  encode Shift+Enter as a line feed (such as Zed's terminal) are normalized
+  before presenter routing.
 - **Message dedenting:** submitted messages are automatically dedented —
   common leading whitespace is stripped (via `textwrap::dedent`) and
   leading/trailing blank-only lines are removed.

@@ -107,12 +107,36 @@ pub trait ToolCallResult: Send + Sync + std::fmt::Debug {
 
     /// Structured metadata for this result.
     ///
-    /// All keys are rendered as `key=value` in the TUI/CLI tool bubble and
-    /// embedded in the `result_metadata` field of the tool-response envelope.
+    /// The complete value is embedded in the `result_metadata` field of the
+    /// tool-response envelope. The CLI/TUI projection is provided separately
+    /// by [`display_summary`](Self::display_summary).
     ///
     /// Returns `None` for tools whose text already captures everything relevant.
     fn metadata(&self) -> Option<serde_json::Value> {
         None
+    }
+
+    /// Properties to render in the CLI/TUI tool summary.
+    ///
+    /// The default renders every property from [`metadata`](Self::metadata).
+    /// Tools may omit default-valued properties here without changing the
+    /// complete structured metadata sent to the LLM/API.
+    fn display_summary(&self) -> Vec<(String, String)> {
+        self.metadata()
+            .and_then(|metadata| metadata.as_object().cloned())
+            .map(|metadata| {
+                metadata
+                    .into_iter()
+                    .map(|(key, value)| {
+                        let display = match value {
+                            serde_json::Value::String(value) => value,
+                            other => other.to_string(),
+                        };
+                        (key, display)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// JSON Schema describing the fields that are actually present in
@@ -138,7 +162,7 @@ pub trait ToolCallResult: Send + Sync + std::fmt::Debug {
 /// Returned by [`ToolCall::pending_content_sections`] and
 /// [`ToolCallResult::content_sections`] to expose structured content (file
 /// text, command output, code) with optional syntax and line-number metadata.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ContentSection {
     /// Optional label for this block. Absent when the call produces only one
     /// section and a label would add no information.
@@ -158,7 +182,7 @@ pub struct ContentSection {
 /// Lines are unified-diff text from the `similar` crate; `+` lines are
 /// additions, `−` lines are removals. Renderers that support colour should
 /// paint additions green and removals red.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DiffSection {
     /// Optional label (e.g. the file path being patched).
     pub label: Option<String>,
@@ -167,7 +191,7 @@ pub struct DiffSection {
 }
 
 /// A single line in a search result — either a match line or a context line.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SearchResultLine {
     /// 1-based line number within the source file.
     pub line_number: usize,
@@ -178,7 +202,7 @@ pub struct SearchResultLine {
 }
 
 /// A block of search results from a single file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SearchResultSection {
     /// Path of the file that was searched (mirrors the form of the `path`
     /// argument: relative when the input was relative, absolute when absolute).
@@ -192,7 +216,7 @@ pub struct SearchResultSection {
 
 /// A content block produced by a tool call — either a rich file / text
 /// section or a unified diff.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Section {
     Content(ContentSection),
     Diff(DiffSection),
@@ -230,14 +254,17 @@ pub trait ToolCall: Send + Sync {
     /// schema's field order.
     fn argument_order(&self, key: &str) -> usize;
 
-    /// Non-content-section, non-null arguments sorted by schema-defined rank.
+    /// Non-content-section, non-null arguments supported by the tool schema,
+    /// sorted by schema-defined rank. Unknown input keys are not displayed.
     fn title_arguments(&self) -> Vec<(String, serde_json::Value)> {
         let mut args: Vec<(String, serde_json::Value)> = self
             .arguments()
             .as_object()
             .into_iter()
             .flat_map(|map| map.iter())
-            .filter(|(k, v)| !v.is_null() && !self.is_body_argument(k))
+            .filter(|(k, v)| {
+                !v.is_null() && !self.is_body_argument(k) && self.argument_order(k) != usize::MAX
+            })
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         args.sort_by_key(|(k, _)| self.argument_order(k));
@@ -324,7 +351,7 @@ pub trait Tool: Send + Sync {
 
     /// Whether an argument value equals the tool's semantic default, so a host
     /// can suppress it from an invocation summary. Defaults to `false`; tools
-    /// override for optional arguments (e.g. `read`'s `mode: bytes`,
+    /// override for optional arguments (e.g. `read`'s `mode: lines`,
     /// `offset: 0`/`null`, `limit: null`).
     fn is_default_argument(&self, _key: &str, _value: &Value) -> bool {
         false
@@ -335,7 +362,8 @@ pub trait Tool: Send + Sync {
     /// primary (inline) one. Ranks are derived from the tool's schema property
     /// order, which reflects the argument **struct's declaration order** (via
     /// schemars `preserve_order`), so no per-tool ordering needs to be
-    /// hand-written. Unknown keys sort last.
+    /// hand-written. Unknown keys return `usize::MAX` and are omitted from
+    /// invocation titles.
     ///
     /// Handles schemas produced by `#[serde(flatten)]` on a tagged enum, where
     /// schemars emits the outer struct's properties inside an `allOf` branch
@@ -562,6 +590,9 @@ pub struct ToolRegistryConfig {
     /// agents whose `AgentConfig::can_spawn` is `true`; structurally absent
     /// otherwise (never gated by `allowed_tools`).
     pub include_spawn_subagent: bool,
+    /// Agent types and model-facing descriptions advertised by
+    /// `spawn_subagent`, when that tool is registered.
+    pub spawn_agent_types: Vec<spawn_subagent::AgentTypeInfo>,
     /// Present only for `Role::Child` agents: registers `agent_finish`, wired to
     /// send its result through this config's channel/ids.
     pub agent_finish: Option<agent_finish::AgentFinishToolConfig>,
@@ -576,6 +607,7 @@ impl Default for ToolRegistryConfig {
             auto_approve_spawn: false,
             allowed_tools: DEFAULT_CLI_TOOLS.iter().map(|s| s.to_string()).collect(),
             include_spawn_subagent: false,
+            spawn_agent_types: Vec::new(),
             agent_finish: None,
         }
     }
@@ -649,9 +681,10 @@ pub fn default_registry(
     // former is structural (present only when the agent can spawn children),
     // the latter is injected only into `Role::Child` registries.
     if config.include_spawn_subagent {
-        registry.register(Arc::new(spawn_subagent::SpawnSubagentTool::new(
-            config.auto_approve_spawn,
-        )));
+        registry.register(Arc::new(
+            spawn_subagent::SpawnSubagentTool::new(config.auto_approve_spawn)
+                .with_agent_types(config.spawn_agent_types),
+        ));
     }
     if let Some(agent_finish_config) = config.agent_finish.clone() {
         registry.register(Arc::new(agent_finish::AgentFinishTool::new(
@@ -841,6 +874,34 @@ mod tests {
         );
         assert_eq!(registry.names().len(), 7);
         assert!(registry.get(clarify::ClarifyTool::NAME).is_some());
+    }
+
+    #[test]
+    fn registered_tool_titles_omit_unknown_arguments() {
+        let sandbox = std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new()));
+        let config = ToolRegistryConfig {
+            allowed_tools: DEFAULT_TUI_TOOLS
+                .iter()
+                .map(|name| name.to_string())
+                .collect(),
+            include_spawn_subagent: true,
+            ..ToolRegistryConfig::default()
+        };
+        let registry = default_registry(sandbox, config);
+
+        for tool_name in registry.names() {
+            let call = registry
+                .create_call(
+                    &tool_name,
+                    uuid::Uuid::new_v4(),
+                    serde_json::json!({ "unknown_argument": "not supported" }),
+                )
+                .expect("registered tool call");
+            assert!(
+                call.title_arguments().is_empty(),
+                "{tool_name} displayed an unsupported argument"
+            );
+        }
     }
 
     #[test]

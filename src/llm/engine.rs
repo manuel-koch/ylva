@@ -18,6 +18,7 @@ use std::sync::{Arc, RwLock};
 use futures::future::{join_all, BoxFuture};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 use crate::agent::{Message, StreamEvent};
 use crate::llm::{ModelInfo, Provider, ToolSchema};
@@ -98,8 +99,8 @@ impl EngineConfig {
     }
 }
 
-/// The provider and model names shown for the conversation currently on
-/// screen.
+/// The named engine, provider connection, and model shown for the conversation
+/// currently on screen.
 ///
 /// This intentionally contains only display metadata. Runtime request
 /// settings remain owned by [`EngineRuntimeConfig`], while the immutable
@@ -107,6 +108,11 @@ impl EngineConfig {
 /// copied from the runtime snapshot for display only.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EngineDisplayInfo {
+    /// The profile key under `[engines.*]`, when the runtime has one.
+    ///
+    /// Directly constructed engines used by compatibility callers may not have
+    /// a named-engine key and leave this empty.
+    pub engine_name: String,
     pub provider_connection: String,
     pub model: String,
     /// Explicit reasoning effort, or `None` when the provider default is used.
@@ -118,6 +124,7 @@ impl EngineDisplayInfo {
     pub fn from_engine(engine: &dyn Engine) -> Self {
         let config = engine.config();
         Self {
+            engine_name: engine.active_engine_name().unwrap_or_default(),
             provider_connection: config.provider_connection,
             model: config.model,
             reasoning_effort: engine.reasoning_effort(),
@@ -128,6 +135,7 @@ impl EngineDisplayInfo {
 impl From<&EngineConfig> for EngineDisplayInfo {
     fn from(config: &EngineConfig) -> Self {
         EngineDisplayInfo {
+            engine_name: String::new(),
             provider_connection: config.provider_connection.clone(),
             model: config.model.clone(),
             reasoning_effort: None,
@@ -252,6 +260,12 @@ pub trait Engine: Send + Sync {
     /// caller code.
     fn config(&self) -> EngineConfig;
 
+    /// Return the active profile engine name when this runtime routes among
+    /// named engines. A directly constructed engine has no named key.
+    fn active_engine_name(&self) -> Option<String> {
+        None
+    }
+
     /// List the models the underlying provider offers.
     fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>>;
 
@@ -375,15 +389,22 @@ impl EngineRouter {
         })
     }
 
-    fn active_engine(&self) -> Arc<dyn Engine> {
+    fn active_engine_entry(&self) -> (String, Arc<dyn Engine>) {
         let active_engine = self
             .active_engine
             .read()
             .expect("the active engine lock is poisoned");
-        self.engines
+        let engine_name = active_engine.clone();
+        let engine = self
+            .engines
             .get(active_engine.as_str())
             .expect("the active engine must remain configured")
-            .clone()
+            .clone();
+        (engine_name, engine)
+    }
+
+    fn active_engine(&self) -> Arc<dyn Engine> {
+        self.active_engine_entry().1
     }
 
     /// Return one representative engine for each named provider connection.
@@ -435,12 +456,28 @@ impl Engine for EngineRouter {
         tools: Vec<ToolSchema>,
         cancel: CancellationToken,
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
-        let engine = self.active_engine();
-        Box::pin(async move { engine.chat(messages, tools, cancel).await })
+        let (engine_name, engine) = self.active_engine_entry();
+        let config = engine.config();
+        tracing::debug!(
+            engine = %engine_name,
+            provider_connection = %config.provider_connection,
+            model = %config.model,
+            "named engine selected for chat request"
+        );
+        let span = tracing::debug_span!(
+            "engine_request",
+            engine = %engine_name,
+            provider_connection = %config.provider_connection,
+        );
+        Box::pin(async move { engine.chat(messages, tools, cancel).await }.instrument(span))
     }
 
     fn config(&self) -> EngineConfig {
         self.active_engine().config()
+    }
+
+    fn active_engine_name(&self) -> Option<String> {
+        Some(self.active_engine_entry().0)
     }
 
     fn reasoning_effort(&self) -> Option<String> {
@@ -899,6 +936,23 @@ model = "local"
             result.is_ok(),
             "chat should delegate to MockProvider successfully"
         );
+    }
+
+    #[test]
+    fn engine_router_logs_the_selected_named_engine_for_chat_requests() {
+        let log = crate::test_support::capture_logs(async {
+            let engine: Arc<dyn Engine> =
+                Arc::new(CatalogEngine::new("ollama-local", "local-model", &[]));
+            let router = EngineRouter::new(HashMap::from([("local".to_string(), engine)]), "local")
+                .expect("router construction");
+
+            let _request = router.chat(vec![], vec![], CancellationToken::new());
+        });
+
+        assert!(log.contains("named engine selected for chat request"));
+        assert!(log.contains("engine=local"));
+        assert!(log.contains("provider_connection=ollama-local"));
+        assert!(log.contains("model=local-model"));
     }
 
     #[tokio::test]

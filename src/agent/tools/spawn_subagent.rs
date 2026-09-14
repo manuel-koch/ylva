@@ -50,10 +50,12 @@ fn default_agent_type() -> String {
 #[derive(Debug, Clone, JsonSchema, Deserialize)]
 pub struct SpawnSubagentArgs {
     /// 3-6 word label for what the child is doing, e.g. "Refactor auth token validation".
-    /// Shown in the (possibly collapsed) tool-call bubble title.
+    /// Shown in the (possibly collapsed) tool-call bubble title and included in
+    /// the later completion event so the parent can correlate results without
+    /// relying on completion order.
     pub label: String,
-    /// Self-contained instruction for the child — it has no knowledge of this
-    /// conversation beyond `briefing`.
+    /// Self-contained instruction and expected deliverable for the child — it
+    /// has no knowledge of this conversation beyond `briefing`.
     pub task: String,
     /// Optional context/background injected ahead of `task` in the child's own
     /// conversation, so it need not be repeated in `task`.
@@ -64,15 +66,62 @@ pub struct SpawnSubagentArgs {
     pub agent_type: String,
 }
 
+/// Model-facing metadata for one configured agent type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentTypeInfo {
+    pub name: String,
+    pub description: Option<String>,
+}
+
 pub struct SpawnSubagentTool {
     auto_approve: bool,
+    description: String,
 }
 
 impl SpawnSubagentTool {
     pub const NAME: &'static str = "spawn_subagent";
 
     pub fn new(auto_approve: bool) -> Self {
-        SpawnSubagentTool { auto_approve }
+        SpawnSubagentTool {
+            auto_approve,
+            description: Self::base_description().to_string(),
+        }
+    }
+
+    /// Add the profile's agent-type catalog to the model-facing tool
+    /// description. The catalog belongs to this tool because it explains the
+    /// `agent_type` argument at the point where the model selects it.
+    pub fn with_agent_types(mut self, mut agent_types: Vec<AgentTypeInfo>) -> Self {
+        agent_types.sort_by(|left, right| left.name.cmp(&right.name));
+        self.description = Self::base_description().to_string();
+        self.description.push_str("\n\nAvailable agent types:\n");
+        for agent_type in agent_types {
+            let description = agent_type
+                .description
+                .as_deref()
+                .filter(|description| !description.trim().is_empty())
+                .unwrap_or("No description provided.");
+            self.description
+                .push_str(&format!("- {}: {description}\n", agent_type.name));
+        }
+        self.description
+            .push_str("Choose `agent_type` from this list; omit it to use `default`.");
+        self
+    }
+
+    fn base_description() -> &'static str {
+        "Delegate a self-contained task to a background child agent. The immediate tool result \
+         is admission only, not the child's answer: it has the JSON shape \
+         {\"event\":\"subagent_accepted\",\"status\":\"running\"|\"queued\",\"run_id\":\"...\", \
+         \"outstanding_count\":N,\"all_done\":false}. Never invent a tool call merely to wait \
+         (no sleep, status-only command, or polling). A terminal completion is delivered later \
+         as a hidden harness notice, not as a second tool result; it contains the child's \
+         run_id, tool_call_id, label, status, result/error/sources, outstanding_count, and \
+         all_done. Completion order is not a reliable ordering signal. Do not acknowledge an \
+         intermediate completion or tell the user to wait. Use a result only when it helps with \
+         genuinely useful work; when all_done is true, combine the terminal results and answer \
+         the user. The harness handles the continuation, so never claim a child completed from \
+         the admission result alone."
     }
 }
 
@@ -87,15 +136,7 @@ impl Tool for SpawnSubagentTool {
     }
 
     fn description(&self) -> &str {
-        "Delegate a self-contained task to a concurrent child agent. Returns immediately with \
-         status (`\"running\"`/`\"queued\"`) and `run_id` — never invent a tool call just to \
-         pass time while it runs (no `bash sleep`, no `echo`/status-only commands, no polling \
-         of any kind): you are re-prompted automatically the instant the child finishes, so \
-         there is nothing to gain by calling any tool merely to wait. If there's genuinely \
-         other work to do, do it now; otherwise end your turn with a short text update and no \
-         tool call at all — that is a normal, complete turn, not a stall. The child's final \
-         outcome later arrives as a separate `system` message referencing this call's \
-         `tool_call_id` — treat that as the authoritative report."
+        &self.description
     }
 
     fn input_schema(&self) -> schemars::schema::RootSchema {
@@ -235,6 +276,29 @@ mod tests {
         let args: SpawnSubagentArgs =
             serde_json::from_value(serde_json::json!({"label": "Do it", "task": "do it"})).unwrap();
         assert_eq!(args.agent_type, DEFAULT_CHILD_AGENT_TYPE);
+    }
+
+    #[test]
+    fn description_advertises_agent_types_in_sorted_order() {
+        let tool = SpawnSubagentTool::new(false).with_agent_types(vec![
+            AgentTypeInfo {
+                name: "research".to_string(),
+                description: Some("Investigate the repository.".to_string()),
+            },
+            AgentTypeInfo {
+                name: "default".to_string(),
+                description: None,
+            },
+        ]);
+        let description = tool.description();
+        assert!(description.contains("Available agent types:"));
+        assert!(description.contains("- default: No description provided."));
+        assert!(description.contains("- research: Investigate the repository."));
+        assert!(
+            description.find("- default:").unwrap() < description.find("- research:").unwrap(),
+            "agent types should be listed deterministically: {description}"
+        );
+        assert!(description.contains("Choose `agent_type` from this list"));
     }
 
     #[test]

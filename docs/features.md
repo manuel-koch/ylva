@@ -28,11 +28,20 @@ invocation.
 ## CLI Runtime
 
 Non-interactive, one-shot session: the initial user turn is sent to the
-agent, the assistant response is streamed to stdout as it arrives, and the
-final committed conversation history is printed as JSONL on exit — one JSON
-object per message, in the same wire shape the provider sees.
+agent, and the assistant response is streamed to stdout as it arrives. The
+committed session is persisted incrementally.
+CLI prints the identifier of the persisted session on exit via `stderr`.
 
 Selected automatically when stdout is not a terminal, or forced via `--no-tui`.
+
+When CLI stdout is a color-capable terminal, section headers and tool status
+lines use the same semantic colors as their TUI bubbles. Colors are disabled
+for non-terminal output, `TERM=dumb`, or `NO_COLOR` in `--color=auto` mode.
+Use `--color=no` to force plain output or `--color=yes` to force colors;
+these modes affect CLI output only and do not affect the TUI.
+Tool-call status blocks are separated from preceding assistant output by a
+blank line, while each call's completion status remains adjacent to its
+invocation.
 
 Initial user turn resolution: `--prompt <text>`, else piped stdin read to EOF
 (only when stdin is not a terminal) — e.g. `echo '…' | ylva`.
@@ -65,8 +74,13 @@ intact.
   directory, so the same checkout always lands in the same folder.
 - Every start begins a **fresh** session: Ylva never auto-resumes and shows no
   startup picker.
-- `--conversation-id <uuid>` re-attaches an existing session and appends to it;
-  an unknown id is an error rather than a silent fresh session.
+- `--conversation-id <uuid>` re-attaches an existing session, replays its
+  prior transcript into the next headless request and the TUI chat view, and
+  appends the new turn; an unknown id is an error rather than a silent fresh
+  session. Tool bubbles retain their persisted metadata, and completed or
+  interrupted subagent runs remain drillable; a child's own transcript is
+  loaded lazily on first drill-in. See the [resume contract](persistence.md#resume-contract)
+  for compatibility and orphan-recovery details.
 - A session is exclusively locked while open, so a second Ylva cannot
   interleave writes into the same file.
 - Child-agent runs record a start/result pair in the parent session and write
@@ -93,8 +107,9 @@ Currently the following AI model providers are supported:
 
 Named provider connections are constructed independently, so multiple
 connections can use the same implementation (for example, local Ollama and
-Ollama Cloud). The active connection is shown in the conversation footer, and
-`/models` queries each connection once and lists
+Ollama Cloud). The conversation footer shows the active named engine and model
+when a profile engine name is available; direct unnamed engines show only the
+model. `/models` queries each connection once and lists
 `provider_connection/model` entries so a selection can change both connection
 and model.
 
@@ -135,8 +150,10 @@ affect sandbox approval checks. See
 **WIP:** `read` and `write` currently only support UTF-8 code points via lossy decode.
 
 - **read**: Read file content from given `path` using `mode`/`offset`/`limit`.
-  Mode can be `bytes`/`chars`/`lines`.
-  Offset and limit are 0-based!
+  Mode can be `bytes`/`chars`/`lines` and defaults to `lines` for every call.
+  In `lines` mode, `offset` is a 0-based line index and `limit` is a line
+  count. Use `chars` for character counts or set `bytes` explicitly for byte
+  ranges and binary data. Offset and limit are 0-based within the selected mode.
 - **write**: Write `content` to file at given `path`. Requires user approval before
   execution (approval-gated). Use to create new files or overwrite existing ones.
 - **edit**: Patch an existing file in-place. The file must already exist (use `write`
@@ -153,22 +170,41 @@ affect sandbox approval checks. See
   and context line is annotated with its position in the old and/or new file.
   Requires user approval by default.
 - **glob**: Search for paths using a glob `pattern`, including wildcards like `*`, `?`, `**`, `[...]`.
-  Hidden files (dot-prefixed names) are **included by default**, matching `find . -type f` behaviour.
-  Optional `dot_ignore` (default `false`); set to `true` to exclude any path component that starts
-  with `.`. Optional `git_ignore` (default `true`) skips gitignored paths;
-  set to `false` to use plain glob matching without gitignore rules. Optional `only_files` /
-  `only_dirs` filters restrict results to files or directories only (mutually exclusive; both `true`
-  returns an error). Optional `limit` caps the result count; when capped, `ignored_matches` and
-  `matches` are set in result metadata. Optional `only_count`
-  returns only the match count via `matches` in metadata; content is empty.
+  Patterns are resolved relative to cwd unless absolute; to search beneath a sub-directory, include
+  that directory in the pattern (for example, `docs/**/*.md`). There is no separate `path`
+  argument. Bare `**` matches directories; use `**/*` to match files and directories recursively.
+  The search root is never a match and is always excluded from returned paths and all
+  counts, regardless of the pattern or option flags; only descendants are eligible. Hidden files
+  (dot-prefixed names) are **included by default**, matching `find . -type f` behaviour. Optional
+  `dot_ignore` (default `false`); set to `true` to exclude any path component that starts with `.`.
+  Optional `git_ignore` (default `true`) skips paths matched by `.gitignore` rules; it does not
+  exclude the `.git` directory or other dot-prefixed paths. Set `dot_ignore` to `true` to exclude
+  them. Set `git_ignore` to `false` to use plain glob matching without gitignore rules. Optional
+  `only_files` / `only_dirs` filters restrict results to files or directories only (mutually
+  exclusive; both `true` returns an error). Optional `limit` caps the result count; omit it for
+  no result-count limit rather than using an arbitrary large value.
+  Result metadata contains flat `files`, `directories`, and `total` counts, where `total` is the
+  sum of the other two fields, plus a boolean `truncated`. `truncated` is `false` when all
+  matching paths are returned and `true` when `limit` omits additional paths; it does not report
+  an omission count. Optional `only_count` returns no paths and exposes the same counts; the result
+  text retains the matching total.
+  CLI/TUI summaries use a tool-provided display projection: `glob` omits zero-valued `files` and
+  `directories` and `truncated=false`. It omits `total` when either type count is zero, because
+  the total is then inferable, except that an empty result displays `total=0`; the complete
+  metadata remains available to the LLM/API.
   Paths inside the workspace are auto-approved; paths outside are denied by the sandbox.
-- **bash**: Execute a shell command via `bash -c`. Requires explicit human approval
-  before execution. stdout and stderr are merged in true
-  arrival order. Output is capped at 100 KB
+- **bash**: Execute a shell command or multi-line script via `bash -c` from the
+  current working directory, which is the workspace root in normal runtime.
+  Use relative paths directly; do not prefix commands with a redundant `cd` to
+  the workspace root. Requires explicit human approval before execution. stdout
+  and stderr are merged in true arrival order. Output is capped at 100 KB
   (`truncated` / `truncated_at_bytes` fields present in result metadata when
   capped). Default timeout: 30 s. On timeout or cancellation the entire
   process (including any child processes it spawned) is killed. See
   [implementation notes](./implementation-notes.md#bash-tool-process-group-cleanup).
+  The tool description explicitly tells the model never to use it to sleep,
+  poll, or otherwise wait for a spawned subagent — the harness delivers each
+  subagent's completion automatically.
 - **search**: Search file contents using a regular-expression `pattern` within a
   directory tree (defaults to cwd when `path` is omitted). Respects `.gitignore`.
   Binary files are skipped. Results formatted in grep style: `filepath:lineno: content` for matches
@@ -196,19 +232,29 @@ affect sandbox approval checks. See
   is shown as the tool-call bubble's primary title text — including while
   collapsed. Only available to agents allowed to spawn children (no nesting —
   delegation is one level deep). Requires user approval unless
-  `--auto-approve-spawn` is set. The call resolves immediately with a
-  `running`/`queued` status — at most one child runs at a time, further
-  spawns queue automatically. The child's eventual outcome (success, failure,
-  or cancellation) arrives later as a separate message once the child
-  finishes, is cancelled, or hits its iteration cap. See
+  `--auto-approve-spawn` is set. The call resolves immediately with an
+  admission event containing the `run_id`, `tool_call_id`, `label`, and
+  outstanding-run count; this is not the child's outcome. A terminal
+  completion event later carries the same correlation fields plus
+  `status`, `result`/`error`, `sources`, `outstanding_count`, and `all_done`.
+  Completion order is not a reliable ordering signal. The current scheduler
+  runs at most one child at a time and queues further spawns, but that is an
+  implementation constraint rather than part of the model-facing contract. Its
+  description lists every configured agent type and its optional
+  model-facing `description`, so the parent can choose a suitable type instead
+  of guessing names.
+  See
   [Child-agent delegation](#child-agent-delegation).
 - **agent_finish**: Only available to child agents (a root agent never sees
   it). Reports `status` (`"success"` or `"failure"`), an optional `result` /
   `error`, and optional `sources`, then ends the child's turn. The parent
-  receives this as the `spawn_subagent` call's outcome — it never sees the
-  child's own conversation, only the `result`/`error` string, so a child
+  receives this through the `spawn_subagent` lifecycle event — it never sees
+  the child's own conversation, only the `result`/`error` string, so a child
   should make its `result` self-contained rather than referencing
-  "earlier"/"above" content the parent cannot see. If a child goes idle
+  "earlier"/"above" content the parent cannot see, and must not fold in
+  meta-commentary or self-review narration about its own process (e.g.
+  "Self-Correction/Review:") — only the finished deliverable belongs there.
+  If a child goes idle
   without calling `agent_finish`, the parent instead receives a synthesized
   result built from the child's last assistant message; if the child hits
   its max-tool-iterations cap first, the parent receives a clear failure
@@ -221,18 +267,31 @@ One level of agent delegation lets a root agent hand off a self-contained
 task to a child agent that runs **concurrently** with the parent — the
 parent keeps processing its own messages and tools while the child works.
 
-- At most one child runs at a time; further `spawn_subagent` calls queue and
-  start automatically as each preceding child finishes.
-- The child's outcome (success, failure, or cancellation) is reported back
-  to the parent as a new message once it's known, re-prompting the parent
-  immediately if it was otherwise idle, so it reacts without waiting for a
-  new user message.
+- The current scheduler runs at most one child at a time; further
+  `spawn_subagent` calls queue and start automatically as each preceding child
+  finishes. This is not a model-facing ordering guarantee, so callers correlate
+  results by `run_id`, `tool_call_id`, and `label`.
+- Each child's outcome (success, failure, or cancellation) is reported back
+  to the parent as a structured hidden harness event. Intermediate events are
+  recorded without forcing an acknowledgement turn; once `all_done` is true,
+  the parent receives one continuation so it can aggregate the results without
+  waiting for a new user message.
 - Stopping the parent (`Ctrl+C`/`Esc`) also cancels any running/queued
   children.
 - A child's own tool calls go through the same approval flow as the
   parent's — a child is never auto-denied just for being a child.
 - Use `--auto-approve-spawn` to skip the human-approval prompt for
   `spawn_subagent` calls (mirrors `--auto-approve-edit` / `--auto-approve-write`).
+- A child spawned after a root `/models` switch uses the root's active
+  provider/model when it resolves the same named engine. An explicit engine
+  override for that child uses its own named engine selection.
+- Agent configuration selects a complete named engine; it cannot override
+  individual engine properties. Define a specialized named engine when a
+  child needs different model, temperature, context, reasoning, or connection
+  settings.
+- A change to a shared engine applies to the next LLM request, not to a
+  request that is already streaming. A child can therefore use the new
+  selection on a later request in the same run.
 
 See [implementation notes](./implementation-notes.md#child-agent-delegation-internals)
 for the full mechanics.
@@ -256,7 +315,11 @@ streaming/running tools in the background:
   `spawn_subagent` bubble (task/label/agent type) so context isn't lost.
   Typing while merely *watching* a running child is a no-op rather than
   silently steering the wrong agent (root vs. child) — the footer omits
-  `enter: send` in that state to make this clear.
+  `enter send` in that state to make this clear.
+- Both the header-to-chat divider and the chat-to-input divider, plus the
+  conversation scrollbar (track/thumb/arrows), are tinted to match the
+  `spawn_subagent` bubble's own border color while drilled in, instead of
+  the root conversation's neutral divider/scrollbar color.
 - A child's transcript remains browsable after it finishes — nothing is
   discarded when a subagent completes.
 - The footer/header spinner keeps animating for as long as the subagent's
@@ -279,10 +342,16 @@ module structure (model/presenter/view/driver split).
 
 - **Layout:** a scrollable chat-history area, a variable-height input box
   (capped at 1/3 of the terminal height), a `─` separator line, and a 2-row
-  footer (mode/hint row and key-hints row). The mode/hint row also shows the
-  active `provider-connection/model` identity for the transcript on screen,
-  including an explicit reasoning effort in parentheses and the selected child
-  while drilled in. No sidebar.
+  footer (mode/hint row and key-hints row). Key names in the key-hints row are
+  bold, action text is normal, and multiple hints use a ` · ` separator. The
+  mode/hint row also shows the
+  active `named-engine → selected model-id` identity for the transcript on
+  screen, including an explicit reasoning effort in parentheses and the
+  selected child while drilled in. In the main conversation it also shows separate counts
+  for running and queued subagents in a compact `Subagents: <running> running,
+  <queued> queued` label; finished subagents are excluded, zero-valued
+  categories are omitted, and the counts are hidden while viewing a child
+  transcript. No sidebar.
 - **Input always active:** the input box is never disabled. `Enter` sends
   unconditionally — while the model is streaming, the message is queued as a
   pending steer (shown dimmed, then committed once the model has seen it),
@@ -299,7 +368,9 @@ module structure (model/presenter/view/driver split).
   the first press shows a per-key hint (`Esc`: cancel only; `Ctrl+C`: cancel
   & quit) and a second press within 2 seconds confirms that key's action;
   while idle, `Ctrl+C` double-press quits and `Esc` immediately clears the
-  input. OS SIGINT stops immediately (no double-press).
+  input. After an interrupt, the TUI waits for the agent's terminal idle
+  update before applying the selected quit-or-stay-open behavior. OS SIGINT
+  stops immediately (no double-press).
 - **Help popup (`F1`):** toggles a centered popup with the full keybinding
   table and build-info values.
 - **Smart auto-scroll:** the chat follows the newest output by default; the
@@ -331,7 +402,11 @@ module structure (model/presenter/view/driver split).
   streaming…"`, or `"Subagent done, parent working…"`) so it's never
   ambiguous which agent — parent or child — is doing what.
 - **Queued subagent bubbles** show a static `≡` glyph instead of the animated
-  spinner while waiting for the one running-child slot to free up.
+  spinner while waiting for the one running-child slot to free up. The
+  internal `run_id` used to correlate child lifecycle events is omitted from
+  the bubble title in both the root and child conversation views, and live
+  `running`/`queued` state is communicated by the indicator and footer rather
+  than a `status=...` title property.
 - **Input as a message:** the input box renders like a sent user message — a
   colored left border, no full frame and no `"Input"` title. Long text
   word-wraps inside the box, and the box grows with its content up to the
@@ -341,9 +416,10 @@ module structure (model/presenter/view/driver split).
   visible text in the slash-command overlay and copies it to the clipboard on
   release. `read`/`glob` tool status lines and approval buttons remain
   mouse-clickable.
-- **Shift+Enter / Alt+Enter:** insert a newline in terminals that support the
-  kitty keyboard protocol (ZED, iTerm2, kitty, WezTerm), so the modifier is
-  not mistaken for send.
+- **Shift+Enter / Alt+Enter:** insert a newline through the terminal's
+  modified-key encoding. Kitty keyboard protocol terminals (iTerm2, kitty,
+  WezTerm) report the modifier directly; terminals that encode Shift+Enter as
+  a line feed (such as Zed's terminal) are normalized to the same action.
 - **Message dedenting:** submitted messages are automatically dedented —
   common leading whitespace is stripped and leading/trailing blank-only lines
   are removed. This makes pasting indented code snippets or quoted text send
@@ -366,10 +442,13 @@ module structure (model/presenter/view/driver split).
   instead of plain wrapped text. Supported: **bold**/*italic*, `inline code`
   (distinct color), fenced code blocks (dim, verbatim, syntax-highlighted
   when a language tag is given), bullet/numbered lists, headings,
-  blockquotes, horizontal rules, and tables. Plain text with no Markdown
-  syntax wraps as plain text. Unsupported syntax (links, images, HTML)
-  degrades to plain text rather than crashing or dropping content. Markdown
-  and syntax highlighting are applied live while a response streams.
+  blockquotes, horizontal rules, and tables. Tables fit the bubble width,
+  including by character-wrapping unbroken cell content when necessary.
+  Styled Markdown rows use terminal display widths, including for wide
+  Unicode glyphs, so content stays inside the bubble. Plain text with no
+  Markdown syntax wraps as plain text. Unsupported syntax (links, images,
+  HTML) degrades to plain text rather than crashing or dropping content.
+  Markdown and syntax highlighting are applied live while a response streams.
 - **Selectable syntax theme:** code blocks and file previews highlight with
   either the `dark` or the `light` theme, chosen with the `theme` key of the
   runtime profile (see [configuration](./configuration.md#profile-file)).
@@ -399,12 +478,18 @@ See [configuration](./configuration.md) for all available fields.
 
 ### Runtime profiles
 
-A profile groups a default engine with optional per-agent overrides. This is the
-groundwork for Phase 6 child agents, which will let different agent types run against
-different engines automatically.
+A profile groups a default engine with optional per-agent overrides. Each agent
+type may also define a model-facing `description`; root agents that can spawn
+children receive all configured agent types and descriptions in the
+`spawn_subagent` tool definition.
 
 Profiles are read from `~/.ylva/profiles/<name>/config.toml`; see
 [configuration](./configuration.md#profile-file) for the supported keys.
+The `default` agent type is always available; when `[agents.default]` is
+omitted, it uses the built-in root configuration with child spawning enabled.
+Defining other agent types, such as `local-discovery`, does not disable the
+default agent. If `[agents.default]` is defined, its settings replace the
+built-in defaults.
 
 ## Slash commands
 
