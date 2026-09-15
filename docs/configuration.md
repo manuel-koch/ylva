@@ -80,6 +80,7 @@ engine = "ollama/local"
 |---|---|---|
 | `default_engine` | `String` | Name of the `[engines.*]` entry used when an agent type names none. Defaults to `default`. |
 | `compact_engine` | `Option<String>` | Engine used for summarisation tasks; resolves to `default_engine` when absent. Phase 10 wires this at runtime. |
+| `utility_engine` | `Option<String>` | Isolated engine used to generate session titles from the first user message and completed assistant reply; resolves to `default_engine` when absent. |
 | `default_model` | `Option<String>` | Model filled into every `[engines.*]` entry that names none of its own. |
 | `theme` | `dark` \| `light` | Syntax-highlighting theme. Defaults to `dark`. See [features — rendering](./features.md#tui-architecture). |
 | `keybindings` | table of strings | **Reserved.** Accepted and validated so a profile carrying one loads, but Phase 7 ships the fixed key map in `docs/keybindings.md` and does not apply these entries yet. |
@@ -97,8 +98,8 @@ engine is initially active, and `/models` queries each named provider
 connection once before displaying `provider_connection/model` choices. The
 profile's `default_engine` is initially active.
 Referencing an engine name that no table defines (from `default_engine`,
-`compact_engine`, or an agent override) is a hard error rather than a silent
-fallback.
+`compact_engine`, `utility_engine`, or an agent override) is a hard error rather
+than a silent fallback.
 
 When the root agent changes its active provider connection or model through
 `/models`, a child spawned afterwards that resolves the same named engine uses
@@ -153,6 +154,7 @@ A profile groups engine selection and per-agent settings for a runtime session.
 |---|---|---|
 | `default_engine` | `String` | Name of the engine used when no agent-level override is present (required). |
 | `compact_engine` | `Option<String>` | Engine used for summarisation tasks. Resolves to `default_engine` when absent. Phase 10 wires this at runtime. |
+| `utility_engine` | `Option<String>` | Isolated engine used for utility tasks such as session-title generation. Resolves to `default_engine` when absent and does not follow `/models` runtime switching. |
 | `provider_connections` | `HashMap<String, ProviderConnectionConfig>` | Named provider connections, keyed by connection name. |
 | `engines` | `HashMap<String, EngineConfig>` | Named model/runtime configurations, keyed by engine name. |
 | `agents` | `HashMap<String, AgentConfig>` | Per-agent-type settings, keyed by agent-type name. |

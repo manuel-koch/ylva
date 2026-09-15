@@ -2862,45 +2862,45 @@ See reducer-state-handling-plan.md.
 
 ### Phase 9: Automatic Session Title Generation
 
-- [ ] **Goal:** Make persisted sessions discoverable by generating a concise
+- [x] **Goal:** Make persisted sessions discoverable by generating a concise
       title from the first explicit user message and the first completed LLM
       reply, using a dedicated utility engine rather than copying the user's
       message into the `meta` header.
 
-- [ ] Add the profile-level `utility_engine` setting alongside `default_engine`
+- [x] Add the profile-level `utility_engine` setting alongside `default_engine`
       and `compact_engine`; when unset, resolve `utility_engine` to
       `default_engine`. Resolve it independently of the active conversation
       engine and the context-compaction `compact_engine`. The utility request
       must not change the active engine or its runtime model settings.
 
-- [ ] After the first conversation turn completes, capture the first explicit
+- [x] After the first conversation turn completes, capture the first explicit
       user message and the first completed assistant reply. Do not trigger title
       generation for implicit harness messages, incomplete/interrupted replies,
       or sessions that never commit a user turn and a reply.
 
-- [ ] Start an explicit temporary utility conversation with no session store,
+- [x] Start an explicit temporary utility conversation with no session store,
       no visible UI updates, and no tools. Send a strict title-generation
       prompt containing both source messages in clearly delimited sections:
       return only a concise title, with no explanation, markdown, or quotation
       marks.
 
-- [ ] Validate and normalize the utility response to one non-empty line within
+- [x] Validate and normalize the utility response to one non-empty line within
       the session-title length limit. A failed, empty, or malformed utility
       response must not fall back to copying the first user message; report the
       failure and leave the title pending for a later retry.
 
-- [ ] Persist the generated title to the current session through an explicit
+- [x] Persist the generated title to the current session through an explicit
       store operation that atomically rewrites only the `meta` header line.
       Keep the user and assistant events durable in their original order and
       ensure the temporary utility conversation never appears in the current
       session transcript or session listing.
 
-- [ ] On resume, detect a completed first turn whose title is still empty and
+- [x] On resume, detect a completed first turn whose title is still empty and
       retry the same utility conversation from the persisted user/assistant
       messages. Apply the same flow to child transcripts, using the child's
       first task message and first reply as its title inputs.
 
-- [ ] Add seam-level tests for utility-engine selection, the exact prompt
+- [x] Add seam-level tests for utility-engine selection, the exact prompt
       inputs, isolation from the current store/UI, validation and retry
       behavior, atomic title persistence, resume recovery, and metadata-only
       session discovery.

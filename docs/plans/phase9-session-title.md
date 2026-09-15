@@ -21,6 +21,7 @@ empty title, and to child-agent transcripts (using the child's first task
 message and first reply).
 
 **Acceptance criteria:**
+
 - A new profile setting `utility_engine` (alongside `default_engine` and
   `compact_engine` in `ProfileConfig`, `src/config/profile.rs`) is resolved
   independently, falling back to `default_engine` when unset. Selecting or
@@ -79,6 +80,7 @@ behaves identically whether the first turn just completed live or is being
 retried after a resume.
 
 **Decisions locked in during planning (do not revisit without cause):**
+
 - `Store` owns building the full title-generation prompt string
   (`Store::title_prompt`), not just raw source strings — this keeps the
   prompt wording in one place and makes a future "regenerate from more than
@@ -101,17 +103,19 @@ retried after a resume.
   truncated to `TITLE_MAX_CHARS`). Only a genuinely empty response or an
   engine/transport error is treated as a failure that leaves the title
   empty for a later retry.
-- The driver's utility-title task is spawned off the hot path and is
-  **best-effort/detached**: if the process exits before it finishes, it may
-  be silently dropped. No shutdown-path tracking/awaiting is added — the
-  next `Store::resume` already retries correctly, and that is sufficient.
+- The driver's utility-title task is spawned off the agent-loop hot path. TUI
+  work remains best-effort/detached, while the headless runner retains the
+  started task handle until its visible run has finished so a normal CLI
+  process can persist the generated title before exit. An interrupted or
+  externally terminated process can still leave the title empty; the next
+  `Store::resume` retries correctly.
 
 ## Implementation Plan
 
 Flip each `[ ]` to `[x]` immediately after completing it and rewrite this
 file in place, so progress is resumable across sessions.
 
-1. [ ] **Add `utility_engine` to `ProfileConfig`.** In
+1. [x] **Add `utility_engine` to `ProfileConfig`.** In
    `src/config/profile.rs`, add `pub utility_engine: Option<String>` next to
    `compact_engine` (same `#[serde(default)]` shape), default to `None` in
    `ProfileConfig::default()`, and add `utility_engine_name(&self) -> &str`
@@ -120,13 +124,13 @@ file in place, so progress is resumable across sessions.
    (`src/agent_factory.rs`, the `for required in [...]` loop) to also
    require `profile.utility_engine_name()` to name a configured engine.
 
-2. [ ] **Expose engine lookup by name from `AgentFactory`.** Add a method
+2. [x] **Expose engine lookup by name from `AgentFactory`.** Add a method
    (e.g. `AgentFactory::engine(&self, name: &str) -> Option<Arc<dyn Engine>>`)
    returning the raw configured engine (not a router), so the driver layer
    can resolve the utility engine independently of the active
    conversation/compaction engine without constructing a new `EngineRouter`.
 
-3. [ ] **Redefine "turn complete" precisely, and capture the assistant side
+3. [x] **Redefine "turn complete" precisely, and capture the assistant side
    too.** In `src/store.rs`, change `SessionWriter::append`'s
    `turn_is_complete` check to require
    `Message::Assistant { status: AssistantStatus::Complete, .. }` (not any
@@ -138,7 +142,7 @@ file in place, so progress is resumable across sessions.
    message), so both halves of the prompt are available together once the
    first turn completes.
 
-4. [ ] **Replace copy-based finalization with `Store::title_prompt()` /
+4. [x] **Replace copy-based finalization with `Store::title_prompt()` /
    `Store::set_title()`.** Remove `title_from_first_user_message` and its
    call site in `finalize_title_if_pending`. In its place:
    - Add `Store::title_prompt(&self) -> Option<String>`: returns `None`
@@ -160,7 +164,7 @@ file in place, so progress is resumable across sessions.
      it only tracks readiness (`meta_awaiting_title`, the two captured
      source strings) and executes rewrites `Store::set_title` requests.
 
-5. [ ] **Trigger title generation from the driver layer.** In both
+5. [x] **Trigger title generation from the driver layer.** In both
    `ConsoleApp` (`src/cli_driver.rs`) and `TuiApp`/`AppState`
    (`src/tui_driver.rs`), after observing the root agent loop's first
    completed turn (a `UiUpdate::StreamDone` — or equivalent terminal signal —
@@ -196,7 +200,7 @@ file in place, so progress is resumable across sessions.
      and detached: if the process exits before it completes, it is dropped
      without further handling (the next resume's retry covers that case).
 
-6. [ ] **Resume-time retry.** In `Store::resume` (`src/store.rs`), keep the
+6. [x] **Resume-time retry.** In `Store::resume` (`src/store.rs`), keep the
    existing detection of an empty on-disk title, but extend the
    re-derivation to also scan for the **first complete assistant reply**
    (extend `first_explicit_user_message`'s sibling logic, or add a
@@ -205,7 +209,7 @@ file in place, so progress is resumable across sessions.
    already in the transcript — the driver layer then calls the exact same
    shared helper from step 5, without waiting for a brand-new turn.
 
-7. [ ] **Child transcript titles.** Wire the same driver-level helper
+7. [x] **Child transcript titles.** Wire the same driver-level helper
    (step 5) into child-agent completion handling (`ChildAgentManager` /
    `src/agent/child_agent_manager.rs` and wherever
    `Store::write_child_transcript` is invoked), triggered live, right when
@@ -213,7 +217,7 @@ file in place, so progress is resumable across sessions.
    using the child's own `Store` handle so `title_prompt()` reflects the
    child's first task message and first reply.
 
-8. [ ] **Tests.**
+8. [x] **Tests.**
    - `src/store.rs`: unit tests for the tightened `turn_is_complete` check
      (an `Interrupted` assistant message must not trigger title-readiness),
      for `Store::title_prompt` (returns `None` until both source messages
@@ -242,7 +246,7 @@ file in place, so progress is resumable across sessions.
      the persisted `meta.title` on disk was produced by the utility path
      (not a literal copy of the first user message).
 
-9. [ ] **Documentation.**
+9. [x] **Documentation.**
    - `docs/configuration.md`: document the new `utility_engine` setting in
      both configuration tables (mirroring the existing `compact_engine`
      rows at lines ~82 and ~155), and update the `[engines.*]` "hard error"
@@ -323,7 +327,8 @@ file in place, so progress is resumable across sessions.
   must not follow `/models` engine-switching behavior.
 - `src/llm/engine.rs`: `Engine::chat` (trait, ~line 249) is the seam to
   call directly for a one-shot utility request:
-  `fn chat<'a>(&'a self, messages: Vec<Message>, tools: Vec<ToolSchema>, cancel: CancellationToken) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>>`.
+  `fn chat<'a>(&'a self, messages: Vec<Message>, tools: Vec<ToolSchema>,`
+  `cancel: CancellationToken) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>>`.
   Pass `tools: vec![]` for "no tools". `StreamEvent` (in `src/agent.rs`,
   ~line 328) has variants `Text`, `Thinking`, `Delta`, `Done`, `Cancelled`,
   `Error` — accumulate `Text`/`Delta` content until `Done`.

@@ -37,7 +37,7 @@
 
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -56,8 +56,7 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// an event-type-specific path even without the header (§4H decision 4).
 pub const EVENT_VERSION: u32 = 1;
 
-/// Maximum number of characters of the first user message kept as the
-/// session's auto-generated `meta` title (§4H decision 8).
+/// Maximum number of characters kept in a generated session `meta` title.
 pub const TITLE_MAX_CHARS: usize = 80;
 
 /// Capacity of the channel feeding the writer task. Large enough that a burst
@@ -82,6 +81,8 @@ pub enum StoreError {
         #[source]
         source: std::io::Error,
     },
+    #[error("session '{session_id}' writer is no longer available")]
+    WriterClosed { session_id: Uuid },
 }
 
 /// One persisted JSONL line.
@@ -177,8 +178,9 @@ pub struct SessionMeta {
     pub provider_connection: String,
     pub model: String,
     pub session_id: Uuid,
-    /// First user message, truncated to [`TITLE_MAX_CHARS`] and flattened to
-    /// one line. Empty when the session committed no user turn.
+    /// Utility-engine-generated one-line title, truncated to
+    /// [`TITLE_MAX_CHARS`]. Empty while title generation is pending or when
+    /// the session has no completed turn.
     #[serde(default)]
     pub title: String,
     /// Set only for a child-agent's own session file, naming the parent's
@@ -255,18 +257,11 @@ pub fn now_timestamp() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-/// Derive a session title from the first user message: single-line, trimmed,
-/// and truncated to [`TITLE_MAX_CHARS`] characters (§4H decision 8).
-fn title_from_first_user_message(text: &str) -> String {
-    let single_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    single_line.chars().take(TITLE_MAX_CHARS).collect()
-}
-
 /// Write `meta` as a brand-new file's first line and flush it immediately,
 /// so it is durable on disk before anything else is ever appended. Returns
 /// the number of bytes written (the JSON line plus its trailing newline),
 /// which later locates exactly where the second line begins for the
-/// title-finalizing rewrite in [`SessionWriter::finalize_title`].
+/// metadata-only title rewrite.
 fn write_meta_line(
     file: &mut LockedSessionFile,
     path: &Path,
@@ -286,37 +281,58 @@ fn write_meta_line(
 
 /// Parse an existing file's first line as `meta`, alongside its raw byte
 /// length (JSON plus trailing newline) — the counterpart read used on
-/// [`Store::resume`] to figure out whether a still-empty title needs
-/// finalizing and, if so, where the second line begins.
-fn read_meta_line_with_length(path: &Path) -> Option<(SessionMeta, u64)> {
+/// [`Store::resume`] to figure out whether a still-empty title can be
+/// rewritten and, if so, where the second line begins.
+fn read_meta_line_with_length(path: &Path) -> Result<Option<(SessionMeta, u64)>, StoreError> {
     use std::io::BufRead;
 
-    let file = std::fs::File::open(path).ok()?;
+    let file = std::fs::File::open(path).map_err(|source| StoreError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
     let mut first_line = String::new();
     let bytes_read = std::io::BufReader::new(file)
         .read_line(&mut first_line)
-        .ok()?;
-    match serde_json::from_str::<StoreEvent>(first_line.trim_end()) {
-        Ok(StoreEvent::Meta(meta)) => Some((meta, bytes_read as u64)),
-        _ => None,
-    }
+        .map_err(|source| StoreError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    Ok(
+        match serde_json::from_str::<StoreEvent>(first_line.trim_end()) {
+            Ok(StoreEvent::Meta(meta)) => Some((meta, bytes_read as u64)),
+            _ => None,
+        },
+    )
 }
 
-/// Scan an existing file for the first committed **explicit user** message,
-/// used on [`Store::resume`] to re-seed the title source in memory when the
-/// on-disk title is still empty (the process that will finalize it may not
-/// be the one that originally captured it).
-fn first_explicit_user_message(path: &Path) -> Option<String> {
-    Store::read_messages(path)
-        .ok()?
-        .into_iter()
-        .find_map(|message| match message {
+/// Rebuild the title inputs from committed transcript messages.
+fn title_snapshot(meta: &SessionMeta, messages: &[Message]) -> TitleSnapshot {
+    let mut snapshot = TitleSnapshot {
+        title: meta.title.clone(),
+        ..TitleSnapshot::default()
+    };
+    for message in messages {
+        match message {
             Message::User {
                 content,
                 kind: UserMessageKind::Explicit,
-            } => Some(content),
-            _ => None,
-        })
+            } if snapshot.first_user_message.is_none() => {
+                snapshot.first_user_message = Some(content.clone());
+            }
+            Message::Assistant {
+                content,
+                status: crate::agent::AssistantStatus::Complete,
+                ..
+            } if snapshot.first_user_message.is_some()
+                && snapshot.first_complete_assistant_message.is_none()
+                && !content.trim().is_empty() =>
+            {
+                snapshot.first_complete_assistant_message = Some(content.clone());
+            }
+            _ => {}
+        }
+    }
+    snapshot
 }
 
 /// A handle onto one open session file.
@@ -335,8 +351,8 @@ struct StoreInner {
     project_key: String,
     chats_root: PathBuf,
     path: PathBuf,
-    event_tx: mpsc::Sender<StoreEvent>,
-    flush_tx: mpsc::Sender<oneshot::Sender<()>>,
+    command_tx: mpsc::Sender<WriterCommand>,
+    title_snapshot: Mutex<TitleSnapshot>,
 }
 
 impl std::fmt::Debug for Store {
@@ -354,10 +370,9 @@ impl Store {
     ///
     /// The `meta` header is written immediately with an empty `title`, so
     /// every commit is durable the instant it is written (no event is ever
-    /// held only in memory). The title is filled in later, once the first
-    /// conversation turn completes, by an atomic rewrite of just that first
-    /// line (§4H decision 8) — never by delaying the durability of anything
-    /// that follows it.
+    /// held only in memory). A driver later supplies a generated title through
+    /// [`Store::set_title`], which atomically rewrites just that first line
+    /// without delaying later event durability.
     pub fn create(
         chats_root: &Path,
         cwd: &Path,
@@ -394,8 +409,8 @@ impl Store {
             file,
             TitleState {
                 meta_awaiting_title,
-                pending_title_source: None,
             },
+            TitleSnapshot::default(),
         ))
     }
 
@@ -406,9 +421,9 @@ impl Store {
     /// fallback (§4H decision 5). A corrupt trailing line (a write cut short
     /// by a power loss) is truncated before the first append so the repaired
     /// file never carries mid-file corruption (§4H decision 6). If the prior
-    /// run never got far enough to finalize the title (killed mid-turn), the
-    /// title source is re-derived from the transcript so this run can still
-    /// finish the job once its own first turn completes.
+    /// run never got far enough to generate the title (killed mid-turn), the
+    /// title inputs are re-derived from the transcript so this run can retry
+    /// generation immediately.
     pub fn resume(chats_root: &Path, cwd: &Path, session_id: Uuid) -> Result<Store, StoreError> {
         let project_key = project_key(cwd);
         let path = session_path(chats_root, &project_key, session_id);
@@ -417,12 +432,18 @@ impl Store {
         }
         let mut file = open_locked_session_file(&path, session_id, true)?;
         repair_trailing_corruption(&mut file, &path)?;
-        let (meta_awaiting_title, pending_title_source) = match read_meta_line_with_length(&path) {
-            Some((meta, meta_line_len)) if meta.title.is_empty() => {
-                let title_source = first_explicit_user_message(&path);
-                (Some((meta, meta_line_len)), title_source)
+        let (meta_awaiting_title, title_snapshot) = match read_meta_line_with_length(&path)? {
+            Some((meta, meta_line_len)) => {
+                let messages = Store::read_messages(&path)?;
+                let snapshot = title_snapshot(&meta, &messages);
+                let title_state = if meta.title.is_empty() {
+                    Some((meta, meta_line_len))
+                } else {
+                    None
+                };
+                (title_state, snapshot)
             }
-            _ => (None, None),
+            None => (None, TitleSnapshot::default()),
         };
         Ok(Store::spawn_writer(
             session_id,
@@ -432,8 +453,8 @@ impl Store {
             file,
             TitleState {
                 meta_awaiting_title,
-                pending_title_source,
             },
+            title_snapshot,
         ))
     }
 
@@ -481,8 +502,8 @@ impl Store {
             file,
             TitleState {
                 meta_awaiting_title: Some((meta, meta_line_len)),
-                pending_title_source: None,
             },
+            TitleSnapshot::default(),
         ))
     }
 
@@ -493,17 +514,15 @@ impl Store {
         path: PathBuf,
         file: LockedSessionFile,
         title_state: TitleState,
+        title_snapshot: TitleSnapshot,
     ) -> Store {
-        let (event_tx, event_rx) = mpsc::channel::<StoreEvent>(WRITER_CHANNEL_CAPACITY);
-        let (flush_tx, flush_rx) = mpsc::channel::<oneshot::Sender<()>>(WRITER_CHANNEL_CAPACITY);
+        let (command_tx, command_rx) = mpsc::channel::<WriterCommand>(WRITER_CHANNEL_CAPACITY);
         tokio::spawn(run_writer(SessionWriter {
             file,
             path: path.clone(),
             session_id,
             meta_awaiting_title: title_state.meta_awaiting_title,
-            pending_title_source: title_state.pending_title_source,
-            event_rx,
-            flush_rx,
+            command_rx,
         }));
         Store {
             inner: Arc::new(StoreInner {
@@ -511,14 +530,25 @@ impl Store {
                 project_key,
                 chats_root,
                 path,
-                event_tx,
-                flush_tx,
+                command_tx,
+                title_snapshot: Mutex::new(title_snapshot),
             }),
         }
     }
 
     pub fn session_id(&self) -> Uuid {
         self.inner.session_id
+    }
+
+    /// Return the currently persisted session title, or an empty string while
+    /// title generation is still pending.
+    pub fn title(&self) -> String {
+        self.inner
+            .title_snapshot
+            .lock()
+            .expect("title snapshot mutex is not poisoned")
+            .title
+            .clone()
     }
 
     pub fn project_key(&self) -> &str {
@@ -533,22 +563,22 @@ impl Store {
         &self.inner.path
     }
 
-    /// Sending end of the writer channel. The agent loop enqueues committed
-    /// events in commit order; the writer task appends them serially, so the
-    /// on-disk order matches the commit order without the loop ever blocking
-    /// on disk (§4H decision 10).
-    pub fn sender(&self) -> mpsc::Sender<StoreEvent> {
-        self.inner.event_tx.clone()
-    }
-
     /// Enqueue one already-built event.
     pub fn record_event(&self, event: StoreEvent) {
-        if let Err(error) = self.inner.event_tx.try_send(event) {
+        if let Err(error) = self
+            .inner
+            .command_tx
+            .try_send(WriterCommand::Event(Box::new(event.clone())))
+        {
             tracing::warn!(
                 session_id = %self.inner.session_id,
                 %error,
                 "dropping store event: writer channel unavailable"
             );
+            return;
+        }
+        if let StoreEvent::Message { message, .. } = event {
+            self.update_title_snapshot(&message);
         }
     }
 
@@ -559,6 +589,119 @@ impl Store {
             timestamp: now_timestamp(),
             message: message.clone(),
         });
+    }
+
+    /// Return the utility-engine prompt once the first explicit user message
+    /// and first non-empty complete assistant reply have both been committed.
+    pub fn title_prompt(&self) -> Option<String> {
+        let snapshot = self
+            .inner
+            .title_snapshot
+            .lock()
+            .expect("title snapshot mutex is not poisoned");
+        if !snapshot.title.is_empty() {
+            tracing::debug!(
+                session_id = %self.inner.session_id,
+                stage = "skipped",
+                reason = "title_already_set",
+                "session title generation skipped"
+            );
+            return None;
+        }
+        let Some(user_message) = snapshot.first_user_message.as_deref() else {
+            tracing::debug!(
+                session_id = %self.inner.session_id,
+                stage = "skipped",
+                reason = "awaiting_explicit_user_message",
+                "session title generation is not ready"
+            );
+            return None;
+        };
+        let Some(assistant_message) = snapshot.first_complete_assistant_message.as_deref() else {
+            tracing::debug!(
+                session_id = %self.inner.session_id,
+                stage = "skipped",
+                reason = "awaiting_complete_assistant_reply",
+                "session title generation is not ready"
+            );
+            return None;
+        };
+        let prompt = format!(
+            "Generate a concise title for this conversation.\n\
+             Return only one bare title, with no markdown, quotation marks, or explanation.\
+             \n\n<user_message>\n{user_message}\n</user_message>\n\
+             <assistant_message>\n{assistant_message}\n</assistant_message>",
+        );
+        tracing::debug!(
+            session_id = %self.inner.session_id,
+            stage = "prompt_ready",
+            user_message_chars = user_message.chars().count(),
+            assistant_message_chars = assistant_message.chars().count(),
+            prompt_chars = prompt.chars().count(),
+            "session title prompt is ready"
+        );
+        Some(prompt)
+    }
+
+    /// Enqueue a metadata-only title rewrite on the session writer.
+    pub async fn set_title(&self, title: String) -> Result<(), StoreError> {
+        if !self
+            .inner
+            .title_snapshot
+            .lock()
+            .expect("title snapshot mutex is not poisoned")
+            .title
+            .is_empty()
+        {
+            return Ok(());
+        }
+        let (result_tx, result_rx) = oneshot::channel();
+        let title_for_snapshot = title.clone();
+        self.inner
+            .command_tx
+            .send(WriterCommand::SetTitle { title, result_tx })
+            .await
+            .map_err(|_| StoreError::WriterClosed {
+                session_id: self.inner.session_id,
+            })?;
+        let result = result_rx.await.map_err(|_| StoreError::WriterClosed {
+            session_id: self.inner.session_id,
+        })?;
+        result?;
+        let mut snapshot = self
+            .inner
+            .title_snapshot
+            .lock()
+            .expect("title snapshot mutex is not poisoned");
+        snapshot.title = title_for_snapshot;
+        Ok(())
+    }
+
+    fn update_title_snapshot(&self, message: &Message) {
+        let mut snapshot = self
+            .inner
+            .title_snapshot
+            .lock()
+            .expect("title snapshot mutex is not poisoned");
+        match message {
+            Message::User {
+                content,
+                kind: UserMessageKind::Explicit,
+            } if snapshot.first_user_message.is_none() => {
+                snapshot.first_user_message = Some(content.clone());
+            }
+            Message::Assistant {
+                content,
+                status: crate::agent::AssistantStatus::Complete,
+                ..
+            } if snapshot.first_user_message.is_some()
+                && snapshot.first_complete_assistant_message.is_none()
+                && !content.trim().is_empty() =>
+            {
+                snapshot.first_complete_assistant_message = Some(content.clone());
+            }
+            _ => {}
+        }
     }
 
     /// Enqueue a `model_changed` record: written on every process start
@@ -620,8 +763,9 @@ impl Store {
 
     /// Write a completed child-agent transcript **once**, into its own
     /// sub-session file under the same `project_key`, with its own `meta`
-    /// header auto-titled from the first explicit user message in `messages`
-    /// (§4H decision 9). Child transcripts are never streamed live.
+    /// header titled asynchronously from the first explicit user message and
+    /// complete assistant reply in `messages`. Child
+    /// transcripts are never streamed live.
     ///
     /// `provider_connection_and_model` is the child's own resolved engine —
     /// which can differ from the parent's. `None` (the child's engine
@@ -635,6 +779,19 @@ impl Store {
         provider_connection_and_model: Option<(&str, &str)>,
         messages: &[Message],
     ) -> Result<Uuid, StoreError> {
+        Ok(self
+            .write_child_transcript_store(provider_connection_and_model, messages)
+            .await?
+            .session_id())
+    }
+
+    /// Write a child transcript and retain its store handle for follow-up
+    /// metadata operations such as utility-engine title generation.
+    pub async fn write_child_transcript_store(
+        &self,
+        provider_connection_and_model: Option<(&str, &str)>,
+        messages: &[Message],
+    ) -> Result<Store, StoreError> {
         let (provider_connection, model) = provider_connection_and_model.unwrap_or(("", ""));
         let child_store =
             self.start_new_session(provider_connection, model, Some(self.inner.session_id))?;
@@ -643,7 +800,7 @@ impl Store {
         }
         child_store.record_child_transcript_messages(messages);
         child_store.flush().await;
-        Ok(child_store.session_id())
+        Ok(child_store)
     }
 
     /// Write a child transcript using the child run id as its session id.
@@ -656,6 +813,20 @@ impl Store {
         provider_connection_and_model: Option<(&str, &str)>,
         messages: &[Message],
     ) -> Result<Uuid, StoreError> {
+        Ok(self
+            .write_child_transcript_for_run_store(run_id, provider_connection_and_model, messages)
+            .await?
+            .session_id())
+    }
+
+    /// Write a child transcript using the run id and retain its store handle
+    /// for follow-up metadata operations.
+    pub async fn write_child_transcript_for_run_store(
+        &self,
+        run_id: Uuid,
+        provider_connection_and_model: Option<(&str, &str)>,
+        messages: &[Message],
+    ) -> Result<Store, StoreError> {
         let (provider_connection, model) = provider_connection_and_model.unwrap_or(("", ""));
         let child_store = self.start_new_session_with_id(
             run_id,
@@ -668,7 +839,7 @@ impl Store {
         }
         child_store.record_child_transcript_messages(messages);
         child_store.flush().await;
-        Ok(child_store.session_id())
+        Ok(child_store)
     }
 
     fn record_child_transcript_messages(&self, messages: &[Message]) {
@@ -683,7 +854,13 @@ impl Store {
     /// for the queue to drain.
     pub async fn flush(&self) {
         let (ack_tx, ack_rx) = oneshot::channel();
-        if self.inner.flush_tx.send(ack_tx).await.is_err() {
+        if self
+            .inner
+            .command_tx
+            .send(WriterCommand::Flush(ack_tx))
+            .await
+            .is_err()
+        {
             return;
         }
         let _ = ack_rx.await;
@@ -973,46 +1150,46 @@ fn repair_trailing_corruption(file: &mut LockedSessionFile, path: &Path) -> Resu
     Ok(())
 }
 
-/// The still-unfinalized-title state carried from [`Store::create`],
-/// [`Store::resume`], or [`Store::start_new_session`] into the spawned
-/// writer task — bundled into one type so [`Store::spawn_writer`] doesn't
-/// need a separate parameter for each field.
+/// The title rewrite state carried into the spawned writer task.
 struct TitleState {
-    /// `Some((meta, meta_line_len))` until the title has been finalized:
+    /// `Some((meta, meta_line_len))` until a generated title is persisted:
     /// `meta` is the header as currently written to disk (title still
     /// empty), and `meta_line_len` is the byte length of that first line
     /// (JSON plus newline), i.e. where the second line begins — needed to
-    /// rewrite just the first line in place once the title is known. `None`
-    /// if this session's header already carried a title (e.g. on resume, a
-    /// prior run already finished the job).
+    /// rewrite just the first line once the title is known. `None` if this
+    /// session's header already carried a title.
     meta_awaiting_title: Option<(SessionMeta, u64)>,
-    /// The first committed **explicit user** message's content, captured as
-    /// soon as it is seen (or re-derived from the transcript on resume), so
-    /// the title can be filled in once the turn it belongs to completes.
-    pending_title_source: Option<String>,
 }
 
-/// State owned by the writer task: the locked file plus both receiving ends.
+#[derive(Default)]
+struct TitleSnapshot {
+    title: String,
+    first_user_message: Option<String>,
+    first_complete_assistant_message: Option<String>,
+}
+
+enum WriterCommand {
+    Event(Box<StoreEvent>),
+    SetTitle {
+        title: String,
+        result_tx: oneshot::Sender<Result<(), StoreError>>,
+    },
+    Flush(oneshot::Sender<()>),
+}
+
+/// State owned by the writer task: the locked file and command receiver.
 struct SessionWriter {
     file: LockedSessionFile,
     path: PathBuf,
     session_id: Uuid,
-    /// `Some((meta, meta_line_len))` until the title has been finalized:
+    /// `Some((meta, meta_line_len))` until a generated title is persisted:
     /// `meta` is the header as currently written to disk (title still
     /// empty), and `meta_line_len` is the byte length of that first line
     /// (JSON plus newline), i.e. where the second line begins — needed to
-    /// rewrite just the first line in place once the title is known. `None`
-    /// once finalized (or if this session's header already carried a title
-    /// on resume, meaning a prior run already finished the job).
+    /// rewrite just the first line once the title is known. `None` once
+    /// finalized (or if this session's header already carried a title).
     meta_awaiting_title: Option<(SessionMeta, u64)>,
-    /// The first committed **explicit user** message's content, captured as
-    /// soon as it is seen (or re-derived from the transcript on resume), so
-    /// the title can be filled in once the turn it belongs to completes.
-    /// `None` until then; stays `None` for a turn that opens with only
-    /// implicit/tool messages.
-    pending_title_source: Option<String>,
-    event_rx: mpsc::Receiver<StoreEvent>,
-    flush_rx: mpsc::Receiver<oneshot::Sender<()>>,
+    command_rx: mpsc::Receiver<WriterCommand>,
 }
 
 /// The dedicated writer task: appends one JSON line per event and flushes it,
@@ -1020,88 +1197,94 @@ struct SessionWriter {
 async fn run_writer(mut writer: SessionWriter) {
     loop {
         tokio::select! {
-            biased;
-            event = writer.event_rx.recv() => {
-                match event {
-                    Some(event) => writer.append(event),
+            command = writer.command_rx.recv() => {
+                match command {
+                    Some(WriterCommand::Event(event)) => writer.append(*event),
+                    Some(WriterCommand::SetTitle { title, result_tx }) => {
+                        let _ = result_tx.send(writer.set_title(&title));
+                    }
+                    Some(WriterCommand::Flush(ack)) => {
+                        // Drain everything enqueued before the flush request
+                        // so the barrier covers events and title commands.
+                        while let Ok(command) = writer.command_rx.try_recv() {
+                            match command {
+                                WriterCommand::Event(event) => writer.append(*event),
+                                WriterCommand::SetTitle { title, result_tx } => {
+                                    let _ = result_tx.send(writer.set_title(&title));
+                                }
+                                WriterCommand::Flush(nested_ack) => {
+                                    let _ = nested_ack.send(());
+                                }
+                            }
+                        }
+                        let _ = ack.send(());
+                    }
                     None => break,
                 }
-            }
-            ack = writer.flush_rx.recv() => {
-                let Some(ack) = ack else { break };
-                // Drain everything enqueued before the flush request so the
-                // barrier really covers all prior events.
-                while let Ok(event) = writer.event_rx.try_recv() {
-                    writer.append(event);
-                }
-                let _ = ack.send(());
             }
         }
     }
     // Drain anything still queued after the senders were dropped.
-    while let Ok(event) = writer.event_rx.try_recv() {
-        writer.append(event);
+    while let Ok(command) = writer.command_rx.try_recv() {
+        match command {
+            WriterCommand::Event(event) => writer.append(*event),
+            WriterCommand::SetTitle { title, result_tx } => {
+                let _ = result_tx.send(writer.set_title(&title));
+            }
+            WriterCommand::Flush(ack) => {
+                let _ = ack.send(());
+            }
+        }
     }
-    writer.finalize_title_if_pending();
 }
 
 impl SessionWriter {
-    /// Every event is written and flushed immediately, in commit order — no
-    /// event is ever held back only in memory, so a crash right after commit
-    /// never loses it. The `meta` header's title, however, may still be a
-    /// placeholder on disk (`meta_awaiting_title` is `Some`): once the first
-    /// conversation turn completes (the first committed `Message::Assistant`
-    /// reply), the title is finalized by rewriting just that first line.
+    /// Every event is written and flushed immediately, in commit order.
     fn append(&mut self, event: StoreEvent) {
-        if self.meta_awaiting_title.is_some() && self.pending_title_source.is_none() {
-            if let StoreEvent::Message {
-                message:
-                    Message::User {
-                        content,
-                        kind: UserMessageKind::Explicit,
-                    },
-                ..
-            } = &event
-            {
-                self.pending_title_source = Some(content.clone());
-            }
-        }
         self.write_line(&event);
-        let turn_is_complete = matches!(
-            &event,
-            StoreEvent::Message {
-                message: Message::Assistant { .. },
-                ..
-            }
-        );
-        if turn_is_complete {
-            self.finalize_title_if_pending();
-        }
     }
 
-    /// If the title hasn't been finalized yet and a title source is known,
-    /// rewrite the `meta` line in place (temp file + atomic `rename()`, the
+    /// Rewrite the `meta` line in place (temp file + atomic `rename()`, the
     /// same pattern used for schema-upgrade rewrites — §4H decision 4) so it
-    /// carries the resolved title. A no-op once already finalized, and a
-    /// no-op (left for a later turn or for [`Store::resume`] to retry) if no
-    /// explicit user message has been seen yet.
-    fn finalize_title_if_pending(&mut self) {
+    /// carries the supplied generated title. A no-op once already finalized.
+    fn set_title(&mut self, title: &str) -> Result<(), StoreError> {
         let Some((mut meta, meta_line_len)) = self.meta_awaiting_title.take() else {
-            return;
+            return Ok(());
         };
-        let Some(title_source) = &self.pending_title_source else {
-            // No explicit user message seen yet (e.g. a turn that opened
-            // with only implicit/tool messages) — keep waiting.
+        let title = title.trim();
+        if title.is_empty() {
             self.meta_awaiting_title = Some((meta, meta_line_len));
-            return;
-        };
-        meta.title = title_from_first_user_message(title_source);
-        if let Err(error) = self.rewrite_meta_line(&meta, meta_line_len) {
-            tracing::error!(path = %self.path.display(), %error, "failed to finalize session title");
-            // Leave it unfinalized so a later turn, or the next resume, can
-            // retry rather than losing the title forever.
-            self.meta_awaiting_title = Some((meta, meta_line_len));
+            return Ok(());
         }
+        let title_chars = title.chars().count();
+        tracing::debug!(
+            session_id = %self.session_id,
+            stage = "persist_started",
+            title_chars,
+            "rewriting session metadata with generated title"
+        );
+        meta.title = title.chars().take(TITLE_MAX_CHARS).collect();
+        if let Err(error) = self.rewrite_meta_line(&meta, meta_line_len) {
+            tracing::error!(
+                session_id = %self.session_id,
+                path = %self.path.display(),
+                stage = "persist_failed",
+                %error,
+                "failed to persist session title"
+            );
+            self.meta_awaiting_title = Some((meta, meta_line_len));
+            return Err(StoreError::Io {
+                path: self.path.clone(),
+                source: error,
+            });
+        }
+        tracing::debug!(
+            session_id = %self.session_id,
+            stage = "persisted",
+            title_chars,
+            "session title metadata rewrite completed"
+        );
+        Ok(())
     }
 
     /// Rewrite only the file's first line (the `meta` header) to carry the
@@ -1157,7 +1340,7 @@ impl SessionWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::{AssistantStatus, Message};
+    use crate::agent::{AssistantStatus, Message, ToolCallRequest};
 
     fn read_events(path: &Path) -> Vec<StoreEvent> {
         std::fs::read_to_string(path)
@@ -1206,7 +1389,10 @@ mod tests {
         assert_eq!(meta.schema_version, SCHEMA_VERSION);
         assert_eq!(meta.session_id, session_id);
         assert_eq!(meta.project_key, project_key(temp.path()));
-        assert_eq!(meta.title, "hello store");
+        assert_eq!(
+            meta.title, "",
+            "the store does not copy conversation text into the title"
+        );
         assert!(matches!(
             &events[1],
             StoreEvent::Message { message: Message::User { content, .. }, .. } if content == "hello store"
@@ -1235,6 +1421,10 @@ mod tests {
         store.record_message(&user_message("are you still there"));
         store.flush().await;
 
+        assert!(
+            store.title_prompt().is_none(),
+            "a user message without a completed reply is not title-ready"
+        );
         let events = read_events(store.path());
         assert_eq!(events.len(), 2, "meta + the user message: {events:?}");
         let StoreEvent::Meta(meta) = &events[0] else {
@@ -1249,12 +1439,83 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resuming_a_session_that_never_got_a_reply_still_finalizes_its_title() {
+    async fn an_interrupted_assistant_reply_does_not_make_title_ready() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let chats_root = temp.path().join("chats");
+        let store = Store::create(
+            &chats_root,
+            temp.path(),
+            Uuid::new_v4(),
+            "openrouter",
+            "gpt-4o",
+        )
+        .expect("store created");
+
+        store.record_message(&user_message("unfinished question"));
+        store.record_message(&Message::Assistant {
+            content: "partial reply".to_string(),
+            status: AssistantStatus::Interrupted,
+            tool_calls: Vec::new(),
+        });
+        store.flush().await;
+
+        assert!(
+            store.title_prompt().is_none(),
+            "interrupted replies must not trigger title generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_tool_call_completion_does_not_hide_the_first_text_reply() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let chats_root = temp.path().join("chats");
+        let store = Store::create(
+            &chats_root,
+            temp.path(),
+            Uuid::new_v4(),
+            "openrouter",
+            "gpt-4o",
+        )
+        .expect("store created");
+
+        store.record_message(&user_message("count the files"));
+        store.record_message(&Message::Assistant {
+            content: String::new(),
+            status: AssistantStatus::Complete,
+            tool_calls: vec![ToolCallRequest {
+                id: Uuid::new_v4(),
+                name: "glob".to_string(),
+                arguments: serde_json::json!({"pattern": "**/*"}),
+                persisted_title_arguments: Vec::new(),
+            }],
+        });
+        assert!(
+            store.title_prompt().is_none(),
+            "an assistant tool-call envelope is not the completed text reply"
+        );
+
+        let session_id = store.session_id();
+        store.flush().await;
+        drop(store);
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let resumed = Store::resume(&chats_root, temp.path(), session_id).expect("resume succeeds");
+        resumed.record_message(&assistant_message("There are 42 files."));
+        let prompt = resumed
+            .title_prompt()
+            .expect("the first text reply should make the title ready");
+        assert!(prompt.contains("<assistant_message>\nThere are 42 files."));
+        assert!(!prompt.contains("<assistant_message>\n</assistant_message>"));
+    }
+
+    #[tokio::test]
+    async fn resuming_a_session_rebuilds_title_prompt_inputs() {
         // A prior run committed a user message and was killed before the
         // assistant replied: the title is still empty on disk. Resuming and
-        // completing the turn should finalize it, re-deriving the title
-        // source from the transcript rather than relying on in-memory state
-        // from the crashed process.
+        // completing the turn should rebuild both prompt inputs from the
+        // transcript rather than relying on in-memory state from the crashed
+        // process.
         let temp = tempfile::tempdir().expect("tempdir");
         let chats_root = temp.path().join("chats");
         let session_id = Uuid::new_v4();
@@ -1272,11 +1533,15 @@ mod tests {
         resumed.record_message(&assistant_message("late reply"));
         resumed.flush().await;
 
+        let prompt = resumed.title_prompt().expect("title prompt is ready");
+        assert!(prompt.contains("<user_message>\norphaned question"));
+        assert!(prompt.contains("<assistant_message>\nlate reply"));
+        assert!(prompt.contains("Return only one bare title"));
         let events = read_events(resumed.path());
         let StoreEvent::Meta(meta) = &events[0] else {
             panic!("first line must be the meta header, got {:?}", events[0]);
         };
-        assert_eq!(meta.title, "orphaned question");
+        assert_eq!(meta.title, "");
     }
 
     #[tokio::test]
@@ -1573,7 +1838,7 @@ mod tests {
 
         assert_eq!(summaries.len(), 2, "unreadable file skipped: {summaries:?}");
         assert_eq!(summaries[0].session_id, newer.session_id());
-        assert_eq!(summaries[0].title, "newer question");
+        assert_eq!(summaries[0].title, "");
         assert_eq!(summaries[0].provider_connection, "ollama");
         assert_eq!(summaries[0].model, "llama3");
         assert_eq!(summaries[1].session_id, older.session_id());
@@ -1756,7 +2021,10 @@ mod tests {
         let StoreEvent::Meta(meta) = &events[0] else {
             panic!("child transcript needs its own meta header")
         };
-        assert_eq!(meta.title, "summarize the module");
+        assert_eq!(
+            meta.title, "",
+            "child transcript titles are generated by the driver, not copied by the store"
+        );
         assert_eq!(meta.provider_connection, "ollama");
         assert_eq!(meta.model, "llama3");
         assert_eq!(
@@ -1951,16 +2219,47 @@ mod tests {
         );
     }
 
-    #[test]
-    fn title_from_first_user_message_is_single_line_and_bounded() {
+    #[tokio::test]
+    async fn set_title_trims_and_bounds_only_the_metadata_line() {
         let long = "x".repeat(TITLE_MAX_CHARS * 2);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let chats_root = temp.path().join("chats");
+        let store = Store::create(
+            &chats_root,
+            temp.path(),
+            Uuid::new_v4(),
+            "openrouter",
+            "gpt-4o",
+        )
+        .expect("store created");
+        store.record_message(&user_message("preserve this user message"));
+        store.record_message(&assistant_message("preserve this assistant reply"));
+        store.flush().await;
+        let events_before_title = read_events(store.path());
+        store
+            .set_title(format!("  {long}\nignored "))
+            .await
+            .expect("title rewrite succeeds");
+        let StoreEvent::Meta(meta) = &read_events(store.path())[0] else {
+            panic!("first line must be the meta header")
+        };
+        assert_eq!(meta.title.chars().count(), TITLE_MAX_CHARS);
+        assert!(meta.title.chars().all(|character| character == 'x'));
+        let events_after_title = read_events(store.path());
         assert_eq!(
-            title_from_first_user_message(&long).chars().count(),
-            TITLE_MAX_CHARS
+            events_after_title[1..],
+            events_before_title[1..],
+            "title rewrite must preserve every event after the metadata line"
         );
+        let bytes_after_first_title = std::fs::read(store.path()).expect("session file readable");
+        store
+            .set_title("a different title".to_string())
+            .await
+            .expect("idempotent title rewrite succeeds");
         assert_eq!(
-            title_from_first_user_message("  first\nsecond   third "),
-            "first second third"
+            std::fs::read(store.path()).expect("session file readable"),
+            bytes_after_first_title,
+            "a second title write must not alter the session file"
         );
     }
 

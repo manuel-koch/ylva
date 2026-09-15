@@ -39,6 +39,10 @@ pub struct ProfileConfig {
     /// falls back to `default_engine`. Phase 10 wires this at runtime.
     #[serde(default)]
     pub compact_engine: Option<String>,
+    /// Name of the isolated utility engine used for session-title generation.
+    /// When `None`, falls back to `default_engine`.
+    #[serde(default)]
+    pub utility_engine: Option<String>,
     /// Named provider connections, keyed by the connection name referenced by
     /// an engine's `provider_connection` field.
     #[serde(default)]
@@ -91,6 +95,7 @@ impl Default for ProfileConfig {
         ProfileConfig {
             default_engine: default_engine_name(),
             compact_engine: None,
+            utility_engine: None,
             provider_connections: HashMap::new(),
             engines: HashMap::new(),
             default_model: None,
@@ -229,6 +234,14 @@ impl ProfileConfig {
     /// `default_engine` (see `docs/configuration.md`).
     pub fn compact_engine_name(&self) -> &str {
         self.compact_engine
+            .as_deref()
+            .unwrap_or(self.default_engine.as_str())
+    }
+
+    /// Engine name used for utility tasks such as session-title generation:
+    /// `utility_engine` when set, else `default_engine`.
+    pub fn utility_engine_name(&self) -> &str {
+        self.utility_engine
             .as_deref()
             .unwrap_or(self.default_engine.as_str())
     }
@@ -624,6 +637,19 @@ engine = "ollama/local"
             ..ProfileConfig::default()
         };
         assert_eq!(profile.compact_engine_name(), "main");
+    }
+
+    #[test]
+    fn utility_engine_falls_back_to_default_and_honors_explicit_selection() {
+        let mut profile = ProfileConfig {
+            default_engine: "main".to_string(),
+            compact_engine: None,
+            utility_engine: None,
+            ..ProfileConfig::default()
+        };
+        assert_eq!(profile.utility_engine_name(), "main");
+        profile.utility_engine = Some("cheap".to_string());
+        assert_eq!(profile.utility_engine_name(), "cheap");
     }
 
     #[test]

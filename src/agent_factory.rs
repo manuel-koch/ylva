@@ -27,6 +27,7 @@ use crate::config::ProfileConfig;
 use crate::llm::engine::{Engine, EngineConfig, EngineRouter};
 use crate::llm::ProviderRegistry;
 use crate::sandbox::Sandbox;
+use crate::session_title::TitleAttempt;
 use crate::store::Store;
 
 /// Constructs [`AgentLoop`] instances from a named set of [`Engine`]s and a
@@ -137,6 +138,7 @@ impl AgentFactory {
         for required in [
             profile.default_engine.as_str(),
             profile.compact_engine_name(),
+            profile.utility_engine_name(),
         ] {
             anyhow::ensure!(
                 engines.contains_key(required),
@@ -154,6 +156,15 @@ impl AgentFactory {
     /// provider-connection/model.
     pub fn engine_config(&self, name: &str) -> Option<EngineConfig> {
         self.engines.get(name).map(|engine| engine.config())
+    }
+
+    /// Return the raw configured engine named by `name`.
+    ///
+    /// Unlike an [`EngineRouter`], this does not participate in active model
+    /// or provider-connection selection. Utility requests use this accessor
+    /// so they cannot mutate the conversation engine's runtime selection.
+    pub fn engine(&self, name: &str) -> Option<Arc<dyn Engine>> {
+        self.engines.get(name).cloned()
     }
 
     /// Enable persistence: every `Role::Root` agent built by this factory
@@ -386,6 +397,7 @@ impl AgentFactory {
                 let parent_store = parent_store.clone();
                 let parent_engine = parent_engine.clone();
                 let parent_engine_name = parent_engine_name.clone();
+                let utility_engine = engines.get(profile.utility_engine_name()).cloned();
                 let child_engine_name =
                     resolve_engine_name(&profile, &request.agent_type).to_string();
                 let run_id = request.run_id;
@@ -470,6 +482,7 @@ impl AgentFactory {
                         ChildTranscriptTarget {
                             parent_store,
                             engine_config: child_engine_config,
+                            utility_engine,
                         },
                     )
                     .await;
@@ -519,6 +532,9 @@ struct ChildTranscriptTarget {
     /// validation, but persisting nothing is safer than persisting a
     /// misleading empty pair.
     engine_config: Option<EngineConfig>,
+    /// The independently resolved utility engine used to title this child
+    /// transcript without routing through the child's active engine.
+    utility_engine: Option<Arc<dyn Engine>>,
 }
 
 /// Build one live engine from its configuration.
@@ -601,11 +617,20 @@ async fn write_child_transcript(
         .as_ref()
         .map(|config| (config.provider_connection.as_str(), config.model.as_str()));
     match parent_store
-        .write_child_transcript_for_run(run_id, provider_connection_and_model, context.messages())
+        .write_child_transcript_for_run_store(
+            run_id,
+            provider_connection_and_model,
+            context.messages(),
+        )
         .await
     {
-        Ok(child_session_id) => {
+        Ok(child_store) => {
+            let child_session_id = child_store.session_id();
             tracing::debug!(%child_session_id, "persisted child agent transcript");
+            if let Some(utility_engine) = &target.utility_engine {
+                let _ = TitleAttempt::default()
+                    .trigger_with_engine(child_store, utility_engine.clone());
+            }
         }
         Err(error) => {
             tracing::warn!(%error, "failed to persist child agent transcript");
@@ -1009,6 +1034,16 @@ mod tests {
     }
 
     #[test]
+    fn from_profile_rejects_an_undefined_utility_engine() {
+        let mut profile = two_engine_profile();
+        profile.utility_engine = Some("missing-utility".to_string());
+        let error = AgentFactory::from_profile(&profile)
+            .err()
+            .expect("an undefined utility engine must fail loudly");
+        assert!(error.to_string().contains("missing-utility"), "{error}");
+    }
+
+    #[test]
     fn from_profile_requires_an_api_base_url_for_an_http_provider() {
         let profile = ProfileConfig {
             default_engine: "remote".to_string(),
@@ -1210,27 +1245,41 @@ mod tests {
         let mut child_context = Context::new();
         child_context.push_user("summarize the module".to_string());
         child_context.push_assistant("the child's answer".to_string(), AssistantStatus::Complete);
+        let utility_engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+            Arc::new(MockProvider::new(
+                vec!["Child Module Summary".to_string()],
+                Duration::ZERO,
+            )),
+            test_engine_config(),
+        ));
 
         write_child_transcript(
             &ChildTranscriptTarget {
                 parent_store: Some(parent_store.clone()),
                 engine_config: Some(test_engine_config()),
+                utility_engine: Some(utility_engine),
             },
             Uuid::new_v4(),
             &child_context,
         )
         .await;
 
-        let sessions = crate::store::Store::list_sessions(&chats_root, parent_store.project_key())
-            .expect("sessions listable");
-        let child_summary = sessions
-            .iter()
-            .find(|summary| summary.session_id != parent_store.session_id())
-            .expect("the child transcript has its own session file");
-        assert_eq!(
-            child_summary.title, "summarize the module",
-            "the child session is auto-titled from its task"
-        );
+        let child_summary = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let sessions =
+                    crate::store::Store::list_sessions(&chats_root, parent_store.project_key())
+                        .expect("sessions listable");
+                if let Some(summary) = sessions.into_iter().find(|summary| {
+                    summary.session_id != parent_store.session_id()
+                        && summary.title == "Child Module Summary"
+                }) {
+                    break summary;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the child title is generated by the utility engine");
         assert_eq!(
             child_summary.parent_session,
             Some(parent_store.session_id()),
@@ -1256,6 +1305,7 @@ mod tests {
             &ChildTranscriptTarget {
                 parent_store: None,
                 engine_config: Some(test_engine_config()),
+                utility_engine: None,
             },
             Uuid::new_v4(),
             &child_context,
@@ -1340,6 +1390,7 @@ mod tests {
             ChildTranscriptTarget {
                 parent_store: None,
                 engine_config: None,
+                utility_engine: None,
             },
         )
         .await;

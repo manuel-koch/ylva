@@ -31,6 +31,7 @@ use crate::config::ProfileConfig;
 use crate::llm::engine::{EngineConfig, EngineImpl};
 use crate::llm::Provider;
 use crate::sandbox::{ApprovalCheck, Sandbox};
+use crate::session_title::TitleAttempt;
 use crate::theme::{
     ASSISTANT_STREAM_BORDER_COLOR, ERROR_COLOR, INTERRUPTED_COLOR, THINKING_BORDER_COLOR,
     TOOL_BUBBLE_BORDER_COLOR, USER_MESSAGE_BORDER_COLOR,
@@ -208,13 +209,20 @@ impl App for ConsoleApp {
         let (agent, ui_rx) = self
             .factory
             .create(&self.profile, &self.agent_type, Role::Root)?;
-        run_cli_to_with_options(
+        let title_driver = Some(TitleDriver {
+            factory: Arc::clone(&self.factory),
+            profile: self.profile.clone(),
+            attempt: TitleAttempt::default(),
+            pending_tasks: std::sync::Mutex::new(Vec::new()),
+        });
+        run_cli_to_with_title(
             agent,
             ui_rx,
             registry,
             self.prompt,
             &mut *self.writer,
             self.output_options,
+            title_driver,
         )
         .await
         .map(|_| 0u8)
@@ -388,13 +396,75 @@ pub async fn run_cli_to(
 /// [`run_cli_to`] with explicit terminal-output options.
 pub async fn run_cli_to_with_options(
     agent: AgentLoop,
-    mut ui_rx: mpsc::Receiver<UiUpdate>,
+    ui_rx: mpsc::Receiver<UiUpdate>,
     registry: Arc<ToolRegistry>,
     initial_prompt: String,
     out: &mut (dyn Write + Send),
     output_options: CliOutputOptions,
 ) -> anyhow::Result<()> {
+    run_cli_to_with_title(
+        agent,
+        ui_rx,
+        registry,
+        initial_prompt,
+        out,
+        output_options,
+        None,
+    )
+    .await
+}
+
+struct TitleDriver {
+    factory: Arc<AgentFactory>,
+    profile: ProfileConfig,
+    attempt: TitleAttempt,
+    pending_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+}
+
+impl TitleDriver {
+    fn trigger(&self, agent: &AgentLoop) {
+        if let Some(store) = agent.store() {
+            if let Some(task) =
+                self.attempt
+                    .trigger(store, Arc::clone(&self.factory), self.profile.clone())
+            {
+                self.pending_tasks
+                    .lock()
+                    .expect("title task mutex is not poisoned")
+                    .push(task);
+            }
+        }
+    }
+
+    async fn wait_for_pending_tasks(&self) {
+        let pending_tasks = std::mem::take(
+            &mut *self
+                .pending_tasks
+                .lock()
+                .expect("title task mutex is not poisoned"),
+        );
+        for task in pending_tasks {
+            if let Err(error) = task.await {
+                tracing::debug!(%error, "session title task ended unexpectedly");
+            }
+        }
+    }
+}
+
+async fn run_cli_to_with_title(
+    agent: AgentLoop,
+    mut ui_rx: mpsc::Receiver<UiUpdate>,
+    registry: Arc<ToolRegistry>,
+    initial_prompt: String,
+    out: &mut (dyn Write + Send),
+    output_options: CliOutputOptions,
+    title_driver: Option<TitleDriver>,
+) -> anyhow::Result<()> {
     let mut agent = agent;
+
+    if let Some(title_driver) = &title_driver {
+        title_driver.trigger(&agent);
+    }
 
     // Echo the user's turn before sending the request, so it appears even
     // while the provider is still connecting / retrying (the "Assistant:"
@@ -786,6 +856,9 @@ pub async fn run_cli_to_with_options(
                     writeln!(out)?;
                 }
                 if pending_spawn_call_ids.is_empty() {
+                    if let Some(title_driver) = &title_driver {
+                        title_driver.trigger(&agent);
+                    }
                     tracing::debug!(
                         "cli_driver: StreamDone with no pending spawns, ending conversation"
                     );
@@ -892,6 +965,9 @@ pub async fn run_cli_to_with_options(
         .await
         .expect("agent loop task panicked")
         .expect("agent loop returned an error");
+    if let Some(title_driver) = &title_driver {
+        title_driver.wait_for_pending_tasks().await;
+    }
     Ok(())
 }
 
