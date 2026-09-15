@@ -2922,7 +2922,7 @@ See reducer-state-handling-plan.md.
       error
 
 - [ ] `ylva init` (seeds the full standard set into `~/.ylva/`) and
-      `ylva init --project` (seeds a minimal `.ylva/profiles/default/config.toml`
+      `ylva init-project` (seeds a minimal `.ylva/profiles/default/config.toml`
       into the project root); both write-if-missing by default, `--force` reseeds.
       What standard config should be used for engine/provider/agent ?
 
@@ -2947,7 +2947,7 @@ See reducer-state-handling-plan.md.
       variable taking precedence.
 
 - [ ] Project-scoped `.env` auto-loading (e.g. `.ylva/profiles/<name>/.env`);
-      `ylva init --project` also deploys a `.gitignore` inside the project's
+      `ylva init-project` also deploys a `.gitignore` inside the project's
       `.ylva/` ignoring `.env`
 
 - [ ] Per-tool sandbox rule configuration: load configurable `[tool.*]` rule
