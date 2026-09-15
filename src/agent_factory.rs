@@ -54,6 +54,8 @@ pub struct AgentFactory {
     /// Session store handed to every `Role::Root` agent this factory builds,
     /// when persistence is enabled.
     store: Option<Store>,
+    /// Resolved `SOUL.md` text used only for newly created root contexts.
+    system_prompt: Option<String>,
 }
 
 impl AgentFactory {
@@ -65,6 +67,7 @@ impl AgentFactory {
             auto_approve_spawn: false,
             allowed_tools: DEFAULT_CLI_TOOLS.iter().map(|s| s.to_string()).collect(),
             store: None,
+            system_prompt: None,
         }
     }
 
@@ -176,6 +179,13 @@ impl AgentFactory {
         self
     }
 
+    /// Set the initial system message for root agents built by this factory.
+    /// Child agents keep their briefing-based construction unchanged.
+    pub fn with_system_prompt(mut self, system_prompt: impl Into<String>) -> Self {
+        self.system_prompt = Some(system_prompt.into());
+        self
+    }
+
     /// Enable automatic approval of `write` tool calls (no user prompt).
     pub fn with_auto_approve_write(mut self) -> Self {
         self.auto_approve_write = true;
@@ -236,6 +246,7 @@ impl AgentFactory {
             agent_type,
             role,
             self.store.clone(),
+            self.system_prompt.clone(),
             None,
         )
     }
@@ -256,6 +267,7 @@ impl AgentFactory {
         agent_type: &str,
         role: Role,
         store: Option<Store>,
+        system_prompt: Option<String>,
         inherited_engine: Option<Arc<dyn Engine>>,
     ) -> anyhow::Result<(AgentLoop, mpsc::Receiver<UiUpdate>)> {
         let engine_name = resolve_engine_name(profile, agent_type);
@@ -271,6 +283,7 @@ impl AgentFactory {
             Arc::new(EngineRouter::new(engines.clone(), engine_name)?)
         };
 
+        let is_root = matches!(&role, Role::Root);
         let child_role_config = match role {
             Role::Root => None,
             Role::Child(config) => Some(config),
@@ -324,6 +337,11 @@ impl AgentFactory {
         ));
         let (agent_loop, ui_rx) = AgentLoop::new(Arc::clone(&engine), registry);
         let mut agent_loop = agent_loop.with_configured_engine_name(engine_name);
+        if is_root {
+            if let Some(system_prompt) = system_prompt {
+                agent_loop = agent_loop.with_system_prompt(system_prompt);
+            }
+        }
 
         if let Some(child_role_config) = child_role_config {
             agent_loop = agent_loop.with_child_role(child_role_config);
@@ -431,6 +449,7 @@ impl AgentFactory {
                     &profile,
                     &request.agent_type,
                     Role::Child(child_role_config),
+                    None,
                     None,
                     inherited_engine,
                 );
@@ -1373,6 +1392,7 @@ mod tests {
             &profile,
             &request.agent_type,
             Role::Child(child_role_config),
+            None,
             None,
             None,
         )

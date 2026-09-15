@@ -4,11 +4,21 @@ Reference for Ylva's configuration files.
 
 ## Profile file
 
-One flat TOML file describes a runtime profile:
+One TOML file describes a runtime profile. Ylva resolves that file through a
+three-layer, per-file fallback chain:
 
 ```text
-~/.ylva/profiles/<profile-name>/config.toml
+<workspace-root>/.ylva/profiles/<profile-name>/config.toml
+    -> ~/.ylva/profiles/<profile-name>/config.toml
+    -> code-owned defaults for the implicit `default` profile
 ```
+
+The workspace root is discovered by walking up from the current working
+directory to the nearest ancestor containing either a `.ylva/` directory or a
+`.git` marker. A `.ylva/` directory defines a workspace-local configuration
+layer; `.git` is the repository-root fallback. When no marker exists, there is
+no workspace layer. The highest layer that defines the requested file replaces
+that file entirely; lower layers are not merged into it.
 
 An optional `~/.ylva/profiles/<profile-name>/.env` file supplies provider
 environment variables and values for `${ENV_VAR}` interpolation in
@@ -22,24 +32,23 @@ exported process variables take precedence over values from the profile file.
 - `~/.ylva` is used verbatim from the `YLVA_HOME` environment variable when
   it is set and non-empty, otherwise it is
   `${HOME}/.ylva` — see
-  [persistence](./persistence.md#relocating-the-root-with-ylva_home). The same
-  root holds the chat store.
+  [persistence](./persistence.md#relocating-the-ylva-home-with-ylva_home). The
+  same home holds the chat store.
 - A **missing** file's behavior depends on how the profile was selected:
   - **Explicit** (`--profile <name>` given): a hard error (exit code `2`)
-    naming the missing profile — the user asked for that specific profile,
-    so it is never silently substituted.
+    naming the missing profile when no project or home file exists — the user
+    asked for that specific profile, so it is never silently substituted.
   - **Implicit** (no `--profile` flag; the `default` profile): not an error —
-    Ylva falls back to an in-code default profile (one `default` agent type
-    that may spawn children, the dark theme, and no configured engines — the
-    backend then comes from the environment variables in
-    `docs/cli-options.md`), so it still runs out of the box without ever
-    writing a config file.
+    `ProfileConfig::default()` supplies one `default` agent type that may
+    spawn children, the dark theme, and no configured engines. The backend
+    then comes from the environment variables in `docs/cli-options.md`, so
+    Ylva runs out of the box without writing a config file.
 - An **unreadable or malformed** file is always a hard error (exit code `2`)
   naming the file and the parse problem, explicit or implicit; a config the
   user did write is never silently ignored.
 - Profile validation errors (for example, an engine reference that has no
   corresponding `[engines.*]` table) name the selected profile and the full
-  `config.toml` path together with the validation detail.
+  path of the resolved `config.toml` together with the validation detail.
 - Unknown keys are ignored, so a file written for a newer Ylva still loads.
 
 Example:
@@ -119,9 +128,68 @@ profile `.env` and process environment are merged. Missing variables and
 malformed references are hard startup errors; expanded secret values are never
 logged.
 
-**WIP:** The three-layer project/home/embedded fallback chain, `SOUL.md`, and
-`agents/*.md` persona sourcing are **not** implemented — they remain Phase 9
-work.
+`ylva init` writes code-owned starters (`SOUL.md` and
+`profiles/default/config.toml`) into `~/.ylva/`; it does not seed agent-type
+files. Use `ylva init --project` to seed the same default profile starter under
+the discovered workspace root. Both commands write only missing files unless
+`--force` is supplied. Global, profile-scoped, and project-scoped
+`agents/*.md` loading remains Phase 10.2 work; richer examples are documented
+below rather than shipped as repository templates.
+
+### Global persona (`SOUL.md`)
+
+`SOUL.md` defines the global persona for the top-level conversation. Its
+initial system message is resolved independently from the profile, using the
+same whole-file replacement order:
+
+```text
+<workspace-root>/.ylva/SOUL.md
+    -> ~/.ylva/SOUL.md
+    -> code-owned built-in SOUL
+```
+
+The resolved text is trimmed only at the end and becomes the first system
+message of a newly created root context. Agent-type personas are a separate
+layer: an agent type may provide its own persona and system-prompt body. In
+the planned agent-type file model, those instructions apply whenever that
+type runs as the root agent or as a child. Standalone `agents/*.md` loading
+remains Phase 10.2 work. Until that phase is implemented, child contexts
+use `Context::new()`'s code-owned fallback rather than the project/home-
+resolved value, and add their task-specific briefing. The built-in value is
+`You are Ylva, a helpful agent with tool capabilities.` and guarantees an
+out-of-the-box global persona when neither disk layer exists.
+
+### Agent-type files
+
+Agent-type files are user-authored external configuration. Phase 10.2 loads
+them from the project `.ylva/agents/`, the selected profile's `agents/`
+directory, and the global `~/.ylva/agents/` directory, with the more specific
+scope taking precedence. A type may be written as pure TOML:
+
+```toml
+allowed_tools = ["read", "search", "glob"]
+timeout_secs = 120
+can_spawn = false
+system_prompt = "Locate relevant files and explain the evidence."
+```
+
+or as Markdown with a required TOML `+++` frontmatter block:
+
+```markdown
++++
+allowed_tools = ["read", "search", "glob"]
+timeout_secs = 120
+can_spawn = false
++++
+
+Locate relevant files and explain the evidence.
+```
+
+The frontmatter supplies agent settings and the Markdown body supplies the
+system-prompt text. `research` and `code_edit` are documentation examples
+that users may copy and customize; `ylva init` does not create them. The
+code-owned `default` agent remains available when no user-authored definition
+replaces it.
 
 ## Engine configuration (`EngineConfig`)
 
@@ -167,7 +235,7 @@ A profile groups engine selection and per-agent settings for a runtime session.
 | `description` | `Option<String>` | Model-facing summary of the tasks this agent type is suited for. The root agent receives it in the `spawn_subagent` tool description. |
 | `allowed_tools` | `Option<Vec<String>>` | Restrict which tool names this agent may invoke. `None` falls back to the caller's flat default tool list (`AgentFactory::with_allowed_tools`, or `DEFAULT_CLI_TOOLS`/`DEFAULT_TUI_TOOLS` when unset). `Some(names)` is honored per `agent_type` by `AgentFactory::build`, so a distinct `agent_type` — including one used only for spawned children — can be restricted to a genuinely different tool set than the root or any other agent type. |
 | `timeout_secs` | `Option<u64>` | Maximum wall-clock seconds before the agent is cancelled. `None` means no timeout. |
-| `persona` | `Option<String>` | Optional persona instruction prepended to the system prompt. |
+| `persona` | `Option<String>` | Optional agent-type persona instruction prepended to that type's system-prompt body. It is independent of the global `SOUL.md` persona and applies when the type runs as root or child. |
 | `can_spawn` | `bool` | When `true` (and this is a `Role::Root` agent), `AgentFactory::create` registers the `spawn_subagent` tool and wires a `ChildAgentManager` so this agent may delegate self-contained tasks to a concurrently-running `Role::Child` agent (one level deep; children cannot spawn further children). Use `--auto-approve-spawn` to skip the human-approval prompt for `spawn_subagent` calls. See "Child-agent delegation" in `docs/features.md`. |
 
 Every loaded profile has a `default` agent type. If `[agents.default]` is
@@ -210,7 +278,7 @@ named glob rule (last match wins):
 | `outside_workspace` | `AutoDenied` | Any path that normalizes outside the workspace root. |
 | `dot_path` | `AutoDenied` | Any content-tool path whose relative-to-root form has a component starting with `.` (dot-files/dot-directories). `glob` enumeration may inspect dot-prefixed paths inside the workspace. |
 
-**WIP:** These two rules are not yet configurable — Phase 9 is expected to load
+**WIP:** These two rules are not yet configurable — Phase 10.3 is expected to load
 per-tool `[tool.*]` rule lists (including `outside_workspace`/`dot_path`
 overrides) from the layered TOML config; until then the defaults above apply
 uniformly to content tools. `search`'s `path: None` (cwd, never leaves the

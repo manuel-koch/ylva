@@ -46,7 +46,7 @@ use uuid::Uuid;
 
 use crate::agent::{Message, UserMessageKind};
 use crate::sandbox::SandboxContext;
-use crate::ylva_home::ylva_root;
+use crate::ylva_home::ylva_home;
 
 /// Version of the whole-file schema, written into the `meta` header. Bumped
 /// only for a semantic break that needs an upgrader (§4H decision 4).
@@ -212,14 +212,14 @@ pub struct SessionSummary {
 
 /// `~/.ylva/chats`, the production root of all persisted sessions.
 ///
-/// The `~/.ylva` root comes from [`ylva_root`], i.e. the dedicated
+/// The Ylva home comes from [`ylva_home`], i.e. the dedicated
 /// `YLVA_HOME` environment variable before the operating system's home
 /// directory. That variable is the seam an end-to-end test uses to redirect a
 /// spawned `ylva` process's persistence into a temporary directory without
 /// touching the real `HOME`.
 pub fn default_chats_root() -> Result<PathBuf, StoreError> {
-    let root = ylva_root().ok_or(StoreError::HomeDirectoryNotFound)?;
-    Ok(root.join("chats"))
+    let home = ylva_home().ok_or(StoreError::HomeDirectoryNotFound)?;
+    Ok(home.join("chats"))
 }
 
 /// Stable content hash grouping every session launched from the same physical

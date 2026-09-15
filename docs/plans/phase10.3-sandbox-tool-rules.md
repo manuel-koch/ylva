@@ -76,9 +76,9 @@ while still guaranteeing a safe default when no config is present.
   (`outside_workspace` → `AutoDenied`, `dot_path` → `AutoDenied`, with the
   existing `allow_dot_paths` bypass for `glob` enumeration preserved),
   applied via **Rust struct-literal code**, not parsed from any embedded
-  TOML file — this floor must exist unconditionally, independent of the
-  embedded `config/` tree that `phase10.1` introduces, so it can never be
-  broken by a missing/corrupted embedded resource.
+  TOML file — this floor must exist unconditionally, independent of any
+  repository configuration files, so it can never be broken by a
+  missing/corrupted resource.
 - **A tool with a `[tool.<name>]` table configured (at any layer) uses
   exactly that list — it fully replaces the default floor for that tool**,
   it does not implicitly merge with it. A user who configures `[tool.read]`
@@ -161,17 +161,18 @@ sandbox::` to confirm the current baseline passes before changing anything.
 2. [ ] Add a serde-deserializable representation for `ApprovalCheck`
        (`src/sandbox.rs` or a new `src/config/sandbox_rule.rs`): a tagged
        enum/struct such as
-       `{ verdict: "auto_approved" | "auto_denied" | "user_approval_required", reason: Option<String> }`,
+       `{ verdict: "auto_approved" | "auto_denied" | "user_approval_required",
+       reason: Option<String> }`,
        converting into `crate::sandbox::ApprovalCheck` (`AutoDenied` requires
        a `reason`; validate/default it if a config omits `reason` for
        `auto_denied`).
 3. [ ] Add a `SandboxRuleConfig` enum with two variants, both deserializing
        from one `rules` list entry:
        - `Named { rule: NamedSandboxRule, verdict: ApprovalCheckConfig }`
-         where `NamedSandboxRule` is `OutsideWorkspace | DotPath` (serde
-         string values `"outside_workspace"`/`"dot_path"`).
+       where `NamedSandboxRule` is `OutsideWorkspace | DotPath` (serde
+       string values `"outside_workspace"`/`"dot_path"`).
        - `Glob { pattern: String, verdict: ApprovalCheckConfig }` (the
-         existing custom-glob-rule shape, now config-parseable).
+       existing custom-glob-rule shape, now config-parseable).
        Use an untagged or externally-tagged serde representation that
        distinguishes the two by the presence of `rule` vs. `pattern` —
        pick whichever `serde(untagged)`/manual `Deserialize` approach reads
@@ -190,11 +191,11 @@ sandbox::` to confirm the current baseline passes before changing anything.
        `workspace_root`, `effective` path, `allow_dot_paths`), returning
        `Option<ApprovalCheck>` each. Both:
        - the **unconditional default-floor path** (no `[tool.<name>]`
-         config for this tool) calls both evaluators directly with the
-         hardcoded `AutoDenied` verdicts (today's exact behavior), and
+       config for this tool) calls both evaluators directly with the
+       hardcoded `AutoDenied` verdicts (today's exact behavior), and
        - the **named-rule config path** (`SandboxRuleConfig::Named`) calls
-         the same evaluator functions but with the *configured* verdict
-         instead of the hardcoded one.
+       the same evaluator functions but with the *configured* verdict
+       instead of the hardcoded one.
        must share the same evaluator implementation — no duplicated logic.
 6. [ ] Wire resolved per-tool rule lists from `ProfileConfig.tools` into
        `SandboxContext` construction. In `default_registry`
@@ -220,18 +221,18 @@ sandbox::` to confirm the current baseline passes before changing anything.
        before proceeding).
 9. [ ] Add new tests for the config-driven path:
        - A `[tool.read]` rule list overriding the default `dot_path` rule
-         (e.g. changing its verdict to `user_approval_required`) for `read`
-         only, leaving `write`/`edit` unaffected (still using the default
-         floor).
+       (e.g. changing its verdict to `user_approval_required`) for `read`
+       only, leaving `write`/`edit` unaffected (still using the default
+       floor).
        - A profile with no `[tool.*]` tables at all falls back to the two
-         built-in defaults for every tool (regression-confirms step 6's
-         fallback branch).
+       built-in defaults for every tool (regression-confirms step 6's
+       fallback branch).
        - A `[tool.write]` list mixing a `Named` rule and a custom `Glob`
-         rule, confirming list-order/last-match-wins evaluation across the
-         two variant kinds.
+       rule, confirming list-order/last-match-wins evaluation across the
+       two variant kinds.
        - `--auto-approve-write` still auto-approves even when `[tool.write]`
-         is configured with rules that would otherwise deny a path (catch
-         -all still wins, appended last).
+       is configured with rules that would otherwise deny a path (catch
+       -all still wins, appended last).
 10. [ ] Update `docs/configuration.md`'s "Sandbox" section: replace the
         "Phase 6 hardcodes two rules... **WIP:** These two rules are not yet
         configurable" language with documentation of the new `[tool.*]`

@@ -20,17 +20,17 @@ home directory is unavailable.
 
 | Segment | Meaning |
 | --- | --- |
-| `~/.ylva/chats` | Root of all persisted sessions. `~/.ylva` is resolved by `ylva_home::ylva_root()`: the `YLVA_HOME` environment variable, used verbatim as the root when it is set and non-empty, otherwise `<operating-system-home>/.ylva` (`dirs::home_dir()`). |
+| `~/.ylva/chats` | Root of all persisted sessions. `~/.ylva` is resolved by `ylva_home::ylva_home()`: the `YLVA_HOME` environment variable, used verbatim as the Ylva home when it is set and non-empty, otherwise `<operating-system-home>/.ylva` (`dirs::home_dir()`). |
 | `<project_key>` | SHA-256 hex digest grouping every session launched from the same physical directory — see below. |
 | `<session_id>` | The session's UUID v4. `--conversation-id <session_id>` re-attaches it. |
 
 A child agent's transcript is a session file of its own in the **same**
 `<project_key>` directory, written once when the child finishes.
 
-### Relocating the root with `YLVA_HOME`
+### Relocating the Ylva home with `YLVA_HOME`
 
 Setting `YLVA_HOME=/some/dir` makes Ylva read and write `/some/dir` directly
-— chats *and* profiles — instead of `~/.ylva`. `YLVA_HOME` names the root
+— chats *and* profiles — instead of `~/.ylva`. `YLVA_HOME` names the Ylva home
 directly, matching the convention of `CARGO_HOME`/`RUSTUP_HOME`/`GOPATH`/
 `XDG_DATA_HOME`: it is *the* Ylva home. The dedicated variable exists so
 an isolated setup (a test harness, a throwaway sandbox) can redirect Ylva's own

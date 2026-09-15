@@ -19,7 +19,7 @@
 //!
 //! Isolation comes from one `tempfile::TempDir` used as both the child
 //! process's `YLVA_HOME` (so `<tempdir>/chats` resolves inside it, since
-//! `YLVA_HOME` names the Ylva state root directly — no further `.ylva`
+//! `YLVA_HOME` names the Ylva home directly — no further `.ylva`
 //! nesting is applied when it is set) and its working directory (so the
 //! derived `project_key` is deterministic). The dedicated override is set
 //! **only** on the spawned child (`Command::env`), never on the test

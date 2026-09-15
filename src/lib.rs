@@ -20,6 +20,7 @@ pub mod cli_driver;
 pub mod config;
 pub mod events;
 pub mod highlight;
+pub mod init_command;
 pub mod llm;
 pub mod logging;
 pub mod markdown;
@@ -49,21 +50,27 @@ pub use agent::tools::{
 pub use agent::{
     AgentCommand, AgentEvent, AgentLoop, AgentMode, AssembledToolCall, AssistantStatus,
     ChildRoleConfig, Context, DeltaChunk, Message, PendingTool, Role, StreamEvent, ToolCallRequest,
-    ToolResult, UiUpdate, UserMessageKind, DEFAULT_SYSTEM_PROMPT, DEFAULT_TOOL_TIMEOUT_SECS,
-    MAX_TOOL_USE_ITERATIONS, TOOL_PROTOCOL_SYSTEM_PROMPT,
+    ToolResult, UiUpdate, UserMessageKind, DEFAULT_TOOL_TIMEOUT_SECS, MAX_TOOL_USE_ITERATIONS,
+    TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
 pub use agent_factory::AgentFactory;
 pub use app::App;
 pub use build_info::{BuildInfo, BUILD_INFO};
 pub use child_agent_manager::{ChildAgentManager, FinishResult, SpawnRequest, SpawnStatus};
 pub use cli_driver::{run_cli, run_cli_to, run_cli_to_with_options, CliOutputOptions, ConsoleApp};
+pub use config::layered::{
+    current_workspace_root, discover_workspace_root, ConfigLayer, ResolvedFile,
+};
+pub use config::soul::{load_soul, DEFAULT_SOUL};
 pub use config::{
-    default_profiles_root, load_profile_environment, profile_config_path, profile_env_path,
-    AgentConfig, ConfigError, ProfileConfig, ProviderConfig, ProviderConnectionConfig,
-    DEFAULT_PROFILE_NAME, PROFILE_CONFIG_FILE_NAME, PROFILE_ENV_FILE_NAME,
+    default_profiles_root, load_profile_environment, profile_config_path,
+    profile_config_source_path, profile_env_path, AgentConfig, ConfigError, ProfileConfig,
+    ProviderConfig, ProviderConnectionConfig, DEFAULT_PROFILE_NAME, PROFILES_DIRECTORY_NAME,
+    PROFILE_CONFIG_FILE_NAME, PROFILE_ENV_FILE_NAME,
 };
 pub use events::AppAction;
 pub use highlight::{active_theme, set_active_theme, ThemeName};
+pub use init_command::{run_init, run_init_project, InitReport};
 pub use llm::engine;
 pub use llm::engine::{
     Engine, EngineConfig, EngineDisplayInfo, EngineImpl, EngineRouter, EngineRuntimeConfig,
@@ -87,7 +94,7 @@ pub use tui_driver::TuiApp;
 pub use tui_reducer_state::{
     ActiveSubagentCounts, AppLayout, AppState, ChatArea, ChatEntry, ChatSelection, DomainEvent,
     Effect, Focus, HelpPopupLayout, InputAreaLayout, InputEvent, SlashOverlayLayout, ToolCallState,
-    TuiMode, UserMessageState,
+    TuiDisplayMetadata, TuiMode, UserMessageState,
 };
 pub use tui_render_state::TuiState;
-pub use ylva_home::{ylva_root, YLVA_HOME_ENVIRONMENT_VARIABLE};
+pub use ylva_home::{ylva_home, YLVA_DIR_NAME, YLVA_HOME_ENVIRONMENT_VARIABLE};

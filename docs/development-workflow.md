@@ -35,7 +35,7 @@ make outdated-dependencies           # cargo update --dry-run — show available
 make upgrade-dependencies            # cargo update — apply dependency upgrades to Cargo.lock
 ```
 
-The `Makefile` at the project root is the source of truth for `make` targets.
+The `Makefile` at the workspace root is the source of truth for `make` targets.
 This section is a documentation mirror — when a target is added, removed, renamed,
 or its command changes, update this section in the same commit (see
 [AGENTS](../AGENTS.md) → *Docs are part of the change set*).
@@ -198,7 +198,7 @@ the real binary instead:
   `tests/cli_version.rs` for the minimal form, and
   `tests/store_persistence_e2e.rs` for the full pattern).
 - Give it a `tempfile::TempDir` as **both** `YLVA_HOME` (`Command::env`) and its
-  working directory (`Command::current_dir`): `YLVA_HOME` names the state root
+  working directory (`Command::current_dir`): `YLVA_HOME` names the Ylva home
   directly (`<tempdir>/chats`, `<tempdir>/profiles`, and the fixed cwd makes
   any cwd-derived key deterministic. `YLVA_HOME` redirects Ylva's state and nothing else.
 - Point it at a `common::mock_llm_server::MockLlmServer` through the same

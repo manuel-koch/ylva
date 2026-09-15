@@ -1,4 +1,4 @@
-# Phase 10.2: Agent-Type Files (Global / Profile-Scoped / Project-Scoped) & Project `.env`
+# Phase 10.2: Agent-Type Files, Global SOUL Inheritance & Project `.env`
 
 Implementing agent: flip each `[ ]` to `[x]` immediately after completing that
 step and rewrite this file in place, so progress is resumable across
@@ -24,16 +24,24 @@ definitions, `~/.ylva/profiles/<name>/agents/*.md`), **6** (project-scoped
 agent-type definitions, `.ylva/agents/*.md`), and **8** (project-scoped
 `.env` auto-loading plus a seeded `.gitignore`).
 
+It also completes the global-persona inheritance contract introduced by Phase
+10.1: the resolved `SOUL.md` is automatically included in every root and
+child agent context, while each agent type contributes only its additional
+specialization.
+
 **This plan depends on** `docs/plans/phase10.1-config-layering-and-init.md`
 being implemented first: it reuses that plan's
 
 - three-layer file-resolution core (`src/config/layered.rs`,
-  `discover_project_root`),
-- embedded `config/` tree (specifically `config/agents/research.md` and
-  `config/agents/code_edit.md`, which 10.1 creates and seeds via `ylva init`
-  but does **not** wire into any runtime loader), and
+  `discover_workspace_root`), with code-owned built-in defaults rather than an
+  embedded repository configuration tree,
 - `run_init_project` function in `src/init_command.rs` (10.1), which this
   plan extends to also write a `.gitignore`.
+
+Phase 10.1 currently passes the resolved `SOUL.md` only to root loops. That is
+an implementation boundary, not the final persona semantics. This plan must
+carry the same resolved global text through the child-agent factory path so
+child agents inherit it automatically and exactly once.
 
 Read `docs/blueprint.md` §4G in full before implementing, especially
 "Agent-Type File Formats," "Profile Agent-Type Assignment & Overrides," and
@@ -47,8 +55,10 @@ Let agent-type behavior be authored once, as a standalone Markdown-with
 -frontmatter (or pure-TOML) file, shared across profiles (global scope),
 scoped to one profile, or scoped to one project — composing with the
 existing profile-inline `[agents.<type>]` TOML override mechanism instead of
-replacing it, so a team can check in shared agent personalities without
-duplicating them per profile.
+replacing it, so a team can check in shared agent specializations without
+duplicating the global Ylva identity in every type. The resolved `SOUL.md`
+forms the global baseline for every context; type-specific persona and
+system-prompt content is additive.
 
 ### Acceptance criteria
 
@@ -58,6 +68,10 @@ duplicating them per profile.
   the pure-TOML and `+++`-frontmatter-Markdown formats from
   `docs/blueprint.md` §4G "Agent-Type File Formats"), and merged into the
   same `ProfileConfig.agents` map consumed by `AgentFactory`.
+- Agent-type files are user-authored external configuration. There is no
+  embedded `config/agents/` floor: the code-owned `default` agent remains the
+  fallback required for a runnable installation, while `research` and
+  `code_edit` are documentation examples that users may copy and customize.
 - Precedence for the **same type name** appearing in more than one file
   source: **project-scoped > profile-scoped > global** (most-specific-to
   -the-current-run wins; whole-entry replace between file sources, not a
@@ -93,16 +107,25 @@ duplicating them per profile.
   (built-in file, global file, profile file, project file, or absent
   entirely for a TOML-only type). No special-casing where `persona` is
   rejected or ignored because a file-sourced body also exists.
-- A project-scoped `<project_root>/.ylva/profiles/<name>/.env` is
+- Global persona composition: the resolved `SOUL.md` text is inherited by
+  every root and child context exactly once. It is the shared identity
+  baseline, not part of the agent-type file replacement chain. The effective
+  prompt order is global SOUL, agent-type persona/body, tool protocol, and —
+  for a child — its task briefing and child-runtime constraints. An
+  agent-type definition does not need to repeat the global identity.
+- A project-scoped `<workspace_root>/.ylva/profiles/<name>/.env` is
   auto-loaded the same way the existing home-scoped one is. Precedence when
   the same variable name is defined in both: **project `.env` wins over home
   `.env`**; an already-exported process environment variable still wins
   over both (unchanged from today).
 - `run_init_project` (from `phase10.1`) is extended to also write
-  `<project_root>/.ylva/.gitignore` containing at least `.env`, so a
+  `<workspace_root>/.ylva/.gitignore` containing at least `.env`, so a
   project's committed `.ylva/` never leaks secrets.
 - `make lint`, `make test`, and `make test-coverage` all pass (≥80% line
   coverage) after the change.
+- `ylva init` does not seed agent-type files; its SOUL/profile
+  starters are defined by Phase 10.1's code-owned built-ins, and richer
+  examples live in documentation.
 - `docs/configuration.md` and the relevant `docs/blueprint.md` checkboxes
   (items 4, 5, 6, 8) are updated in the same commit as the code they
   describe.
@@ -133,6 +156,11 @@ duplicating them per profile.
   breaking the existing `persona` semantics or its TOML deserialization
   (`persona` must remain settable independently of any file source, for
   agent types with no file at all).
+- **Global SOUL is inherited, not copied into agent definitions.** The
+  resolved text is supplied once by the root factory and captured by the
+  child-agent construction closure. Root and child contexts use the same
+  global baseline; only the agent-type prompt, child briefing, and
+  role-specific runtime constraints differ.
 - **Markdown frontmatter is strict**: a `.md` agent-type file without a
   leading `+++ ... +++` block is a parse error (per blueprint §4G), not a
   silent fallback to treating the whole file as a plain prompt.
@@ -151,9 +179,12 @@ duplicating them per profile.
 First files to open: `src/config/agent.rs` (current `AgentConfig` shape),
 `src/config/profile.rs::load_file` (where inline `[agents.*]` tables are
 currently applied), and `src/config/layered.rs` (the resolution core added
-by `phase10.1`, which this plan reuses). First test to run: `cargo test
---lib config::` and `cargo test --lib agent_factory::` to confirm the
-`phase10.1` + Phase 7 baseline passes before changing anything (requires
+by `phase10.1`, which this plan reuses), followed by
+`src/agent_factory.rs::build_child_agent_manager` and
+`src/agent.rs::AgentLoop::run` (the child construction and context assembly
+paths that must inherit the global SOUL). First test to run:
+`cargo test --lib config::` and `cargo test --lib agent_factory::` to confirm
+the `phase10.1` + Phase 7 baseline passes before changing anything (requires
 `phase10.1` already merged).
 
 ## Implementation Plan
@@ -161,15 +192,15 @@ by `phase10.1`, which this plan reuses). First test to run: `cargo test
 1. [ ] Add `src/config/agent_type_file.rs` implementing the two file
        formats from `docs/blueprint.md` §4G "Agent-Type File Formats":
        - Pure TOML (`.toml`): deserializes directly into `AgentConfig` plus
-         a `system_prompt: String` field read from a top-level
-         `system_prompt` key (the format shown in blueprint's example
-         embeds it as a `"""..."""` TOML string).
+       a `system_prompt: String` field read from a top-level
+       `system_prompt` key (the format shown in blueprint's example
+       embeds it as a `"""..."""` TOML string).
        - Markdown with `+++` frontmatter (`.md`): the TOML between the
-         first and second `+++` line (each on its own line) deserializes
-         into `AgentConfig`; everything after the closing `+++` (trimmed)
-         becomes `system_prompt`. A `.md` file whose content does not start
-         with a `+++` line is a parse error (new `ConfigError` variant
-         naming the file).
+       first and second `+++` line (each on its own line) deserializes
+       into `AgentConfig`; everything after the closing `+++` (trimmed)
+       becomes `system_prompt`. A `.md` file whose content does not start
+       with a `+++` line is a parse error (new `ConfigError` variant
+       naming the file).
        Both formats produce the same output shape: `(AgentConfig,
        system_prompt: String)`, or a struct wrapping both — call it
        `AgentTypeDefinition`.
@@ -186,16 +217,15 @@ by `phase10.1`, which this plan reuses). First test to run: `cargo test
        than resolve one named file) — each of `~/.ylva/agents/`,
        `~/.ylva/profiles/<name>/agents/`, `.ylva/agents/` (when a project
        root is discovered) is scanned for `*.md`/`*.toml` files, keyed by
-       file stem = agent-type name. Also resolve the **built-in** floor for
-       exactly the three names `default`/`research`/`code_edit` via
-       `config/agents/*.md` (added in `phase10.1`), through the same
-       layered core.
+       file stem = agent-type name. Do not add an embedded agent-file floor:
+       `default` comes from the code-owned fallback, while other names exist
+       only when a user-authored file or inline profile table defines them.
 4. [ ] Implement the precedence merge: for each type name appearing in any
        source, pick the single highest-precedence file
-       (project-scoped > profile-scoped > global > built-in), producing one
+       (project-scoped > profile-scoped > global), producing one
        `AgentTypeDefinition` per name. `default` always has at least the
-       built-in floor; other names have no floor unless a file defines them
-       somewhere.
+       code-owned fallback; other names have no floor unless a file or inline
+       profile table defines them somewhere.
 5. [ ] Implement the same-scope conflict check (see Acceptance Criteria):
        after step 4 resolves each type's file-sourced definition (if any),
        check whether the *active* `config.toml`'s own layer (project or
@@ -220,64 +250,86 @@ by `phase10.1`, which this plan reuses). First test to run: `cargo test
        field overrides (`ProfileConfig::load_file` in
        `src/config/profile.rs`) — implement as a new
        `ProfileConfig::load_agent_types` helper called from `load_file`,
-       passing in the resolved project/home roots from `phase10.1`.
+       passing in the resolved workspace root and Ylva home from `phase10.1`.
        Existing field-override behaviors ("Profiles can adapt global agent
        types by overriding specific fields," "can disable," local-only
        `agents/` shadowing) continue to work unchanged on top of this
        splice.
-7. [ ] Update system-prompt/persona assembly in `src/agent_factory.rs`
-       (wherever `AgentConfig::persona` is currently read to build a child
-       or root agent's effective system prompt) so it **always prepends**
-       `persona` (when present) to the resolved `AgentConfig::system_prompt`
-       (when present), regardless of which scope/source supplied
-       `system_prompt`. When `system_prompt` is absent (a TOML-only agent
-       type with no backing file), behavior is unchanged from today
-       (`persona` alone, or neither).
+7. [ ] Update system-prompt/persona assembly across
+       `src/agent_factory.rs` and `src/agent.rs`:
+       - Always prepend `AgentConfig::persona` (when present) to the
+       resolved `AgentConfig::system_prompt` body (when present),
+       regardless of which scope/source supplied the body. When the body is
+       absent (a TOML-only agent type), preserve the existing
+       `persona`-alone / no-persona behavior.
+       - Treat the resolved `SOUL.md` text as a separate global baseline.
+       Pass it to both `Role::Root` and `Role::Child` loops, removing the
+       current root-only guard in `AgentFactory::build` and carrying the
+       same value through `build_child_agent_manager`'s spawn closure.
+       - Compose the effective context without duplication: global SOUL
+       first, then the agent-type persona/body, then the tool protocol; a
+       child additionally receives its briefing and child-runtime
+       constraints. Keep `Context::new()` as the compatibility fallback
+       for direct library/test contexts that do not have a resolved global
+       persona.
 8. [ ] Extend `load_profile_environment`/`ProfileConfig::load*`
        (`src/config.rs`, `src/config/profile.rs`) so that, when a project
-       root is discovered (via `phase10.1`'s `discover_project_root`), a
-       project-scoped `<project_root>/.ylva/profiles/<name>/.env` is also
+       root is discovered (via `phase10.1`'s `discover_workspace_root`), a
+       project-scoped `<workspace_root>/.ylva/profiles/<name>/.env` is also
        loaded and merged: project `.env` values take precedence over home
        `.env` values for the same key; an already-exported process variable
        still wins over both (unchanged).
 9. [ ] Extend `run_init_project` (`src/init_command.rs`, added in
-       `phase10.1`) to also write `<project_root>/.ylva/.gitignore`
+       `phase10.1`) to also write `<workspace_root>/.ylva/.gitignore`
        containing at least an `.env` line, using the project `.ylva/` root
        path that function already returns/exposes. Write-if-missing /
        `--force` semantics match the rest of `run_init_project`'s output.
 10. [ ] Unit/integration tests:
         - Global-only type resolves; profile-scoped type shadows a global
-          type of the same name for that profile only (unaffected in
-          another profile); project-scoped type shadows both.
+        type of the same name for that profile only (unaffected in
+        another profile); project-scoped type shadows both.
         - A `.md` file without `+++` is a load error naming the file.
         - A pure `.toml` agent-type file works (format 1 from §4G).
         - The same-scope conflict error fires for both scope tiers
-          independently (see step 5), and does not fire for the legitimate
-          cross-scope override case.
+        independently (see step 5), and does not fire for the legitimate
+        cross-scope override case.
         - `persona` is prepended to a file-sourced `system_prompt`;
-          `persona` alone still works when no file exists for that type.
+        `persona` alone still works when no file exists for that type.
         - A project-scoped `.env` value is visible for `${ENV_VAR}`
-          interpolation in the project's `config.toml`; process env still
-          wins over both project and home `.env`; project `.env` wins over
-          home `.env` for the same key.
+        interpolation in the project's `config.toml`; process env still
+        wins over both project and home `.env`; project `.env` wins over
+        home `.env` for the same key.
         - `ylva init --project` produces a `.gitignore` that ignores a
-          written `.env` file (a simple content assertion, or
-          `git check-ignore` semantics if a live git repo is set up in the
-          test).
+        written `.env` file (a simple content assertion, or
+        `git check-ignore` semantics if a live git repo is set up in the
+        test).
+        - A customized project/home `SOUL.md` is present in both a root
+        request and a child request, exactly once per context; a child does
+        not need to repeat the global identity in its agent-type definition.
+        - A root and child using the same agent type receive the same global
+        SOUL plus that type's persona/body, while the child additionally
+        receives only its own briefing and child-runtime constraints.
 11. [ ] Update `docs/configuration.md`: add an "Agent-type files
         (`agents/*.md`, `agents/*.toml`)" subsection documenting the two
         supported formats, the three discovery locations and their
         shadowing precedence, the same-scope-conflict hard error, and how
         file-based resolution composes with a profile's inline
         `[agents.<type>]` overrides (including the `persona`-always
-        -prepends rule). Update the "Profile file" / `.env` section to
-        document project-scoped `.env` and its precedence over home `.env`.
-12. [ ] Update `docs/blueprint.md` §7 Phase 10: flip checklist items 4, 5,
-        6, and 8 from `- [ ]` to `- [x]` once each is completed and
-        verified.
-13. [ ] Run `make lint`, `make test`, and `make test-coverage`; fix any
+        -prepends rule). Document that global `SOUL.md` is inherited by root
+        and child contexts, while agent-type persona/body content is
+        additive. Update the "Profile file" / `.env` section to document
+        project-scoped `.env` and its precedence over home `.env`.
+12. [ ] Update `docs/features.md` and `docs/implementation-notes.md` to
+        describe the global-SOUL → agent-type → role-specific prompt
+        composition and the fact that child contexts inherit the global SOUL
+        automatically.
+13. [ ] Update `docs/blueprint.md` §4G's persona and child-agent lifecycle
+        prose to distinguish the global SOUL baseline from agent-type
+        persona, then flip Phase 10 checklist items 4, 5, 6, and 8 in §7
+        from `- [ ]` to `- [x]` once each is completed and verified.
+14. [ ] Run `make lint`, `make test`, and `make test-coverage`; fix any
         finding before reporting this plan done.
-14. [ ] Run `rumdl fmt` on every `docs/*.md` file edited in steps 11-12.
+15. [ ] Run `rumdl fmt` on every Markdown document edited in steps 11-13.
 
 ## Implementation Hints
 
@@ -289,15 +341,26 @@ by `phase10.1`, which this plan reuses). First test to run: `cargo test
   `profile.agents: HashMap<String, AgentConfig>`) and where the in-code
   `default_agent_config()` floor is inserted
   (`profile.agents.entry(DEFAULT_PROFILE_NAME).or_insert_with(...)`) — this
-  is the exact call site step 6 must feed into *before* that entry-or
-  -insert line runs, so a file-sourced `default` (from `phase10.1`'s
-  `config/agents/default.md`) is present before the in-code fallback would
-  otherwise be needed.
+  is the exact call site step 6 must preserve: file-sourced definitions and
+  inline tables are loaded before the code-owned `default_agent_config()`
+  fallback, which remains the only built-in agent-type floor.
 - `src/agent_factory.rs::AgentFactory::create`/`build` resolve an agent
-  type's `AgentConfig` purely via `profile.agents.get(agent_type)` — no
-  change needed there beyond step 7's persona/system_prompt composition;
+  type's `AgentConfig` purely via `profile.agents.get(agent_type)`;
   `profile.agents` already being fully populated by the time `AgentFactory`
-  reads it is the entire integration point.
+  reads it is the configuration integration point. The same module currently
+  applies its optional `system_prompt` only inside an `is_root` guard, while
+  `build_child_agent_manager` passes `None` for the child build; step 7 must
+  remove that root-only restriction and capture the resolved global SOUL in
+  the child spawn closure.
+- `src/agent.rs::AgentLoop::run` already constructs a context from its
+  optional `system_prompt`, then appends a child briefing and child-runtime
+  budget message. `Context::with_system_prompt` also installs the tool
+  protocol message, so prompt assembly must preserve the documented order
+  without inserting the global SOUL twice.
+- `src/main.rs` resolves `load_soul(workspace_root)` once and supplies the
+  resulting text through `AgentFactory::with_system_prompt`; that value is
+  the global baseline to propagate to child loops, not an agent-type-specific
+  prompt.
 - `docs/blueprint.md` §4G "Agent-Type File Formats" gives both example
   formats verbatim (pure TOML with a `system_prompt = """..."""` string;
   Markdown with `+++`-delimited frontmatter and a plain-text body) — mirror
@@ -307,16 +370,16 @@ by `phase10.1`, which this plan reuses). First test to run: `cargo test
   disable (`enabled = false`), and local-only-shadowing behaviors this plan
   must not regress — read that subsection fully before changing
   `src/config/profile.rs`.
-- `phase10.1`'s `src/config/layered.rs` provides `discover_project_root`
+- `phase10.1`'s `src/config/layered.rs` provides `discover_workspace_root`
   and the single-file resolution core; this plan's step 3 needs a
   directory-enumeration variant of the same idea (list files present at
   each of the three `agents/` locations) rather than resolving one named
   file — implement it alongside the existing core, sharing its
   layer-precedence logic rather than duplicating it.
-- `phase10.1`'s `config/agents/research.md`/`config/agents/code_edit.md`
-  (embedded, seeded by `ylva init` but unused until now) are exactly the
-  files this plan's built-in floor (step 3) should resolve for those two
-  names.
+- `research` and `code_edit` are documentation examples, not built-in
+  resources. Tests should create their user-authored files in temporary
+  project, profile, or home layers and should verify that no embedded
+  agent-file fallback is required.
 - `phase10.1`'s `src/init_command.rs::run_init_project` is the function
   this plan's step 9 extends — read its signature/return type in
   `phase10.1`'s implementation before adding the `.gitignore` write, so the

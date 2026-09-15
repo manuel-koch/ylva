@@ -12,24 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Runtime profile configuration.
-//!
-//! Phase 7 loads exactly **one** flat file —
-//! `~/.ylva/profiles/<name>/config.toml` — into the structs below. There is
-//! deliberately no project-local `.ylva/` discovery, no `SOUL.md`, and no
-//! `agents/*.md` sourcing: the layered three-source chain is Phase 9 scope.
+//! Runtime profile configuration and layered configuration resolution.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::ylva_home::ylva_root;
+use crate::ylva_home::ylva_home;
 
 mod agent;
+pub mod layered;
 mod profile;
 mod provider;
+pub mod soul;
 
 pub use agent::AgentConfig;
-pub use profile::ProfileConfig;
+pub use profile::{profile_config_source_path, ProfileConfig};
 pub use provider::{ProviderConfig, ProviderConnectionConfig};
 
 /// File name of a profile's configuration inside its profile directory.
@@ -37,6 +34,9 @@ pub const PROFILE_CONFIG_FILE_NAME: &str = "config.toml";
 
 /// File name of a profile's optional environment file.
 pub const PROFILE_ENV_FILE_NAME: &str = ".env";
+
+/// Directory containing all named profile directories.
+pub const PROFILES_DIRECTORY_NAME: &str = "profiles";
 
 /// Profile used when none is named explicitly.
 pub const DEFAULT_PROFILE_NAME: &str = "default";
@@ -55,7 +55,7 @@ pub const DEFAULT_PROFILE_NAME: &str = "default";
 pub enum ConfigError {
     #[error("profile '{profile_name}' not found: no config file at {}", path.display())]
     ProfileNotFound { profile_name: String, path: PathBuf },
-    #[error("cannot read profile config at {}: {source}", path.display())]
+    #[error("cannot read configuration file at {}: {source}", path.display())]
     Unreadable {
         path: PathBuf,
         #[source]
@@ -91,11 +91,11 @@ pub enum ConfigError {
 
 /// `~/.ylva/profiles`, the production root of all profile directories.
 ///
-/// The `~/.ylva` root comes from [`ylva_root`]: the dedicated `YLVA_HOME`
+/// The Ylva home comes from [`ylva_home`]: the dedicated `YLVA_HOME`
 /// environment variable before the operating system's home directory.
 pub fn default_profiles_root() -> Result<PathBuf, ConfigError> {
-    let root = ylva_root().ok_or(ConfigError::HomeDirectoryNotFound)?;
-    Ok(root.join("profiles"))
+    let home = ylva_home().ok_or(ConfigError::HomeDirectoryNotFound)?;
+    Ok(home.join(PROFILES_DIRECTORY_NAME))
 }
 
 /// Path of one profile's configuration file.

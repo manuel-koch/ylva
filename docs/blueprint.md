@@ -1067,9 +1067,9 @@ impl Context {
 **Insertion rules (Phase 1 subset):**
 
 - `Context::new()` seeds the initial system message `Message::System { content:
-  "You are Ylva, a helpful agent with tool capabilities." }` (SSOT constant for
-  Phase 1; Phase 10 sources this from a customizable **SOUL.md**,
-  see §4G).
+  "You are Ylva, a helpful agent with tool capabilities." }` from the
+  code-owned global SOUL value; Phase 10 allows project and home
+  **SOUL.md** files to replace it, see §4G.
 - `push_user(text)` → `Message::User { content: text }`
 - `push_assistant(content, status, tool_calls)` →
   `Message::Assistant { content, status, tool_calls }`
@@ -1529,13 +1529,13 @@ Those are defined in the user's config hierarchy.
 
 ```text
 ~/.ylva/
-├── SOUL.md                     # optional persona / initial system message (built-in default)
+├── SOUL.md                     # optional persona / initial system message (code default)
 ├── agents/                     # global, shared agent-type definitions
-│   ├── research.md             # .md with +++ frontmatter (seeded format)
+│   ├── research.md             # .md with +++ frontmatter (user-authored example)
 │   └── code_edit.md
 └── profiles/
     ├── default/
-    │   └── config.toml         # default profile (always exists)
+    │   └── config.toml         # optional file; code defaults apply if absent
     ├── local/
     │   └── config.toml
     └── work/
@@ -1545,30 +1545,21 @@ Those are defined in the user's config hierarchy.
 ##### Config Source of Truth & Distribution
 
 The `~/.ylva/` layout above is the **runtime** home-directory tree. Its
-canonical contents are **maintained in the repo** as a `config/` tree that
-**mirrors this layout exactly**, and embedded into the binary via
-`include_str!`:
-
-```text
-config/                        # source of truth (versioned, embedded)
-├── agents/
-│   ├── research.md
-│   └── code_edit.md
-└── profiles/
-    └── default/
-        └── config.toml
-```
+configuration files are user-authored and may be committed to a project or
+kept in the user's home directory. Ylva owns only the code-backed built-ins:
+the global SOUL text and `ProfileConfig::default()`. Richer profile and
+agent-type examples belong in this documentation and are not repository
+configuration templates.
 
 Themes are **not** files — they are compiled into the binary and
 name-selectable (`dark | light | monokai`), not seeded into any scope (§4F).
 
 **Persona / initial system message (SOUL.md):** the initial system message of
-a chat (the root agent's persona) follows the same scopes, expressed as a
-**`SOUL.md`** in the project `.ylva/` and home `~/.ylva/` layers with a
-built-in default. It resolves through the same three-layer fallback chain
-below. Phase 1 hard-codes the default message (`"You are Ylva, a helpful agent
-with tool capabilities."`) as an SSOT constant; the SOUL.md loader replaces
-that constant's source in the config phase (§4C, §7 Phase 10).
+a chat follows the same scopes, expressed as a **`SOUL.md`** in the project
+`.ylva/` and home `~/.ylva/` layers with a code-owned built-in default. It
+resolves through the same three-layer fallback chain below. The default
+message (`"You are Ylva, a helpful agent with tool capabilities."`) is one
+SSOT value used by the loader, `Context::new()`, and `ylva init`.
 
 **Three-layer fallback chain**, resolved per-file with **whole-layer replace**
 (highest layer that defines a file wins; lower layers ignored for that file):
@@ -1576,24 +1567,26 @@ that constant's source in the config phase (§4C, §7 Phase 10).
 ```text
 project  .ylva/        (current project, cwd/git-root scope)
   → home  ~/.ylva/     (per-user, shared across projects)
-  → built-in  config/  (embedded defaults — always the guaranteed floor)
+  → built-in  code     (compiled defaults — always the guaranteed floor)
 ```
 
 - A file missing from a higher layer falls through to the next lower layer.
-- Missing everywhere is **never a hard error** — built-in always supplies the
-  standard default profile and agent types, so an empty `~/.ylva/` or a fresh
-  project still runs out of the box.
-- Project scope is discovered by walking up from cwd to the nearest ancestor
-  containing a `.ylva/` (or the project's git root).
+- The implicit `default` profile falls back to `ProfileConfig::default()` when
+  both disk layers are absent; an explicitly requested missing profile is a
+  hard error.
+- The built-in SOUL always supplies a persona, so an empty `~/.ylva/` or a
+  fresh project still has an identity out of the box.
+- Workspace scope is discovered by walking up from cwd to the nearest ancestor
+  containing a `.ylva/` or `.git` marker.
 
 **Distribution — `ylva init`:**
 
-- `ylva init` seeds the **full standard set** (default profile `config.toml`,
-  `agents/research.md`, and `agents/code_edit.md`) into `~/.ylva/`.
-- `ylva init --project` seeds **only** a minimal
-  `.ylva/profiles/default/config.toml` with placeholder values into the
-  project root. Agent types and additional profiles are added manually only
-  when the project explicitly wants to override (inheritance covers the rest).
+- `ylva init` writes only code-owned starters (`SOUL.md` and the default
+  profile `config.toml`) into `~/.ylva/`; it does not seed agent-type files.
+- `ylva init --project` seeds **only** the same
+  `.ylva/profiles/default/config.toml` starter into the workspace root. Agent
+  types and additional profiles are added manually only when the project
+  explicitly wants to override (inheritance covers the rest).
 - Both are **write-if-missing** by default; `--force` reseeds a built-in file.
 
 **Canonical paths, no synonyms:** there is exactly one location per file
@@ -1625,9 +1618,9 @@ entirely.
 ##### Agent-Type File Formats
 
 Each global agent type is defined by a file in `agents/` named after its type.
-The **built-in/seeded** types (research, code_edit) ship as Markdown with
-frontmatter (format 2 below); pure TOML remains supported for hand-authored
-files. Two formats are supported:
+The example types (research, code_edit) use Markdown with frontmatter (format
+2 below); pure TOML remains supported for hand-authored files. Two formats are
+supported:
 
 1. **Pure TOML** (`.toml`):
 
@@ -1660,11 +1653,11 @@ a parse error. The body (after the closing `+++`) becomes the `system_prompt`.
 This format is ideal for long, evolving prompts because it avoids escaped
 quotes and indentation battles.
 
-The **default** agent type is always available (seeded under
-`config/agents/default.md`, overridable like any other type). It carries a
-full tool whitelist and `can_spawn = true`, so a bare `ylva` invocation runs
-the default agent as a `Root` that can delegate. This is the single
-out-of-the-box experience.
+The **default** agent type is always available from the code-owned profile
+defaults and is overridable like any other type. It carries a full tool
+whitelist and `can_spawn = true`, so a bare `ylva` invocation runs the
+default agent as a `Root` that can delegate. This is the single out-of-the-box
+experience. `ylva init` does not seed the example agent files.
 
 ##### Engine Definitions (Model Plumbing)
 
@@ -2206,7 +2199,7 @@ the CLI args + stdout/stderr buffering. Each constructs its root `AgentLoop`
 via `AgentFactory::create(profile, agent_type, Role::Root)`, drives it, and
 returns an exit code. Constructors are not on the trait — the two modes take
 different inputs (terminal handle vs CLI flags). The root `agent_type`
-defaults to `default` (the built-in seeded type, see §4G) and is overridable
+defaults to `default` (the code-owned fallback type, see §4G) and is overridable
 via `--agent <type>` in both modes.
 
 ```rust
@@ -2791,8 +2784,8 @@ See reducer-state-handling-plan.md.
       `~/.ylva/profiles/default/config.toml`) into the existing
       `ProfileConfig`/`AgentConfig`/`EngineConfig` structs for default model,
       theme, keybindings, and agent-type engine assignments. The full `§4G`
-      three-layer fallback chain (project `.ylva/` → home `~/.ylva/` → embedded
-      `config/`), `ylva init`/`ylva init --project` distribution, `SOUL.md`
+      three-layer fallback chain (project `.ylva/` → home `~/.ylva/` → code-owned
+      built-ins), `ylva init`/`ylva init --project` distribution, `SOUL.md`
       persona loading, and global `agents/*.md` type files are **out of scope
       for Phase 7** — see Phase 10 below. Profile-scoped `.env` loading is
       implemented for the provider environment.
@@ -2916,17 +2909,19 @@ See reducer-state-handling-plan.md.
       infrastructure (engines/profiles) are both fully file-driven and
       shareable across projects/users.
 
-- [ ] Three-layer fallback chain: project `.ylva/` (cwd/git-root scope) → home
-      `~/.ylva/` (per-user) → embedded `config/` (built-in floor), resolved
-      per-file with whole-layer replace; missing everywhere is never a hard
-      error
+- [x] Three-layer fallback chain: project `.ylva/` (cwd/git-root scope) → home
+      `~/.ylva/` (per-user) → code-owned built-ins, resolved per-file with
+      whole-layer replace. The implicit default profile and global SOUL have
+      code-backed floors; an explicitly requested missing profile is a hard
+      error.
 
-- [ ] `ylva init` (seeds the full standard set into `~/.ylva/`) and
-      `ylva init --project` (seeds a minimal `.ylva/profiles/default/config.toml`
-      into the project root); both write-if-missing by default, `--force` reseeds.
-      What standard config should be used for engine/provider/agent ?
+- [x] `ylva init` (writes SOUL/profile starters into `~/.ylva/`) and
+      `ylva init --project` (seeds the same
+      `.ylva/profiles/default/config.toml` starter into the workspace root);
+      both write-if-missing by default, `--force` reseeds. Agent-type files are
+      user-authored and richer examples live in documentation.
 
-- [ ] `SOUL.md` persona / initial system message loader (project `.ylva/` and
+- [x] `SOUL.md` persona / initial system message loader (project `.ylva/` and
       home `~/.ylva/`, built-in default), replacing the Phase 1 SSOT constant's
       source per §4C/§4G
 
@@ -3230,7 +3225,7 @@ where they are documented in the body of this document.
 | **Retention/deletion**         | History kept forever (no auto-delete); explicit `ylva delete … --dry-run`; auto-compression bounds disk                                                                                        | §4H decisions 11–12                          |
 | **Message enum**               | `System`, `User`, `Assistant { content, status, tool_calls }`, `ToolResult`, `ToolError` (Q1)                                                                                               | §4B ReAct Loop                               |
 | **Context Phase 1**            | Simple `Vec<Message>`; no `buffer`, no `TieredMessage` (Q2, Q13)                                                                                                                              | §4C Context                                  |
-| **Persona / system message**   | `Context::new()` seeds `Message::System` = "You are Ylva, a helpful agent with tool capabilities." (SSOT constant); a config phase loads it from a `SOUL.md` (project `.ylva/` / home `~/.ylva/`, three-layer fallback)                                                                                      | §4C Context, §4G Config, §7 Phase 1/6        |
+| **Persona / system message**   | `Context::new()` uses the code-owned global SOUL value; project `.ylva/SOUL.md` and home `~/.ylva/SOUL.md` replace it through the three-layer fallback                                                                                      | §4C Context, §4G Config, §7 Phase 1/6        |
 | **Ollama tools validation**    | Spike required before Phase 2; fallback to native provider if `/v1` lacks tool support (Q3). **Spike 3 PASSED** — unified provider kept, no `ollama_native` fallback                                                                                                | §5 OpenRouter vs Ollama, §0 Spike 3                      |
 | **`base_url` semantics**       | `base_url` is a generic provider concept: endpoint/path interpretation lives only in the concrete provider; OpenAI compatibility never enters the `Provider` trait. `OpenAiCompatibleProvider` receives a base incl. the origin+version prefix and internally appends `/chat/completions` (Phase 2 refinement) | §4A Unified Provider Trait |
 | **HTTP retry**                 | Inside Provider; 3 retries, base 1 s, max 30 s, exponential with jitter, honoring `Retry-After`; pre-stream only (Q4)                                                                         | §4A Unified Provider Trait                   |

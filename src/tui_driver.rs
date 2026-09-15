@@ -52,8 +52,8 @@ use crate::render;
 use crate::session_title::{SessionTitleUpdate, TitleAttempt};
 use crate::tui_reducer_state::{
     engine_choice_label, matching_model_indices, model_choice_label, AppState, ConfirmKey,
-    DomainEvent, Effect, Focus, HistoryDirection, InputEvent, ModelChoice, SlashOverlay, TuiMode,
-    UserMessageState,
+    DomainEvent, Effect, Focus, HistoryDirection, InputEvent, ModelChoice, SlashOverlay,
+    TuiDisplayMetadata, TuiMode, UserMessageState,
 };
 use crate::tui_render_state::TuiState;
 use crate::ToolRegistry;
@@ -893,6 +893,7 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
     let slash_overlay_drag = app.slash_overlay_drag_selection();
     let active_subagent_counts = app.active_subagent_counts();
     TuiState {
+        display_metadata: app.display_metadata,
         parent_agent_mode: agent_mode,
         agent_mode,
         active_subagent_counts,
@@ -922,6 +923,10 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
             help_scroll_offset: app.help_popup.help_scroll_offset,
             help_scroll_x: app.help_popup.help_scroll_x,
             help_popup_rect: app.layout.help_popup.rect,
+            help_content_area: app.layout.help_popup.content_area,
+            help_rendered_lines: app.help_popup.help_rendered_lines,
+            help_selection: app.help_popup.help_selection,
+            help_drag_active: app.help_popup.help_drag_active,
         },
         clarify_banner_state: crate::tui_render_state::ClarifyBannerState {
             pending_clarify,
@@ -940,7 +945,7 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
             chat_area_height: app.conversation.chat_area_height,
             chat_area: chat_area_rect,
             chat_rendered_lines: app.conversation.chat_rendered_lines,
-            chat_rendered_line_chrome_widths: app.conversation.chat_rendered_line_chrome_widths,
+            chat_rendered_line_prefix_widths: app.conversation.chat_rendered_line_prefix_widths,
             chat_selection: app.conversation.chat_selection,
             chat_drag_active: app.conversation.chat_drag_active,
             bubble_title_rows: app.conversation.bubble_title_rows,
@@ -989,7 +994,7 @@ where
     B: Backend,
     B::Error: std::error::Error + Send + Sync + 'static,
 {
-    let title_runtime = TitleRuntime::disabled();
+    let tui_runtime = TuiRuntime::disabled();
     run_tui_with_title(
         terminal,
         agent,
@@ -997,7 +1002,7 @@ where
         initial_prompt,
         action_rx,
         clipboard,
-        title_runtime,
+        tui_runtime,
     )
     .await
 }
@@ -1022,17 +1027,19 @@ impl TitleDriver {
     }
 }
 
-struct TitleRuntime {
+struct TuiRuntime {
     driver: Option<TitleDriver>,
     update_rx: mpsc::UnboundedReceiver<SessionTitleUpdate>,
+    display_metadata: TuiDisplayMetadata,
 }
 
-impl TitleRuntime {
+impl TuiRuntime {
     fn disabled() -> Self {
         let (_update_tx, update_rx) = mpsc::unbounded_channel();
         Self {
             driver: None,
             update_rx,
+            display_metadata: TuiDisplayMetadata::default(),
         }
     }
 }
@@ -1109,7 +1116,7 @@ async fn run_tui_with_title<B>(
     initial_prompt: Option<String>,
     mut action_rx: mpsc::Receiver<AppAction>,
     clipboard: &mut dyn ClipboardSink,
-    title_runtime: TitleRuntime,
+    tui_runtime: TuiRuntime,
 ) -> anyhow::Result<TuiState>
 where
     B: Backend,
@@ -1117,11 +1124,13 @@ where
 {
     let mut agent = agent;
     let mut ui_rx = ui_rx;
-    let TitleRuntime {
+    let TuiRuntime {
         driver: title_driver,
         update_rx: mut title_update_rx,
-    } = title_runtime;
+        display_metadata,
+    } = tui_runtime;
     let mut state = AppState::new();
+    state.display_metadata = display_metadata;
     let mut textarea = TextArea::default();
     configure_textarea(&mut textarea);
     let replay_store = agent.store();
@@ -1595,6 +1604,7 @@ pub struct TuiApp {
     profile: ProfileConfig,
     agent_type: String,
     explicit_prompt: Option<String>,
+    display_metadata: TuiDisplayMetadata,
 }
 
 impl TuiApp {
@@ -1609,7 +1619,14 @@ impl TuiApp {
             profile,
             agent_type,
             explicit_prompt,
+            display_metadata: TuiDisplayMetadata::default(),
         }
+    }
+
+    /// Set the runtime identity and paths shown by the TUI.
+    pub fn with_display_metadata(mut self, display_metadata: TuiDisplayMetadata) -> Self {
+        self.display_metadata = display_metadata;
+        self
     }
 }
 
@@ -1656,9 +1673,10 @@ impl App for TuiApp {
             self.explicit_prompt,
             action_rx,
             &mut ArboardClipboard,
-            TitleRuntime {
+            TuiRuntime {
                 driver: title_driver,
                 update_rx: title_update_rx,
+                display_metadata: self.display_metadata,
             },
         )
         .await
@@ -1867,9 +1885,10 @@ mod tests {
             Some("question".to_string()),
             action_rx,
             &mut NoopClipboard,
-            TitleRuntime {
+            TuiRuntime {
                 driver: Some(title_driver),
                 update_rx: title_update_rx,
+                display_metadata: TuiDisplayMetadata::default(),
             },
         )
         .await;

@@ -60,7 +60,10 @@ fn an_explicitly_named_missing_profile_is_a_hard_error() {
 fn a_profile_validation_error_names_the_profile_config_file() {
     let ylva_home = TempDir::new().expect("tempdir");
     let profile_name = "broken";
-    let profile_directory = ylva_home.path().join("profiles").join(profile_name);
+    let profile_directory = ylva_home
+        .path()
+        .join(ylva::PROFILES_DIRECTORY_NAME)
+        .join(profile_name);
     fs::create_dir_all(&profile_directory).expect("create profile directory");
     fs::write(
         profile_directory.join("config.toml"),

@@ -4,6 +4,35 @@ Internal mechanics, module/struct/field references, and design rationale that
 back the user-facing behavior described in [features](./features.md). This
 document is for contributors working on Ylva's internals, not end users.
 
+## Layered configuration and persona assembly
+
+`config::layered` resolves each runtime-layout-relative file independently
+from the project `.ylva/` layer, the home `YLVA_HOME` layer, and the
+code-owned built-in layer. The first existing file wins without merging lower
+layers. Project discovery walks upward from the current directory, preferring
+the nearest `.ylva/` ancestor and otherwise the nearest `.git` ancestor.
+
+`ProfileConfig` passes the selected file's path into the existing TOML parser
+and environment interpolation code, so malformed or unreadable files still
+fail with the path that actually won. `ProfileConfig::default()` is the
+implicit default floor; explicit profile names still fail when no project or
+home layer defines them.
+
+`load_soul` uses the same resolver for the global `SOUL.md` persona.
+The code-owned `DEFAULT_SOUL` value is the resolver's built-in floor and is
+also used by `Context::new()` and `init_command`. `AgentFactory` stores the
+resolved text on root loops only; `AgentLoop::run` uses it for the initial
+`Context`, while child loops currently retain the same code-owned SOUL through
+`Context::new()` rather than the project/home-resolved text, and add their
+task-specific briefing.
+Agent-type personas are separate from `SOUL.md`: the same type definition is
+intended to provide its persona and system-prompt body whether it runs as a
+root or child agent. Standalone agent-type file loading and this
+role-independent prompt assembly are Phase 10.2 work. `init_command` writes
+the code-owned SOUL and shared profile starter to the home or workspace layer,
+recording written and skipped paths in `InitReport`; it does not seed
+agent-type files.
+
 ## Engine/provider runtime configuration
 
 `EngineConfig` contains the engine's immutable connection settings and the
@@ -346,13 +375,13 @@ user-facing on-disk contract; this section is the contributor view.
   `Option<Store>` remains available only to lower-level APIs and tests that
   intentionally run without persistence.
 - **`~/.ylva` resolution.** `src/ylva_home.rs` is the single source of truth for
-  the per-user root shared by `chats/` and `profiles/`: `ylva_root()` returns a
-  non-empty `YLVA_HOME` verbatim as the root, else `dirs::home_dir()` with
+  the Ylva home shared by `chats/` and `profiles/`: `ylva_home()` returns a
+  non-empty `YLVA_HOME` verbatim as the home, else `dirs::home_dir()` with
   `.ylva` appended. Its pure core,
-  `resolve_ylva_root(override_value, home_directory)`, takes both inputs as
+  `resolve_ylva_home(override_value, home_directory)`, takes both inputs as
   arguments so it is unit-testable without mutating the process environment.
   `store::default_chats_root()` and `config::default_profiles_root()` both build
-  on it and map a missing root to their own domain error.
+  on it and map a missing home to their own domain error.
 
 ## Child-agent delegation internals
 
@@ -666,7 +695,14 @@ log lines, without risking sensitive payloads in the log file.
 
 `src/render.rs` + `src/tui_widgets.rs` — `render(frame, state)` entry point.
 Writes computed geometry back to `state.layout`; delegates widget rendering
-to helpers in `tui_widgets.rs`.
+to helpers in `tui_widgets.rs`. `AppState::display_metadata` carries the
+selected runtime profile, its resolved config path, Ylva home, and workspace
+root into the startup logo and help popup. Runtime paths beneath the
+operating-system home directory are rendered with a `~` prefix; paths outside
+that directory remain absolute. The view stores the plain rendered lines and
+content geometry for both surfaces, allowing the Presenter to map mouse drags
+through centered or scrolled content and emit clipboard effects without
+coupling it to ratatui.
 
 ### Driver
 
@@ -724,6 +760,11 @@ Left-dragging within any visible slash-command overlay row selects its
 rendered text, highlights the range while dragging, and copies the selected
 text to the clipboard on release without changing the command or model
 selection.
+
+The same selection pipeline is used by the startup wordmark and help popup:
+the View records the rendered lines and geometry, while the Presenter owns
+mouse routing and emits `Effect::CopyToClipboard` on release. Help-popup
+coordinates include the current vertical and horizontal scroll offsets.
 
 Slash effects (`Effect::ClearConversation`/`ShowTools`/`ListModels`/
 `SwitchModel`) are the only ones that need the engine, so

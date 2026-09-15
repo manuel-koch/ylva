@@ -23,6 +23,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 use ratatui::Frame;
 use ratatui_textarea::TextArea;
+use std::path::Path;
 use std::time::Instant;
 
 use crate::highlight::{
@@ -124,6 +125,16 @@ const MODEL_PICKER_FOOTER_HINTS: &[FooterHint] = &[
     FooterHint::key("enter", "switch"),
     FooterHint::key("esc", "cancel"),
     FooterHint::key("F1", "help"),
+];
+const HELP_POPUP_IDLE_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("esc", "close"),
+    FooterHint::key("ctrl-c", "quit"),
+    FooterHint::key("F1", "close"),
+];
+const HELP_POPUP_BUSY_FOOTER_HINTS: &[FooterHint] = &[
+    FooterHint::key("esc", "close"),
+    FooterHint::key("ctrl-c", "cancel & quit"),
+    FooterHint::key("F1", "close"),
 ];
 const CLARIFY_FOOTER_HINTS: &[FooterHint] = &[
     FooterHint::key("enter", "answer"),
@@ -536,7 +547,17 @@ pub fn draw(
         );
     }
 
-    let button_areas = if let Some((_, name, _)) = &state.pending_approval.clone() {
+    let button_areas = if state.help_popup.show_help {
+        draw_normal_footer(
+            frame,
+            footer_row_1,
+            footer_row_2,
+            state,
+            help_popup_footer_hints(state),
+            hint,
+        );
+        None
+    } else if let Some((_, name, _)) = &state.pending_approval.clone() {
         draw_approval_footer(
             frame,
             footer_row_1,
@@ -607,6 +628,14 @@ fn footer_keybinding_hints(state: &TuiState, input_is_empty: bool) -> &'static [
     }
 }
 
+fn help_popup_footer_hints(state: &TuiState) -> &'static [FooterHint] {
+    if state.parent_agent_mode == AgentMode::Idle {
+        HELP_POPUP_IDLE_FOOTER_HINTS
+    } else {
+        HELP_POPUP_BUSY_FOOTER_HINTS
+    }
+}
+
 fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
     // Split horizontally first so all widths are derived from content_area —
     // this ensures trailing-pad spans reach the right edge of content_area
@@ -655,7 +684,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
     // with no tokens yet is not "a fresh session", it's mid-flight work, so
     // the empty-state wordmark would be misleading there.
     if state.chat_entries.is_empty() && state.child_view.child_view_bubble.is_none() {
-        append_logo(&mut lines);
+        append_logo(&mut lines, &state.display_metadata.profile_name);
     } else {
         lines.push(Line::default());
     }
@@ -837,7 +866,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
     // alongside so that terminal column indices (which include chrome) can be
     // adjusted when slicing the selection.
     let mut rendered_lines: Vec<String> = Vec::with_capacity(lines.len());
-    let mut chrome_widths: Vec<usize> = Vec::with_capacity(lines.len());
+    let mut prefix_widths: Vec<usize> = Vec::with_capacity(lines.len());
     for line in &lines {
         let raw: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         // Body content lines are `▌  ` (bar + margin = 3 chars) followed by a
@@ -856,10 +885,10 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
             .map_or(raw.len(), |(byte_pos, _)| byte_pos);
         let clean = raw[content_start_byte..].trim_end_matches(' ').to_string();
         rendered_lines.push(clean);
-        chrome_widths.push(chrome);
+        prefix_widths.push(chrome + line_alignment_offset(line, content_area.width));
     }
     state.conversation.chat_rendered_lines = rendered_lines;
-    state.conversation.chat_rendered_line_chrome_widths = chrome_widths;
+    state.conversation.chat_rendered_line_prefix_widths = prefix_widths;
 
     // Apply selection highlight to lines in the selected range.
     if let Some(sel) = state.conversation.chat_selection {
@@ -878,7 +907,13 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
                 } else {
                     usize::MAX
                 };
-                apply_selection_highlight_to_line(line, col_start, col_end, CHAT_SELECTION_BG);
+                let alignment_offset = line_alignment_offset(line, content_area.width);
+                apply_selection_highlight_to_line(
+                    line,
+                    col_start.saturating_sub(alignment_offset),
+                    col_end.saturating_sub(alignment_offset),
+                    CHAT_SELECTION_BG,
+                );
             }
         }
     }
@@ -1085,7 +1120,7 @@ fn apply_selection_highlight_to_line(
 
 /// Render the Ylva wordmark, horizontally centered. Only shown when the
 /// conversation is still empty (no messages submitted yet).
-fn append_logo(lines: &mut Vec<Line>) {
+fn append_logo(lines: &mut Vec<Line>, profile_name: &str) {
     lines.push(Line::default());
     lines.push(Line::default());
     let style = Style::default().fg(LOGO_COLOR).add_modifier(Modifier::BOLD);
@@ -1099,12 +1134,26 @@ fn append_logo(lines: &mut Vec<Line>) {
         Line::styled(build_info_text, Style::default().fg(BUILD_INFO_COLOR))
             .alignment(Alignment::Center),
     );
+    let profile_text = format!("profile: {profile_name}");
+    lines.push(
+        Line::styled(profile_text, Style::default().fg(BUILD_INFO_COLOR))
+            .alignment(Alignment::Center),
+    );
     // A blank spacer separates the wordmark block from the conversation.
     lines.push(Line::default());
 }
 
 fn terminal_display_width(text: &str) -> usize {
     Line::from(text).width()
+}
+
+fn line_alignment_offset(line: &Line<'_>, area_width: u16) -> usize {
+    let line_width = line.width();
+    match line.alignment.unwrap_or(Alignment::Left) {
+        Alignment::Left => 0,
+        Alignment::Center => (area_width as usize / 2).saturating_sub(line_width / 2),
+        Alignment::Right => (area_width as usize).saturating_sub(line_width),
+    }
 }
 
 /// Common visual scaffolding shared by every chat "bubble" renderer
@@ -3074,6 +3123,7 @@ fn draw_help_popup(frame: &mut Frame, state: &mut TuiState) {
         .padding(Padding::uniform(1));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
+    state.help_popup.help_content_area = inner;
 
     // Build content lines grouped into sections. Each section starts with a
     // heading line followed by its entries; sections are separated by a blank.
@@ -3136,6 +3186,10 @@ fn draw_help_popup(frame: &mut Frame, state: &mut TuiState) {
             ],
         },
         Section {
+            heading: "Runtime",
+            entries: &[],
+        },
+        Section {
             heading: "Build",
             entries: &[],
         },
@@ -3147,27 +3201,90 @@ fn draw_help_popup(frame: &mut Frame, state: &mut TuiState) {
             all_lines.push(Line::default());
         }
         all_lines.push(Line::styled(section.heading, heading_style));
-        if section.heading == "Build" {
-            for bi_line in BUILD_INFO.render().lines() {
-                all_lines.push(Line::from(format!("  {bi_line}")));
+        match section.heading {
+            "Runtime" => {
+                let home_directory = dirs::home_dir();
+                let runtime_entries = [
+                    ("Profile:", state.display_metadata.profile_name.clone()),
+                    (
+                        "Profile path:",
+                        state.display_metadata.profile_path.as_deref().map_or_else(
+                            || "built-in default".to_string(),
+                            |path| format_home_relative_path(path, home_directory.as_deref()),
+                        ),
+                    ),
+                    (
+                        "Ylva home:",
+                        state.display_metadata.ylva_home.as_deref().map_or_else(
+                            || "not resolved".to_string(),
+                            |path| format_home_relative_path(path, home_directory.as_deref()),
+                        ),
+                    ),
+                    (
+                        "Workspace root:",
+                        state
+                            .display_metadata
+                            .workspace_root
+                            .as_deref()
+                            .map_or_else(
+                                || "not discovered".to_string(),
+                                |path| format_home_relative_path(path, home_directory.as_deref()),
+                            ),
+                    ),
+                ];
+                let label_width = runtime_entries
+                    .iter()
+                    .map(|(label, _)| label.chars().count())
+                    .max()
+                    .unwrap_or(0);
+                for (label, value) in runtime_entries {
+                    all_lines.push(Line::from(format!("  {label:<label_width$} {value}")));
+                }
             }
-        } else {
-            // Align descriptions to the longest key within this section only,
-            // so short-key sections don't inherit padding from long-key ones.
-            let key_width = section
-                .entries
-                .iter()
-                .map(|(key, _)| key.chars().count())
-                .max()
-                .unwrap_or(0);
-            for (key, desc) in section.entries {
-                all_lines.push(Line::from(format!("  {key:<key_width$}  {desc}")));
+            "Build" => {
+                let build_entries = BUILD_INFO
+                    .render()
+                    .lines()
+                    .skip(1)
+                    .filter_map(|line| line.split_once(':'))
+                    .map(|(label, value)| (format!("{label}:"), value.trim_start().to_string()))
+                    .collect::<Vec<_>>();
+                let label_width = build_entries
+                    .iter()
+                    .map(|(label, _)| label.chars().count())
+                    .max()
+                    .unwrap_or(0);
+                for (label, value) in build_entries {
+                    all_lines.push(Line::from(format!("  {label:<label_width$} {value}")));
+                }
+            }
+            _ => {
+                // Align descriptions to the longest key within this section only,
+                // so short-key sections don't inherit padding from long-key ones.
+                let key_width = section
+                    .entries
+                    .iter()
+                    .map(|(key, _)| key.chars().count())
+                    .max()
+                    .unwrap_or(0);
+                for (key, desc) in section.entries {
+                    all_lines.push(Line::from(format!("  {key:<key_width$}  {desc}")));
+                }
             }
         }
     }
 
     let total_lines = all_lines.len();
     let max_line_width = all_lines.iter().map(|l| l.width()).max().unwrap_or(0);
+    state.help_popup.help_rendered_lines = all_lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        })
+        .collect();
 
     let viewport_height = inner.height as usize;
     let viewport_width = inner.width as usize;
@@ -3179,6 +3296,33 @@ fn draw_help_popup(frame: &mut Frame, state: &mut TuiState) {
     state.help_popup.help_scroll_x = state.help_popup.help_scroll_x.min(max_scroll_x);
     let scroll_y = state.help_popup.help_scroll_offset;
     let scroll_x = state.help_popup.help_scroll_x;
+
+    if let Some(selection) = state.help_popup.help_selection {
+        if !selection.is_empty() {
+            let (start_line, start_col, end_line, end_col) = selection.normalized();
+            for (line_index, line) in all_lines.iter_mut().enumerate() {
+                if line_index < start_line || line_index > end_line {
+                    continue;
+                }
+                let column_start = if line_index == start_line {
+                    start_col
+                } else {
+                    0
+                };
+                let column_end = if line_index == end_line {
+                    end_col
+                } else {
+                    usize::MAX
+                };
+                apply_selection_highlight_to_line(
+                    line,
+                    column_start,
+                    column_end,
+                    CHAT_SELECTION_BG,
+                );
+            }
+        }
+    }
 
     frame.render_widget(
         Paragraph::new(all_lines).scroll((scroll_y as u16, scroll_x as u16)),
@@ -3231,11 +3375,27 @@ fn draw_help_popup(frame: &mut Frame, state: &mut TuiState) {
     }
 }
 
+fn format_home_relative_path(path: &Path, home_directory: Option<&Path>) -> String {
+    let Some(home_directory) = home_directory else {
+        return path.display().to_string();
+    };
+
+    match path.strip_prefix(home_directory) {
+        Ok(relative_path) if relative_path.as_os_str().is_empty() => "~".to_string(),
+        Ok(relative_path) => Path::new("~").join(relative_path).display().to_string(),
+        Err(_) => path.display().to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{apply_selection_highlight_to_line, compute_scrollbar_thumb, plural_noun};
+    use super::{
+        apply_selection_highlight_to_line, compute_scrollbar_thumb, format_home_relative_path,
+        plural_noun,
+    };
     use crate::theme::CHAT_SELECTION_BG;
     use ratatui::text::{Line, Span};
+    use std::path::Path;
 
     fn plain_line(text: &str) -> Line<'static> {
         Line::from(vec![Span::raw(text.to_owned())])
@@ -3246,6 +3406,34 @@ mod tests {
         assert_eq!(plural_noun(1, "message", "messages"), "message");
         assert_eq!(plural_noun(0, "message", "messages"), "messages");
         assert_eq!(plural_noun(2, "message", "messages"), "messages");
+    }
+
+    #[test]
+    fn home_relative_path_uses_tilde_for_home_and_descendants() {
+        let home_directory = Path::new("/Users/manuelkoch");
+
+        assert_eq!(
+            format_home_relative_path(home_directory, Some(home_directory)),
+            "~"
+        );
+        assert_eq!(
+            format_home_relative_path(
+                Path::new("/Users/manuelkoch/workspace/artificial-intelligence/ylva"),
+                Some(home_directory),
+            ),
+            "~/workspace/artificial-intelligence/ylva"
+        );
+    }
+
+    #[test]
+    fn home_relative_path_keeps_paths_outside_home_absolute() {
+        assert_eq!(
+            format_home_relative_path(
+                Path::new("/tmp/ylva-home/profiles/default/config.toml"),
+                Some(Path::new("/Users/manuelkoch")),
+            ),
+            "/tmp/ylva-home/profiles/default/config.toml"
+        );
     }
 
     fn highlighted_in(line: &Line<'_>) -> String {

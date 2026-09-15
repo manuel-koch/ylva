@@ -23,8 +23,8 @@ use ylva::llm::ProviderRegistry;
 use ylva::{
     AgentCommand, AgentLoop, AssistantStatus, Engine, EngineConfig, EngineImpl, Message,
     OllamaProvider, OpenAiCompatibleProvider, OpenRouterProvider, Provider,
-    ProviderConnectionConfig, StreamEvent, ToolRegistry, UiUpdate, UserMessageKind,
-    DEFAULT_SYSTEM_PROMPT, TOOL_PROTOCOL_SYSTEM_PROMPT,
+    ProviderConnectionConfig, StreamEvent, ToolRegistry, UiUpdate, UserMessageKind, DEFAULT_SOUL,
+    TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
 
 use common::collect_until;
@@ -508,7 +508,7 @@ async fn agent_loop_round_trip_commits_streamed_text() {
         context.messages(),
         &[
             Message::System {
-                content: DEFAULT_SYSTEM_PROMPT.to_string(),
+                content: DEFAULT_SOUL.to_string(),
             },
             Message::System {
                 content: TOOL_PROTOCOL_SYSTEM_PROMPT.to_string(),

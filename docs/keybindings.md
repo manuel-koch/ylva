@@ -29,6 +29,8 @@ running and queued subagent counts in a compact label such as
 | `ctrl-c` (×2, same key, ≤ 2 s) | Idle, input non-empty | Quit TUI, discarding the draft |
 | `esc` | Idle | Clear input field (no quit); also dismisses a pending `ctrl-c` quit confirm |
 | `esc` | Help popup open | Close popup |
+| `ctrl-c` (×1) | Help popup open | Show the quit/cancel hint |
+| `ctrl-c` (×2, same key, ≤ 2 s) | Help popup open | Quit when idle; interrupt and quit while busy |
 | Left-click inside popup | Help popup open | No effect (stays open) |
 | Left-click outside popup | Help popup open | Close popup |
 | `enter` | Approval sub-mode | Approve tool |

@@ -27,7 +27,7 @@ use crate::agent::AgentMode;
 use crate::llm::engine::EngineDisplayInfo;
 use crate::tui_reducer_state::{
     ActiveSubagentCounts, BannerDragSelection, ChatEntry, ChatSelection, InputArea, SlashOverlay,
-    SlashOverlayLayout, ToolCallState,
+    SlashOverlayLayout, ToolCallState, TuiDisplayMetadata,
 };
 
 // ─── Per-area sub-structs ──────────────────────────────────────────────────────
@@ -55,6 +55,15 @@ pub struct HelpPopupState {
     /// `tui_widgets::draw_help_popup` for mouse click-outside-to-close hit-testing.
     /// Zero-sized when the popup isn't shown.
     pub help_popup_rect: ratatui::layout::Rect,
+    /// On-screen content rect of the Help popup, excluding its border and
+    /// padding. Used to map mouse selections to popup content coordinates.
+    pub help_content_area: ratatui::layout::Rect,
+    /// Plain text of every rendered help line, indexed before scroll offsets.
+    pub help_rendered_lines: Vec<String>,
+    /// Active or committed help-popup selection.
+    pub help_selection: Option<ChatSelection>,
+    /// True while the left mouse button is held down in the Help popup.
+    pub help_drag_active: bool,
 }
 
 /// Drill-in child-view header bubble render state.
@@ -119,7 +128,7 @@ pub struct ConversationListState {
     /// corresponding `chat_rendered_lines` entry. Zero for non-bubble lines.
     /// Used by `extract_chat_selection_text` to map terminal columns (which
     /// include the chrome) back to content columns.
-    pub chat_rendered_line_chrome_widths: Vec<usize>,
+    pub chat_rendered_line_prefix_widths: Vec<usize>,
     /// Active or committed chat selection. `None` = no selection.
     pub chat_selection: Option<ChatSelection>,
     /// True while the left mouse button is held down in the chat area (drag
@@ -150,7 +159,7 @@ impl Default for ConversationListState {
             chat_area_height: 0,
             chat_area: ratatui::layout::Rect::default(),
             chat_rendered_lines: Vec::new(),
-            chat_rendered_line_chrome_widths: Vec::new(),
+            chat_rendered_line_prefix_widths: Vec::new(),
             chat_selection: None,
             chat_drag_active: false,
             bubble_title_rows: Vec::new(),
@@ -160,6 +169,9 @@ impl Default for ConversationListState {
 }
 
 pub struct TuiState {
+    /// Runtime identity and paths displayed in the startup logo and help
+    /// popup.
+    pub display_metadata: TuiDisplayMetadata,
     /// Status of the root/parent agent loop. While a child transcript is
     /// displayed, [`Self::agent_mode`] describes that visible child instead,
     /// so the footer can still report parent activity separately.
@@ -255,6 +267,7 @@ pub struct TuiState {
 impl TuiState {
     pub fn new() -> Self {
         TuiState {
+            display_metadata: TuiDisplayMetadata::default(),
             parent_agent_mode: AgentMode::Idle,
             agent_mode: AgentMode::Idle,
             active_subagent_counts: ActiveSubagentCounts::default(),
@@ -281,6 +294,10 @@ impl TuiState {
                 help_scroll_offset: 0,
                 help_scroll_x: 0,
                 help_popup_rect: ratatui::layout::Rect::default(),
+                help_content_area: ratatui::layout::Rect::default(),
+                help_rendered_lines: Vec::new(),
+                help_selection: None,
+                help_drag_active: false,
             },
             clarify_banner_state: ClarifyBannerState {
                 pending_clarify: None,

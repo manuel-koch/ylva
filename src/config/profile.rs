@@ -13,16 +13,18 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
 use crate::highlight::ThemeName;
 use crate::llm::engine::EngineConfig;
+use crate::ylva_home::YLVA_DIR_NAME;
 
 use super::{
+    layered::{current_workspace_root, resolve_file_at_paths, ResolvedFile},
     load_profile_environment, AgentConfig, ConfigError, ProviderConnectionConfig,
-    DEFAULT_PROFILE_NAME,
+    DEFAULT_PROFILE_NAME, PROFILES_DIRECTORY_NAME, PROFILE_CONFIG_FILE_NAME,
 };
 
 /// Top-level runtime profile that groups engine selection and per-agent settings.
@@ -131,7 +133,26 @@ impl ProfileConfig {
         profile_name: &str,
         environment: &HashMap<String, String>,
     ) -> Result<ProfileConfig, ConfigError> {
-        Self::load_file(profiles_root, profile_name, environment)
+        let workspace_root = current_workspace_root();
+        Self::load_with_environment_at_workspace_root(
+            profiles_root,
+            profile_name,
+            environment,
+            workspace_root.as_deref(),
+        )
+    }
+
+    /// Load a profile using an explicitly discovered workspace root.
+    ///
+    /// The binary uses this entry point so the workspace root is discovered
+    /// once and shared with the root persona loader.
+    pub fn load_with_environment_at_workspace_root(
+        profiles_root: &Path,
+        profile_name: &str,
+        environment: &HashMap<String, String>,
+        workspace_root: Option<&Path>,
+    ) -> Result<ProfileConfig, ConfigError> {
+        Self::load_file(profiles_root, profile_name, environment, workspace_root)
     }
 
     /// Load `<profiles_root>/<profile_name>/config.toml`, falling back to
@@ -157,7 +178,24 @@ impl ProfileConfig {
         profile_name: &str,
         environment: &HashMap<String, String>,
     ) -> Result<ProfileConfig, ConfigError> {
-        match Self::load_file(profiles_root, profile_name, environment) {
+        let workspace_root = current_workspace_root();
+        Self::load_or_default_with_environment_at_workspace_root(
+            profiles_root,
+            profile_name,
+            environment,
+            workspace_root.as_deref(),
+        )
+    }
+
+    /// Load a profile with an explicitly discovered workspace root, falling back
+    /// to the in-code defaults when no file exists.
+    pub fn load_or_default_with_environment_at_workspace_root(
+        profiles_root: &Path,
+        profile_name: &str,
+        environment: &HashMap<String, String>,
+        workspace_root: Option<&Path>,
+    ) -> Result<ProfileConfig, ConfigError> {
+        match Self::load_file(profiles_root, profile_name, environment, workspace_root) {
             Ok(profile) => Ok(profile),
             Err(ConfigError::ProfileNotFound { path, .. }) => {
                 tracing::debug!(path = %path.display(), "no profile config; using defaults");
@@ -175,18 +213,19 @@ impl ProfileConfig {
         profiles_root: &Path,
         profile_name: &str,
         environment: &HashMap<String, String>,
+        workspace_root: Option<&Path>,
     ) -> Result<ProfileConfig, ConfigError> {
         let path = super::profile_config_path(profiles_root, profile_name);
-        let contents = match std::fs::read_to_string(&path) {
-            Ok(contents) => contents,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(ConfigError::ProfileNotFound {
-                    profile_name: profile_name.to_string(),
-                    path,
-                });
-            }
-            Err(source) => return Err(ConfigError::Unreadable { path, source }),
-        };
+        let resolved = resolve_profile_config_file(profiles_root, profile_name, workspace_root)?
+            .ok_or_else(|| ConfigError::ProfileNotFound {
+                profile_name: profile_name.to_string(),
+                path: path.clone(),
+            })?;
+        let ResolvedFile {
+            contents,
+            layer,
+            path,
+        } = resolved;
         let mut document: toml::Value =
             toml::from_str(&contents).map_err(|source| ConfigError::Malformed {
                 path: path.clone(),
@@ -208,6 +247,7 @@ impl ProfileConfig {
             .or_insert_with(default_agent_config);
         tracing::info!(
             path = %path.display(),
+            ?layer,
             provider_connections = profile.provider_connections.len(),
             engines = profile.engines.len(),
             agents = profile.agents.len(),
@@ -245,6 +285,40 @@ impl ProfileConfig {
             .as_deref()
             .unwrap_or(self.default_engine.as_str())
     }
+}
+
+/// Return the path of the profile configuration file selected by the same
+/// workspace/home layering used to load the profile.
+pub fn profile_config_source_path(
+    profiles_root: &Path,
+    profile_name: &str,
+    workspace_root: Option<&Path>,
+) -> Result<Option<PathBuf>, ConfigError> {
+    Ok(
+        resolve_profile_config_file(profiles_root, profile_name, workspace_root)?
+            .map(|resolved| resolved.path),
+    )
+}
+
+fn resolve_profile_config_file(
+    profiles_root: &Path,
+    profile_name: &str,
+    workspace_root: Option<&Path>,
+) -> Result<Option<ResolvedFile>, ConfigError> {
+    let relative_path = PathBuf::from(PROFILES_DIRECTORY_NAME)
+        .join(profile_name)
+        .join(PROFILE_CONFIG_FILE_NAME);
+    let home_path = profiles_root
+        .join(profile_name)
+        .join(PROFILE_CONFIG_FILE_NAME);
+    let workspace_path = workspace_root.map(|root| root.join(YLVA_DIR_NAME).join(&relative_path));
+    let built_in_path = PathBuf::from("<built-in>").join(&relative_path);
+    resolve_file_at_paths(
+        workspace_path.as_deref(),
+        Some(&home_path),
+        &built_in_path,
+        None,
+    )
 }
 
 fn interpolate_toml_strings(
@@ -539,6 +613,98 @@ api_key = "${MISSING_API_KEY}"
                 .get(DEFAULT_PROFILE_NAME)
                 .expect("a default agent type")
                 .can_spawn
+        );
+    }
+
+    #[test]
+    fn the_code_default_profile_is_the_implicit_floor() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let profiles_root = temp.path().join(PROFILES_DIRECTORY_NAME);
+        let profile = ProfileConfig::load_or_default_with_environment_at_workspace_root(
+            &profiles_root,
+            DEFAULT_PROFILE_NAME,
+            &HashMap::new(),
+            None,
+        )
+        .expect("the code default profile is used");
+
+        assert_eq!(profile.default_engine, DEFAULT_PROFILE_NAME);
+        assert!(profile.engines.is_empty());
+        assert_eq!(profile.theme, ThemeName::Dark);
+    }
+
+    #[test]
+    fn project_profile_replaces_the_home_profile_for_the_same_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home_profiles_root = temp.path().join("home").join(PROFILES_DIRECTORY_NAME);
+        let workspace_root = temp.path().join("project");
+        write_profile_config(
+            &home_profiles_root,
+            DEFAULT_PROFILE_NAME,
+            "theme = \"light\"\n",
+        );
+        let project_config = workspace_root
+            .join(".ylva")
+            .join(PROFILES_DIRECTORY_NAME)
+            .join(DEFAULT_PROFILE_NAME)
+            .join(PROFILE_CONFIG_FILE_NAME);
+        std::fs::create_dir_all(project_config.parent().expect("project config parent"))
+            .expect("mkdir");
+        std::fs::write(&project_config, "theme = \"dark\"\n").expect("write project config");
+
+        let profile = ProfileConfig::load_with_environment_at_workspace_root(
+            &home_profiles_root,
+            DEFAULT_PROFILE_NAME,
+            &HashMap::new(),
+            Some(&workspace_root),
+        )
+        .expect("the project profile loads");
+
+        assert_eq!(profile.theme, ThemeName::Dark);
+    }
+
+    #[test]
+    fn profile_config_source_path_matches_profile_layer_precedence() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home_profiles_root = temp.path().join("home").join(PROFILES_DIRECTORY_NAME);
+        let workspace_root = temp.path().join("project");
+        write_profile_config(
+            &home_profiles_root,
+            DEFAULT_PROFILE_NAME,
+            "theme = \"light\"\n",
+        );
+        let workspace_config = workspace_root
+            .join(YLVA_DIR_NAME)
+            .join(PROFILES_DIRECTORY_NAME)
+            .join(DEFAULT_PROFILE_NAME)
+            .join(PROFILE_CONFIG_FILE_NAME);
+        std::fs::create_dir_all(workspace_config.parent().expect("workspace config parent"))
+            .expect("mkdir");
+        std::fs::write(&workspace_config, "theme = \"dark\"\n").expect("write workspace config");
+
+        assert_eq!(
+            profile_config_source_path(
+                &home_profiles_root,
+                DEFAULT_PROFILE_NAME,
+                Some(&workspace_root)
+            )
+            .expect("resolve workspace profile path"),
+            Some(workspace_config.clone())
+        );
+
+        std::fs::remove_file(&workspace_config).expect("remove workspace config");
+        assert_eq!(
+            profile_config_source_path(
+                &home_profiles_root,
+                DEFAULT_PROFILE_NAME,
+                Some(&workspace_root)
+            )
+            .expect("resolve home profile path"),
+            Some(
+                home_profiles_root
+                    .join(DEFAULT_PROFILE_NAME)
+                    .join(PROFILE_CONFIG_FILE_NAME)
+            )
         );
     }
 

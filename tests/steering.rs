@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use ylva::{
     AgentCommand, AgentLoop, AssistantStatus, EngineImpl, Message, MockProvider, ToolRegistry,
-    UiUpdate, UserMessageKind, DEFAULT_SYSTEM_PROMPT, TOOL_PROTOCOL_SYSTEM_PROMPT,
+    UiUpdate, UserMessageKind, DEFAULT_SOUL, TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
 
 use common::collect_until;
@@ -103,7 +103,7 @@ async fn steer_is_injected_at_natural_point_without_cancelling_stream() {
         context.messages(),
         &[
             Message::System {
-                content: DEFAULT_SYSTEM_PROMPT.to_string(),
+                content: DEFAULT_SOUL.to_string(),
             },
             Message::System {
                 content: TOOL_PROTOCOL_SYSTEM_PROMPT.to_string(),

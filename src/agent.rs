@@ -544,10 +544,6 @@ pub enum Message {
     },
 }
 
-/// config phase (Phase 9 §4G layering) may source this from a SOUL.md file
-/// without changing call sites.
-pub const DEFAULT_SYSTEM_PROMPT: &str = "You are Ylva, a helpful agent with tool capabilities.";
-
 /// Prefix marking an asynchronous, out-of-band harness notice (e.g. "a
 /// spawned subagent finished") sent via `Context::push_async_harness_notice`
 /// as a `role:"user"` message rather than `role:"system"`. Not every
@@ -597,11 +593,16 @@ pub struct Context {
 
 impl Context {
     pub fn new() -> Self {
+        Self::with_system_prompt(crate::config::soul::DEFAULT_SOUL)
+    }
+
+    /// Construct a context with a caller-supplied initial system message.
+    pub fn with_system_prompt(system_prompt: impl Into<String>) -> Self {
         Context {
             store: None,
             messages: vec![
                 Message::System {
-                    content: DEFAULT_SYSTEM_PROMPT.to_string(),
+                    content: system_prompt.into(),
                 },
                 Message::System {
                     content: TOOL_PROTOCOL_SYSTEM_PROMPT.to_string(),
@@ -613,9 +614,10 @@ impl Context {
     /// Attach a session store, so every message committed from here on is
     /// also appended to the session file.
     ///
-    /// The two system prompts installed by [`Context::new`] are deliberately
-    /// not persisted: they are rebuilt from the running binary on every
-    /// resume, so storing them would pin a stale copy into the transcript.
+    /// The two system prompts installed by [`Context::new`] or
+    /// [`Context::with_system_prompt`] are deliberately not persisted: they
+    /// are rebuilt from the running binary on every resume, so storing them
+    /// would pin a stale copy into the transcript.
     pub fn set_store(&mut self, store: Store) {
         match Store::read_messages(store.path()) {
             Ok(messages) => self.hydrate(messages),
@@ -1002,6 +1004,9 @@ pub struct AgentLoop {
     /// Set via [`AgentLoop::with_child_role`]; injected as an extra system
     /// message ahead of the child's task.
     briefing: Option<String>,
+    /// Root-only initial system message loaded from `SOUL.md`. Child loops
+    /// leave this unset and retain [`Context::new`]'s compatibility prompt.
+    system_prompt: Option<String>,
     /// Set via [`AgentLoop::with_child_role`] from `config.run_id` for a
     /// `Role::Child` agent; `None` for `Role::Root`. Stamped onto every
     /// `UiUpdate::ToolPending`/`ClarifyPending` this loop emits so the root
@@ -1072,6 +1077,7 @@ impl AgentLoop {
             agent_rx: Some(agent_rx),
             parent_cancel: None,
             briefing: None,
+            system_prompt: None,
             own_run_id: None,
             child_agent_manager: None,
             finish_rx: None,
@@ -1101,6 +1107,12 @@ impl AgentLoop {
         self.parent_cancel = Some(config.parent_cancel);
         self.briefing = config.briefing;
         self.own_run_id = Some(config.run_id);
+        self
+    }
+
+    /// Set the root agent's initial system message.
+    pub fn with_system_prompt(mut self, system_prompt: impl Into<String>) -> Self {
+        self.system_prompt = Some(system_prompt.into());
         self
     }
 
@@ -1192,6 +1204,7 @@ impl AgentLoop {
             .expect("AgentLoop run() must not be called more than once");
         let parent_cancel = self.parent_cancel.take();
         let briefing = self.briefing.take();
+        let system_prompt = self.system_prompt.clone();
         let own_run_id = self.own_run_id.take();
         let mut child_agent_manager = self.child_agent_manager.take();
         let mut finish_rx = self.finish_rx.take();
@@ -1216,7 +1229,10 @@ impl AgentLoop {
         let is_child = parent_cancel.is_some();
 
         tokio::spawn(async move {
-            let mut context = Context::new();
+            let mut context = match system_prompt.as_deref() {
+                Some(system_prompt) => Context::with_system_prompt(system_prompt),
+                None => Context::new(),
+            };
             if let Some(store) = store {
                 context.set_store(store);
             }
@@ -2223,7 +2239,12 @@ impl AgentLoop {
                                 }
                             }
                             AgentCommand::ClearContext => {
-                                let mut fresh_context = Context::new();
+                                let mut fresh_context = match system_prompt.as_deref() {
+                                    Some(system_prompt) => {
+                                        Context::with_system_prompt(system_prompt)
+                                    }
+                                    None => Context::new(),
+                                };
                                 if let Some(store) = &store_for_commands {
                                     let config = engine.config();
                                     match store.start_new_session(
@@ -3165,13 +3186,26 @@ mod tests {
             context.messages(),
             &[
                 Message::System {
-                    content: DEFAULT_SYSTEM_PROMPT.to_string(),
+                    content: crate::config::soul::DEFAULT_SOUL.to_string(),
                 },
                 Message::System {
                     content: TOOL_PROTOCOL_SYSTEM_PROMPT.to_string(),
                 },
             ]
         );
+    }
+
+    #[test]
+    fn session_can_begin_with_a_caller_supplied_system_message() {
+        let context = Context::with_system_prompt("project persona");
+
+        assert_eq!(
+            context.messages()[0],
+            Message::System {
+                content: "project persona".to_string(),
+            }
+        );
+        assert!(matches!(context.messages()[1], Message::System { .. }));
     }
 
     #[test]

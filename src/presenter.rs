@@ -88,6 +88,7 @@ fn keyboard_help(state: &mut AppState, event: InputEvent) -> Vec<Effect> {
             state.focus = Focus::MainInput;
             state.help_popup.help_scroll_offset = 0;
             state.help_popup.help_scroll_x = 0;
+            state.clear_help_selection();
             vec![]
         }
         InputEvent::SigInt => vec![Effect::StopAgent],
@@ -162,6 +163,7 @@ fn keyboard_approval(
         InputEvent::KeyInput(key_event) => vec![Effect::TextareaKey(key_event)],
         InputEvent::ShowHelp => {
             state.focus = Focus::HelpPopup;
+            state.clear_help_selection();
             vec![]
         }
         InputEvent::Paste(text) => vec![Effect::Paste(text)],
@@ -179,6 +181,7 @@ fn keyboard_main(
     match event {
         InputEvent::ShowHelp => {
             state.focus = Focus::HelpPopup;
+            state.clear_help_selection();
             vec![]
         }
         InputEvent::SigInt => vec![Effect::StopAgent],
@@ -356,6 +359,7 @@ fn keyboard_clarify(
     match event {
         InputEvent::ShowHelp => {
             state.focus = Focus::HelpPopup;
+            state.clear_help_selection();
             vec![]
         }
         InputEvent::SigInt => vec![Effect::StopAgent],
@@ -822,6 +826,18 @@ fn route_mouse(
                     state.focus = Focus::MainInput;
                     state.help_popup.help_scroll_offset = 0;
                     state.help_popup.help_scroll_x = 0;
+                    state.clear_help_selection();
+                } else if let Some((line, column)) = state.help_popup_content_position(column, row)
+                {
+                    state.help_popup.help_selection = Some(ChatSelection {
+                        anchor_line: line,
+                        anchor_col: column,
+                        cursor_line: line,
+                        cursor_col: column,
+                    });
+                    state.help_popup.help_drag_active = true;
+                } else {
+                    state.clear_help_selection();
                 }
                 return vec![];
             }
@@ -938,6 +954,15 @@ fn route_mouse(
                 state.slash_overlay_drag_end = Some((column, row));
                 return vec![];
             }
+            if state.help_popup.help_drag_active {
+                if let Some((line, column)) = state.help_popup_drag_position(column, row) {
+                    if let Some(selection) = state.help_popup.help_selection.as_mut() {
+                        selection.cursor_line = line;
+                        selection.cursor_col = column;
+                    }
+                }
+                return vec![];
+            }
             // Banner drag: update the highlight endpoint; suppress input selection.
             if state
                 .clarify_banner_state
@@ -1024,6 +1049,16 @@ fn route_mouse(
                                 return vec![Effect::SetInputText(choice_text.clone())];
                             }
                         }
+                    }
+                }
+                return vec![];
+            }
+
+            if state.help_popup.help_drag_active {
+                state.help_popup.help_drag_active = false;
+                if let Some(text) = state.extract_help_selection_text() {
+                    if !text.is_empty() {
+                        return vec![Effect::CopyToClipboard(text)];
                     }
                 }
                 return vec![];
@@ -4185,6 +4220,48 @@ mod tests {
         assert!(
             !state.conversation.chat_drag_active,
             "drag should be cleared"
+        );
+    }
+
+    #[test]
+    fn help_popup_drag_mouse_up_emits_copy_to_clipboard_effect() {
+        let mut state = AppState::new();
+        state.focus = Focus::HelpPopup;
+        state.layout.help_popup.rect = ratatui::layout::Rect::new(8, 3, 24, 6);
+        state.layout.help_popup.content_area = ratatui::layout::Rect::new(10, 5, 20, 3);
+        state.help_popup.help_rendered_lines = vec!["hello world".to_string()];
+
+        let mouse_down = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 10,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        };
+        update(&mut state, TuiEvent::Mouse(mouse_down), &empty_textarea());
+        let mouse_drag = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            column: 15,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        };
+        update(&mut state, TuiEvent::Mouse(mouse_drag), &empty_textarea());
+        let mouse_up = crossterm::event::MouseEvent {
+            kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: 15,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        };
+        let effects = update(&mut state, TuiEvent::Mouse(mouse_up), &empty_textarea());
+
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::CopyToClipboard(text) if text == "hello")),
+            "expected CopyToClipboard(\"hello\"), got {effects:?}"
+        );
+        assert!(
+            !state.help_popup.help_drag_active,
+            "help popup drag should be cleared"
         );
     }
 

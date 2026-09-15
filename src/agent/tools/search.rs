@@ -708,7 +708,7 @@ mod tests {
     #[test]
     fn search_tool_workspace_path_is_auto_approved() {
         let tool = SearchTool::default();
-        // cwd in tests is the project root; src/ is inside the workspace.
+        // cwd in tests is the workspace root; src/ is inside the workspace.
         let args = serde_json::json!({ "pattern": "fn main", "path": "src" });
         assert!(matches!(
             tool.needs_approval(&args),

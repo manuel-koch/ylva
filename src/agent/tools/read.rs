@@ -416,7 +416,7 @@ mod tests {
         let tool = ReadTool::default();
         let args = serde_json::json!({ "path": "src/main.rs" });
         // Phase 6.0: reads inside the workspace are auto-approved by the sandbox;
-        // the cwd is the project root in tests, so "src/main.rs" is in-workspace.
+        // the cwd is the workspace root in tests, so "src/main.rs" is in-workspace.
         assert!(matches!(
             tool.needs_approval(&args),
             crate::sandbox::ApprovalCheck::AutoApproved

@@ -693,24 +693,24 @@ async fn drag_in_chat_area_selects_text() {
     // Let the TUI render at least one frame so chat_area is set.
     tokio::time::sleep(Duration::from_millis(30)).await;
 
-    // Simulate a mouse-down in the chat area (row 5, column 5).
+    // Simulate a mouse-down over visible wordmark text (row 5).
     send(
         &action_tx,
         AppAction::MouseInput(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: 5,
+            column: 25,
             row: 5,
             modifiers: crossterm::event::KeyModifiers::NONE,
         }),
     )
     .await;
 
-    // Simulate a drag to column 15 on the same row.
+    // Simulate a drag to column 35 on the same row.
     send(
         &action_tx,
         AppAction::MouseInput(MouseEvent {
             kind: MouseEventKind::Drag(MouseButton::Left),
-            column: 15,
+            column: 35,
             row: 5,
             modifiers: crossterm::event::KeyModifiers::NONE,
         }),
@@ -722,7 +722,7 @@ async fn drag_in_chat_area_selects_text() {
         &action_tx,
         AppAction::MouseInput(MouseEvent {
             kind: MouseEventKind::Up(MouseButton::Left),
-            column: 15,
+            column: 35,
             row: 5,
             modifiers: crossterm::event::KeyModifiers::NONE,
         }),
@@ -1156,6 +1156,93 @@ fn footer_renders_bold_keys_with_normal_action_text_and_separators() {
             "separator cell at column {column} should not be bold"
         );
     }
+}
+
+#[test]
+fn help_popup_footer_shows_popup_controls_instead_of_input_controls() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_widgets;
+    use ylva::TuiState;
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 20)).expect("terminal");
+    let mut state = TuiState::new();
+    state.help_popup.show_help = true;
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("draw");
+
+    let rendered: String = (0..20u16)
+        .flat_map(|row| (0..120u16).map(move |column| (column, row)))
+        .map(|(column, row)| {
+            terminal
+                .backend()
+                .buffer()
+                .cell((column, row))
+                .unwrap()
+                .symbol()
+                .to_string()
+        })
+        .collect();
+    assert!(
+        rendered.contains("esc close · ctrl-c quit · F1 close"),
+        "help popup footer should advertise popup controls: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("enter send"),
+        "help popup footer must not advertise sending: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("esc clear draft"),
+        "help popup footer must not advertise clearing the draft: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("scroll"),
+        "help popup footer must not advertise cursor or scroll controls: {rendered:?}"
+    );
+}
+
+#[test]
+fn busy_help_popup_footer_shows_cancel_and_quit() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_widgets;
+    use ylva::{AgentMode, TuiState};
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 20)).expect("terminal");
+    let mut state = TuiState::new();
+    state.help_popup.show_help = true;
+    state.parent_agent_mode = AgentMode::Streaming;
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("draw");
+
+    let rendered: String = (0..20u16)
+        .flat_map(|row| (0..120u16).map(move |column| (column, row)))
+        .map(|(column, row)| {
+            terminal
+                .backend()
+                .buffer()
+                .cell((column, row))
+                .unwrap()
+                .symbol()
+                .to_string()
+        })
+        .collect();
+    assert!(
+        rendered.contains("esc close · ctrl-c cancel & quit · F1 close"),
+        "busy help popup footer should advertise cancellation and quit: {rendered:?}"
+    );
 }
 
 #[test]
@@ -2403,5 +2490,285 @@ async fn click_outside_help_popup_closes_it() {
     assert!(
         !state.help_popup.show_help,
         "click outside the help popup must close it"
+    );
+}
+
+#[test]
+fn dragging_across_logo_build_lines_copies_version_and_profile() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::{
+        presenter, render, AppState, Effect, TextareaContext, TuiDisplayMetadata, TuiEvent,
+        BUILD_INFO,
+    };
+
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    let mut state = AppState::new();
+    state.display_metadata = TuiDisplayMetadata {
+        profile_name: "work".to_string(),
+        ..TuiDisplayMetadata::default()
+    };
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            render::render(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("draw");
+
+    let buffer = terminal.backend().buffer().clone();
+    let rows: Vec<String> = (0..30u16)
+        .map(|row| {
+            (0..100u16)
+                .map(|column| buffer.cell((column, row)).unwrap().symbol().to_string())
+                .collect()
+        })
+        .collect();
+    let version_line = format!("v{}  {}", BUILD_INFO.version, BUILD_INFO.git_commit);
+    let version_row = rows
+        .iter()
+        .position(|row| row.contains(&version_line))
+        .expect("version line should be rendered");
+    let profile_row = rows
+        .iter()
+        .position(|row| row.contains("profile: work"))
+        .expect("profile line should be rendered");
+    let version_column = rows[version_row]
+        .find(&version_line)
+        .expect("version line start should be visible") as u16;
+    let profile_end_column = (rows[profile_row]
+        .find("profile: work")
+        .expect("profile line start should be visible")
+        + "profile: work".len()) as u16;
+
+    let textarea_context = TextareaContext {
+        is_empty: true,
+        text: String::new(),
+        cursor_row: 0,
+        cursor_row_is_last: true,
+    };
+    presenter::update(
+        &mut state,
+        TuiEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: version_column,
+            row: version_row as u16,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }),
+        &textarea_context,
+    );
+    presenter::update(
+        &mut state,
+        TuiEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: profile_end_column,
+            row: profile_row as u16,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }),
+        &textarea_context,
+    );
+    let effects = presenter::update(
+        &mut state,
+        TuiEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: profile_end_column,
+            row: profile_row as u16,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }),
+        &textarea_context,
+    );
+
+    let expected = format!(
+        "v{}  {}\nprofile: work",
+        BUILD_INFO.version, BUILD_INFO.git_commit
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::CopyToClipboard(text) if text == &expected)),
+        "dragging the logo should copy both build lines without alignment padding: {effects:?}"
+    );
+}
+
+#[test]
+fn startup_logo_shows_selected_runtime_profile() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::{tui_widgets, TuiDisplayMetadata, TuiState};
+
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    let mut state = TuiState {
+        display_metadata: TuiDisplayMetadata {
+            profile_name: "work".to_string(),
+            ..TuiDisplayMetadata::default()
+        },
+        ..TuiState::new()
+    };
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("draw");
+
+    let buffer = terminal.backend().buffer().clone();
+    let rendered: String = (0..24u16)
+        .flat_map(|row| (0..80u16).map(move |column| (column, row)))
+        .map(|(column, row)| buffer.cell((column, row)).unwrap().symbol().to_string())
+        .collect();
+    assert!(
+        rendered.contains("profile: work"),
+        "startup logo should show the selected runtime profile: {rendered:?}"
+    );
+}
+
+#[test]
+fn help_popup_shows_runtime_paths() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use std::path::PathBuf;
+    use ylva::{tui_widgets, TuiDisplayMetadata, TuiState};
+
+    let backend = TestBackend::new(120, 80);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    let mut state = TuiState {
+        display_metadata: TuiDisplayMetadata {
+            profile_name: "work".to_string(),
+            profile_path: Some(PathBuf::from("/tmp/ylva-home/profiles/work/config.toml")),
+            ylva_home: Some(PathBuf::from("/tmp/ylva-home")),
+            workspace_root: Some(PathBuf::from("/workspace/example")),
+        },
+        ..TuiState::new()
+    };
+    state.help_popup.show_help = true;
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("draw");
+
+    let buffer = terminal.backend().buffer().clone();
+    let rendered: String = (0..80u16)
+        .flat_map(|row| (0..120u16).map(move |column| (column, row)))
+        .map(|(column, row)| buffer.cell((column, row)).unwrap().symbol().to_string())
+        .collect();
+    assert!(
+        rendered.contains("  Profile path:   /tmp/ylva-home/profiles/work/config.toml"),
+        "help popup should show the resolved profile path: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("  Profile:        work"),
+        "runtime values should align after their labels: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("  Ylva home:      /tmp/ylva-home"),
+        "help popup should show the resolved Ylva home: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("  Workspace root: /workspace/example"),
+        "help popup should show the discovered workspace root: {rendered:?}"
+    );
+    assert!(
+        rendered.contains(&format!("  Version:  v{}", ylva::BUILD_INFO.version)),
+        "build values should align after their labels: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("Ylva - Agent-Harness"),
+        "help popup should not repeat the build product name: {rendered:?}"
+    );
+}
+
+#[test]
+fn dragging_scrolled_help_popup_line_copies_rendered_text() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::{presenter, render, AppState, Effect, Focus, TextareaContext, TuiEvent};
+
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    let mut state = AppState::new();
+    state.focus = Focus::HelpPopup;
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            render::render(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("initial help popup draw");
+
+    let target_line = state
+        .help_popup
+        .help_rendered_lines
+        .iter()
+        .position(|line| line == "Help popup")
+        .expect("help popup heading should be rendered");
+    state.help_popup.help_scroll_offset = target_line;
+    terminal
+        .draw(|frame| {
+            render::render(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("scrolled help popup draw");
+
+    let content_area = state.layout.help_popup.content_area;
+    assert_eq!(
+        state.help_popup.help_scroll_offset, target_line,
+        "the target heading should be visible at the top of the scrolled popup"
+    );
+    let target_column_end = content_area.x + "Help popup".chars().count() as u16;
+    let target_row = content_area.y;
+    let textarea_context = TextareaContext {
+        is_empty: true,
+        text: String::new(),
+        cursor_row: 0,
+        cursor_row_is_last: true,
+    };
+
+    presenter::update(
+        &mut state,
+        TuiEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: content_area.x,
+            row: target_row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }),
+        &textarea_context,
+    );
+    presenter::update(
+        &mut state,
+        TuiEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: target_column_end,
+            row: target_row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }),
+        &textarea_context,
+    );
+    let effects = presenter::update(
+        &mut state,
+        TuiEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: target_column_end,
+            row: target_row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }),
+        &textarea_context,
+    );
+
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::CopyToClipboard(text) if text == "Help popup")),
+        "dragging a scrolled help line should copy its rendered text: {effects:?}"
     );
 }

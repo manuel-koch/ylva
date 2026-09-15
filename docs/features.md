@@ -396,7 +396,13 @@ module structure (model/presenter/view/driver split).
   update before applying the selected quit-or-stay-open behavior. OS SIGINT
   stops immediately (no double-press).
 - **Help popup (`F1`):** toggles a centered popup with the full keybinding
-  table and build-info values.
+  table, the selected runtime profile and its config path, the resolved Ylva
+  home, the discovered workspace root, and build-info values. An unavailable
+  path is shown explicitly. Paths beneath the operating-system home directory
+  use `~` notation when applicable; other paths remain absolute. Mouse-dragging
+  across visible popup text copies the selection to the clipboard, including
+  text reached after scrolling. The footer switches to popup controls while
+  the popup is open.
 - **Smart auto-scroll:** the chat follows the newest output by default; the
   mouse wheel and `PageUp`/`PageDown`/`End` scroll the history directly (no
   focus needed). Scrolling up disables auto-scroll; scrolling back down to
@@ -404,8 +410,10 @@ module structure (model/presenter/view/driver split).
   whatever scroll-lock state the user left it in, rather than jumping back to
   the bottom.
 - **Wordmark:** while the conversation is empty, a centered ASCII-art "Ylva"
-  wordmark is displayed with the version and git commit shown below it. Once
-  the first message is sent, the wordmark disappears.
+  wordmark is displayed with the version and git commit on one line and the
+  selected runtime profile on the next line. Mouse-dragging across those lines
+  copies the selected text to the clipboard. Once the first message is sent,
+  the wordmark disappears.
 - **Input history:** `↑` on the first line loads the previous sent message
   (draft is saved); `↓` restores it; any edit while browsing copies the entry
   to a fresh draft.
@@ -494,9 +502,12 @@ model, sampling parameters, and connection details. Multiple engines can be defi
 and referenced by name, for example a fast local Ollama engine for chat and
 a more capable OpenRouter model for heavier tasks.
 
-Engines are read from one flat profile file,
-`~/.ylva/profiles/<name>/config.toml` (`--profile <name>` selects it). Without
-such a file, the backend comes from environment variables as before.
+Engines are read from the resolved profile file:
+`<workspace-root>/.ylva/profiles/<name>/config.toml`, then
+`~/.ylva/profiles/<name>/config.toml`, then the code-owned defaults for the
+implicit `default` profile. The `--profile <name>` value selects the profile
+name. With no disk file for the implicit default profile, the code defaults
+leave provider discovery to the environment variables as before.
 
 See [configuration](./configuration.md) for all available fields.
 
@@ -507,13 +518,29 @@ type may also define a model-facing `description`; root agents that can spawn
 children receive all configured agent types and descriptions in the
 `spawn_subagent` tool definition.
 
-Profiles are read from `~/.ylva/profiles/<name>/config.toml`; see
+Profiles use the project/home/built-in resolution chain described in
 [configuration](./configuration.md#profile-file) for the supported keys.
 The `default` agent type is always available; when `[agents.default]` is
 omitted, it uses the built-in root configuration with child spawning enabled.
 Defining other agent types, such as `local-discovery`, does not disable the
 default agent. If `[agents.default]` is defined, its settings replace the
 built-in defaults.
+
+### Layered global persona and initialization
+
+The top-level conversation's global persona comes from `SOUL.md`, resolved
+from the project `.ylva/`, home `~/.ylva/`, and the code-owned built-in value
+in that order. Agent types have a separate, role-independent persona and
+system-prompt body. Phase 10.2 will apply the selected type's instructions
+whether it runs as the root agent or as a child. Until then, only the global
+`SOUL.md` is resolved for the root at runtime; child contexts use
+`Context::new()`'s code-owned fallback plus their task briefing.
+
+`ylva init` writes `SOUL.md` and
+`profiles/default/config.toml` starters; it does not seed agent-type files.
+`ylva init --project` seeds the same default profile starter in the workspace.
+Both support write-if-missing and `--force` reseeding. Richer agent-type and
+profile examples are documented rather than shipped as repository templates.
 
 ## Slash commands
 

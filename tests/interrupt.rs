@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use ylva::{
     AgentCommand, AgentLoop, AssistantStatus, EngineImpl, Message, MockProvider, ToolRegistry,
-    UiUpdate, UserMessageKind, DEFAULT_SYSTEM_PROMPT, TOOL_PROTOCOL_SYSTEM_PROMPT,
+    UiUpdate, UserMessageKind, DEFAULT_SOUL, TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
 
 mod common;
@@ -90,7 +90,7 @@ async fn stop_aborts_stream_flushes_partial_and_clears_pending_steers() {
         context.messages(),
         &[
             Message::System {
-                content: DEFAULT_SYSTEM_PROMPT.to_string(),
+                content: DEFAULT_SOUL.to_string(),
             },
             Message::System {
                 content: TOOL_PROTOCOL_SYSTEM_PROMPT.to_string(),
@@ -148,7 +148,7 @@ async fn stop_of_two_tokened_stream_commits_only_first_token() {
         context.messages(),
         &[
             Message::System {
-                content: DEFAULT_SYSTEM_PROMPT.to_string(),
+                content: DEFAULT_SOUL.to_string(),
             },
             Message::System {
                 content: TOOL_PROTOCOL_SYSTEM_PROMPT.to_string(),
