@@ -289,18 +289,20 @@ user-facing on-disk contract; this section is the contributor view.
   first-token instant (no such event is persisted). `#[serde(default)]`
   reads a `message` line written before this field existed back as `""`
   rather than failing.
-- **Immediate `meta` header, deferred title.** The header is written to disk
-  right away (empty `title`) when the session is created, so every subsequent
-  event is durable the instant it is written — nothing is ever buffered only
-  in memory waiting on a title. Once the first conversation turn completes
-  (the first committed `Message::Assistant`), `SessionWriter::finalize_title_if_pending`
-  rewrites just that first line via `rewrite_meta_line` (temp file plus
-  `rename()`, the same pattern as a schema-upgrade rewrite), then reopens and
-  re-`flock`s the file at its new inode so later appends keep landing at the
-  same path. `Store::resume` re-derives the title source from the transcript
-  (`first_explicit_user_message`) when the on-disk title is still empty, so a
-  session killed mid-turn still gets titled once a later run completes a
-  turn.
+- **Immediate `meta` header, utility-generated title.** The header is written
+  to disk right away with an empty `title`, so event commits never wait on
+  network I/O. `SessionWriter` tracks only the first explicit user message
+  and first non-empty complete assistant reply; assistant messages that only
+  contain tool calls are skipped. `Store::title_prompt()` exposes the exact
+  delimited prompt once both are available. The CLI/TUI driver resolves
+  `ProfileConfig::utility_engine_name()` through `AgentFactory::engine()` and
+  invokes that raw engine directly with one user message and no tools, store,
+  or UI channel. A normalized non-empty response is persisted by
+  `Store::set_title()`, whose writer command reuses the temp-file-plus-atomic-
+  `rename()` rewrite of only the first line, then reacquires the lock on the
+  replacement inode. `Store::resume` rebuilds the two source messages from
+  committed transcript events, so an empty title can be retried by the next
+  process; child transcripts use the same flow with their own store handle.
 - **`model_changed`, not `meta.provider_connection`/`meta.model`.**
   `meta.provider_connection`/`meta.model` capture only the
   connection/model pair resolved at session creation and are
@@ -674,6 +676,15 @@ runtime mode, selected by `main.rs` based on whether stdout is a terminal.
 `tui_driver.rs` owns `TextArea` and channel handles, converts `AppAction →
 InputEvent` and `UiUpdate → DomainEvent`, calls `update()`, then executes the
 returned `Vec<Effect>` via `execute_effects()`.
+
+The real TUI also owns the terminal-title lifecycle. It saves the existing
+title before entering the alternate screen, displays the persisted session
+title with the `Ylva Agent Harness` suffix, and restores the previous title on
+exit. A successful background title-generation task sends a metadata-only
+notification to the TUI loop; the loop performs the terminal write so title
+updates cannot interleave with frame rendering. Notifications carry the
+session ID and are ignored after `/clear` if they belong to the previous
+session.
 
 `cli_driver.rs` consumes `UiUpdate` events from the agent and streams the
 assistant response to stdout. The session store remains the canonical

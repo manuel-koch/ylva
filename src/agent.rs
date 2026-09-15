@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -109,6 +109,101 @@ pub enum AgentCommand {
         provider_connection: String,
         model: String,
     },
+}
+
+fn agent_command_name(command: &AgentCommand) -> &'static str {
+    match command {
+        AgentCommand::Prompt(_) => "prompt",
+        AgentCommand::Stop { .. } => "stop",
+        AgentCommand::ApproveTool { .. } => "approve_tool",
+        AgentCommand::DenyTool { .. } => "deny_tool",
+        AgentCommand::AnswerClarify(_) => "answer_clarify",
+        AgentCommand::AbortClarify => "abort_clarify",
+        AgentCommand::ForChild { .. } => "for_child",
+        AgentCommand::ClearContext => "clear_context",
+        AgentCommand::RecordModelChanged { .. } => "record_model_changed",
+    }
+}
+
+fn log_agent_command(command: &AgentCommand, mode: AgentMode, has_stream: bool, has_tool: bool) {
+    let command_name = agent_command_name(command);
+    match command {
+        AgentCommand::Prompt(text) | AgentCommand::AnswerClarify(text) => {
+            tracing::debug!(
+                command = command_name,
+                ?mode,
+                has_stream,
+                has_tool,
+                text_len = text.len(),
+                "agent command received"
+            );
+        }
+        AgentCommand::Stop { reason } => {
+            tracing::debug!(
+                command = command_name,
+                ?mode,
+                has_stream,
+                has_tool,
+                reason_len = reason.len(),
+                "agent command received"
+            );
+        }
+        AgentCommand::ApproveTool { id } => {
+            tracing::debug!(
+                command = command_name,
+                ?mode,
+                has_stream,
+                has_tool,
+                tool_call_id = %id,
+                "agent command received"
+            );
+        }
+        AgentCommand::DenyTool { id, reason } => {
+            tracing::debug!(
+                command = command_name,
+                ?mode,
+                has_stream,
+                has_tool,
+                tool_call_id = %id,
+                reason_len = reason.len(),
+                "agent command received"
+            );
+        }
+        AgentCommand::ForChild { run_id, command } => {
+            tracing::debug!(
+                command = command_name,
+                ?mode,
+                has_stream,
+                has_tool,
+                run_id = %run_id,
+                nested_command = agent_command_name(command),
+                "agent command received"
+            );
+        }
+        AgentCommand::RecordModelChanged {
+            provider_connection,
+            model,
+        } => {
+            tracing::debug!(
+                command = command_name,
+                ?mode,
+                has_stream,
+                has_tool,
+                provider_connection_len = provider_connection.len(),
+                model_len = model.len(),
+                "agent command received"
+            );
+        }
+        AgentCommand::AbortClarify | AgentCommand::ClearContext => {
+            tracing::debug!(
+                command = command_name,
+                ?mode,
+                has_stream,
+                has_tool,
+                "agent command received"
+            );
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -922,6 +1017,9 @@ pub struct AgentLoop {
     /// Set via [`AgentLoop::with_store`] when persistence is enabled: the
     /// session file this loop's committed messages are appended to.
     store: Option<Store>,
+    /// Shared with the running loop so drivers observe the successor store
+    /// after `AgentCommand::ClearContext` rolls the session over.
+    current_store: Arc<Mutex<Option<Store>>>,
 }
 
 /// Awaits the next `FinishResult` when `rx` is `Some`, else never resolves.
@@ -962,6 +1060,7 @@ impl AgentLoop {
         let (cmd_tx, cmd_rx) = mpsc::channel::<AgentCommand>(10);
         let (ui_tx, ui_rx) = mpsc::channel::<UiUpdate>(100);
         let (agent_tx, agent_rx) = mpsc::channel::<AgentEvent>(10);
+        let current_store = Arc::new(Mutex::new(None));
         let agent = AgentLoop {
             engine,
             configured_engine_name: None,
@@ -978,6 +1077,7 @@ impl AgentLoop {
             finish_rx: None,
             subagent_ui_rx: None,
             store: None,
+            current_store,
         };
         (agent, ui_rx)
     }
@@ -1050,6 +1150,10 @@ impl AgentLoop {
     /// Enables persistence for this loop: every message the outer loop
     /// commits to its `Context` is also appended to `store`'s session file.
     pub fn with_store(mut self, store: Store) -> Self {
+        *self
+            .current_store
+            .lock()
+            .expect("current store mutex is not poisoned") = Some(store.clone());
         self.store = Some(store);
         self
     }
@@ -1057,7 +1161,10 @@ impl AgentLoop {
     /// The session store this loop persists to, when persistence is enabled.
     /// Cloning is cheap: every clone shares one writer task (see [`Store`]).
     pub fn store(&self) -> Option<Store> {
-        self.store.clone()
+        self.current_store
+            .lock()
+            .expect("current store mutex is not poisoned")
+            .clone()
     }
 
     pub async fn send_command(&self, cmd: AgentCommand) {
@@ -1090,6 +1197,7 @@ impl AgentLoop {
         let mut finish_rx = self.finish_rx.take();
         let mut subagent_ui_rx = self.subagent_ui_rx.take();
         let store = self.store.clone();
+        let current_store = Arc::clone(&self.current_store);
         // Retained past `Context::set_store` so `AgentCommand::ClearContext`
         // can roll the session over to a fresh file on the same store root.
         let store_for_commands = store.clone();
@@ -1165,6 +1273,12 @@ impl AgentLoop {
                         match event {
                             AgentEvent::StreamDone { partial } => {
                                 context.push_assistant(partial, AssistantStatus::Complete);
+                                // Signal the driver only after the completed
+                                // assistant message has entered Context and
+                                // the session store. This ordering lets
+                                // out-of-band consumers safely inspect the
+                                // committed turn.
+                                let _ = ui_tx.send(UiUpdate::StreamDone).await;
                                 let steers_injected = inject_pending_steers(&mut pending_steers, &mut context);
                                 if steers_injected {
                                     pending_child_finish_reprompt = false;
@@ -1646,12 +1760,17 @@ impl AgentLoop {
                             // return the final committed Context (read-only history).
                             return Ok(context);
                         };
+                        log_agent_command(
+                            &cmd,
+                            mode,
+                            current_cancel.is_some(),
+                            current_tool_cancel.is_some(),
+                        );
                         match cmd {
                             AgentCommand::Prompt(text) => {
                                 if text.is_empty() {
                                     continue;
                                 }
-                                tracing::debug!(text_len = text.len(), "command: prompt");
                                 if mode == AgentMode::Idle {
                                     iterations = 1;
                                     context.push_user(text);
@@ -1934,13 +2053,6 @@ impl AgentLoop {
                                 }
                             }
                             AgentCommand::Stop { reason } => {
-                                tracing::info!(
-                                    %reason,
-                                    has_stream = current_cancel.is_some(),
-                                    has_tool = current_tool_cancel.is_some(),
-                                    ?mode,
-                                    "stop command received"
-                                );
                                 if let Some(manager) = child_agent_manager.as_mut() {
                                     let cancelled_spawns = manager.cancel_all();
                                     let cancelled_count = cancelled_spawns.len();
@@ -2111,7 +2223,6 @@ impl AgentLoop {
                                 }
                             }
                             AgentCommand::ClearContext => {
-                                tracing::info!("command: clear context");
                                 let mut fresh_context = Context::new();
                                 if let Some(store) = &store_for_commands {
                                     let config = engine.config();
@@ -2123,11 +2234,15 @@ impl AgentLoop {
                                         Ok(new_store) => fresh_context.set_store(new_store),
                                         Err(error) => tracing::warn!(
                                             %error,
-                                            "could not start a new session file;                                              the cleared conversation is not persisted"
+                                            "could not start a new session file; the cleared conversation is not persisted"
                                         ),
                                     }
                                 }
                                 context = fresh_context;
+                                *current_store
+                                    .lock()
+                                    .expect("current store mutex is not poisoned") =
+                                    context.store();
                             }
                             AgentCommand::RecordModelChanged {
                                 provider_connection,
@@ -2747,7 +2862,6 @@ fn start_request(
                     }
                     StreamEvent::Done => {
                         if accumulators.is_empty() {
-                            let _ = ui_tx.send(UiUpdate::StreamDone).await;
                             let _ = agent_tx.send(AgentEvent::StreamDone { partial }).await;
                         } else {
                             let mut calls = Vec::new();
@@ -2883,6 +2997,85 @@ mod tests {
         std::sync::Arc::new(std::sync::RwLock::new(Sandbox::with_root(PathBuf::from(
             env!("CARGO_MANIFEST_DIR"),
         ))))
+    }
+
+    #[test]
+    fn agent_command_dispatch_logs_every_command_variant() {
+        let log = capture_logs(async {
+            tracing::callsite::rebuild_interest_cache();
+            let registry = Arc::new(ToolRegistry::new());
+            let (mut agent_loop, _ui_rx) = AgentLoop::new(test_engine(), registry);
+            let handle = agent_loop.run();
+            let tool_call_id = Uuid::nil();
+            let child_run_id = Uuid::nil();
+
+            agent_loop
+                .send_command(AgentCommand::Prompt(String::new()))
+                .await;
+            agent_loop
+                .send_command(AgentCommand::ApproveTool { id: tool_call_id })
+                .await;
+            agent_loop
+                .send_command(AgentCommand::DenyTool {
+                    id: tool_call_id,
+                    reason: "private denial reason".to_string(),
+                })
+                .await;
+            agent_loop
+                .send_command(AgentCommand::AnswerClarify("private answer".to_string()))
+                .await;
+            agent_loop.send_command(AgentCommand::AbortClarify).await;
+            agent_loop
+                .send_command(AgentCommand::Stop {
+                    reason: "private stop reason".to_string(),
+                })
+                .await;
+            agent_loop.send_command(AgentCommand::ClearContext).await;
+            agent_loop
+                .send_command(AgentCommand::RecordModelChanged {
+                    provider_connection: "private connection".to_string(),
+                    model: "private model".to_string(),
+                })
+                .await;
+            agent_loop
+                .send_command(AgentCommand::ForChild {
+                    run_id: child_run_id,
+                    command: Box::new(AgentCommand::AbortClarify),
+                })
+                .await;
+
+            drop(agent_loop);
+            handle
+                .await
+                .expect("agent command logging task should not panic")
+                .expect("agent command logging loop should shut down cleanly");
+        });
+
+        for command_name in [
+            "prompt",
+            "approve_tool",
+            "deny_tool",
+            "answer_clarify",
+            "abort_clarify",
+            "stop",
+            "clear_context",
+            "record_model_changed",
+            "for_child",
+        ] {
+            assert!(
+                log.contains(&format!("command=\"{command_name}\"")),
+                "missing receipt log for {command_name}: {log}"
+            );
+        }
+        assert_eq!(
+            log.matches("agent command received").count(),
+            9,
+            "each command should produce exactly one receipt event: {log}"
+        );
+        assert!(
+            !log.contains("private"),
+            "command receipt logs must not include private payloads: {log}"
+        );
     }
 
     #[test]
@@ -3792,194 +3985,200 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn root_reprompts_after_child_finish_arrives_mid_stream() {
-        // Regression test: a `spawn_subagent` child's `FinishResult` landing
-        // while the root is mid-`Streaming` (not `Idle`) must force a
-        // re-prompt once the root's current tool-free stream completes,
-        // instead of silently going `Idle` and stranding the child's result
-        // in `context` unseen by the model. Without the
-        // `pending_child_finish_reprompt` flag this reproduces the bug where
-        // the root's last streamed text claims it's "waiting for subagents"
-        // and the conversation ends right there.
-        use crate::agent::tools::{default_registry, ToolRegistryConfig};
-        use crate::child_agent_manager::{ChildAgentManager, FinishResult};
+    #[test]
+    fn root_reprompts_after_child_finish_arrives_mid_stream() {
+        crate::test_support::run_locked(async {
+            // Regression test: a `spawn_subagent` child's `FinishResult` landing
+            // while the root is mid-`Streaming` (not `Idle`) must force a
+            // re-prompt once the root's current tool-free stream completes,
+            // instead of silently going `Idle` and stranding the child's result
+            // in `context` unseen by the model. Without the
+            // `pending_child_finish_reprompt` flag this reproduces the bug where
+            // the root's last streamed text claims it's "waiting for subagents"
+            // and the conversation ends right there.
+            use crate::agent::tools::{default_registry, ToolRegistryConfig};
+            use crate::child_agent_manager::{ChildAgentManager, FinishResult};
 
-        // Two text tokens with a real gap between them so there is a window
-        // to inject the `FinishResult` while `mode == Streaming`, i.e. before
-        // this turn's `StreamDone`.
-        let script = vec![
-            MockEvent::Text("Pending: waiting for subagents".to_string()),
-            MockEvent::Text(" ...".to_string()),
-        ];
-        let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
-            Arc::new(MockProvider::with_script(script, Duration::from_millis(80))),
-            EngineConfig {
-                provider_connection: "mock".to_string(),
-                model: "test-model".to_string(),
-                temperature: None,
-                context_length: None,
-                api_base_url: None,
-                api_key: None,
-                reasoning: None,
-            },
-        ));
-
-        let registry = Arc::new(default_registry(
-            test_sandbox(),
-            ToolRegistryConfig::default(),
-        ));
-
-        let (subagent_ui_tx, _subagent_ui_rx) = mpsc::channel(8);
-        let manager = ChildAgentManager::new(
-            subagent_ui_tx,
-            Box::new(
-                |_request, _cancel, _ui_tx| crate::child_agent_manager::SpawnOutcome {
-                    command_sender: None,
-                    handle: tokio::spawn(async {}),
+            // Two text tokens with a real gap between them so there is a window
+            // to inject the `FinishResult` while `mode == Streaming`, i.e. before
+            // this turn's `StreamDone`.
+            let script = vec![
+                MockEvent::Text("Pending: waiting for subagents".to_string()),
+                MockEvent::Text(" ...".to_string()),
+            ];
+            let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+                Arc::new(MockProvider::with_script(script, Duration::from_millis(80))),
+                EngineConfig {
+                    provider_connection: "mock".to_string(),
+                    model: "test-model".to_string(),
+                    temperature: None,
+                    context_length: None,
+                    api_base_url: None,
+                    api_key: None,
+                    reasoning: None,
                 },
-            ),
-        );
-        let (finish_tx, finish_rx) = mpsc::channel(1);
-        let (parent_subagent_ui_tx, parent_subagent_ui_rx) = mpsc::channel(8);
-        let _ = parent_subagent_ui_tx; // kept alive only to avoid closing the channel early
+            ));
 
-        let (mut agent_loop, mut ui_rx) = AgentLoop::new(engine, registry);
-        agent_loop = agent_loop.with_child_agent_manager(manager, finish_rx, parent_subagent_ui_rx);
+            let registry = Arc::new(default_registry(
+                test_sandbox(),
+                ToolRegistryConfig::default(),
+            ));
 
-        let handle = agent_loop.run();
-        agent_loop
-            .send_command(AgentCommand::Prompt("do the task".into()))
-            .await;
+            let (subagent_ui_tx, _subagent_ui_rx) = mpsc::channel(8);
+            let manager = ChildAgentManager::new(
+                subagent_ui_tx,
+                Box::new(
+                    |_request, _cancel, _ui_tx| crate::child_agent_manager::SpawnOutcome {
+                        command_sender: None,
+                        handle: tokio::spawn(async {}),
+                    },
+                ),
+            );
+            let (finish_tx, finish_rx) = mpsc::channel(1);
+            let (parent_subagent_ui_tx, parent_subagent_ui_rx) = mpsc::channel(8);
+            let _ = parent_subagent_ui_tx; // kept alive only to avoid closing the channel early
 
-        // Let the first stream start (mode -> Streaming) before injecting.
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        finish_tx
-            .send(FinishResult {
-                run_id: Uuid::new_v4(),
-                call_id: Uuid::new_v4(),
-                status: "success".to_string(),
-                result: Some("child done".to_string()),
-                error: None,
-                sources: vec![],
-            })
-            .await
-            .expect("finish_rx must still be open");
+            let (mut agent_loop, mut ui_rx) = AgentLoop::new(engine, registry);
+            agent_loop =
+                agent_loop.with_child_agent_manager(manager, finish_rx, parent_subagent_ui_rx);
 
-        // Give the loop time to finish the first stream, observe the
-        // deferred finish while not idle, and (if fixed) start a second,
-        // tool-free re-prompt.
-        tokio::time::sleep(Duration::from_millis(300)).await;
+            let handle = agent_loop.run();
+            agent_loop
+                .send_command(AgentCommand::Prompt("do the task".into()))
+                .await;
 
-        // Dropping the loop closes `cmd_tx`, which is how `run()` returns the
-        // final committed history (see `cli_driver.rs`'s identical pattern).
-        drop(agent_loop);
+            // Let the first stream start (mode -> Streaming) before injecting.
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            finish_tx
+                .send(FinishResult {
+                    run_id: Uuid::new_v4(),
+                    call_id: Uuid::new_v4(),
+                    status: "success".to_string(),
+                    result: Some("child done".to_string()),
+                    error: None,
+                    sources: vec![],
+                })
+                .await
+                .expect("finish_rx must still be open");
 
-        let context = tokio::time::timeout(Duration::from_secs(2), handle)
-            .await
-            .expect("run() should return promptly after being dropped")
-            .expect("run() task should not panic")
-            .expect("run() should not return an error");
+            // Give the loop time to finish the first stream, observe the
+            // deferred finish while not idle, and (if fixed) start a second,
+            // tool-free re-prompt.
+            tokio::time::sleep(Duration::from_millis(300)).await;
 
-        let assistant_turns = context
-            .messages()
-            .iter()
-            .filter(|message| matches!(message, Message::Assistant { .. }))
-            .count();
-        assert!(
-            assistant_turns >= 2,
-            "root must be re-prompted after the child's result arrives mid-stream \
+            // Dropping the loop closes `cmd_tx`, which is how `run()` returns the
+            // final committed history (see `cli_driver.rs`'s identical pattern).
+            drop(agent_loop);
+
+            let context = tokio::time::timeout(Duration::from_secs(2), handle)
+                .await
+                .expect("run() should return promptly after being dropped")
+                .expect("run() task should not panic")
+                .expect("run() should not return an error");
+
+            let assistant_turns = context
+                .messages()
+                .iter()
+                .filter(|message| matches!(message, Message::Assistant { .. }))
+                .count();
+            assert!(
+                assistant_turns >= 2,
+                "root must be re-prompted after the child's result arrives mid-stream \
              instead of going idle after a single turn; got {assistant_turns} assistant turn(s)"
-        );
-        assert!(
+            );
+            assert!(
             context.messages().iter().any(
                 |message| matches!(message, Message::User { content, kind: UserMessageKind::ImplicitToolNote } if content.contains("Subagent completion event") && content.contains("\"event\":\"subagent_completed\""))
             ),
             "the child's finish result must be recorded in context as an implicit user message"
         );
 
-        // Drain the ui updates; just ensure the channel didn't panic/drop.
-        while ui_rx.try_recv().is_ok() {}
+            // Drain the ui updates; just ensure the channel didn't panic/drop.
+            while ui_rx.try_recv().is_ok() {}
+        });
     }
 
-    #[tokio::test]
-    async fn child_role_run_returns_immediately_after_finish_tool_is_called() {
-        // Regression/integration test for Phase 6.9: a `Role::Child` agent
-        // whose model calls `agent_finish` must have its context carry the tool
-        // result, must send the `FinishResult` through `finish_tx`, and must
-        // return from `run()` without waiting for a tool-free `StreamDone`.
-        use crate::agent::tools::{
-            agent_finish::AgentFinishToolConfig, default_registry, ToolRegistryConfig,
-        };
+    #[test]
+    fn child_role_run_returns_immediately_after_finish_tool_is_called() {
+        crate::test_support::run_locked(async {
+            // Regression/integration test for Phase 6.9: a `Role::Child` agent
+            // whose model calls `agent_finish` must have its context carry the tool
+            // result, must send the `FinishResult` through `finish_tx`, and must
+            // return from `run()` without waiting for a tool-free `StreamDone`.
+            use crate::agent::tools::{
+                agent_finish::AgentFinishToolConfig, default_registry, ToolRegistryConfig,
+            };
 
-        let script = vec![MockEvent::Delta(DeltaChunk {
-            tool_call_index: 0,
-            tool_call_id: Some("call_1".into()),
-            function_name: Some(tools::agent_finish::AgentFinishTool::NAME.to_string()),
-            arguments_fragment: Some("{\"status\":\"success\",\"result\":\"done\"}".to_string()),
-        })];
-        let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
-            Arc::new(MockProvider::with_script(script, Duration::from_millis(0))),
-            EngineConfig {
-                provider_connection: "mock".to_string(),
-                model: "test-model".to_string(),
-                temperature: None,
-                context_length: None,
-                api_base_url: None,
-                api_key: None,
-                reasoning: None,
-            },
-        ));
+            let script = vec![MockEvent::Delta(DeltaChunk {
+                tool_call_index: 0,
+                tool_call_id: Some("call_1".into()),
+                function_name: Some(tools::agent_finish::AgentFinishTool::NAME.to_string()),
+                arguments_fragment: Some(
+                    "{\"status\":\"success\",\"result\":\"done\"}".to_string(),
+                ),
+            })];
+            let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+                Arc::new(MockProvider::with_script(script, Duration::from_millis(0))),
+                EngineConfig {
+                    provider_connection: "mock".to_string(),
+                    model: "test-model".to_string(),
+                    temperature: None,
+                    context_length: None,
+                    api_base_url: None,
+                    api_key: None,
+                    reasoning: None,
+                },
+            ));
 
-        let (finish_tx, mut finish_rx) = mpsc::channel(1);
-        let (subagent_ui_tx, _subagent_ui_rx) = mpsc::channel(8);
-        let run_id = Uuid::new_v4();
-        let call_id = Uuid::new_v4();
+            let (finish_tx, mut finish_rx) = mpsc::channel(1);
+            let (subagent_ui_tx, _subagent_ui_rx) = mpsc::channel(8);
+            let run_id = Uuid::new_v4();
+            let call_id = Uuid::new_v4();
 
-        let registry = Arc::new(default_registry(
-            test_sandbox(),
-            ToolRegistryConfig {
-                allowed_tools: vec![],
-                agent_finish: Some(AgentFinishToolConfig {
-                    finish_tx: finish_tx.clone(),
-                    run_id,
-                    call_id,
-                }),
-                ..Default::default()
-            },
-        ));
+            let registry = Arc::new(default_registry(
+                test_sandbox(),
+                ToolRegistryConfig {
+                    allowed_tools: vec![],
+                    agent_finish: Some(AgentFinishToolConfig {
+                        finish_tx: finish_tx.clone(),
+                        run_id,
+                        call_id,
+                    }),
+                    ..Default::default()
+                },
+            ));
 
-        let (mut agent_loop, mut ui_rx) = AgentLoop::new(engine, registry);
-        agent_loop = agent_loop.with_child_role(ChildRoleConfig {
-            run_id,
-            call_id,
-            briefing: Some("do the task".to_string()),
-            parent_cancel: CancellationToken::new(),
-            subagent_ui_tx,
-            finish_tx,
-        });
+            let (mut agent_loop, mut ui_rx) = AgentLoop::new(engine, registry);
+            agent_loop = agent_loop.with_child_role(ChildRoleConfig {
+                run_id,
+                call_id,
+                briefing: Some("do the task".to_string()),
+                parent_cancel: CancellationToken::new(),
+                subagent_ui_tx,
+                finish_tx,
+            });
 
-        let handle = agent_loop.run();
-        agent_loop
-            .send_command(AgentCommand::Prompt("child task".into()))
-            .await;
+            let handle = agent_loop.run();
+            agent_loop
+                .send_command(AgentCommand::Prompt("child task".into()))
+                .await;
 
-        let context = tokio::time::timeout(Duration::from_secs(2), handle)
-            .await
-            .expect("child run() should return promptly after finish")
-            .expect("run() task should not panic")
-            .expect("run() should not return an error");
+            let context = tokio::time::timeout(Duration::from_secs(2), handle)
+                .await
+                .expect("child run() should return promptly after finish")
+                .expect("run() task should not panic")
+                .expect("run() should not return an error");
 
-        assert!(
-            context.messages().iter().any(|message| matches!(
-                message,
-                Message::ToolResult {
-                    value: ToolResult { name, .. },
-                } if name == tools::agent_finish::AgentFinishTool::NAME
-            )),
-            "context should carry the finish tool's result"
-        );
-        assert!(
+            assert!(
+                context.messages().iter().any(|message| matches!(
+                    message,
+                    Message::ToolResult {
+                        value: ToolResult { name, .. },
+                    } if name == tools::agent_finish::AgentFinishTool::NAME
+                )),
+                "context should carry the finish tool's result"
+            );
+            assert!(
             context.messages().iter().any(|message| matches!(
                 message,
                 Message::System { content } if content.contains("tool-use") && content.contains(&MAX_TOOL_USE_ITERATIONS.to_string())
@@ -3988,170 +4187,175 @@ mod tests {
              tool-use iteration budget, so it can wrap up before hitting it"
         );
 
-        let finish_result = tokio::time::timeout(Duration::from_secs(1), finish_rx.recv())
-            .await
-            .expect("finish_rx should receive promptly")
-            .expect("finish_tx should not be dropped without sending");
-        assert_eq!(finish_result.run_id, run_id);
-        assert_eq!(finish_result.call_id, call_id);
-        assert_eq!(finish_result.status, "success");
-        assert_eq!(finish_result.result.as_deref(), Some("done"));
+            let finish_result = tokio::time::timeout(Duration::from_secs(1), finish_rx.recv())
+                .await
+                .expect("finish_rx should receive promptly")
+                .expect("finish_tx should not be dropped without sending");
+            assert_eq!(finish_result.run_id, run_id);
+            assert_eq!(finish_result.call_id, call_id);
+            assert_eq!(finish_result.status, "success");
+            assert_eq!(finish_result.result.as_deref(), Some("done"));
 
-        // Drain the ui updates emitted along the way; we only assert that a
-        // ToolDone for "agent_finish" was sent among them.
-        let mut saw_finish_tool_done = false;
-        while let Ok(Some(update)) =
-            tokio::time::timeout(Duration::from_millis(50), ui_rx.recv()).await
-        {
-            if matches!(update, UiUpdate::ToolDone { ref name, .. } if name == tools::agent_finish::AgentFinishTool::NAME)
+            // Drain the ui updates emitted along the way; we only assert that a
+            // ToolDone for "agent_finish" was sent among them.
+            let mut saw_finish_tool_done = false;
+            while let Ok(Some(update)) =
+                tokio::time::timeout(Duration::from_millis(50), ui_rx.recv()).await
             {
-                saw_finish_tool_done = true;
+                if matches!(update, UiUpdate::ToolDone { ref name, .. } if name == tools::agent_finish::AgentFinishTool::NAME)
+                {
+                    saw_finish_tool_done = true;
+                }
             }
-        }
-        assert!(
-            saw_finish_tool_done,
-            "expected a ToolDone update for finish"
-        );
+            assert!(
+                saw_finish_tool_done,
+                "expected a ToolDone update for finish"
+            );
+        });
     }
 
-    #[tokio::test]
-    async fn root_role_does_not_receive_the_child_iteration_budget_heads_up() {
-        // The heads-up message is only meaningful for a `Role::Child` loop
-        // (only it can be silently cut off with no one to explain things to);
-        // a root loop's `Interrupted` assistant bubble already tells a human
-        // what happened, so it must not get this extra system message too.
-        let registry = Arc::new(tools::default_registry(
-            test_sandbox(),
-            tools::ToolRegistryConfig::default(),
-        ));
-        let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
-            Arc::new(MockProvider::new(
-                vec!["answer".to_string()],
-                Duration::from_millis(0),
-            )),
-            EngineConfig {
-                provider_connection: "mock".to_string(),
-                model: "test-model".to_string(),
-                temperature: None,
-                context_length: None,
-                api_base_url: None,
-                api_key: None,
-                reasoning: None,
-            },
-        ));
+    #[test]
+    fn root_role_does_not_receive_the_child_iteration_budget_heads_up() {
+        crate::test_support::run_locked(async {
+            // The heads-up message is only meaningful for a `Role::Child` loop
+            // (only it can be silently cut off with no one to explain things to);
+            // a root loop's `Interrupted` assistant bubble already tells a human
+            // what happened, so it must not get this extra system message too.
+            let registry = Arc::new(tools::default_registry(
+                test_sandbox(),
+                tools::ToolRegistryConfig::default(),
+            ));
+            let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+                Arc::new(MockProvider::new(
+                    vec!["answer".to_string()],
+                    Duration::from_millis(0),
+                )),
+                EngineConfig {
+                    provider_connection: "mock".to_string(),
+                    model: "test-model".to_string(),
+                    temperature: None,
+                    context_length: None,
+                    api_base_url: None,
+                    api_key: None,
+                    reasoning: None,
+                },
+            ));
 
-        let (mut agent_loop, _ui_rx) = AgentLoop::new(engine, registry);
-        let handle = agent_loop.run();
-        agent_loop
-            .send_command(AgentCommand::Prompt("hi".into()))
-            .await;
-        drop(agent_loop);
+            let (mut agent_loop, _ui_rx) = AgentLoop::new(engine, registry);
+            let handle = agent_loop.run();
+            agent_loop
+                .send_command(AgentCommand::Prompt("hi".into()))
+                .await;
+            drop(agent_loop);
 
-        let context = tokio::time::timeout(Duration::from_secs(2), handle)
-            .await
-            .expect("root run() should return promptly after being dropped")
-            .expect("run() task should not panic")
-            .expect("run() should not return an error");
+            let context = tokio::time::timeout(Duration::from_secs(2), handle)
+                .await
+                .expect("root run() should return promptly after being dropped")
+                .expect("run() task should not panic")
+                .expect("run() should not return an error");
 
-        assert!(
+            assert!(
             !context
                 .messages()
                 .iter()
                 .any(|message| matches!(message, Message::System { content } if content.contains("tool-use"))),
             "a root loop must not receive the child-only iteration-budget heads-up"
         );
+        });
     }
 
-    #[tokio::test]
-    async fn child_role_iteration_cap_exceeded_returns_err_not_unstructured_ok() {
-        // Regression test: a `Role::Child` loop whose model keeps calling
-        // tools without ever calling `agent_finish` must, once the iteration
-        // cap trips, report a clear `Err` (→ `drive_child_to_completion`'s
-        // `Ok(Err(error))` arm, `status: "failure"`) rather than the
-        // "unstructured" `Ok(context)` fallback that would otherwise mistake
-        // the guard's boilerplate message for a genuine final answer.
-        // The mock replays this single scripted tool call on every fresh
-        // request, so the child keeps calling "read" (auto-approved inside
-        // the sandbox root, so no approval round-trip is needed) forever
-        // without ever calling `agent_finish`, tripping the iteration guard.
-        let script = vec![MockEvent::Delta(DeltaChunk {
-            tool_call_index: 0,
-            tool_call_id: Some("call_1".into()),
-            function_name: Some("read".to_string()),
-            arguments_fragment: Some(
-                serde_json::json!({
-                    "path": "Cargo.toml",
-                })
-                .to_string(),
-            ),
-        })];
-        let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
-            Arc::new(MockProvider::with_script(script, Duration::from_millis(0))),
-            EngineConfig {
-                provider_connection: "mock".to_string(),
-                model: "test-model".to_string(),
-                temperature: None,
-                context_length: None,
-                api_base_url: None,
-                api_key: None,
-                reasoning: None,
-            },
-        ));
+    #[test]
+    fn child_role_iteration_cap_exceeded_returns_err_not_unstructured_ok() {
+        crate::test_support::run_locked(async {
+            // Regression test: a `Role::Child` loop whose model keeps calling
+            // tools without ever calling `agent_finish` must, once the iteration
+            // cap trips, report a clear `Err` (→ `drive_child_to_completion`'s
+            // `Ok(Err(error))` arm, `status: "failure"`) rather than the
+            // "unstructured" `Ok(context)` fallback that would otherwise mistake
+            // the guard's boilerplate message for a genuine final answer.
+            // The mock replays this single scripted tool call on every fresh
+            // request, so the child keeps calling "read" (auto-approved inside
+            // the sandbox root, so no approval round-trip is needed) forever
+            // without ever calling `agent_finish`, tripping the iteration guard.
+            let script = vec![MockEvent::Delta(DeltaChunk {
+                tool_call_index: 0,
+                tool_call_id: Some("call_1".into()),
+                function_name: Some("read".to_string()),
+                arguments_fragment: Some(
+                    serde_json::json!({
+                        "path": "Cargo.toml",
+                    })
+                    .to_string(),
+                ),
+            })];
+            let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+                Arc::new(MockProvider::with_script(script, Duration::from_millis(0))),
+                EngineConfig {
+                    provider_connection: "mock".to_string(),
+                    model: "test-model".to_string(),
+                    temperature: None,
+                    context_length: None,
+                    api_base_url: None,
+                    api_key: None,
+                    reasoning: None,
+                },
+            ));
 
-        let registry = Arc::new(tools::default_registry(
-            test_sandbox(),
-            tools::ToolRegistryConfig::default(),
-        ));
+            let registry = Arc::new(tools::default_registry(
+                test_sandbox(),
+                tools::ToolRegistryConfig::default(),
+            ));
 
-        let (finish_tx, _finish_rx) = mpsc::channel(1);
-        let (subagent_ui_tx, mut subagent_ui_rx) = mpsc::channel(16);
-        let run_id = Uuid::new_v4();
-        let call_id = Uuid::new_v4();
+            let (finish_tx, _finish_rx) = mpsc::channel(1);
+            let (subagent_ui_tx, mut subagent_ui_rx) = mpsc::channel(16);
+            let run_id = Uuid::new_v4();
+            let call_id = Uuid::new_v4();
 
-        let (mut agent_loop, mut ui_rx) = AgentLoop::new(engine, registry);
-        agent_loop = agent_loop.with_child_role(ChildRoleConfig {
-            run_id,
-            call_id,
-            briefing: Some("do the task".to_string()),
-            parent_cancel: CancellationToken::new(),
-            subagent_ui_tx,
-            finish_tx,
-        });
+            let (mut agent_loop, mut ui_rx) = AgentLoop::new(engine, registry);
+            agent_loop = agent_loop.with_child_role(ChildRoleConfig {
+                run_id,
+                call_id,
+                briefing: Some("do the task".to_string()),
+                parent_cancel: CancellationToken::new(),
+                subagent_ui_tx,
+                finish_tx,
+            });
 
-        let handle = agent_loop.run();
-        agent_loop
-            .send_command(AgentCommand::Prompt("child task".into()))
-            .await;
+            let handle = agent_loop.run();
+            agent_loop
+                .send_command(AgentCommand::Prompt("child task".into()))
+                .await;
 
-        let result = tokio::time::timeout(Duration::from_secs(5), handle)
-            .await
-            .expect("child run() should return promptly once the iteration cap trips")
-            .expect("run() task should not panic");
+            let result = tokio::time::timeout(Duration::from_secs(5), handle)
+                .await
+                .expect("child run() should return promptly once the iteration cap trips")
+                .expect("run() task should not panic");
 
-        let error = result.expect_err(
-            "a child hitting the iteration cap must return Err, not Ok(context) \
+            let error = result.expect_err(
+                "a child hitting the iteration cap must return Err, not Ok(context) \
              (which would be mistaken for an 'unstructured' final answer)",
-        );
-        assert!(
-            error.to_string().contains("iterations"),
-            "error should explain the iteration cap was hit; got: {error}"
-        );
+            );
+            assert!(
+                error.to_string().contains("iterations"),
+                "error should explain the iteration cap was hit; got: {error}"
+            );
 
-        // No boilerplate assistant bubble should have been pushed to the
-        // child's own context (that message is reserved for a human reading
-        // the root's transcript directly).
-        while let Ok(update) = ui_rx.try_recv() {
-            if let UiUpdate::Error {
-                message,
-                run_id: got_run_id,
-            } = update
-            {
-                assert_eq!(got_run_id, Some(run_id));
-                assert!(message.contains("iterations"));
+            // No boilerplate assistant bubble should have been pushed to the
+            // child's own context (that message is reserved for a human reading
+            // the root's transcript directly).
+            while let Ok(update) = ui_rx.try_recv() {
+                if let UiUpdate::Error {
+                    message,
+                    run_id: got_run_id,
+                } = update
+                {
+                    assert_eq!(got_run_id, Some(run_id));
+                    assert!(message.contains("iterations"));
+                }
             }
-        }
-        // Drain the subagent ui channel too; just ensure nothing panics.
-        while subagent_ui_rx.try_recv().is_ok() {}
+            // Drain the subagent ui channel too; just ensure nothing panics.
+            while subagent_ui_rx.try_recv().is_ok() {}
+        });
     }
 
     #[tokio::test]

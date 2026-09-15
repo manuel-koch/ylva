@@ -26,6 +26,7 @@ pub mod markdown;
 pub mod presenter;
 pub mod render;
 pub mod sandbox;
+pub(crate) mod session_title;
 pub mod slash_command;
 pub mod store;
 pub(crate) mod theme;

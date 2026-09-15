@@ -172,6 +172,10 @@ fn assert_session_holds_one_completed_turn(run: &PersistenceRun) {
     };
     assert_eq!(meta.project_key, run.project_key);
     assert_eq!(meta.session_id, sessions[0].session_id);
+    assert_eq!(
+        meta.title, "mock answer",
+        "the title comes from the utility-engine response, not the user's prompt"
+    );
 
     assert!(
         events.iter().any(|event| matches!(
@@ -382,7 +386,13 @@ async fn resumed_headless_request_replays_the_prior_transcript_once() {
         .iter()
         .filter_map(|body| serde_json::from_str::<serde_json::Value>(body).ok())
         .filter(|body| body["messages"].is_array())
-        .nth(2)
+        .find(|body| {
+            body["messages"].as_array().is_some_and(|messages| {
+                messages.iter().any(|message| {
+                    message["role"] == "user" && message["content"] == "second prompt"
+                })
+            })
+        })
         .expect("the resumed chat request was captured");
     let messages = second_request["messages"]
         .as_array()

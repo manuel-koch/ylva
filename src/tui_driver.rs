@@ -19,7 +19,7 @@
 //! [`Effect`]s via `execute_effects`. Domain updates from [`AgentLoop`] are
 //! converted to [`DomainEvent`]s and routed through the same path.
 
-use std::io;
+use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -30,7 +30,7 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
 };
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::style::Style;
@@ -49,6 +49,7 @@ use crate::llm::engine::{Engine, EngineConfig, EngineImpl};
 use crate::llm::Provider;
 use crate::presenter::{self, TextareaContext, TuiEvent};
 use crate::render;
+use crate::session_title::{SessionTitleUpdate, TitleAttempt};
 use crate::tui_reducer_state::{
     engine_choice_label, matching_model_indices, model_choice_label, AppState, ConfirmKey,
     DomainEvent, Effect, Focus, HistoryDirection, InputEvent, ModelChoice, SlashOverlay, TuiMode,
@@ -981,8 +982,134 @@ pub async fn run_tui<B>(
     agent: AgentLoop,
     ui_rx: mpsc::Receiver<UiUpdate>,
     initial_prompt: Option<String>,
+    action_rx: mpsc::Receiver<AppAction>,
+    clipboard: &mut dyn ClipboardSink,
+) -> anyhow::Result<TuiState>
+where
+    B: Backend,
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
+    let title_runtime = TitleRuntime::disabled();
+    run_tui_with_title(
+        terminal,
+        agent,
+        ui_rx,
+        initial_prompt,
+        action_rx,
+        clipboard,
+        title_runtime,
+    )
+    .await
+}
+
+struct TitleDriver {
+    factory: Arc<AgentFactory>,
+    profile: ProfileConfig,
+    attempt: TitleAttempt,
+    title_update_tx: mpsc::UnboundedSender<SessionTitleUpdate>,
+}
+
+impl TitleDriver {
+    fn trigger(&self, agent: &AgentLoop) {
+        if let Some(store) = agent.store() {
+            let _ = self.attempt.trigger_with_title_updates(
+                store,
+                Arc::clone(&self.factory),
+                self.profile.clone(),
+                self.title_update_tx.clone(),
+            );
+        }
+    }
+}
+
+struct TitleRuntime {
+    driver: Option<TitleDriver>,
+    update_rx: mpsc::UnboundedReceiver<SessionTitleUpdate>,
+}
+
+impl TitleRuntime {
+    fn disabled() -> Self {
+        let (_update_tx, update_rx) = mpsc::unbounded_channel();
+        Self {
+            driver: None,
+            update_rx,
+        }
+    }
+}
+
+fn trigger_title_on_stream_done(
+    update: &UiUpdate,
+    title_driver: Option<&TitleDriver>,
+    agent: &AgentLoop,
+    active_title_session_id: &mut Option<uuid::Uuid>,
+) {
+    if !matches!(update, UiUpdate::StreamDone) {
+        return;
+    }
+    if let Some(title_driver) = title_driver {
+        *active_title_session_id = agent.store().map(|store| store.session_id());
+        title_driver.trigger(agent);
+    }
+}
+
+const DEFAULT_TERMINAL_TITLE: &str = "Ylva Agent Harness";
+
+/// Format the terminal title without allowing model output to inject terminal
+/// control characters into the title escape sequence.
+fn format_terminal_title(session_title: Option<&str>) -> String {
+    let sanitized_title = session_title
+        .unwrap_or_default()
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect::<String>()
+        .trim()
+        .to_string();
+    if sanitized_title.is_empty() {
+        DEFAULT_TERMINAL_TITLE.to_string()
+    } else {
+        format!("{sanitized_title} - {DEFAULT_TERMINAL_TITLE}")
+    }
+}
+
+fn set_terminal_title(session_title: Option<&str>) -> io::Result<()> {
+    let mut stdout = io::stdout();
+    execute!(stdout, SetTitle(format_terminal_title(session_title)))
+}
+
+/// Saves and restores the title around the TUI session where the terminal
+/// supports the standard xterm title stack controls.
+struct TerminalTitleGuard;
+
+impl TerminalTitleGuard {
+    fn new() -> io::Result<Self> {
+        let mut stdout = io::stdout();
+        write!(stdout, "\x1b[22;0t")?;
+        stdout.flush()?;
+        Ok(Self)
+    }
+}
+
+impl Drop for TerminalTitleGuard {
+    fn drop(&mut self) {
+        let result = (|| -> io::Result<()> {
+            let mut stdout = io::stdout();
+            write!(stdout, "\x1b[23;0t")?;
+            stdout.flush()
+        })();
+        if let Err(error) = result {
+            tracing::debug!(%error, "could not restore the terminal title");
+        }
+    }
+}
+
+async fn run_tui_with_title<B>(
+    terminal: &mut Terminal<B>,
+    agent: AgentLoop,
+    ui_rx: mpsc::Receiver<UiUpdate>,
+    initial_prompt: Option<String>,
     mut action_rx: mpsc::Receiver<AppAction>,
     clipboard: &mut dyn ClipboardSink,
+    title_runtime: TitleRuntime,
 ) -> anyhow::Result<TuiState>
 where
     B: Backend,
@@ -990,6 +1117,10 @@ where
 {
     let mut agent = agent;
     let mut ui_rx = ui_rx;
+    let TitleRuntime {
+        driver: title_driver,
+        update_rx: mut title_update_rx,
+    } = title_runtime;
     let mut state = AppState::new();
     let mut textarea = TextArea::default();
     configure_textarea(&mut textarea);
@@ -1033,8 +1164,14 @@ where
     let mut mouse_drag = MouseDrag::default();
     let mut pending_run_ids = PendingRunIds::default();
     let mut pending_model_list: Option<PendingModelList> = None;
+    let mut title_updates_open = true;
+    let mut active_title_session_id = replay_store.as_ref().map(|store| store.session_id());
 
     let handle = agent.run();
+
+    if let Some(title_driver) = &title_driver {
+        title_driver.trigger(&agent);
+    }
 
     let mut spinner_tick = tokio::time::interval(SPINNER_TICK_INTERVAL);
     spinner_tick.tick().await;
@@ -1058,6 +1195,29 @@ where
         };
 
         select! {
+            title_update = title_update_rx.recv(), if title_updates_open => {
+                match title_update {
+                    Some(update) if active_title_session_id == Some(update.session_id) => {
+                        if let Err(error) = set_terminal_title(Some(&update.title)) {
+                            tracing::warn!(
+                                %error,
+                                "could not update the terminal title with the session title"
+                            );
+                        }
+                    }
+                    Some(update) => {
+                        tracing::debug!(
+                            session_id = %update.session_id,
+                            stage = "stale_terminal_update",
+                            "ignored a session-title update for an inactive session"
+                        );
+                    }
+                    None => {
+                        title_updates_open = false;
+                    }
+                }
+            }
+
             model_list_result = wait_for_model_list(&mut pending_model_list) => {
                 let Some((filter, result)) = model_list_result else {
                     continue;
@@ -1152,6 +1312,9 @@ where
                         started_model_list = true;
                     }
                 }
+                let clear_conversation_requested = immediate_slash_effects
+                    .iter()
+                    .any(|effect| matches!(effect, Effect::ClearConversation));
                 execute_slash_effects(
                     &mut state,
                     immediate_slash_effects,
@@ -1159,6 +1322,12 @@ where
                     &cmd_tx,
                 )
                 .await;
+                if clear_conversation_requested && title_driver.is_some() {
+                    active_title_session_id = None;
+                    if let Err(error) = set_terminal_title(None) {
+                        tracing::warn!(%error, "could not reset the terminal title");
+                    }
+                }
                 if was_loading_models
                     && !started_model_list
                     && !matches!(state.slash_overlay, SlashOverlay::LoadingModels)
@@ -1182,6 +1351,12 @@ where
                 {
                     break;
                 }
+                trigger_title_on_stream_done(
+                    &update,
+                    title_driver.as_ref(),
+                    &agent,
+                    &mut active_title_session_id,
+                );
 
                 let mut drain_quit = false;
                 for _ in 0..CHANNEL_CAPACITY {
@@ -1197,6 +1372,12 @@ where
                                 drain_quit = true;
                                 break;
                             }
+                            trigger_title_on_stream_done(
+                                &next,
+                                title_driver.as_ref(),
+                                &agent,
+                                &mut active_title_session_id,
+                            );
                         }
                         Err(_) => break,
                     }
@@ -1434,6 +1615,7 @@ impl TuiApp {
 
 impl App for TuiApp {
     async fn run(self) -> anyhow::Result<u8> {
+        let _terminal_title_guard = TerminalTitleGuard::new()?;
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(
@@ -1443,6 +1625,7 @@ impl App for TuiApp {
             EnableMouseCapture,
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
             EnableBracketedPaste,
+            SetTitle(format_terminal_title(None)),
         )?;
         let _guard = TerminalGuard;
 
@@ -1456,14 +1639,27 @@ impl App for TuiApp {
         let (agent, ui_rx) = self
             .factory
             .create(&self.profile, &self.agent_type, Role::Root)?;
+        let initial_session_title = agent.store().map(|store| store.title());
+        set_terminal_title(initial_session_title.as_deref())?;
+        let (title_update_tx, title_update_rx) = mpsc::unbounded_channel();
+        let title_driver = Some(TitleDriver {
+            factory: Arc::clone(&self.factory),
+            profile: self.profile.clone(),
+            attempt: TitleAttempt::default(),
+            title_update_tx,
+        });
 
-        run_tui(
+        run_tui_with_title(
             &mut terminal,
             agent,
             ui_rx,
             self.explicit_prompt,
             action_rx,
             &mut ArboardClipboard,
+            TitleRuntime {
+                driver: title_driver,
+                update_rx: title_update_rx,
+            },
         )
         .await
         .map(|_| 0u8)
@@ -1546,6 +1742,8 @@ fn install_sigint_relay(action_tx: mpsc::Sender<AppAction>) -> anyhow::Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
     use crate::llm::engine::DEFAULT_CONTEXT_LENGTH;
     use crate::tui_reducer_state::{ChatEntry, ToolCallState};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -1563,6 +1761,125 @@ mod tests {
             cursor_row: textarea.cursor().0,
             cursor_row_is_last: textarea.cursor().0 + 1 >= textarea.lines().len().max(1),
         }
+    }
+
+    #[test]
+    fn terminal_title_uses_the_session_title_and_product_suffix() {
+        assert_eq!(
+            format_terminal_title(Some("Investigate persistence")),
+            "Investigate persistence - Ylva Agent Harness"
+        );
+        assert_eq!(format_terminal_title(None), "Ylva Agent Harness");
+    }
+
+    #[test]
+    fn terminal_title_removes_control_characters_from_model_output() {
+        assert_eq!(
+            format_terminal_title(Some("Title\u{001b} \nwith controls")),
+            "Title with controls - Ylva Agent Harness"
+        );
+    }
+
+    #[tokio::test]
+    async fn tui_triggers_title_generation_when_stream_done_is_drained() {
+        use ratatui::backend::TestBackend;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let chats_root = temp.path().join("chats");
+        let store = crate::store::Store::create(
+            &chats_root,
+            temp.path(),
+            Uuid::new_v4(),
+            "mock",
+            "conversation",
+        )
+        .expect("store created");
+        let provider = Arc::new(crate::llm::MockProvider::new(
+            (0..8).map(|_| "answer ".to_string()).collect(),
+            Duration::ZERO,
+        ));
+        let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+            provider,
+            EngineConfig {
+                provider_connection: "mock".to_string(),
+                model: "conversation".to_string(),
+                temperature: None,
+                context_length: None,
+                api_base_url: None,
+                api_key: None,
+                reasoning: None,
+            },
+        ));
+        let factory = Arc::new(
+            AgentFactory::new(HashMap::from([("default".to_string(), engine)]))
+                .with_allowed_tools(&[])
+                .with_store(store.clone()),
+        );
+        let profile = ProfileConfig::default();
+        let (agent, ui_rx) = factory
+            .create(&profile, "default", Role::Root)
+            .expect("root agent created");
+        let (action_tx, action_rx) = mpsc::channel(16);
+        let (title_update_tx, title_update_rx) = mpsc::unbounded_channel();
+        let title_driver = TitleDriver {
+            factory: Arc::clone(&factory),
+            profile,
+            attempt: TitleAttempt::default(),
+            title_update_tx,
+        };
+        let expected_title = "answer ".repeat(8).trim().to_string();
+        let stopper_expected_title = expected_title.clone();
+        let title_store = store.clone();
+        let stopper = tokio::spawn(async move {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+            loop {
+                if title_store.title() == stopper_expected_title {
+                    action_tx
+                        .send(AppAction::CtrlC)
+                        .await
+                        .expect("first quit confirmation is delivered");
+                    action_tx
+                        .send(AppAction::CtrlC)
+                        .await
+                        .expect("second quit confirmation is delivered");
+                    return true;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    action_tx
+                        .send(AppAction::CtrlC)
+                        .await
+                        .expect("first timeout quit confirmation is delivered");
+                    action_tx
+                        .send(AppAction::CtrlC)
+                        .await
+                        .expect("second timeout quit confirmation is delivered");
+                    return false;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal created");
+
+        let result = run_tui_with_title(
+            &mut terminal,
+            agent,
+            ui_rx,
+            Some("question".to_string()),
+            action_rx,
+            &mut NoopClipboard,
+            TitleRuntime {
+                driver: Some(title_driver),
+                update_rx: title_update_rx,
+            },
+        )
+        .await;
+
+        assert!(result.is_ok(), "TUI should exit cleanly");
+        assert!(
+            stopper.await.expect("stopper task completed"),
+            "title generation should complete before the TUI is stopped"
+        );
+        assert_eq!(store.title(), expected_title);
     }
 
     fn setup() -> (
