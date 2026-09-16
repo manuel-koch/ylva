@@ -536,11 +536,12 @@ whether it runs as the root agent or as a child. Until then, only the global
 `SOUL.md` is resolved for the root at runtime; child contexts use
 `Context::new()`'s code-owned fallback plus their task briefing.
 
-`ylva init` writes `SOUL.md` and
-`profiles/default/config.toml` starters; it does not seed agent-type files.
-`ylva init --workspace` seeds the same default profile starter in the workspace.
-Both support write-if-missing and `--force` reseeding. Richer agent-type and
-profile examples are documented rather than shipped as repository templates.
+`ylva init` writes `SOUL.md`, `profiles/default/config.toml`, and an annotated
+`profiles/default/.env` starter; it does not seed agent-type files.
+`ylva init --workspace` seeds the default profile config and `.env` starters
+plus `.gitignore` in the workspace. Both support write-if-missing and
+`--force` reseeding. Richer agent-type and profile examples are documented
+rather than shipped as repository templates.
 
 ## Slash commands
 

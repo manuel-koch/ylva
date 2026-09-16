@@ -32,9 +32,10 @@ Agent-type personas are separate from `SOUL.md`: the same type definition is
 intended to provide its persona and system-prompt body whether it runs as a
 root or child agent. Standalone agent-type file loading and this
 role-independent prompt assembly are Phase 10.2 work. `init_command` writes
-the code-owned SOUL and shared profile starter to the home or workspace layer,
-recording written and skipped paths in `InitReport`; it does not seed
-agent-type files.
+the code-owned SOUL, shared profile starter, and annotated profile environment
+starter to the home layer. Workspace initialization also writes
+`.ylva/.gitignore` to exclude profile environment files. Both record written
+and skipped paths in `InitReport`; neither seeds agent-type files.
 
 ## Engine/provider runtime configuration
 

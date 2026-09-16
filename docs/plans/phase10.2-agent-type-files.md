@@ -279,7 +279,7 @@ the `phase10.1` + Phase 7 baseline passes before changing anything (requires
        loaded and merged: project `.env` values take precedence over home
        `.env` values for the same key; an already-exported process variable
        still wins over both (unchanged).
-9. [ ] Extend `run_init_workspace` (`src/init_command.rs`, added in
+9. [x] Extend `run_init_workspace` (`src/init_command.rs`, added in
        `phase10.1`) to also write `<workspace_root>/.ylva/.gitignore`
        containing at least an `.env` line, using the project `.ylva/` root
        path that function already returns/exposes. Write-if-missing /

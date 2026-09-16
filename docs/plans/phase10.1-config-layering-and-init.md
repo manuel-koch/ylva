@@ -61,9 +61,9 @@ files:
 - Agent-type definitions are user-authored external files. The code-owned
   `default` agent remains the runtime fallback; `research` and `code_edit`
   are documented examples, not embedded or automatically seeded files.
-- `ylva init` keeps its command surface but writes code-owned `SOUL.md` and
-  default-profile starters from code. Richer TOML and agent-type examples
-  belong in documentation.
+- `ylva init` keeps its command surface but writes code-owned `SOUL.md`,
+  default-profile config, and an annotated default-profile `.env` starter from
+  code. Richer TOML and agent-type examples belong in documentation.
 
 ### Goal & motivation
 
@@ -89,18 +89,15 @@ file to exist for Ylva to run out of the box.
   (`ConfigError::ProfileNotFound` only when the profile is missing at every
   layer for an **explicitly** named profile; a malformed/unreadable file at
   any layer is always a hard error).
-- `ylva init` writes `~/.ylva/SOUL.md` and
-  `~/.ylva/profiles/default/config.toml` starters from code, write-if-missing,
-  with `--force` reseeding. It does not seed agent-type files; users author
-  those files from the documented formats and examples.
-- `ylva init --workspace` seeds the same
-  `.ylva/profiles/default/config.toml` starter in the workspace root,
-  write-if-missing, `--force` reseeds. (The `.gitignore` deployment
-  named in blueprint checklist item 8 is implemented in
-  `docs/plans/phase10.2-agent-type-files.md`, which extends this plan's
-  `run_init_workspace` function — this plan only needs to leave that function
-  easily extensible, e.g. by returning/accepting the project `.ylva/` root
-  path so 10.2 can add a file write beside it.)
+- `ylva init` writes `~/.ylva/SOUL.md`,
+  `~/.ylva/profiles/default/config.toml`, and an annotated
+  `~/.ylva/profiles/default/.env` starter from code, write-if-missing, with
+  `--force` reseeding. It does not seed agent-type files; users author those
+  files from the documented formats and examples.
+- `ylva init --workspace` seeds the default profile `config.toml` and
+  annotated `.env` starters and `.ylva/.gitignore` in the workspace root,
+  write-if-missing, and `--force` reseeds. Project-scoped `.env` loading
+  remains Phase 10.2 work.
 - A project `.ylva/SOUL.md`, if present, wins over `~/.ylva/SOUL.md`, which
   wins over the code-owned default persona; the resolved text becomes the
   first `Message::System` in a freshly created **root** `Context`. The same
@@ -278,9 +275,11 @@ baseline passes before changing anything.
         (already-present, not forced) for a clear CLI summary. `run_init`
         seeds, under `ylva_home` (`ylva_home()`'s value): `SOUL.md`,
         `agents/research.md`, `agents/code_edit.md`,
-        `profiles/default/config.toml` using the shared code-owned starter.
-        `run_init_workspace` seeds, under `<workspace_root>/.ylva/`, only the
-        same `profiles/default/config.toml` starter.
+        `profiles/default/config.toml` using the shared code-owned starter,
+        plus an annotated `profiles/default/.env` starter.
+        `run_init_workspace` seeds, under `<workspace_root>/.ylva/`, the
+        default profile `config.toml` and annotated `.env` starters plus
+        `.gitignore`.
         Both default to write-if-missing (an existing file is left
         untouched and reported as skipped); `force: true` overwrites
         unconditionally. Return/expose the project `.ylva/` root path used,
@@ -300,10 +299,11 @@ baseline passes before changing anything.
 13. [x] Add `tests/cli_init.rs` (new integration test file, following
         `tests/cli_profile.rs`'s pattern of spawning the compiled binary
         with `YLVA_HOME` pointed at a `tempfile::TempDir`): `ylva init` on
-        an empty `YLVA_HOME` seeds all four files; running it again without
+        an empty `YLVA_HOME` seeds all three files; running it again without
         `--force` leaves an edited file untouched; `--force` overwrites it;
-        `ylva init --workspace` in an empty tempdir-as-cwd seeds only
-        `.ylva/profiles/default/config.toml` (not the global agent types).
+        `ylva init --workspace` in an empty tempdir-as-cwd seeds only the
+        `.ylva/profiles/default/config.toml`, `.env`, and `.gitignore`
+        starters (not the global agent types).
 14. [x] Add unit/integration tests for SOUL.md precedence: root agent picks
         up a project `SOUL.md` over a home one over the built-in default.
         Spawn the compiled binary per `docs/development-workflow.md`'s
@@ -339,8 +339,9 @@ baseline passes before changing anything.
         `ProfileConfig::default()` as the implicit default-profile floor and
         keep explicit missing-profile errors unchanged.
 22. [x] Change `ylva init` home seeding to write only code-owned
-        `SOUL.md` and `profiles/default/config.toml` starters. Use the same
-        profile starter for `ylva init --workspace` and preserve
+        `SOUL.md`, `profiles/default/config.toml`, and the annotated
+        `profiles/default/.env` starter. Use the same profile starter for
+        `ylva init --workspace`, add `.ylva/.gitignore`, and preserve
         write-if-missing / `--force` behavior; stop seeding `agents/*.md` files.
 23. [x] Update unit and integration tests for the code-owned built-in floor,
         minimal initialization output, removal of embedded agent-type files,

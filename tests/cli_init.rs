@@ -67,6 +67,14 @@ fn init_seeds_home_files_and_force_controls_overwrites() {
         .join(ylva::DEFAULT_PROFILE_NAME)
         .join(ylva::PROFILE_CONFIG_FILE_NAME)
         .is_file());
+    let environment_path = ylva_home
+        .path()
+        .join(ylva::PROFILES_DIRECTORY_NAME)
+        .join(ylva::DEFAULT_PROFILE_NAME)
+        .join(ylva::PROFILE_ENV_FILE_NAME);
+    assert!(fs::read_to_string(environment_path)
+        .expect("read environment starter")
+        .starts_with('#'));
     assert!(!ylva_home.path().join("agents").exists());
 
     let soul_path = ylva_home.path().join("SOUL.md");
@@ -90,7 +98,7 @@ fn init_seeds_home_files_and_force_controls_overwrites() {
 }
 
 #[test]
-fn workspace_init_seeds_only_the_shared_profile_starter() {
+fn workspace_init_seeds_the_profile_starters() {
     let ylva_home = TempDir::new().expect("home tempdir");
     let workspace_root = TempDir::new().expect("workspace tempdir");
     let output = run_ylva(
@@ -123,6 +131,14 @@ fn workspace_init_seeds_only_the_shared_profile_starter() {
     )
     .expect("read placeholder config")
     .contains("example.invalid"));
+    assert!(fs::read_to_string(
+        workspace_root
+            .path()
+            .join(ylva::YLVA_DIR_NAME)
+            .join(".gitignore")
+    )
+    .expect("read workspace gitignore")
+    .contains(".env"));
 }
 
 #[test]
@@ -154,6 +170,19 @@ fn workspace_init_does_not_treat_global_home_as_workspace_root() {
     assert!(
         workspace_config_path.is_file(),
         "workspace config should be written below the current workspace"
+    );
+    let workspace_environment_path = workspace_root
+        .join(ylva::YLVA_DIR_NAME)
+        .join(ylva::PROFILES_DIRECTORY_NAME)
+        .join(ylva::DEFAULT_PROFILE_NAME)
+        .join(ylva::PROFILE_ENV_FILE_NAME);
+    assert!(fs::read_to_string(workspace_environment_path)
+        .expect("read workspace environment starter")
+        .starts_with('#'));
+    assert!(
+        fs::read_to_string(workspace_root.join(ylva::YLVA_DIR_NAME).join(".gitignore"))
+            .expect("read workspace gitignore")
+            .contains(".env")
     );
     assert_eq!(
         fs::read_to_string(global_config_path).expect("read global config"),

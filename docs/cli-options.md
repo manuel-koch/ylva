@@ -7,7 +7,7 @@ Reference for Ylva's command-line interface.
 | Flag | Type | Accepted values | Default | Description |
 | --- | --- | --- | --- | --- |
 | `--version` | none | — | — | Print build provenance (`Version`, `Commit`, `Built`, `Profile`) and exit. Takes precedence over all other arguments. |
-| `init [--workspace] [--force]` | subcommand | `--workspace`, `--force` | — | Write configuration starters and exit before provider/session startup. Without `--workspace`, writes `SOUL.md` and `profiles/default/config.toml` under `YLVA_HOME` (or `${HOME}/.ylva`); `--workspace` writes the same `profiles/default/config.toml` starter under the discovered workspace root's `.ylva/`; both modes write-if-missing unless `--force` is supplied. Agent-type files are not seeded. |
+| `init [--workspace] [--force]` | subcommand | `--workspace`, `--force` | — | Write configuration starters and exit before provider/session startup. Without `--workspace`, writes `SOUL.md`, `profiles/default/config.toml`, and an annotated `profiles/default/.env` under `YLVA_HOME` (or `${HOME}/.ylva`); `--workspace` writes the default profile config and `.env` starters plus `.gitignore` under the discovered workspace root's `.ylva/`; both modes write-if-missing unless `--force` is supplied. Agent-type files are not seeded. |
 | `--no-tui` | none | — | — | Force headless (CLI) mode even when stdout is a terminal. Useful for scripting or debugging without the TUI. |
 | `--color=<mode>` | enum | `auto`, `no`, `yes` | `auto` | Select CLI color behavior: detect terminal support, force no colors, or force colors. Has no effect on TUI rendering. |
 | `--prompt <text>` | string | any text | *none* | Initial user turn sent to the agent. Resolved with the precedence described below. |

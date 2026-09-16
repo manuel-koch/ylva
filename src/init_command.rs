@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use crate::config::soul::DEFAULT_SOUL;
 use crate::config::{
     ConfigError, DEFAULT_PROFILE_NAME, PROFILES_DIRECTORY_NAME, PROFILE_CONFIG_FILE_NAME,
+    PROFILE_ENV_FILE_NAME,
 };
 use crate::ylva_home::YLVA_DIR_NAME;
 
@@ -37,6 +38,15 @@ theme = "dark"
 # provider_connection = "example"
 # model = "replace-me"
 "#;
+
+const DEFAULT_PROFILE_ENV_STARTER: &str = r#"# Local provider secrets and other environment values for this profile.
+# Examples: API keys, access tokens, and custom provider endpoints.
+# Do not commit this file.
+# Exported process variables take precedence over values in this file.
+"#;
+
+const PROFILE_ENV_GITIGNORE_STARTER: &str =
+    "# Keep ylva profile environment files out of version control.\n.env\n";
 
 /// Files written or skipped by one init operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,15 +107,33 @@ pub fn run_init_workspace(workspace_root: &Path, force: bool) -> Result<InitRepo
         force,
         &mut report,
     )?;
+    seed_file(
+        &workspace_config_root,
+        &default_profile_env_relative_path(),
+        DEFAULT_PROFILE_ENV_STARTER,
+        force,
+        &mut report,
+    )?;
+    seed_file(
+        &workspace_config_root,
+        Path::new(".gitignore"),
+        PROFILE_ENV_GITIGNORE_STARTER,
+        force,
+        &mut report,
+    )?;
     Ok(report)
 }
 
-fn home_files() -> [(PathBuf, &'static str); 2] {
+fn home_files() -> [(PathBuf, &'static str); 3] {
     [
         (PathBuf::from("SOUL.md"), DEFAULT_SOUL),
         (
             default_profile_config_relative_path(),
             DEFAULT_PROFILE_STARTER,
+        ),
+        (
+            default_profile_env_relative_path(),
+            DEFAULT_PROFILE_ENV_STARTER,
         ),
     ]
 }
@@ -114,6 +142,12 @@ fn default_profile_config_relative_path() -> PathBuf {
     PathBuf::from(PROFILES_DIRECTORY_NAME)
         .join(DEFAULT_PROFILE_NAME)
         .join(PROFILE_CONFIG_FILE_NAME)
+}
+
+fn default_profile_env_relative_path() -> PathBuf {
+    PathBuf::from(PROFILES_DIRECTORY_NAME)
+        .join(DEFAULT_PROFILE_NAME)
+        .join(PROFILE_ENV_FILE_NAME)
 }
 
 fn seed_file(
@@ -152,7 +186,15 @@ mod tests {
         let first = run_init(temporary_directory.path(), false).expect("initialization succeeds");
         assert_eq!(first.written.len(), home_files().len());
         assert!(first.skipped.is_empty());
-
+        let environment_path = temporary_directory
+            .path()
+            .join(PROFILES_DIRECTORY_NAME)
+            .join(DEFAULT_PROFILE_NAME)
+            .join(PROFILE_ENV_FILE_NAME);
+        assert_eq!(
+            std::fs::read_to_string(environment_path).expect("read environment starter"),
+            DEFAULT_PROFILE_ENV_STARTER
+        );
         let second =
             run_init(temporary_directory.path(), false).expect("second initialization succeeds");
         assert!(second.written.is_empty());
@@ -176,23 +218,45 @@ mod tests {
     }
 
     #[test]
-    fn workspace_init_seeds_only_the_shared_profile_starter() {
+    fn workspace_init_seeds_the_profile_starters() {
         let temporary_directory = tempfile::tempdir().expect("tempdir");
 
         let report = run_init_workspace(temporary_directory.path(), false)
             .expect("workspace initialization");
-        let expected = temporary_directory
+        let expected_config = temporary_directory
             .path()
             .join(YLVA_DIR_NAME)
             .join(PROFILES_DIRECTORY_NAME)
             .join(DEFAULT_PROFILE_NAME)
             .join(PROFILE_CONFIG_FILE_NAME);
+        let expected_environment = temporary_directory
+            .path()
+            .join(YLVA_DIR_NAME)
+            .join(default_profile_env_relative_path());
+        let expected_gitignore = temporary_directory
+            .path()
+            .join(YLVA_DIR_NAME)
+            .join(".gitignore");
 
-        assert_eq!(report.written, vec![expected.clone()]);
-        assert!(expected.is_file());
+        assert_eq!(
+            report.written,
+            vec![
+                expected_config.clone(),
+                expected_environment.clone(),
+                expected_gitignore.clone()
+            ]
+        );
+        assert!(expected_config.is_file());
         assert!(!temporary_directory.path().join(".ylva/SOUL.md").exists());
-        assert!(std::fs::read_to_string(expected)
+        assert!(std::fs::read_to_string(expected_config)
             .expect("read placeholder")
             .contains("example.invalid"));
+        assert_eq!(
+            std::fs::read_to_string(expected_environment).expect("read environment starter"),
+            DEFAULT_PROFILE_ENV_STARTER
+        );
+        assert!(std::fs::read_to_string(expected_gitignore)
+            .expect("read workspace gitignore")
+            .contains(".env"));
     }
 }

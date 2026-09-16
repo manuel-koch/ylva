@@ -1581,11 +1581,12 @@ project  .ylva/        (current project, cwd/git-root scope)
 
 **Distribution — `ylva init`:**
 
-- `ylva init` writes only code-owned starters (`SOUL.md` and the default
-  profile `config.toml`) into `~/.ylva/`; it does not seed agent-type files.
-- `ylva init --workspace` seeds **only** the same
-  `.ylva/profiles/default/config.toml` starter into the workspace root. Agent
-  types and additional profiles are added manually only when the project
+- `ylva init` writes only code-owned starters (`SOUL.md`, the default profile
+  `config.toml`, and an annotated default profile `.env`) into `~/.ylva/`; it
+  does not seed agent-type files.
+- `ylva init --workspace` seeds **only** the default profile `config.toml` and
+  annotated `.env` starters plus `.ylva/.gitignore` into the workspace root.
+  Agent types and additional profiles are added manually only when the project
   explicitly wants to override (inheritance covers the rest).
 - Both are **write-if-missing** by default; `--force` reseeds a built-in file.
 
@@ -2915,9 +2916,10 @@ See reducer-state-handling-plan.md.
       code-backed floors; an explicitly requested missing profile is a hard
       error.
 
-- [x] `ylva init` (writes SOUL/profile starters into `~/.ylva/`) and
-      `ylva init --workspace` (seeds the same
-      `.ylva/profiles/default/config.toml` starter into the workspace root);
+- [x] `ylva init` (writes SOUL/profile starters, including `.env`, into
+      `~/.ylva/`) and
+      `ylva init --workspace` (seeds the default profile `config.toml` and
+      `.env` starters into the workspace root);
       both write-if-missing by default, `--force` reseeds. Agent-type files are
       user-authored and richer examples live in documentation.
 

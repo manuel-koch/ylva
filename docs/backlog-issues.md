@@ -1,7 +1,7 @@
 # Backlog of issues discovered while testing
 
-- [ ] "init" command should create an empty ".env" file with a comment
-      to describe its usecase.
+- [x] "init" creates an empty ".env" file in the "default" profile
+      with a comment describing its use case.
 
-- [ ] "init" should create a ".gitignore" file in the "profiles"
-      directory and exclude any ".env" files from git.
+- [x] "init --workspace" creates a ".gitignore" file in the workspace
+      ".ylva" directory and excludes any ".env" files from git.

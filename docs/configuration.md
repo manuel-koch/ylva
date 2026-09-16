@@ -131,10 +131,11 @@ profile `.env` and process environment are merged. Missing variables and
 malformed references are hard startup errors; expanded secret values are never
 logged.
 
-`ylva init` writes code-owned starters (`SOUL.md` and
-`profiles/default/config.toml`) into `~/.ylva/`; it does not seed agent-type
-files. Use `ylva init --workspace` to seed the same default profile starter under
-the discovered workspace root. Both commands write only missing files unless
+`ylva init` writes code-owned starters (`SOUL.md`,
+`profiles/default/config.toml`, and `profiles/default/.env`) into `~/.ylva/`;
+it does not seed agent-type files. Use `ylva init --workspace` to seed the
+default profile config and `.env` starters plus `.gitignore` under the
+discovered workspace root. Both commands write only missing files unless
 `--force` is supplied. Global, profile-scoped, and project-scoped
 `agents/*.md` loading remains Phase 10.2 work; richer examples are documented
 below rather than shipped as repository templates.
