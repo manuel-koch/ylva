@@ -45,6 +45,7 @@ use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::agent::{Message, UserMessageKind};
+use crate::child_agent_manager::FinishResultOrigin;
 use crate::sandbox::SandboxContext;
 use crate::ylva_home::ylva_home;
 
@@ -138,6 +139,8 @@ pub enum StoreEvent {
         result: Option<String>,
         #[serde(default)]
         sources: Vec<String>,
+        #[serde(default)]
+        origin: FinishResultOrigin,
     },
     /// The provider-connection/model actually serving this session changed — written
     /// once on **every process start** (a fresh session or a resume alike,
@@ -748,6 +751,7 @@ impl Store {
         status: &str,
         result: Option<String>,
         sources: Vec<String>,
+        origin: FinishResultOrigin,
     ) {
         self.record_event(StoreEvent::ChildResult {
             version: EVENT_VERSION,
@@ -758,6 +762,7 @@ impl Store {
             status: status.to_string(),
             result,
             sources,
+            origin,
         });
     }
 
@@ -964,6 +969,7 @@ impl Store {
                         status: None,
                         result: None,
                         sources: Vec::new(),
+                        origin: FinishResultOrigin::default(),
                         duration: None,
                     });
                 }
@@ -974,6 +980,7 @@ impl Store {
                     status,
                     result,
                     sources,
+                    origin,
                     ..
                 } => {
                     if let Some(index) = starts.get(&id).copied() {
@@ -986,6 +993,7 @@ impl Store {
                         run.status = Some(status);
                         run.result = result;
                         run.sources = sources;
+                        run.origin = origin;
                     }
                 }
                 _ => {}
@@ -1015,6 +1023,7 @@ pub struct ChildRunRecord {
     pub status: Option<String>,
     pub result: Option<String>,
     pub sources: Vec<String>,
+    pub origin: FinishResultOrigin,
     pub duration: Option<std::time::Duration>,
 }
 
@@ -1875,6 +1884,7 @@ mod tests {
             "success",
             Some("found it".to_string()),
             vec!["src/agent.rs".to_string()],
+            FinishResultOrigin::Agent,
         );
         store.flush().await;
 
@@ -1907,6 +1917,7 @@ mod tests {
             parent_session,
             status,
             sources,
+            origin,
             ..
         } = result
         else {
@@ -1916,6 +1927,7 @@ mod tests {
         assert_eq!(*parent_session, parent_id);
         assert_eq!(status, "success");
         assert_eq!(sources, &["src/agent.rs".to_string()]);
+        assert_eq!(*origin, FinishResultOrigin::Agent);
     }
 
     #[tokio::test]
@@ -1948,6 +1960,7 @@ mod tests {
             "success",
             Some("found it".to_string()),
             vec!["src/agent.rs".to_string()],
+            FinishResultOrigin::Agent,
         );
         store.record_child_start(
             orphaned_run_id,

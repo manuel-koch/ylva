@@ -25,9 +25,13 @@ that file entirely; lower layers are not merged into it.
 
 An optional `~/.ylva/profiles/<profile-name>/.env` file supplies provider
 environment variables and values for `${ENV_VAR}` interpolation in
-`config.toml`. Profiles without explicit `[engines.*]` or
+`config.toml`. When a workspace root is discovered, the matching
+`<workspace-root>/.ylva/profiles/<profile-name>/.env` is loaded as well.
+Project values override home-profile values, and exported process values still
+override both. Profiles without explicit `[engines.*]` or
 `[provider_connections.*]` tables use it for provider discovery. Already
-exported process variables take precedence over values from the profile file.
+exported process variables take precedence over values from either profile
+environment file.
 
 - `--profile <name>` selects the profile directory explicitly; without it,
   the implicit `default` profile is used (see below for how a missing file
@@ -141,8 +145,8 @@ it does not seed agent-type files. Use `ylva init --workspace` to seed the
 default profile config and `.env` starters plus `.gitignore` under the
 discovered workspace root. Both commands write only missing files unless
 `--force` is supplied. Global, profile-scoped, and project-scoped
-`agents/*.md` loading remains Phase 10.2 work; richer examples are documented
-below rather than shipped as repository templates.
+`agents/*.md` and `agents/*.toml` files are discovered at runtime; richer
+examples are documented below rather than shipped as repository templates.
 
 ### Global persona (`SOUL.md`)
 
@@ -156,23 +160,22 @@ same whole-file replacement order:
     -> code-owned built-in SOUL
 ```
 
-The resolved text is trimmed only at the end and becomes the first system
-message of a newly created root context. Agent-type personas are a separate
-layer: an agent type may provide its own persona and system-prompt body. In
-the planned agent-type file model, those instructions apply whenever that
-type runs as the root agent or as a child. Standalone `agents/*.md` loading
-remains Phase 10.2 work. Until that phase is implemented, child contexts
-use `Context::new()`'s code-owned fallback rather than the project/home-
-resolved value, and add their task-specific briefing. The built-in value is
+The resolved text is trimmed only at the end and becomes the global baseline
+of every newly created root and child context, exactly once. Agent-type
+persona and system-prompt content is additive: the effective prompt order is
+global SOUL, agent-type `persona`, agent-type file body, the tool protocol,
+then (for a child) its briefing and runtime constraints. The built-in value is
 `You are Ylva, a helpful agent with tool capabilities.` and guarantees an
 out-of-the-box global persona when neither disk layer exists.
 
 ### Agent-type files
 
-Agent-type files are user-authored external configuration. Phase 10.2 loads
-them from the project `.ylva/agents/`, the selected profile's `agents/`
-directory, and the global `~/.ylva/agents/` directory, with the more specific
-scope taking precedence. A type may be written as pure TOML:
+Agent-type files are user-authored external configuration. Ylva loads them
+from the project `.ylva/agents/`, the selected profile's
+`~/.ylva/profiles/<profile-name>/agents/` directory, and the global
+`~/.ylva/agents/` directory. For the same type, project scope shadows
+profile scope, which shadows global scope; file sources replace the complete
+definition rather than merging fields. A type may be written as pure TOML:
 
 ```toml
 allowed_tools = ["read", "search", "glob"]
@@ -181,7 +184,7 @@ can_spawn = false
 system_prompt = "Locate relevant files and explain the evidence."
 ```
 
-or as Markdown with a required TOML `+++` frontmatter block:
+or as Markdown with a required TOML `+++` or YAML `---` frontmatter block:
 
 ```markdown
 +++
@@ -193,8 +196,35 @@ can_spawn = false
 Locate relevant files and explain the evidence.
 ```
 
+The YAML variant uses the same Markdown body convention:
+
+```markdown
+---
+allowed_tools:
+  - read
+  - search
+  - glob
+timeout_secs: 120
+can_spawn: false
+---
+
+Locate relevant files and explain the evidence.
+```
+
 The frontmatter supplies agent settings and the Markdown body supplies the
-system-prompt text. `research` and `code_edit` are documentation examples
+system-prompt text. TOML frontmatter must begin with and close `+++`; YAML
+frontmatter must begin with and close `---`. A plain Markdown file is a load
+error. A profile's inline
+`[agents.<type>]` table is applied afterward as a field-level override
+(`engine`, `allowed_tools`, `timeout_secs`, `persona`, and related settings),
+so `persona` is always prepended to the file body and also works when no file
+body exists. Every configured agent `engine` must name an engine available to
+the initialized profile; invalid references are hard startup errors rather
+than deferred until that agent is spawned. If the active `config.toml` and its
+same-scope `agents/<type>`
+file both provide a base definition, loading fails with an error naming the
+type, scope, and both paths; adapting a lower-scope file from the active
+profile remains valid. `research` and `code_edit` are documentation examples
 that users may copy and customize; `ylva init` does not create them. The
 code-owned `default` agent remains available when no user-authored definition
 replaces it.
@@ -244,6 +274,7 @@ A profile groups engine selection and per-agent settings for a runtime session.
 | `allowed_tools` | `Option<Vec<String>>` | Restrict which tool names this agent may invoke. `None` falls back to the caller's flat default tool list (`AgentFactory::with_allowed_tools`, or `DEFAULT_CLI_TOOLS`/`DEFAULT_TUI_TOOLS` when unset). `Some(names)` is honored per `agent_type` by `AgentFactory::build`, so a distinct `agent_type` — including one used only for spawned children — can be restricted to a genuinely different tool set than the root or any other agent type. |
 | `timeout_secs` | `Option<u64>` | Maximum wall-clock seconds before the agent is cancelled. `None` means no timeout. |
 | `persona` | `Option<String>` | Optional agent-type persona instruction prepended to that type's system-prompt body. It is independent of the global `SOUL.md` persona and applies when the type runs as root or child. |
+| `system_prompt` | `Option<String>` | File-authored agent-type system-prompt body. It is additive to the global SOUL and is not set by inline profile tables. |
 | `can_spawn` | `bool` | When `true` (and this is a `Role::Root` agent), `AgentFactory::create` registers the `spawn_subagent` tool and wires a `ChildAgentManager` so this agent may delegate self-contained tasks to a concurrently-running `Role::Child` agent (one level deep; children cannot spawn further children). Use `--auto-approve-spawn` to skip the human-approval prompt for `spawn_subagent` calls. See "Child-agent delegation" in `docs/features.md`. |
 
 Every loaded profile has a `default` agent type. If `[agents.default]` is

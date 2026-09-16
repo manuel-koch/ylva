@@ -5,3 +5,10 @@
 
 - [x] "init --workspace" creates a ".gitignore" file in the workspace
       ".ylva" directory and excludes any ".env" files from git.
+
+- [ ] Unable to select text in subagent conversion header bubble.
+      Trying to drag on the header just toggles expand/collapse but
+      doesn't select nor copy selected text.
+
+- [ ] We don't load past sessions to provide functionality to walk thru
+      recent user messages to fill draft message input.

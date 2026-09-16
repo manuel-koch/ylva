@@ -22,7 +22,9 @@ use crate::agent::tools::agent_finish::AgentFinishToolConfig;
 use crate::agent::tools::spawn_subagent::AgentTypeInfo;
 use crate::agent::tools::{default_registry, ToolRegistryConfig, DEFAULT_CLI_TOOLS};
 use crate::agent::{AgentLoop, ChildRoleConfig, Context, Message, Role, UiUpdate};
-use crate::child_agent_manager::{ChildAgentManager, FinishResult, SpawnRequest};
+use crate::child_agent_manager::{
+    ChildAgentManager, FinishResult, FinishResultOrigin, SpawnRequest,
+};
 use crate::config::ProfileConfig;
 use crate::llm::engine::{Engine, EngineConfig, EngineRouter};
 use crate::llm::ProviderRegistry;
@@ -148,7 +150,15 @@ impl AgentFactory {
                 "profile references engine '{required}', which no [engines.*] table defines"
             );
         }
+        validate_profile_agent_engines(&engines, profile)?;
         Ok(AgentFactory::new(engines))
+    }
+
+    /// Validate every configured agent type against the engines available to
+    /// this factory. This runs during startup so an unused agent type cannot
+    /// hide an invalid engine reference until a child is spawned.
+    pub fn validate_profile_agent_engines(&self, profile: &ProfileConfig) -> anyhow::Result<()> {
+        validate_profile_agent_engines(&self.engines, profile)
     }
 
     /// Snapshot of the named engine's configuration, if it exists.
@@ -180,7 +190,8 @@ impl AgentFactory {
     }
 
     /// Set the initial system message for root agents built by this factory.
-    /// Child agents keep their briefing-based construction unchanged.
+    /// The resolved agent-type persona and system-prompt body are appended
+    /// when an agent is created. The same global text is inherited by children.
     pub fn with_system_prompt(mut self, system_prompt: impl Into<String>) -> Self {
         self.system_prompt = Some(system_prompt.into());
         self
@@ -283,7 +294,6 @@ impl AgentFactory {
             Arc::new(EngineRouter::new(engines.clone(), engine_name)?)
         };
 
-        let is_root = matches!(&role, Role::Root);
         let child_role_config = match role {
             Role::Root => None,
             Role::Child(config) => Some(config),
@@ -337,10 +347,10 @@ impl AgentFactory {
         ));
         let (agent_loop, ui_rx) = AgentLoop::new(Arc::clone(&engine), registry);
         let mut agent_loop = agent_loop.with_configured_engine_name(engine_name);
-        if is_root {
-            if let Some(system_prompt) = system_prompt {
-                agent_loop = agent_loop.with_system_prompt(system_prompt);
-            }
+        if let Some(system_prompt) =
+            compose_agent_system_prompt(system_prompt.as_deref(), profile.agents.get(agent_type))
+        {
+            agent_loop = agent_loop.with_system_prompt(system_prompt);
         }
 
         if let Some(child_role_config) = child_role_config {
@@ -356,6 +366,7 @@ impl AgentFactory {
                 store.clone(),
                 engine.clone(),
                 engine_name.to_string(),
+                system_prompt,
             );
             if let Some(store) = store.clone() {
                 manager.manager = manager.manager.with_store(store);
@@ -400,6 +411,7 @@ impl AgentFactory {
         parent_store: Option<Store>,
         parent_engine: Arc<dyn Engine>,
         parent_engine_name: String,
+        system_prompt: Option<String>,
     ) -> BuiltChildAgentManager {
         let (finish_tx, finish_rx) = mpsc::channel::<FinishResult>(16);
         let (subagent_ui_tx, subagent_ui_rx) = mpsc::channel::<UiUpdate>(100);
@@ -415,6 +427,7 @@ impl AgentFactory {
                 let parent_store = parent_store.clone();
                 let parent_engine = parent_engine.clone();
                 let parent_engine_name = parent_engine_name.clone();
+                let system_prompt = system_prompt.clone();
                 let utility_engine = engines.get(profile.utility_engine_name()).cloned();
                 let child_engine_name =
                     resolve_engine_name(&profile, &request.agent_type).to_string();
@@ -450,7 +463,7 @@ impl AgentFactory {
                     &request.agent_type,
                     Role::Child(child_role_config),
                     None,
-                    None,
+                    system_prompt,
                     inherited_engine,
                 );
                 let (child_loop, child_ui_rx) = match built {
@@ -466,6 +479,7 @@ impl AgentFactory {
                         let _ = finish_tx.try_send(FinishResult {
                             run_id,
                             call_id,
+                            origin: FinishResultOrigin::Runtime,
                             status: "failure".to_string(),
                             result: None,
                             error: Some(error.to_string()),
@@ -520,6 +534,25 @@ impl AgentFactory {
             subagent_ui_rx,
         }
     }
+}
+
+fn compose_agent_system_prompt(
+    global_system_prompt: Option<&str>,
+    agent_config: Option<&crate::config::AgentConfig>,
+) -> Option<String> {
+    let mut prompt_sections = Vec::new();
+    if let Some(global_system_prompt) = global_system_prompt {
+        prompt_sections.push(global_system_prompt);
+    }
+    if let Some(agent_config) = agent_config {
+        if let Some(persona) = agent_config.persona.as_deref() {
+            prompt_sections.push(persona);
+        }
+        if let Some(system_prompt) = agent_config.system_prompt.as_deref() {
+            prompt_sections.push(system_prompt);
+        }
+    }
+    (!prompt_sections.is_empty()).then(|| prompt_sections.join("\n\n"))
 }
 
 /// Return value of [`AgentFactory::build_child_agent_manager`]: the manager
@@ -593,6 +626,22 @@ fn engine_from_profile_config(
     )))
 }
 
+fn validate_profile_agent_engines(
+    engines: &HashMap<String, Arc<dyn Engine>>,
+    profile: &ProfileConfig,
+) -> anyhow::Result<()> {
+    for (agent_type, agent_config) in &profile.agents {
+        let Some(engine_name) = agent_config.engine.as_deref() else {
+            continue;
+        };
+        anyhow::ensure!(
+            engines.contains_key(engine_name),
+            "agent type '{agent_type}' references engine '{engine_name}', but no such engine is configured"
+        );
+    }
+    Ok(())
+}
+
 fn implicit_engine_config(
     provider_connection_name: &str,
     default_model: Option<&str>,
@@ -651,6 +700,7 @@ async fn write_child_transcript(
                     .trigger_with_engine(child_store, utility_engine.clone());
             }
         }
+
         Err(error) => {
             tracing::warn!(%error, "failed to persist child agent transcript");
         }
@@ -757,6 +807,7 @@ async fn drive_child_to_completion(
                 .send(FinishResult {
                     run_id,
                     call_id,
+                    origin: FinishResultOrigin::Runtime,
                     status: "unstructured".to_string(),
                     result: Some(text),
                     error: None,
@@ -769,6 +820,7 @@ async fn drive_child_to_completion(
                 .send(FinishResult {
                     run_id,
                     call_id,
+                    origin: FinishResultOrigin::Runtime,
                     status: "failure".to_string(),
                     result: None,
                     error: Some(error.to_string()),
@@ -781,6 +833,7 @@ async fn drive_child_to_completion(
                 .send(FinishResult {
                     run_id,
                     call_id,
+                    origin: FinishResultOrigin::Runtime,
                     status: "failure".to_string(),
                     result: None,
                     error: Some(format!("child agent task panicked: {join_error}")),
@@ -822,13 +875,46 @@ fn extract_last_assistant_text(context: &Context) -> String {
 
 #[cfg(test)]
 mod tests {
+    use futures::future::BoxFuture;
     use std::time::Duration;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
+    use crate::agent::StreamEvent;
     use crate::llm::engine::{EngineConfig, EngineImpl};
-    use crate::llm::MockProvider;
+    use crate::llm::{MockProvider, ModelInfo, Provider, ToolSchema};
     use crate::{AgentConfig, AssistantStatus, ProfileConfig};
     use uuid::Uuid;
+
+    struct FailingProvider;
+
+    impl Provider for FailingProvider {
+        fn name(&self) -> &str {
+            "failing"
+        }
+
+        fn chat<'a>(
+            &'a self,
+            _messages: Vec<Message>,
+            _tools: Vec<ToolSchema>,
+            _cancel: CancellationToken,
+        ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+            Box::pin(async {
+                let (sender, receiver) = mpsc::channel(1);
+                let _ = sender
+                    .send(StreamEvent::Error(anyhow::anyhow!(
+                        "provider returned HTTP 404: model 'invalid' not found"
+                    )))
+                    .await;
+                Ok(receiver)
+            })
+        }
+
+        fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+    }
 
     fn test_engine_config() -> EngineConfig {
         EngineConfig {
@@ -857,6 +943,7 @@ mod tests {
                     allowed_tools: None,
                     timeout_secs: None,
                     persona: None,
+                    system_prompt: None,
                     can_spawn: true,
                 },
             )]),
@@ -891,6 +978,7 @@ mod tests {
                 allowed_tools: None,
                 timeout_secs: None,
                 persona: None,
+                system_prompt: None,
                 can_spawn: false,
             },
         );
@@ -939,6 +1027,7 @@ mod tests {
                         allowed_tools: None,
                         timeout_secs: None,
                         persona: None,
+                        system_prompt: None,
                         can_spawn: false,
                     },
                 ),
@@ -950,6 +1039,7 @@ mod tests {
                         allowed_tools: None,
                         timeout_secs: None,
                         persona: None,
+                        system_prompt: None,
                         can_spawn: false,
                     },
                 ),
@@ -1126,6 +1216,116 @@ mod tests {
     }
 
     #[test]
+    fn root_and_child_contexts_share_global_and_agent_type_prompt_once() {
+        crate::test_support::run_locked(async {
+            let provider = Arc::new(MockProvider::new(
+                vec!["answer".to_string()],
+                Duration::from_millis(0),
+            ));
+            let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(provider, test_engine_config()));
+            let factory = AgentFactory::new(HashMap::from([("default".to_string(), engine)]))
+                .with_system_prompt("global soul");
+            let profile = ProfileConfig {
+                default_engine: "default".to_string(),
+                agents: HashMap::from([(
+                    "specialist".to_string(),
+                    AgentConfig {
+                        engine: None,
+                        description: None,
+                        allowed_tools: None,
+                        timeout_secs: None,
+                        persona: Some("specialist persona".to_string()),
+                        system_prompt: Some("specialist body".to_string()),
+                        can_spawn: false,
+                    },
+                )]),
+                ..ProfileConfig::default()
+            };
+
+            let (mut root, _root_ui_rx) = factory
+                .create(&profile, "specialist", Role::Root)
+                .expect("root construction succeeds");
+            let root_handle = root.run();
+            root.send_command(crate::agent::AgentCommand::Prompt("root task".to_string()))
+                .await;
+            drop(root);
+            let root_context = tokio::time::timeout(Duration::from_secs(2), root_handle)
+                .await
+                .expect("root run completes")
+                .expect("root task does not panic")
+                .expect("root task succeeds");
+            let root_system_messages: Vec<_> = root_context
+                .messages()
+                .iter()
+                .filter_map(|message| match message {
+                    Message::System { content } => Some(content.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                root_system_messages.first().copied(),
+                Some("global soul\n\nspecialist persona\n\nspecialist body")
+            );
+            assert_eq!(
+                root_system_messages
+                    .iter()
+                    .filter(|content| content.contains("global soul"))
+                    .count(),
+                1
+            );
+
+            let (finish_tx, _finish_rx) = mpsc::channel(1);
+            let (subagent_ui_tx, _subagent_ui_rx) = mpsc::channel(1);
+            let (mut child, _child_ui_rx) = factory
+                .create(
+                    &profile,
+                    "specialist",
+                    Role::Child(ChildRoleConfig {
+                        run_id: Uuid::new_v4(),
+                        call_id: Uuid::new_v4(),
+                        briefing: Some("child briefing".to_string()),
+                        parent_cancel: CancellationToken::new(),
+                        subagent_ui_tx,
+                        finish_tx,
+                    }),
+                )
+                .expect("child construction succeeds");
+            let child_handle = child.run();
+            child
+                .send_command(crate::agent::AgentCommand::Prompt("child task".to_string()))
+                .await;
+            let child_context = tokio::time::timeout(Duration::from_secs(2), child_handle)
+                .await
+                .expect("child run completes")
+                .expect("child task does not panic")
+                .expect("child task succeeds");
+            let child_system_messages: Vec<_> = child_context
+                .messages()
+                .iter()
+                .filter_map(|message| match message {
+                    Message::System { content } => Some(content.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                child_system_messages.first().copied(),
+                Some("global soul\n\nspecialist persona\n\nspecialist body")
+            );
+            assert_eq!(
+                child_system_messages
+                    .iter()
+                    .filter(|content| content.contains("global soul"))
+                    .count(),
+                1
+            );
+            assert!(child_system_messages.contains(&"child briefing"));
+            assert!(child_system_messages
+                .iter()
+                .any(|content| content.contains("tool-use")));
+        });
+    }
+
+    #[test]
     fn create_uses_agent_config_engine_when_present() {
         let provider = Arc::new(MockProvider::new(vec![], Duration::from_millis(0)));
         let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(provider, test_engine_config()));
@@ -1141,6 +1341,7 @@ mod tests {
                     allowed_tools: None,
                     timeout_secs: None,
                     persona: None,
+                    system_prompt: None,
                     can_spawn: false,
                 },
             )]),
@@ -1182,6 +1383,7 @@ mod tests {
                 allowed_tools: Some(vec!["read".to_string()]),
                 timeout_secs: None,
                 persona: None,
+                system_prompt: None,
                 can_spawn: false,
             },
         );
@@ -1355,6 +1557,7 @@ mod tests {
                     allowed_tools: None,
                     timeout_secs: None,
                     persona: None,
+                    system_prompt: None,
                     can_spawn: false,
                 },
             )]),
@@ -1428,6 +1631,89 @@ mod tests {
         assert_eq!(
             finish_result.result.as_deref(),
             Some("child's final answer")
+        );
+    }
+
+    #[tokio::test]
+    async fn run_child_reports_stream_error_as_failure_instead_of_unstructured_result() {
+        let provider = Arc::new(FailingProvider);
+        let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(provider, test_engine_config()));
+        let engines = HashMap::from([("default".to_string(), engine)]);
+        let profile = ProfileConfig {
+            default_engine: "default".to_string(),
+            compact_engine: None,
+            agents: HashMap::from([(
+                "default".to_string(),
+                AgentConfig {
+                    engine: None,
+                    description: None,
+                    allowed_tools: None,
+                    timeout_secs: None,
+                    persona: None,
+                    system_prompt: None,
+                    can_spawn: false,
+                },
+            )]),
+            ..ProfileConfig::default()
+        };
+
+        let (finish_tx, mut finish_rx) = mpsc::channel::<FinishResult>(1);
+        let (forward_ui_tx, mut forward_ui_rx) = mpsc::channel::<UiUpdate>(16);
+        let run_id = Uuid::new_v4();
+        let call_id = Uuid::new_v4();
+        let cancel = CancellationToken::new();
+        let child_role_config = ChildRoleConfig {
+            run_id,
+            call_id,
+            briefing: None,
+            parent_cancel: cancel.clone(),
+            subagent_ui_tx: forward_ui_tx.clone(),
+            finish_tx: finish_tx.clone(),
+        };
+        let (child_loop, child_ui_rx) = AgentFactory::build(
+            &engines,
+            &[],
+            false,
+            false,
+            false,
+            &profile,
+            "default",
+            Role::Child(child_role_config),
+            None,
+            None,
+            None,
+        )
+        .expect("child agent should construct successfully");
+
+        drive_child_to_completion(
+            child_loop,
+            child_ui_rx,
+            "do the child task".to_string(),
+            run_id,
+            call_id,
+            cancel,
+            finish_tx,
+            forward_ui_tx,
+            ChildTranscriptTarget {
+                parent_store: None,
+                engine_config: None,
+                utility_engine: None,
+            },
+        )
+        .await;
+
+        while forward_ui_rx.try_recv().is_ok() {}
+
+        let finish_result = tokio::time::timeout(Duration::from_secs(1), finish_rx.recv())
+            .await
+            .expect("finish_rx should receive promptly")
+            .expect("finish_tx should not be dropped without sending");
+        assert_eq!(finish_result.status, "failure");
+        assert_eq!(finish_result.origin, FinishResultOrigin::Runtime);
+        assert_eq!(finish_result.result, None);
+        assert_eq!(
+            finish_result.error.as_deref(),
+            Some("provider returned HTTP 404: model 'invalid' not found")
         );
     }
 }

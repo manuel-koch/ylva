@@ -37,6 +37,12 @@ pub struct AgentConfig {
     /// Optional persona instruction prepended to the system prompt.
     #[serde(default)]
     pub persona: Option<String>,
+    /// File-authored agent-type system-prompt body. Inline
+    /// `config.toml` `[agents.<type>]` tables do not set this field; they
+    /// provide profile-level overrides such as `persona`, `engine`, and
+    /// `allowed_tools`.
+    #[serde(default)]
+    pub system_prompt: Option<String>,
     /// When `true` the agent is permitted to spawn child agents via
     /// `AgentFactory::create` with `Role::Child`. Checked in Phase 6.
     #[serde(default, deserialize_with = "deserialize_bool_or_string")]

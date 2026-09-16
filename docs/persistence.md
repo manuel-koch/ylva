@@ -60,7 +60,7 @@ is the `meta` header**; every following line is an event.
 {"type":"message","version":1,"timestamp":"2026-01-08T09:41:07.456Z","message":{"role":"user","content":"explain the store layout","kind":"explicit"}}
 {"type":"message","version":1,"timestamp":"2026-01-08T09:41:09.012Z","message":{"role":"assistant","content":"…","status":"complete","tool_calls":[]}}
 {"type":"child_start","version":1,"created_at":"…","id":"…","parent_session":"6f1e…","agent_type":"explorer","task":"…"}
-{"type":"child_result","version":1,"completed_at":"…","id":"…","parent_session":"6f1e…","status":"success","result":"…","sources":[]}
+{"type":"child_result","version":1,"completed_at":"…","id":"…","parent_session":"6f1e…","status":"success","result":"…","sources":[],"origin":"agent"}
 ```
 
 A child-agent's own session file carries `parent_session` in its own `meta`
@@ -137,7 +137,9 @@ engine — it never needs to cross-reference the parent's.
 ### `child_start` / `child_result`
 
 Written to the **parent** session when a child agent run begins and when it
-finishes. Both carry `parent_session`, so a child's records are always
+finishes. The result's `origin` is `agent` when the child called
+`agent_finish`, or `runtime` when the harness produced the outcome. Both
+carry `parent_session`, so a child's records are always
 attributable. The child's own transcript is written separately, once, at
 completion, and its own `meta` line carries `parent_session` too (see above) —
 so the link is discoverable from either file, not just top-down from the

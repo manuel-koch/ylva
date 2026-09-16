@@ -1281,6 +1281,11 @@ impl AgentLoop {
             // to report a clear `Err` (→ `status: "failure"`) instead of the
             // generic "unstructured" `Ok(context)` fallback.
             let mut iteration_cap_exceeded: Option<String> = None;
+            // A child has no caller that can recover from a provider/stream
+            // failure after the current request ends. Preserve that
+            // authoritative error so the child returns `Err` instead of
+            // being misclassified as an unstructured successful answer.
+            let mut stream_error: Option<String> = None;
 
             loop {
                 tokio::select! {
@@ -1360,6 +1365,9 @@ impl AgentLoop {
                             AgentEvent::StreamError(error) => {
                                 pending_steers.clear();
                                 mode = AgentMode::Idle;
+                                if is_child {
+                                    stream_error = Some(error.clone());
+                                }
                                 tracing::error!(message = %error, "agent stream error");
                                 let _ = ui_tx
                                     .send(UiUpdate::Error {
@@ -1492,6 +1500,12 @@ impl AgentLoop {
                             }
                             AgentEvent::ToolError { id, name, error, partial_output, duration, content_sections } => {
                                 current_tool_cancel = None;
+                                tracing::error!(
+                                    tool = %name,
+                                    tool_call_id = %id,
+                                    error = %error,
+                                    "tool failed"
+                                );
                                 context.push_tool_error(
                                     id,
                                     name,
@@ -2098,6 +2112,7 @@ impl AgentLoop {
                                         let cancellation_result = crate::child_agent_manager::FinishResult {
                                             run_id: cancelled.run_id,
                                             call_id: cancelled.call_id,
+                                            origin: crate::child_agent_manager::FinishResultOrigin::Runtime,
                                             status: "cancelled".to_string(),
                                             result: None,
                                             error: Some(
@@ -2308,15 +2323,17 @@ impl AgentLoop {
                 // (the spawn wrapper) harvest the final `Context` and report
                 // an "unstructured" outcome.
                 //
-                // The iteration-cap case is different and reported as a hard
-                // `Err` instead: `iteration_cap_exceeded` (set only for a
-                // child, see `advance_tool_queue`'s doc comment) means the
-                // model never got a chance to conclude naturally, so there is
-                // no "final answer" to salvage — `drive_child_to_completion`'s
-                // existing `Ok(Err(error))` arm already reports exactly the
-                // right shape (`status: "failure"`, explicit `error`, no
-                // fabricated `result`) with zero changes needed there.
+                // Iteration-cap and stream-error cases are different and
+                // reported as hard `Err`s instead: the child either never got
+                // a chance to conclude naturally or the provider failed, so
+                // there is no "final answer" to salvage. The
+                // `drive_child_to_completion` `Ok(Err(error))` arm reports
+                // exactly the right shape (`status: "failure"`, explicit
+                // `error`, no fabricated `result`).
                 if is_child && mode == AgentMode::Idle {
+                    if let Some(message) = stream_error.take() {
+                        return Err(anyhow::anyhow!(message));
+                    }
                     if let Some(message) = iteration_cap_exceeded.take() {
                         return Err(anyhow::anyhow!(message));
                     }
@@ -2837,13 +2854,10 @@ fn start_request(
                             .await;
                     } else {
                         let message = format!("{error}");
-                        tracing::error!(message = %message, "engine chat failed");
-                        let _ = ui_tx
-                            .send(UiUpdate::Error {
-                                message: message.clone(),
-                                run_id: own_run_id,
-                            })
-                            .await;
+                        tracing::debug!(
+                            message = %message,
+                            "engine chat failed; forwarding stream failure"
+                        );
                         let _ = agent_tx.send(AgentEvent::StreamError(message)).await;
                     }
                     return;
@@ -2899,12 +2913,6 @@ fn start_request(
                                 }
                             }
                             if let Some(error) = error {
-                                let _ = ui_tx
-                                    .send(UiUpdate::Error {
-                                        message: error.clone(),
-                                        run_id: own_run_id,
-                                    })
-                                    .await;
                                 let _ = agent_tx.send(AgentEvent::StreamError(error)).await;
                             } else {
                                 let _ = agent_tx.send(AgentEvent::ToolCall { calls }).await;
@@ -2921,12 +2929,6 @@ fn start_request(
                     }
                     StreamEvent::Error(error) => {
                         let message = format!("{error}");
-                        let _ = ui_tx
-                            .send(UiUpdate::Error {
-                                message: message.clone(),
-                                run_id: own_run_id,
-                            })
-                            .await;
                         let _ = agent_tx.send(AgentEvent::StreamError(message)).await;
                         break;
                     }
@@ -2989,15 +2991,41 @@ fn inject_pending_steers(pending_steers: &mut VecDeque<String>, context: &mut Co
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::future::BoxFuture;
     use std::path::PathBuf;
 
     use crate::test_support::capture_logs;
     use crate::{
         agent::tools::{clarify::ClarifyTool, write::WriteTool},
         llm::engine::{Engine, EngineConfig, EngineImpl},
-        llm::{MockEvent, MockProvider},
+        llm::{MockEvent, MockProvider, ModelInfo, Provider, ToolSchema},
         sandbox::{Sandbox, SandboxContext},
     };
+
+    struct FailingProvider;
+
+    impl Provider for FailingProvider {
+        fn name(&self) -> &str {
+            "failing"
+        }
+
+        fn chat<'a>(
+            &'a self,
+            _messages: Vec<Message>,
+            _tools: Vec<ToolSchema>,
+            _cancel: CancellationToken,
+        ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+            Box::pin(async {
+                Err(anyhow::anyhow!(
+                    "provider returned HTTP 404: model 'invalid' not found"
+                ))
+            })
+        }
+
+        fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+    }
 
     fn test_engine() -> Arc<dyn Engine> {
         Arc::new(EngineImpl::new(
@@ -3012,6 +3040,105 @@ mod tests {
                 reasoning: None,
             },
         ))
+    }
+
+    #[test]
+    fn stream_failure_emits_one_user_visible_error() {
+        crate::test_support::run_locked(async {
+            let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+                Arc::new(FailingProvider),
+                EngineConfig {
+                    provider_connection: "failing".to_string(),
+                    model: "invalid".to_string(),
+                    temperature: None,
+                    context_length: None,
+                    api_base_url: None,
+                    api_key: None,
+                    reasoning: None,
+                },
+            ));
+            let (mut agent, mut ui_rx) = AgentLoop::new(engine, Arc::new(ToolRegistry::new()));
+            let handle = agent.run();
+            agent
+                .send_command(AgentCommand::Prompt("trigger failure".to_string()))
+                .await;
+
+            let mut error_messages = Vec::new();
+            while let Ok(Some(update)) =
+                tokio::time::timeout(Duration::from_millis(100), ui_rx.recv()).await
+            {
+                if let UiUpdate::Error { message, .. } = update {
+                    error_messages.push(message);
+                }
+            }
+
+            assert_eq!(
+                error_messages,
+                vec!["provider returned HTTP 404: model 'invalid' not found".to_string()],
+                "a stream failure must be rendered once even though the provider and \
+                 agent-loop layers both observe it"
+            );
+
+            drop(agent);
+            handle
+                .await
+                .expect("agent task should not panic")
+                .expect("agent should stop cleanly after the channel closes");
+        });
+    }
+
+    #[test]
+    fn user_visible_tool_failures_are_written_to_the_log() {
+        let log = capture_logs(async {
+            let script = vec![MockEvent::Delta(DeltaChunk {
+                tool_call_index: 0,
+                tool_call_id: Some("call-1".to_string()),
+                function_name: Some("missing_tool".to_string()),
+                arguments_fragment: Some("{}".to_string()),
+            })];
+            let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+                Arc::new(MockProvider::with_script(script, Duration::from_millis(0))),
+                EngineConfig {
+                    provider_connection: "mock".to_string(),
+                    model: "test-model".to_string(),
+                    temperature: None,
+                    context_length: None,
+                    api_base_url: None,
+                    api_key: None,
+                    reasoning: None,
+                },
+            ));
+            let (mut agent, mut ui_rx) = AgentLoop::new(engine, Arc::new(ToolRegistry::new()));
+            let handle = agent.run();
+            agent
+                .send_command(AgentCommand::Prompt("trigger tool failure".to_string()))
+                .await;
+
+            loop {
+                let update = ui_rx
+                    .recv()
+                    .await
+                    .expect("agent should emit a tool error update");
+                if matches!(update, UiUpdate::ToolError { .. }) {
+                    break;
+                }
+            }
+
+            drop(agent);
+            handle
+                .await
+                .expect("agent task should not panic")
+                .expect("agent should stop cleanly after the channel closes");
+        });
+
+        assert!(
+            log.contains("tool failed"),
+            "user-visible tool failures must be logged: {log}"
+        );
+        assert!(
+            log.contains("Unknown tool 'missing_tool'"),
+            "the log must include the tool failure diagnostic: {log}"
+        );
     }
 
     fn test_sandbox() -> std::sync::Arc<std::sync::RwLock<Sandbox>> {
@@ -4087,6 +4214,7 @@ mod tests {
                 .send(FinishResult {
                     run_id: Uuid::new_v4(),
                     call_id: Uuid::new_v4(),
+                    origin: crate::child_agent_manager::FinishResultOrigin::Agent,
                     status: "success".to_string(),
                     result: Some("child done".to_string()),
                     error: None,

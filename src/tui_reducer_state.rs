@@ -710,6 +710,7 @@ fn project_messages_with_child_runs(
                 let finish_result = crate::agent::child_agent_manager::FinishResult {
                     run_id: child_run.run_id,
                     call_id: child_run.call_id,
+                    origin: child_run.origin,
                     status: status.clone(),
                     result: if status == "failure" {
                         None
@@ -3082,6 +3083,7 @@ mod tests {
                 status: Some("success".to_string()),
                 result: Some("patch is safe".to_string()),
                 sources: vec!["src/lib.rs".to_string()],
+                origin: crate::child_agent_manager::FinishResultOrigin::Agent,
                 duration: Some(Duration::from_secs(1)),
             },
             ChildRunRecord {
@@ -3096,6 +3098,7 @@ mod tests {
                 status: None,
                 result: None,
                 sources: vec![],
+                origin: crate::child_agent_manager::FinishResultOrigin::default(),
                 duration: None,
             },
         ];
@@ -3160,6 +3163,7 @@ mod tests {
             status: Some("success".to_string()),
             result: Some("done".to_string()),
             sources: vec![],
+            origin: crate::child_agent_manager::FinishResultOrigin::Agent,
             duration: Some(Duration::from_secs(1)),
         }];
         let root_messages = vec![Message::Assistant {

@@ -38,6 +38,13 @@ received"` event with a stable `command` variant field. Payloads are represented
 by lengths or correlation IDs rather than their contents; tool approval/denial
 events remain separate outcome events.
 
+When a logfile is enabled, user-visible provider/stream failures, tool
+failures, and fatal startup errors are also emitted through `tracing`. Fatal
+startup paths flush the non-blocking logfile before exiting. A provider stream
+failure is routed through the agent event loop once, so one failed request
+produces one user-facing error even though lower layers may record their own
+structured diagnostics.
+
 ## CLI Runtime
 
 Non-interactive, one-shot session: the initial user turn is sent to the
@@ -283,7 +290,9 @@ affect sandbox approval checks. See
   result built from the child's last assistant message; if the child hits
   its max-tool-iterations cap first, the parent receives a clear failure
   instead, so it isn't mistaken for the child's own conclusion. A child is
-  told its tool-use iteration budget up front so it can pace itself.
+  told its tool-use iteration budget up front so it can pace itself. Provider
+  and stream failures are also reported as clear failures rather than being
+  synthesized as empty or unstructured results.
 
 ## Child-agent delegation
 
@@ -337,6 +346,8 @@ streaming/running tools in the background:
   drill-in is never yanked away).
 - While viewing a child's transcript, a header above it shows the original
   `spawn_subagent` bubble (task/label/agent type) so context isn't lost.
+  Completed child bubbles highlight `status=failure` in red in both the root
+  conversation and this drill-in header.
   Typing while merely *watching* a running child is a no-op rather than
   silently steering the wrong agent (root vs. child) — the footer omits
   `enter send` in that state to make this clear.
@@ -526,15 +537,22 @@ Defining other agent types, such as `local-discovery`, does not disable the
 default agent. If `[agents.default]` is defined, its settings replace the
 built-in defaults.
 
+Agent types can also be authored as standalone `.md` or `.toml` files in the
+global `~/.ylva/agents/`, selected profile `agents/`, or project
+`.ylva/agents/` directories. Project files shadow profile files, and profile
+files shadow global files for the same type; file definitions are replaced
+whole before inline profile fields are applied. A Markdown file uses strict
+`+++` TOML or `---` YAML frontmatter followed by its system-prompt body.
+Inline `persona` content always precedes that body.
+
 ### Layered global persona and initialization
 
 The top-level conversation's global persona comes from `SOUL.md`, resolved
 from the project `.ylva/`, home `~/.ylva/`, and the code-owned built-in value
-in that order. Agent types have a separate, role-independent persona and
-system-prompt body. Phase 10.2 will apply the selected type's instructions
-whether it runs as the root agent or as a child. Until then, only the global
-`SOUL.md` is resolved for the root at runtime; child contexts use
-`Context::new()`'s code-owned fallback plus their task briefing.
+in that order. The resolved SOUL is inherited exactly once by both root and
+child contexts. Agent-type persona and file body are then appended, followed
+by the tool protocol; a child additionally receives its task briefing and
+runtime-budget constraints.
 
 `ylva init` writes `SOUL.md`, `profiles/default/config.toml`, and an annotated
 `profiles/default/.env` starter; it does not seed agent-type files.

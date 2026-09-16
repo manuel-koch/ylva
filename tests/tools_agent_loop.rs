@@ -926,6 +926,7 @@ async fn intermediate_subagent_completion_does_not_reprompt_until_all_children_f
         .send(FinishResult {
             run_id: running_run_id,
             call_id: running_call_id,
+            origin: ylva::child_agent_manager::FinishResultOrigin::Agent,
             status: "success".to_string(),
             result: Some("first result".to_string()),
             error: None,
@@ -961,6 +962,7 @@ async fn intermediate_subagent_completion_does_not_reprompt_until_all_children_f
         .send(FinishResult {
             run_id: second_run_id,
             call_id: second_call_id,
+            origin: ylva::child_agent_manager::FinishResultOrigin::Agent,
             status: "success".to_string(),
             result: Some("second result".to_string()),
             error: None,
@@ -1073,6 +1075,7 @@ async fn iteration_guard_also_stops_a_runaway_spawn_subagent_finish_reprompt_loo
                 .send(FinishResult {
                     run_id: request.run_id,
                     call_id: request.call_id,
+                    origin: ylva::child_agent_manager::FinishResultOrigin::Agent,
                     status: "success".to_string(),
                     result: Some("done".to_string()),
                     error: None,

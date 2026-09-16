@@ -5200,6 +5200,7 @@ mod tests {
                 status: Some("success".to_string()),
                 result: Some(child_result.to_string()),
                 sources,
+                origin: crate::child_agent_manager::FinishResultOrigin::Agent,
                 duration: Some(Duration::from_millis(91)),
             }],
         );

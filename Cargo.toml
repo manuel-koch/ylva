@@ -44,6 +44,7 @@ dirs = "6"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 toml = "1.1.5"
 dotenvy = "0.15"
+serde_yaml = "0.9"
 
 [build-dependencies]
 time = { version = "0.3", features = ["formatting", "macros"] }

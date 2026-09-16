@@ -95,7 +95,9 @@ impl Default for LogConfig {
 /// file path is intentionally omitted to keep lines readable. A failure to set
 /// up the file is reported as an `Err` naming the path that could not be used,
 /// rather than a panic. The returned [`LogGuards`] must be kept alive until
-/// process exit or buffered events may be lost.
+/// process exit or buffered events may be lost. Code that terminates with
+/// `std::process::exit` must drop the guard explicitly first, because that
+/// function skips destructors.
 pub fn init_logging(config: LogConfig) -> Result<Option<LogGuards>, String> {
     let Some(ref path) = config.log_file else {
         return Ok(None);

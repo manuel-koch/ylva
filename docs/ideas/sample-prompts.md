@@ -170,6 +170,9 @@ Run `tests/e2e/heavy-output.bash`.
 
 ---
 
+Use agent researcher-a to delegate discovering tool capabilities in
+workspace source-code.
+
 Run the following task in a subagent and let it report its findings back:
 
 Analyze the `src/agent/child_agent_manager.rs` functionality

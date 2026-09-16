@@ -30,7 +30,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::{Tool, ToolCall, ToolCallResult, ToolError, DEFAULT_TOOL_TIMEOUT_SECS};
-use crate::child_agent_manager::FinishResult;
+use crate::child_agent_manager::{FinishResult, FinishResultOrigin};
 use crate::sandbox::ApprovalCheck;
 
 /// The status a child reports for its own run.
@@ -199,6 +199,7 @@ impl ToolCall for AgentFinishCall {
             let finish_result = FinishResult {
                 run_id: self.config.run_id,
                 call_id: self.config.call_id,
+                origin: FinishResultOrigin::Agent,
                 status: status.as_str().to_string(),
                 result: args.result,
                 error: args.error,
@@ -270,6 +271,7 @@ mod tests {
         let finish_result = finish_rx.recv().await.expect("finish result sent");
         assert_eq!(finish_result.run_id, run_id);
         assert_eq!(finish_result.call_id, call_id);
+        assert_eq!(finish_result.origin, FinishResultOrigin::Agent);
         assert_eq!(finish_result.status, "success");
         assert_eq!(finish_result.result.as_deref(), Some("all done"));
         assert_eq!(finish_result.sources, vec!["a.rs".to_string()]);
@@ -293,6 +295,7 @@ mod tests {
         );
         let _ = call.run().await.expect("finish call succeeds");
         let finish_result = finish_rx.recv().await.expect("finish result sent");
+        assert_eq!(finish_result.origin, FinishResultOrigin::Agent);
         assert_eq!(finish_result.status, "failure");
         assert_eq!(
             finish_result.error.as_deref(),

@@ -17,15 +17,17 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::ylva_home::ylva_home;
+use crate::ylva_home::{ylva_home, YLVA_DIR_NAME};
 
 mod agent;
+pub mod agent_type_file;
 pub mod layered;
 mod profile;
 mod provider;
 pub mod soul;
 
 pub use agent::AgentConfig;
+pub use agent_type_file::AgentTypeDefinition;
 pub use profile::{profile_config_source_path, ProfileConfig};
 pub use provider::{ProviderConfig, ProviderConnectionConfig};
 
@@ -66,6 +68,32 @@ pub enum ConfigError {
         path: PathBuf,
         #[source]
         source: toml::de::Error,
+    },
+    #[error("malformed agent-type file at {}: {message}", path.display())]
+    MalformedAgentType { path: PathBuf, message: String },
+    #[error(
+        "agent type '{agent_type}' has conflicting {scope}-scope files at {} and {}",
+        first_path.display(),
+        second_path.display()
+    )]
+    ConflictingAgentTypeFiles {
+        agent_type: String,
+        scope: String,
+        first_path: PathBuf,
+        second_path: PathBuf,
+    },
+    #[error(
+        "agent type '{agent_type}' has an ambiguous {scope}-scope definition: \
+         inline table at {} conflicts with file {}"
+        ,
+        toml_path.display(),
+        file_path.display()
+    )]
+    AmbiguousAgentTypeDefinition {
+        agent_type: String,
+        scope: String,
+        toml_path: PathBuf,
+        file_path: PathBuf,
     },
     #[error("cannot read profile environment at {}: {source}", path.display())]
     EnvironmentUnreadable {
@@ -115,54 +143,79 @@ pub fn profile_env_path(profiles_root: &Path, profile_name: &str) -> PathBuf {
 /// Values from the profile-local `.env` file are used as defaults and
 /// exported process values always win, including explicitly exported empty
 /// values. The returned map is also used for `${NAME}` interpolation in the
-/// profile TOML.
+/// profile TOML. This compatibility wrapper loads only the supplied home
+/// profile path; startup uses [`load_profile_environment_at_workspace_root`]
+/// to add the project-scoped file.
 pub fn load_profile_environment(
     profile_env_path: Option<&Path>,
 ) -> Result<HashMap<String, String>, ConfigError> {
+    load_profile_environment_at_workspace_root(profile_env_path, None, DEFAULT_PROFILE_NAME)
+}
+
+/// Load a profile's home and project environment files plus process variables.
+///
+/// The merge order is home `.env`, project `.env`, then exported process
+/// variables. Later values win, so project values override home values while
+/// process variables retain their existing highest precedence.
+pub fn load_profile_environment_at_workspace_root(
+    profile_env_path: Option<&Path>,
+    workspace_root: Option<&Path>,
+    profile_name: &str,
+) -> Result<HashMap<String, String>, ConfigError> {
     let mut values = HashMap::new();
     if let Some(path) = profile_env_path {
-        let metadata = match std::fs::metadata(path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(process_environment_values());
-            }
-            Err(source) => {
-                return Err(ConfigError::EnvironmentUnreadable {
-                    path: path.to_path_buf(),
-                    source,
-                });
-            }
-        };
-        if !metadata.is_file() {
-            return Err(ConfigError::EnvironmentMalformed {
-                path: path.to_path_buf(),
-                message: "path is not a file".to_string(),
-            });
-        }
-
-        let entries =
-            dotenvy::from_path_iter(path).map_err(|error| ConfigError::EnvironmentMalformed {
-                path: path.to_path_buf(),
-                message: error.to_string(),
-            })?;
-        for entry in entries {
-            let (name, value) = entry.map_err(|error| ConfigError::EnvironmentMalformed {
-                path: path.to_path_buf(),
-                message: error.to_string(),
-            })?;
-            values.insert(name, value);
-        }
+        load_dotenv_file(path, &mut values)?;
+    }
+    if let Some(workspace_root) = workspace_root {
+        let project_environment_path = workspace_root
+            .join(YLVA_DIR_NAME)
+            .join(PROFILES_DIRECTORY_NAME)
+            .join(profile_name)
+            .join(PROFILE_ENV_FILE_NAME);
+        load_dotenv_file(&project_environment_path, &mut values)?;
     }
     values.extend(process_environment_values());
-    let environment_path = profile_env_path
-        .map(|path| path.display().to_string())
-        .unwrap_or_default();
+    let environment_path = profile_env_path.map(|path| path.display().to_string());
     tracing::info!(
-        path = %environment_path,
+        home_path = ?environment_path,
+        project = workspace_root.is_some(),
         variables = values.len(),
         "profile environment loaded"
     );
     Ok(values)
+}
+
+fn load_dotenv_file(path: &Path, values: &mut HashMap<String, String>) -> Result<(), ConfigError> {
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(ConfigError::EnvironmentUnreadable {
+                path: path.to_path_buf(),
+                source,
+            })
+        }
+    };
+    if !metadata.is_file() {
+        return Err(ConfigError::EnvironmentMalformed {
+            path: path.to_path_buf(),
+            message: "path is not a file".to_string(),
+        });
+    }
+
+    let entries =
+        dotenvy::from_path_iter(path).map_err(|error| ConfigError::EnvironmentMalformed {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+    for entry in entries {
+        let (name, value) = entry.map_err(|error| ConfigError::EnvironmentMalformed {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+        values.insert(name, value);
+    }
+    Ok(())
 }
 
 fn process_environment_values() -> HashMap<String, String> {
@@ -180,6 +233,49 @@ mod tests {
         assert_eq!(
             profile_env_path(profiles_root, "work"),
             PathBuf::from("/tmp/ylva/profiles/work/.env")
+        );
+    }
+
+    #[test]
+    fn project_profile_environment_overrides_home_profile_environment() {
+        let temporary_directory = tempfile::tempdir().expect("temporary directory");
+        let home_profiles_root = temporary_directory.path().join("home/profiles");
+        let home_environment = profile_env_path(&home_profiles_root, "work");
+        std::fs::create_dir_all(home_environment.parent().expect("home environment parent"))
+            .expect("create home environment directory");
+        std::fs::write(&home_environment, "SHARED=home\nHOME_ONLY=home\n")
+            .expect("write home environment");
+
+        let workspace_root = temporary_directory.path().join("project");
+        let project_environment = workspace_root
+            .join(YLVA_DIR_NAME)
+            .join(PROFILES_DIRECTORY_NAME)
+            .join("work")
+            .join(PROFILE_ENV_FILE_NAME);
+        std::fs::create_dir_all(
+            project_environment
+                .parent()
+                .expect("project environment parent"),
+        )
+        .expect("create project environment directory");
+        std::fs::write(
+            &project_environment,
+            "SHARED=project\nPROJECT_ONLY=project\n",
+        )
+        .expect("write project environment");
+
+        let values = load_profile_environment_at_workspace_root(
+            Some(&home_environment),
+            Some(&workspace_root),
+            "work",
+        )
+        .expect("load merged environment");
+
+        assert_eq!(values.get("SHARED").map(String::as_str), Some("project"));
+        assert_eq!(values.get("HOME_ONLY").map(String::as_str), Some("home"));
+        assert_eq!(
+            values.get("PROJECT_ONLY").map(String::as_str),
+            Some("project")
         );
     }
 }

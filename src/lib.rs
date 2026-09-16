@@ -63,10 +63,10 @@ pub use config::layered::{
 };
 pub use config::soul::{load_soul, DEFAULT_SOUL};
 pub use config::{
-    default_profiles_root, load_profile_environment, profile_config_path,
-    profile_config_source_path, profile_env_path, AgentConfig, ConfigError, ProfileConfig,
-    ProviderConfig, ProviderConnectionConfig, DEFAULT_PROFILE_NAME, PROFILES_DIRECTORY_NAME,
-    PROFILE_CONFIG_FILE_NAME, PROFILE_ENV_FILE_NAME,
+    default_profiles_root, load_profile_environment, load_profile_environment_at_workspace_root,
+    profile_config_path, profile_config_source_path, profile_env_path, AgentConfig, ConfigError,
+    ProfileConfig, ProviderConfig, ProviderConnectionConfig, DEFAULT_PROFILE_NAME,
+    PROFILES_DIRECTORY_NAME, PROFILE_CONFIG_FILE_NAME, PROFILE_ENV_FILE_NAME,
 };
 pub use events::AppAction;
 pub use highlight::{active_theme, set_active_theme, ThemeName};

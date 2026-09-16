@@ -1531,6 +1531,18 @@ fn append_result_section_lines(
     }
 }
 
+struct SummarySegment {
+    text: String,
+    style: Style,
+}
+
+fn summary_spans(segments: &[SummarySegment]) -> Vec<Span<'static>> {
+    segments
+        .iter()
+        .map(|segment| Span::styled(segment.text.clone(), segment.style))
+        .collect()
+}
+
 fn append_tool_bubble_lines(
     lines: &mut Vec<Line<'static>>,
     bubble: ToolBubbleArgs<'_>,
@@ -1706,7 +1718,18 @@ fn append_tool_bubble_lines(
         .map(str::to_string)
         .unwrap_or_else(|| crate::agent::tools::title_case_tool_name(name));
 
-    // Duration shown in the title for Done and Error states.
+    let tool_ran = matches!(state, ToolCallState::Done { .. });
+    let dim_white = Style::default()
+        .fg(CONTENT_COLOR)
+        .add_modifier(Modifier::DIM);
+    let failure_status = Style::default()
+        .fg(ERROR_COLOR)
+        .add_modifier(Modifier::BOLD);
+
+    // Duration and summary segments shown in the title for Done and Error
+    // states. The caller assigns each segment's style explicitly so summary
+    // rendering does not need to infer special text from the final string.
+    let mut summary_segments: Vec<SummarySegment> = vec![];
     let summary_text: String = match state {
         ToolCallState::Done {
             summary, duration, ..
@@ -1718,9 +1741,39 @@ fn append_tool_bubble_lines(
                 .map(|(key, value)| format!("{key}={value}"))
                 .collect();
             parts.push(duration_formatted);
+            for (index, (key, value)) in summary.iter().enumerate() {
+                if index > 0 {
+                    summary_segments.push(SummarySegment {
+                        text: " ".to_string(),
+                        style: dim_white,
+                    });
+                }
+                summary_segments.push(SummarySegment {
+                    text: format!("{key}={value}"),
+                    style: if is_subagent && key == "status" && value == "failure" {
+                        failure_status
+                    } else {
+                        dim_white
+                    },
+                });
+            }
+            if !summary.is_empty() {
+                summary_segments.push(SummarySegment {
+                    text: " ".to_string(),
+                    style: dim_white,
+                });
+            }
+            summary_segments.push(SummarySegment {
+                text: format!("{duration_seconds:.3}s"),
+                style: dim_white,
+            });
             parts.join(" ")
         }
         ToolCallState::Error { duration, .. } if duration.as_nanos() > 0 => {
+            summary_segments.push(SummarySegment {
+                text: format!("{:.3}s", duration.as_secs_f64()),
+                style: dim_white,
+            });
             format!("{:.3}s", duration.as_secs_f64())
         }
         _ => String::new(),
@@ -1731,10 +1784,6 @@ fn append_tool_bubble_lines(
 
     // Record the bubble's start row (title line) before pushing.
     let bubble_start_row = lines.len();
-
-    let dim_white = Style::default()
-        .fg(CONTENT_COLOR)
-        .add_modifier(Modifier::DIM);
 
     // ── Title rendering ─────────────────────────────────────────────────────
     // Two display modes controlled by `collapsed`:
@@ -1751,8 +1800,6 @@ fn append_tool_bubble_lines(
     //             Hard-broken on `\n`, then width-wrapped at `wrap_width - 2`
     //             with a two-space indent. Primary arg chars → bold white;
     //             props chars → dim white.
-
-    let tool_ran = matches!(state, ToolCallState::Done { .. });
 
     let prefix_char_len = title_prefix.chars().count();
 
@@ -1777,6 +1824,16 @@ fn append_tool_bubble_lines(
     }
 
     // Summary suffix, used in both modes.
+    let summary_prefix = if has_args && tool_ran { " → " } else { " " };
+    if !summary_text.is_empty() {
+        summary_segments.insert(
+            0,
+            SummarySegment {
+                text: summary_prefix.to_string(),
+                style: dim_white,
+            },
+        );
+    }
     let summary_suffix: String = if !summary_text.is_empty() {
         if has_args && tool_ran {
             format!(" → {summary_text}")
@@ -1810,15 +1867,13 @@ fn append_tool_bubble_lines(
     // `line_text` is the display string for the prefix+args portion of the row.
     // `prefix_end` and `primary_end` are char-index boundaries within `line_text`.
     // `truncated` appends a dim "..." when the args were truncated.
-    // `suffix` is always rendered in dim white after the optional "..." (used
-    // for the summary / duration text that must stay visible even when args are
-    // long enough to be truncated).
+    // Summary segments are always rendered after the optional "..." so the
+    // summary / duration stays visible even when args are truncated.
     let emit_styled_line = |lines: &mut Vec<Line>,
                             line_text: &str,
                             prefix_end: usize,
                             primary_end: usize,
-                            truncated: bool,
-                            suffix: &str| {
+                            truncated: bool| {
         let chars: Vec<char> = line_text.chars().collect();
         let total = chars.len();
         let pe = prefix_end.min(total);
@@ -1845,8 +1900,8 @@ fn append_tool_bubble_lines(
         if truncated {
             spans.push(Span::styled("...", dim_white));
         }
-        if !suffix.is_empty() {
-            spans.push(Span::styled(suffix.to_string(), dim_white));
+        if !summary_segments.is_empty() {
+            spans.extend(summary_spans(&summary_segments));
         }
         lines.push(Line::from(spans));
     };
@@ -1894,14 +1949,7 @@ fn append_tool_bubble_lines(
         } else {
             prefix_end
         };
-        emit_styled_line(
-            lines,
-            &display_text,
-            prefix_end,
-            primary_end,
-            truncated,
-            &summary_suffix,
-        );
+        emit_styled_line(lines, &display_text, prefix_end, primary_end, truncated);
     } else {
         // ── Expanded: line 1 = prefix + summary; lines 2+ = args ──────────
 
@@ -1918,10 +1966,7 @@ fn append_tool_bubble_lines(
             ));
         }
         if first_total > pe {
-            first_spans.push(Span::styled(
-                first_chars[pe..].iter().collect::<String>(),
-                dim_white,
-            ));
+            first_spans.extend(summary_spans(&summary_segments));
         }
         lines.push(Line::from(first_spans));
 
@@ -3620,6 +3665,106 @@ mod tests {
             rendered.contains("check logs") && rendered.contains("reproduce it"),
             "expected bullet items in rendered bubble, got: {rendered:?}"
         );
+    }
+
+    #[test]
+    fn tool_bubble_renders_runtime_error_content_literally() {
+        use super::{append_tool_bubble_lines, ToolBubbleArgs};
+        use crate::agent::tools::{ContentSection, Section};
+        use crate::tui_reducer_state::{ResultSection, ToolCallState};
+
+        let state = ToolCallState::Done {
+            arguments: serde_json::json!({}),
+            result_section: ResultSection::plain(""),
+            content_sections: vec![Section::Content(ContentSection {
+                label: Some("Error".to_string()),
+                content: "unknown engine: local-discovery_".to_string(),
+                file_extension: None,
+                line_number_offset: None,
+            })],
+            summary: vec![],
+            duration: std::time::Duration::ZERO,
+            title_arguments: vec![],
+        };
+        let mut lines: Vec<Line<'static>> = vec![];
+        let mut bubble_title_rows = vec![];
+        append_tool_bubble_lines(
+            &mut lines,
+            ToolBubbleArgs {
+                id: uuid::Uuid::new_v4(),
+                name: "spawn_subagent",
+                state: &state,
+                collapsed: false,
+                spinner_frame: 0,
+                display_title_override: None,
+            },
+            &mut bubble_title_rows,
+            80,
+        );
+
+        let rendered: String = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(
+            rendered.contains("unknown engine: local-discovery_"),
+            "runtime diagnostic should remain literal, got: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("local-discovery _"),
+            "runtime diagnostic should not be reformatted as Markdown, got: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn failed_subagent_status_is_red_in_root_and_header_bubble_titles() {
+        use super::{append_tool_bubble_lines, ToolBubbleArgs, ERROR_COLOR};
+        use crate::tui_reducer_state::{ResultSection, ToolCallState};
+        use ratatui::style::Modifier;
+
+        let state = ToolCallState::Done {
+            arguments: serde_json::json!({"label": "Inspect change"}),
+            result_section: ResultSection::plain(""),
+            content_sections: vec![],
+            summary: vec![("status".to_string(), "failure".to_string())],
+            duration: std::time::Duration::from_millis(123),
+            title_arguments: vec![("label".to_string(), serde_json::json!("Inspect change"))],
+        };
+
+        for display_title_override in [None, Some("Subagent")] {
+            for collapsed in [true, false] {
+                let mut lines: Vec<Line<'static>> = vec![];
+                let mut bubble_title_rows = vec![];
+                append_tool_bubble_lines(
+                    &mut lines,
+                    ToolBubbleArgs {
+                        id: uuid::Uuid::new_v4(),
+                        name: "spawn_subagent",
+                        state: &state,
+                        collapsed,
+                        spinner_frame: 0,
+                        display_title_override,
+                    },
+                    &mut bubble_title_rows,
+                    80,
+                );
+
+                let failure_status_span = lines
+                    .iter()
+                    .flat_map(|line| line.spans.iter())
+                    .find(|span| span.content.as_ref() == "status=failure")
+                    .expect("failed subagent status should be rendered");
+                assert_eq!(failure_status_span.style.fg, Some(ERROR_COLOR));
+                assert!(
+                    failure_status_span
+                        .style
+                        .add_modifier
+                        .contains(Modifier::BOLD),
+                    "failed subagent status should be bold"
+                );
+            }
+        }
     }
 
     #[test]

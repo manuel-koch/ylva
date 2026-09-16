@@ -24,15 +24,31 @@ home layer defines them.
 `load_soul` uses the same resolver for the global `SOUL.md` persona.
 The code-owned `DEFAULT_SOUL` value is the resolver's built-in floor and is
 also used by `Context::new()` and `init_command`. `AgentFactory` stores the
-resolved text on root loops only; `AgentLoop::run` uses it for the initial
-`Context`, while child loops currently retain the same code-owned SOUL through
-`Context::new()` rather than the project/home-resolved text, and add their
-task-specific briefing.
-Agent-type personas are separate from `SOUL.md`: the same type definition is
-intended to provide its persona and system-prompt body whether it runs as a
-root or child agent. Standalone agent-type file loading and this
-role-independent prompt assembly are Phase 10.2 work. `init_command` writes
-the code-owned SOUL, shared profile starter, and annotated profile environment
+resolved text through both root and child factory paths. `AgentLoop::run`
+constructs the initial context from the composed global SOUL and agent-type
+prompt, then appends a child's briefing and runtime-budget constraint. Direct
+library/test loops that do not receive a resolved prompt retain
+`Context::new()` as the compatibility fallback.
+
+`agent_type_file` enumerates user-authored `.md` and `.toml` files in global,
+profile, and project agent directories. Markdown files use either TOML
+frontmatter delimited by `+++` or YAML frontmatter delimited by `---`; the
+trimmed body becomes the file-authored system prompt. The highest-precedence
+file replaces the complete lower-scope definition; inline
+`[agents.<type>]` values are deserialized as optional field overrides and
+applied afterward. A same-scope file and inline definition is rejected as
+ambiguous, while a profile override of a lower-scope file is valid. `persona`
+and the file-authored `system_prompt` are composed after the global SOUL and
+before the tool protocol. After the profile's engine set is materialized,
+`AgentFactory` validates every agent type's explicit engine reference before
+the store or CLI/TUI loop starts; environment-derived engine sets use the same
+validation path.
+
+`load_profile_environment_at_workspace_root` merges the home profile `.env`,
+the project `<workspace>/.ylva/profiles/<name>/.env`, and process variables in
+that order. This snapshot feeds both TOML interpolation and provider
+discovery; environment values are never logged. `init_command` writes the
+code-owned SOUL, shared profile starter, and annotated profile environment
 starter to the home layer. Workspace initialization also writes
 `.ylva/.gitignore` to exclude profile environment files. Both record written
 and skipped paths in `InitReport`; neither seeds agent-type files.
@@ -249,7 +265,9 @@ so this only matters when that flag is used.
 Fixed UI colors are centralized in `theme.rs`, including message roles,
 controls, overlays, and Markdown rendering colors. `tui_widgets.rs` and
 `markdown.rs` consume that palette, so a future theme switch has one
-color-definition module to update. ANSI styling is enabled only when the
+color-definition module to update. Completed `spawn_subagent` bubbles render
+`status=failure` in the error color, and the drill-in header reuses the same
+renderer. ANSI styling is enabled only when the
 headless output writes to a terminal that is not `TERM=dumb` and `NO_COLOR` is
 unset in `--color=auto` mode. `--color=no` and `--color=yes` explicitly
 disable or enable ANSI styling for that output path.
@@ -415,12 +433,16 @@ user-facing on-disk contract; this section is the contributor view.
   It never rewrites or duplicates the provisional tool result; the
   tool-calling wire protocol only permits one tool-result message per
   `tool_call_id`. The notice also tells the root that the result is already
-  shown to the user verbatim in the tool bubble's Result/Error/Sources
-  sections, so it should not repeat or quote it back. Intermediate completion
-  notices do not force an acknowledgement turn. When `all_done` becomes true,
-  the root is re-prompted once (immediately if idle, or after its current
-  stream/tool round) so it can aggregate the results without waiting for a
-  new user message.
+  shown to the user in the tool bubble's Result/Error/Sources sections, so it
+  should not repeat or quote it back. Agent-reported prose is rendered as
+  Markdown, while runtime diagnostics (for example, an unknown engine) are
+  rendered literally so identifiers and punctuation are not reformatted.
+  Provider and stream failures are terminal runtime outcomes, not
+  unstructured child results.
+  Intermediate completion notices do not force an acknowledgement turn. When
+  `all_done` becomes true, the root is re-prompted once (immediately if idle,
+  or after its current stream/tool round) so it can aggregate the results
+  without waiting for a new user message.
 - `AgentCommand::Stop` on the parent cancels the running child (and drains
   the queue) via `ChildAgentManager::cancel_all`; each cancelled/queued call
   is resolved to a terminal `ToolDone` (`status: "cancelled"`) and logged

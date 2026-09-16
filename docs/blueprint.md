@@ -1070,6 +1070,10 @@ impl Context {
   "You are Ylva, a helpful agent with tool capabilities." }` from the
   code-owned global SOUL value; Phase 10 allows project and home
   **SOUL.md** files to replace it, see §4G.
+- The resolved global SOUL is inherited exactly once by root and child
+  contexts. An agent type then contributes its own `persona` and
+  file-authored `system_prompt` body; the tool protocol follows, and a child
+  adds its briefing and runtime constraints after that shared prompt.
 - `push_user(text)` → `Message::User { content: text }`
 - `push_assistant(content, status, tool_calls)` →
   `Message::Assistant { content, status, tool_calls }`
@@ -1531,7 +1535,7 @@ Those are defined in the user's config hierarchy.
 ~/.ylva/
 ├── SOUL.md                     # optional persona / initial system message (code default)
 ├── agents/                     # global, shared agent-type definitions
-│   ├── research.md             # .md with +++ frontmatter (user-authored example)
+│   ├── research.md             # .md with +++ TOML or --- YAML frontmatter
 │   └── code_edit.md
 └── profiles/
     ├── default/
@@ -1599,18 +1603,23 @@ The project `.ylva/` is meant to be **committed** to the project repo (shared,
 team-consistent config).
 
 The home profile's optional `.env` file
-(`~/.ylva/profiles/default/.env`) is auto-loaded at startup, with an
-already-exported environment variable taking precedence over the `.env`
-value. TOML string values can reference the merged environment with
-`${ENV_VAR}`. Numeric and boolean fields accept expanded strings when the
-result parses as the target type. Missing variables are startup errors, and
-secret values are never logged. Project-scoped `.env` loading remains Phase 10
-work; the workspace `.gitignore` is seeded by `ylva init --workspace`.
+(`~/.ylva/profiles/default/.env`) and, when a workspace is discovered, the
+matching project file (`.ylva/profiles/default/.env`) are auto-loaded at
+startup. Project values override home values, and an already-exported
+environment variable takes precedence over both. TOML string values can
+reference the merged environment with `${ENV_VAR}`. Numeric and boolean
+fields accept expanded strings when the result parses as the target type.
+Missing variables are startup errors, secret values are never logged, and the
+workspace `.gitignore` is seeded by `ylva init --workspace`.
 
-**Global agent types** (`~/.ylva/agents/`) define *behavior*: tools,
-prompts, max iterations, timeouts, `can_spawn`. They are fully self-contained
-and shared across all profiles, and the same entries are usable as root or
-child.
+**Agent types** define *behavior*: tools, prompts, max iterations, timeouts,
+and `can_spawn`. Global (`~/.ylva/agents/`), profile
+(`~/.ylva/profiles/<name>/agents/`), and project (`.ylva/agents/`) files are
+resolved by project > profile > global precedence. The selected file is the
+complete base definition; inline `[agents.<type>]` profile values are applied
+afterward as field-level overrides. The same type is usable as root or child,
+and the global SOUL remains a separate identity baseline rather than being
+copied into agent files.
 
 **Profiles** (`~/.ylva/profiles/<name>/`) define *infrastructure*:
 which engine (provider-connection/model/temperature/context-size) each agent
@@ -1636,7 +1645,7 @@ system_prompt = """You are a deep research assistant.
 Be thorough. Cite file paths when referencing code."""
 ```
 
-2. **Markdown with TOML frontmatter** (`.md`):
+2. **Markdown with TOML frontmatter** (`.md`, `+++` delimiters):
 
 ```markdown
 +++
@@ -1650,8 +1659,28 @@ You are a deep research assistant. Be thorough. Cite file paths when
 referencing code. Always explain your reasoning before concluding.
 ```
 
-Markdown frontmatter **must** be present; a `.md` file without a `+++` block is
-a parse error. The body (after the closing `+++`) becomes the `system_prompt`.
+Markdown frontmatter **must** be present; a `.md` file without a `+++` or `---`
+block is a parse error. The body (after the closing delimiter) becomes the
+`system_prompt`.
+
+3. **Markdown with YAML frontmatter** (`.md`, `---` delimiters):
+
+```markdown
+---
+allowed_tools:
+  - read
+  - search
+  - glob
+timeout_secs: 120
+can_spawn: false
+---
+
+Locate relevant files and explain the evidence.
+```
+
+YAML frontmatter uses the same body convention: everything after the closing
+`---` becomes the `system_prompt`. A Markdown file must use one of these
+frontmatter formats; a plain Markdown file is a parse error.
 This format is ideal for long, evolving prompts because it avoids escaped
 quotes and indentation battles.
 
@@ -1806,9 +1835,9 @@ child agents as well.
 #### Child-Agent Lifecycle
 
 1. **Briefing:** the `ChildAgentManager` constructs a new `Context` with a
-   **hybrid** prompt: a system message containing the type's persona,
-   constraints, available tools, and output format; and a user message
-   containing the curated `briefing`.
+   **hybrid** prompt: the inherited global SOUL followed by the type's
+   persona, constraints, available tools, and output format; and a user
+   message containing the curated `briefing`.
 2. **Spawn:** the `ChildAgentManager` builds a `Role::Child` and calls
    `AgentFactory::create(profile, agent_type, role)`. The returned
    `AgentLoop` receives:
@@ -1880,7 +1909,7 @@ store (see §4H). Two JSONL record shapes are written per parent session file:
 
 ```json
 {"type":"child_start","v":1,"id":"<run-uuid>","parent_session":"<uuid>","agent_type":"research","task":"…","created_at":"…"}
-{"type":"child_result","v":1,"id":"<run-uuid>","parent_session":"<uuid>","status":"success|timeout|max_iterations|error|aborted_by_user","result":"…","sources":["…"],"completed_at":"…"}
+{"type":"child_result","v":1,"id":"<run-uuid>","parent_session":"<uuid>","status":"success|timeout|max_iterations|error|aborted_by_user","result":"…","sources":["…"],"origin":"agent|runtime","completed_at":"…"}
 ```
 
 - The parent-session link is explicit (`parent_session`, `parent_message_index`).
@@ -2928,23 +2957,25 @@ See reducer-state-handling-plan.md.
       home `~/.ylva/`, built-in default), replacing the Phase 1 SSOT constant's
       source per §4C/§4G
 
-- [ ] Global agent-type definitions (`~/.ylva/agents/*.md` with `+++`
-      frontmatter, e.g. `research.md`, `code_edit.md`), shared across profiles
+- [x] Global agent-type definitions (`~/.ylva/agents/*.md` with `+++` TOML or
+      `---` YAML frontmatter, e.g. `research.md`, `code_edit.md`), shared across
+      profiles
       and usable as root or child agent types
 
-- [ ] Profile-scoped agent-type definitions (`~/.ylva/profiles/<name>/agents/*.md`
-      with `+++` frontmatter, e.g. `research.md`, `code_edit.md`), usable as root
-      or child agent types
+- [x] Profile-scoped agent-type definitions
+      (`~/.ylva/profiles/<name>/agents/*.md` with `+++` TOML or `---` YAML
+      frontmatter, e.g. `research.md`, `code_edit.md`), usable as root or child
+      agent types
 
-- [ ] Project-scoped agent-type definitions (`.ylva/agents/*.md`
-      with `+++` frontmatter, e.g. `research.md`, `code_edit.md`), usable as root
-      or child agent types
+- [x] Project-scoped agent-type definitions (`.ylva/agents/*.md` with `+++` TOML
+      or `---` YAML frontmatter, e.g. `research.md`, `code_edit.md`), usable as
+      root or child agent types
 
 - [x] Profile-scoped `.env` auto-loading
       (`~/.ylva/profiles/<name>/.env`), with an already-exported environment
       variable taking precedence.
 
-- [ ] Project-scoped `.env` auto-loading (e.g. `.ylva/profiles/<name>/.env`);
+- [x] Project-scoped `.env` auto-loading (e.g. `.ylva/profiles/<name>/.env`);
       `ylva init --workspace` also deploys a `.gitignore` inside the project's
       `.ylva/` ignoring `.env`
 
@@ -3206,7 +3237,7 @@ where they are documented in the body of this document.
 | **Child-agent steering**        | Root steer queues and injects at the next natural point; child finishes naturally in the background                                                                                            | §4G Agent Types & Delegation                  |
 | **Child-agent result**          | Tool-based `agent_finish` with unstructured fallback                                                                                                                                                | §4G Child-Agent Lifecycle                    |
 | **Agent-type tools**            | Global agent files define whitelist; profiles can override                                                                                                                                      | §4G Agent-Type File Formats                  |
-| **Agent-type config format**    | `.toml` flat or `.md` with TOML frontmatter (body = system_prompt)                                                                                                                              | §4G Agent-Type File Formats                   |
+| **Agent-type config format**    | `.toml` flat or `.md` with `+++` TOML or `---` YAML frontmatter (body = system_prompt)                                                                                                          | §4G Agent-Type File Formats                   |
 | **Child-agent safety**          | Inherits parent safety settings                                                                                                                                                                | §4G Safety Inheritance                        |
 | **Child-agent persistence**     | `child_start` / `child_result` JSONL records in the parent session + dedicated sub-session file (§4H)                                                                                          | §4G Agent Types & Delegation, §4H            |
 | **Child-agent UI**              | Collapsible sidebar panel + status bar line                                                                                                                                                    | §4G Agent Types & Delegation                  |

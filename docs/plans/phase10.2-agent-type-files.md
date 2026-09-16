@@ -65,7 +65,7 @@ system-prompt content is additive.
 - Global (`~/.ylva/agents/*.md`), profile-scoped
   (`~/.ylva/profiles/<name>/agents/*.md`), and project-scoped
   (`.ylva/agents/*.md`) agent-type files are all discovered, parsed (both
-  the pure-TOML and `+++`-frontmatter-Markdown formats from
+  the pure-TOML and `+++`-TOML/`---`-YAML-frontmatter Markdown formats from
   `docs/blueprint.md` §4G "Agent-Type File Formats"), and merged into the
   same `ProfileConfig.agents` map consumed by `AgentFactory`.
 - Agent-type files are user-authored external configuration. There is no
@@ -161,13 +161,12 @@ system-prompt content is additive.
   child-agent construction closure. Root and child contexts use the same
   global baseline; only the agent-type prompt, child briefing, and
   role-specific runtime constraints differ.
-- **Markdown frontmatter is strict**: a `.md` agent-type file without a
-  leading `+++ ... +++` block is a parse error (per blueprint §4G), not a
-  silent fallback to treating the whole file as a plain prompt.
-- **No new dependency anticipated.** `+++`-delimited frontmatter parsing is
-  "TOML between two `+++` lines, then a plain-text body" — a manual
-  splitter is sufficient (YAGNI); prefer that over adding a Markdown/
-  frontmatter crate.
+- **Markdown frontmatter is strict**: a `.md` agent-type file must use either
+  a `+++ ... +++` TOML block or a `--- ... ---` YAML block (per blueprint
+  §4G), not silently fall back to treating the whole file as a plain prompt.
+- **Frontmatter parsing remains format-specific.** TOML frontmatter is split
+  manually, while YAML frontmatter uses the project's Serde-based YAML parser;
+  both formats produce the same `AgentConfig` plus plain-text body shape.
 - **Coverage threshold ≥80%** (`make test-coverage`) applies to all new
   non-UI files this plan adds.
 - **Docs-are-part-of-the-change-set** and **ADR-consistency** rules apply
@@ -189,29 +188,33 @@ the `phase10.1` + Phase 7 baseline passes before changing anything (requires
 
 ## Implementation Plan
 
-1. [ ] Add `src/config/agent_type_file.rs` implementing the two file
+1. [x] Add `src/config/agent_type_file.rs` implementing the supported file
        formats from `docs/blueprint.md` §4G "Agent-Type File Formats":
        - Pure TOML (`.toml`): deserializes directly into `AgentConfig` plus
        a `system_prompt: String` field read from a top-level
        `system_prompt` key (the format shown in blueprint's example
        embeds it as a `"""..."""` TOML string).
-       - Markdown with `+++` frontmatter (`.md`): the TOML between the
-       first and second `+++` line (each on its own line) deserializes
-       into `AgentConfig`; everything after the closing `+++` (trimmed)
-       becomes `system_prompt`. A `.md` file whose content does not start
-       with a `+++` line is a parse error (new `ConfigError` variant
-       naming the file).
+       - Markdown with `+++` TOML frontmatter (`.md`): the TOML between the
+       first and second `+++` line (each on its own line) deserializes into
+       `AgentConfig`; everything after the closing `+++` (trimmed) becomes
+       `system_prompt`.
+       - Markdown with `---` YAML frontmatter (`.md`): the YAML between the
+       first and second `---` line (each on its own line) deserializes into
+       `AgentConfig`; everything after the closing `---` (trimmed) becomes
+       `system_prompt`.
+       A `.md` file whose content does not start with either delimiter is a
+       parse error (new `ConfigError` variant naming the file).
        Both formats produce the same output shape: `(AgentConfig,
        system_prompt: String)`, or a struct wrapping both — call it
        `AgentTypeDefinition`.
-2. [ ] Add `system_prompt: Option<String>` to `AgentConfig`
+2. [x] Add `system_prompt: Option<String>` to `AgentConfig`
        (`src/config/agent.rs`) alongside the existing `persona` field, with
        a doc comment clarifying: `system_prompt` is the file-authored body
        (never set by an inline `config.toml` `[agents.*]` table — TOML
        tables only ever set `persona`, `engine`, `allowed_tools`, etc.);
        `persona` remains a profile-level prepend, independent of
        `system_prompt`'s presence.
-3. [ ] Implement discovery of agent-type files across the three sources,
+3. [x] Implement discovery of agent-type files across the three sources,
        reusing `src/config/layered.rs`'s per-file resolution logic
        (generalized, if needed, to enumerate a *directory's* files rather
        than resolve one named file) — each of `~/.ylva/agents/`,
@@ -220,13 +223,13 @@ the `phase10.1` + Phase 7 baseline passes before changing anything (requires
        file stem = agent-type name. Do not add an embedded agent-file floor:
        `default` comes from the code-owned fallback, while other names exist
        only when a user-authored file or inline profile table defines them.
-4. [ ] Implement the precedence merge: for each type name appearing in any
+4. [x] Implement the precedence merge: for each type name appearing in any
        source, pick the single highest-precedence file
        (project-scoped > profile-scoped > global), producing one
        `AgentTypeDefinition` per name. `default` always has at least the
        code-owned fallback; other names have no floor unless a file or inline
        profile table defines them somewhere.
-5. [ ] Implement the same-scope conflict check (see Acceptance Criteria):
+5. [x] Implement the same-scope conflict check (see Acceptance Criteria):
        after step 4 resolves each type's file-sourced definition (if any),
        check whether the *active* `config.toml`'s own layer (project or
        home, whichever layer that file actually resolved from) has its own
@@ -244,7 +247,7 @@ the `phase10.1` + Phase 7 baseline passes before changing anything (requires
        regression test confirming the *cross*-scope case (profile
        `config.toml` adapting a *global* `agents/research.md`) does **not**
        trigger the error.
-6. [ ] Splice the resolved, precedence-and-conflict-checked
+6. [x] Splice the resolved, precedence-and-conflict-checked
        `AgentTypeDefinition` map into `ProfileConfig.agents` **before** the
        profile's own inline `[agents.<type>]` TOML tables are applied as
        field overrides (`ProfileConfig::load_file` in
@@ -255,7 +258,7 @@ the `phase10.1` + Phase 7 baseline passes before changing anything (requires
        types by overriding specific fields," "can disable," local-only
        `agents/` shadowing) continue to work unchanged on top of this
        splice.
-7. [ ] Update system-prompt/persona assembly across
+7. [x] Update system-prompt/persona assembly across
        `src/agent_factory.rs` and `src/agent.rs`:
        - Always prepend `AgentConfig::persona` (when present) to the
        resolved `AgentConfig::system_prompt` body (when present),
@@ -272,7 +275,7 @@ the `phase10.1` + Phase 7 baseline passes before changing anything (requires
        constraints. Keep `Context::new()` as the compatibility fallback
        for direct library/test contexts that do not have a resolved global
        persona.
-8. [ ] Extend `load_profile_environment`/`ProfileConfig::load*`
+8. [x] Extend `load_profile_environment`/`ProfileConfig::load*`
        (`src/config.rs`, `src/config/profile.rs`) so that, when a project
        root is discovered (via `phase10.1`'s `discover_workspace_root`), a
        project-scoped `<workspace_root>/.ylva/profiles/<name>/.env` is also
@@ -284,12 +287,15 @@ the `phase10.1` + Phase 7 baseline passes before changing anything (requires
        containing at least an `.env` line, using the project `.ylva/` root
        path that function already returns/exposes. Write-if-missing /
        `--force` semantics match the rest of `run_init_workspace`'s output.
-10. [ ] Unit/integration tests:
+10. [x] Unit/integration tests:
         - Global-only type resolves; profile-scoped type shadows a global
         type of the same name for that profile only (unaffected in
         another profile); project-scoped type shadows both.
-        - A `.md` file without `+++` is a load error naming the file.
+        - A `.md` file without `+++` or `---` frontmatter is a load error
+        naming the file.
         - A pure `.toml` agent-type file works (format 1 from §4G).
+        - Markdown with `---` YAML frontmatter works alongside `+++` TOML
+        frontmatter.
         - The same-scope conflict error fires for both scope tiers
         independently (see step 5), and does not fire for the legitimate
         cross-scope override case.
@@ -309,9 +315,9 @@ the `phase10.1` + Phase 7 baseline passes before changing anything (requires
         - A root and child using the same agent type receive the same global
         SOUL plus that type's persona/body, while the child additionally
         receives only its own briefing and child-runtime constraints.
-11. [ ] Update `docs/configuration.md`: add an "Agent-type files
-        (`agents/*.md`, `agents/*.toml`)" subsection documenting the two
-        supported formats, the three discovery locations and their
+11. [x] Update `docs/configuration.md`: add an "Agent-type files
+        (`agents/*.md`, `agents/*.toml`)" subsection documenting the supported
+        formats, the three discovery locations and their
         shadowing precedence, the same-scope-conflict hard error, and how
         file-based resolution composes with a profile's inline
         `[agents.<type>]` overrides (including the `persona`-always
@@ -319,17 +325,17 @@ the `phase10.1` + Phase 7 baseline passes before changing anything (requires
         and child contexts, while agent-type persona/body content is
         additive. Update the "Profile file" / `.env` section to document
         project-scoped `.env` and its precedence over home `.env`.
-12. [ ] Update `docs/features.md` and `docs/implementation-notes.md` to
+12. [x] Update `docs/features.md` and `docs/implementation-notes.md` to
         describe the global-SOUL → agent-type → role-specific prompt
         composition and the fact that child contexts inherit the global SOUL
         automatically.
-13. [ ] Update `docs/blueprint.md` §4G's persona and child-agent lifecycle
+13. [x] Update `docs/blueprint.md` §4G's persona and child-agent lifecycle
         prose to distinguish the global SOUL baseline from agent-type
         persona, then flip Phase 10 checklist items 4, 5, 6, and 8 in §7
         from `- [ ]` to `- [x]` once each is completed and verified.
-14. [ ] Run `make lint`, `make test`, and `make test-coverage`; fix any
+14. [x] Run `make lint`, `make test`, and `make test-coverage`; fix any
         finding before reporting this plan done.
-15. [ ] Run `rumdl fmt` on every Markdown document edited in steps 11-13.
+15. [x] Run `rumdl fmt` on every Markdown document edited in steps 11-13.
 
 ## Implementation Hints
 
@@ -361,10 +367,10 @@ the `phase10.1` + Phase 7 baseline passes before changing anything (requires
   resulting text through `AgentFactory::with_system_prompt`; that value is
   the global baseline to propagate to child loops, not an agent-type-specific
   prompt.
-- `docs/blueprint.md` §4G "Agent-Type File Formats" gives both example
+- `docs/blueprint.md` §4G "Agent-Type File Formats" gives the example
   formats verbatim (pure TOML with a `system_prompt = """..."""` string;
-  Markdown with `+++`-delimited frontmatter and a plain-text body) — mirror
-  those exactly rather than inventing a new shape.
+  Markdown with `+++`-delimited TOML or `---`-delimited YAML frontmatter and
+  a plain-text body) — mirror those exactly rather than inventing a new shape.
 - `docs/blueprint.md` §4G also documents the pre-existing field-override
   ("Profiles can adapt global agent types by overriding specific fields"),
   disable (`enabled = false`), and local-only-shadowing behaviors this plan
@@ -394,5 +400,5 @@ the `phase10.1` + Phase 7 baseline passes before changing anything (requires
   reads `current_dir()` or asserts on `tracing` output.
 - Coverage/lint gates: `make lint`, `make test`, `make test-coverage`
   (≥80%, excludes `tui_widgets.rs`/`render.rs`/`main.rs`).
-- No new dependency anticipated; manual `+++`-delimiter splitting is
-  sufficient for frontmatter parsing (see Key Constraints).
+- TOML `+++`-delimiter splitting remains manual; YAML `---` frontmatter uses
+  the Serde-based YAML parser dependency.
