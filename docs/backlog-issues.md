@@ -10,5 +10,10 @@
       Trying to drag on the header just toggles expand/collapse but
       doesn't select nor copy selected text.
 
-- [ ] We don't load past sessions to provide functionality to walk thru
+- [x] We don't load past sessions to provide functionality to walk thru
       recent user messages to fill draft message input.
+
+- [ ] What happens when a user uses slash-command "/clear" while a current
+      conversation is in-flight ?
+      Should a "/clear" automatically force an abort of the current
+      running conversation ( incl. subagents and tools ).

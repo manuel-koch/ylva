@@ -314,6 +314,13 @@ user-facing on-disk contract; this section is the contributor view.
   without title arguments use an empty title projection. The projection is
   schema-based, so unknown input keys are omitted from CLI/TUI titles.
   System messages and implicit harness notes remain model-only.
+- **Prior-session input history.** At TUI startup, `Store::read_past_explicit_user_messages`
+  scans prior top-level sessions in newest-first order, collects at most the
+  configured `ProfileConfig::input_history_limit` explicit user messages, and
+  deduplicates exact text while retaining the newest occurrence, and returns
+  that bounded set oldest-first. The driver prepends it to the current
+  session's history without adding those messages to the transcript or model
+  context; child-agent transcripts are skipped.
 - **Tool-result payload.** `Message::ToolResult` carries a serializable
   `ToolResult` payload as its flattened value, and
   `Context::push_tool_result` forwards that value unchanged. This keeps the

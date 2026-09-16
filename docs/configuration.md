@@ -63,6 +63,7 @@ Example:
 ```toml
 default_engine = "ollama/local"
 theme = "dark"
+input_history_limit = 50
 
 [provider_connections.ollama-local]
 provider = "ollama"
@@ -99,6 +100,7 @@ engine = "ollama/local"
 | `utility_engine` | `Option<String>` | Isolated engine used to generate session titles from the first user message and completed assistant reply; resolves to `default_engine` when absent. |
 | `default_model` | `Option<String>` | Model filled into every `[engines.*]` entry that names none of its own. |
 | `theme` | `dark` \| `light` | Syntax-highlighting theme. Defaults to `dark`. See [features — rendering](./features.md#tui-architecture). |
+| `input_history_limit` | `usize` | Maximum number of explicit messages from prior top-level sessions loaded into TUI input history. Defaults to `50`; `0` disables prior-session history. |
 | `keybindings` | table of strings | **Reserved.** Accepted and validated so a profile carrying one loads, but Phase 7 ships the fixed key map in `docs/keybindings.md` and does not apply these entries yet. |
 | `[provider_connections.<name>]` | table | A named provider connection. Its `provider` field selects the implementation kind; its endpoint and credentials belong to this connection. |
 | `[engines.<name>]` | table | A named engine — see `EngineConfig` below. |

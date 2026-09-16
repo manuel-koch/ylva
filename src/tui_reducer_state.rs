@@ -1894,6 +1894,14 @@ impl AppState {
         self.conversation.scroll_offset = 0;
     }
 
+    /// Prepend messages loaded from prior sessions to the current input
+    /// history without changing the hydrated conversation view.
+    pub fn prepend_input_history(&mut self, mut prior_messages: Vec<String>) {
+        prior_messages.append(&mut self.input_history);
+        self.input_history = prior_messages;
+        self.history_index = None;
+    }
+
     /// Replace a replay-discovered child's empty transcript after its first
     /// drill-in read. Repeated drill-ins keep the loaded transcript.
     pub fn load_child_messages(&mut self, run_id: Uuid, messages: &[Message]) {

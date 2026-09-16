@@ -1035,6 +1035,7 @@ struct TuiRuntime {
     driver: Option<TitleDriver>,
     update_rx: mpsc::UnboundedReceiver<SessionTitleUpdate>,
     display_metadata: TuiDisplayMetadata,
+    input_history_limit: usize,
 }
 
 impl TuiRuntime {
@@ -1044,6 +1045,7 @@ impl TuiRuntime {
             driver: None,
             update_rx,
             display_metadata: TuiDisplayMetadata::default(),
+            input_history_limit: ProfileConfig::default().input_history_limit,
         }
     }
 }
@@ -1132,6 +1134,7 @@ where
         driver: title_driver,
         update_rx: mut title_update_rx,
         display_metadata,
+        input_history_limit,
     } = tui_runtime;
     let mut state = AppState::new();
     state.display_metadata = display_metadata;
@@ -1162,6 +1165,16 @@ where
             }
         };
         state.replay_messages(&messages, &child_runs);
+        match store.read_past_explicit_user_messages(input_history_limit) {
+            Ok(prior_messages) => state.prepend_input_history(prior_messages),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    path = %store.path().display(),
+                    "could not load prior session input history"
+                );
+            }
+        }
     }
     let cmd_tx = agent.command_sender();
     let engine = agent.engine();
@@ -1681,6 +1694,7 @@ impl App for TuiApp {
                 driver: title_driver,
                 update_rx: title_update_rx,
                 display_metadata: self.display_metadata,
+                input_history_limit: self.profile.input_history_limit,
             },
         )
         .await
@@ -1893,6 +1907,7 @@ mod tests {
                 driver: Some(title_driver),
                 update_rx: title_update_rx,
                 display_metadata: TuiDisplayMetadata::default(),
+                input_history_limit: ProfileConfig::default().input_history_limit,
             },
         )
         .await;
@@ -1903,6 +1918,94 @@ mod tests {
             "title generation should complete before the TUI is stopped"
         );
         assert_eq!(store.title(), expected_title);
+    }
+
+    #[tokio::test]
+    async fn tui_loads_prior_session_user_messages_into_input_history() {
+        use ratatui::backend::TestBackend;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let chats_root = temp.path().join("chats");
+        let previous_store = crate::store::Store::create(
+            &chats_root,
+            temp.path(),
+            Uuid::new_v4(),
+            "mock",
+            "conversation",
+        )
+        .expect("previous store created");
+        previous_store.record_message(&crate::agent::Message::User {
+            content: "previous prompt".to_string(),
+            kind: crate::agent::UserMessageKind::Explicit,
+        });
+        previous_store.record_message(&crate::agent::Message::User {
+            content: "latest previous prompt".to_string(),
+            kind: crate::agent::UserMessageKind::Explicit,
+        });
+        previous_store.flush().await;
+
+        let current_store = crate::store::Store::create(
+            &chats_root,
+            temp.path(),
+            Uuid::new_v4(),
+            "mock",
+            "conversation",
+        )
+        .expect("current store created");
+        current_store.record_message(&crate::agent::Message::User {
+            content: "current prompt".to_string(),
+            kind: crate::agent::UserMessageKind::Explicit,
+        });
+        current_store.flush().await;
+
+        let provider = Arc::new(crate::llm::MockProvider::new(Vec::new(), Duration::ZERO));
+        let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+            provider,
+            EngineConfig {
+                provider_connection: "mock".to_string(),
+                model: "conversation".to_string(),
+                temperature: None,
+                context_length: None,
+                api_base_url: None,
+                api_key: None,
+                reasoning: None,
+            },
+        ));
+        let factory = AgentFactory::new(HashMap::from([("default".to_string(), engine)]))
+            .with_allowed_tools(&[])
+            .with_store(current_store);
+        let (agent, ui_rx) = factory
+            .create(&ProfileConfig::default(), "default", Role::Root)
+            .expect("root agent created");
+        let (action_tx, action_rx) = mpsc::channel(1);
+        drop(action_tx);
+        let (_title_update_tx, title_update_rx) = mpsc::unbounded_channel();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal created");
+
+        let tui_state = run_tui_with_title(
+            &mut terminal,
+            agent,
+            ui_rx,
+            None,
+            action_rx,
+            &mut NoopClipboard,
+            TuiRuntime {
+                driver: None,
+                update_rx: title_update_rx,
+                display_metadata: TuiDisplayMetadata::default(),
+                input_history_limit: 1,
+            },
+        )
+        .await
+        .expect("TUI exits cleanly");
+
+        assert_eq!(
+            tui_state.input_history,
+            vec![
+                "latest previous prompt".to_string(),
+                "current prompt".to_string()
+            ]
+        );
     }
 
     fn setup() -> (

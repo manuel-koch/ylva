@@ -202,6 +202,15 @@ Listing sessions takes no lock — it is a pure read.
   so reading a session never writes its messages back or duplicates them on a
   later flush. The rule is unconditional for fresh and resumed sessions; a
   new file simply has no messages to hydrate.
+- **TUI input history:** On startup, the TUI also reads explicit user messages
+  from prior top-level sessions in the same project, newest prompts first until
+  the configured `input_history_limit` is reached, then presents those
+  messages oldest to newest. Child-agent transcripts and the current session
+  are excluded from this lookup; the current session is replayed separately.
+  Exact duplicate prompts are collapsed across sessions and only the newest
+  occurrence is retained. These messages seed only the draft input history and
+  never hydrate the visible transcript or model context, so this does not
+  change the fresh-session/no-auto-resume contract.
 - **Full-fidelity tool bubbles:** `Message::ToolResult` persists `summary`,
   `content_sections`, `duration`, and specialized result-section identifiers;
   `Message::ToolError` persists `content_sections` in addition to its

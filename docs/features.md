@@ -427,7 +427,11 @@ module structure (model/presenter/view/driver split).
   the wordmark disappears.
 - **Input history:** `↑` on the first line loads the previous sent message
   (draft is saved); `↓` restores it; any edit while browsing copies the entry
-  to a fresh draft.
+  to a fresh draft. History includes explicit user messages from prior
+  top-level sessions in the same project, ordered oldest to newest, up to the
+  configured `input_history_limit` (default `50`); child-agent prompts are
+  excluded, and duplicate prompts are collapsed by exact text with the newest
+  occurrence retained.
 - **Line navigation:** `Fn+Left`/`Fn+Right` move the input cursor to the
   start/end of the current line, wrapping to the previous/next line.
 - **Starts empty:** the TUI launches with an empty input box and no auto-sent

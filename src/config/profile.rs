@@ -66,6 +66,13 @@ pub struct ProfileConfig {
     /// Syntax-highlighting theme used by the renderers.
     #[serde(default)]
     pub theme: ThemeName,
+    /// Maximum number of explicit messages from prior sessions loaded into
+    /// the TUI input history.
+    #[serde(
+        default = "default_input_history_limit",
+        deserialize_with = "deserialize_usize_or_string"
+    )]
+    pub input_history_limit: usize,
     /// Reserved key-to-action map. Accepted and validated as a table of
     /// strings so a profile carrying one still loads, but Phase 7 ships a
     /// fixed key map (`docs/keybindings.md`) and does not apply these
@@ -79,6 +86,31 @@ pub struct ProfileConfig {
 
 fn default_engine_name() -> String {
     DEFAULT_PROFILE_NAME.to_string()
+}
+
+const DEFAULT_INPUT_HISTORY_LIMIT: usize = 50;
+
+fn default_input_history_limit() -> usize {
+    DEFAULT_INPUT_HISTORY_LIMIT
+}
+
+fn deserialize_usize_or_string<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum HistoryLimitValue {
+        Number(usize),
+        Text(String),
+    }
+
+    match HistoryLimitValue::deserialize(deserializer)? {
+        HistoryLimitValue::Number(value) => Ok(value),
+        HistoryLimitValue::Text(value) => value.trim().parse::<usize>().map_err(|error| {
+            serde::de::Error::custom(format!("invalid input_history_limit '{value}': {error}"))
+        }),
+    }
 }
 
 fn default_agent_config() -> AgentConfig {
@@ -106,6 +138,7 @@ impl Default for ProfileConfig {
             engines: HashMap::new(),
             default_model: None,
             theme: ThemeName::default(),
+            input_history_limit: default_input_history_limit(),
             keybindings: HashMap::new(),
             agents: HashMap::from([(DEFAULT_PROFILE_NAME.to_string(), default_agent_config())]),
         }
@@ -587,6 +620,7 @@ default_engine = "fast"
 compact_engine = "cheap"
 default_model = "gemma4:e4b-mlx"
 theme = "light"
+input_history_limit = 25
 
 [keybindings]
 submit = "enter"
@@ -626,6 +660,7 @@ persona = "You explore code."
         assert_eq!(profile.default_engine, "fast");
         assert_eq!(profile.compact_engine_name(), "cheap");
         assert_eq!(profile.theme, ThemeName::Light);
+        assert_eq!(profile.input_history_limit, 25);
         assert_eq!(
             profile.keybindings.get("submit").map(String::as_str),
             Some("enter")
@@ -749,6 +784,8 @@ model = "cloud-model"
             temp.path(),
             "typed-values",
             r#"
+input_history_limit = "${INPUT_HISTORY_LIMIT}"
+
 [engines.local]
 provider = "ollama"
 temperature = "${TEMPERATURE}"
@@ -762,6 +799,7 @@ can_spawn = "${CAN_SPAWN}"
         let environment = HashMap::from([
             ("TEMPERATURE".to_string(), "0.2".to_string()),
             ("CONTEXT_LENGTH".to_string(), "128kb".to_string()),
+            ("INPUT_HISTORY_LIMIT".to_string(), "17".to_string()),
             ("TIMEOUT_SECONDS".to_string(), "120".to_string()),
             ("CAN_SPAWN".to_string(), "true".to_string()),
         ]);
@@ -772,6 +810,7 @@ can_spawn = "${CAN_SPAWN}"
 
         assert_eq!(profile.engines["local"].temperature, Some(0.2));
         assert_eq!(profile.engines["local"].context_length, Some(128 * 1024));
+        assert_eq!(profile.input_history_limit, 17);
         assert_eq!(profile.agents["worker"].timeout_secs, Some(120));
         assert!(profile.agents["worker"].can_spawn);
     }
@@ -829,6 +868,7 @@ api_key = "${MISSING_API_KEY}"
         assert_eq!(profile.default_engine, DEFAULT_PROFILE_NAME);
         assert!(profile.engines.is_empty());
         assert_eq!(profile.theme, ThemeName::Dark);
+        assert_eq!(profile.input_history_limit, 50);
     }
 
     #[test]
