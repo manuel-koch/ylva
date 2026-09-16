@@ -90,18 +90,18 @@ fn init_seeds_home_files_and_force_controls_overwrites() {
 }
 
 #[test]
-fn project_init_seeds_only_the_shared_profile_starter() {
+fn workspace_init_seeds_only_the_shared_profile_starter() {
     let ylva_home = TempDir::new().expect("home tempdir");
     let workspace_root = TempDir::new().expect("workspace tempdir");
     let output = run_ylva(
         ylva_home.path(),
         workspace_root.path(),
-        &["init", "--project"],
+        &["init", "--workspace"],
     );
 
     assert!(
         output.status.success(),
-        "project init succeeds: {}",
+        "workspace init succeeds: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(workspace_root
@@ -123,6 +123,42 @@ fn project_init_seeds_only_the_shared_profile_starter() {
     )
     .expect("read placeholder config")
     .contains("example.invalid"));
+}
+
+#[test]
+fn workspace_init_does_not_treat_global_home_as_workspace_root() {
+    let home_root = TempDir::new().expect("home root tempdir");
+    let ylva_home = home_root.path().join(".ylva");
+    let workspace_root = home_root.path().join("project");
+    let global_config_path = ylva_home
+        .join(ylva::PROFILES_DIRECTORY_NAME)
+        .join(ylva::DEFAULT_PROFILE_NAME)
+        .join(ylva::PROFILE_CONFIG_FILE_NAME);
+    fs::create_dir_all(global_config_path.parent().expect("global config parent"))
+        .expect("create global config directory");
+    fs::write(&global_config_path, "global config").expect("write global config");
+    fs::create_dir(&workspace_root).expect("create workspace directory");
+
+    let output = run_ylva(&ylva_home, &workspace_root, &["init", "--workspace"]);
+
+    assert!(
+        output.status.success(),
+        "workspace init succeeds: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let workspace_config_path = workspace_root
+        .join(ylva::YLVA_DIR_NAME)
+        .join(ylva::PROFILES_DIRECTORY_NAME)
+        .join(ylva::DEFAULT_PROFILE_NAME)
+        .join(ylva::PROFILE_CONFIG_FILE_NAME);
+    assert!(
+        workspace_config_path.is_file(),
+        "workspace config should be written below the current workspace"
+    );
+    assert_eq!(
+        fs::read_to_string(global_config_path).expect("read global config"),
+        "global config"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

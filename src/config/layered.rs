@@ -16,7 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::ylva_home::YLVA_DIR_NAME;
+use crate::ylva_home::{ylva_home, YLVA_DIR_NAME};
 
 use super::ConfigError;
 
@@ -111,10 +111,19 @@ fn read_external_file(path: &Path) -> Result<Option<String>, ConfigError> {
 /// Discover the nearest workspace root from `start`.
 ///
 /// The nearest ancestor containing either `.ylva/` or `.git` is returned.
+/// The global Ylva home is not treated as a workspace `.ylva` marker.
 /// `None` means neither marker exists before the filesystem root.
 pub fn discover_workspace_root(start: &Path) -> Option<PathBuf> {
+    let home = ylva_home();
+    discover_workspace_root_with_home(start, home.as_deref())
+}
+
+fn discover_workspace_root_with_home(start: &Path, ylva_home: Option<&Path>) -> Option<PathBuf> {
     for ancestor in start.ancestors() {
-        if ancestor.join(YLVA_DIR_NAME).is_dir() {
+        let workspace_config_directory = ancestor.join(YLVA_DIR_NAME);
+        if workspace_config_directory.is_dir()
+            && !is_ylva_home_path(&workspace_config_directory, ylva_home)
+        {
             return Some(ancestor.to_path_buf());
         }
         if ancestor.join(".git").exists() {
@@ -122,6 +131,22 @@ pub fn discover_workspace_root(start: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+fn is_ylva_home_path(candidate: &Path, ylva_home: Option<&Path>) -> bool {
+    let Some(ylva_home) = ylva_home else {
+        return false;
+    };
+    if candidate == ylva_home {
+        return true;
+    }
+    match (
+        std::fs::canonicalize(candidate),
+        std::fs::canonicalize(ylva_home),
+    ) {
+        (Ok(candidate), Ok(ylva_home)) => candidate == ylva_home,
+        _ => false,
+    }
 }
 
 /// Discover the workspace root from the current working directory.
@@ -269,5 +294,20 @@ mod tests {
         std::fs::create_dir(&nested).expect("nested directory");
 
         assert_eq!(discover_workspace_root(&nested), None);
+    }
+
+    #[test]
+    fn workspace_root_ignores_the_global_home_marker() {
+        let temporary_directory = tempfile::tempdir().expect("tempdir");
+        let home_root = temporary_directory.path();
+        let ylva_home = home_root.join(YLVA_DIR_NAME);
+        let nested = home_root.join("project").join("nested");
+        std::fs::create_dir(&ylva_home).expect("global Ylva home");
+        std::fs::create_dir_all(&nested).expect("nested project directory");
+
+        assert_eq!(
+            discover_workspace_root_with_home(&nested, Some(&ylva_home)),
+            None
+        );
     }
 }

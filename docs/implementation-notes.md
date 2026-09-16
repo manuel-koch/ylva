@@ -10,7 +10,10 @@ document is for contributors working on Ylva's internals, not end users.
 from the project `.ylva/` layer, the home `YLVA_HOME` layer, and the
 code-owned built-in layer. The first existing file wins without merging lower
 layers. Project discovery walks upward from the current directory, preferring
-the nearest `.ylva/` ancestor and otherwise the nearest `.git` ancestor.
+the nearest `.ylva/` ancestor and otherwise the nearest `.git` ancestor. The
+global `YLVA_HOME` directory is excluded from `.ylva` marker detection, so a
+project beneath the user's home directory cannot select the global home as its
+workspace root.
 
 `ProfileConfig` passes the selected file's path into the existing TOML parser
 and environment interpolation code, so malformed or unreadable files still

@@ -35,7 +35,7 @@ being implemented first: it reuses that plan's
 - three-layer file-resolution core (`src/config/layered.rs`,
   `discover_workspace_root`), with code-owned built-in defaults rather than an
   embedded repository configuration tree,
-- `run_init_project` function in `src/init_command.rs` (10.1), which this
+- `run_init_workspace` function in `src/init_command.rs` (10.1), which this
   plan extends to also write a `.gitignore`.
 
 Phase 10.1 currently passes the resolved `SOUL.md` only to root loops. That is
@@ -118,7 +118,7 @@ system-prompt content is additive.
   the same variable name is defined in both: **project `.env` wins over home
   `.env`**; an already-exported process environment variable still wins
   over both (unchanged from today).
-- `run_init_project` (from `phase10.1`) is extended to also write
+- `run_init_workspace` (from `phase10.1`) is extended to also write
   `<workspace_root>/.ylva/.gitignore` containing at least `.env`, so a
   project's committed `.ylva/` never leaks secrets.
 - `make lint`, `make test`, and `make test-coverage` all pass (≥80% line
@@ -279,11 +279,11 @@ the `phase10.1` + Phase 7 baseline passes before changing anything (requires
        loaded and merged: project `.env` values take precedence over home
        `.env` values for the same key; an already-exported process variable
        still wins over both (unchanged).
-9. [ ] Extend `run_init_project` (`src/init_command.rs`, added in
+9. [ ] Extend `run_init_workspace` (`src/init_command.rs`, added in
        `phase10.1`) to also write `<workspace_root>/.ylva/.gitignore`
        containing at least an `.env` line, using the project `.ylva/` root
        path that function already returns/exposes. Write-if-missing /
-       `--force` semantics match the rest of `run_init_project`'s output.
+       `--force` semantics match the rest of `run_init_workspace`'s output.
 10. [ ] Unit/integration tests:
         - Global-only type resolves; profile-scoped type shadows a global
         type of the same name for that profile only (unaffected in
@@ -299,7 +299,7 @@ the `phase10.1` + Phase 7 baseline passes before changing anything (requires
         interpolation in the project's `config.toml`; process env still
         wins over both project and home `.env`; project `.env` wins over
         home `.env` for the same key.
-        - `ylva init --project` produces a `.gitignore` that ignores a
+        - `ylva init --workspace` produces a `.gitignore` that ignores a
         written `.env` file (a simple content assertion, or
         `git check-ignore` semantics if a live git repo is set up in the
         test).
@@ -380,7 +380,7 @@ the `phase10.1` + Phase 7 baseline passes before changing anything (requires
   resources. Tests should create their user-authored files in temporary
   project, profile, or home layers and should verify that no embedded
   agent-file fallback is required.
-- `phase10.1`'s `src/init_command.rs::run_init_project` is the function
+- `phase10.1`'s `src/init_command.rs::run_init_workspace` is the function
   this plan's step 9 extends — read its signature/return type in
   `phase10.1`'s implementation before adding the `.gitignore` write, so the
   project `.ylva/` root path is reused rather than re-derived.

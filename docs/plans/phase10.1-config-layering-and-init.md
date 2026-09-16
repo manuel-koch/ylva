@@ -16,13 +16,13 @@ sibling plans because Phase 10's scope is too large for one linear
 execution:
 
 - **This plan (10.1)** implements blueprint Phase 10 checklist items **1**
-  (three-layer fallback chain), **2** (`ylva init`/`ylva init --project`),
+  (three-layer fallback chain), **2** (`ylva init`/`ylva init --workspace`),
   and **3** (`SOUL.md` persona loader).
 - `docs/plans/phase10.2-agent-type-files.md` implements items 4-6 (global/
   profile-scoped/project-scoped `agents/*.md` type files) and item 8
   (project-scoped `.env` + `.gitignore`). It **depends on this plan**: it
   reuses this plan's layered-resolution core (`src/config/layered.rs`) and
-  `run_init_project` function (extending it to also write a `.gitignore`).
+  `run_init_workspace` function (extending it to also write a `.gitignore`).
 - `docs/plans/phase10.3-sandbox-tool-rules.md` implements item 9 (per-tool
   sandbox rule configuration). It has **no hard dependency** on this plan —
   it only needs the pre-existing `ProfileConfig` struct (already present
@@ -69,7 +69,7 @@ files:
 
 Replace the Phase 7 single-file, home-only profile loader with the full
 three-layer (project `.ylva/` → home `~/.ylva/` → built-in code) resolution
-chain; add `ylva init`/`ylva init --project` to create user-facing profile
+chain; add `ylva init`/`ylva init --workspace` to create user-facing profile
 starters; and replace the hardcoded root prompt with a resolvable `SOUL.md`,
 so user-authored behavior remains file-driven and shareable without
 maintaining boilerplate config files in the repository or requiring a config
@@ -93,12 +93,12 @@ file to exist for Ylva to run out of the box.
   `~/.ylva/profiles/default/config.toml` starters from code, write-if-missing,
   with `--force` reseeding. It does not seed agent-type files; users author
   those files from the documented formats and examples.
-- `ylva init --project` seeds the same
+- `ylva init --workspace` seeds the same
   `.ylva/profiles/default/config.toml` starter in the workspace root,
   write-if-missing, `--force` reseeds. (The `.gitignore` deployment
   named in blueprint checklist item 8 is implemented in
   `docs/plans/phase10.2-agent-type-files.md`, which extends this plan's
-  `run_init_project` function — this plan only needs to leave that function
+  `run_init_workspace` function — this plan only needs to leave that function
   easily extensible, e.g. by returning/accepting the project `.ylva/` root
   path so 10.2 can add a file write beside it.)
 - A project `.ylva/SOUL.md`, if present, wins over `~/.ylva/SOUL.md`, which
@@ -119,7 +119,7 @@ file to exist for Ylva to run out of the box.
 ### Key constraints
 
 - **No `clap` yet.** `src/main.rs` still hand-parses `std::env::args()`
-  (Phase 12 introduces `clap`). `ylva init`/`ylva init --project` must be
+  (Phase 12 introduces `clap`). `ylva init`/`ylva init --workspace` must be
   added as leading-subcommand-style dispatch consistent with the existing
   `--version`/`--no-tui`/`--color=` handwritten style — do not pull in
   `clap` early (see `docs/ideas/cli-options-parsing.md`, which explicitly
@@ -273,13 +273,13 @@ baseline passes before changing anything.
         Lifecycle", unaffected by SOUL.md).
 11. [x] Add a new `src/init_command.rs` exposing
         `pub fn run_init(ylva_home: &Path, force: bool) -> Result<InitReport, ConfigError>`
-        and `pub fn run_init_project(workspace_root: &Path, force: bool) -> Result<InitReport, ConfigError>`,
+        and `pub fn run_init_workspace(workspace_root: &Path, force: bool) -> Result<InitReport, ConfigError>`,
         where `InitReport` records which files were written vs. skipped
         (already-present, not forced) for a clear CLI summary. `run_init`
         seeds, under `ylva_home` (`ylva_home()`'s value): `SOUL.md`,
         `agents/research.md`, `agents/code_edit.md`,
         `profiles/default/config.toml` using the shared code-owned starter.
-        `run_init_project` seeds, under `<workspace_root>/.ylva/`, only the
+        `run_init_workspace` seeds, under `<workspace_root>/.ylva/`, only the
         same `profiles/default/config.toml` starter.
         Both default to write-if-missing (an existing file is left
         untouched and reported as skipped); `force: true` overwrites
@@ -290,7 +290,7 @@ baseline passes before changing anything.
         dispatched **before** the existing `--version`/logging/profile
         -loading pipeline (matching how `--version` is already
         special-cased at the very top of `fn main()`). A trailing
-        `--project` flag on `ylva init` selects `run_init_project` (rooted
+        `--workspace` flag on `ylva init` selects `run_init_workspace` (rooted
         at the discovered workspace root from step 2, or the cwd itself if
         none is found yet) instead of `run_init`; a trailing `--force` flag
         works with either form. Print the `InitReport` summary to stdout
@@ -302,7 +302,7 @@ baseline passes before changing anything.
         with `YLVA_HOME` pointed at a `tempfile::TempDir`): `ylva init` on
         an empty `YLVA_HOME` seeds all four files; running it again without
         `--force` leaves an edited file untouched; `--force` overwrites it;
-        `ylva init --project` in an empty tempdir-as-cwd seeds only
+        `ylva init --workspace` in an empty tempdir-as-cwd seeds only
         `.ylva/profiles/default/config.toml` (not the global agent types).
 14. [x] Add unit/integration tests for SOUL.md precedence: root agent picks
         up a project `SOUL.md` over a home one over the built-in default.
@@ -318,7 +318,7 @@ baseline passes before changing anything.
         "Persona (`SOUL.md`)" subsection documenting the resolution order
         and the built-in default text's role. Remove/adjust any "WIP" note
         that refers to this work as not-yet-implemented.
-16. [x] Update `docs/cli-options.md`: document `ylva init [--project]
+16. [x] Update `docs/cli-options.md`: document `ylva init [--workspace]
         [--force]` alongside the existing flags table, including its exit
         codes on failure.
 17. [x] Update `docs/blueprint.md` §7 Phase 10: flip checklist items 1, 2,
@@ -340,7 +340,7 @@ baseline passes before changing anything.
         keep explicit missing-profile errors unchanged.
 22. [x] Change `ylva init` home seeding to write only code-owned
         `SOUL.md` and `profiles/default/config.toml` starters. Use the same
-        profile starter for `ylva init --project` and preserve
+        profile starter for `ylva init --workspace` and preserve
         write-if-missing / `--force` behavior; stop seeding `agents/*.md` files.
 23. [x] Update unit and integration tests for the code-owned built-in floor,
         minimal initialization output, removal of embedded agent-type files,

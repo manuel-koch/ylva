@@ -538,7 +538,7 @@ whether it runs as the root agent or as a child. Until then, only the global
 
 `ylva init` writes `SOUL.md` and
 `profiles/default/config.toml` starters; it does not seed agent-type files.
-`ylva init --project` seeds the same default profile starter in the workspace.
+`ylva init --workspace` seeds the same default profile starter in the workspace.
 Both support write-if-missing and `--force` reseeding. Richer agent-type and
 profile examples are documented rather than shipped as repository templates.
 

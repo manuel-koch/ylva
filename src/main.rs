@@ -34,22 +34,22 @@ enum CliColorMode {
 }
 
 fn run_init_command(arguments: &[String]) -> Result<ylva::InitReport, String> {
-    let mut project = false;
+    let mut workspace = false;
     let mut force = false;
     for argument in arguments {
         match argument.as_str() {
-            "--project" => project = true,
+            "--workspace" => workspace = true,
             "--force" => force = true,
             other => return Err(format!("unknown init argument '{other}'")),
         }
     }
 
-    if project {
+    if workspace {
         let current_directory =
             std::env::current_dir().map_err(|error| format!("cannot resolve cwd: {error}"))?;
         let workspace_root =
             ylva::discover_workspace_root(&current_directory).unwrap_or(current_directory);
-        ylva::run_init_project(&workspace_root, force).map_err(|error| error.to_string())
+        ylva::run_init_workspace(&workspace_root, force).map_err(|error| error.to_string())
     } else {
         let ylva_home = ylva::ylva_home()
             .ok_or_else(|| "cannot resolve the home directory for ~/.ylva".to_string())?;

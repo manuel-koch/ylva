@@ -70,7 +70,7 @@ pub use config::{
 };
 pub use events::AppAction;
 pub use highlight::{active_theme, set_active_theme, ThemeName};
-pub use init_command::{run_init, run_init_project, InitReport};
+pub use init_command::{run_init, run_init_workspace, InitReport};
 pub use llm::engine;
 pub use llm::engine::{
     Engine, EngineConfig, EngineDisplayInfo, EngineImpl, EngineRouter, EngineRuntimeConfig,

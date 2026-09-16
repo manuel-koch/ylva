@@ -16,8 +16,11 @@ three-layer, per-file fallback chain:
 The workspace root is discovered by walking up from the current working
 directory to the nearest ancestor containing either a `.ylva/` directory or a
 `.git` marker. A `.ylva/` directory defines a workspace-local configuration
-layer; `.git` is the repository-root fallback. When no marker exists, there is
-no workspace layer. The highest layer that defines the requested file replaces
+layer; `.git` is the repository-root fallback. The global Ylva home is not
+treated as a workspace marker when it is an ancestor of the current directory,
+so projects under the user's home directory do not accidentally write to or
+load from the global configuration layer. When no marker exists, there is no
+workspace layer. The highest layer that defines the requested file replaces
 that file entirely; lower layers are not merged into it.
 
 An optional `~/.ylva/profiles/<profile-name>/.env` file supplies provider
@@ -130,7 +133,7 @@ logged.
 
 `ylva init` writes code-owned starters (`SOUL.md` and
 `profiles/default/config.toml`) into `~/.ylva/`; it does not seed agent-type
-files. Use `ylva init --project` to seed the same default profile starter under
+files. Use `ylva init --workspace` to seed the same default profile starter under
 the discovered workspace root. Both commands write only missing files unless
 `--force` is supplied. Global, profile-scoped, and project-scoped
 `agents/*.md` loading remains Phase 10.2 work; richer examples are documented

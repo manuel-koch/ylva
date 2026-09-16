@@ -57,13 +57,13 @@ impl InitReport {
             self.root.display()
         )];
         for path in &self.written {
-            lines.push(format!("wrote {}", path.display()));
+            lines.push(format!("Wrote {}", path.display()));
         }
         for path in &self.skipped {
-            lines.push(format!("skipped {} (already exists)", path.display()));
+            lines.push(format!("Skipped {} (already exists)", path.display()));
         }
         if self.written.is_empty() && self.skipped.is_empty() {
-            lines.push("no files were selected".to_string());
+            lines.push("No files were selected".to_string());
         }
         lines.join("\n")
     }
@@ -83,7 +83,7 @@ pub fn run_init(ylva_home: &Path, force: bool) -> Result<InitReport, ConfigError
 }
 
 /// Seed the workspace-local default profile beneath `<workspace_root>/.ylva/`.
-pub fn run_init_project(workspace_root: &Path, force: bool) -> Result<InitReport, ConfigError> {
+pub fn run_init_workspace(workspace_root: &Path, force: bool) -> Result<InitReport, ConfigError> {
     let workspace_config_root = workspace_root.join(YLVA_DIR_NAME);
     let mut report = InitReport {
         root: workspace_config_root.clone(),
@@ -176,11 +176,11 @@ mod tests {
     }
 
     #[test]
-    fn project_init_seeds_only_the_shared_profile_starter() {
+    fn workspace_init_seeds_only_the_shared_profile_starter() {
         let temporary_directory = tempfile::tempdir().expect("tempdir");
 
-        let report =
-            run_init_project(temporary_directory.path(), false).expect("project initialization");
+        let report = run_init_workspace(temporary_directory.path(), false)
+            .expect("workspace initialization");
         let expected = temporary_directory
             .path()
             .join(YLVA_DIR_NAME)

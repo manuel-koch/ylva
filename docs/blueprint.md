@@ -1583,7 +1583,7 @@ project  .ylva/        (current project, cwd/git-root scope)
 
 - `ylva init` writes only code-owned starters (`SOUL.md` and the default
   profile `config.toml`) into `~/.ylva/`; it does not seed agent-type files.
-- `ylva init --project` seeds **only** the same
+- `ylva init --workspace` seeds **only** the same
   `.ylva/profiles/default/config.toml` starter into the workspace root. Agent
   types and additional profiles are added manually only when the project
   explicitly wants to override (inheritance covers the rest).
@@ -1602,7 +1602,7 @@ The home profile's optional `.env` file
 already-exported environment variable taking precedence over the `.env`
 value. TOML string values can reference the merged environment with
 `${ENV_VAR}`. Missing variables are startup errors, and secret values are
-never logged. Project-scoped `.env` loading and the `ylva init --project`-
+never logged. Project-scoped `.env` loading and the `ylva init --workspace`-
 managed `.gitignore` remain Phase 10 work.
 
 **Global agent types** (`~/.ylva/agents/`) define *behavior*: tools,
@@ -2785,7 +2785,7 @@ See reducer-state-handling-plan.md.
       `ProfileConfig`/`AgentConfig`/`EngineConfig` structs for default model,
       theme, keybindings, and agent-type engine assignments. The full `§4G`
       three-layer fallback chain (project `.ylva/` → home `~/.ylva/` → code-owned
-      built-ins), `ylva init`/`ylva init --project` distribution, `SOUL.md`
+      built-ins), `ylva init`/`ylva init --workspace` distribution, `SOUL.md`
       persona loading, and global `agents/*.md` type files are **out of scope
       for Phase 7** — see Phase 10 below. Profile-scoped `.env` loading is
       implemented for the provider environment.
@@ -2916,7 +2916,7 @@ See reducer-state-handling-plan.md.
       error.
 
 - [x] `ylva init` (writes SOUL/profile starters into `~/.ylva/`) and
-      `ylva init --project` (seeds the same
+      `ylva init --workspace` (seeds the same
       `.ylva/profiles/default/config.toml` starter into the workspace root);
       both write-if-missing by default, `--force` reseeds. Agent-type files are
       user-authored and richer examples live in documentation.
@@ -2942,7 +2942,7 @@ See reducer-state-handling-plan.md.
       variable taking precedence.
 
 - [ ] Project-scoped `.env` auto-loading (e.g. `.ylva/profiles/<name>/.env`);
-      `ylva init --project` also deploys a `.gitignore` inside the project's
+      `ylva init --workspace` also deploys a `.gitignore` inside the project's
       `.ylva/` ignoring `.env`
 
 - [ ] Per-tool sandbox rule configuration: load configurable `[tool.*]` rule
