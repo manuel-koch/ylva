@@ -19,8 +19,11 @@ A Rust-based terminal UI that implements an agent-harness.
    [development-workflow](./docs/development-workflow.md). Before writing tests involving
    `tracing`, cwd, or integration-test side-effects, read the relevant entries in
    [known-test-issues](./docs/known-test-issues.md).
-3. **Before reporting done**, run the verification commands in
-   [development-workflow](./docs/development-workflow.md) and fix any findings.
+3. **Before reporting done**, follow the verification policy in
+   [development-workflow](./docs/development-workflow.md): for code changes,
+   run `make format lint` and the single mandatory test gate `make test-coverage`.
+   `make test-coverage` runs the full test suite and enforces the coverage
+   threshold, so do not also run `make test` as a mandatory duplicate.
 4. **Plan execution:** Planned implementations are executed from their plan file
    in [development-workflow](./docs/development-workflow.md) → *Plan execution*;
    update the named docs in the same commit.
