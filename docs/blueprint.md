@@ -1602,9 +1602,10 @@ The home profile's optional `.env` file
 (`~/.ylva/profiles/default/.env`) is auto-loaded at startup, with an
 already-exported environment variable taking precedence over the `.env`
 value. TOML string values can reference the merged environment with
-`${ENV_VAR}`. Missing variables are startup errors, and secret values are
-never logged. Project-scoped `.env` loading and the `ylva init --workspace`-
-managed `.gitignore` remain Phase 10 work.
+`${ENV_VAR}`. Numeric and boolean fields accept expanded strings when the
+result parses as the target type. Missing variables are startup errors, and
+secret values are never logged. Project-scoped `.env` loading remains Phase 10
+work; the workspace `.gitignore` is seeded by `ylva init --workspace`.
 
 **Global agent types** (`~/.ylva/agents/`) define *behavior*: tools,
 prompts, max iterations, timeouts, `can_spawn`. They are fully self-contained

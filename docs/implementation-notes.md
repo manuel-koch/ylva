@@ -155,9 +155,10 @@ environment variable.
 
 Environment discovery loads the selected profile's `.env` plus exported
 process variables, and the merged snapshot is used both for provider
-discovery and `${ENV_VAR}` interpolation in every TOML string. Process
-variables win over `.env` values, and missing interpolation variables fail
-profile loading. The merged snapshot is never logged.
+discovery and `${ENV_VAR}` interpolation in every TOML string. Typed numeric
+and boolean fields parse expanded strings after interpolation. Process
+variables win over `.env` values, and missing or invalid interpolation values
+fail profile loading. The merged snapshot is never logged.
 
 ## Tool-result wire protocol
 

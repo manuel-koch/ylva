@@ -239,11 +239,10 @@ baseline passes before changing anything.
        last-resort path is never exercised in practice.
        - Malformed/unreadable file at any layer remains a hard error, named
        with its resolved path.
-7. [x] Confirm `${ENV_VAR}` interpolation (already implemented in
+7. [x] Confirm `${ENV_VAR}` interpolation (implemented in
        `src/config/profile.rs::interpolate_toml_strings`) continues to run
-       unchanged after parsing whichever layer's `config.toml` won — no
-       interpolation logic changes, only the source-selection step
-       upstream of it.
+       after parsing whichever layer's `config.toml` won. Expanded strings
+       are also accepted by typed numeric and boolean fields.
 8. [x] Add a new `src/config/soul.rs` exposing
        `pub fn load_soul(workspace_root: Option<&Path>) -> Result<String, ConfigError>`,
        built on the layered resolution core from step 1: resolves

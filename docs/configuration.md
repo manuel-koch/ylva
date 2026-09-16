@@ -127,9 +127,13 @@ filled from the matching provider environment variable; an inline value
 remains authoritative.
 
 `${ENV_VAR}` references are expanded in every TOML string value after the
-profile `.env` and process environment are merged. Missing variables and
-malformed references are hard startup errors; expanded secret values are never
-logged.
+profile `.env` and process environment are merged. Numeric and boolean fields
+also accept expanded string values and parse them according to their field
+type; for example, `temperature = "${TEMPERATURE}"`,
+`timeout_secs = "${TIMEOUT_SECONDS}"`, and
+`can_spawn = "${CAN_SPAWN}"`. Missing variables, malformed references, and
+values that cannot be parsed as the target type are hard startup errors;
+expanded secret values are never logged.
 
 `ylva init` writes code-owned starters (`SOUL.md`,
 `profiles/default/config.toml`, and `profiles/default/.env`) into `~/.ylva/`;

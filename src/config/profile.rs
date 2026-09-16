@@ -579,6 +579,40 @@ model = "cloud-model"
     }
 
     #[test]
+    fn numeric_and_boolean_environment_interpolation_loads() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "typed-values",
+            r#"
+[engines.local]
+provider = "ollama"
+temperature = "${TEMPERATURE}"
+context_length = "${CONTEXT_LENGTH}"
+
+[agents.worker]
+timeout_secs = "${TIMEOUT_SECONDS}"
+can_spawn = "${CAN_SPAWN}"
+"#,
+        );
+        let environment = HashMap::from([
+            ("TEMPERATURE".to_string(), "0.2".to_string()),
+            ("CONTEXT_LENGTH".to_string(), "128kb".to_string()),
+            ("TIMEOUT_SECONDS".to_string(), "120".to_string()),
+            ("CAN_SPAWN".to_string(), "true".to_string()),
+        ]);
+
+        let profile =
+            ProfileConfig::load_with_environment(temp.path(), "typed-values", &environment)
+                .expect("the typed-value profile loads");
+
+        assert_eq!(profile.engines["local"].temperature, Some(0.2));
+        assert_eq!(profile.engines["local"].context_length, Some(128 * 1024));
+        assert_eq!(profile.agents["worker"].timeout_secs, Some(120));
+        assert!(profile.agents["worker"].can_spawn);
+    }
+
+    #[test]
     fn missing_environment_interpolation_is_a_profile_error() {
         let temp = tempfile::tempdir().expect("tempdir");
         write_profile_config(
