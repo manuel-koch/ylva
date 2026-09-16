@@ -839,6 +839,20 @@ Two rules keep this consistent with blueprint §4C:
   was created — rather than reusing whatever
   `meta.provider_connection`/`meta.model` were
   written at creation.
+- `AgentCommand::ClearContext`'s handler first interrupts whatever is
+  in-flight — cancelling the current stream/tool token, calling
+  `child_agent_manager.cancel_all()`, and draining `pending_tools`/
+  `pending_steers` — the same shutdown `AgentCommand::Stop` performs. This
+  alone can't close the race: cancellation is cooperative, so an
+  already-running stream/tool/child task can still emit one more
+  `AgentEvent`/`FinishResult` after the clear, produced against the
+  soon-to-be-replaced `Context`. A per-loop `generation` counter (bumped on
+  every `ClearContext`) is stamped onto every `AgentEvent` at the moment its
+  producer is spawned; the loop drops any event whose stamped generation
+  doesn't match the current one. A `cancelled_run_ids` set records child
+  `run_id`s cancelled by `Stop`/`ClearContext` so a straggling `FinishResult`
+  for one of them is dropped by the `finish_rx` arm instead of being applied
+  to a `Context` it no longer belongs to.
 
 `AppState::available_tool_names` is captured once, at TUI startup, from the
 resolved `AgentLoop::registry()` (sorted, since the registry is a `HashMap`),
