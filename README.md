@@ -11,9 +11,14 @@ Yvla is not loaded with bloat of barely used functionality you may find in other
 
 Ylva is highly customizable to adapt to user needs.
 
-- [x] global and workspace scoped configurations
-- [x] customize behavoir using `profiles` on global and and workspace scope
-- [x] Ability to run main and subagents
+- [x] Global and workspace scoped configurations
+- [x] Customize behavior using `profiles` on global and and workspace scope
+- [x] Multiple LLM providers built-in
+  - [x] Ollama
+  - [x] Openrouter
+  - [ ] Copilot
+- [x] Configurable `engines` ( combination of provider + model + config )
+- [x] Ability to run main and subagent(s)
 - [x] Support LLM calling tools:
   - [x] `read`, `edit` & `write` file access
   - [x] `search` for file content using regexp
@@ -21,6 +26,11 @@ Ylva is highly customizable to adapt to user needs.
   - [x] `bash` to run arbitrary commands in a shell
   - [x] `clarify` to ask user interactive question
   - [x] `spawn_subagent` to deligate workload to a spawned subagents
-- [x] Multiple LLM providers built-in
-  - [x] Ollama
-  - [x] Openrouter
+  - [ ] `web_search` to search for terms in www
+  - [ ] `web_fetch` to fetch data from a given URL
+- [x] Persistent session storage
+  - [x] Ability to resume an existing session
+  - [x] User message history, to reuse a message/prompt from a recent session
+  - [x] Automatic title generation for a session
+- [ ] Tracking token usage in current context
+- [ ] Session / context compaction
