@@ -87,6 +87,16 @@ pub struct ChildViewState {
     /// hit-testing (routing scroll-wheel events to the header instead of the
     /// chat area below it). Zero-sized while `child_view_bubble` is `None`.
     pub header_bubble_area: ratatui::layout::Rect,
+    /// Plain text of every rendered header line, indexed before the vertical
+    /// scroll offset. Used for extracting selected text on mouse-up.
+    pub header_rendered_lines: Vec<String>,
+    /// Number of leading header chrome characters stripped from each rendered
+    /// line. Used to map terminal columns back to content columns.
+    pub header_rendered_line_prefix_widths: Vec<usize>,
+    /// Active or committed header selection.
+    pub header_selection: Option<ChatSelection>,
+    /// True while the left mouse button is held down in the header bubble.
+    pub header_drag_active: bool,
 }
 
 /// Clarify-tool banner render state.
@@ -309,6 +319,10 @@ impl TuiState {
                 child_view_bubble: None,
                 header_bubble_scroll_offset: 0,
                 header_bubble_area: ratatui::layout::Rect::default(),
+                header_rendered_lines: Vec::new(),
+                header_rendered_line_prefix_widths: Vec::new(),
+                header_selection: None,
+                header_drag_active: false,
             },
             conversation: ConversationListState::default(),
             slash_overlay: SlashOverlay::default(),

@@ -938,6 +938,10 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
             child_view_bubble: None,
             header_bubble_scroll_offset: 0,
             header_bubble_area: ratatui::layout::Rect::default(),
+            header_rendered_lines: Vec::new(),
+            header_rendered_line_prefix_widths: Vec::new(),
+            header_selection: None,
+            header_drag_active: false,
         },
         conversation: crate::tui_render_state::ConversationListState {
             scroll_offset: app.conversation.scroll_offset,

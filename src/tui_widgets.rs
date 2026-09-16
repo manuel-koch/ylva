@@ -367,6 +367,35 @@ pub fn draw(
         let row_offset = state.child_view.header_bubble_scroll_offset.min(max_offset);
         state.child_view.header_bubble_scroll_offset = row_offset;
 
+        let (rendered_lines, prefix_widths) =
+            rendered_line_selection_data(&header_lines, header_content_area.width);
+        state.child_view.header_rendered_lines = rendered_lines;
+        state.child_view.header_rendered_line_prefix_widths = prefix_widths;
+
+        if let Some(selection) = state.child_view.header_selection {
+            if !selection.is_empty() {
+                let (start_line, start_col, end_line, end_col) = selection.normalized();
+                for (index, line) in header_lines.iter_mut().enumerate() {
+                    if index < start_line || index > end_line {
+                        continue;
+                    }
+                    let column_start = if index == start_line { start_col } else { 0 };
+                    let column_end = if index == end_line {
+                        end_col
+                    } else {
+                        usize::MAX
+                    };
+                    let alignment_offset = line_alignment_offset(line, header_content_area.width);
+                    apply_selection_highlight_to_line(
+                        line,
+                        column_start.saturating_sub(alignment_offset),
+                        column_end.saturating_sub(alignment_offset),
+                        CHAT_SELECTION_BG,
+                    );
+                }
+            }
+        }
+
         let paragraph = Paragraph::new(header_lines).scroll((row_offset as u16, 0));
         frame.render_widget(paragraph, header_content_area);
 
@@ -404,6 +433,8 @@ pub fn draw(
         );
     } else {
         state.child_view.header_bubble_area = Rect::default();
+        state.child_view.header_rendered_lines.clear();
+        state.child_view.header_rendered_line_prefix_widths.clear();
     }
 
     draw_chat(frame, chat_area, state);
@@ -860,33 +891,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
     state.conversation.thinking_title_rows = thinking_title_rows_out;
 
     // Extract plain text of every line for selection/copy support.
-    // Tool bubble lines are prefixed with the `▌  ` chrome (border + margin);
-    // strip it so copied text contains only content. Trailing spaces added by
-    // `trailing_pad` are also stripped. The chrome character count is recorded
-    // alongside so that terminal column indices (which include chrome) can be
-    // adjusted when slicing the selection.
-    let mut rendered_lines: Vec<String> = Vec::with_capacity(lines.len());
-    let mut prefix_widths: Vec<usize> = Vec::with_capacity(lines.len());
-    for line in &lines {
-        let raw: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        // Body content lines are `▌  ` (bar + margin = 3 chars) followed by a
-        // 2-char structural gutter `  `, making 5 chars of chrome before real
-        // content. Title and separator lines have only the 3-char `▌  ` prefix.
-        let chrome = if raw.starts_with("▌    ") {
-            5.min(raw.chars().count())
-        } else if raw.starts_with('▌') {
-            3.min(raw.chars().count())
-        } else {
-            0
-        };
-        let content_start_byte = raw
-            .char_indices()
-            .nth(chrome)
-            .map_or(raw.len(), |(byte_pos, _)| byte_pos);
-        let clean = raw[content_start_byte..].trim_end_matches(' ').to_string();
-        rendered_lines.push(clean);
-        prefix_widths.push(chrome + line_alignment_offset(line, content_area.width));
-    }
+    let (rendered_lines, prefix_widths) = rendered_line_selection_data(&lines, content_area.width);
     state.conversation.chat_rendered_lines = rendered_lines;
     state.conversation.chat_rendered_line_prefix_widths = prefix_widths;
 
@@ -1154,6 +1159,37 @@ fn line_alignment_offset(line: &Line<'_>, area_width: u16) -> usize {
         Alignment::Center => (area_width as usize / 2).saturating_sub(line_width / 2),
         Alignment::Right => (area_width as usize).saturating_sub(line_width),
     }
+}
+
+/// Build the plain-text selection cache for rendered lines and record the
+/// leading bubble chrome needed to map terminal columns back to content.
+fn rendered_line_selection_data(lines: &[Line<'_>], area_width: u16) -> (Vec<String>, Vec<usize>) {
+    let mut rendered_lines = Vec::with_capacity(lines.len());
+    let mut prefix_widths = Vec::with_capacity(lines.len());
+    for line in lines {
+        let raw: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        // Body content lines are `▌  ` (bar + margin = 3 chars) followed by a
+        // 2-char structural gutter `  `, making 5 chars of chrome before real
+        // content. Title and separator lines have only the 3-char `▌  ` prefix.
+        let chrome = if raw.starts_with("▌    ") {
+            5.min(raw.chars().count())
+        } else if raw.starts_with('▌') {
+            3.min(raw.chars().count())
+        } else {
+            0
+        };
+        let content_start_byte = raw
+            .char_indices()
+            .nth(chrome)
+            .map_or(raw.len(), |(byte_pos, _)| byte_pos);
+        rendered_lines.push(raw[content_start_byte..].trim_end_matches(' ').to_string());
+        prefix_widths.push(chrome + line_alignment_offset(line, area_width));
+    }
+    (rendered_lines, prefix_widths)
 }
 
 /// Common visual scaffolding shared by every chat "bubble" renderer

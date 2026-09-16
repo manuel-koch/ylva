@@ -223,6 +223,13 @@ fn project_for_draw(state: &AppState) -> TuiState {
             child_view_bubble,
             header_bubble_scroll_offset: state.child_view.header_bubble_scroll_offset,
             header_bubble_area: ratatui::layout::Rect::default(),
+            header_rendered_lines: state.child_view.header_rendered_lines.clone(),
+            header_rendered_line_prefix_widths: state
+                .child_view
+                .header_rendered_line_prefix_widths
+                .clone(),
+            header_selection: state.child_view.header_selection,
+            header_drag_active: state.child_view.header_drag_active,
         },
         conversation: crate::tui_render_state::ConversationListState {
             scroll_offset: state.conversation.scroll_offset,
@@ -250,6 +257,11 @@ fn sync_from_draw(state: &mut AppState, rendered: TuiState, button_areas: Option
     state.layout.clarify_banner = rendered.clarify_banner_state.clarify_banner;
     state.layout.header_bubble = rendered.child_view.header_bubble_area;
     state.child_view.header_bubble_scroll_offset = rendered.child_view.header_bubble_scroll_offset;
+    state.child_view.header_rendered_lines = rendered.child_view.header_rendered_lines;
+    state.child_view.header_rendered_line_prefix_widths =
+        rendered.child_view.header_rendered_line_prefix_widths;
+    state.child_view.header_selection = rendered.child_view.header_selection;
+    state.child_view.header_drag_active = rendered.child_view.header_drag_active;
     state.layout.help_popup.rect = rendered.help_popup.help_popup_rect;
     state.layout.help_popup.content_area = rendered.help_popup.help_content_area;
     state.layout.slash_overlay = rendered.slash_overlay_layout;

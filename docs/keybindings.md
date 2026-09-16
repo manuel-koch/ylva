@@ -53,6 +53,8 @@ running and queued subagent counts in a compact label such as
 | Mouse wheel | Any | Scroll chat; when help popup is open, scroll popup (no focus needed) |
 | Left-click | Input focused | Move the cursor to the clicked character (word-wrapping honored) |
 | Left-drag | Input focused | Select text; click (no drag) just places the cursor |
+| Left-click | Child-view header bubble | Toggle the header bubble expand/collapse state |
+| Left-drag | Chat or child-view header bubble | Select visible text; release copies a non-empty selection to the clipboard |
 | Left-click on tool bubble title / border | Any | Toggle tool bubble expand (`▼`) / collapse (`▶`) |
 | Double-click on a `spawn_subagent` tool bubble's title | Any | Drill in to the subagent's conversation view (manual navigation; does not auto-return; still works after the subagent has finished) |
 | `esc` (input empty) | Subagent drill-in view | Go back to the root conversation (does not cancel/interrupt the root agent's turn); restores the scroll position from before drilling in |

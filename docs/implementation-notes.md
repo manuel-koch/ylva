@@ -631,8 +631,11 @@ user-facing on-disk contract; this section is the contributor view.
   when the content overflows. Mouse-wheel events over the header's rect
   (`AppState.layout.header_bubble`, hit-tested in `presenter::route_mouse`
   ahead of the clarify-banner/chat-area checks) scroll the header instead of
-  the chat area. The offset resets to `0` whenever a fresh child view is
-  entered (`switch_to_child_view` / `ChildAgentStarted`).
+  the chat area. The header also keeps a plain-text line cache and selection
+  range in `AppState.child_view`; a left drag maps screen rows through the
+  independent scroll offset, highlights the visible range, and copies a
+  non-empty selection on mouse-up. The offset resets to `0` whenever a fresh
+  child view is entered (`switch_to_child_view` / `ChildAgentStarted`).
 - `switch_to_child_view` (manual drill-in via double-click) also re-pins the
   main chat area's scroll to the bottom (`conversation.scroll_offset = 0`,
   `conversation.scroll_locked = true`) — these fields are shared between the
@@ -666,10 +669,11 @@ user-facing on-disk contract; this section is the contributor view.
   lives in any `child_conversations` entry's `messages` (subagent) or
   `chat_entries` (root), independent of `active_view`.
 - Clicking anywhere on the child-view header bubble toggles its collapsed
-  state — unlike a normal chat bubble, this needs no click-vs-double-click
-  debounce, since the drill-in gesture only applies from the root
-  transcript. `AppState::header_bubble_id()` is the single source of truth
-  for which real `chat_entries` bubble the header re-renders (used by both
+  state after mouse-up when no drag range was selected — unlike a normal chat
+  bubble, this needs no click-vs-double-click debounce, since the drill-in
+  gesture only applies from the root transcript.
+  `AppState::header_bubble_id()` is the single source of truth for which real
+  `chat_entries` bubble the header re-renders (used by both
   `render::project_for_draw` and `presenter::route_mouse`), and
   `AppState::toggle_header_bubble_collapsed()` flips that bubble's
   `collapsed` flag directly — deliberately not reusing

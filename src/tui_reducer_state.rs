@@ -1510,7 +1510,7 @@ pub struct HelpPopupState {
 }
 
 /// Drill-in child-view header bubble state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ChildViewState {
     /// Current vertical scroll offset inside the child-view header bubble
     /// (lines from the top of its content), used only when the bubble's full
@@ -1518,6 +1518,16 @@ pub struct ChildViewState {
     /// range by `tui_widgets::draw` each frame; reset to 0 whenever the header bubble
     /// it applies to changes (see `presenter::domain_child_lifecycle`).
     pub header_bubble_scroll_offset: usize,
+    /// Plain text of every rendered header line, indexed before the vertical
+    /// scroll offset. Used for extracting selected text on mouse-up.
+    pub header_rendered_lines: Vec<String>,
+    /// Number of leading header chrome characters stripped from each rendered
+    /// line. Used to map terminal columns back to content columns.
+    pub header_rendered_line_prefix_widths: Vec<usize>,
+    /// Active or committed header selection.
+    pub header_selection: Option<ChatSelection>,
+    /// `true` while the left mouse button is held down in the header bubble.
+    pub header_drag_active: bool,
 }
 
 /// Clarify-tool banner scroll/drag state.
@@ -2147,6 +2157,8 @@ impl AppState {
         // navigation into the child view, regardless of where it was left
         // scrolled to on a previous visit.
         self.child_view.header_bubble_scroll_offset = 0;
+        self.child_view.header_selection = None;
+        self.child_view.header_drag_active = false;
         // The main chat area's `scroll_offset`/`scroll_locked` are shared
         // between the root and child views (single fields, not per-view) —
         // if the user had scrolled away from the bottom while viewing
@@ -2553,6 +2565,37 @@ impl AppState {
             .saturating_add(lines);
     }
 
+    /// Return the absolute rendered-line and column position under a header
+    /// bubble cell.
+    pub fn header_bubble_content_position(&self, column: u16, row: u16) -> Option<(usize, usize)> {
+        let area = self.layout.header_bubble;
+        if !area.contains((column, row).into()) {
+            return None;
+        }
+        Some((
+            self.child_view.header_bubble_scroll_offset + row.saturating_sub(area.y) as usize,
+            column.saturating_sub(area.x) as usize,
+        ))
+    }
+
+    /// Clamp a drag endpoint to the visible header bubble content area and
+    /// return its absolute rendered-line and column position.
+    pub fn header_bubble_drag_position(&self, column: u16, row: u16) -> Option<(usize, usize)> {
+        let area = self.layout.header_bubble;
+        if area.is_empty() {
+            return None;
+        }
+        let max_column = area.x.saturating_add(area.width.saturating_sub(1));
+        let max_row = area.y.saturating_add(area.height.saturating_sub(1));
+        let clamped_column = column.clamp(area.x, max_column);
+        let clamped_row = row.clamp(area.y, max_row);
+        Some((
+            self.child_view.header_bubble_scroll_offset
+                + clamped_row.saturating_sub(area.y) as usize,
+            clamped_column.saturating_sub(area.x) as usize,
+        ))
+    }
+
     /// Toggle the collapsed/expanded state of the tool bubble with the given id.
     ///
     /// Collapsing a bubble whose body extends below the viewport shrinks the
@@ -2641,6 +2684,15 @@ impl AppState {
             self.help_popup.help_selection.as_ref(),
             &self.help_popup.help_rendered_lines,
             &[],
+        )
+    }
+
+    /// Extract the text covered by the current child-view header selection.
+    pub fn extract_header_selection_text(&self) -> Option<String> {
+        extract_selection_text(
+            self.child_view.header_selection.as_ref(),
+            &self.child_view.header_rendered_lines,
+            &self.child_view.header_rendered_line_prefix_widths,
         )
     }
 

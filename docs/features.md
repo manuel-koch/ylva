@@ -456,9 +456,9 @@ module structure (model/presenter/view/driver split).
   1/3 height cap.
 - **Mouse editing:** a left-click in the input box places the cursor at the
   clicked character; a left-drag selects text. The same drag gesture selects
-  visible text in the slash-command overlay and copies it to the clipboard on
-  release. `read`/`glob` tool status lines and approval buttons remain
-  mouse-clickable.
+  visible text in the chat bubbles, child-view header bubble, and
+  slash-command overlay, copying it to the clipboard on release.
+  `read`/`glob` tool status lines and approval buttons remain mouse-clickable.
 - **Shift+Enter / Alt+Enter:** insert a newline through the terminal's
   modified-key encoding. Kitty keyboard protocol terminals (iTerm2, kitty,
   WezTerm) report the modifier directly; terminals that encode Shift+Enter as

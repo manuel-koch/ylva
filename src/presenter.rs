@@ -867,16 +867,23 @@ fn route_mouse(
                 }
             }
 
-            // Click anywhere on the child-view header bubble toggles its
-            // collapsed state immediately — unlike a normal chat bubble,
-            // there's no drill-in/collapse ambiguity to debounce here (the
-            // user is already viewing the child; double-clicking a bubble's
-            // title to drill in only applies to the root transcript).
+            // A header click is held until mouse-up so a drag can select and
+            // copy its rendered text instead of toggling the bubble.
             let hb = state.layout.header_bubble;
             let in_header_bubble =
                 column >= hb.x && column < hb.x + hb.width && row >= hb.y && row < hb.y + hb.height;
             if in_header_bubble {
-                state.toggle_header_bubble_collapsed();
+                if let Some((anchor_line, anchor_col)) =
+                    state.header_bubble_content_position(column, row)
+                {
+                    state.child_view.header_selection = Some(ChatSelection {
+                        anchor_line,
+                        anchor_col,
+                        cursor_line: anchor_line,
+                        cursor_col: anchor_col,
+                    });
+                    state.child_view.header_drag_active = true;
+                }
                 return vec![];
             }
 
@@ -957,6 +964,15 @@ fn route_mouse(
             if state.help_popup.help_drag_active {
                 if let Some((line, column)) = state.help_popup_drag_position(column, row) {
                     if let Some(selection) = state.help_popup.help_selection.as_mut() {
+                        selection.cursor_line = line;
+                        selection.cursor_col = column;
+                    }
+                }
+                return vec![];
+            }
+            if state.child_view.header_drag_active {
+                if let Some((line, column)) = state.header_bubble_drag_position(column, row) {
+                    if let Some(selection) = state.child_view.header_selection.as_mut() {
                         selection.cursor_line = line;
                         selection.cursor_col = column;
                     }
@@ -1061,6 +1077,22 @@ fn route_mouse(
                         return vec![Effect::CopyToClipboard(text)];
                     }
                 }
+                return vec![];
+            }
+
+            if state.child_view.header_drag_active {
+                state.child_view.header_drag_active = false;
+                let selection = state.child_view.header_selection;
+                if let Some(text) = state.extract_header_selection_text() {
+                    if !text.is_empty() {
+                        return vec![Effect::CopyToClipboard(text)];
+                    }
+                }
+                if selection.is_some_and(|selection| !selection.is_empty()) {
+                    return vec![];
+                }
+                state.child_view.header_selection = None;
+                state.toggle_header_bubble_collapsed();
                 return vec![];
             }
 
@@ -2287,8 +2319,8 @@ mod tests {
     };
     use crate::agent::{AssistantStatus, Message, ToolCallRequest, ToolResult};
     use crate::tui_reducer_state::{
-        AppState, ChatEntry, ConversationView, Focus, InputEvent, ModelChoice, ResultSection,
-        SlashOverlay, ToolCallState, TuiMode,
+        AppState, ChatEntry, ChatSelection, ConversationView, Focus, InputEvent, ModelChoice,
+        ResultSection, SlashOverlay, ToolCallState, TuiMode,
     };
     use crate::ProviderModelOption;
 
@@ -4011,11 +4043,128 @@ mod tests {
         };
 
         update(&mut state, TuiEvent::Mouse(mouse_down), &empty_textarea());
+        update(
+            &mut state,
+            TuiEvent::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
+                column: 5,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &empty_textarea(),
+        );
 
         assert!(
             matches!(&state.chat_entries[0], ChatEntry::ToolBubble { collapsed, .. } if *collapsed),
             "click on the header bubble must toggle the real root bubble's collapsed state"
         );
+    }
+
+    #[test]
+    fn drag_on_header_bubble_copies_text_without_toggling_collapse() {
+        use crate::tui_reducer_state::ToolCallState;
+
+        let mut state = AppState::new();
+        let bubble_id = Uuid::new_v4();
+        state.chat_entries.push(ChatEntry::ToolBubble {
+            id: bubble_id,
+            name: crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
+            state: Box::new(ToolCallState::Running {
+                arguments: serde_json::json!({
+                    "agent_type": "reviewer",
+                    "task": "inspect this task"
+                }),
+                content_sections: vec![],
+                title_arguments: vec![
+                    ("agent_type".to_string(), serde_json::json!("reviewer")),
+                    ("task".to_string(), serde_json::json!("inspect this task")),
+                ],
+                progress_arguments: vec![],
+            }),
+            collapsed: false,
+        });
+        let run_id = Uuid::new_v4();
+        state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id,
+            agent_type: "reviewer".to_string(),
+            task: "inspect this task".to_string(),
+            label: "Inspect task".to_string(),
+        });
+        state.switch_to_child_view(run_id);
+        render_app_state_buffer(&mut state);
+        let task_line = state
+            .child_view
+            .header_rendered_lines
+            .iter()
+            .position(|line| line.contains("inspect this task"))
+            .expect("rendered header must contain the task");
+        let task_column = state.child_view.header_rendered_line_prefix_widths[task_line];
+        let task_text_column = state.child_view.header_rendered_lines[task_line]
+            .find("inspect")
+            .expect("rendered header must contain the selected word");
+        let task_row = state.layout.header_bubble.y + task_line as u16;
+        let selection_start =
+            state.layout.header_bubble.x + (task_column + task_text_column) as u16;
+        let selection_end = selection_start + "inspect".chars().count() as u16;
+
+        update(
+            &mut state,
+            TuiEvent::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: selection_start,
+                row: task_row,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &empty_textarea(),
+        );
+        assert!(
+            matches!(&state.chat_entries[0], ChatEntry::ToolBubble { collapsed, .. } if !*collapsed),
+            "header mouse-down must not toggle collapse before the drag is resolved"
+        );
+
+        update(
+            &mut state,
+            TuiEvent::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+                column: selection_end,
+                row: task_row,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &empty_textarea(),
+        );
+        let rendered = render_app_state_buffer(&mut state);
+        assert_eq!(
+            rendered
+                .cell((selection_start, task_row))
+                .expect("selected header cell")
+                .style()
+                .bg,
+            Some(crate::theme::CHAT_SELECTION_BG),
+            "the selected header range must be highlighted"
+        );
+        let effects = update(
+            &mut state,
+            TuiEvent::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
+                column: selection_end,
+                row: task_row,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &empty_textarea(),
+        );
+
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::CopyToClipboard(text) if text == "inspect")),
+            "header drag must copy its selected text: {effects:?}"
+        );
+        assert!(
+            matches!(&state.chat_entries[0], ChatEntry::ToolBubble { collapsed, .. } if !*collapsed),
+            "a non-empty header drag must not toggle collapse"
+        );
+        assert!(!state.child_view.header_drag_active);
     }
 
     #[test]
@@ -4134,6 +4283,16 @@ mod tests {
             &mut state,
             TuiEvent::Mouse(crossterm::event::MouseEvent {
                 kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: 5,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &empty_textarea(),
+        );
+        update(
+            &mut state,
+            TuiEvent::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Up(crossterm::event::MouseButton::Left),
                 column: 5,
                 row: 1,
                 modifiers: KeyModifiers::NONE,
