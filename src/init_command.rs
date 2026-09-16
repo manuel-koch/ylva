@@ -33,6 +33,7 @@ theme = "dark"
 # [provider_connections.example]
 # provider = "ollama"
 # api_base_url = "https://example.invalid"
+# api_key = "${OLLAMA_API_KEY}"
 
 # [engines.default]
 # provider_connection = "example"
