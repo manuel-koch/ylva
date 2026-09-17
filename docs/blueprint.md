@@ -2979,7 +2979,7 @@ See reducer-state-handling-plan.md.
       `ylva init --workspace` also deploys a `.gitignore` inside the project's
       `.ylva/` ignoring `.env`
 
-- [ ] Per-tool sandbox rule configuration: load configurable `[tool.*]` rule
+- [x] Per-tool sandbox rule configuration: load configurable `[tool.*]` rule
       lists (including `outside_workspace`/`dot_path` overrides, §4E) from the
       layered config, replacing Phase 6's hardcoded two-rule default
 

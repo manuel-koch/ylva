@@ -82,6 +82,25 @@ pub struct ProfileConfig {
     /// Map of agent-type name to its configuration.
     #[serde(default)]
     pub agents: HashMap<String, AgentConfig>,
+    /// Map of tool name (e.g. `read`, `write`) to its `[tool.<name>]`
+    /// sandbox rule list. When a tool name has no entry here, its
+    /// `SandboxContext` falls back to the built-in default floor
+    /// (`outside_workspace`/`dot_path` → `AutoDenied`, see
+    /// `docs/configuration.md`'s "Sandbox" section and
+    /// [`crate::sandbox::SandboxContext`]); when it does, that entry's rule
+    /// list fully replaces the default floor for that tool.
+    #[serde(default, rename = "tool")]
+    pub tools: HashMap<String, ToolSandboxConfig>,
+}
+
+/// A single `[tool.<name>]` TOML table: currently just the ordered
+/// `rules` list evaluated by [`crate::sandbox::SandboxContext`] for that
+/// tool (last match wins). See [`crate::sandbox::SandboxRuleConfig`].
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ToolSandboxConfig {
+    /// Ordered sandbox rules for this tool; last match wins.
+    #[serde(default)]
+    pub rules: Vec<crate::sandbox::SandboxRuleConfig>,
 }
 
 fn default_engine_name() -> String {
@@ -141,6 +160,7 @@ impl Default for ProfileConfig {
             input_history_limit: default_input_history_limit(),
             keybindings: HashMap::new(),
             agents: HashMap::from([(DEFAULT_PROFILE_NAME.to_string(), default_agent_config())]),
+            tools: HashMap::new(),
         }
     }
 }
@@ -710,6 +730,68 @@ persona = "You explore code."
         assert!(
             !explorer.can_spawn,
             "can_spawn defaults to false when the table omits it"
+        );
+    }
+
+    #[test]
+    fn tool_sandbox_rules_table_loads_named_and_glob_rules() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "with-tools",
+            r#"
+[tool.read]
+rules = [
+  { rule = "dot_path", verdict = "user_approval_required" },
+]
+
+[tool.write]
+rules = [
+  { rule = "outside_workspace", verdict = "auto_denied" },
+  { pattern = "**/build/**", verdict = "auto_approved" },
+]
+"#,
+        );
+
+        let profile = ProfileConfig::load(temp.path(), "with-tools").expect("the fixture loads");
+
+        let read_rules = &profile.tools.get("read").expect("read table").rules;
+        assert_eq!(read_rules.len(), 1);
+        assert!(matches!(
+            read_rules[0],
+            crate::sandbox::SandboxRuleConfig::Named {
+                rule: crate::sandbox::NamedSandboxRule::DotPath,
+                ..
+            }
+        ));
+
+        let write_rules = &profile.tools.get("write").expect("write table").rules;
+        assert_eq!(write_rules.len(), 2);
+        assert!(matches!(
+            write_rules[0],
+            crate::sandbox::SandboxRuleConfig::Named {
+                rule: crate::sandbox::NamedSandboxRule::OutsideWorkspace,
+                ..
+            }
+        ));
+        assert!(
+            matches!(&write_rules[1], crate::sandbox::SandboxRuleConfig::Glob { pattern, .. } if pattern == "**/build/**")
+        );
+
+        assert!(
+            !profile.tools.contains_key("edit"),
+            "a tool with no [tool.<name>] table has no entry, falling back to the default floor"
+        );
+    }
+
+    #[test]
+    fn a_profile_with_no_tool_tables_has_an_empty_tools_map() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(temp.path(), "no-tools", "default_engine = \"fast\"\n");
+        let profile = ProfileConfig::load(temp.path(), "no-tools").expect("the fixture loads");
+        assert!(
+            profile.tools.is_empty(),
+            "no [tool.*] tables means no configured overrides for any tool"
         );
     }
 

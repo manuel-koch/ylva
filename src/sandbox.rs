@@ -16,12 +16,23 @@
 //!
 //! [`SandboxContext::check_path`] returns `None` (abstain) or an explicit
 //! `Some(`[`ApprovalCheck`]`)` verdict. Tools apply their own default when
-//! the sandbox abstains. TOML per-tool config loading is not yet implemented.
+//! the sandbox abstains.
+//!
+//! Per-tool rule lists are configurable via a `[tool.<name>]` TOML table
+//! (see [`SandboxRuleConfig`] and `docs/configuration.md`'s "Sandbox"
+//! section) that is parsed by `crate::config::profile::ProfileConfig` and
+//! wired into a tool's [`SandboxContext`] by
+//! [`crate::agent::tools::default_registry`] via
+//! [`SandboxContext::with_configured_rules`]. When a tool has no such table
+//! configured at any resolved layer, [`SandboxContext`] falls back to the
+//! unconditional built-in floor: `outside_workspace` → `AutoDenied` and
+//! `dot_path` → `AutoDenied`.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use glob::Pattern;
+use serde::Deserialize;
 
 /// The verdict from a sandbox approval check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,8 +53,139 @@ pub struct SandboxRule {
     pub pattern: Pattern,
 }
 
+/// Default reason shown when the built-in (or a configured, reason-less)
+/// `outside_workspace` rule denies a path.
+const OUTSIDE_WORKSPACE_REASON: &str = "Access denied by security policy: path is outside the \
+                                         workspace root; only paths within the workspace are \
+                                         accessible";
+
+/// Default reason shown when the built-in (or a configured, reason-less)
+/// `dot_path` rule denies a path.
+const DOT_PATH_REASON: &str =
+    "Access denied by security policy: dot-files and dot-directories are not accessible";
+
+/// One of the two structural sandbox checks that ship as Rust code
+/// (`SandboxContext`'s hardcoded default floor) but may also be referenced
+/// by name from a `[tool.<name>]` config table's `rules` list, so a user can
+/// reorder or change their verdict without reimplementing the underlying
+/// path-comparison logic in glob syntax.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NamedSandboxRule {
+    /// Matches any path that normalizes outside the workspace root.
+    OutsideWorkspace,
+    /// Matches any content-tool path whose relative-to-root form has a
+    /// component starting with `.` (unless `allow_dot_paths` bypasses it).
+    DotPath,
+}
+
+/// The serde-friendly counterpart of [`ApprovalCheck`]'s variants, without
+/// the `AutoDenied` variant's mandatory `reason` field (carried as a
+/// sibling `reason` field on [`SandboxRuleConfig`] instead, so it can
+/// default per-rule via [`SandboxRuleConfig::to_approval_check`]).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalVerdictConfig {
+    AutoApproved,
+    AutoDenied,
+    UserApprovalRequired,
+}
+
+impl ApprovalVerdictConfig {
+    /// Convert into an [`ApprovalCheck`], falling back to `default_reason`
+    /// when `reason` is `None` for an `AutoDenied` verdict.
+    fn to_approval_check(&self, reason: Option<&str>, default_reason: &str) -> ApprovalCheck {
+        match self {
+            ApprovalVerdictConfig::AutoApproved => ApprovalCheck::AutoApproved,
+            ApprovalVerdictConfig::AutoDenied => ApprovalCheck::AutoDenied {
+                reason: reason.unwrap_or(default_reason).to_string(),
+            },
+            ApprovalVerdictConfig::UserApprovalRequired => ApprovalCheck::UserApprovalRequired,
+        }
+    }
+}
+
+/// One entry of a `[tool.<name>]` table's `rules` list — either a reference
+/// to one of the two built-in [`NamedSandboxRule`] checks (with a
+/// configurable verdict) or a custom glob-pattern rule (the config-parseable
+/// form of [`SandboxRule`]). Distinguished on deserialization by the
+/// presence of `rule` (named) vs. `pattern` (glob). `reason` is optional
+/// for `verdict = "auto_denied"` and defaults to the same message the
+/// built-in floor uses for that rule (or a generic message for a custom
+/// glob rule) when omitted.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum SandboxRuleConfig {
+    /// `{ rule = "outside_workspace" | "dot_path", verdict = "...", reason = "..." }`.
+    Named {
+        rule: NamedSandboxRule,
+        verdict: ApprovalVerdictConfig,
+        #[serde(default)]
+        reason: Option<String>,
+    },
+    /// `{ pattern = "...", verdict = "...", reason = "..." }`.
+    Glob {
+        pattern: String,
+        verdict: ApprovalVerdictConfig,
+        #[serde(default)]
+        reason: Option<String>,
+    },
+}
+
+/// An entry in [`SandboxContext`]'s resolved per-tool rule list: either a
+/// named structural check (re-evaluated dynamically against the current
+/// `workspace_root`/path) or a fixed glob pattern. Built from
+/// [`SandboxRuleConfig`] by [`SandboxContext::with_configured_rules`]; kept
+/// distinct from the public [`SandboxRule`] type (which stays glob-only) so
+/// that `SandboxRule`'s existing field shape — relied on by pre-existing
+/// tests and by the `--auto-approve-write`/`--auto-approve-edit` catch-all
+/// rules — is unaffected by this addition.
+enum ResolvedRule {
+    Named {
+        rule: NamedSandboxRule,
+        verdict: ApprovalCheck,
+    },
+    Glob {
+        verdict: ApprovalCheck,
+        pattern: Pattern,
+    },
+}
+
+impl ResolvedRule {
+    fn from_config(config: SandboxRuleConfig) -> Result<Self, glob::PatternError> {
+        Ok(match config {
+            SandboxRuleConfig::Named {
+                rule,
+                verdict,
+                reason,
+            } => {
+                let default_reason = match rule {
+                    NamedSandboxRule::OutsideWorkspace => OUTSIDE_WORKSPACE_REASON,
+                    NamedSandboxRule::DotPath => DOT_PATH_REASON,
+                };
+                ResolvedRule::Named {
+                    rule,
+                    verdict: verdict.to_approval_check(reason.as_deref(), default_reason),
+                }
+            }
+            SandboxRuleConfig::Glob {
+                pattern,
+                verdict,
+                reason,
+            } => {
+                let default_reason = "Access denied by security policy: path matched a \
+                                       configured sandbox rule";
+                ResolvedRule::Glob {
+                    verdict: verdict.to_approval_check(reason.as_deref(), default_reason),
+                    pattern: Pattern::new(&pattern)?,
+                }
+            }
+        })
+    }
+}
+
 /// Shared workspace sandbox. Holds the workspace root used to evaluate
-/// path-based rules. Per-tool TOML config is not yet implemented.
+/// path-based rules.
 pub struct Sandbox {
     /// Absolute path of the workspace root (cwd at startup).
     pub workspace_root: PathBuf,
@@ -127,8 +269,19 @@ impl Default for Sandbox {
 /// applies its own default.
 pub struct SandboxContext {
     sandbox: Arc<RwLock<Sandbox>>,
-    /// Ordered rules; last match wins.
+    /// Ordered rules; last match wins. Always evaluated last, after either
+    /// `configured_rules` or the built-in default floor — this is what
+    /// `--auto-approve-write`/`--auto-approve-edit`'s catch-all rule uses so
+    /// it wins regardless of any `[tool.<name>]` config.
     rules: Vec<SandboxRule>,
+    /// When `Some`, fully replaces the built-in default floor (the two
+    /// hardcoded `outside_workspace`/`dot_path` checks) for this tool: only
+    /// this list's entries are evaluated in list order (last match wins)
+    /// before `rules`. `None` means "no `[tool.<name>]` config for this
+    /// tool" — the default floor applies instead. Populated from a
+    /// profile's `[tool.<name>]` table via
+    /// [`SandboxContext::with_configured_rules`].
+    configured_rules: Option<Vec<ResolvedRule>>,
 }
 
 impl std::fmt::Debug for SandboxContext {
@@ -136,25 +289,59 @@ impl std::fmt::Debug for SandboxContext {
         formatter
             .debug_struct("SandboxContext")
             .field("rules_count", &self.rules.len())
+            .field(
+                "configured_rules_count",
+                &self.configured_rules.as_ref().map(Vec::len),
+            )
             .finish()
     }
 }
 
 impl SandboxContext {
-    /// Build a context with an empty rule list.
-    /// Named glob rules (if any) are appended by tool constructors.
+    /// Build a context with an empty rule list and no `[tool.<name>]`
+    /// config, so the built-in default floor
+    /// (`outside_workspace`/`dot_path` → `AutoDenied`) applies. Named glob
+    /// rules (if any) are appended by tool constructors.
     pub fn new(sandbox: Arc<RwLock<Sandbox>>) -> Self {
         SandboxContext {
             sandbox,
             rules: vec![],
+            configured_rules: None,
         }
     }
 
     /// Append a rule to the end of this context's rule list. Last match wins,
     /// so appending a catch-all rule (e.g. `**` → `AutoApproved`) effectively
-    /// overrides any earlier verdict for every path.
+    /// overrides any earlier verdict for every path. Always evaluated after
+    /// `configured_rules`/the default floor, so this continues to win
+    /// regardless of `[tool.<name>]` config.
     pub fn with_rule(mut self, rule: SandboxRule) -> Self {
         self.rules.push(rule);
+        self
+    }
+
+    /// Replace this tool's built-in default floor with the rule list parsed
+    /// from a `[tool.<name>]` table's `rules` key. This *fully replaces* the
+    /// floor for this tool (it does not merge with it): a caller that still
+    /// wants `outside_workspace`/`dot_path` protection must include those as
+    /// explicit [`SandboxRuleConfig::Named`] entries in `rules`.
+    ///
+    /// Invalid glob patterns are skipped (with a `tracing::warn!`) rather
+    /// than causing a panic or a hard config-load failure, since sandbox
+    /// rules are safety-critical and a single malformed pattern should not
+    /// silently disable outside_workspace/dot_path protection.
+    pub fn with_configured_rules(mut self, rules: Vec<SandboxRuleConfig>) -> Self {
+        let resolved = rules
+            .into_iter()
+            .filter_map(|rule| match ResolvedRule::from_config(rule) {
+                Ok(resolved) => Some(resolved),
+                Err(error) => {
+                    tracing::warn!(%error, "skipping invalid sandbox rule glob pattern");
+                    None
+                }
+            })
+            .collect();
+        self.configured_rules = Some(resolved);
         self
     }
 
@@ -259,10 +446,16 @@ impl SandboxContext {
     /// `/var/folders` → `/private/var/folders`.
     ///
     /// Rule evaluation order:
-    /// 1. Outside-workspace → `Some(AutoDenied)`.
-    /// 2. Any component of the path relative to the workspace root starts with `.` → `Some(AutoDenied)`.
-    /// 3. Named glob rules (from `self.rules`) are evaluated last; last match wins.
-    /// 4. If nothing fires → `None` (sandbox abstains).
+    /// 1. When `configured_rules` is `Some` (this tool has a `[tool.<name>]`
+    ///    config table), evaluate exactly that list, in order, last match
+    ///    wins — this *replaces* the default floor rather than merging with
+    ///    it. Otherwise evaluate the built-in default floor: outside-workspace
+    ///    → `Some(AutoDenied)`, then any component of the path relative to the
+    ///    workspace root starting with `.` → `Some(AutoDenied)`.
+    /// 2. Named glob rules (from `self.rules`) are evaluated last; last match
+    ///    wins. This is what `--auto-approve-write`/`--auto-approve-edit`'s
+    ///    catch-all rule relies on to win regardless of step 1's outcome.
+    /// 3. If nothing fires → `None` (sandbox abstains).
     pub fn check_path(&self, path: &Path) -> Option<ApprovalCheck> {
         self.check_path_with_dot_path_access(path, false)
     }
@@ -272,6 +465,48 @@ impl SandboxContext {
     /// rule enforcement.
     pub fn check_path_allowing_dot_paths(&self, path: &Path) -> Option<ApprovalCheck> {
         self.check_path_with_dot_path_access(path, true)
+    }
+
+    /// Returns `true` when `effective` normalizes outside `workspace_root`.
+    /// Shared by the default floor and the `outside_workspace` named rule so
+    /// the underlying comparison exists in exactly one place.
+    fn matches_outside_workspace(workspace_root: &Path, effective: &Path) -> bool {
+        !effective.starts_with(workspace_root)
+    }
+
+    /// Returns `true` when the portion of `effective` relative to
+    /// `workspace_root` has a dot-prefixed component, unless `allow_dot_paths`
+    /// bypasses the check (used by `glob` enumeration). A path outside the
+    /// workspace (whose `strip_prefix` fails) never matches here — the
+    /// `outside_workspace` rule is responsible for that case. Shared by the
+    /// default floor and the `dot_path` named rule so the underlying
+    /// comparison exists in exactly one place.
+    fn matches_dot_path(workspace_root: &Path, effective: &Path, allow_dot_paths: bool) -> bool {
+        if allow_dot_paths {
+            return false;
+        }
+        match effective.strip_prefix(workspace_root) {
+            Ok(relative) => Self::is_dot_path(relative),
+            Err(_) => false,
+        }
+    }
+
+    /// Evaluate one [`NamedSandboxRule`] against `workspace_root`/`effective`,
+    /// returning whether it matches.
+    fn evaluate_named_rule(
+        rule: NamedSandboxRule,
+        workspace_root: &Path,
+        effective: &Path,
+        allow_dot_paths: bool,
+    ) -> bool {
+        match rule {
+            NamedSandboxRule::OutsideWorkspace => {
+                Self::matches_outside_workspace(workspace_root, effective)
+            }
+            NamedSandboxRule::DotPath => {
+                Self::matches_dot_path(workspace_root, effective, allow_dot_paths)
+            }
+        }
     }
 
     fn check_path_with_dot_path_access(
@@ -291,37 +526,71 @@ impl SandboxContext {
 
         // Resolve symlinks and non-canonical prefixes (e.g. macOS /var → /private/var).
         let effective = Self::canonicalize_best_effort(&normalized);
+        let path_str = effective.to_string_lossy();
 
         // No implicit zeroth verdict — absence of a match returns None.
         let mut verdict: Option<ApprovalCheck> = None;
 
-        // Rule: outside workspace → AutoDenied.
-        // TODO: make this configurable via named rule `path_outside_workspace`.
-        if !effective.starts_with(&workspace_root) {
-            verdict = Some(ApprovalCheck::AutoDenied {
-                reason: "Access denied by security policy: path is outside the workspace root; \
-                         only paths within the workspace are accessible"
-                    .to_string(),
-            });
-        } else {
-            // Rule: any component of the relative portion starts with `.` → AutoDenied.
-            // Strip the workspace prefix so only the tool-navigated components are
-            // examined, not system directories embedded in the workspace path itself.
-            // TODO: make this configurable via named rule `dot_path`.
-            if let Ok(relative) = effective.strip_prefix(&workspace_root) {
-                if !allow_dot_paths && Self::is_dot_path(relative) {
+        match &self.configured_rules {
+            Some(configured) => {
+                // `[tool.<name>]` config fully replaces the default floor:
+                // evaluate exactly this list, in order, last match wins.
+                for rule in configured {
+                    match rule {
+                        ResolvedRule::Named {
+                            rule: named,
+                            verdict: rule_verdict,
+                        } => {
+                            if Self::evaluate_named_rule(
+                                *named,
+                                &workspace_root,
+                                &effective,
+                                allow_dot_paths,
+                            ) {
+                                verdict = Some(rule_verdict.clone());
+                            }
+                        }
+                        ResolvedRule::Glob {
+                            verdict: rule_verdict,
+                            pattern,
+                        } => {
+                            if pattern.matches(&path_str) {
+                                verdict = Some(rule_verdict.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            None => {
+                // Built-in default floor: outside_workspace, then dot_path.
+                if Self::evaluate_named_rule(
+                    NamedSandboxRule::OutsideWorkspace,
+                    &workspace_root,
+                    &effective,
+                    allow_dot_paths,
+                ) {
                     verdict = Some(ApprovalCheck::AutoDenied {
-                        reason: "Access denied by security policy: \
-                                 dot-files and dot-directories are not accessible"
-                            .to_string(),
+                        reason: OUTSIDE_WORKSPACE_REASON.to_string(),
+                    });
+                }
+                if Self::evaluate_named_rule(
+                    NamedSandboxRule::DotPath,
+                    &workspace_root,
+                    &effective,
+                    allow_dot_paths,
+                ) {
+                    verdict = Some(ApprovalCheck::AutoDenied {
+                        reason: DOT_PATH_REASON.to_string(),
                     });
                 }
             }
         }
 
-        // Named glob rules (appended by tool constructors).
+        // Named glob rules (appended by tool constructors, e.g.
+        // --auto-approve-write/--auto-approve-edit's catch-all). Always
+        // evaluated last so they win regardless of configured_rules/the
+        // default floor.
         for rule in &self.rules {
-            let path_str = effective.to_string_lossy();
             if rule.pattern.matches(&path_str) {
                 verdict = Some(rule.verdict.clone());
             }
@@ -636,5 +905,198 @@ mod tests {
         let temporary_dir = tempfile::tempdir().unwrap();
         let base = std::fs::canonicalize(temporary_dir.path()).unwrap();
         assert_eq!(to_relative_path(base.to_str().unwrap(), &base), None);
+    }
+
+    #[test]
+    fn sandbox_rule_config_named_variant_parses_from_toml() {
+        let parsed: SandboxRuleConfig = toml::from_str(
+            r#"
+            rule = "dot_path"
+            verdict = "user_approval_required"
+            "#,
+        )
+        .expect("named rule config parses");
+        assert!(matches!(
+            parsed,
+            SandboxRuleConfig::Named {
+                rule: NamedSandboxRule::DotPath,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn sandbox_rule_config_glob_variant_parses_from_toml() {
+        let parsed: SandboxRuleConfig = toml::from_str(
+            r#"
+            pattern = "**/*.secret"
+            verdict = "auto_denied"
+            reason = "no secrets"
+            "#,
+        )
+        .expect("glob rule config parses");
+        match parsed {
+            SandboxRuleConfig::Glob {
+                pattern,
+                verdict,
+                reason,
+            } => {
+                assert_eq!(pattern, "**/*.secret");
+                assert_eq!(
+                    verdict.to_approval_check(reason.as_deref(), "fallback"),
+                    ApprovalCheck::AutoDenied {
+                        reason: "no secrets".to_string()
+                    }
+                );
+            }
+            other => panic!("expected Glob variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn approval_verdict_config_auto_denied_defaults_reason_when_omitted() {
+        let parsed = ApprovalVerdictConfig::AutoDenied;
+        assert_eq!(
+            parsed.to_approval_check(None, "default reason"),
+            ApprovalCheck::AutoDenied {
+                reason: "default reason".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn configured_named_rule_overrides_default_dot_path_verdict() {
+        // A `[tool.read]`-style config changing `dot_path`'s verdict to
+        // `UserApprovalRequired` for this tool only; `outside_workspace`
+        // protection is intentionally NOT included, confirming the
+        // full-replace (not merge) semantics.
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let workspace = temporary_dir.path().to_path_buf();
+        let sandbox = make_sandbox(&workspace);
+        let context = SandboxContext::new(Arc::clone(&sandbox)).with_configured_rules(vec![
+            SandboxRuleConfig::Named {
+                rule: NamedSandboxRule::DotPath,
+                verdict: ApprovalVerdictConfig::UserApprovalRequired,
+                reason: None,
+            },
+        ]);
+
+        let dot_path = workspace.join(".env");
+        assert_eq!(
+            context.check_path(&dot_path),
+            Some(ApprovalCheck::UserApprovalRequired),
+            "configured dot_path rule should override the default AutoDenied verdict"
+        );
+
+        // outside_workspace is not part of this tool's configured list, so it
+        // no longer fires (full replace, not merge) — sandbox abstains.
+        let outside = temporary_dir.path().join("other/file.rs");
+        assert_eq!(
+            context.check_path(&outside),
+            None,
+            "outside_workspace should not fire when omitted from configured_rules"
+        );
+    }
+
+    #[test]
+    fn unconfigured_tool_falls_back_to_default_floor() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let workspace = temporary_dir.path().join("workspace");
+        let sandbox = make_sandbox(&workspace);
+        // No with_configured_rules call: default floor applies to every tool.
+        let context = SandboxContext::new(Arc::clone(&sandbox));
+
+        let dot_path = workspace.join(".env");
+        assert!(matches!(
+            context.check_path(&dot_path),
+            Some(ApprovalCheck::AutoDenied { .. })
+        ));
+        let outside = temporary_dir.path().join("other/file.rs");
+        assert!(matches!(
+            context.check_path(&outside),
+            Some(ApprovalCheck::AutoDenied { .. })
+        ));
+    }
+
+    #[test]
+    fn configured_rules_mix_named_and_glob_last_match_wins() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let workspace = temporary_dir.path().to_path_buf();
+        let sandbox = make_sandbox(&workspace);
+        let canonical_workspace = sandbox.read().unwrap().workspace_root.clone();
+        let allow_pattern = format!("{}/allowed/**", canonical_workspace.to_string_lossy());
+
+        // List order: dot_path (AutoDenied) then a glob rule that re-approves
+        // one specific dot-path — last match wins, so the glob rule (later in
+        // the list) should override the earlier named rule for matching paths.
+        let dot_allow_pattern =
+            format!("{}/.allowed_dot/**", canonical_workspace.to_string_lossy());
+        let context = SandboxContext::new(Arc::clone(&sandbox)).with_configured_rules(vec![
+            SandboxRuleConfig::Named {
+                rule: NamedSandboxRule::DotPath,
+                verdict: ApprovalVerdictConfig::AutoDenied,
+                reason: None,
+            },
+            SandboxRuleConfig::Glob {
+                pattern: allow_pattern,
+                verdict: ApprovalVerdictConfig::AutoApproved,
+                reason: None,
+            },
+            SandboxRuleConfig::Glob {
+                pattern: dot_allow_pattern,
+                verdict: ApprovalVerdictConfig::AutoApproved,
+                reason: None,
+            },
+        ]);
+
+        // Regular dot-path still denied (only the named rule matches it).
+        let dot_path = workspace.join(".env");
+        assert!(matches!(
+            context.check_path(&dot_path),
+            Some(ApprovalCheck::AutoDenied { .. })
+        ));
+
+        // Dot-path under .allowed_dot: named dot_path rule matches (deny),
+        // then the later glob rule also matches and overrides to approved —
+        // proving last-match-wins across Named and Glob in one list.
+        let allowed_dot_path = workspace.join(".allowed_dot/file.txt");
+        assert_eq!(
+            context.check_path(&allowed_dot_path),
+            Some(ApprovalCheck::AutoApproved)
+        );
+
+        // Non-dot path under allowed/: only the glob rule matches.
+        let allowed_path = workspace.join("allowed/file.txt");
+        assert_eq!(
+            context.check_path(&allowed_path),
+            Some(ApprovalCheck::AutoApproved)
+        );
+    }
+
+    #[test]
+    fn auto_approve_catch_all_wins_over_configured_deny_rule() {
+        // Mirrors --auto-approve-write/--auto-approve-edit: the catch-all
+        // `with_rule` is appended after `with_configured_rules` and must win
+        // even though the configured list would otherwise deny the path.
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let workspace = temporary_dir.path().to_path_buf();
+        let sandbox = make_sandbox(&workspace);
+        let context = SandboxContext::new(Arc::clone(&sandbox))
+            .with_configured_rules(vec![SandboxRuleConfig::Named {
+                rule: NamedSandboxRule::DotPath,
+                verdict: ApprovalVerdictConfig::AutoDenied,
+                reason: None,
+            }])
+            .with_rule(SandboxRule {
+                verdict: ApprovalCheck::AutoApproved,
+                pattern: glob::Pattern::new("**").unwrap(),
+            });
+
+        let dot_path = workspace.join(".env");
+        assert_eq!(
+            context.check_path(&dot_path),
+            Some(ApprovalCheck::AutoApproved),
+            "catch-all auto-approve rule must win over a configured deny rule"
+        );
     }
 }

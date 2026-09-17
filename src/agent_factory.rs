@@ -333,6 +333,11 @@ impl AgentFactory {
             .unwrap_or_else(|| allowed_tools.to_vec());
 
         let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new()));
+        let tool_sandbox_rules = profile
+            .tools
+            .iter()
+            .map(|(tool_name, tool_config)| (tool_name.clone(), tool_config.rules.clone()))
+            .collect();
         let registry = Arc::new(default_registry(
             sandbox,
             ToolRegistryConfig {
@@ -343,6 +348,7 @@ impl AgentFactory {
                 include_spawn_subagent: can_spawn,
                 spawn_agent_types,
                 agent_finish: agent_finish_config,
+                tool_sandbox_rules,
             },
         ));
         let (agent_loop, ui_rx) = AgentLoop::new(Arc::clone(&engine), registry);

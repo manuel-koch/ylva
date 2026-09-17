@@ -596,6 +596,13 @@ pub struct ToolRegistryConfig {
     /// Present only for `Role::Child` agents: registers `agent_finish`, wired to
     /// send its result through this config's channel/ids.
     pub agent_finish: Option<agent_finish::AgentFinishToolConfig>,
+    /// Per-tool sandbox rule lists parsed from the profile's `[tool.<name>]`
+    /// tables (`ProfileConfig::tools`), keyed by tool name. A tool name with
+    /// no entry here falls back to `SandboxContext`'s built-in default floor
+    /// (`outside_workspace`/`dot_path` → `AutoDenied`); an entry fully
+    /// replaces that floor for its tool. See `docs/configuration.md`'s
+    /// "Sandbox" section.
+    pub tool_sandbox_rules: HashMap<String, Vec<crate::sandbox::SandboxRuleConfig>>,
 }
 
 impl Default for ToolRegistryConfig {
@@ -609,6 +616,7 @@ impl Default for ToolRegistryConfig {
             include_spawn_subagent: false,
             spawn_agent_types: Vec::new(),
             agent_finish: None,
+            tool_sandbox_rules: HashMap::new(),
         }
     }
 }
@@ -626,14 +634,26 @@ pub fn default_registry(
     let allowed = &config.allowed_tools;
     let mut registry = ToolRegistry::new();
 
+    // Builds a tool's SandboxContext, replacing the built-in default floor
+    // with `config.tool_sandbox_rules`'s entry for `tool_name` (a profile's
+    // `[tool.<name>]` table) when one is configured; otherwise the default
+    // floor (`outside_workspace`/`dot_path` → `AutoDenied`) applies.
+    let sandbox_context_for = |tool_name: &str| -> SandboxContext {
+        let mut context = SandboxContext::new(Arc::clone(&sandbox));
+        if let Some(rules) = config.tool_sandbox_rules.get(tool_name) {
+            context = context.with_configured_rules(rules.clone());
+        }
+        context
+    };
+
     if allowed.iter().any(|name| name == read::ReadTool::NAME) {
-        registry.register(Arc::new(read::ReadTool::new(SandboxContext::new(
-            Arc::clone(&sandbox),
+        registry.register(Arc::new(read::ReadTool::new(sandbox_context_for(
+            read::ReadTool::NAME,
         ))));
     }
     if allowed.iter().any(|name| name == write::WriteTool::NAME) {
         registry.register(Arc::new(write::WriteTool::new({
-            let mut context = SandboxContext::new(Arc::clone(&sandbox));
+            let mut context = sandbox_context_for(write::WriteTool::NAME);
             if config.auto_approve_write {
                 context = context.with_rule(crate::sandbox::SandboxRule {
                     verdict: crate::sandbox::ApprovalCheck::AutoApproved,
@@ -644,23 +664,23 @@ pub fn default_registry(
         })));
     }
     if allowed.iter().any(|name| name == glob::GlobTool::NAME) {
-        registry.register(Arc::new(glob::GlobTool::new(SandboxContext::new(
-            Arc::clone(&sandbox),
+        registry.register(Arc::new(glob::GlobTool::new(sandbox_context_for(
+            glob::GlobTool::NAME,
         ))));
     }
     if allowed.iter().any(|name| name == bash::BashTool::NAME) {
-        registry.register(Arc::new(bash::BashTool::new(SandboxContext::new(
-            Arc::clone(&sandbox),
+        registry.register(Arc::new(bash::BashTool::new(sandbox_context_for(
+            bash::BashTool::NAME,
         ))));
     }
     if allowed.iter().any(|name| name == search::SearchTool::NAME) {
-        registry.register(Arc::new(search::SearchTool::new(SandboxContext::new(
-            Arc::clone(&sandbox),
+        registry.register(Arc::new(search::SearchTool::new(sandbox_context_for(
+            search::SearchTool::NAME,
         ))));
     }
     if allowed.iter().any(|name| name == edit::EditTool::NAME) {
         let edit_tool = {
-            let mut context = SandboxContext::new(Arc::clone(&sandbox));
+            let mut context = sandbox_context_for(edit::EditTool::NAME);
             if config.auto_approve_edit {
                 context = context.with_rule(crate::sandbox::SandboxRule {
                     verdict: crate::sandbox::ApprovalCheck::AutoApproved,
@@ -921,6 +941,84 @@ mod tests {
         assert!(registry.get(bash::BashTool::NAME).is_some());
         assert!(registry.get(read::ReadTool::NAME).is_some());
         assert!(registry.get(edit::EditTool::NAME).is_none());
+    }
+
+    #[test]
+    fn default_registry_wires_configured_rules_per_tool_only() {
+        use crate::sandbox::{ApprovalVerdictConfig, NamedSandboxRule};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sandbox = std::sync::Arc::new(std::sync::RwLock::new(
+            crate::sandbox::Sandbox::with_root(temp.path().to_path_buf()),
+        ));
+        let mut tool_sandbox_rules = HashMap::new();
+        tool_sandbox_rules.insert(
+            read::ReadTool::NAME.to_string(),
+            vec![crate::sandbox::SandboxRuleConfig::Named {
+                rule: NamedSandboxRule::DotPath,
+                verdict: ApprovalVerdictConfig::UserApprovalRequired,
+                reason: None,
+            }],
+        );
+        let registry = default_registry(
+            sandbox,
+            ToolRegistryConfig {
+                tool_sandbox_rules,
+                ..ToolRegistryConfig::default()
+            },
+        );
+
+        let dot_path = temp.path().join(".env").to_string_lossy().to_string();
+
+        let read_tool = registry.get(read::ReadTool::NAME).expect("read tool");
+        assert_eq!(
+            read_tool.needs_approval(&serde_json::json!({ "path": dot_path })),
+            ApprovalCheck::UserApprovalRequired,
+            "read's [tool.read] config overrides the default AutoDenied dot_path verdict"
+        );
+
+        // write has no [tool.write] entry: unaffected, still uses the
+        // default floor (dot_path -> AutoDenied).
+        let write_tool = registry.get(write::WriteTool::NAME).expect("write tool");
+        assert!(matches!(
+            write_tool.needs_approval(&serde_json::json!({ "path": dot_path, "content": "x" })),
+            ApprovalCheck::AutoDenied { .. }
+        ));
+    }
+
+    #[test]
+    fn auto_approve_write_wins_over_configured_deny_rule() {
+        use crate::sandbox::{ApprovalVerdictConfig, NamedSandboxRule};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sandbox = std::sync::Arc::new(std::sync::RwLock::new(
+            crate::sandbox::Sandbox::with_root(temp.path().to_path_buf()),
+        ));
+        let mut tool_sandbox_rules = HashMap::new();
+        tool_sandbox_rules.insert(
+            write::WriteTool::NAME.to_string(),
+            vec![crate::sandbox::SandboxRuleConfig::Named {
+                rule: NamedSandboxRule::DotPath,
+                verdict: ApprovalVerdictConfig::AutoDenied,
+                reason: None,
+            }],
+        );
+        let registry = default_registry(
+            sandbox,
+            ToolRegistryConfig {
+                auto_approve_write: true,
+                tool_sandbox_rules,
+                ..ToolRegistryConfig::default()
+            },
+        );
+
+        let dot_path = temp.path().join(".env").to_string_lossy().to_string();
+        let write_tool = registry.get(write::WriteTool::NAME).expect("write tool");
+        assert_eq!(
+            write_tool.needs_approval(&serde_json::json!({ "path": dot_path, "content": "x" })),
+            ApprovalCheck::AutoApproved,
+            "--auto-approve-write's catch-all rule must still win over a configured deny rule"
+        );
     }
 
     #[test]

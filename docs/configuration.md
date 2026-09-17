@@ -311,20 +311,67 @@ prefixes such as macOS's `/var` → `/private/var`) and returns either an
 explicit verdict or `None` (abstain, letting the calling tool apply its own
 default).
 
-Phase 6 hardcodes two rules, evaluated in this order, before any per-tool
-named glob rule (last match wins):
+**Default floor.** When a tool has no `[tool.<name>]` config table (see
+below) at any resolved layer, two rules apply unconditionally, evaluated in
+this order, before any custom rule appended in code (e.g.
+`--auto-approve-write`/`--auto-approve-edit`, last match wins):
 
 | Rule | Verdict | Notes |
 |---|---|---|
 | `outside_workspace` | `AutoDenied` | Any path that normalizes outside the workspace root. |
 | `dot_path` | `AutoDenied` | Any content-tool path whose relative-to-root form has a component starting with `.` (dot-files/dot-directories). `glob` enumeration may inspect dot-prefixed paths inside the workspace. |
 
-**WIP:** These two rules are not yet configurable — Phase 10.3 is expected to load
-per-tool `[tool.*]` rule lists (including `outside_workspace`/`dot_path`
-overrides) from the layered TOML config; until then the defaults above apply
-uniformly to content tools. `search`'s `path: None` (cwd, never leaves the
-workspace by construction) skips the sandbox check entirely and is
-auto-approved; when a `path` is given, it goes through the same
-`check_path`/`dot_path`/`outside_workspace` evaluation as `read`, `write`, and
-`edit`. `glob` uses the same workspace boundary and named-rule checks but
-allows dot-prefixed paths because it only enumerates paths.
+This floor is Rust struct-literal code, not parsed from any embedded TOML
+file, so it can never be broken by a missing or corrupted config file.
+`search`'s `path: None` (cwd, never leaves the workspace by construction)
+skips the sandbox check entirely and is auto-approved; when a `path` is
+given, it goes through the same `check_path`/`dot_path`/`outside_workspace`
+evaluation as `read`, `write`, and `edit`. `glob` uses the same workspace
+boundary and named-rule checks but allows dot-prefixed paths because it
+only enumerates paths.
+
+**Per-tool `[tool.<name>]` config.** A profile's `config.toml` may configure
+a tool's rule list explicitly, e.g.:
+
+```toml
+[tool.read]
+rules = [
+  { rule = "dot_path", verdict = "user_approval_required" },
+]
+
+[tool.write]
+rules = [
+  { rule = "outside_workspace", verdict = "auto_denied" },
+  { pattern = "**/build/**", verdict = "auto_approved" },
+]
+```
+
+Each `rules` entry is one of:
+
+- A **named rule**, `{ rule = "outside_workspace" | "dot_path", verdict = "...", reason = "..." }`,
+  referencing one of the two built-in structural checks above with a
+  configurable verdict — reorder them or change their verdict without
+  reimplementing the path-comparison logic in glob syntax.
+- A **custom glob rule**, `{ pattern = "...", verdict = "...", reason = "..." }`,
+  matched against the canonicalized absolute path (the config-parseable form
+  of the `SandboxRule` type tool constructors can also append in code).
+
+`verdict` is one of `"auto_approved"`, `"auto_denied"`, or
+`"user_approval_required"`; `reason` is optional and only used for
+`"auto_denied"`, defaulting to the same message the built-in floor uses for
+that rule (or a generic message for a custom glob rule) when omitted.
+
+Rules are evaluated in list order; last match wins — the same
+last-match-wins semantics as the default floor and as code-appended rules.
+
+**A configured `[tool.<name>]` table fully replaces the default floor for
+that tool — it does not merge with it.** A profile that configures
+`[tool.read]` must include its own `{ rule = "outside_workspace", ... }`/
+`{ rule = "dot_path", ... }` entries if it still wants those protections for
+`read`; a tool with no `[tool.<name>]` table at all keeps the unconditional
+default floor.
+
+`--auto-approve-write`/`--auto-approve-edit` continue to work unchanged:
+each still appends its own catch-all `AutoApproved` rule (`pattern = "**"`)
+after whichever rule list applies (config-provided or the default floor),
+so the flag always wins regardless of `[tool.*]` config.
