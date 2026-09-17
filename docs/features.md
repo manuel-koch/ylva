@@ -228,8 +228,8 @@ affect sandbox approval checks. See
   current working directory, which is the workspace root in normal runtime.
   Use relative paths directly; do not prefix commands with a redundant `cd` to
   the workspace root. Requires explicit human approval before execution. stdout
-  and stderr are merged in true arrival order. Output is capped at 100 KB
-  (`truncated` / `truncated_at_bytes` fields present in result metadata when
+  and stderr are merged in true arrival order. Output is capped at 1000 whole output
+  lines (`truncated` field present in result metadata when
   capped). Default timeout: 30 s. On timeout or cancellation the entire
   process (including any child processes it spawned) is killed. See
   [implementation notes](./implementation-notes.md#bash-tool-process-group-cleanup).
@@ -248,8 +248,8 @@ affect sandbox approval checks. See
   entry per occurrence, ignoring context lines, like `grep -o`. `files_with_matches` and
   `only_matches` are mutually exclusive. Result paths mirror the form of the input: a
   relative `path` argument produces relative result paths; an absolute argument produces
-  absolute result paths. Output is capped at 100 KB (`truncated` / `truncated_at_bytes` fields present
-  in result metadata when capped). Paths inside the
+  absolute result paths. Output is capped at 1000 whole output lines (`truncated` field
+  present in result metadata when capped). Paths inside the
   workspace are auto-approved; paths outside are auto-denied.
 - **clarify**: Ask the user a question in the TUI and wait for their answer.
   Optional `context` adds supporting detail. Optional `choices` supplies up to

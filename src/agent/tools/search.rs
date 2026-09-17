@@ -18,7 +18,7 @@
 //! Results are formatted in grep style (`filepath:lineno: content` for
 //! matches, `filepath-lineno- content` for context lines). One
 //! [`SearchResultSection`] is emitted per matching file. Total output is capped
-//! at [`SEARCH_OUTPUT_LIMIT_BYTES`].
+//! at [`SEARCH_OUTPUT_LIMIT_LINES`] whole output lines.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -34,10 +34,10 @@ use super::{
 };
 use crate::sandbox::{ApprovalCheck, SandboxContext};
 
-/// Maximum total bytes in the combined search output. Output beyond this cap
-/// is discarded; the result's `metadata()` will carry
-/// `truncated` and `truncated_at_bytes`.
-pub const SEARCH_OUTPUT_LIMIT_BYTES: usize = 100 * 1024;
+/// Maximum number of whole output lines in the combined search output. Lines
+/// beyond this cap are discarded; the result's `metadata()` will carry
+/// `truncated`.
+pub const SEARCH_OUTPUT_LIMIT_LINES: usize = 1000;
 
 /// Number of bytes inspected to detect binary files (null-byte heuristic).
 const BINARY_PROBE_BYTES: usize = 8 * 1024;
@@ -83,12 +83,9 @@ pub struct SearchResultMetadata {
     /// Total matching lines across all files (absent in files-with-matches mode).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matching_lines: Option<usize>,
-    /// Present and `true` when output exceeded the byte cap and was truncated.
+    /// Present and `true` when output exceeded the line cap and was truncated.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truncated: Option<bool>,
-    /// Byte offset at which truncation began (only present when `truncated` is `true`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub truncated_at_bytes: Option<usize>,
 }
 
 /// Successful output from a `search` invocation.
@@ -96,11 +93,9 @@ pub struct SearchResultMetadata {
 pub struct SearchResult {
     /// All matching sections, one per file that contained at least one match.
     pub sections: Vec<SearchResultSection>,
-    /// `true` when the 100 KB output cap was reached and some output was
+    /// `true` when the output-line cap was reached and some output was
     /// discarded.
     pub truncated: bool,
-    /// Byte count at which truncation occurred (only `Some` when `truncated`).
-    pub truncated_at_bytes: Option<usize>,
     /// `true` when the search was run in files-with-matches mode (no line
     /// content collected, sections carry only file paths).
     pub files_with_matches: bool,
@@ -109,12 +104,7 @@ pub struct SearchResult {
 }
 
 impl SearchResult {
-    fn new(
-        sections: Vec<SearchResultSection>,
-        truncated: bool,
-        truncated_at_bytes: Option<usize>,
-        files_with_matches: bool,
-    ) -> Self {
+    fn new(sections: Vec<SearchResultSection>, truncated: bool, files_with_matches: bool) -> Self {
         let text = if files_with_matches {
             sections
                 .iter()
@@ -145,7 +135,6 @@ impl SearchResult {
         SearchResult {
             sections,
             truncated,
-            truncated_at_bytes,
             files_with_matches,
             text,
         }
@@ -168,7 +157,6 @@ impl ToolCallResult for SearchResult {
             matching_files: self.sections.len(),
             matching_lines: (!self.files_with_matches).then_some(matching_lines),
             truncated: self.truncated.then_some(true),
-            truncated_at_bytes: self.truncated.then_some(self.truncated_at_bytes).flatten(),
         };
         serde_json::to_value(metadata).ok()
     }
@@ -389,27 +377,17 @@ fn is_binary_file(path: &Path) -> bool {
     probe[..bytes_read].contains(&0u8)
 }
 
-/// Format a single output line, applying the cap and recording truncation.
-/// Returns `false` when the cap is exceeded and the line was not appended.
-fn append_line(
-    buffer: &mut String,
-    line: &str,
-    total_bytes: &mut usize,
-    truncated: &mut bool,
-    truncated_at_bytes: &mut Option<usize>,
-) -> bool {
+/// Record a single output line against the line-count cap.
+/// Returns `false` when the cap is exceeded and the line must be discarded.
+fn record_line(line_count: &mut usize, truncated: &mut bool) -> bool {
     if *truncated {
         return false;
     }
-    let needed = line.len() + 1; // +1 for '\n'
-    if *total_bytes + needed > SEARCH_OUTPUT_LIMIT_BYTES {
+    if *line_count >= SEARCH_OUTPUT_LIMIT_LINES {
         *truncated = true;
-        *truncated_at_bytes = Some(*total_bytes);
         return false;
     }
-    buffer.push_str(line);
-    buffer.push('\n');
-    *total_bytes += needed;
+    *line_count += 1;
     true
 }
 
@@ -489,9 +467,8 @@ fn search_blocking(
     only_matches: bool,
 ) -> SearchResult {
     let mut sections: Vec<SearchResultSection> = Vec::new();
-    let mut total_bytes: usize = 0;
+    let mut line_count: usize = 0;
     let mut truncated = false;
-    let mut truncated_at_bytes: Option<usize> = None;
 
     let walker = ignore::WalkBuilder::new(root).git_ignore(true).build();
 
@@ -565,15 +542,7 @@ fn search_blocking(
 
         if files_with_matches {
             // Only record the file path; skip all line content.
-            let formatted = file_path_str.clone();
-            let mut byte_count_buffer = String::new();
-            if !append_line(
-                &mut byte_count_buffer,
-                &formatted,
-                &mut total_bytes,
-                &mut truncated,
-                &mut truncated_at_bytes,
-            ) {
+            if !record_line(&mut line_count, &mut truncated) {
                 break;
             }
             sections.push(SearchResultSection {
@@ -592,15 +561,7 @@ fn search_blocking(
                 if let Some(line) = lines.get(lineno - 1) {
                     for matched in regex.find_iter(line) {
                         let match_text = matched.as_str().to_string();
-                        let formatted = format!("{file_path_str}:{lineno}: {match_text}");
-                        let mut byte_count_buffer = String::new();
-                        if !append_line(
-                            &mut byte_count_buffer,
-                            &formatted,
-                            &mut total_bytes,
-                            &mut truncated,
-                            &mut truncated_at_bytes,
-                        ) {
+                        if !record_line(&mut line_count, &mut truncated) {
                             break 'outer;
                         }
                         search_result_lines.push(SearchResultLine {
@@ -654,19 +615,7 @@ fn search_blocking(
                     is_match,
                     content: (*line).to_string(),
                 };
-                let formatted = if is_match {
-                    format!("{file_path_str}:{lineno}: {line}")
-                } else {
-                    format!("{file_path_str}-{lineno}- {line}")
-                };
-                let mut byte_count_buffer = String::new();
-                if !append_line(
-                    &mut byte_count_buffer,
-                    &formatted,
-                    &mut total_bytes,
-                    &mut truncated,
-                    &mut truncated_at_bytes,
-                ) {
+                if !record_line(&mut line_count, &mut truncated) {
                     break;
                 }
                 search_result_lines.push(search_result_line);
@@ -682,7 +631,7 @@ fn search_blocking(
         }
     }
 
-    SearchResult::new(sections, truncated, truncated_at_bytes, files_with_matches)
+    SearchResult::new(sections, truncated, files_with_matches)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -884,13 +833,12 @@ mod tests {
     }
 
     #[test]
-    fn search_output_truncated_at_100kb_cap() {
+    fn search_output_truncated_at_1000_line_cap() {
         crate::test_support::run_locked(async {
             let dir = TempDir::new().expect("tempdir");
-            // Create enough content to exceed the 100 KB cap.
-            // Each line is ~120 bytes; 1000 lines ≈ 120 KB.
+            // Create enough matching lines to exceed the 1000-line cap.
             let line = "a".repeat(100) + " NEEDLE here\n";
-            let content = line.repeat(1000);
+            let content = line.repeat(1500);
             std::fs::write(dir.path().join("big.txt"), &content).expect("write");
             let result = search_files(SearchInputArgs {
                 pattern: "NEEDLE".to_string(),
@@ -904,9 +852,10 @@ mod tests {
             .await
             .expect("search ok");
             assert!(result.truncated, "output must be truncated");
-            assert!(
-                result.truncated_at_bytes.is_some(),
-                "truncated_at_bytes must be set"
+            let total_emitted_lines: usize = result.sections.iter().map(|s| s.lines.len()).sum();
+            assert_eq!(
+                total_emitted_lines, SEARCH_OUTPUT_LIMIT_LINES,
+                "must cap at whole lines, never split mid-line"
             );
             // The metadata() must advertise the truncation.
             let meta = result
