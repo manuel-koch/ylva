@@ -28,7 +28,7 @@ pub mod soul;
 
 pub use agent::AgentConfig;
 pub use agent_type_file::AgentTypeDefinition;
-pub use profile::{profile_config_source_path, ProfileConfig};
+pub use profile::{profile_config_source_path, ProfileConfig, ToolSandboxConfig};
 pub use provider::{ProviderConfig, ProviderConnectionConfig};
 
 /// File name of a profile's configuration inside its profile directory.

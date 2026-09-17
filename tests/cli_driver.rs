@@ -362,6 +362,7 @@ async fn child_spawn_after_root_model_switch_uses_the_root_active_engine() {
                 persona: None,
                 system_prompt: None,
                 can_spawn: true,
+                tools: std::collections::HashMap::new(),
             },
         )]),
         ..ProfileConfig::default()
@@ -454,6 +455,7 @@ async fn running_child_uses_a_shared_engine_switch_on_its_next_request() {
                 persona: None,
                 system_prompt: None,
                 can_spawn: true,
+                tools: std::collections::HashMap::new(),
             },
         )]),
         ..ProfileConfig::default()
@@ -561,6 +563,7 @@ async fn child_with_explicit_engine_override_keeps_its_named_engine() {
                     persona: None,
                     system_prompt: None,
                     can_spawn: true,
+                    tools: std::collections::HashMap::new(),
                 },
             ),
             (
@@ -573,6 +576,7 @@ async fn child_with_explicit_engine_override_keeps_its_named_engine() {
                     persona: None,
                     system_prompt: None,
                     can_spawn: false,
+                    tools: std::collections::HashMap::new(),
                 },
             ),
         ]),
@@ -985,6 +989,7 @@ async fn console_app_reacts_to_child_finish_through_real_agent_factory_and_run_c
                 persona: None,
                 system_prompt: None,
                 can_spawn: true,
+                tools: std::collections::HashMap::new(),
             },
         )]),
         ..ylva::ProfileConfig::default()
@@ -1152,6 +1157,7 @@ async fn spawned_child_bash_approval_is_routed_to_the_child_not_the_root() {
                 persona: None,
                 system_prompt: None,
                 can_spawn: true,
+                tools: std::collections::HashMap::new(),
             },
         )]),
         ..ylva::ProfileConfig::default()

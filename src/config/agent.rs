@@ -12,7 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use serde::Deserialize;
+
+use super::profile::ToolSandboxConfig;
 
 /// Per-agent configuration within a profile.
 #[derive(Debug, Clone, Deserialize)]
@@ -30,6 +34,15 @@ pub struct AgentConfig {
     /// registered tools are available. Tool filtering is implemented in Phase 6.
     #[serde(default)]
     pub allowed_tools: Option<Vec<String>>,
+    /// Per-tool sandbox rule lists scoped to this agent type, keyed by tool
+    /// name (`[agents.<type>.tools.<name>]`/agent-type-file `[tools.<name>]`
+    /// tables). When a tool name has an entry here it takes precedence over
+    /// the profile-level `ProfileConfig::tools` entry for the same tool, for
+    /// this agent type only; when absent, resolution falls back to the
+    /// profile-level entry and then the built-in default floor. See
+    /// `docs/configuration.md`'s "Sandbox" section.
+    #[serde(default)]
+    pub tools: HashMap<String, ToolSandboxConfig>,
     /// Maximum wall-clock seconds the agent may run before being cancelled.
     /// `None` means no timeout is enforced.
     #[serde(default, deserialize_with = "deserialize_optional_u64_or_string")]

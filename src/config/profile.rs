@@ -141,6 +141,7 @@ fn default_agent_config() -> AgentConfig {
         persona: None,
         system_prompt: None,
         can_spawn: true,
+        tools: HashMap::new(),
     }
 }
 
@@ -470,6 +471,7 @@ fn load_agent_types(
             persona: None,
             system_prompt: None,
             can_spawn: false,
+            tools: HashMap::new(),
         });
         apply_agent_config_overrides(config, overrides);
     }
@@ -494,6 +496,9 @@ fn apply_agent_config_overrides(config: &mut AgentConfig, overrides: AgentConfig
     }
     if let Some(can_spawn) = overrides.can_spawn {
         config.can_spawn = can_spawn;
+    }
+    if overrides.tools.is_some() {
+        config.tools = overrides.tools.unwrap_or_default();
     }
 }
 
@@ -792,6 +797,49 @@ rules = [
         assert!(
             profile.tools.is_empty(),
             "no [tool.*] tables means no configured overrides for any tool"
+        );
+    }
+
+    #[test]
+    fn inline_agent_type_tools_table_parses_independent_of_profile_level_tools() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "agent-scoped-tools",
+            r#"
+[tool.write]
+rules = [
+  { rule = "outside_workspace", verdict = "auto_denied" },
+]
+
+[agents.custom]
+allowed_tools = ["read", "write"]
+
+[agents.custom.tools.write]
+rules = [
+  { rule = "outside_workspace", verdict = "auto_denied" },
+  { pattern = "**/build/**", verdict = "auto_approved" },
+]
+"#,
+        );
+
+        let profile =
+            ProfileConfig::load(temp.path(), "agent-scoped-tools").expect("the fixture loads");
+
+        let profile_write_rules = &profile.tools.get("write").expect("write table").rules;
+        assert_eq!(profile_write_rules.len(), 1);
+
+        let custom_agent = profile.agents.get("custom").expect("the custom agent");
+        let agent_write_rules = &custom_agent
+            .tools
+            .get("write")
+            .expect("agent-scoped write table")
+            .rules;
+        assert_eq!(
+            agent_write_rules.len(),
+            2,
+            "the agent-scoped table is independent of, and need not match, the \
+             profile-level table for the same tool"
         );
     }
 
@@ -1470,6 +1518,7 @@ engine = "ollama/local"
                     persona: Some("You are a helpful assistant.".to_string()),
                     system_prompt: None,
                     can_spawn: false,
+                    tools: HashMap::new(),
                 },
             )]),
             ..ProfileConfig::default()
@@ -1502,6 +1551,7 @@ engine = "ollama/local"
             persona: None,
             system_prompt: None,
             can_spawn: true,
+            tools: HashMap::new(),
         };
 
         assert!(agent_config.engine.is_none());

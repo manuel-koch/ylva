@@ -278,6 +278,7 @@ A profile groups engine selection and per-agent settings for a runtime session.
 | `persona` | `Option<String>` | Optional agent-type persona instruction prepended to that type's system-prompt body. It is independent of the global `SOUL.md` persona and applies when the type runs as root or child. |
 | `system_prompt` | `Option<String>` | File-authored agent-type system-prompt body. It is additive to the global SOUL and is not set by inline profile tables. |
 | `can_spawn` | `bool` | When `true` (and this is a `Role::Root` agent), `AgentFactory::create` registers the `spawn_subagent` tool and wires a `ChildAgentManager` so this agent may delegate self-contained tasks to a concurrently-running `Role::Child` agent (one level deep; children cannot spawn further children). Use `--auto-approve-spawn` to skip the human-approval prompt for `spawn_subagent` calls. See "Child-agent delegation" in `docs/features.md`. |
+| `tools` | `HashMap<String, ToolSandboxConfig>` | Per-tool sandbox rule lists scoped to this agent type only, keyed by tool name (`[agents.<type>.tools.<name>]` inline tables, or a file-authored agent-type's own top-level `[tools.<name>]`/`tools: { <name>: ... }` table). Same shape as the profile-level `[tool.<name>]` table (see "Sandbox" below), resolved with higher precedence than it for this agent type. |
 
 Every loaded profile has a `default` agent type. If `[agents.default]` is
 absent, Ylva supplies the built-in default configuration: it uses
@@ -371,7 +372,49 @@ that tool — it does not merge with it.** A profile that configures
 `read`; a tool with no `[tool.<name>]` table at all keeps the unconditional
 default floor.
 
+**Per-agent-type `[agents.<type>.tools.<name>]` override.** An agent type
+may configure its own rule list for a tool, taking precedence over the
+profile-level `[tool.<name>]` table for that tool, for that agent type only
+— other agent types in the same profile are unaffected:
+
+```toml
+[tool.write]
+rules = [
+  { rule = "outside_workspace", verdict = "auto_denied" },
+]
+
+[agents.custom]
+allowed_tools = ["read", "write"]
+
+[agents.custom.tools.write]
+rules = [
+  { rule = "outside_workspace", verdict = "auto_denied" },
+  { pattern = "**/build/**", verdict = "auto_approved" },
+]
+```
+
+A file-authored agent-type definition (`agents/<type>.toml`, or a `.md`
+file's `+++` TOML or `---` YAML frontmatter) configures the same override
+with a top-level `[tools.<name>]` table (TOML) or `tools: { <name>: { rules:
+[...] } }` (YAML) — no `agents.<type>.` prefix, since the file itself is
+already scoped to that one agent type.
+
+**Resolution order**, most specific wins, each tier fully replacing the
+next (no merging across tiers):
+
+1. `[agents.<type>.tools.<name>]` (or the agent-type file's `[tools.<name>]`/
+   `tools: { <name>: ... }`), if present.
+2. The profile-level `[tool.<name>]` table, if present.
+3. The unconditional default floor described above.
+
+Both `[tool.<name>]` and `[agents.<type>.tools.<name>]` (and their
+file-authored equivalents) hard-validate their tool name against the
+registered tool set (`read`, `write`, `glob`, `bash`, `search`, `edit`,
+`clarify`) at startup; an unrecognized name is a hard error naming the
+offending agent type (or "profile-level"), the unknown name, and its source.
+
 `--auto-approve-write`/`--auto-approve-edit` continue to work unchanged:
 each still appends its own catch-all `AutoApproved` rule (`pattern = "**"`)
-after whichever rule list applies (config-provided or the default floor),
-so the flag always wins regardless of `[tool.*]` config.
+after whichever rule list applies (agent-type-scoped, profile-level, or the
+default floor), so the flag always wins regardless of `[tool.*]`/
+`[agents.<type>.tools.*]` config.

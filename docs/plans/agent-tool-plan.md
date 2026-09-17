@@ -179,7 +179,7 @@ current profile-level-only baseline passes before changing anything.
 
 ## Implementation Plan
 
-1. [ ] Add `pub tools: HashMap<String, ToolSandboxConfig>` (with
+1. [x] Add `pub tools: HashMap<String, ToolSandboxConfig>` (with
        `#[serde(default)]`) to `AgentConfig` (`src/config/agent.rs`),
        importing `ToolSandboxConfig` from `crate::config::profile` (or
        relocate `ToolSandboxConfig` to a shared location if that avoids a
@@ -189,7 +189,7 @@ current profile-level-only baseline passes before changing anything.
        and inline-override fallback, `src/agent_factory.rs` test fixtures,
        any other call site found via `grep -rn "AgentConfig {"`) to include
        `tools: HashMap::new()`.
-2. [ ] Add the matching `tools: Option<HashMap<String, ToolSandboxConfig>>`
+2. [x] Add the matching `tools: Option<HashMap<String, ToolSandboxConfig>>`
        field (with `#[serde(default)]`) to `AgentConfigOverrides`
        (`src/config/agent_type_file.rs`), and extend
        `apply_agent_config_overrides` (`src/config/profile.rs`) to replace
@@ -198,7 +198,7 @@ current profile-level-only baseline passes before changing anything.
        `if overrides.allowed_tools.is_some()` pattern) — do not merge
        individual tool entries between the file-sourced base and the
        inline override.
-3. [ ] Add parsing tests in `src/config/agent_type_file.rs` (following the
+3. [x] Add parsing tests in `src/config/agent_type_file.rs` (following the
        existing `pure_toml_agent_type_files_parse_settings_and_system_prompt`/
        `markdown_agent_type_files_parse_yaml_frontmatter_and_trimmed_body`
        style) proving: a pure-TOML agent-type file with a `[tools.write]`
@@ -206,12 +206,12 @@ current profile-level-only baseline passes before changing anything.
        `.md` `---` YAML frontmatter file with `tools: { write: { rules:
        [...] } }`, all deserialize into `AgentConfig.tools["write"].rules`
        correctly.
-4. [ ] Add a profile-level test in `src/config/profile.rs` (near
+4. [x] Add a profile-level test in `src/config/profile.rs` (near
        `tool_sandbox_rules_table_loads_named_and_glob_rules`) proving an
        inline `[agents.<type>.tools.<name>]` table parses into
        `ProfileConfig::agents[<type>].tools[<name>].rules`, independent of
        `ProfileConfig::tools`.
-5. [ ] In `AgentFactory::build` (`src/agent_factory.rs`, replacing the
+5. [x] In `AgentFactory::build` (`src/agent_factory.rs`, replacing the
        current unconditional `let tool_sandbox_rules = profile.tools...`
        block near line 336), resolve per-tool rules with the three-tier
        fallback: for each tool name appearing in either
@@ -221,7 +221,7 @@ current profile-level-only baseline passes before changing anything.
        map (so `default_registry`'s existing "absent → default floor"
        behavior in `src/agent/tools.rs` is unchanged and does not need to
        change).
-6. [ ] Add a test in `src/agent_factory.rs` (near
+6. [x] Add a test in `src/agent_factory.rs` (near
        `create_honors_per_agent_type_allowed_tools_override`) proving: two
        agent types share one profile where only `[tool.write]` is set
        profile-wide, one agent type additionally sets
@@ -229,7 +229,7 @@ current profile-level-only baseline passes before changing anything.
        resulting `SandboxContext`/registry behavior differs between the
        two agent types for `write` while both still share the profile
        default for any other tool.
-7. [ ] Add `validate_profile_agent_tool_names` (or extend
+7. [x] Add `validate_profile_agent_tool_names` (or extend
        `validate_profile_agent_engines`'s call site) in
        `src/agent_factory.rs`, invoked from the same startup path
        (`validate_profile_agent_engines`'s caller, around line 153) that
@@ -248,7 +248,7 @@ current profile-level-only baseline passes before changing anything.
        with a message naming the agent type and the bad tool name, and
        another proving an unrecognized name in the profile-level
        `[tool.<bad-name>]` table fails the same way.
-8. [ ] Update `docs/configuration.md`: add a `tools` row to the "Per-agent
+8. [x] Update `docs/configuration.md`: add a `tools` row to the "Per-agent
        configuration (`AgentConfig`)" table (cross-referencing the
        "Sandbox" section), and extend the "Sandbox" section's "Per-tool
        `[tool.<name>]` config" paragraph with the new three-tier
@@ -257,14 +257,16 @@ current profile-level-only baseline passes before changing anything.
        `[agents.<type>.tools.<name>]`, and a note that both `[tool.<name>]`
        and `[agents.<type>.tools.<name>]` now hard-validate the tool name
        against the registered tool set at startup (step 7).
-9. [ ] Resolve `docs/ideas/agent-tools.md`'s disposition per the Open
+9. [x] Resolve `docs/ideas/agent-tools.md`'s disposition per the Open
        Questions section below (delete it, or replace its content with a
        pointer to this plan/the shipped docs section) once implementation
-       is complete.
-10. [ ] Run `make lint`, `make test`, and `make test-coverage`; fix any
+       is complete. **Resolved:** user chose to keep `docs/ideas/agent-tools.md`
+       unchanged.
+10. [x] Run `make lint`, `make test`, and `make test-coverage`; fix any
         finding before reporting this plan done.
-11. [ ] Run `rumdl fmt docs/configuration.md` (and `docs/ideas/agent-tools.md`
-        if step 9 edits rather than deletes it).
+11. [x] Run `rumdl fmt docs/configuration.md` (and `docs/ideas/agent-tools.md`
+        if step 9 edits rather than deletes it — not applicable, file kept
+        as-is).
 
 ## Implementation Hints
 

@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use super::profile::ToolSandboxConfig;
 use super::{AgentConfig, ConfigError};
 
 /// The parsed configuration supplied by one agent-type file.
@@ -242,6 +243,8 @@ pub(crate) struct AgentConfigOverrides {
     pub persona: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_bool_or_string")]
     pub can_spawn: Option<bool>,
+    #[serde(default)]
+    pub tools: Option<HashMap<String, ToolSandboxConfig>>,
 }
 
 fn deserialize_optional_u64_or_string<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
@@ -352,6 +355,65 @@ system_prompt = "Investigate the evidence."
             definition.config.system_prompt.as_deref(),
             Some("Investigate the evidence.")
         );
+    }
+
+    #[test]
+    fn pure_toml_agent_type_files_parse_tools_sandbox_rules() {
+        let definition = parse_agent_type_contents(
+            Path::new("research.toml"),
+            r#"
+allowed_tools = ["read", "write"]
+
+[tools.write]
+rules = [
+  { rule = "outside_workspace", verdict = "auto_denied" },
+  { pattern = "**/build/**", verdict = "auto_approved" },
+]
+"#,
+        )
+        .expect("pure TOML with tools table parses");
+
+        let write_rules = &definition
+            .config
+            .tools
+            .get("write")
+            .expect("write tool entry present")
+            .rules;
+        assert_eq!(write_rules.len(), 2);
+    }
+
+    #[test]
+    fn toml_frontmatter_agent_type_files_parse_tools_sandbox_rules() {
+        let definition = parse_agent_type_contents(
+            Path::new("research.md"),
+            "+++\nallowed_tools = [\"write\"]\n\n[tools.write]\nrules = [{ rule = \"outside_workspace\", verdict = \"auto_denied\" }]\n+++\n\nInvestigate the evidence.\n",
+        )
+        .expect("TOML frontmatter with tools table parses");
+
+        let write_rules = &definition
+            .config
+            .tools
+            .get("write")
+            .expect("write tool entry present")
+            .rules;
+        assert_eq!(write_rules.len(), 1);
+    }
+
+    #[test]
+    fn yaml_frontmatter_agent_type_files_parse_tools_sandbox_rules() {
+        let definition = parse_agent_type_contents(
+            Path::new("research.md"),
+            "---\nallowed_tools:\n  - write\ntools:\n  write:\n    rules:\n      - rule: outside_workspace\n        verdict: auto_denied\n---\n\nInvestigate the evidence.\n",
+        )
+        .expect("YAML frontmatter with tools table parses");
+
+        let write_rules = &definition
+            .config
+            .tools
+            .get("write")
+            .expect("write tool entry present")
+            .rules;
+        assert_eq!(write_rules.len(), 1);
     }
 
     #[test]

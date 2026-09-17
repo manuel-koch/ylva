@@ -20,7 +20,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent::tools::agent_finish::AgentFinishToolConfig;
 use crate::agent::tools::spawn_subagent::AgentTypeInfo;
-use crate::agent::tools::{default_registry, ToolRegistryConfig, DEFAULT_CLI_TOOLS};
+use crate::agent::tools::{
+    default_registry, ToolRegistryConfig, DEFAULT_CLI_TOOLS, DEFAULT_TUI_TOOLS,
+};
 use crate::agent::{AgentLoop, ChildRoleConfig, Context, Message, Role, UiUpdate};
 use crate::child_agent_manager::{
     ChildAgentManager, FinishResult, FinishResultOrigin, SpawnRequest,
@@ -151,14 +153,18 @@ impl AgentFactory {
             );
         }
         validate_profile_agent_engines(&engines, profile)?;
+        validate_profile_agent_tool_names(profile)?;
         Ok(AgentFactory::new(engines))
     }
 
     /// Validate every configured agent type against the engines available to
-    /// this factory. This runs during startup so an unused agent type cannot
-    /// hide an invalid engine reference until a child is spawned.
+    /// this factory, and every configured tool name (profile-level and
+    /// per-agent-type) against the registered tool set. This runs during
+    /// startup so an unused agent type cannot hide an invalid engine or tool
+    /// name reference until a child is spawned.
     pub fn validate_profile_agent_engines(&self, profile: &ProfileConfig) -> anyhow::Result<()> {
-        validate_profile_agent_engines(&self.engines, profile)
+        validate_profile_agent_engines(&self.engines, profile)?;
+        validate_profile_agent_tool_names(profile)
     }
 
     /// Snapshot of the named engine's configuration, if it exists.
@@ -332,11 +338,28 @@ impl AgentFactory {
             .and_then(|agent_config| agent_config.allowed_tools.clone())
             .unwrap_or_else(|| allowed_tools.to_vec());
 
+        // Per-tool sandbox rules resolve most-specific-wins, each tier fully
+        // replacing the next (no merging across tiers): the agent type's own
+        // `[agents.<type>.tools.<name>]` table, then the profile-wide
+        // `[tool.<name>]` table, then (absent from both) the built-in default
+        // floor handled by `default_registry`/`SandboxContext`.
         let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new()));
+        let agent_type_tools = profile
+            .agents
+            .get(agent_type)
+            .map(|agent_config| &agent_config.tools);
         let tool_sandbox_rules = profile
             .tools
-            .iter()
-            .map(|(tool_name, tool_config)| (tool_name.clone(), tool_config.rules.clone()))
+            .keys()
+            .chain(agent_type_tools.into_iter().flat_map(|tools| tools.keys()))
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .filter_map(|tool_name| {
+                let resolved = agent_type_tools
+                    .and_then(|tools| tools.get(tool_name))
+                    .or_else(|| profile.tools.get(tool_name))?;
+                Some((tool_name.clone(), resolved.rules.clone()))
+            })
             .collect();
         let registry = Arc::new(default_registry(
             sandbox,
@@ -648,6 +671,32 @@ fn validate_profile_agent_engines(
     Ok(())
 }
 
+/// Validate that every tool name configured in the profile's `[tool.<name>]`
+/// table and each agent type's `[agents.<type>.tools.<name>]` table is one of
+/// the registered tool names, so a typo or renamed tool fails fast at
+/// startup instead of silently never applying its configured rules.
+fn validate_profile_agent_tool_names(profile: &ProfileConfig) -> anyhow::Result<()> {
+    for tool_name in profile.tools.keys() {
+        anyhow::ensure!(
+            DEFAULT_TUI_TOOLS.contains(&tool_name.as_str()),
+            "profile-level [tool.{tool_name}] table names unknown tool '{tool_name}'; \
+             registered tools are: {}",
+            DEFAULT_TUI_TOOLS.join(", ")
+        );
+    }
+    for (agent_type, agent_config) in &profile.agents {
+        for tool_name in agent_config.tools.keys() {
+            anyhow::ensure!(
+                DEFAULT_TUI_TOOLS.contains(&tool_name.as_str()),
+                "agent type '{agent_type}' [agents.{agent_type}.tools.{tool_name}] table \
+                 names unknown tool '{tool_name}'; registered tools are: {}",
+                DEFAULT_TUI_TOOLS.join(", ")
+            );
+        }
+    }
+    Ok(())
+}
+
 fn implicit_engine_config(
     provider_connection_name: &str,
     default_model: Option<&str>,
@@ -951,6 +1000,7 @@ mod tests {
                     persona: None,
                     system_prompt: None,
                     can_spawn: true,
+                    tools: HashMap::new(),
                 },
             )]),
             ..ProfileConfig::default()
@@ -986,6 +1036,7 @@ mod tests {
                 persona: None,
                 system_prompt: None,
                 can_spawn: false,
+                tools: HashMap::new(),
             },
         );
 
@@ -1035,6 +1086,7 @@ mod tests {
                         persona: None,
                         system_prompt: None,
                         can_spawn: false,
+                        tools: HashMap::new(),
                     },
                 ),
                 (
@@ -1047,6 +1099,7 @@ mod tests {
                         persona: None,
                         system_prompt: None,
                         can_spawn: false,
+                        tools: HashMap::new(),
                     },
                 ),
             ]),
@@ -1200,6 +1253,51 @@ mod tests {
     }
 
     #[test]
+    fn validate_profile_agent_engines_rejects_unknown_profile_level_tool_name() {
+        let (factory, mut profile) = make_factory();
+        profile.tools.insert(
+            "not-a-real-tool".to_string(),
+            crate::config::ToolSandboxConfig { rules: vec![] },
+        );
+        let error = factory
+            .validate_profile_agent_engines(&profile)
+            .expect_err("an unknown profile-level tool name must fail startup validation");
+        let message = error.to_string();
+        assert!(message.contains("not-a-real-tool"), "{message}");
+        assert!(
+            message.contains("profile-level") || message.contains("[tool."),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn validate_profile_agent_engines_rejects_unknown_agent_type_scoped_tool_name() {
+        let (factory, mut profile) = make_factory();
+        profile.agents.insert(
+            "custom".to_string(),
+            AgentConfig {
+                engine: None,
+                description: None,
+                allowed_tools: None,
+                timeout_secs: None,
+                persona: None,
+                system_prompt: None,
+                can_spawn: false,
+                tools: HashMap::from([(
+                    "not-a-real-tool".to_string(),
+                    crate::config::ToolSandboxConfig { rules: vec![] },
+                )]),
+            },
+        );
+        let error = factory
+            .validate_profile_agent_engines(&profile)
+            .expect_err("an unknown agent-type-scoped tool name must fail startup validation");
+        let message = error.to_string();
+        assert!(message.contains("not-a-real-tool"), "{message}");
+        assert!(message.contains("custom"), "{message}");
+    }
+
+    #[test]
     fn create_returns_ok_for_child_role_with_known_engine() {
         let (factory, profile) = make_factory();
         let (finish_tx, _finish_rx) = mpsc::channel(1);
@@ -1243,6 +1341,7 @@ mod tests {
                         persona: Some("specialist persona".to_string()),
                         system_prompt: Some("specialist body".to_string()),
                         can_spawn: false,
+                        tools: HashMap::new(),
                     },
                 )]),
                 ..ProfileConfig::default()
@@ -1349,6 +1448,7 @@ mod tests {
                     persona: None,
                     system_prompt: None,
                     can_spawn: false,
+                    tools: HashMap::new(),
                 },
             )]),
             ..ProfileConfig::default()
@@ -1391,6 +1491,7 @@ mod tests {
                 persona: None,
                 system_prompt: None,
                 can_spawn: false,
+                tools: HashMap::new(),
             },
         );
         let (restricted, _ui_rx) = factory
@@ -1405,6 +1506,95 @@ mod tests {
             restricted.registry().get("read").is_some(),
             "expected the per-agent_type allowed_tools override to still \
              register the tool it did configure"
+        );
+    }
+
+    #[test]
+    fn create_honors_per_agent_type_tools_sandbox_rules_override() {
+        // Two agent types share one profile where the profile-wide
+        // `[tool.write]` table only denies writes outside the workspace; one
+        // agent type additionally sets `[agents.<type>.tools.write]` with an
+        // extra glob rule auto-approving writes under `scratch/`. Only that
+        // agent type's `write` tool should auto-approve a `scratch/` path;
+        // the other agent type (profile default only) must still abstain
+        // (require user approval) for that same path.
+        let workspace_root = std::fs::canonicalize(std::env::current_dir().expect("current_dir"))
+            .expect("canonicalize cwd");
+        let scratch_path = workspace_root.join("scratch/file.txt");
+        let scratch_glob_pattern = format!("{}/scratch/**", workspace_root.to_string_lossy());
+        let write_args = serde_json::json!({
+            "path": scratch_path.to_string_lossy(),
+            "content": "hello",
+        });
+
+        let (factory, mut profile) = make_factory();
+        profile.tools.insert(
+            "write".to_string(),
+            crate::config::ToolSandboxConfig {
+                rules: vec![crate::sandbox::SandboxRuleConfig::Named {
+                    rule: crate::sandbox::NamedSandboxRule::OutsideWorkspace,
+                    verdict: crate::sandbox::ApprovalVerdictConfig::AutoDenied,
+                    reason: None,
+                }],
+            },
+        );
+        profile.agents.insert(
+            "scratch-writer".to_string(),
+            AgentConfig {
+                engine: None,
+                description: None,
+                allowed_tools: None,
+                timeout_secs: None,
+                persona: None,
+                system_prompt: None,
+                can_spawn: false,
+                tools: HashMap::from([(
+                    "write".to_string(),
+                    crate::config::ToolSandboxConfig {
+                        rules: vec![
+                            crate::sandbox::SandboxRuleConfig::Named {
+                                rule: crate::sandbox::NamedSandboxRule::OutsideWorkspace,
+                                verdict: crate::sandbox::ApprovalVerdictConfig::AutoDenied,
+                                reason: None,
+                            },
+                            crate::sandbox::SandboxRuleConfig::Glob {
+                                pattern: scratch_glob_pattern,
+                                verdict: crate::sandbox::ApprovalVerdictConfig::AutoApproved,
+                                reason: None,
+                            },
+                        ],
+                    },
+                )]),
+            },
+        );
+
+        let (default_agent, _ui_rx) = factory
+            .create(&profile, "default", Role::Root)
+            .expect("factory creates the default agent");
+        let default_write = default_agent
+            .registry()
+            .get("write")
+            .expect("write tool registered");
+        assert_eq!(
+            default_write.needs_approval(&write_args),
+            crate::sandbox::ApprovalCheck::UserApprovalRequired,
+            "the default agent type has no agent-scoped tools override, so it \
+             must fall back to the profile-level table alone, which does not \
+             auto-approve scratch/ paths"
+        );
+
+        let (scratch_agent, _ui_rx) = factory
+            .create(&profile, "scratch-writer", Role::Root)
+            .expect("factory creates the scratch-writer agent");
+        let scratch_write = scratch_agent
+            .registry()
+            .get("write")
+            .expect("write tool registered");
+        assert_eq!(
+            scratch_write.needs_approval(&write_args),
+            crate::sandbox::ApprovalCheck::AutoApproved,
+            "the scratch-writer agent type's own tools.write table must win \
+             over the profile-level table for that tool"
         );
     }
 
@@ -1565,6 +1755,7 @@ mod tests {
                     persona: None,
                     system_prompt: None,
                     can_spawn: false,
+                    tools: HashMap::new(),
                 },
             )]),
             ..ProfileConfig::default()
@@ -1658,6 +1849,7 @@ mod tests {
                     persona: None,
                     system_prompt: None,
                     can_spawn: false,
+                    tools: HashMap::new(),
                 },
             )]),
             ..ProfileConfig::default()
