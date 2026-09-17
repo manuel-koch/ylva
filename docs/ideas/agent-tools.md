@@ -12,7 +12,7 @@ TOML/YAML:
 [agents.custom]
 description = "Custom agent definition."
 engine = "ollama/local"
-tools_available = ["read", "write"]
+allowed_tools = ["read", "write"]
 
 [agents.custom.tools.write]
 rules = [
@@ -26,13 +26,14 @@ rules = [
 ```yaml
 ---
 engine: "ollama/local"
-tools_available: ["read","write"]
+allowed_tools: ["read","write"]
 tools:
   write:
-    - rule: "outside_workspace"
-      verdict: "auto_denied"
-    - pattern: "**/build/**"
-      verdict: "auto_approved"
+    rules:
+      - rule: "outside_workspace"
+        verdict: "auto_denied"
+      - pattern: "**/build/**"
+        verdict: "auto_approved"
 ---
 You are an utility agent with customized tool config.
 ```
