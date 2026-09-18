@@ -281,7 +281,10 @@ affect sandbox approval checks. See
   [Child-agent delegation](#child-agent-delegation).
 - **agent_finish**: Only available to child agents (a root agent never sees
   it). Reports `status` (`"success"` or `"failure"`), an optional `result` /
-  `error`, and optional `sources`, then ends the child's turn. The parent
+  `error`, and optional `sources`, then ends the child's turn. `status` is
+  requested as mandatory but tolerated as missing: if a model omits it, it is
+  inferred as `"failure"` when `error` is set and `"success"` otherwise,
+  rather than the call being auto-denied for a schema violation. The parent
   receives this through the `spawn_subagent` lifecycle event — it never sees
   the child's own conversation, only the `result`/`error` string, so a child
   should make its `result` self-contained rather than referencing

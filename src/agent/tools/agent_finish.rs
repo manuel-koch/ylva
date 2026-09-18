@@ -53,8 +53,13 @@ impl AgentFinishStatus {
 /// `agent_finish` arguments: the child's final report to its parent.
 #[derive(Debug, Clone, JsonSchema, Deserialize)]
 pub struct AgentFinishArgs {
-    /// Whether the task succeeded or failed.
-    pub status: AgentFinishStatus,
+    /// Whether the task succeeded or failed. Required — always specify this,
+    /// and emit it as the first field in your call. If omitted (weaker
+    /// models sometimes drop it), it is inferred as `"failure"` when `error`
+    /// is set and `"success"` otherwise, so the call still completes rather
+    /// than being rejected.
+    #[serde(default)]
+    pub status: Option<AgentFinishStatus>,
     /// Final answer for the parent when `status` is `"success"`. Must be
     /// self-contained — the parent never sees prior turns, tool output, or
     /// reasoning; inline the actual findings/content here, never "see above".
@@ -195,7 +200,16 @@ impl ToolCall for AgentFinishCall {
         async move {
             let args: AgentFinishArgs = serde_json::from_value(self.raw_arguments.clone())
                 .map_err(|error| ToolError::failed(AgentFinishTool::NAME, error.to_string()))?;
-            let status = args.status;
+            // `status` is optional on the wire: some models omit it. Infer it
+            // from `error`/`result` so the call still completes instead of
+            // being rejected — see `AgentFinishArgs::status` doc comment.
+            let status = args.status.unwrap_or_else(|| {
+                if args.error.is_some() {
+                    AgentFinishStatus::Failure
+                } else {
+                    AgentFinishStatus::Success
+                }
+            });
             let finish_result = FinishResult {
                 run_id: self.config.run_id,
                 call_id: self.config.call_id,
@@ -275,6 +289,57 @@ mod tests {
         assert_eq!(finish_result.status, "success");
         assert_eq!(finish_result.result.as_deref(), Some("all done"));
         assert_eq!(finish_result.sources, vec!["a.rs".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn run_infers_success_status_when_status_is_omitted_but_result_is_present() {
+        let (finish_tx, mut finish_rx) = mpsc::channel(1);
+        let tool = AgentFinishTool::new(AgentFinishToolConfig {
+            finish_tx,
+            run_id: Uuid::new_v4(),
+            call_id: Uuid::new_v4(),
+        });
+        let call = tool.create_call(
+            Uuid::new_v4(),
+            serde_json::json!({"result": "all done, no status given"}),
+        );
+        let output = call.run().await.expect("finish call succeeds");
+        assert!(output.text().contains("success"));
+        let finish_result = finish_rx.recv().await.expect("finish result sent");
+        assert_eq!(finish_result.status, "success");
+    }
+
+    #[tokio::test]
+    async fn run_infers_failure_status_when_status_is_omitted_but_error_is_present() {
+        let (finish_tx, mut finish_rx) = mpsc::channel(1);
+        let tool = AgentFinishTool::new(AgentFinishToolConfig {
+            finish_tx,
+            run_id: Uuid::new_v4(),
+            call_id: Uuid::new_v4(),
+        });
+        let call = tool.create_call(
+            Uuid::new_v4(),
+            serde_json::json!({"error": "could not complete the task, no status given"}),
+        );
+        let output = call.run().await.expect("finish call succeeds");
+        assert!(output.text().contains("failure"));
+        let finish_result = finish_rx.recv().await.expect("finish result sent");
+        assert_eq!(finish_result.status, "failure");
+    }
+
+    #[test]
+    fn input_schema_does_not_require_status() {
+        let schema = AgentFinishTool::new(test_config()).input_schema();
+        assert!(
+            !schema
+                .schema
+                .object
+                .as_ref()
+                .expect("object schema")
+                .required
+                .contains("status"),
+            "status must stay optional in the schema so omitting it is not auto-denied"
+        );
     }
 
     #[tokio::test]
