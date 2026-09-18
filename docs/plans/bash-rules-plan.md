@@ -258,11 +258,11 @@ anything.
 
 ## Implementation Plan
 
-1. [ ] Add `tree-sitter` and `tree-sitter-bash` as dependencies in
+1. [x] Add `tree-sitter` and `tree-sitter-bash` as dependencies in
        `Cargo.toml` (`[dependencies]`), confirming their licenses (MIT) are
        compatible with Apache-2.0, and confirm the build succeeds with the
        new `cc`-based build step (`cargo build`) on the current toolchain.
-2. [ ] **Spike (throwaway probe, not the real extractor):** write a small
+2. [x] **Spike (throwaway probe, not the real extractor):** write a small
        standalone test/example against `tree-sitter-bash` that parses
        sample scripts and prints the *full* tree — including anonymous/
        unnamed nodes, not just named ones (`tree-sitter`'s cursor API
@@ -284,31 +284,31 @@ anything.
        design is preserved in the codebase, not just this plan. Delete the
        throwaway probe/example once step 3's real extractor module exists
        and covers the same ground via its own tests.
-3. [ ] Write a bash-script extractor module (new file, e.g.
+3. [x] Write a bash-script extractor module (new file, e.g.
        `src/sandbox/bash_command_extractor.rs`, wired into `src/sandbox.rs`
        via `mod bash_command_extractor;` or as a submodule per the
        project's file-per-module convention) that:
        - Parses a `command` string into a `tree-sitter-bash` AST.
        - Walks `list`/`pipeline`/`command` nodes (the real grammar node
-         names confirmed in step 2 — no `simple_command` type exists), and
-         additionally walks a parent node's direct children in source
-         order to discover `;`/`&`-separated sibling statements (per step
-         2's findings, these are not grouped under any node).
+       names confirmed in step 2 — no `simple_command` type exists), and
+       additionally walks a parent node's direct children in source
+       order to discover `;`/`&`-separated sibling statements (per step
+       2's findings, these are not grouped under any node).
        - For each extracted `command` node, extracts its argv as a
-         `Vec<ArgvToken>` (skipping/recording any leading
-         `variable_assignment` children separately — see the
-         `variable_assignment_prefix` rule below), where each token tracks
-         its literal text and whether it was quoted (needed for the
-         unquoted-glob/brace checks in step 5).
+       `Vec<ArgvToken>` (skipping/recording any leading
+       `variable_assignment` children separately — see the
+       `variable_assignment_prefix` rule below), where each token tracks
+       its literal text and whether it was quoted (needed for the
+       unquoted-glob/brace checks in step 5).
        - Returns a result type distinguishing: fully-parsed commands (with
-         their argv lists and any variable-assignment-prefix flag), commands
-         that are un-analysable (contain a disallowed node type nested
-         within them), and a top-level parse failure for the whole script.
+       their argv lists and any variable-assignment-prefix flag), commands
+       that are un-analysable (contain a disallowed node type nested
+       within them), and a top-level parse failure for the whole script.
        - Detects a trailing `&` (backgrounding) per extracted command,
-         exposed as a boolean flag alongside each extracted command or as
-         its own structural signal for step 6's `backgrounded` rule, using
-         the mechanism step 2 empirically confirmed.
-4. [ ] Add unit tests for the extractor covering: the three "in-scope"
+       exposed as a boolean flag alongside each extracted command or as
+       its own structural signal for step 6's `backgrounded` rule, using
+       the mechanism step 2 empirically confirmed.
+4. [x] Add unit tests for the extractor covering: the three "in-scope"
        examples from `docs/ideas/bash-rules.md`'s "Scanning scope (v1)"
        section (`find . -type f ; echo "Foo" ; cat foo.txt`,
        `find . -type f | sort | cut -d "_" -f2`,
@@ -330,7 +330,7 @@ anything.
        as a `command` sibling child) — so a future `tree-sitter-bash`
        version bump that silently changes these shapes fails CI loudly
        instead of silently misclassifying commands.
-5. [ ] Add unquoted-glob/brace detection: given an `ArgvToken`, inspect its
+5. [x] Add unquoted-glob/brace detection: given an `ArgvToken`, inspect its
        literal text for an unquoted `*`, `?`, or `[...]` (glob) or an
        unquoted `{...,...}` (brace expansion), using the token's quoted-
        ness (tracked in step 3) to skip quoted occurrences. Add unit tests
@@ -338,7 +338,7 @@ anything.
        `cat '*.txt'` (not flagged), `echo {a,b}` (unquoted brace flagged),
        `echo "{a,b}"` (not flagged), and a token with no glob/brace
        characters (not flagged).
-6. [ ] Extend `NamedSandboxRule` (`src/sandbox.rs`) with four new
+6. [x] Extend `NamedSandboxRule` (`src/sandbox.rs`) with four new
        variants: `Backgrounded`, `VariableAssignmentPrefix`,
        `UnquotedGlob`, `UnquotedBraceExpansion` (serde string values
        `"backgrounded"`, `"variable_assignment_prefix"`, `"unquoted_glob"`,
@@ -351,7 +351,7 @@ anything.
        `unquoted_glob` → `UserApprovalRequired`,
        `unquoted_brace_expansion` → `UserApprovalRequired`) and by the
        config-driven named-rule path with a configured verdict.
-7. [ ] Add the `CommandGlob` variant to `SandboxRuleConfig`
+7. [x] Add the `CommandGlob` variant to `SandboxRuleConfig`
        (`src/sandbox.rs`): `{ command = ["git", "reflog", "*"], verdict =
        "...", reason = "..." }`, with `command` as a `Vec<String>` field
        (fixed field name and shape — an array of literal tokens, not a
@@ -364,14 +364,14 @@ anything.
        one-or-more-extra-tokens for a trailing `**` (never abstains on
        unquoted glob/brace in its tail). Literal-prefix tokens always
        match by exact text equality.
-8. [ ] Add config validation: extend the existing tool-name/rule-kind
+8. [x] Add config validation: extend the existing tool-name/rule-kind
        validation (`docs/plans/phase10.3-sandbox-tool-rules.md`'s
        precedent for path-only tools) so `CommandGlob` rules are only
        accepted under `[tool.bash]`/`[agents.<type>.tools.bash]`, and
        `Named`/`Glob` path rules are rejected there — a hard startup error
        naming the tool, the rule's list index in its `rules` array, and
        the expected kind for that tool.
-9. [ ] Implement `SandboxContext::check_command` (`src/sandbox.rs`,
+9. [x] Implement `SandboxContext::check_command` (`src/sandbox.rs`,
        replacing the current stub): parse the command via the step-3
        extractor; for each extracted `command`, evaluate the resolved
        named-rule/`CommandGlob` list for `bash` (config-driven or default
@@ -396,7 +396,7 @@ anything.
        -node contributes any structural verdict, and `self.rules` has no
        match either (pure abstention, unchanged from today's
        total-abstention semantics as the safe fallback).
-10. [ ] Update/replace the existing `check_command_always_abstains` test
+10. [x] Update/replace the existing `check_command_always_abstains` test
         (`src/sandbox.rs`) — it encodes the pre-this-plan stub behavior
         (total abstention for every command) and must be revised to
         reflect the new default floor (e.g. confirm a background command
@@ -418,7 +418,7 @@ anything.
         floor), and a `self.rules` catch-all (`with_rule` appended
         directly, simulating a future code-level override) winning over a
         structural `AutoDenied` verdict for the same command.
-11. [ ] Add `--auto-approve-bash`, following the exact plumbing pattern of
+11. [x] Add `--auto-approve-bash`, following the exact plumbing pattern of
         `--auto-approve-write`/`--auto-approve-edit`: parse the flag in
         `src/main.rs` (alongside the existing `auto_approve_edit`/
         `auto_approve_write` parsing), add `auto_approve_bash: bool` to
@@ -435,14 +435,14 @@ anything.
         `auto_approve_write_wins_over_configured_deny_rule`
         (`src/agent/tools.rs`) for `auto_approve_bash` winning over a
         configured `[tool.bash]` deny rule.
-12. [ ] Wire `[tool.bash]`/`[agents.<type>.tools.bash]` config resolution
+12. [x] Wire `[tool.bash]`/`[agents.<type>.tools.bash]` config resolution
         for `CommandGlob`/named command rules into
         `src/agent/tools.rs`'s `default_registry` (the same wiring point
         used for path-based tools per
         `docs/plans/phase10.3-sandbox-tool-rules.md`'s step 6) — no new
         wiring mechanism, just extending the existing per-tool resolution
         to cover `bash`'s new rule kinds.
-13. [ ] Update `docs/configuration.md`'s "Sandbox" section: document the
+13. [x] Update `docs/configuration.md`'s "Sandbox" section: document the
         `CommandGlob` rule shape and matching semantics, the four new
         named rules and their default-floor verdicts, the worst-case
         aggregation rule (both cross-command and, for the unconfigured
@@ -454,11 +454,11 @@ anything.
         Add a `--auto-approve-bash` row to `docs/cli-options.md`'s flags
         table, matching the existing `--auto-approve-write`/
         `--auto-approve-edit` rows' phrasing.
-14. [ ] Update `docs/features.md`/`docs/implementation-notes.md` wherever
+14. [x] Update `docs/features.md`/`docs/implementation-notes.md` wherever
         they describe `bash` tool approval as unconditionally requiring
         user approval, to reflect the new rule-driven behavior and default
         floor.
-15. [ ] Update `docs/blueprint.md` for consistency with the now-implemented
+15. [x] Update `docs/blueprint.md` for consistency with the now-implemented
         `--auto-approve-bash` flag: the "Tool Approval in Headless Mode"
         mapping (`--auto-approve-shell` → `bash`, around line 2331) and
         the Phase 11 checklist item listing `--auto-approve-shell`
@@ -468,9 +468,9 @@ anything.
         (already implemented, this plan) rather than a still-to-be-built
         `--auto-approve-shell`, avoiding a future duplicate flag for the
         same purpose. Do not otherwise renumber or re-scope Phase 11.
-16. [ ] Run `make format lint` and `make test-coverage`; fix any finding
+16. [x] Run `make format lint` and `make test-coverage`; fix any finding
         before reporting this plan done.
-17. [ ] Run `rumdl fmt` on every `docs/*.md` file edited in steps 13-15.
+17. [x] Run `rumdl fmt` on every `docs/*.md` file edited in steps 13-15.
 
 ## Proposed Improvements
 

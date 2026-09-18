@@ -28,9 +28,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use ylva::{
-    default_registry, AgentCommand, AgentLoop, ApprovalCheck, AssistantStatus, DeltaChunk,
-    EngineImpl, Message, MockEvent, MockProvider, Provider, Sandbox, StreamEvent, Tool, ToolCall,
-    ToolCallResult, ToolError, ToolRegistry, ToolRegistryConfig, ToolSchema, UiUpdate,
+    default_registry, AgentCommand, AgentLoop, ApprovalCheck, AssistantStatus, AutoApproveTool,
+    DeltaChunk, EngineImpl, Message, MockEvent, MockProvider, Provider, Sandbox, StreamEvent, Tool,
+    ToolCall, ToolCallResult, ToolError, ToolRegistry, ToolRegistryConfig, ToolSchema, UiUpdate,
     UserMessageKind, MAX_TOOL_USE_ITERATIONS,
 };
 
@@ -818,7 +818,7 @@ async fn intermediate_subagent_completion_does_not_reprompt_until_all_children_f
         make_sandbox(),
         ToolRegistryConfig {
             include_spawn_subagent: true,
-            auto_approve_spawn: true,
+            auto_approve: std::collections::HashSet::from([AutoApproveTool::Spawn]),
             ..ToolRegistryConfig::default()
         },
     ));
@@ -1042,7 +1042,7 @@ async fn iteration_guard_also_stops_a_runaway_spawn_subagent_finish_reprompt_loo
         make_sandbox(),
         ToolRegistryConfig {
             include_spawn_subagent: true,
-            auto_approve_spawn: true,
+            auto_approve: std::collections::HashSet::from([AutoApproveTool::Spawn]),
             ..ToolRegistryConfig::default()
         },
     ));
@@ -1195,7 +1195,7 @@ async fn stop_while_spawn_subagent_is_running_resolves_it_to_cancelled_tool_done
         make_sandbox(),
         ToolRegistryConfig {
             include_spawn_subagent: true,
-            auto_approve_spawn: true,
+            auto_approve: std::collections::HashSet::from([AutoApproveTool::Spawn]),
             ..ToolRegistryConfig::default()
         },
     ));

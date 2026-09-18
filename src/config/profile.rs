@@ -103,6 +103,61 @@ pub struct ToolSandboxConfig {
     pub rules: Vec<crate::sandbox::SandboxRuleConfig>,
 }
 
+/// Validate that every `[tool.<name>]`/`[agents.<type>.tools.<name>]` rule
+/// list uses the rule kind appropriate for its tool: `bash` accepts only
+/// [`crate::sandbox::SandboxRuleConfig::CommandGlob`] and the four
+/// `bash`-only [`crate::sandbox::NamedSandboxRule`] variants
+/// (`backgrounded`/`variable_assignment_prefix`/`unquoted_glob`/
+/// `unquoted_brace_expansion`); every other tool accepts only
+/// [`crate::sandbox::SandboxRuleConfig::PathGlob`] and the two path
+/// [`crate::sandbox::NamedSandboxRule`] variants (`outside_workspace`/
+/// `dot_path`). A mismatch is a hard startup error naming the tool, the
+/// rule's list index, and the expected kind, since a silently-ignored rule
+/// kind mismatch would be a safety-critical footgun. A `command` rule whose
+/// `*`/`**` wildcard isn't the last token is likewise a hard error (see
+/// [`crate::sandbox::SandboxRuleConfig::has_misplaced_command_glob_wildcard`]):
+/// left unchecked, it would silently degrade to a literal (never-matching)
+/// token instead of a wildcard.
+fn validate_tool_sandbox_rules(
+    tools: &HashMap<String, ToolSandboxConfig>,
+    path: &Path,
+) -> Result<(), ConfigError> {
+    for (tool_name, tool_config) in tools {
+        let is_bash = tool_name == crate::agent::tools::bash::BashTool::NAME;
+        for (index, rule) in tool_config.rules.iter().enumerate() {
+            let mismatched = if is_bash {
+                rule.is_path_only()
+            } else {
+                rule.is_bash_only()
+            };
+            if mismatched {
+                let expected = if is_bash {
+                    "a `command` argv-glob rule or a named command rule \
+                     (`backgrounded`/`variable_assignment_prefix`/`unquoted_glob`/\
+                     `unquoted_brace_expansion`)"
+                } else {
+                    "a `pattern` path-glob rule or a named path rule \
+                     (`outside_workspace`/`dot_path`)"
+                };
+                return Err(ConfigError::InvalidSandboxRuleKind {
+                    path: path.to_path_buf(),
+                    tool: tool_name.clone(),
+                    index,
+                    expected: expected.to_string(),
+                });
+            }
+            if rule.has_misplaced_command_glob_wildcard() {
+                return Err(ConfigError::MisplacedCommandGlobWildcard {
+                    path: path.to_path_buf(),
+                    tool: tool_name.clone(),
+                    index,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 fn default_engine_name() -> String {
     DEFAULT_PROFILE_NAME.to_string()
 }
@@ -326,6 +381,10 @@ impl ProfileConfig {
             &path,
             inline_agents,
         )?;
+        validate_tool_sandbox_rules(&profile.tools, &path)?;
+        for agent in profile.agents.values() {
+            validate_tool_sandbox_rules(&agent.tools, &path)?;
+        }
         tracing::info!(
             path = %path.display(),
             ?layer,
@@ -351,6 +410,11 @@ impl ProfileConfig {
             Path::new("<built-in>"),
             HashMap::new(),
         )?;
+        let built_in_path = Path::new("<built-in>");
+        validate_tool_sandbox_rules(&profile.tools, built_in_path)?;
+        for agent in profile.agents.values() {
+            validate_tool_sandbox_rules(&agent.tools, built_in_path)?;
+        }
         Ok(profile)
     }
 
@@ -780,13 +844,196 @@ rules = [
             }
         ));
         assert!(
-            matches!(&write_rules[1], crate::sandbox::SandboxRuleConfig::Glob { pattern, .. } if pattern == "**/build/**")
+            matches!(&write_rules[1], crate::sandbox::SandboxRuleConfig::PathGlob { pattern, .. } if pattern == "**/build/**")
         );
 
         assert!(
             !profile.tools.contains_key("edit"),
             "a tool with no [tool.<name>] table has no entry, falling back to the default floor"
         );
+    }
+
+    #[test]
+    fn tool_bash_table_loads_command_glob_and_bash_named_rules() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "with-bash-tools",
+            r#"
+[tool.bash]
+rules = [
+  { rule = "backgrounded", verdict = "auto_denied" },
+  { command = ["git", "reflog", "*"], verdict = "auto_approved" },
+]
+"#,
+        );
+
+        let profile =
+            ProfileConfig::load(temp.path(), "with-bash-tools").expect("the fixture loads");
+        let bash_rules = &profile.tools.get("bash").expect("bash table").rules;
+        assert_eq!(bash_rules.len(), 2);
+        assert!(matches!(
+            bash_rules[0],
+            crate::sandbox::SandboxRuleConfig::Named {
+                rule: crate::sandbox::NamedSandboxRule::Backgrounded,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &bash_rules[1],
+            crate::sandbox::SandboxRuleConfig::CommandGlob { command, .. }
+                if command == &vec!["git".to_string(), "reflog".to_string(), "*".to_string()]
+        ));
+    }
+
+    #[test]
+    fn command_glob_rule_under_a_non_bash_tool_is_a_hard_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "bad-command-glob",
+            r#"
+[tool.read]
+rules = [
+  { command = ["git", "status"], verdict = "auto_approved" },
+]
+"#,
+        );
+
+        let error = ProfileConfig::load(temp.path(), "bad-command-glob")
+            .expect_err("a CommandGlob rule under [tool.read] must be rejected");
+        assert!(matches!(
+            error,
+            ConfigError::InvalidSandboxRuleKind { tool, index: 0, .. } if tool == "read"
+        ));
+    }
+
+    #[test]
+    fn path_glob_rule_under_tool_bash_is_a_hard_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "bad-path-glob",
+            r#"
+[tool.bash]
+rules = [
+  { pattern = "**/build/**", verdict = "auto_approved" },
+]
+"#,
+        );
+
+        let error = ProfileConfig::load(temp.path(), "bad-path-glob")
+            .expect_err("a PathGlob rule under [tool.bash] must be rejected");
+        assert!(matches!(
+            error,
+            ConfigError::InvalidSandboxRuleKind { tool, index: 0, .. } if tool == "bash"
+        ));
+    }
+
+    #[test]
+    fn command_glob_rule_with_a_non_trailing_single_wildcard_is_a_hard_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "bad-command-wildcard-position",
+            r#"
+[tool.bash]
+rules = [
+  { command = ["git", "*", "status"], verdict = "auto_approved" },
+]
+"#,
+        );
+
+        let error = ProfileConfig::load(temp.path(), "bad-command-wildcard-position")
+            .expect_err("a `*` that isn't the last command token must be rejected");
+        assert!(matches!(
+            error,
+            ConfigError::MisplacedCommandGlobWildcard { tool, index: 0, .. } if tool == "bash"
+        ));
+    }
+
+    #[test]
+    fn command_glob_rule_with_a_non_trailing_multi_wildcard_is_a_hard_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "bad-command-double-wildcard-position",
+            r#"
+[tool.bash]
+rules = [
+  { command = ["git", "**", "status"], verdict = "auto_approved" },
+]
+"#,
+        );
+
+        let error = ProfileConfig::load(temp.path(), "bad-command-double-wildcard-position")
+            .expect_err("a `**` that isn't the last command token must be rejected");
+        assert!(matches!(
+            error,
+            ConfigError::MisplacedCommandGlobWildcard { tool, index: 0, .. } if tool == "bash"
+        ));
+    }
+
+    #[test]
+    fn command_glob_rule_with_a_trailing_wildcard_loads_successfully() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "good-command-wildcard-position",
+            r#"
+[tool.bash]
+rules = [
+  { command = ["git", "status", "*"], verdict = "auto_approved" },
+]
+"#,
+        );
+
+        ProfileConfig::load(temp.path(), "good-command-wildcard-position")
+            .expect("a trailing `*` as the last command token must be accepted");
+    }
+
+    #[test]
+    fn outside_workspace_named_rule_under_tool_bash_is_a_hard_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "bad-named-rule",
+            r#"
+[tool.bash]
+rules = [
+  { rule = "outside_workspace", verdict = "auto_denied" },
+]
+"#,
+        );
+
+        let error = ProfileConfig::load(temp.path(), "bad-named-rule")
+            .expect_err("outside_workspace under [tool.bash] must be rejected");
+        assert!(matches!(
+            error,
+            ConfigError::InvalidSandboxRuleKind { tool, index: 0, .. } if tool == "bash"
+        ));
+    }
+
+    #[test]
+    fn backgrounded_named_rule_under_a_path_tool_is_a_hard_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "bad-named-rule-path-tool",
+            r#"
+[tool.write]
+rules = [
+  { rule = "backgrounded", verdict = "auto_denied" },
+]
+"#,
+        );
+
+        let error = ProfileConfig::load(temp.path(), "bad-named-rule-path-tool")
+            .expect_err("backgrounded under [tool.write] must be rejected");
+        assert!(matches!(
+            error,
+            ConfigError::InvalidSandboxRuleKind { tool, index: 0, .. } if tool == "write"
+        ));
     }
 
     #[test]

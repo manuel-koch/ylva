@@ -113,6 +113,27 @@ pub enum ConfigError {
         path.display()
     )]
     InvalidEnvironmentReference { path: PathBuf, reference: String },
+    #[error(
+        "profile config at {} has an invalid sandbox rule for tool '{tool}' \
+         ([tool.{tool}].rules[{index}]): expected {expected}",
+        path.display()
+    )]
+    InvalidSandboxRuleKind {
+        path: PathBuf,
+        tool: String,
+        index: usize,
+        expected: String,
+    },
+    #[error(
+        "profile config at {} has a misplaced wildcard in [tool.{tool}].rules[{index}].command: \
+         `*`/`**` only match trailing arguments, so they may only appear as the last element",
+        path.display()
+    )]
+    MisplacedCommandGlobWildcard {
+        path: PathBuf,
+        tool: String,
+        index: usize,
+    },
     #[error("cannot resolve the home directory for ~/.ylva")]
     HomeDirectoryNotFound,
 }

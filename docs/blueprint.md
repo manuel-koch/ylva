@@ -1388,9 +1388,13 @@ queues a steer and injects it at the next natural point rather than cancelling
 anything.
 
 **Headless mode safety:** Mutating tools (`write`, `edit`, `bash`) require
-explicit `--auto-approve-write` or `--auto-approve-shell` flags. If invoked without
-the corresponding flag, the agent emits exit code `4` and a descriptive error to
-stderr. A script that forgets the flag fails loudly, never silently executes `rm -rf /`.
+explicit `--auto-approve-write`, `--auto-approve-edit`, or `--auto-approve-bash`
+flags (implemented; see `docs/cli-options.md`/`docs/configuration.md`'s
+"`bash` command rules" — the `--auto-approve-shell` name below is this
+blueprint's original placeholder for what shipped as `--auto-approve-bash`).
+If invoked without the corresponding flag, the agent emits exit code `4` and
+a descriptive error to stderr. A script that forgets the flag fails loudly,
+never silently executes `rm -rf /`.
 
 ### F. Rich Chat Rendering
 
@@ -1829,7 +1833,8 @@ definition for that profile only.
 ##### Safety Inheritance
 
 Safety settings (e.g., whether `bash` requires approval) are **inherited** from
-the parent agent. In headless mode, `--auto-approve-shell` applies to
+the parent agent. In headless mode, `--auto-approve-bash` (shipped under this
+name; see the note near "Headless mode safety" above) applies to
 child agents as well.
 
 #### Child-Agent Lifecycle
@@ -2289,7 +2294,7 @@ ylva --prompt "generate tests" --format json
 ylva --prompt "refactor everything" \
   --auto-approve-read \
   --auto-approve-write \
-  --auto-approve-shell
+  --auto-approve-bash
 
 # Suppress stderr progress indicators
 ylva --prompt "quick check" --quiet
@@ -2308,7 +2313,7 @@ ylva --prompt "quick check" --quiet
 Streaming response...
 Executing tool: read("src/main.rs") → 87 lines
 Executing tool: write("src/lib.rs") → pending approval
-Error: Tool 'bash' requires --auto-approve-shell or interactive mode
+Error: Tool 'bash' requires --auto-approve-bash or interactive mode
 Done.
 ```
 
@@ -2328,7 +2333,9 @@ Read-only tools (`read`, `glob`, `search`) execute automatically. Mutating tools
 explicit flags:
 
 - `--auto-approve-write` → `write`, `edit`
-- `--auto-approve-shell` → `bash`
+- `--auto-approve-bash` → `bash` (implemented; see `docs/cli-options.md`/
+  `docs/configuration.md`'s "`bash` command rules" — this superseded the
+  `--auto-approve-shell` name originally sketched in this blueprint)
 
 The `clarify` tool is **not registered** in headless mode. The model never sees it;
 if a decision is needed, the model must make a best-effort guess or error out.
@@ -3029,7 +3036,10 @@ for scripting and automation.
 
 - [ ] Buffer stdout output; emit final JSON object on `--format json`
 
-- [ ] Implement granular `--auto-approve-read`, `--auto-approve-write`, `--auto-approve-shell` flags
+- [ ] Implement granular `--auto-approve-read`, `--auto-approve-write`, `--auto-approve-bash` flags
+      (`--auto-approve-write`/`--auto-approve-edit`/`--auto-approve-bash`/`--auto-approve-spawn`
+      already implemented ahead of this phase; `--auto-approve-read` remains outstanding — see
+      `docs/cli-options.md`)
 
 - [ ] Define exit codes: `0` success, `1` error, `2` interrupt, `3` tool failure, `4` approval denied
 
@@ -3071,9 +3081,10 @@ for scripting and automation.
 9. **Double-append on Cancelled → Done race.** If the cancel fires just as the stream naturally ends,
    ensure you don't append the assistant message twice. Use a `stream_finished: AtomicBool` inside
    the streaming task.
-10. **Headless mode must never auto-approve dangerous tools by default.** If `--auto-approve-shell`
-    is not passed, `bash` must exit with code `4` and a clear error. A script that forgets the flag
-    should fail loudly, not silently execute `rm -rf /`.
+10. **Headless mode must never auto-approve dangerous tools by default.** If `--auto-approve-bash`
+    (implemented; superseded the `--auto-approve-shell` placeholder name) is not passed, `bash`
+    must exit with code `4` and a clear error. A script that forgets the flag should fail loudly,
+    not silently execute `rm -rf /`.
 11. **Context ownership confusion.** The inner streaming task must never hold a mutable reference to
     `Context`. Send completion events back to the outer agent loop via channel so the outer loop
     remains the sole writer.

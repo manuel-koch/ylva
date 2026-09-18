@@ -19,7 +19,8 @@ use std::sync::Arc;
 use ylva::llm::provider_registry::{ProviderEnv, ProviderRegistry, ProviderSelection};
 use ylva::logging::{init_logging, LogConfig, LogFormat};
 use ylva::{
-    AgentFactory, App, ConsoleApp, Engine, EngineImpl, ProfileConfig, TuiApp, DEFAULT_TUI_TOOLS,
+    AgentFactory, App, AutoApproveTool, ConsoleApp, Engine, EngineImpl, ProfileConfig, TuiApp,
+    DEFAULT_TUI_TOOLS,
 };
 
 /// Fallback demo prompt used when neither `--prompt` nor piped stdin supplies
@@ -213,9 +214,18 @@ fn main() {
         }
     };
 
-    let auto_approve_edit = args.contains(&"--auto-approve-edit".to_string());
-    let auto_approve_write = args.contains(&"--auto-approve-write".to_string());
-    let auto_approve_spawn = args.contains(&"--auto-approve-spawn".to_string());
+    // Maps each `--auto-approve-*` flag to its `AutoApproveTool` variant;
+    // `read`/`glob`/`search` mirror `write`/`edit`/`bash`/`spawn` (`clarify`
+    // has no auto-approve concept — it always requires approval).
+    let auto_approve_flags: [(&str, AutoApproveTool); 7] = [
+        ("--auto-approve-read", AutoApproveTool::Read),
+        ("--auto-approve-write", AutoApproveTool::Write),
+        ("--auto-approve-glob", AutoApproveTool::Glob),
+        ("--auto-approve-bash", AutoApproveTool::Bash),
+        ("--auto-approve-search", AutoApproveTool::Search),
+        ("--auto-approve-edit", AutoApproveTool::Edit),
+        ("--auto-approve-spawn", AutoApproveTool::Spawn),
+    ];
 
     let factory_without_store = {
         // Engines come from the profile's `[engines.*]` tables when it defines
@@ -251,14 +261,10 @@ fn main() {
         if use_tui {
             factory = factory.with_allowed_tools(DEFAULT_TUI_TOOLS);
         }
-        if auto_approve_edit {
-            factory = factory.with_auto_approve_edit();
-        }
-        if auto_approve_write {
-            factory = factory.with_auto_approve_write();
-        }
-        if auto_approve_spawn {
-            factory = factory.with_auto_approve_spawn();
+        for (flag, tool) in auto_approve_flags {
+            if args.contains(&flag.to_string()) {
+                factory = factory.with_auto_approve(tool);
+            }
         }
         factory = factory.with_system_prompt(root_system_prompt.clone());
         factory

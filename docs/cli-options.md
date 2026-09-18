@@ -16,8 +16,12 @@ Reference for Ylva's command-line interface.
 | `--log-level <level>` | enum | `trace`, `debug`, `info`, `warn`, `error` | `info` | Minimum severity written. Selecting a level includes it and all higher-severity levels (`trace < debug < info < warn < error`). |
 | `--log-format <format>` | enum | `text`, `json` | `text` | Output format. `text` is human-readable; `json` produces JSONL (one JSON object per line). |
 | `--conversation-id <uuid>` | uuid | any persisted session id | *none* | Resume the named session: its `.jsonl` file is re-attached for append instead of a fresh session being started. An unknown id is a hard error (exit code `2`) — never a silent fresh session. See `docs/persistence.md`. |
-| `--auto-approve-edit` | none | — | — | Skip the human-approval prompt for `edit` tool calls. |
+| `--auto-approve-read` | none | — | — | Skip the human-approval prompt for `read` tool calls. |
 | `--auto-approve-write` | none | — | — | Skip the human-approval prompt for `write` tool calls. |
+| `--auto-approve-glob` | none | — | — | Skip the human-approval prompt for `glob` tool calls. |
+| `--auto-approve-bash` | none | — | — | Skip the human-approval prompt for `bash` tool calls. |
+| `--auto-approve-search` | none | — | — | Skip the human-approval prompt for `search` tool calls. |
+| `--auto-approve-edit` | none | — | — | Skip the human-approval prompt for `edit` tool calls. |
 | `--auto-approve-spawn` | none | — | — | Skip the human-approval prompt for `spawn_subagent` tool calls. See `can_spawn` in `docs/configuration.md` and "Child-agent delegation" in `docs/features.md`. |
 
 An invalid `--color`, `--log-level`, `--log-format`, or `--conversation-id`

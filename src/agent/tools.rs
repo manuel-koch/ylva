@@ -564,6 +564,21 @@ pub const DEFAULT_TUI_TOOLS: &[&str] = &[
     clarify::ClarifyTool::NAME,
 ];
 
+/// One tool whose approval prompt can be bypassed via a `--auto-approve-*`
+/// CLI flag or [`ToolRegistryConfig::auto_approve`] entry. `clarify` has no
+/// variant here: it always requires user approval (there is no sandbox or
+/// bypass concept for it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AutoApproveTool {
+    Read,
+    Write,
+    Glob,
+    Bash,
+    Search,
+    Edit,
+    Spawn,
+}
+
 /// Configuration for [`default_registry`], controlling per-tool approval policies
 /// and the explicit set of tools to register.
 ///
@@ -572,16 +587,10 @@ pub const DEFAULT_TUI_TOOLS: &[&str] = &[
 /// [`DEFAULT_CLI_TOOLS`] or [`DEFAULT_TUI_TOOLS`] explicitly.
 #[derive(Debug)]
 pub struct ToolRegistryConfig {
-    /// When `true`, `edit` tool calls are auto-approved without a user prompt.
-    /// Intended for automated / e2e testing where no human is present to approve.
-    pub auto_approve_edit: bool,
-    /// When `true`, `write` tool calls are auto-approved without a user prompt.
-    /// Intended for automated / e2e testing where no human is present to approve.
-    pub auto_approve_write: bool,
-    /// When `true`, `spawn_subagent` tool calls are auto-approved without a
-    /// user prompt. Intended for automated / e2e testing where no human is
-    /// present to approve.
-    pub auto_approve_spawn: bool,
+    /// The set of tools whose approval prompt is bypassed (auto-approved)
+    /// without a user prompt. Intended for automated / e2e testing where no
+    /// human is present to approve.
+    pub auto_approve: std::collections::HashSet<AutoApproveTool>,
     /// Explicit list of tool names to register. Only tools whose name appears
     /// here are added to the registry; all others are skipped regardless of
     /// whether they exist in the candidate pool.
@@ -609,9 +618,7 @@ impl Default for ToolRegistryConfig {
     /// Defaults to [`DEFAULT_CLI_TOOLS`] (the six standard headless tools).
     fn default() -> Self {
         Self {
-            auto_approve_edit: false,
-            auto_approve_write: false,
-            auto_approve_spawn: false,
+            auto_approve: std::collections::HashSet::new(),
             allowed_tools: DEFAULT_CLI_TOOLS.iter().map(|s| s.to_string()).collect(),
             include_spawn_subagent: false,
             spawn_agent_types: Vec::new(),
@@ -637,60 +644,56 @@ pub fn default_registry(
     // Builds a tool's SandboxContext, replacing the built-in default floor
     // with `config.tool_sandbox_rules`'s entry for `tool_name` (a profile's
     // `[tool.<name>]` table) when one is configured; otherwise the default
-    // floor (`outside_workspace`/`dot_path` → `AutoDenied`) applies.
-    let sandbox_context_for = |tool_name: &str| -> SandboxContext {
+    // floor (`outside_workspace`/`dot_path` → `AutoDenied`) applies. When
+    // `auto_approve_tool` is set in `config.auto_approve`, a catch-all
+    // `AutoApproved` rule is appended last, so it always wins regardless of
+    // `[tool.<name>]` config.
+    let sandbox_context_for = |tool_name: &str, auto_approve_tool: AutoApproveTool| {
         let mut context = SandboxContext::new(Arc::clone(&sandbox));
         if let Some(rules) = config.tool_sandbox_rules.get(tool_name) {
             context = context.with_configured_rules(rules.clone());
         }
+        if config.auto_approve.contains(&auto_approve_tool) {
+            context = context.with_rule(crate::sandbox::SandboxRule {
+                verdict: crate::sandbox::ApprovalCheck::AutoApproved,
+                pattern: ::glob::Pattern::new("**").expect("** is a valid glob"),
+            });
+        }
         context
     };
 
-    if allowed.iter().any(|name| name == read::ReadTool::NAME) {
-        registry.register(Arc::new(read::ReadTool::new(sandbox_context_for(
-            read::ReadTool::NAME,
-        ))));
-    }
-    if allowed.iter().any(|name| name == write::WriteTool::NAME) {
-        registry.register(Arc::new(write::WriteTool::new({
-            let mut context = sandbox_context_for(write::WriteTool::NAME);
-            if config.auto_approve_write {
-                context = context.with_rule(crate::sandbox::SandboxRule {
-                    verdict: crate::sandbox::ApprovalCheck::AutoApproved,
-                    pattern: ::glob::Pattern::new("**").expect("** is a valid glob"),
-                });
+    // Registers `name` only when present in `allowed`, wiring its sandbox
+    // context via `sandbox_context_for` and building the tool with `make`.
+    let mut register_sandboxed_tool =
+        |name: &'static str,
+         auto_approve_tool: AutoApproveTool,
+         make: &dyn Fn(SandboxContext) -> Arc<dyn Tool>| {
+            if allowed.iter().any(|allowed_name| allowed_name == name) {
+                registry.register(make(sandbox_context_for(name, auto_approve_tool)));
             }
-            context
-        })));
-    }
-    if allowed.iter().any(|name| name == glob::GlobTool::NAME) {
-        registry.register(Arc::new(glob::GlobTool::new(sandbox_context_for(
-            glob::GlobTool::NAME,
-        ))));
-    }
-    if allowed.iter().any(|name| name == bash::BashTool::NAME) {
-        registry.register(Arc::new(bash::BashTool::new(sandbox_context_for(
-            bash::BashTool::NAME,
-        ))));
-    }
-    if allowed.iter().any(|name| name == search::SearchTool::NAME) {
-        registry.register(Arc::new(search::SearchTool::new(sandbox_context_for(
-            search::SearchTool::NAME,
-        ))));
-    }
-    if allowed.iter().any(|name| name == edit::EditTool::NAME) {
-        let edit_tool = {
-            let mut context = sandbox_context_for(edit::EditTool::NAME);
-            if config.auto_approve_edit {
-                context = context.with_rule(crate::sandbox::SandboxRule {
-                    verdict: crate::sandbox::ApprovalCheck::AutoApproved,
-                    pattern: ::glob::Pattern::new("**").expect("** is a valid glob"),
-                });
-            }
-            edit::EditTool::new(context)
         };
-        registry.register(Arc::new(edit_tool));
-    }
+
+    register_sandboxed_tool(read::ReadTool::NAME, AutoApproveTool::Read, &|context| {
+        Arc::new(read::ReadTool::new(context))
+    });
+    register_sandboxed_tool(write::WriteTool::NAME, AutoApproveTool::Write, &|context| {
+        Arc::new(write::WriteTool::new(context))
+    });
+    register_sandboxed_tool(glob::GlobTool::NAME, AutoApproveTool::Glob, &|context| {
+        Arc::new(glob::GlobTool::new(context))
+    });
+    register_sandboxed_tool(bash::BashTool::NAME, AutoApproveTool::Bash, &|context| {
+        Arc::new(bash::BashTool::new(context))
+    });
+    register_sandboxed_tool(
+        search::SearchTool::NAME,
+        AutoApproveTool::Search,
+        &|context| Arc::new(search::SearchTool::new(context)),
+    );
+    register_sandboxed_tool(edit::EditTool::NAME, AutoApproveTool::Edit, &|context| {
+        Arc::new(edit::EditTool::new(context))
+    });
+
     if allowed
         .iter()
         .any(|name| name == clarify::ClarifyTool::NAME)
@@ -702,8 +705,10 @@ pub fn default_registry(
     // the latter is injected only into `Role::Child` registries.
     if config.include_spawn_subagent {
         registry.register(Arc::new(
-            spawn_subagent::SpawnSubagentTool::new(config.auto_approve_spawn)
-                .with_agent_types(config.spawn_agent_types),
+            spawn_subagent::SpawnSubagentTool::new(
+                config.auto_approve.contains(&AutoApproveTool::Spawn),
+            )
+            .with_agent_types(config.spawn_agent_types),
         ));
     }
     if let Some(agent_finish_config) = config.agent_finish.clone() {
@@ -1006,7 +1011,7 @@ mod tests {
         let registry = default_registry(
             sandbox,
             ToolRegistryConfig {
-                auto_approve_write: true,
+                auto_approve: std::collections::HashSet::from([AutoApproveTool::Write]),
                 tool_sandbox_rules,
                 ..ToolRegistryConfig::default()
             },
@@ -1018,6 +1023,198 @@ mod tests {
             write_tool.needs_approval(&serde_json::json!({ "path": dot_path, "content": "x" })),
             ApprovalCheck::AutoApproved,
             "--auto-approve-write's catch-all rule must still win over a configured deny rule"
+        );
+    }
+
+    #[test]
+    fn auto_approve_bash_wins_over_configured_deny_rule() {
+        use crate::sandbox::{ApprovalVerdictConfig, NamedSandboxRule};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sandbox = std::sync::Arc::new(std::sync::RwLock::new(
+            crate::sandbox::Sandbox::with_root(temp.path().to_path_buf()),
+        ));
+        let mut tool_sandbox_rules = HashMap::new();
+        tool_sandbox_rules.insert(
+            bash::BashTool::NAME.to_string(),
+            vec![crate::sandbox::SandboxRuleConfig::Named {
+                rule: NamedSandboxRule::Backgrounded,
+                verdict: ApprovalVerdictConfig::AutoDenied,
+                reason: None,
+            }],
+        );
+        let registry = default_registry(
+            sandbox,
+            ToolRegistryConfig {
+                auto_approve: std::collections::HashSet::from([AutoApproveTool::Bash]),
+                tool_sandbox_rules,
+                ..ToolRegistryConfig::default()
+            },
+        );
+
+        let bash_tool = registry.get(bash::BashTool::NAME).expect("bash tool");
+        assert_eq!(
+            bash_tool.needs_approval(&serde_json::json!({ "command": "sleep 10 &" })),
+            ApprovalCheck::AutoApproved,
+            "--auto-approve-bash's catch-all rule must still win over a configured deny rule"
+        );
+    }
+
+    #[test]
+    fn auto_approve_read_wins_over_configured_deny_rule() {
+        use crate::sandbox::{ApprovalVerdictConfig, NamedSandboxRule};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sandbox = std::sync::Arc::new(std::sync::RwLock::new(
+            crate::sandbox::Sandbox::with_root(temp.path().to_path_buf()),
+        ));
+        let mut tool_sandbox_rules = HashMap::new();
+        tool_sandbox_rules.insert(
+            read::ReadTool::NAME.to_string(),
+            vec![crate::sandbox::SandboxRuleConfig::Named {
+                rule: NamedSandboxRule::DotPath,
+                verdict: ApprovalVerdictConfig::AutoDenied,
+                reason: None,
+            }],
+        );
+        let registry = default_registry(
+            sandbox,
+            ToolRegistryConfig {
+                auto_approve: std::collections::HashSet::from([AutoApproveTool::Read]),
+                tool_sandbox_rules,
+                ..ToolRegistryConfig::default()
+            },
+        );
+
+        let dot_path = temp.path().join(".env").to_string_lossy().to_string();
+        let read_tool = registry.get(read::ReadTool::NAME).expect("read tool");
+        assert_eq!(
+            read_tool.needs_approval(&serde_json::json!({ "path": dot_path })),
+            ApprovalCheck::AutoApproved,
+            "--auto-approve-read's catch-all rule must still win over a configured deny rule"
+        );
+    }
+
+    #[test]
+    fn auto_approve_glob_wins_over_configured_deny_rule() {
+        use crate::sandbox::{ApprovalVerdictConfig, NamedSandboxRule};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sandbox = std::sync::Arc::new(std::sync::RwLock::new(
+            crate::sandbox::Sandbox::with_root(temp.path().to_path_buf()),
+        ));
+        let mut tool_sandbox_rules = HashMap::new();
+        tool_sandbox_rules.insert(
+            glob::GlobTool::NAME.to_string(),
+            vec![crate::sandbox::SandboxRuleConfig::Named {
+                rule: NamedSandboxRule::OutsideWorkspace,
+                verdict: ApprovalVerdictConfig::AutoDenied,
+                reason: None,
+            }],
+        );
+        let registry = default_registry(
+            sandbox,
+            ToolRegistryConfig {
+                auto_approve: std::collections::HashSet::from([AutoApproveTool::Glob]),
+                tool_sandbox_rules,
+                ..ToolRegistryConfig::default()
+            },
+        );
+
+        let outside = temp
+            .path()
+            .parent()
+            .expect("temp dir has a parent")
+            .join("other")
+            .to_string_lossy()
+            .to_string();
+        let glob_tool = registry.get(glob::GlobTool::NAME).expect("glob tool");
+        assert_eq!(
+            glob_tool.needs_approval(&serde_json::json!({ "pattern": "*", "path": outside })),
+            ApprovalCheck::AutoApproved,
+            "--auto-approve-glob's catch-all rule must still win over a configured deny rule"
+        );
+    }
+
+    #[test]
+    fn auto_approve_search_wins_over_configured_deny_rule() {
+        use crate::sandbox::{ApprovalVerdictConfig, NamedSandboxRule};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sandbox = std::sync::Arc::new(std::sync::RwLock::new(
+            crate::sandbox::Sandbox::with_root(temp.path().to_path_buf()),
+        ));
+        let mut tool_sandbox_rules = HashMap::new();
+        tool_sandbox_rules.insert(
+            search::SearchTool::NAME.to_string(),
+            vec![crate::sandbox::SandboxRuleConfig::Named {
+                rule: NamedSandboxRule::OutsideWorkspace,
+                verdict: ApprovalVerdictConfig::AutoDenied,
+                reason: None,
+            }],
+        );
+        let registry = default_registry(
+            sandbox,
+            ToolRegistryConfig {
+                auto_approve: std::collections::HashSet::from([AutoApproveTool::Search]),
+                tool_sandbox_rules,
+                ..ToolRegistryConfig::default()
+            },
+        );
+
+        let outside = temp
+            .path()
+            .parent()
+            .expect("temp dir has a parent")
+            .join("other")
+            .to_string_lossy()
+            .to_string();
+        let search_tool = registry.get(search::SearchTool::NAME).expect("search tool");
+        assert_eq!(
+            search_tool.needs_approval(&serde_json::json!({ "pattern": "foo", "path": outside })),
+            ApprovalCheck::AutoApproved,
+            "--auto-approve-search's catch-all rule must still win over a configured deny rule"
+        );
+    }
+
+    #[test]
+    fn default_registry_wires_configured_command_glob_rules_for_bash() {
+        use crate::sandbox::ApprovalVerdictConfig;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sandbox = std::sync::Arc::new(std::sync::RwLock::new(
+            crate::sandbox::Sandbox::with_root(temp.path().to_path_buf()),
+        ));
+        let mut tool_sandbox_rules = HashMap::new();
+        tool_sandbox_rules.insert(
+            bash::BashTool::NAME.to_string(),
+            vec![crate::sandbox::SandboxRuleConfig::CommandGlob {
+                command: vec!["git".to_string(), "status".to_string()],
+                verdict: ApprovalVerdictConfig::AutoApproved,
+                reason: None,
+            }],
+        );
+        let registry = default_registry(
+            sandbox,
+            ToolRegistryConfig {
+                tool_sandbox_rules,
+                ..ToolRegistryConfig::default()
+            },
+        );
+
+        let bash_tool = registry.get(bash::BashTool::NAME).expect("bash tool");
+        assert_eq!(
+            bash_tool.needs_approval(&serde_json::json!({ "command": "git status" })),
+            ApprovalCheck::AutoApproved,
+            "[tool.bash]'s configured CommandGlob rule must resolve through default_registry"
+        );
+        // A different command not matched by the configured rule falls back
+        // to the (now fully-replaced, empty-otherwise) configured list, which
+        // abstains -> the tool's own conservative default (UserApprovalRequired).
+        assert_eq!(
+            bash_tool.needs_approval(&serde_json::json!({ "command": "git log" })),
+            ApprovalCheck::UserApprovalRequired,
+            "[tool.bash]'s configured rules fully replace the default floor"
         );
     }
 

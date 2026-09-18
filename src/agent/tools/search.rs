@@ -17,8 +17,9 @@
 //!
 //! Results are formatted in grep style (`filepath:lineno: content` for
 //! matches, `filepath-lineno- content` for context lines). One
-//! [`SearchResultSection`] is emitted per matching file. Total output is capped
-//! at [`SEARCH_OUTPUT_LIMIT_LINES`] whole output lines.
+//! [`SearchResultSection`] is emitted per matching file. Total output is
+//! capped at [`SEARCH_OUTPUT_LIMIT_LINES`] whole output lines or
+//! [`SEARCH_OUTPUT_LIMIT_BYTES`], whichever is hit first.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -38,6 +39,14 @@ use crate::sandbox::{ApprovalCheck, SandboxContext};
 /// beyond this cap are discarded; the result's `metadata()` will carry
 /// `truncated`.
 pub const SEARCH_OUTPUT_LIMIT_LINES: usize = 1000;
+
+/// Maximum number of bytes of line/match content in the combined search
+/// output, independent of [`SEARCH_OUTPUT_LIMIT_LINES`]. Bounds worst-case
+/// memory/context usage when matched lines are very long (e.g. a match
+/// inside a minified file) that the line cap alone cannot catch. Whichever
+/// cap is hit first stops collection; the result's `metadata()` will carry
+/// `truncated`.
+pub const SEARCH_OUTPUT_LIMIT_BYTES: usize = 65_536;
 
 /// Number of bytes inspected to detect binary files (null-byte heuristic).
 const BINARY_PROBE_BYTES: usize = 8 * 1024;
@@ -296,7 +305,7 @@ impl Tool for SearchTool {
         `filepath:lineno: content` matches, `filepath-lineno- content` context). Alternation is \
         `|`, e.g. `foo|bar` (not the English words `OR`/`AND`, which are matched as literal \
         text). Binary files \
-        skipped; output capped at 100 KB. `glob` (e.g. `**/*.rs`) restricts searched files. \
+        skipped; output capped at 64 KB. `glob` (e.g. `**/*.rs`) restricts searched files. \
         `files_with_matches: true` returns only file paths. `only_matches: true` returns only \
         matched substrings, like `grep -o`. `files_with_matches`/`only_matches` are mutually \
         exclusive."
@@ -377,17 +386,28 @@ fn is_binary_file(path: &Path) -> bool {
     probe[..bytes_read].contains(&0u8)
 }
 
-/// Record a single output line against the line-count cap.
-/// Returns `false` when the cap is exceeded and the line must be discarded.
-fn record_line(line_count: &mut usize, truncated: &mut bool) -> bool {
+/// Record a single output line against the line-count and byte-count caps.
+/// `content_len` is the byte length of the line's content about to be
+/// recorded (checked before it is added, so a single oversized line cannot
+/// blow past [`SEARCH_OUTPUT_LIMIT_BYTES`]).
+/// Returns `false` when either cap is exceeded and the line must be discarded.
+fn record_line(
+    line_count: &mut usize,
+    byte_count: &mut usize,
+    content_len: usize,
+    truncated: &mut bool,
+) -> bool {
     if *truncated {
         return false;
     }
-    if *line_count >= SEARCH_OUTPUT_LIMIT_LINES {
+    if *line_count >= SEARCH_OUTPUT_LIMIT_LINES
+        || *byte_count + content_len > SEARCH_OUTPUT_LIMIT_BYTES
+    {
         *truncated = true;
         return false;
     }
     *line_count += 1;
+    *byte_count += content_len;
     true
 }
 
@@ -468,6 +488,7 @@ fn search_blocking(
 ) -> SearchResult {
     let mut sections: Vec<SearchResultSection> = Vec::new();
     let mut line_count: usize = 0;
+    let mut byte_count: usize = 0;
     let mut truncated = false;
 
     let walker = ignore::WalkBuilder::new(root).git_ignore(true).build();
@@ -542,7 +563,12 @@ fn search_blocking(
 
         if files_with_matches {
             // Only record the file path; skip all line content.
-            if !record_line(&mut line_count, &mut truncated) {
+            if !record_line(
+                &mut line_count,
+                &mut byte_count,
+                file_path_str.len(),
+                &mut truncated,
+            ) {
                 break;
             }
             sections.push(SearchResultSection {
@@ -561,7 +587,12 @@ fn search_blocking(
                 if let Some(line) = lines.get(lineno - 1) {
                     for matched in regex.find_iter(line) {
                         let match_text = matched.as_str().to_string();
-                        if !record_line(&mut line_count, &mut truncated) {
+                        if !record_line(
+                            &mut line_count,
+                            &mut byte_count,
+                            match_text.len(),
+                            &mut truncated,
+                        ) {
                             break 'outer;
                         }
                         search_result_lines.push(SearchResultLine {
@@ -615,7 +646,12 @@ fn search_blocking(
                     is_match,
                     content: (*line).to_string(),
                 };
-                if !record_line(&mut line_count, &mut truncated) {
+                if !record_line(
+                    &mut line_count,
+                    &mut byte_count,
+                    search_result_line.content.len(),
+                    &mut truncated,
+                ) {
                     break;
                 }
                 search_result_lines.push(search_result_line);
@@ -836,8 +872,10 @@ mod tests {
     fn search_output_truncated_at_1000_line_cap() {
         crate::test_support::run_locked(async {
             let dir = TempDir::new().expect("tempdir");
-            // Create enough matching lines to exceed the 1000-line cap.
-            let line = "a".repeat(100) + " NEEDLE here\n";
+            // Create enough matching lines to exceed the 1000-line cap, each
+            // short enough that the combined output stays under the byte cap
+            // so only the line cap is exercised here.
+            let line = "NEEDLE\n";
             let content = line.repeat(1500);
             std::fs::write(dir.path().join("big.txt"), &content).expect("write");
             let result = search_files(SearchInputArgs {
@@ -864,6 +902,46 @@ mod tests {
             let obj = meta.as_object().expect("metadata is a JSON object");
             assert!(obj.contains_key("truncated"), "truncated key expected");
             assert_eq!(obj["truncated"], json!(true));
+        });
+    }
+
+    #[test]
+    fn search_output_truncated_at_byte_cap_with_few_huge_lines() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            // A handful of matching lines, each far larger than the byte cap
+            // divided by the line cap, so the byte cap (not the line cap)
+            // must trigger truncation.
+            let huge_line = "a".repeat(SEARCH_OUTPUT_LIMIT_BYTES) + " NEEDLE\n";
+            let content = huge_line.repeat(3);
+            std::fs::write(dir.path().join("huge.txt"), &content).expect("write");
+            let result = search_files(SearchInputArgs {
+                pattern: "NEEDLE".to_string(),
+                path: Some(dir.path().display().to_string()),
+                case_sensitive: true,
+                context_lines: 0,
+                glob: None,
+                files_with_matches: false,
+                only_matches: false,
+            })
+            .await
+            .expect("search ok");
+            assert!(result.truncated, "output must be truncated");
+            let total_emitted_lines: usize = result.sections.iter().map(|s| s.lines.len()).sum();
+            assert!(
+                total_emitted_lines < SEARCH_OUTPUT_LIMIT_LINES,
+                "byte cap must trigger before the line cap: got {total_emitted_lines} lines"
+            );
+            let total_emitted_bytes: usize = result
+                .sections
+                .iter()
+                .flat_map(|s| s.lines.iter())
+                .map(|line| line.content.len())
+                .sum();
+            assert!(
+                total_emitted_bytes <= SEARCH_OUTPUT_LIMIT_BYTES,
+                "output must never exceed the byte cap: got {total_emitted_bytes} bytes"
+            );
         });
     }
 

@@ -45,6 +45,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 toml = "1.1.5"
 dotenvy = "0.15"
 serde_yaml = "0.9"
+tree-sitter = "0.25"
+tree-sitter-bash = "0.25"
 
 [build-dependencies]
 time = { version = "0.3", features = ["formatting", "macros"] }

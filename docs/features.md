@@ -67,8 +67,11 @@ Initial user turn resolution: `--prompt <text>`, else piped stdin read to EOF
 (only when stdin is not a terminal) — e.g. `echo '…' | ylva`.
 
 Tool approval is host-driven: `read`/`glob` are auto-approved immediately;
-`write` and `edit` require explicit user approval; `bash` always requires
-user approval.
+`write` and `edit` require explicit user approval by default; `bash`
+requires user approval by default but is subject to structural sandbox
+rules (backgrounded commands, variable-assignment prefixes, unquoted glob/
+brace expansion) and configurable `[tool.bash]` rules — see "`bash` command
+rules" in [configuration](./configuration.md#bash-command-rules).
 
 Tool status lines render as `[tool] <title> …` (e.g. `[tool] Read docs/features.md [limit=32]`)
 

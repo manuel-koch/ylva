@@ -24,10 +24,10 @@ use tokio::sync::{mpsc, Notify};
 use tokio_util::sync::CancellationToken;
 
 use ylva::{
-    cli_driver::run_cli_to, default_registry, AgentCommand, AgentConfig, AgentLoop, DeltaChunk,
-    Engine, EngineConfig, EngineImpl, Message, MockEvent, ModelInfo, ProfileConfig, Provider,
-    ProviderModelOption, Role, Sandbox, StreamEvent, ToolRegistry, ToolRegistryConfig, ToolSchema,
-    UiUpdate,
+    cli_driver::run_cli_to, default_registry, AgentCommand, AgentConfig, AgentLoop,
+    AutoApproveTool, DeltaChunk, Engine, EngineConfig, EngineImpl, Message, MockEvent, ModelInfo,
+    ProfileConfig, Provider, ProviderModelOption, Role, Sandbox, StreamEvent, ToolRegistry,
+    ToolRegistryConfig, ToolSchema, UiUpdate,
 };
 
 /// A provider that emits `phase_one` on the first `chat()` call and
@@ -349,7 +349,7 @@ async fn child_spawn_after_root_model_switch_uses_the_root_active_engine() {
         ("default".to_string(), default_engine as Arc<dyn Engine>),
         ("alternate".to_string(), alternate_engine as Arc<dyn Engine>),
     ]))
-    .with_auto_approve_spawn();
+    .with_auto_approve(AutoApproveTool::Spawn);
     let profile = ProfileConfig {
         default_engine: "default".to_string(),
         agents: std::collections::HashMap::from([(
@@ -442,7 +442,7 @@ async fn running_child_uses_a_shared_engine_switch_on_its_next_request() {
             alternate_engine.clone() as Arc<dyn Engine>,
         ),
     ]))
-    .with_auto_approve_spawn();
+    .with_auto_approve(AutoApproveTool::Spawn);
     let profile = ProfileConfig {
         default_engine: "default".to_string(),
         agents: std::collections::HashMap::from([(
@@ -549,7 +549,7 @@ async fn child_with_explicit_engine_override_keeps_its_named_engine() {
             specialized_engine.clone() as Arc<dyn Engine>,
         ),
     ]))
-    .with_auto_approve_spawn();
+    .with_auto_approve(AutoApproveTool::Spawn);
     let profile = ProfileConfig {
         default_engine: "default".to_string(),
         agents: std::collections::HashMap::from([
@@ -834,7 +834,7 @@ async fn run_cli_waits_for_spawned_child_before_ending_conversation() {
         std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new())),
         ToolRegistryConfig {
             include_spawn_subagent: true,
-            auto_approve_spawn: true,
+            auto_approve: std::collections::HashSet::from([AutoApproveTool::Spawn]),
             ..ToolRegistryConfig::default()
         },
     ));
@@ -999,7 +999,7 @@ async fn console_app_reacts_to_child_finish_through_real_agent_factory_and_run_c
         "default".to_string(),
         engine,
     )]))
-    .with_auto_approve_spawn();
+    .with_auto_approve(AutoApproveTool::Spawn);
 
     let (agent, ui_rx) = factory
         .create(&profile, "default", ylva::Role::Root)
@@ -1167,7 +1167,7 @@ async fn spawned_child_bash_approval_is_routed_to_the_child_not_the_root() {
         "default".to_string(),
         engine,
     )]))
-    .with_auto_approve_spawn();
+    .with_auto_approve(AutoApproveTool::Spawn);
 
     let (agent, ui_rx) = factory
         .create(&profile, "default", ylva::Role::Root)

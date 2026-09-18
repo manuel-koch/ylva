@@ -1,9 +1,11 @@
 +++
-description = "An agent that can perform read-only discovery tasks in workspace solely using builtin tools and a local AI-Model."
+description = "An agent that can perform read-only discovery tasks in workspace using a local LLM."
 engine = "local-discovery"
+allowed_tools = ["bash"]
 [tools.bash]
 rules = [
-    { command=["grep", "**"], verdict="auto_approved" }
+    { command=["grep", "**"], verdict="auto_approved" },
+    { command=["ls", "**"], verdict="auto_approved" }
 ]
 +++
 

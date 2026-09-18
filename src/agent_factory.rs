@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::tools::agent_finish::AgentFinishToolConfig;
 use crate::agent::tools::spawn_subagent::AgentTypeInfo;
 use crate::agent::tools::{
-    default_registry, ToolRegistryConfig, DEFAULT_CLI_TOOLS, DEFAULT_TUI_TOOLS,
+    default_registry, AutoApproveTool, ToolRegistryConfig, DEFAULT_CLI_TOOLS, DEFAULT_TUI_TOOLS,
 };
 use crate::agent::{AgentLoop, ChildRoleConfig, Context, Message, Role, UiUpdate};
 use crate::child_agent_manager::{
@@ -43,16 +43,10 @@ use crate::store::Store;
 /// registry never contains `spawn_subagent`).
 pub struct AgentFactory {
     engines: HashMap<String, Arc<dyn Engine>>,
-    /// When `true`, the `edit` tool is auto-approved without user confirmation.
-    /// Intended for automated / e2e testing where no human is present to approve.
-    auto_approve_edit: bool,
-    /// When `true`, the `write` tool is auto-approved without user confirmation.
-    /// Intended for automated / e2e testing where no human is present to approve.
-    auto_approve_write: bool,
-    /// When `true`, the `spawn_subagent` tool is auto-approved without user
-    /// confirmation. Intended for automated / e2e testing where no human is
-    /// present to approve.
-    auto_approve_spawn: bool,
+    /// The set of tools whose approval prompt is bypassed (auto-approved)
+    /// without user confirmation. Intended for automated / e2e testing where
+    /// no human is present to approve.
+    auto_approve: HashSet<AutoApproveTool>,
     /// Explicit list of tool names to register. Defaults to [`DEFAULT_CLI_TOOLS`].
     allowed_tools: Vec<String>,
     /// Session store handed to every `Role::Root` agent this factory builds,
@@ -66,9 +60,7 @@ impl AgentFactory {
     pub fn new(engines: HashMap<String, Arc<dyn Engine>>) -> Self {
         AgentFactory {
             engines,
-            auto_approve_edit: false,
-            auto_approve_write: false,
-            auto_approve_spawn: false,
+            auto_approve: HashSet::new(),
             allowed_tools: DEFAULT_CLI_TOOLS.iter().map(|s| s.to_string()).collect(),
             store: None,
             system_prompt: None,
@@ -203,21 +195,9 @@ impl AgentFactory {
         self
     }
 
-    /// Enable automatic approval of `write` tool calls (no user prompt).
-    pub fn with_auto_approve_write(mut self) -> Self {
-        self.auto_approve_write = true;
-        self
-    }
-
-    /// Enable automatic approval of `edit` tool calls (no user prompt).
-    pub fn with_auto_approve_edit(mut self) -> Self {
-        self.auto_approve_edit = true;
-        self
-    }
-
-    /// Enable automatic approval of `spawn_subagent` tool calls (no user prompt).
-    pub fn with_auto_approve_spawn(mut self) -> Self {
-        self.auto_approve_spawn = true;
+    /// Enable automatic approval of the given tool's calls (no user prompt).
+    pub fn with_auto_approve(mut self, tool: AutoApproveTool) -> Self {
+        self.auto_approve.insert(tool);
         self
     }
 
@@ -256,9 +236,7 @@ impl AgentFactory {
         Self::build(
             &self.engines,
             &self.allowed_tools,
-            self.auto_approve_edit,
-            self.auto_approve_write,
-            self.auto_approve_spawn,
+            &self.auto_approve,
             profile,
             agent_type,
             role,
@@ -277,9 +255,7 @@ impl AgentFactory {
     fn build(
         engines: &HashMap<String, Arc<dyn Engine>>,
         allowed_tools: &[String],
-        auto_approve_edit: bool,
-        auto_approve_write: bool,
-        auto_approve_spawn: bool,
+        auto_approve: &HashSet<AutoApproveTool>,
         profile: &ProfileConfig,
         agent_type: &str,
         role: Role,
@@ -364,9 +340,7 @@ impl AgentFactory {
         let registry = Arc::new(default_registry(
             sandbox,
             ToolRegistryConfig {
-                auto_approve_edit,
-                auto_approve_write,
-                auto_approve_spawn,
+                auto_approve: auto_approve.clone(),
                 allowed_tools: configured_allowed_tools,
                 include_spawn_subagent: can_spawn,
                 spawn_agent_types,
@@ -388,9 +362,7 @@ impl AgentFactory {
             let mut manager = Self::build_child_agent_manager(
                 engines.clone(),
                 allowed_tools.to_vec(),
-                auto_approve_edit,
-                auto_approve_write,
-                auto_approve_spawn,
+                auto_approve.clone(),
                 profile.clone(),
                 store.clone(),
                 engine.clone(),
@@ -433,9 +405,7 @@ impl AgentFactory {
     fn build_child_agent_manager(
         engines: HashMap<String, Arc<dyn Engine>>,
         allowed_tools: Vec<String>,
-        auto_approve_edit: bool,
-        auto_approve_write: bool,
-        auto_approve_spawn: bool,
+        auto_approve: HashSet<AutoApproveTool>,
         profile: ProfileConfig,
         parent_store: Option<Store>,
         parent_engine: Arc<dyn Engine>,
@@ -451,6 +421,7 @@ impl AgentFactory {
                   forward_ui_tx: mpsc::Sender<UiUpdate>| {
                 let engines = engines.clone();
                 let allowed_tools = allowed_tools.clone();
+                let auto_approve = auto_approve.clone();
                 let profile = profile.clone();
                 let finish_tx = finish_tx.clone();
                 let parent_store = parent_store.clone();
@@ -485,9 +456,7 @@ impl AgentFactory {
                 let built = AgentFactory::build(
                     &engines,
                     &allowed_tools,
-                    auto_approve_edit,
-                    auto_approve_write,
-                    auto_approve_spawn,
+                    &auto_approve,
                     &profile,
                     &request.agent_type,
                     Role::Child(child_role_config),
@@ -1557,7 +1526,7 @@ mod tests {
                                 verdict: crate::sandbox::ApprovalVerdictConfig::AutoDenied,
                                 reason: None,
                             },
-                            crate::sandbox::SandboxRuleConfig::Glob {
+                            crate::sandbox::SandboxRuleConfig::PathGlob {
                                 pattern: scratch_glob_pattern,
                                 verdict: crate::sandbox::ApprovalVerdictConfig::AutoApproved,
                                 reason: None,
@@ -1786,9 +1755,7 @@ mod tests {
         let (child_loop, child_ui_rx) = AgentFactory::build(
             &engines,
             &[],
-            false,
-            false,
-            false,
+            &HashSet::new(),
             &profile,
             &request.agent_type,
             Role::Child(child_role_config),
@@ -1871,9 +1838,7 @@ mod tests {
         let (child_loop, child_ui_rx) = AgentFactory::build(
             &engines,
             &[],
-            false,
-            false,
-            false,
+            &HashSet::new(),
             &profile,
             "default",
             Role::Child(child_role_config),
