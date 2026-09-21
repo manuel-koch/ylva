@@ -17,6 +17,20 @@ Checkmark done tasks in the plan section.
 
 ---
 
+Use subagent(s) to schedule the analysis and/or run it concurrently:
+
+Discover all `docs/ideas/*.md`.
+For each idea: analyse the intend and compare the current 
+state of implementation against the content/aim of the idea.
+
+Save your report with the findings to `docs/ideas/ideas-progress.md`:
+
+- idea is fully implemented
+- idea is partly implemented, note the gaps
+- idea is not implemented/started yet
+ 
+---
+
 Why is the sky blue?
 And why appear oceans green ?
 Why are clouds sometimes shiny bright white or dark gray black ?
