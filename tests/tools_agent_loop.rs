@@ -28,9 +28,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use ylva::{
-    default_registry, AgentCommand, AgentLoop, ApprovalCheck, AssistantStatus, DeltaChunk,
-    EngineImpl, Message, MockEvent, MockProvider, Provider, Sandbox, StreamEvent, Tool, ToolCall,
-    ToolCallResult, ToolError, ToolRegistry, ToolRegistryConfig, ToolSchema, UiUpdate,
+    default_registry, AgentCommand, AgentLoop, ApprovalCheck, AssistantStatus, AutoApproveTool,
+    DeltaChunk, EngineImpl, Message, MockEvent, MockProvider, Provider, Sandbox, StreamEvent, Tool,
+    ToolCall, ToolCallResult, ToolError, ToolRegistry, ToolRegistryConfig, ToolSchema, UiUpdate,
     UserMessageKind, MAX_TOOL_USE_ITERATIONS,
 };
 
@@ -818,7 +818,7 @@ async fn intermediate_subagent_completion_does_not_reprompt_until_all_children_f
         make_sandbox(),
         ToolRegistryConfig {
             include_spawn_subagent: true,
-            auto_approve_spawn: true,
+            auto_approve: std::collections::HashSet::from([AutoApproveTool::Spawn]),
             ..ToolRegistryConfig::default()
         },
     ));
@@ -926,6 +926,7 @@ async fn intermediate_subagent_completion_does_not_reprompt_until_all_children_f
         .send(FinishResult {
             run_id: running_run_id,
             call_id: running_call_id,
+            origin: ylva::child_agent_manager::FinishResultOrigin::Agent,
             status: "success".to_string(),
             result: Some("first result".to_string()),
             error: None,
@@ -961,6 +962,7 @@ async fn intermediate_subagent_completion_does_not_reprompt_until_all_children_f
         .send(FinishResult {
             run_id: second_run_id,
             call_id: second_call_id,
+            origin: ylva::child_agent_manager::FinishResultOrigin::Agent,
             status: "success".to_string(),
             result: Some("second result".to_string()),
             error: None,
@@ -1040,7 +1042,7 @@ async fn iteration_guard_also_stops_a_runaway_spawn_subagent_finish_reprompt_loo
         make_sandbox(),
         ToolRegistryConfig {
             include_spawn_subagent: true,
-            auto_approve_spawn: true,
+            auto_approve: std::collections::HashSet::from([AutoApproveTool::Spawn]),
             ..ToolRegistryConfig::default()
         },
     ));
@@ -1073,6 +1075,7 @@ async fn iteration_guard_also_stops_a_runaway_spawn_subagent_finish_reprompt_loo
                 .send(FinishResult {
                     run_id: request.run_id,
                     call_id: request.call_id,
+                    origin: ylva::child_agent_manager::FinishResultOrigin::Agent,
                     status: "success".to_string(),
                     result: Some("done".to_string()),
                     error: None,
@@ -1192,7 +1195,7 @@ async fn stop_while_spawn_subagent_is_running_resolves_it_to_cancelled_tool_done
         make_sandbox(),
         ToolRegistryConfig {
             include_spawn_subagent: true,
-            auto_approve_spawn: true,
+            auto_approve: std::collections::HashSet::from([AutoApproveTool::Spawn]),
             ..ToolRegistryConfig::default()
         },
     ));

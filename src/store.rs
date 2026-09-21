@@ -45,8 +45,9 @@ use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::agent::{Message, UserMessageKind};
+use crate::child_agent_manager::FinishResultOrigin;
 use crate::sandbox::SandboxContext;
-use crate::ylva_home::ylva_root;
+use crate::ylva_home::ylva_home;
 
 /// Version of the whole-file schema, written into the `meta` header. Bumped
 /// only for a semantic break that needs an upgrader (§4H decision 4).
@@ -138,6 +139,8 @@ pub enum StoreEvent {
         result: Option<String>,
         #[serde(default)]
         sources: Vec<String>,
+        #[serde(default)]
+        origin: FinishResultOrigin,
     },
     /// The provider-connection/model actually serving this session changed — written
     /// once on **every process start** (a fresh session or a resume alike,
@@ -212,14 +215,14 @@ pub struct SessionSummary {
 
 /// `~/.ylva/chats`, the production root of all persisted sessions.
 ///
-/// The `~/.ylva` root comes from [`ylva_root`], i.e. the dedicated
+/// The Ylva home comes from [`ylva_home`], i.e. the dedicated
 /// `YLVA_HOME` environment variable before the operating system's home
 /// directory. That variable is the seam an end-to-end test uses to redirect a
 /// spawned `ylva` process's persistence into a temporary directory without
 /// touching the real `HOME`.
 pub fn default_chats_root() -> Result<PathBuf, StoreError> {
-    let root = ylva_root().ok_or(StoreError::HomeDirectoryNotFound)?;
-    Ok(root.join("chats"))
+    let home = ylva_home().ok_or(StoreError::HomeDirectoryNotFound)?;
+    Ok(home.join("chats"))
 }
 
 /// Stable content hash grouping every session launched from the same physical
@@ -748,6 +751,7 @@ impl Store {
         status: &str,
         result: Option<String>,
         sources: Vec<String>,
+        origin: FinishResultOrigin,
     ) {
         self.record_event(StoreEvent::ChildResult {
             version: EVENT_VERSION,
@@ -758,6 +762,7 @@ impl Store {
             status: status.to_string(),
             result,
             sources,
+            origin,
         });
     }
 
@@ -926,6 +931,72 @@ impl Store {
             .collect())
     }
 
+    /// Read explicit user messages from prior top-level sessions in this
+    /// project, oldest session first.
+    ///
+    /// The current session is excluded because its messages are replayed
+    /// separately by the TUI, and child-agent transcripts are excluded so
+    /// generated subagent tasks do not appear as root-agent draft history.
+    /// Only the newest `limit` messages are selected, then returned oldest
+    /// first for input-history navigation.
+    /// Unreadable session files are skipped with a warning, matching the
+    /// best-effort behavior of [`Store::list_sessions`].
+    pub fn read_past_explicit_user_messages(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<String>, StoreError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let session_summaries =
+            Self::list_sessions(&self.inner.chats_root, &self.inner.project_key)?;
+
+        let mut newest_user_messages = Vec::new();
+        let mut seen_user_messages = std::collections::HashSet::new();
+        for session_summary in session_summaries {
+            if session_summary.session_id == self.inner.session_id
+                || session_summary.parent_session.is_some()
+            {
+                continue;
+            }
+            let messages = match Self::read_messages(&session_summary.path) {
+                Ok(messages) => messages,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        path = %session_summary.path.display(),
+                        "skipping unreadable prior session while loading input history"
+                    );
+                    continue;
+                }
+            };
+            let mut session_user_messages: Vec<_> = messages
+                .into_iter()
+                .filter_map(|message| match message {
+                    Message::User {
+                        content,
+                        kind: UserMessageKind::Explicit,
+                    } => Some(content),
+                    _ => None,
+                })
+                .collect();
+            session_user_messages.reverse();
+            for user_message in session_user_messages {
+                if newest_user_messages.len() == limit {
+                    break;
+                }
+                if seen_user_messages.insert(user_message.clone()) {
+                    newest_user_messages.push(user_message);
+                }
+            }
+            if newest_user_messages.len() == limit {
+                break;
+            }
+        }
+        newest_user_messages.reverse();
+        Ok(newest_user_messages)
+    }
+
     /// Read child-run lifecycle records from a parent session without
     /// modifying the file. Legacy records missing correlation metadata remain
     /// readable through serde defaults, but cannot be joined to a tool bubble.
@@ -964,6 +1035,7 @@ impl Store {
                         status: None,
                         result: None,
                         sources: Vec::new(),
+                        origin: FinishResultOrigin::default(),
                         duration: None,
                     });
                 }
@@ -974,6 +1046,7 @@ impl Store {
                     status,
                     result,
                     sources,
+                    origin,
                     ..
                 } => {
                     if let Some(index) = starts.get(&id).copied() {
@@ -986,6 +1059,7 @@ impl Store {
                         run.status = Some(status);
                         run.result = result;
                         run.sources = sources;
+                        run.origin = origin;
                     }
                 }
                 _ => {}
@@ -1015,6 +1089,7 @@ pub struct ChildRunRecord {
     pub status: Option<String>,
     pub result: Option<String>,
     pub sources: Vec<String>,
+    pub origin: FinishResultOrigin,
     pub duration: Option<std::time::Duration>,
 }
 
@@ -1845,6 +1920,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn past_explicit_user_messages_are_deduplicated_and_skip_current_and_children() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let chats_root = temp.path().join("chats");
+
+        let older = Store::create(
+            &chats_root,
+            temp.path(),
+            Uuid::new_v4(),
+            "openrouter",
+            "gpt-4o",
+        )
+        .expect("older session");
+        older.record_message(&user_message("older prompt"));
+        older.record_message(&user_message("duplicate prompt"));
+        older.record_message(&user_message("older tail"));
+        older.record_message(&Message::User {
+            content: "implicit note".to_string(),
+            kind: UserMessageKind::ImplicitToolNote,
+        });
+        older.flush().await;
+
+        let newer = Store::create(
+            &chats_root,
+            temp.path(),
+            Uuid::new_v4(),
+            "openrouter",
+            "gpt-4o",
+        )
+        .expect("newer session");
+        newer.record_message(&user_message("newer head"));
+        newer.record_message(&user_message("duplicate prompt"));
+        newer.record_message(&user_message("newer tail"));
+        newer.flush().await;
+
+        let child = older
+            .write_child_transcript_for_run_store(
+                Uuid::new_v4(),
+                None,
+                &[user_message("child task")],
+            )
+            .await
+            .expect("child session");
+        child.flush().await;
+
+        let current = Store::create(
+            &chats_root,
+            temp.path(),
+            Uuid::new_v4(),
+            "openrouter",
+            "gpt-4o",
+        )
+        .expect("current session");
+        current.record_message(&user_message("current prompt"));
+        current.flush().await;
+
+        rewrite_meta_created_at(older.path(), "2020-01-01T00:00:00Z");
+        rewrite_meta_created_at(newer.path(), "2030-01-01T00:00:00Z");
+        rewrite_meta_created_at(current.path(), "2040-01-01T00:00:00Z");
+
+        assert_eq!(
+            current
+                .read_past_explicit_user_messages(50)
+                .expect("history reads"),
+            vec![
+                "older prompt".to_string(),
+                "older tail".to_string(),
+                "newer head".to_string(),
+                "duplicate prompt".to_string(),
+                "newer tail".to_string()
+            ]
+        );
+        assert_eq!(
+            current
+                .read_past_explicit_user_messages(1)
+                .expect("limited history reads"),
+            vec!["newer tail".to_string()]
+        );
+    }
+
+    #[tokio::test]
     async fn list_sessions_of_unknown_project_key_is_empty() {
         let temp = tempfile::tempdir().expect("tempdir");
         let summaries = Store::list_sessions(&temp.path().join("chats"), "deadbeef")
@@ -1875,6 +2030,7 @@ mod tests {
             "success",
             Some("found it".to_string()),
             vec!["src/agent.rs".to_string()],
+            FinishResultOrigin::Agent,
         );
         store.flush().await;
 
@@ -1907,6 +2063,7 @@ mod tests {
             parent_session,
             status,
             sources,
+            origin,
             ..
         } = result
         else {
@@ -1916,6 +2073,7 @@ mod tests {
         assert_eq!(*parent_session, parent_id);
         assert_eq!(status, "success");
         assert_eq!(sources, &["src/agent.rs".to_string()]);
+        assert_eq!(*origin, FinishResultOrigin::Agent);
     }
 
     #[tokio::test]
@@ -1948,6 +2106,7 @@ mod tests {
             "success",
             Some("found it".to_string()),
             vec!["src/agent.rs".to_string()],
+            FinishResultOrigin::Agent,
         );
         store.record_child_start(
             orphaned_run_id,

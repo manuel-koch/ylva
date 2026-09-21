@@ -60,7 +60,10 @@ fn an_explicitly_named_missing_profile_is_a_hard_error() {
 fn a_profile_validation_error_names_the_profile_config_file() {
     let ylva_home = TempDir::new().expect("tempdir");
     let profile_name = "broken";
-    let profile_directory = ylva_home.path().join("profiles").join(profile_name);
+    let profile_directory = ylva_home
+        .path()
+        .join(ylva::PROFILES_DIRECTORY_NAME)
+        .join(profile_name);
     fs::create_dir_all(&profile_directory).expect("create profile directory");
     fs::write(
         profile_directory.join("config.toml"),
@@ -104,6 +107,72 @@ model = "test-model"
     assert!(
         stderr.contains("references engine 'missing'"),
         "the error must retain the validation detail: {stderr}"
+    );
+}
+
+/// Every file-authored agent type must resolve its configured engine before
+/// startup reaches the TUI/CLI loop, even when that type is not the root type.
+#[test]
+fn an_invalid_agent_type_engine_is_a_startup_validation_error() {
+    let ylva_home = TempDir::new().expect("tempdir");
+    let profile_directory = ylva_home
+        .path()
+        .join(ylva::PROFILES_DIRECTORY_NAME)
+        .join("broken");
+    let agents_directory = profile_directory.join("agents");
+    fs::create_dir_all(&agents_directory).expect("create profile directories");
+    fs::write(
+        profile_directory.join("config.toml"),
+        r#"
+default_engine = "available"
+
+[engines.available]
+provider = "mock"
+model = "test-model"
+"#,
+    )
+    .expect("write profile config");
+    fs::write(
+        agents_directory.join("researcher.md"),
+        r#"---
+engine: missing
+---
+
+Research the requested topic.
+"#,
+    )
+    .expect("write invalid agent type");
+    let log_path = ylva_home.path().join("startup-error.log");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ylva"))
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env(ylva::YLVA_HOME_ENVIRONMENT_VARIABLE, ylva_home.path())
+        .current_dir(ylva_home.path())
+        .args([
+            "--no-tui",
+            "--prompt",
+            "hi",
+            "--profile",
+            "broken",
+            "--log-file",
+            log_path.to_str().expect("log path is valid UTF-8"),
+        ])
+        .output()
+        .expect("spawn the ylva binary");
+    assert!(
+        !output.status.success(),
+        "an invalid agent engine must prevent startup"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("agent type 'researcher' references engine 'missing'"),
+        "the startup error must identify the agent type and engine: {stderr}"
+    );
+    let log = fs::read_to_string(&log_path).expect("read startup error log");
+    assert!(
+        log.contains("agent type 'researcher' references engine 'missing'"),
+        "startup errors shown on stderr must also be written to the log: {log}"
     );
 }
 

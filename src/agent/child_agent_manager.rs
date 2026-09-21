@@ -33,6 +33,8 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use serde::{Deserialize, Serialize};
+
 use crate::agent::{AgentCommand, UiUpdate};
 use crate::store::Store;
 
@@ -59,11 +61,27 @@ pub struct SpawnRequest {
     pub label: String,
 }
 
+/// Identifies whether a child outcome came from the child itself or from the
+/// surrounding runtime.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FinishResultOrigin {
+    /// The child deliberately called `agent_finish`.
+    Agent,
+    /// The harness produced the outcome because the child could not complete
+    /// normally (for example, an unknown engine or a panic).
+    #[default]
+    Runtime,
+}
+
 /// Outcome of a completed, cancelled, or unstructured-fallback child run.
 #[derive(Debug, Clone)]
 pub struct FinishResult {
     pub run_id: Uuid,
     pub call_id: Uuid,
+    /// Determines whether user-authored Markdown is appropriate for an
+    /// error: only a child-reported outcome is model-authored content.
+    pub origin: FinishResultOrigin,
     /// `"success"`, `"failure"`, or `"unstructured"` (child never called
     /// `agent_finish`; last assistant text was captured as a fallback).
     pub status: String,
@@ -108,9 +126,12 @@ impl FinishResult {
     /// unstructured fallback captures the child's last assistant text into
     /// the same field — see `AgentFactory::run_child`); a non-empty
     /// `sources` list is always appended as its own `"Sources"` section.
-    /// Every section is marked `file_extension: "md"` so `tui_widgets.rs` renders it
-    /// through the project's Markdown renderer instead of raw JSON/syntect
-    /// highlighting. Empty/absent fields produce no section.
+    /// Agent-reported results, errors, and sources are marked
+    /// `file_extension: "md"` so
+    /// `tui_widgets.rs` renders model-authored content through the project's
+    /// Markdown renderer. Runtime diagnostics remain plain text so identifiers
+    /// and punctuation are displayed literally. Empty/absent fields produce no
+    /// section.
     pub fn content_sections(&self) -> Vec<crate::agent::tools::Section> {
         use crate::agent::tools::{ContentSection, Section};
 
@@ -122,11 +143,23 @@ impl FinishResult {
                 line_number_offset: None,
             })
         };
+        let plain_text_section = |label: &str, content: String| {
+            Section::Content(ContentSection {
+                label: Some(label.to_string()),
+                content,
+                file_extension: None,
+                line_number_offset: None,
+            })
+        };
 
         let mut sections = Vec::new();
         if self.status == "failure" {
             if let Some(error) = self.error.as_ref().filter(|s| !s.is_empty()) {
-                sections.push(markdown_section("Error", error.clone()));
+                let section = match self.origin {
+                    FinishResultOrigin::Agent => markdown_section("Error", error.clone()),
+                    FinishResultOrigin::Runtime => plain_text_section("Error", error.clone()),
+                };
+                sections.push(section);
             }
         } else if let Some(result) = self.result.as_ref().filter(|s| !s.is_empty()) {
             sections.push(markdown_section("Result", result.clone()));
@@ -276,6 +309,7 @@ impl ChildAgentManager {
                 .clone()
                 .or_else(|| finish_result.error.clone()),
             finish_result.sources.clone(),
+            finish_result.origin,
         );
     }
 
@@ -553,6 +587,7 @@ mod tests {
         manager.record_child_result(&FinishResult {
             run_id,
             call_id,
+            origin: FinishResultOrigin::Agent,
             status: "success".to_string(),
             result: Some("found it".to_string()),
             error: None,
@@ -617,6 +652,7 @@ mod tests {
         manager.record_child_result(&FinishResult {
             run_id: Uuid::new_v4(),
             call_id: Uuid::new_v4(),
+            origin: FinishResultOrigin::Agent,
             status: "success".to_string(),
             result: None,
             error: None,
@@ -964,6 +1000,7 @@ mod tests {
         let result = FinishResult {
             run_id: Uuid::new_v4(),
             call_id: Uuid::new_v4(),
+            origin: FinishResultOrigin::Agent,
             status: "success".to_string(),
             result: Some("done".to_string()),
             error: None,
@@ -983,6 +1020,7 @@ mod tests {
         let result = FinishResult {
             run_id,
             call_id,
+            origin: FinishResultOrigin::Agent,
             status: "failure".to_string(),
             result: None,
             error: Some("failed".to_string()),
@@ -1018,6 +1056,7 @@ mod tests {
         let result = FinishResult {
             run_id: Uuid::new_v4(),
             call_id: Uuid::new_v4(),
+            origin: FinishResultOrigin::Agent,
             status: "success".to_string(),
             result: Some("# All done\n\nEverything worked.".to_string()),
             error: None,
@@ -1036,6 +1075,7 @@ mod tests {
         let result = FinishResult {
             run_id: Uuid::new_v4(),
             call_id: Uuid::new_v4(),
+            origin: FinishResultOrigin::Runtime,
             status: "unstructured".to_string(),
             result: Some("last assistant text".to_string()),
             error: None,
@@ -1049,20 +1089,41 @@ mod tests {
     }
 
     #[test]
-    fn content_sections_renders_failure_error_instead_of_result() {
+    fn content_sections_renders_failure_error_as_plain_text_instead_of_markdown() {
         let result = FinishResult {
             run_id: Uuid::new_v4(),
             call_id: Uuid::new_v4(),
+            origin: FinishResultOrigin::Runtime,
             status: "failure".to_string(),
             result: Some("should be ignored".to_string()),
-            error: Some("could not complete the task".to_string()),
+            error: Some("unknown engine: local-discovery_".to_string()),
             sources: vec![],
         };
         let sections = result.content_sections();
         assert_eq!(sections.len(), 1);
-        let (label, content, _) = content_section_text(&sections[0]);
+        let (label, content, file_extension) = content_section_text(&sections[0]);
         assert_eq!(label, "Error");
-        assert_eq!(content, "could not complete the task");
+        assert_eq!(content, "unknown engine: local-discovery_");
+        assert!(
+            file_extension.is_empty(),
+            "diagnostic errors must not be interpreted as Markdown"
+        );
+    }
+
+    #[test]
+    fn content_sections_renders_agent_reported_failure_as_markdown() {
+        let result = FinishResult {
+            run_id: Uuid::new_v4(),
+            call_id: Uuid::new_v4(),
+            origin: FinishResultOrigin::Agent,
+            status: "failure".to_string(),
+            result: None,
+            error: Some("**The child could not complete the task.**".to_string()),
+            sources: vec![],
+        };
+        let sections = result.content_sections();
+        let (_, _, file_extension) = content_section_text(&sections[0]);
+        assert_eq!(file_extension, "md");
     }
 
     #[test]
@@ -1070,6 +1131,7 @@ mod tests {
         let result = FinishResult {
             run_id: Uuid::new_v4(),
             call_id: Uuid::new_v4(),
+            origin: FinishResultOrigin::Agent,
             status: "success".to_string(),
             result: Some("done".to_string()),
             error: None,
@@ -1089,6 +1151,7 @@ mod tests {
         let result = FinishResult {
             run_id: Uuid::new_v4(),
             call_id: Uuid::new_v4(),
+            origin: FinishResultOrigin::Agent,
             status: "success".to_string(),
             result: None,
             error: None,

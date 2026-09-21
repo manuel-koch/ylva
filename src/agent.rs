@@ -544,10 +544,6 @@ pub enum Message {
     },
 }
 
-/// config phase (Phase 9 §4G layering) may source this from a SOUL.md file
-/// without changing call sites.
-pub const DEFAULT_SYSTEM_PROMPT: &str = "You are Ylva, a helpful agent with tool capabilities.";
-
 /// Prefix marking an asynchronous, out-of-band harness notice (e.g. "a
 /// spawned subagent finished") sent via `Context::push_async_harness_notice`
 /// as a `role:"user"` message rather than `role:"system"`. Not every
@@ -597,11 +593,16 @@ pub struct Context {
 
 impl Context {
     pub fn new() -> Self {
+        Self::with_system_prompt(crate::config::soul::DEFAULT_SOUL)
+    }
+
+    /// Construct a context with a caller-supplied initial system message.
+    pub fn with_system_prompt(system_prompt: impl Into<String>) -> Self {
         Context {
             store: None,
             messages: vec![
                 Message::System {
-                    content: DEFAULT_SYSTEM_PROMPT.to_string(),
+                    content: system_prompt.into(),
                 },
                 Message::System {
                     content: TOOL_PROTOCOL_SYSTEM_PROMPT.to_string(),
@@ -613,9 +614,10 @@ impl Context {
     /// Attach a session store, so every message committed from here on is
     /// also appended to the session file.
     ///
-    /// The two system prompts installed by [`Context::new`] are deliberately
-    /// not persisted: they are rebuilt from the running binary on every
-    /// resume, so storing them would pin a stale copy into the transcript.
+    /// The two system prompts installed by [`Context::new`] or
+    /// [`Context::with_system_prompt`] are deliberately not persisted: they
+    /// are rebuilt from the running binary on every resume, so storing them
+    /// would pin a stale copy into the transcript.
     pub fn set_store(&mut self, store: Store) {
         match Store::read_messages(store.path()) {
             Ok(messages) => self.hydrate(messages),
@@ -814,7 +816,11 @@ impl PendingTool {
     /// default) and a per-tool `CancellationToken`. Completion is reported via
     /// `agent_tx` (`ToolDone`/`ToolError`/`ToolKilled`); returns the token the
     /// outer loop stores as the running tool's cancel.
-    pub fn execute(self, agent_tx: mpsc::Sender<AgentEvent>) -> CancellationToken {
+    pub fn execute(
+        self,
+        agent_tx: mpsc::Sender<(u64, AgentEvent)>,
+        generation: u64,
+    ) -> CancellationToken {
         let cancel = CancellationToken::new();
         let run_cancel = cancel.clone();
         let id = self.call.id();
@@ -827,10 +833,13 @@ impl PendingTool {
                     biased;
                     _ = run_cancel.cancelled() => {
                         let _ = agent_tx
-                            .send(AgentEvent::ToolKilled {
-                                id,
-                                name: name.clone(),
-                            })
+                            .send((
+                                generation,
+                                AgentEvent::ToolKilled {
+                                    id,
+                                    name: name.clone(),
+                                },
+                            ))
                             .await;
                         return;
                     }
@@ -871,16 +880,19 @@ impl PendingTool {
                         let summary = tool_output.display_summary();
                         let content_sections = tool_output.content_sections();
                         let _ = agent_tx
-                            .send(AgentEvent::ToolDone {
-                                id,
-                                name,
-                                result,
-                                result_metadata,
-                                result_metadata_schema,
-                                summary,
-                                duration,
-                                content_sections,
-                            })
+                            .send((
+                                generation,
+                                AgentEvent::ToolDone {
+                                    id,
+                                    name,
+                                    result,
+                                    result_metadata,
+                                    result_metadata_schema,
+                                    summary,
+                                    duration,
+                                    content_sections,
+                                },
+                            ))
                             .await;
                     }
                     Ok((Err(error), duration)) => {
@@ -902,27 +914,33 @@ impl PendingTool {
                                 vec![]
                             };
                         let _ = agent_tx
-                            .send(AgentEvent::ToolError {
-                                id,
-                                name,
-                                error: error.to_string(),
-                                partial_output,
-                                duration,
-                                content_sections,
-                            })
+                            .send((
+                                generation,
+                                AgentEvent::ToolError {
+                                    id,
+                                    name,
+                                    error: error.to_string(),
+                                    partial_output,
+                                    duration,
+                                    content_sections,
+                                },
+                            ))
                             .await;
                     }
                     Err(_elapsed) => {
                         let message = format!("Tool '{name}' timed out after {timeout_secs}s");
                         let _ = agent_tx
-                            .send(AgentEvent::ToolError {
-                                id,
-                                name,
-                                error: message,
-                                partial_output: None,
-                                duration: Duration::from_secs(timeout_secs),
-                                content_sections: vec![],
-                            })
+                            .send((
+                                generation,
+                                AgentEvent::ToolError {
+                                    id,
+                                    name,
+                                    error: message,
+                                    partial_output: None,
+                                    duration: Duration::from_secs(timeout_secs),
+                                    content_sections: vec![],
+                                },
+                            ))
                             .await;
                     }
                 }
@@ -994,14 +1012,17 @@ pub struct AgentLoop {
     cmd_tx: mpsc::Sender<AgentCommand>,
     cmd_rx: Option<mpsc::Receiver<AgentCommand>>,
     ui_tx: mpsc::Sender<UiUpdate>,
-    agent_tx: mpsc::Sender<AgentEvent>,
-    agent_rx: Option<mpsc::Receiver<AgentEvent>>,
+    agent_tx: mpsc::Sender<(u64, AgentEvent)>,
+    agent_rx: Option<mpsc::Receiver<(u64, AgentEvent)>>,
     /// Set via [`AgentLoop::with_child_role`] for a `Role::Child` agent;
     /// firing it cascades a parent stop into this loop.
     parent_cancel: Option<CancellationToken>,
     /// Set via [`AgentLoop::with_child_role`]; injected as an extra system
     /// message ahead of the child's task.
     briefing: Option<String>,
+    /// Root-only initial system message loaded from `SOUL.md`. Child loops
+    /// leave this unset and retain [`Context::new`]'s compatibility prompt.
+    system_prompt: Option<String>,
     /// Set via [`AgentLoop::with_child_role`] from `config.run_id` for a
     /// `Role::Child` agent; `None` for `Role::Root`. Stamped onto every
     /// `UiUpdate::ToolPending`/`ClarifyPending` this loop emits so the root
@@ -1059,7 +1080,7 @@ impl AgentLoop {
     ) -> (Self, mpsc::Receiver<UiUpdate>) {
         let (cmd_tx, cmd_rx) = mpsc::channel::<AgentCommand>(10);
         let (ui_tx, ui_rx) = mpsc::channel::<UiUpdate>(100);
-        let (agent_tx, agent_rx) = mpsc::channel::<AgentEvent>(10);
+        let (agent_tx, agent_rx) = mpsc::channel::<(u64, AgentEvent)>(10);
         let current_store = Arc::new(Mutex::new(None));
         let agent = AgentLoop {
             engine,
@@ -1072,6 +1093,7 @@ impl AgentLoop {
             agent_rx: Some(agent_rx),
             parent_cancel: None,
             briefing: None,
+            system_prompt: None,
             own_run_id: None,
             child_agent_manager: None,
             finish_rx: None,
@@ -1101,6 +1123,12 @@ impl AgentLoop {
         self.parent_cancel = Some(config.parent_cancel);
         self.briefing = config.briefing;
         self.own_run_id = Some(config.run_id);
+        self
+    }
+
+    /// Set the root agent's initial system message.
+    pub fn with_system_prompt(mut self, system_prompt: impl Into<String>) -> Self {
+        self.system_prompt = Some(system_prompt.into());
         self
     }
 
@@ -1192,6 +1220,7 @@ impl AgentLoop {
             .expect("AgentLoop run() must not be called more than once");
         let parent_cancel = self.parent_cancel.take();
         let briefing = self.briefing.take();
+        let system_prompt = self.system_prompt.clone();
         let own_run_id = self.own_run_id.take();
         let mut child_agent_manager = self.child_agent_manager.take();
         let mut finish_rx = self.finish_rx.take();
@@ -1216,7 +1245,10 @@ impl AgentLoop {
         let is_child = parent_cancel.is_some();
 
         tokio::spawn(async move {
-            let mut context = Context::new();
+            let mut context = match system_prompt.as_deref() {
+                Some(system_prompt) => Context::with_system_prompt(system_prompt),
+                None => Context::new(),
+            };
             if let Some(store) = store {
                 context.set_store(store);
             }
@@ -1247,6 +1279,27 @@ impl AgentLoop {
             let mut pending_tools: VecDeque<PendingTool> = VecDeque::new();
             let mut iterations = 0usize;
             let mut clarify_started_at: Option<std::time::Instant> = None;
+            // Bumped by `AgentCommand::ClearContext` so any `AgentEvent`
+            // produced by a stream/tool started *before* the clear (and
+            // still in flight when it happened — cancellation is
+            // cooperative, not synchronous) is recognised as stale and
+            // dropped when it eventually arrives, instead of being applied
+            // to the unrelated `fresh_context` the clear installed. Every
+            // `start_request`/`PendingTool::execute` call stamps the
+            // `generation` active at spawn time onto its events; the
+            // `agent_rx` arm below only processes an event whose stamped
+            // generation still matches this counter.
+            let mut generation: u64 = 0;
+            // Populated by `AgentCommand::Stop`/`AgentCommand::ClearContext`
+            // right after `child_agent_manager.cancel_all()`: the `run_id`s
+            // of children cancelled but not yet confirmed terminal. A
+            // cancelled child's task may still be mid-flight and send a real
+            // `FinishResult` after cancellation was requested; `finish_rx`'s
+            // arm consults this set to drop such stale results instead of
+            // pushing their content into a `Context` (possibly a brand-new
+            // one, post-`ClearContext`) they no longer belong to.
+            let mut cancelled_run_ids: std::collections::HashSet<Uuid> =
+                std::collections::HashSet::new();
             // Set by the `finish_rx` arm when the final outstanding child's
             // result lands while the root is mid-stream (`mode != Idle`): the
             // result is already in `context` (see the `finish_rx` arm's
@@ -1265,11 +1318,26 @@ impl AgentLoop {
             // to report a clear `Err` (→ `status: "failure"`) instead of the
             // generic "unstructured" `Ok(context)` fallback.
             let mut iteration_cap_exceeded: Option<String> = None;
+            // A child has no caller that can recover from a provider/stream
+            // failure after the current request ends. Preserve that
+            // authoritative error so the child returns `Err` instead of
+            // being misclassified as an unstructured successful answer.
+            let mut stream_error: Option<String> = None;
 
             loop {
                 tokio::select! {
                     biased;
-                    Some(event) = agent_rx.recv() => {
+                    Some((event_generation, event)) = agent_rx.recv() => {
+                        if event_generation != generation {
+                            tracing::debug!(
+                                event_generation,
+                                generation,
+                                ?event,
+                                "dropping stale agent event from a superseded generation \
+                                 (likely produced before an AgentCommand::ClearContext)"
+                            );
+                            continue;
+                        }
                         match event {
                             AgentEvent::StreamDone { partial } => {
                                 context.push_assistant(partial, AssistantStatus::Complete);
@@ -1294,6 +1362,7 @@ impl AgentLoop {
                                         registry.schemas(),
                                         ui_tx.clone(),
                                         agent_tx.clone(),
+                                        generation,
                                         own_run_id,
                                     ));
                                 } else if pending_child_finish_reprompt {
@@ -1325,6 +1394,7 @@ impl AgentLoop {
                                             registry.schemas(),
                                             ui_tx.clone(),
                                             agent_tx.clone(),
+                                            generation,
                                             own_run_id,
                                         ));
                                     }
@@ -1344,6 +1414,9 @@ impl AgentLoop {
                             AgentEvent::StreamError(error) => {
                                 pending_steers.clear();
                                 mode = AgentMode::Idle;
+                                if is_child {
+                                    stream_error = Some(error.clone());
+                                }
                                 tracing::error!(message = %error, "agent stream error");
                                 let _ = ui_tx
                                     .send(UiUpdate::Error {
@@ -1377,14 +1450,17 @@ impl AgentLoop {
                                             let error =
                                                 format!("Unknown tool '{}'", assembled.name);
                                             let _ = agent_tx
-                                                .send(AgentEvent::ToolError {
-                                                    id: assembled.id,
-                                                    name: assembled.name.clone(),
-                                                    error,
-                                                    partial_output: None,
-                                                    duration: std::time::Duration::ZERO,
-                                                    content_sections: vec![],
-                                                })
+                                                .send((
+                                                    generation,
+                                                    AgentEvent::ToolError {
+                                                        id: assembled.id,
+                                                        name: assembled.name.clone(),
+                                                        error,
+                                                        partial_output: None,
+                                                        duration: std::time::Duration::ZERO,
+                                                        content_sections: vec![],
+                                                    },
+                                                ))
                                                 .await;
                                         }
                                     }
@@ -1407,6 +1483,7 @@ impl AgentLoop {
                                     Arc::clone(&registry),
                                     ui_tx.clone(),
                                     agent_tx.clone(),
+                                    generation,
                                     &mut clarify_started_at,
                                     &mut pending_steers,
                                     &mut child_agent_manager,
@@ -1464,6 +1541,7 @@ impl AgentLoop {
                                     Arc::clone(&registry),
                                     ui_tx.clone(),
                                     agent_tx.clone(),
+                                    generation,
                                     &mut clarify_started_at,
                                     &mut pending_steers,
                                     &mut child_agent_manager,
@@ -1476,6 +1554,12 @@ impl AgentLoop {
                             }
                             AgentEvent::ToolError { id, name, error, partial_output, duration, content_sections } => {
                                 current_tool_cancel = None;
+                                tracing::error!(
+                                    tool = %name,
+                                    tool_call_id = %id,
+                                    error = %error,
+                                    "tool failed"
+                                );
                                 context.push_tool_error(
                                     id,
                                     name,
@@ -1503,6 +1587,7 @@ impl AgentLoop {
                                     Arc::clone(&registry),
                                     ui_tx.clone(),
                                     agent_tx.clone(),
+                                    generation,
                                     &mut clarify_started_at,
                                     &mut pending_steers,
                                     &mut child_agent_manager,
@@ -1548,6 +1633,24 @@ impl AgentLoop {
                         // while preserving a single continuation point for
                         // the aggregate answer.
                         let run_id = finish_result.run_id;
+                        if cancelled_run_ids.remove(&run_id) {
+                            // This child was cancelled by a `Stop`/`ClearContext`
+                            // that already resolved (or discarded) its
+                            // tool bubble/context entry synchronously; the
+                            // manager only *requested* cancellation (a
+                            // `CancellationToken` is cooperative, not
+                            // immediate), so the child's task can still race
+                            // in a real `FinishResult` afterwards. Applying it
+                            // now would duplicate an already-settled entry or
+                            // — after `ClearContext` — push content into an
+                            // unrelated, brand-new `Context`. Drop it.
+                            tracing::debug!(
+                                %run_id,
+                                tool_call_id = %finish_result.call_id,
+                                "dropping stale child finish result for a cancelled run"
+                            );
+                            continue;
+                        }
                         let call_id = finish_result.call_id;
                         let status = finish_result.status.clone();
                         let label = child_agent_manager
@@ -1665,6 +1768,7 @@ impl AgentLoop {
                                     registry.schemas(),
                                     ui_tx.clone(),
                                     agent_tx.clone(),
+                                    generation,
                                     own_run_id,
                                 ));
                             }
@@ -1781,6 +1885,7 @@ impl AgentLoop {
                                         registry.schemas(),
                                         ui_tx.clone(),
                                         agent_tx.clone(),
+                                        generation,
                                         own_run_id,
                                     ));
                                 } else {
@@ -1827,6 +1932,7 @@ impl AgentLoop {
                                             Arc::clone(&registry),
                                             ui_tx.clone(),
                                             agent_tx.clone(),
+                                            generation,
                                             &mut clarify_started_at,
                                             &mut pending_steers,
                                             &mut child_agent_manager,
@@ -1847,6 +1953,7 @@ impl AgentLoop {
                                         current_tool_cancel = Some(PendingTool::execute(
                                             pending,
                                             agent_tx.clone(),
+                                            generation,
                                         ));
                                         let _ = ui_tx
                                             .send(UiUpdate::ToolStart {
@@ -1919,6 +2026,7 @@ impl AgentLoop {
                                         Arc::clone(&registry),
                                         ui_tx.clone(),
                                         agent_tx.clone(),
+                                        generation,
                                         &mut clarify_started_at,
                                         &mut pending_steers,
                                         &mut child_agent_manager,
@@ -1989,6 +2097,7 @@ impl AgentLoop {
                                         Arc::clone(&registry),
                                         ui_tx.clone(),
                                         agent_tx.clone(),
+                                        generation,
                                         &mut clarify_started_at,
                                         &mut pending_steers,
                                         &mut child_agent_manager,
@@ -2041,6 +2150,7 @@ impl AgentLoop {
                                         Arc::clone(&registry),
                                         ui_tx.clone(),
                                         agent_tx.clone(),
+                                        generation,
                                         &mut clarify_started_at,
                                         &mut pending_steers,
                                         &mut child_agent_manager,
@@ -2068,6 +2178,7 @@ impl AgentLoop {
                                             tool_call_id = %cancelled.call_id,
                                             "child agent cancelled on parent stop"
                                         );
+                                        cancelled_run_ids.insert(cancelled.run_id);
                                         let mut content_sections = spawn_content_sections
                                             .remove(&cancelled.call_id)
                                             .unwrap_or_default();
@@ -2082,6 +2193,7 @@ impl AgentLoop {
                                         let cancellation_result = crate::child_agent_manager::FinishResult {
                                             run_id: cancelled.run_id,
                                             call_id: cancelled.call_id,
+                                            origin: crate::child_agent_manager::FinishResultOrigin::Runtime,
                                             status: "cancelled".to_string(),
                                             result: None,
                                             error: Some(
@@ -2223,7 +2335,42 @@ impl AgentLoop {
                                 }
                             }
                             AgentCommand::ClearContext => {
-                                let mut fresh_context = Context::new();
+                                // Interrupt whatever was in flight before
+                                // swapping in `fresh_context`, mirroring
+                                // `AgentCommand::Stop`'s cleanup — otherwise
+                                // the old stream/tool/children keep running
+                                // against a `Context` nobody can see anymore
+                                // and their eventual `AgentEvent`s land in the
+                                // new, unrelated conversation instead (see
+                                // the `generation` bump below for the part
+                                // cancellation alone can't cover).
+                                generation = generation.wrapping_add(1);
+                                pending_steers.clear();
+                                pending_tools.clear();
+                                if let Some(cancel_token) = current_cancel.take() {
+                                    cancel_token.cancel();
+                                }
+                                if let Some(tool_cancel) = current_tool_cancel.take() {
+                                    tool_cancel.cancel();
+                                }
+                                if let Some(manager) = child_agent_manager.as_mut() {
+                                    for cancelled in manager.cancel_all() {
+                                        tracing::info!(
+                                            run_id = %cancelled.run_id,
+                                            tool_call_id = %cancelled.call_id,
+                                            "child agent cancelled on clear_context"
+                                        );
+                                        cancelled_run_ids.insert(cancelled.run_id);
+                                        spawn_content_sections.remove(&cancelled.call_id);
+                                    }
+                                }
+                                mode = AgentMode::Idle;
+                                let mut fresh_context = match system_prompt.as_deref() {
+                                    Some(system_prompt) => {
+                                        Context::with_system_prompt(system_prompt)
+                                    }
+                                    None => Context::new(),
+                                };
                                 if let Some(store) = &store_for_commands {
                                     let config = engine.config();
                                     match store.start_new_session(
@@ -2287,15 +2434,17 @@ impl AgentLoop {
                 // (the spawn wrapper) harvest the final `Context` and report
                 // an "unstructured" outcome.
                 //
-                // The iteration-cap case is different and reported as a hard
-                // `Err` instead: `iteration_cap_exceeded` (set only for a
-                // child, see `advance_tool_queue`'s doc comment) means the
-                // model never got a chance to conclude naturally, so there is
-                // no "final answer" to salvage — `drive_child_to_completion`'s
-                // existing `Ok(Err(error))` arm already reports exactly the
-                // right shape (`status: "failure"`, explicit `error`, no
-                // fabricated `result`) with zero changes needed there.
+                // Iteration-cap and stream-error cases are different and
+                // reported as hard `Err`s instead: the child either never got
+                // a chance to conclude naturally or the provider failed, so
+                // there is no "final answer" to salvage. The
+                // `drive_child_to_completion` `Ok(Err(error))` arm reports
+                // exactly the right shape (`status: "failure"`, explicit
+                // `error`, no fabricated `result`).
                 if is_child && mode == AgentMode::Idle {
+                    if let Some(message) = stream_error.take() {
+                        return Err(anyhow::anyhow!(message));
+                    }
                     if let Some(message) = iteration_cap_exceeded.take() {
                         return Err(anyhow::anyhow!(message));
                     }
@@ -2553,7 +2702,8 @@ async fn advance_tool_queue(
     engine: Arc<dyn Engine>,
     registry: Arc<ToolRegistry>,
     ui_tx: mpsc::Sender<UiUpdate>,
-    agent_tx: mpsc::Sender<AgentEvent>,
+    agent_tx: mpsc::Sender<(u64, AgentEvent)>,
+    generation: u64,
     clarify_started_at: &mut Option<std::time::Instant>,
     pending_steers: &mut VecDeque<String>,
     child_agent_manager: &mut Option<crate::child_agent_manager::ChildAgentManager>,
@@ -2614,6 +2764,7 @@ async fn advance_tool_queue(
                     registry.schemas(),
                     ui_tx,
                     agent_tx,
+                    generation,
                     own_run_id,
                 ));
                 return;
@@ -2668,7 +2819,7 @@ async fn advance_tool_queue(
                         let title_arguments = pending.call.title_arguments();
                         tracing::info!(tool = %name, tool_call_id = %call_id, "tool auto-approved");
                         *current_tool_cancel =
-                            Some(PendingTool::execute(pending, agent_tx.clone()));
+                            Some(PendingTool::execute(pending, agent_tx.clone(), generation));
                         let _ = ui_tx
                             .send(UiUpdate::ToolStart {
                                 name,
@@ -2782,7 +2933,8 @@ fn start_request(
     engine: Arc<dyn Engine>,
     tools: Vec<ToolSchema>,
     ui_tx: mpsc::Sender<UiUpdate>,
-    agent_tx: mpsc::Sender<AgentEvent>,
+    agent_tx: mpsc::Sender<(u64, AgentEvent)>,
+    generation: u64,
     own_run_id: Option<Uuid>,
 ) -> CancellationToken {
     let cancel = CancellationToken::new();
@@ -2810,20 +2962,22 @@ fn start_request(
                         );
                         let _ = ui_tx.send(UiUpdate::StreamCancelled).await;
                         let _ = agent_tx
-                            .send(AgentEvent::StreamCancelled {
-                                partial: String::new(),
-                            })
+                            .send((
+                                generation,
+                                AgentEvent::StreamCancelled {
+                                    partial: String::new(),
+                                },
+                            ))
                             .await;
                     } else {
                         let message = format!("{error}");
-                        tracing::error!(message = %message, "engine chat failed");
-                        let _ = ui_tx
-                            .send(UiUpdate::Error {
-                                message: message.clone(),
-                                run_id: own_run_id,
-                            })
+                        tracing::debug!(
+                            message = %message,
+                            "engine chat failed; forwarding stream failure"
+                        );
+                        let _ = agent_tx
+                            .send((generation, AgentEvent::StreamError(message)))
                             .await;
-                        let _ = agent_tx.send(AgentEvent::StreamError(message)).await;
                     }
                     return;
                 }
@@ -2862,7 +3016,9 @@ fn start_request(
                     }
                     StreamEvent::Done => {
                         if accumulators.is_empty() {
-                            let _ = agent_tx.send(AgentEvent::StreamDone { partial }).await;
+                            let _ = agent_tx
+                                .send((generation, AgentEvent::StreamDone { partial }))
+                                .await;
                         } else {
                             let mut calls = Vec::new();
                             let mut error: Option<String> = None;
@@ -2878,15 +3034,13 @@ fn start_request(
                                 }
                             }
                             if let Some(error) = error {
-                                let _ = ui_tx
-                                    .send(UiUpdate::Error {
-                                        message: error.clone(),
-                                        run_id: own_run_id,
-                                    })
+                                let _ = agent_tx
+                                    .send((generation, AgentEvent::StreamError(error)))
                                     .await;
-                                let _ = agent_tx.send(AgentEvent::StreamError(error)).await;
                             } else {
-                                let _ = agent_tx.send(AgentEvent::ToolCall { calls }).await;
+                                let _ = agent_tx
+                                    .send((generation, AgentEvent::ToolCall { calls }))
+                                    .await;
                             }
                         }
                         break;
@@ -2895,18 +3049,16 @@ fn start_request(
                         if accumulators.is_empty() {
                             let _ = ui_tx.send(UiUpdate::StreamCancelled).await;
                         }
-                        let _ = agent_tx.send(AgentEvent::StreamCancelled { partial }).await;
+                        let _ = agent_tx
+                            .send((generation, AgentEvent::StreamCancelled { partial }))
+                            .await;
                         break;
                     }
                     StreamEvent::Error(error) => {
                         let message = format!("{error}");
-                        let _ = ui_tx
-                            .send(UiUpdate::Error {
-                                message: message.clone(),
-                                run_id: own_run_id,
-                            })
+                        let _ = agent_tx
+                            .send((generation, AgentEvent::StreamError(message)))
                             .await;
-                        let _ = agent_tx.send(AgentEvent::StreamError(message)).await;
                         break;
                     }
                 }
@@ -2968,15 +3120,41 @@ fn inject_pending_steers(pending_steers: &mut VecDeque<String>, context: &mut Co
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::future::BoxFuture;
     use std::path::PathBuf;
 
     use crate::test_support::capture_logs;
     use crate::{
         agent::tools::{clarify::ClarifyTool, write::WriteTool},
         llm::engine::{Engine, EngineConfig, EngineImpl},
-        llm::{MockEvent, MockProvider},
+        llm::{MockEvent, MockProvider, ModelInfo, Provider, ToolSchema},
         sandbox::{Sandbox, SandboxContext},
     };
+
+    struct FailingProvider;
+
+    impl Provider for FailingProvider {
+        fn name(&self) -> &str {
+            "failing"
+        }
+
+        fn chat<'a>(
+            &'a self,
+            _messages: Vec<Message>,
+            _tools: Vec<ToolSchema>,
+            _cancel: CancellationToken,
+        ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+            Box::pin(async {
+                Err(anyhow::anyhow!(
+                    "provider returned HTTP 404: model 'invalid' not found"
+                ))
+            })
+        }
+
+        fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+    }
 
     fn test_engine() -> Arc<dyn Engine> {
         Arc::new(EngineImpl::new(
@@ -2991,6 +3169,105 @@ mod tests {
                 reasoning: None,
             },
         ))
+    }
+
+    #[test]
+    fn stream_failure_emits_one_user_visible_error() {
+        crate::test_support::run_locked(async {
+            let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+                Arc::new(FailingProvider),
+                EngineConfig {
+                    provider_connection: "failing".to_string(),
+                    model: "invalid".to_string(),
+                    temperature: None,
+                    context_length: None,
+                    api_base_url: None,
+                    api_key: None,
+                    reasoning: None,
+                },
+            ));
+            let (mut agent, mut ui_rx) = AgentLoop::new(engine, Arc::new(ToolRegistry::new()));
+            let handle = agent.run();
+            agent
+                .send_command(AgentCommand::Prompt("trigger failure".to_string()))
+                .await;
+
+            let mut error_messages = Vec::new();
+            while let Ok(Some(update)) =
+                tokio::time::timeout(Duration::from_millis(100), ui_rx.recv()).await
+            {
+                if let UiUpdate::Error { message, .. } = update {
+                    error_messages.push(message);
+                }
+            }
+
+            assert_eq!(
+                error_messages,
+                vec!["provider returned HTTP 404: model 'invalid' not found".to_string()],
+                "a stream failure must be rendered once even though the provider and \
+                 agent-loop layers both observe it"
+            );
+
+            drop(agent);
+            handle
+                .await
+                .expect("agent task should not panic")
+                .expect("agent should stop cleanly after the channel closes");
+        });
+    }
+
+    #[test]
+    fn user_visible_tool_failures_are_written_to_the_log() {
+        let log = capture_logs(async {
+            let script = vec![MockEvent::Delta(DeltaChunk {
+                tool_call_index: 0,
+                tool_call_id: Some("call-1".to_string()),
+                function_name: Some("missing_tool".to_string()),
+                arguments_fragment: Some("{}".to_string()),
+            })];
+            let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+                Arc::new(MockProvider::with_script(script, Duration::from_millis(0))),
+                EngineConfig {
+                    provider_connection: "mock".to_string(),
+                    model: "test-model".to_string(),
+                    temperature: None,
+                    context_length: None,
+                    api_base_url: None,
+                    api_key: None,
+                    reasoning: None,
+                },
+            ));
+            let (mut agent, mut ui_rx) = AgentLoop::new(engine, Arc::new(ToolRegistry::new()));
+            let handle = agent.run();
+            agent
+                .send_command(AgentCommand::Prompt("trigger tool failure".to_string()))
+                .await;
+
+            loop {
+                let update = ui_rx
+                    .recv()
+                    .await
+                    .expect("agent should emit a tool error update");
+                if matches!(update, UiUpdate::ToolError { .. }) {
+                    break;
+                }
+            }
+
+            drop(agent);
+            handle
+                .await
+                .expect("agent task should not panic")
+                .expect("agent should stop cleanly after the channel closes");
+        });
+
+        assert!(
+            log.contains("tool failed"),
+            "user-visible tool failures must be logged: {log}"
+        );
+        assert!(
+            log.contains("Unknown tool 'missing_tool'"),
+            "the log must include the tool failure diagnostic: {log}"
+        );
     }
 
     fn test_sandbox() -> std::sync::Arc<std::sync::RwLock<Sandbox>> {
@@ -3165,13 +3442,26 @@ mod tests {
             context.messages(),
             &[
                 Message::System {
-                    content: DEFAULT_SYSTEM_PROMPT.to_string(),
+                    content: crate::config::soul::DEFAULT_SOUL.to_string(),
                 },
                 Message::System {
                     content: TOOL_PROTOCOL_SYSTEM_PROMPT.to_string(),
                 },
             ]
         );
+    }
+
+    #[test]
+    fn session_can_begin_with_a_caller_supplied_system_message() {
+        let context = Context::with_system_prompt("project persona");
+
+        assert_eq!(
+            context.messages()[0],
+            Message::System {
+                content: "project persona".to_string(),
+            }
+        );
+        assert!(matches!(context.messages()[1], Message::System { .. }));
     }
 
     #[test]
@@ -3766,9 +4056,9 @@ mod tests {
                     )
                     .expect("write tool registered"),
             };
-            let _cancel = pending.execute(agent_tx);
+            let _cancel = pending.execute(agent_tx, 0);
             tokio::time::timeout(Duration::from_secs(2), async {
-                while let Some(event) = agent_rx.recv().await {
+                while let Some((_generation, event)) = agent_rx.recv().await {
                     if matches!(event, AgentEvent::ToolDone { .. }) {
                         break;
                     }
@@ -3838,6 +4128,7 @@ mod tests {
             registry,
             ui_tx,
             agent_tx,
+            0,
             &mut clarify_started_at,
             &mut pending_steers,
             &mut None,
@@ -3902,6 +4193,7 @@ mod tests {
             registry,
             ui_tx,
             agent_tx,
+            0,
             &mut clarify_started_at,
             &mut pending_steers,
             &mut None,
@@ -3960,6 +4252,7 @@ mod tests {
             registry,
             ui_tx,
             agent_tx,
+            0,
             &mut clarify_started_at,
             &mut pending_steers,
             &mut None,
@@ -4053,6 +4346,7 @@ mod tests {
                 .send(FinishResult {
                     run_id: Uuid::new_v4(),
                     call_id: Uuid::new_v4(),
+                    origin: crate::child_agent_manager::FinishResultOrigin::Agent,
                     status: "success".to_string(),
                     result: Some("child done".to_string()),
                     error: None,
@@ -4094,6 +4388,80 @@ mod tests {
         );
 
             // Drain the ui updates; just ensure the channel didn't panic/drop.
+            while ui_rx.try_recv().is_ok() {}
+        });
+    }
+
+    #[test]
+    fn clear_context_drops_stale_stream_event_from_a_superseded_generation() {
+        crate::test_support::run_locked(async {
+            // Regression test: `AgentCommand::ClearContext` must not let an
+            // `AgentEvent` produced by the pre-clear stream leak into the
+            // brand-new `Context` it installs. Cancellation is cooperative —
+            // the old stream's producer task only notices `current_cancel`
+            // was fired the next time it's polled, so it can still emit a
+            // `StreamCancelled`/`StreamDone` after the clear has already run.
+            // Without the `generation` guard, `StreamCancelled`'s existing
+            // `current_cancel.is_none()` check (designed to reattach a
+            // genuinely interrupted partial to the *same* conversation, as
+            // `AgentCommand::Stop` does) mistakes this stale event for a
+            // fresh interrupt and pushes the old partial into the new,
+            // unrelated context.
+            let script = vec![
+                MockEvent::Text("Pending: partial from before clear".to_string()),
+                MockEvent::Text(" ...".to_string()),
+            ];
+            let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+                Arc::new(MockProvider::with_script(script, Duration::from_millis(80))),
+                EngineConfig {
+                    provider_connection: "mock".to_string(),
+                    model: "test-model".to_string(),
+                    temperature: None,
+                    context_length: None,
+                    api_base_url: None,
+                    api_key: None,
+                    reasoning: None,
+                },
+            ));
+
+            let (mut agent_loop, mut ui_rx) = AgentLoop::new(
+                engine,
+                Arc::new(tools::default_registry(
+                    test_sandbox(),
+                    tools::ToolRegistryConfig::default(),
+                )),
+            );
+            let handle = agent_loop.run();
+            agent_loop
+                .send_command(AgentCommand::Prompt("do the task".into()))
+                .await;
+
+            // Let the first stream start (mode -> Streaming, current_cancel ->
+            // Some) before clearing.
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            agent_loop.send_command(AgentCommand::ClearContext).await;
+
+            // Give the old stream's producer task time to notice the
+            // cancellation and emit its (now stale) `StreamCancelled`.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+
+            drop(agent_loop);
+            let context = tokio::time::timeout(Duration::from_secs(2), handle)
+                .await
+                .expect("run() should return promptly after being dropped")
+                .expect("run() task should not panic")
+                .expect("run() should not return an error");
+
+            assert!(
+                !context.messages().iter().any(|message| matches!(
+                    message,
+                    Message::Assistant { content, .. } if content.contains("Pending: partial from before clear")
+                )),
+                "a stale stream event from before ClearContext must not be \
+                 committed into the fresh context; got {:?}",
+                context.messages()
+            );
+
             while ui_rx.try_recv().is_ok() {}
         });
     }

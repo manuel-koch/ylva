@@ -150,6 +150,7 @@ fn project_for_draw(state: &AppState) -> TuiState {
         .and_then(|run_id| state.child_engine_displays.get(&run_id).cloned())
         .unwrap_or_else(|| state.engine_display.clone());
     TuiState {
+        display_metadata: state.display_metadata.clone(),
         parent_agent_mode,
         agent_mode,
         active_subagent_counts,
@@ -179,6 +180,10 @@ fn project_for_draw(state: &AppState) -> TuiState {
             help_scroll_offset: state.help_popup.help_scroll_offset,
             help_scroll_x: state.help_popup.help_scroll_x,
             help_popup_rect: state.layout.help_popup.rect,
+            help_content_area: state.layout.help_popup.content_area,
+            help_rendered_lines: state.help_popup.help_rendered_lines.clone(),
+            help_selection: state.help_popup.help_selection,
+            help_drag_active: state.help_popup.help_drag_active,
         },
         clarify_banner_state: crate::tui_render_state::ClarifyBannerState {
             pending_clarify: if let crate::tui_reducer_state::TuiMode::ClarifyPending {
@@ -218,6 +223,13 @@ fn project_for_draw(state: &AppState) -> TuiState {
             child_view_bubble,
             header_bubble_scroll_offset: state.child_view.header_bubble_scroll_offset,
             header_bubble_area: ratatui::layout::Rect::default(),
+            header_rendered_lines: state.child_view.header_rendered_lines.clone(),
+            header_rendered_line_prefix_widths: state
+                .child_view
+                .header_rendered_line_prefix_widths
+                .clone(),
+            header_selection: state.child_view.header_selection,
+            header_drag_active: state.child_view.header_drag_active,
         },
         conversation: crate::tui_render_state::ConversationListState {
             scroll_offset: state.conversation.scroll_offset,
@@ -225,9 +237,9 @@ fn project_for_draw(state: &AppState) -> TuiState {
             chat_area_height: state.conversation.chat_area_height,
             chat_area: state.layout.chat_area.rect,
             chat_rendered_lines: state.conversation.chat_rendered_lines.clone(),
-            chat_rendered_line_chrome_widths: state
+            chat_rendered_line_prefix_widths: state
                 .conversation
-                .chat_rendered_line_chrome_widths
+                .chat_rendered_line_prefix_widths
                 .clone(),
             chat_selection: state.conversation.chat_selection,
             chat_drag_active: state.conversation.chat_drag_active,
@@ -245,7 +257,13 @@ fn sync_from_draw(state: &mut AppState, rendered: TuiState, button_areas: Option
     state.layout.clarify_banner = rendered.clarify_banner_state.clarify_banner;
     state.layout.header_bubble = rendered.child_view.header_bubble_area;
     state.child_view.header_bubble_scroll_offset = rendered.child_view.header_bubble_scroll_offset;
+    state.child_view.header_rendered_lines = rendered.child_view.header_rendered_lines;
+    state.child_view.header_rendered_line_prefix_widths =
+        rendered.child_view.header_rendered_line_prefix_widths;
+    state.child_view.header_selection = rendered.child_view.header_selection;
+    state.child_view.header_drag_active = rendered.child_view.header_drag_active;
     state.layout.help_popup.rect = rendered.help_popup.help_popup_rect;
+    state.layout.help_popup.content_area = rendered.help_popup.help_content_area;
     state.layout.slash_overlay = rendered.slash_overlay_layout;
     if let Some(buttons) = button_areas {
         state.layout.approve_button = buttons.approve;
@@ -281,10 +299,13 @@ fn sync_from_draw(state: &mut AppState, rendered: TuiState, button_areas: Option
         }
     }
     state.conversation.chat_rendered_lines = rendered.conversation.chat_rendered_lines;
-    state.conversation.chat_rendered_line_chrome_widths =
-        rendered.conversation.chat_rendered_line_chrome_widths;
+    state.conversation.chat_rendered_line_prefix_widths =
+        rendered.conversation.chat_rendered_line_prefix_widths;
     state.help_popup.help_scroll_offset = rendered.help_popup.help_scroll_offset;
     state.help_popup.help_scroll_x = rendered.help_popup.help_scroll_x;
+    state.help_popup.help_rendered_lines = rendered.help_popup.help_rendered_lines;
+    state.help_popup.help_selection = rendered.help_popup.help_selection;
+    state.help_popup.help_drag_active = rendered.help_popup.help_drag_active;
     state.clarify_banner_state.clarify_scroll_offset =
         rendered.clarify_banner_state.clarify_scroll_offset;
     state.toast = rendered.toast;

@@ -76,9 +76,9 @@ while still guaranteeing a safe default when no config is present.
   (`outside_workspace` → `AutoDenied`, `dot_path` → `AutoDenied`, with the
   existing `allow_dot_paths` bypass for `glob` enumeration preserved),
   applied via **Rust struct-literal code**, not parsed from any embedded
-  TOML file — this floor must exist unconditionally, independent of the
-  embedded `config/` tree that `phase10.1` introduces, so it can never be
-  broken by a missing/corrupted embedded resource.
+  TOML file — this floor must exist unconditionally, independent of any
+  repository configuration files, so it can never be broken by a
+  missing/corrupted resource.
 - **A tool with a `[tool.<name>]` table configured (at any layer) uses
   exactly that list — it fully replaces the default floor for that tool**,
   it does not implicitly merge with it. A user who configures `[tool.read]`
@@ -146,7 +146,7 @@ sandbox::` to confirm the current baseline passes before changing anything.
 
 ## Implementation Plan
 
-1. [ ] Add characterization tests (if any current behavior isn't already
+1. [x] Add characterization tests (if any current behavior isn't already
        covered by the existing `src/sandbox.rs` test module) for today's
        exact two-rule default behavior, so the refactor in later steps has
        a safety net proving no regression. Confirm the existing tests
@@ -158,30 +158,31 @@ sandbox::` to confirm the current baseline passes before changing anything.
        dot-path denial, the `allow_dot_paths` bypass, and a custom glob
        rule overriding the hardcoded defaults. Add any missing case now,
        before refactoring.
-2. [ ] Add a serde-deserializable representation for `ApprovalCheck`
+2. [x] Add a serde-deserializable representation for `ApprovalCheck`
        (`src/sandbox.rs` or a new `src/config/sandbox_rule.rs`): a tagged
        enum/struct such as
-       `{ verdict: "auto_approved" | "auto_denied" | "user_approval_required", reason: Option<String> }`,
+       `{ verdict: "auto_approved" | "auto_denied" | "user_approval_required",
+       reason: Option<String> }`,
        converting into `crate::sandbox::ApprovalCheck` (`AutoDenied` requires
        a `reason`; validate/default it if a config omits `reason` for
        `auto_denied`).
-3. [ ] Add a `SandboxRuleConfig` enum with two variants, both deserializing
+3. [x] Add a `SandboxRuleConfig` enum with two variants, both deserializing
        from one `rules` list entry:
        - `Named { rule: NamedSandboxRule, verdict: ApprovalCheckConfig }`
-         where `NamedSandboxRule` is `OutsideWorkspace | DotPath` (serde
-         string values `"outside_workspace"`/`"dot_path"`).
+       where `NamedSandboxRule` is `OutsideWorkspace | DotPath` (serde
+       string values `"outside_workspace"`/`"dot_path"`).
        - `Glob { pattern: String, verdict: ApprovalCheckConfig }` (the
-         existing custom-glob-rule shape, now config-parseable).
+       existing custom-glob-rule shape, now config-parseable).
        Use an untagged or externally-tagged serde representation that
        distinguishes the two by the presence of `rule` vs. `pattern` —
        pick whichever `serde(untagged)`/manual `Deserialize` approach reads
        most naturally as TOML (test round-tripping both variants).
-4. [ ] Extend `ProfileConfig` (`src/config/profile.rs`) with
+4. [x] Extend `ProfileConfig` (`src/config/profile.rs`) with
        `#[serde(default)] pub tools: HashMap<String, Vec<SandboxRuleConfig>>`,
        populated from `[tool.<name>]` tables' `rules` key. Document the new
        field's doc comment referencing `docs/configuration.md`'s Sandbox
        section.
-5. [ ] Refactor `SandboxContext::check_path_with_dot_path_access`
+5. [x] Refactor `SandboxContext::check_path_with_dot_path_access`
        (`src/sandbox.rs`) so the two structural checks
        (workspace-boundary, dot-path) become two small, named,
        independently-callable evaluator functions (e.g.
@@ -190,13 +191,13 @@ sandbox::` to confirm the current baseline passes before changing anything.
        `workspace_root`, `effective` path, `allow_dot_paths`), returning
        `Option<ApprovalCheck>` each. Both:
        - the **unconditional default-floor path** (no `[tool.<name>]`
-         config for this tool) calls both evaluators directly with the
-         hardcoded `AutoDenied` verdicts (today's exact behavior), and
+       config for this tool) calls both evaluators directly with the
+       hardcoded `AutoDenied` verdicts (today's exact behavior), and
        - the **named-rule config path** (`SandboxRuleConfig::Named`) calls
-         the same evaluator functions but with the *configured* verdict
-         instead of the hardcoded one.
+       the same evaluator functions but with the *configured* verdict
+       instead of the hardcoded one.
        must share the same evaluator implementation — no duplicated logic.
-6. [ ] Wire resolved per-tool rule lists from `ProfileConfig.tools` into
+6. [x] Wire resolved per-tool rule lists from `ProfileConfig.tools` into
        `SandboxContext` construction. In `default_registry`
        (`src/agent/tools.rs`), for each tool: if `profile.tools` has an
        entry for that tool name, build its `SandboxContext` rule list
@@ -204,44 +205,44 @@ sandbox::` to confirm the current baseline passes before changing anything.
        either a call to a named evaluator or a `SandboxRule{pattern,verdict}`);
        otherwise fall back to the two default-floor rules from step 5,
        exactly as today.
-7. [ ] Reconcile `--auto-approve-write`/`--auto-approve-edit` with the new
+7. [x] Reconcile `--auto-approve-write`/`--auto-approve-edit` with the new
        config-driven rule lists: each flag still appends its own catch-all
        `AutoApproved` rule (`pattern = "**"`) **after** whichever rule list
        now applies (config-provided or default-floor) for that tool —
        preserve the existing `with_rule(...)` call in `default_registry`
        for this purpose, just ensure it runs after the config-derived rules
        are appended, not before.
-8. [ ] Re-run the characterization tests from step 1 (and all pre-existing
+8. [x] Re-run the characterization tests from step 1 (and all pre-existing
        `src/sandbox.rs` tests) **unmodified** — they must still pass
        byte-for-byte after the refactor. If any requires a change, treat
        that as a signal of an accidental behavior change; investigate and
        fix the refactor rather than the test, unless the change is
        deliberate and justified (and if so, document why in this plan
        before proceeding).
-9. [ ] Add new tests for the config-driven path:
+9. [x] Add new tests for the config-driven path:
        - A `[tool.read]` rule list overriding the default `dot_path` rule
-         (e.g. changing its verdict to `user_approval_required`) for `read`
-         only, leaving `write`/`edit` unaffected (still using the default
-         floor).
+       (e.g. changing its verdict to `user_approval_required`) for `read`
+       only, leaving `write`/`edit` unaffected (still using the default
+       floor).
        - A profile with no `[tool.*]` tables at all falls back to the two
-         built-in defaults for every tool (regression-confirms step 6's
-         fallback branch).
+       built-in defaults for every tool (regression-confirms step 6's
+       fallback branch).
        - A `[tool.write]` list mixing a `Named` rule and a custom `Glob`
-         rule, confirming list-order/last-match-wins evaluation across the
-         two variant kinds.
+       rule, confirming list-order/last-match-wins evaluation across the
+       two variant kinds.
        - `--auto-approve-write` still auto-approves even when `[tool.write]`
-         is configured with rules that would otherwise deny a path (catch
-         -all still wins, appended last).
-10. [ ] Update `docs/configuration.md`'s "Sandbox" section: replace the
+       is configured with rules that would otherwise deny a path (catch
+       -all still wins, appended last).
+10. [x] Update `docs/configuration.md`'s "Sandbox" section: replace the
         "Phase 6 hardcodes two rules... **WIP:** These two rules are not yet
         configurable" language with documentation of the new `[tool.*]`
         config table (both rule-entry shapes, the default-floor-vs-full
         -replace behavior, and how CLI auto-approve flags compose with it).
-11. [ ] Update `docs/blueprint.md` §7 Phase 10: flip checklist item 9 from
+11. [x] Update `docs/blueprint.md` §7 Phase 10: flip checklist item 9 from
         `- [ ]` to `- [x]` once completed and verified.
-12. [ ] Run `make lint`, `make test`, and `make test-coverage`; fix any
+12. [x] Run `make lint`, `make test`, and `make test-coverage`; fix any
         finding before reporting this plan done.
-13. [ ] Run `rumdl fmt` on `docs/configuration.md` and any other `docs/*.md`
+13. [x] Run `rumdl fmt` on `docs/configuration.md` and any other `docs/*.md`
         file edited in steps 10-11.
 
 ## Implementation Hints

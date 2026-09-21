@@ -22,6 +22,10 @@ model = "gemma4:e4b-mlx"
 provider_connection = "ollama-local"
 model = "gemma4:e4b-mlx"
 
+[engines.broken-local-discovery]
+provider_connection = "ollama-local"
+model = "invalid"
+
 [engines."ollama/cloud"]
 provider_connection = "ollama-cloud"
 model = "gemma4:31b-cloud"

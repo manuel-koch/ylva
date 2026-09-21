@@ -205,7 +205,19 @@ impl ConsoleApp {
 impl App for ConsoleApp {
     async fn run(mut self) -> anyhow::Result<u8> {
         let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new()));
-        let registry = Arc::new(default_registry(sandbox, ToolRegistryConfig::default()));
+        let tool_sandbox_rules = self
+            .profile
+            .tools
+            .iter()
+            .map(|(tool_name, tool_config)| (tool_name.clone(), tool_config.rules.clone()))
+            .collect();
+        let registry = Arc::new(default_registry(
+            sandbox,
+            ToolRegistryConfig {
+                tool_sandbox_rules,
+                ..ToolRegistryConfig::default()
+            },
+        ));
         let (agent, ui_rx) = self
             .factory
             .create(&self.profile, &self.agent_type, Role::Root)?;

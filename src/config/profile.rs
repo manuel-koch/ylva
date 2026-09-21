@@ -13,16 +13,21 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
 use crate::highlight::ThemeName;
 use crate::llm::engine::EngineConfig;
+use crate::ylva_home::YLVA_DIR_NAME;
 
 use super::{
-    load_profile_environment, AgentConfig, ConfigError, ProviderConnectionConfig,
-    DEFAULT_PROFILE_NAME,
+    agent_type_file::{
+        discover_agent_type_files, AgentConfigOverrides, AgentTypeFile, AgentTypeScope,
+    },
+    layered::{current_workspace_root, resolve_file_at_paths, ConfigLayer, ResolvedFile},
+    load_profile_environment_at_workspace_root, AgentConfig, ConfigError, ProviderConnectionConfig,
+    DEFAULT_PROFILE_NAME, PROFILES_DIRECTORY_NAME, PROFILE_CONFIG_FILE_NAME,
 };
 
 /// Top-level runtime profile that groups engine selection and per-agent settings.
@@ -61,6 +66,13 @@ pub struct ProfileConfig {
     /// Syntax-highlighting theme used by the renderers.
     #[serde(default)]
     pub theme: ThemeName,
+    /// Maximum number of explicit messages from prior sessions loaded into
+    /// the TUI input history.
+    #[serde(
+        default = "default_input_history_limit",
+        deserialize_with = "deserialize_usize_or_string"
+    )]
+    pub input_history_limit: usize,
     /// Reserved key-to-action map. Accepted and validated as a table of
     /// strings so a profile carrying one still loads, but Phase 7 ships a
     /// fixed key map (`docs/keybindings.md`) and does not apply these
@@ -70,10 +82,109 @@ pub struct ProfileConfig {
     /// Map of agent-type name to its configuration.
     #[serde(default)]
     pub agents: HashMap<String, AgentConfig>,
+    /// Map of tool name (e.g. `read`, `write`) to its `[tool.<name>]`
+    /// sandbox rule list. When a tool name has no entry here, its
+    /// `SandboxContext` falls back to the built-in default floor
+    /// (`outside_workspace`/`dot_path` → `AutoDenied`, see
+    /// `docs/configuration.md`'s "Sandbox" section and
+    /// [`crate::sandbox::SandboxContext`]); when it does, that entry's rule
+    /// list fully replaces the default floor for that tool.
+    #[serde(default, rename = "tool")]
+    pub tools: HashMap<String, ToolSandboxConfig>,
+}
+
+/// A single `[tool.<name>]` TOML table: currently just the ordered
+/// `rules` list evaluated by [`crate::sandbox::SandboxContext`] for that
+/// tool (last match wins). See [`crate::sandbox::SandboxRuleConfig`].
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ToolSandboxConfig {
+    /// Ordered sandbox rules for this tool; last match wins.
+    #[serde(default)]
+    pub rules: Vec<crate::sandbox::SandboxRuleConfig>,
+}
+
+/// Validate that every `[tool.<name>]`/`[agents.<type>.tools.<name>]` rule
+/// list uses the rule kind appropriate for its tool: `bash` accepts only
+/// [`crate::sandbox::SandboxRuleConfig::CommandGlob`] and the four
+/// `bash`-only [`crate::sandbox::NamedSandboxRule`] variants
+/// (`backgrounded`/`variable_assignment_prefix`/`unquoted_glob`/
+/// `unquoted_brace_expansion`); every other tool accepts only
+/// [`crate::sandbox::SandboxRuleConfig::PathGlob`] and the two path
+/// [`crate::sandbox::NamedSandboxRule`] variants (`outside_workspace`/
+/// `dot_path`). A mismatch is a hard startup error naming the tool, the
+/// rule's list index, and the expected kind, since a silently-ignored rule
+/// kind mismatch would be a safety-critical footgun. A `command` rule whose
+/// `*`/`**` wildcard isn't the last token is likewise a hard error (see
+/// [`crate::sandbox::SandboxRuleConfig::has_misplaced_command_glob_wildcard`]):
+/// left unchecked, it would silently degrade to a literal (never-matching)
+/// token instead of a wildcard.
+fn validate_tool_sandbox_rules(
+    tools: &HashMap<String, ToolSandboxConfig>,
+    path: &Path,
+) -> Result<(), ConfigError> {
+    for (tool_name, tool_config) in tools {
+        let is_bash = tool_name == crate::agent::tools::bash::BashTool::NAME;
+        for (index, rule) in tool_config.rules.iter().enumerate() {
+            let mismatched = if is_bash {
+                rule.is_path_only()
+            } else {
+                rule.is_bash_only()
+            };
+            if mismatched {
+                let expected = if is_bash {
+                    "a `command` argv-glob rule or a named command rule \
+                     (`backgrounded`/`variable_assignment_prefix`/`unquoted_glob`/\
+                     `unquoted_brace_expansion`)"
+                } else {
+                    "a `pattern` path-glob rule or a named path rule \
+                     (`outside_workspace`/`dot_path`)"
+                };
+                return Err(ConfigError::InvalidSandboxRuleKind {
+                    path: path.to_path_buf(),
+                    tool: tool_name.clone(),
+                    index,
+                    expected: expected.to_string(),
+                });
+            }
+            if rule.has_misplaced_command_glob_wildcard() {
+                return Err(ConfigError::MisplacedCommandGlobWildcard {
+                    path: path.to_path_buf(),
+                    tool: tool_name.clone(),
+                    index,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn default_engine_name() -> String {
     DEFAULT_PROFILE_NAME.to_string()
+}
+
+const DEFAULT_INPUT_HISTORY_LIMIT: usize = 50;
+
+fn default_input_history_limit() -> usize {
+    DEFAULT_INPUT_HISTORY_LIMIT
+}
+
+fn deserialize_usize_or_string<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum HistoryLimitValue {
+        Number(usize),
+        Text(String),
+    }
+
+    match HistoryLimitValue::deserialize(deserializer)? {
+        HistoryLimitValue::Number(value) => Ok(value),
+        HistoryLimitValue::Text(value) => value.trim().parse::<usize>().map_err(|error| {
+            serde::de::Error::custom(format!("invalid input_history_limit '{value}': {error}"))
+        }),
+    }
 }
 
 fn default_agent_config() -> AgentConfig {
@@ -83,7 +194,9 @@ fn default_agent_config() -> AgentConfig {
         allowed_tools: None,
         timeout_secs: None,
         persona: None,
+        system_prompt: None,
         can_spawn: true,
+        tools: HashMap::new(),
     }
 }
 
@@ -100,8 +213,10 @@ impl Default for ProfileConfig {
             engines: HashMap::new(),
             default_model: None,
             theme: ThemeName::default(),
+            input_history_limit: default_input_history_limit(),
             keybindings: HashMap::new(),
             agents: HashMap::from([(DEFAULT_PROFILE_NAME.to_string(), default_agent_config())]),
+            tools: HashMap::new(),
         }
     }
 }
@@ -117,7 +232,12 @@ impl ProfileConfig {
     /// [`ProfileConfig::load_or_default`] instead.
     pub fn load(profiles_root: &Path, profile_name: &str) -> Result<ProfileConfig, ConfigError> {
         let environment_path = super::profile_env_path(profiles_root, profile_name);
-        let environment = load_profile_environment(Some(&environment_path))?;
+        let workspace_root = current_workspace_root();
+        let environment = load_profile_environment_at_workspace_root(
+            Some(&environment_path),
+            workspace_root.as_deref(),
+            profile_name,
+        )?;
         Self::load_with_environment(profiles_root, profile_name, &environment)
     }
 
@@ -131,7 +251,26 @@ impl ProfileConfig {
         profile_name: &str,
         environment: &HashMap<String, String>,
     ) -> Result<ProfileConfig, ConfigError> {
-        Self::load_file(profiles_root, profile_name, environment)
+        let workspace_root = current_workspace_root();
+        Self::load_with_environment_at_workspace_root(
+            profiles_root,
+            profile_name,
+            environment,
+            workspace_root.as_deref(),
+        )
+    }
+
+    /// Load a profile using an explicitly discovered workspace root.
+    ///
+    /// The binary uses this entry point so the workspace root is discovered
+    /// once and shared with the root persona loader.
+    pub fn load_with_environment_at_workspace_root(
+        profiles_root: &Path,
+        profile_name: &str,
+        environment: &HashMap<String, String>,
+        workspace_root: Option<&Path>,
+    ) -> Result<ProfileConfig, ConfigError> {
+        Self::load_file(profiles_root, profile_name, environment, workspace_root)
     }
 
     /// Load `<profiles_root>/<profile_name>/config.toml`, falling back to
@@ -146,7 +285,12 @@ impl ProfileConfig {
         profile_name: &str,
     ) -> Result<ProfileConfig, ConfigError> {
         let environment_path = super::profile_env_path(profiles_root, profile_name);
-        let environment = load_profile_environment(Some(&environment_path))?;
+        let workspace_root = current_workspace_root();
+        let environment = load_profile_environment_at_workspace_root(
+            Some(&environment_path),
+            workspace_root.as_deref(),
+            profile_name,
+        )?;
         Self::load_or_default_with_environment(profiles_root, profile_name, &environment)
     }
 
@@ -157,11 +301,33 @@ impl ProfileConfig {
         profile_name: &str,
         environment: &HashMap<String, String>,
     ) -> Result<ProfileConfig, ConfigError> {
-        match Self::load_file(profiles_root, profile_name, environment) {
+        let workspace_root = current_workspace_root();
+        Self::load_or_default_with_environment_at_workspace_root(
+            profiles_root,
+            profile_name,
+            environment,
+            workspace_root.as_deref(),
+        )
+    }
+
+    /// Load a profile with an explicitly discovered workspace root, falling back
+    /// to the in-code defaults when no file exists.
+    pub fn load_or_default_with_environment_at_workspace_root(
+        profiles_root: &Path,
+        profile_name: &str,
+        environment: &HashMap<String, String>,
+        workspace_root: Option<&Path>,
+    ) -> Result<ProfileConfig, ConfigError> {
+        match Self::load_file(profiles_root, profile_name, environment, workspace_root) {
             Ok(profile) => Ok(profile),
             Err(ConfigError::ProfileNotFound { path, .. }) => {
                 tracing::debug!(path = %path.display(), "no profile config; using defaults");
-                Ok(ProfileConfig::default())
+                Self::load_agent_types_into_profile(
+                    ProfileConfig::default(),
+                    profiles_root,
+                    profile_name,
+                    workspace_root,
+                )
             }
             Err(other) => Err(other),
         }
@@ -175,24 +341,30 @@ impl ProfileConfig {
         profiles_root: &Path,
         profile_name: &str,
         environment: &HashMap<String, String>,
+        workspace_root: Option<&Path>,
     ) -> Result<ProfileConfig, ConfigError> {
         let path = super::profile_config_path(profiles_root, profile_name);
-        let contents = match std::fs::read_to_string(&path) {
-            Ok(contents) => contents,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(ConfigError::ProfileNotFound {
-                    profile_name: profile_name.to_string(),
-                    path,
-                });
-            }
-            Err(source) => return Err(ConfigError::Unreadable { path, source }),
-        };
+        let resolved = resolve_profile_config_file(profiles_root, profile_name, workspace_root)?
+            .ok_or_else(|| ConfigError::ProfileNotFound {
+                profile_name: profile_name.to_string(),
+                path: path.clone(),
+            })?;
+        let ResolvedFile {
+            contents,
+            layer,
+            path,
+        } = resolved;
         let mut document: toml::Value =
             toml::from_str(&contents).map_err(|source| ConfigError::Malformed {
                 path: path.clone(),
                 source,
             })?;
         interpolate_toml_strings(&mut document, environment, &path)?;
+        let inline_agents = extract_agent_config_overrides(&document, &path)?;
+        document
+            .as_table_mut()
+            .expect("a parsed TOML document is always a table")
+            .remove("agents");
         let mut profile: ProfileConfig =
             document
                 .try_into()
@@ -201,18 +373,48 @@ impl ProfileConfig {
                     source,
                 })?;
         profile.apply_default_model();
-        // Specialized agent tables do not replace the built-in root agent.
-        profile
-            .agents
-            .entry(DEFAULT_PROFILE_NAME.to_string())
-            .or_insert_with(default_agent_config);
+        profile.agents = load_agent_types(
+            profiles_root,
+            profile_name,
+            workspace_root,
+            layer,
+            &path,
+            inline_agents,
+        )?;
+        validate_tool_sandbox_rules(&profile.tools, &path)?;
+        for agent in profile.agents.values() {
+            validate_tool_sandbox_rules(&agent.tools, &path)?;
+        }
         tracing::info!(
             path = %path.display(),
+            ?layer,
             provider_connections = profile.provider_connections.len(),
             engines = profile.engines.len(),
             agents = profile.agents.len(),
             "profile config loaded"
         );
+        Ok(profile)
+    }
+
+    fn load_agent_types_into_profile(
+        mut profile: ProfileConfig,
+        profiles_root: &Path,
+        profile_name: &str,
+        workspace_root: Option<&Path>,
+    ) -> Result<ProfileConfig, ConfigError> {
+        profile.agents = load_agent_types(
+            profiles_root,
+            profile_name,
+            workspace_root,
+            ConfigLayer::BuiltIn,
+            Path::new("<built-in>"),
+            HashMap::new(),
+        )?;
+        let built_in_path = Path::new("<built-in>");
+        validate_tool_sandbox_rules(&profile.tools, built_in_path)?;
+        for agent in profile.agents.values() {
+            validate_tool_sandbox_rules(&agent.tools, built_in_path)?;
+        }
         Ok(profile)
     }
 
@@ -245,6 +447,157 @@ impl ProfileConfig {
             .as_deref()
             .unwrap_or(self.default_engine.as_str())
     }
+}
+
+fn extract_agent_config_overrides(
+    document: &toml::Value,
+    path: &Path,
+) -> Result<HashMap<String, AgentConfigOverrides>, ConfigError> {
+    let Some(agent_table) = document.get("agents") else {
+        return Ok(HashMap::new());
+    };
+    agent_table
+        .clone()
+        .try_into()
+        .map_err(|source| ConfigError::Malformed {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+fn load_agent_types(
+    profiles_root: &Path,
+    profile_name: &str,
+    workspace_root: Option<&Path>,
+    config_layer: ConfigLayer,
+    config_path: &Path,
+    inline_agents: HashMap<String, AgentConfigOverrides>,
+) -> Result<HashMap<String, AgentConfig>, ConfigError> {
+    let global_agents_root = profiles_root
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("agents");
+    let profile_agents_root = profiles_root.join(profile_name).join("agents");
+    let project_agents_root = workspace_root.map(|root| root.join(YLVA_DIR_NAME).join("agents"));
+
+    let mut resolved_files = HashMap::<String, AgentTypeFile>::new();
+    for (directory, scope) in [
+        (&global_agents_root, AgentTypeScope::Global),
+        (&profile_agents_root, AgentTypeScope::Profile),
+    ] {
+        for (agent_type, file) in discover_agent_type_files(directory, scope)? {
+            resolved_files.insert(agent_type, file);
+        }
+    }
+    if let Some(project_agents_root) = project_agents_root {
+        for (agent_type, file) in
+            discover_agent_type_files(&project_agents_root, AgentTypeScope::Project)?
+        {
+            resolved_files.insert(agent_type, file);
+        }
+    }
+
+    let active_file_scope = match config_layer {
+        ConfigLayer::Workspace => Some(AgentTypeScope::Project),
+        ConfigLayer::Home => Some(AgentTypeScope::Profile),
+        ConfigLayer::BuiltIn => None,
+    };
+    for agent_type in inline_agents.keys() {
+        if let Some(file) = resolved_files.get(agent_type) {
+            if Some(file.scope) == active_file_scope {
+                return Err(ConfigError::AmbiguousAgentTypeDefinition {
+                    agent_type: agent_type.clone(),
+                    scope: file.scope.label().to_string(),
+                    toml_path: config_path.to_path_buf(),
+                    file_path: file.path.clone(),
+                });
+            }
+        }
+    }
+
+    let mut agents = resolved_files
+        .into_iter()
+        .map(|(agent_type, file)| {
+            debug_assert_eq!(agent_type, file.agent_type);
+            (agent_type, file.definition.config)
+        })
+        .collect::<HashMap<_, _>>();
+    agents
+        .entry(DEFAULT_PROFILE_NAME.to_string())
+        .or_insert_with(default_agent_config);
+
+    for (agent_type, overrides) in inline_agents {
+        let config = agents.entry(agent_type).or_insert_with(|| AgentConfig {
+            engine: None,
+            description: None,
+            allowed_tools: None,
+            timeout_secs: None,
+            persona: None,
+            system_prompt: None,
+            can_spawn: false,
+            tools: HashMap::new(),
+        });
+        apply_agent_config_overrides(config, overrides);
+    }
+    Ok(agents)
+}
+
+fn apply_agent_config_overrides(config: &mut AgentConfig, overrides: AgentConfigOverrides) {
+    if overrides.engine.is_some() {
+        config.engine = overrides.engine;
+    }
+    if overrides.description.is_some() {
+        config.description = overrides.description;
+    }
+    if overrides.allowed_tools.is_some() {
+        config.allowed_tools = overrides.allowed_tools;
+    }
+    if overrides.timeout_secs.is_some() {
+        config.timeout_secs = overrides.timeout_secs;
+    }
+    if overrides.persona.is_some() {
+        config.persona = overrides.persona;
+    }
+    if let Some(can_spawn) = overrides.can_spawn {
+        config.can_spawn = can_spawn;
+    }
+    if overrides.tools.is_some() {
+        config.tools = overrides.tools.unwrap_or_default();
+    }
+}
+
+/// Return the path of the profile configuration file selected by the same
+/// workspace/home layering used to load the profile.
+pub fn profile_config_source_path(
+    profiles_root: &Path,
+    profile_name: &str,
+    workspace_root: Option<&Path>,
+) -> Result<Option<PathBuf>, ConfigError> {
+    Ok(
+        resolve_profile_config_file(profiles_root, profile_name, workspace_root)?
+            .map(|resolved| resolved.path),
+    )
+}
+
+fn resolve_profile_config_file(
+    profiles_root: &Path,
+    profile_name: &str,
+    workspace_root: Option<&Path>,
+) -> Result<Option<ResolvedFile>, ConfigError> {
+    let relative_path = PathBuf::from(PROFILES_DIRECTORY_NAME)
+        .join(profile_name)
+        .join(PROFILE_CONFIG_FILE_NAME);
+    let home_path = profiles_root
+        .join(profile_name)
+        .join(PROFILE_CONFIG_FILE_NAME);
+    let workspace_path = workspace_root.map(|root| root.join(YLVA_DIR_NAME).join(&relative_path));
+    let built_in_path = PathBuf::from("<built-in>").join(&relative_path);
+    resolve_file_at_paths(
+        workspace_path.as_deref(),
+        Some(&home_path),
+        &built_in_path,
+        None,
+    )
 }
 
 fn interpolate_toml_strings(
@@ -327,6 +680,7 @@ mod tests {
     use std::collections::HashMap;
     use std::path::Path;
 
+    use crate::config::{profile_env_path, PROFILE_ENV_FILE_NAME};
     use crate::highlight::ThemeName;
 
     use super::*;
@@ -336,6 +690,12 @@ mod tests {
         let path = super::super::profile_config_path(root, profile_name);
         std::fs::create_dir_all(path.parent().expect("a parent directory")).expect("mkdir");
         std::fs::write(&path, contents).expect("write the profile config");
+    }
+
+    fn write_agent_type_file(root: &Path, relative_path: &str, contents: &str) {
+        let path = root.join(relative_path);
+        std::fs::create_dir_all(path.parent().expect("an agent file parent")).expect("mkdir");
+        std::fs::write(path, contents).expect("write the agent-type file");
     }
 
     #[test]
@@ -349,6 +709,7 @@ default_engine = "fast"
 compact_engine = "cheap"
 default_model = "gemma4:e4b-mlx"
 theme = "light"
+input_history_limit = 25
 
 [keybindings]
 submit = "enter"
@@ -388,6 +749,7 @@ persona = "You explore code."
         assert_eq!(profile.default_engine, "fast");
         assert_eq!(profile.compact_engine_name(), "cheap");
         assert_eq!(profile.theme, ThemeName::Light);
+        assert_eq!(profile.input_history_limit, 25);
         assert_eq!(
             profile.keybindings.get("submit").map(String::as_str),
             Some("enter")
@@ -437,6 +799,294 @@ persona = "You explore code."
         assert!(
             !explorer.can_spawn,
             "can_spawn defaults to false when the table omits it"
+        );
+    }
+
+    #[test]
+    fn tool_sandbox_rules_table_loads_named_and_glob_rules() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "with-tools",
+            r#"
+[tool.read]
+rules = [
+  { rule = "dot_path", verdict = "user_approval_required" },
+]
+
+[tool.write]
+rules = [
+  { rule = "outside_workspace", verdict = "auto_denied" },
+  { pattern = "**/build/**", verdict = "auto_approved" },
+]
+"#,
+        );
+
+        let profile = ProfileConfig::load(temp.path(), "with-tools").expect("the fixture loads");
+
+        let read_rules = &profile.tools.get("read").expect("read table").rules;
+        assert_eq!(read_rules.len(), 1);
+        assert!(matches!(
+            read_rules[0],
+            crate::sandbox::SandboxRuleConfig::Named {
+                rule: crate::sandbox::NamedSandboxRule::DotPath,
+                ..
+            }
+        ));
+
+        let write_rules = &profile.tools.get("write").expect("write table").rules;
+        assert_eq!(write_rules.len(), 2);
+        assert!(matches!(
+            write_rules[0],
+            crate::sandbox::SandboxRuleConfig::Named {
+                rule: crate::sandbox::NamedSandboxRule::OutsideWorkspace,
+                ..
+            }
+        ));
+        assert!(
+            matches!(&write_rules[1], crate::sandbox::SandboxRuleConfig::PathGlob { pattern, .. } if pattern == "**/build/**")
+        );
+
+        assert!(
+            !profile.tools.contains_key("edit"),
+            "a tool with no [tool.<name>] table has no entry, falling back to the default floor"
+        );
+    }
+
+    #[test]
+    fn tool_bash_table_loads_command_glob_and_bash_named_rules() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "with-bash-tools",
+            r#"
+[tool.bash]
+rules = [
+  { rule = "backgrounded", verdict = "auto_denied" },
+  { command = ["git", "reflog", "*"], verdict = "auto_approved" },
+]
+"#,
+        );
+
+        let profile =
+            ProfileConfig::load(temp.path(), "with-bash-tools").expect("the fixture loads");
+        let bash_rules = &profile.tools.get("bash").expect("bash table").rules;
+        assert_eq!(bash_rules.len(), 2);
+        assert!(matches!(
+            bash_rules[0],
+            crate::sandbox::SandboxRuleConfig::Named {
+                rule: crate::sandbox::NamedSandboxRule::Backgrounded,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &bash_rules[1],
+            crate::sandbox::SandboxRuleConfig::CommandGlob { command, .. }
+                if command == &vec!["git".to_string(), "reflog".to_string(), "*".to_string()]
+        ));
+    }
+
+    #[test]
+    fn command_glob_rule_under_a_non_bash_tool_is_a_hard_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "bad-command-glob",
+            r#"
+[tool.read]
+rules = [
+  { command = ["git", "status"], verdict = "auto_approved" },
+]
+"#,
+        );
+
+        let error = ProfileConfig::load(temp.path(), "bad-command-glob")
+            .expect_err("a CommandGlob rule under [tool.read] must be rejected");
+        assert!(matches!(
+            error,
+            ConfigError::InvalidSandboxRuleKind { tool, index: 0, .. } if tool == "read"
+        ));
+    }
+
+    #[test]
+    fn path_glob_rule_under_tool_bash_is_a_hard_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "bad-path-glob",
+            r#"
+[tool.bash]
+rules = [
+  { pattern = "**/build/**", verdict = "auto_approved" },
+]
+"#,
+        );
+
+        let error = ProfileConfig::load(temp.path(), "bad-path-glob")
+            .expect_err("a PathGlob rule under [tool.bash] must be rejected");
+        assert!(matches!(
+            error,
+            ConfigError::InvalidSandboxRuleKind { tool, index: 0, .. } if tool == "bash"
+        ));
+    }
+
+    #[test]
+    fn command_glob_rule_with_a_non_trailing_single_wildcard_is_a_hard_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "bad-command-wildcard-position",
+            r#"
+[tool.bash]
+rules = [
+  { command = ["git", "*", "status"], verdict = "auto_approved" },
+]
+"#,
+        );
+
+        let error = ProfileConfig::load(temp.path(), "bad-command-wildcard-position")
+            .expect_err("a `*` that isn't the last command token must be rejected");
+        assert!(matches!(
+            error,
+            ConfigError::MisplacedCommandGlobWildcard { tool, index: 0, .. } if tool == "bash"
+        ));
+    }
+
+    #[test]
+    fn command_glob_rule_with_a_non_trailing_multi_wildcard_is_a_hard_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "bad-command-double-wildcard-position",
+            r#"
+[tool.bash]
+rules = [
+  { command = ["git", "**", "status"], verdict = "auto_approved" },
+]
+"#,
+        );
+
+        let error = ProfileConfig::load(temp.path(), "bad-command-double-wildcard-position")
+            .expect_err("a `**` that isn't the last command token must be rejected");
+        assert!(matches!(
+            error,
+            ConfigError::MisplacedCommandGlobWildcard { tool, index: 0, .. } if tool == "bash"
+        ));
+    }
+
+    #[test]
+    fn command_glob_rule_with_a_trailing_wildcard_loads_successfully() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "good-command-wildcard-position",
+            r#"
+[tool.bash]
+rules = [
+  { command = ["git", "status", "*"], verdict = "auto_approved" },
+]
+"#,
+        );
+
+        ProfileConfig::load(temp.path(), "good-command-wildcard-position")
+            .expect("a trailing `*` as the last command token must be accepted");
+    }
+
+    #[test]
+    fn outside_workspace_named_rule_under_tool_bash_is_a_hard_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "bad-named-rule",
+            r#"
+[tool.bash]
+rules = [
+  { rule = "outside_workspace", verdict = "auto_denied" },
+]
+"#,
+        );
+
+        let error = ProfileConfig::load(temp.path(), "bad-named-rule")
+            .expect_err("outside_workspace under [tool.bash] must be rejected");
+        assert!(matches!(
+            error,
+            ConfigError::InvalidSandboxRuleKind { tool, index: 0, .. } if tool == "bash"
+        ));
+    }
+
+    #[test]
+    fn backgrounded_named_rule_under_a_path_tool_is_a_hard_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "bad-named-rule-path-tool",
+            r#"
+[tool.write]
+rules = [
+  { rule = "backgrounded", verdict = "auto_denied" },
+]
+"#,
+        );
+
+        let error = ProfileConfig::load(temp.path(), "bad-named-rule-path-tool")
+            .expect_err("backgrounded under [tool.write] must be rejected");
+        assert!(matches!(
+            error,
+            ConfigError::InvalidSandboxRuleKind { tool, index: 0, .. } if tool == "write"
+        ));
+    }
+
+    #[test]
+    fn a_profile_with_no_tool_tables_has_an_empty_tools_map() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(temp.path(), "no-tools", "default_engine = \"fast\"\n");
+        let profile = ProfileConfig::load(temp.path(), "no-tools").expect("the fixture loads");
+        assert!(
+            profile.tools.is_empty(),
+            "no [tool.*] tables means no configured overrides for any tool"
+        );
+    }
+
+    #[test]
+    fn inline_agent_type_tools_table_parses_independent_of_profile_level_tools() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "agent-scoped-tools",
+            r#"
+[tool.write]
+rules = [
+  { rule = "outside_workspace", verdict = "auto_denied" },
+]
+
+[agents.custom]
+allowed_tools = ["read", "write"]
+
+[agents.custom.tools.write]
+rules = [
+  { rule = "outside_workspace", verdict = "auto_denied" },
+  { pattern = "**/build/**", verdict = "auto_approved" },
+]
+"#,
+        );
+
+        let profile =
+            ProfileConfig::load(temp.path(), "agent-scoped-tools").expect("the fixture loads");
+
+        let profile_write_rules = &profile.tools.get("write").expect("write table").rules;
+        assert_eq!(profile_write_rules.len(), 1);
+
+        let custom_agent = profile.agents.get("custom").expect("the custom agent");
+        let agent_write_rules = &custom_agent
+            .tools
+            .get("write")
+            .expect("agent-scoped write table")
+            .rules;
+        assert_eq!(
+            agent_write_rules.len(),
+            2,
+            "the agent-scoped table is independent of, and need not match, the \
+             profile-level table for the same tool"
         );
     }
 
@@ -505,6 +1155,44 @@ model = "cloud-model"
     }
 
     #[test]
+    fn numeric_and_boolean_environment_interpolation_loads() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "typed-values",
+            r#"
+input_history_limit = "${INPUT_HISTORY_LIMIT}"
+
+[engines.local]
+provider = "ollama"
+temperature = "${TEMPERATURE}"
+context_length = "${CONTEXT_LENGTH}"
+
+[agents.worker]
+timeout_secs = "${TIMEOUT_SECONDS}"
+can_spawn = "${CAN_SPAWN}"
+"#,
+        );
+        let environment = HashMap::from([
+            ("TEMPERATURE".to_string(), "0.2".to_string()),
+            ("CONTEXT_LENGTH".to_string(), "128kb".to_string()),
+            ("INPUT_HISTORY_LIMIT".to_string(), "17".to_string()),
+            ("TIMEOUT_SECONDS".to_string(), "120".to_string()),
+            ("CAN_SPAWN".to_string(), "true".to_string()),
+        ]);
+
+        let profile =
+            ProfileConfig::load_with_environment(temp.path(), "typed-values", &environment)
+                .expect("the typed-value profile loads");
+
+        assert_eq!(profile.engines["local"].temperature, Some(0.2));
+        assert_eq!(profile.engines["local"].context_length, Some(128 * 1024));
+        assert_eq!(profile.input_history_limit, 17);
+        assert_eq!(profile.agents["worker"].timeout_secs, Some(120));
+        assert!(profile.agents["worker"].can_spawn);
+    }
+
+    #[test]
     fn missing_environment_interpolation_is_a_profile_error() {
         let temp = tempfile::tempdir().expect("tempdir");
         write_profile_config(
@@ -539,6 +1227,416 @@ api_key = "${MISSING_API_KEY}"
                 .get(DEFAULT_PROFILE_NAME)
                 .expect("a default agent type")
                 .can_spawn
+        );
+    }
+
+    #[test]
+    fn the_code_default_profile_is_the_implicit_floor() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let profiles_root = temp.path().join(PROFILES_DIRECTORY_NAME);
+        let profile = ProfileConfig::load_or_default_with_environment_at_workspace_root(
+            &profiles_root,
+            DEFAULT_PROFILE_NAME,
+            &HashMap::new(),
+            None,
+        )
+        .expect("the code default profile is used");
+
+        assert_eq!(profile.default_engine, DEFAULT_PROFILE_NAME);
+        assert!(profile.engines.is_empty());
+        assert_eq!(profile.theme, ThemeName::Dark);
+        assert_eq!(profile.input_history_limit, 50);
+    }
+
+    #[test]
+    fn project_profile_replaces_the_home_profile_for_the_same_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home_profiles_root = temp.path().join("home").join(PROFILES_DIRECTORY_NAME);
+        let workspace_root = temp.path().join("project");
+        write_profile_config(
+            &home_profiles_root,
+            DEFAULT_PROFILE_NAME,
+            "theme = \"light\"\n",
+        );
+        let project_config = workspace_root
+            .join(".ylva")
+            .join(PROFILES_DIRECTORY_NAME)
+            .join(DEFAULT_PROFILE_NAME)
+            .join(PROFILE_CONFIG_FILE_NAME);
+        std::fs::create_dir_all(project_config.parent().expect("project config parent"))
+            .expect("mkdir");
+        std::fs::write(&project_config, "theme = \"dark\"\n").expect("write project config");
+
+        let profile = ProfileConfig::load_with_environment_at_workspace_root(
+            &home_profiles_root,
+            DEFAULT_PROFILE_NAME,
+            &HashMap::new(),
+            Some(&workspace_root),
+        )
+        .expect("the project profile loads");
+
+        assert_eq!(profile.theme, ThemeName::Dark);
+    }
+
+    #[test]
+    fn global_agent_type_file_is_loaded_for_a_profile() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let profiles_root = home.join(PROFILES_DIRECTORY_NAME);
+        write_profile_config(&profiles_root, "work", "theme = \"dark\"\n");
+        write_agent_type_file(
+            &home,
+            "agents/research.md",
+            "+++\ncan_spawn = false\n+++\nInvestigate evidence.\n",
+        );
+
+        let profile = ProfileConfig::load(&profiles_root, "work").expect("profile loads");
+        let research = profile.agents.get("research").expect("global agent type");
+        assert!(!research.can_spawn);
+        assert_eq!(
+            research.system_prompt.as_deref(),
+            Some("Investigate evidence.")
+        );
+    }
+
+    #[test]
+    fn malformed_markdown_agent_type_file_is_a_named_load_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let profiles_root = home.join(PROFILES_DIRECTORY_NAME);
+        write_profile_config(&profiles_root, "work", "theme = \"dark\"\n");
+        write_agent_type_file(
+            &home,
+            "agents/research.md",
+            "This file is missing frontmatter.\n",
+        );
+
+        let error =
+            ProfileConfig::load(&profiles_root, "work").expect_err("malformed agent file fails");
+        let message = error.to_string();
+        assert!(message.contains("malformed agent-type file"), "{message}");
+        assert!(message.contains("research.md"), "{message}");
+    }
+
+    #[test]
+    fn profile_agent_type_file_shadows_global_only_for_that_profile() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let profiles_root = home.join(PROFILES_DIRECTORY_NAME);
+        write_profile_config(&profiles_root, "work", "theme = \"dark\"\n");
+        write_profile_config(&profiles_root, "other", "theme = \"dark\"\n");
+        write_agent_type_file(
+            &home,
+            "agents/research.toml",
+            "system_prompt = \"global\"\ncan_spawn = true\n",
+        );
+        write_agent_type_file(
+            &home,
+            "profiles/work/agents/research.toml",
+            "system_prompt = \"profile\"\ncan_spawn = false\n",
+        );
+
+        let work = ProfileConfig::load(&profiles_root, "work").expect("work profile loads");
+        let other = ProfileConfig::load(&profiles_root, "other").expect("other profile loads");
+        assert_eq!(
+            work.agents["research"].system_prompt.as_deref(),
+            Some("profile")
+        );
+        assert!(!work.agents["research"].can_spawn);
+        assert_eq!(
+            other.agents["research"].system_prompt.as_deref(),
+            Some("global")
+        );
+        assert!(other.agents["research"].can_spawn);
+    }
+
+    #[test]
+    fn project_agent_type_file_shadows_profile_and_global_files() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let profiles_root = home.join(PROFILES_DIRECTORY_NAME);
+        let workspace_root = temp.path().join("project");
+        write_profile_config(&profiles_root, DEFAULT_PROFILE_NAME, "theme = \"dark\"\n");
+        let project_config = workspace_root
+            .join(YLVA_DIR_NAME)
+            .join(PROFILES_DIRECTORY_NAME)
+            .join(DEFAULT_PROFILE_NAME)
+            .join(PROFILE_CONFIG_FILE_NAME);
+        std::fs::create_dir_all(project_config.parent().expect("project config parent"))
+            .expect("mkdir");
+        std::fs::write(&project_config, "theme = \"dark\"\n").expect("write project config");
+        write_agent_type_file(
+            &home,
+            "agents/research.toml",
+            "system_prompt = \"global\"\n",
+        );
+        write_agent_type_file(
+            &home,
+            "profiles/default/agents/research.toml",
+            "system_prompt = \"profile\"\n",
+        );
+        write_agent_type_file(
+            &workspace_root,
+            ".ylva/agents/research.toml",
+            "system_prompt = \"project\"\n",
+        );
+
+        let profile = ProfileConfig::load_with_environment_at_workspace_root(
+            &profiles_root,
+            DEFAULT_PROFILE_NAME,
+            &HashMap::new(),
+            Some(&workspace_root),
+        )
+        .expect("project profile loads");
+        assert_eq!(
+            profile.agents["research"].system_prompt.as_deref(),
+            Some("project")
+        );
+    }
+
+    #[test]
+    fn project_environment_is_used_for_project_profile_interpolation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let profiles_root = home.join(PROFILES_DIRECTORY_NAME);
+        let workspace_root = temp.path().join("project");
+        write_profile_config(&profiles_root, DEFAULT_PROFILE_NAME, "theme = \"light\"\n");
+
+        let project_config = workspace_root
+            .join(YLVA_DIR_NAME)
+            .join(PROFILES_DIRECTORY_NAME)
+            .join(DEFAULT_PROFILE_NAME)
+            .join(PROFILE_CONFIG_FILE_NAME);
+        std::fs::create_dir_all(project_config.parent().expect("project config parent"))
+            .expect("mkdir");
+        std::fs::write(
+            &project_config,
+            r#"
+[provider_connections.project]
+provider = "ollama"
+api_base_url = "${YLVA_PHASE10_2_PROJECT_URL}"
+"#,
+        )
+        .expect("write project config");
+
+        let project_environment = workspace_root
+            .join(YLVA_DIR_NAME)
+            .join(PROFILES_DIRECTORY_NAME)
+            .join(DEFAULT_PROFILE_NAME)
+            .join(PROFILE_ENV_FILE_NAME);
+        std::fs::create_dir_all(project_environment.parent().expect("project env parent"))
+            .expect("mkdir");
+        std::fs::write(
+            &project_environment,
+            "YLVA_PHASE10_2_PROJECT_URL=http://project.example\n",
+        )
+        .expect("write project environment");
+
+        let environment = load_profile_environment_at_workspace_root(
+            Some(&profile_env_path(&profiles_root, DEFAULT_PROFILE_NAME)),
+            Some(&workspace_root),
+            DEFAULT_PROFILE_NAME,
+        )
+        .expect("load project environment");
+        let profile = ProfileConfig::load_with_environment_at_workspace_root(
+            &profiles_root,
+            DEFAULT_PROFILE_NAME,
+            &environment,
+            Some(&workspace_root),
+        )
+        .expect("project profile loads");
+
+        assert_eq!(
+            profile.provider_connections["project"]
+                .api_base_url
+                .as_deref(),
+            Some("http://project.example")
+        );
+    }
+
+    #[test]
+    fn inline_agent_fields_override_a_file_definition_without_replacing_its_body() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let profiles_root = temp.path().join("home").join(PROFILES_DIRECTORY_NAME);
+        write_profile_config(
+            &profiles_root,
+            "work",
+            r#"
+[agents.research]
+persona = "Be concise."
+timeout_secs = 30
+"#,
+        );
+        write_agent_type_file(
+            &temp.path().join("home"),
+            "agents/research.md",
+            "+++\ncan_spawn = true\n+++\nInvestigate evidence.\n",
+        );
+
+        let profile = ProfileConfig::load(&profiles_root, "work").expect("profile loads");
+        let research = profile.agents.get("research").expect("research agent type");
+        assert_eq!(research.persona.as_deref(), Some("Be concise."));
+        assert_eq!(research.timeout_secs, Some(30));
+        assert!(research.can_spawn);
+        assert_eq!(
+            research.system_prompt.as_deref(),
+            Some("Investigate evidence.")
+        );
+    }
+
+    #[test]
+    fn same_scope_project_agent_file_and_inline_table_are_rejected() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let profiles_root = temp.path().join("home").join(PROFILES_DIRECTORY_NAME);
+        let workspace_root = temp.path().join("project");
+        let project_config = workspace_root
+            .join(YLVA_DIR_NAME)
+            .join(PROFILES_DIRECTORY_NAME)
+            .join(DEFAULT_PROFILE_NAME)
+            .join(PROFILE_CONFIG_FILE_NAME);
+        std::fs::create_dir_all(project_config.parent().expect("project config parent"))
+            .expect("mkdir");
+        std::fs::write(&project_config, "[agents.research]\npersona = \"inline\"\n")
+            .expect("write project config");
+        write_agent_type_file(
+            &workspace_root,
+            ".ylva/agents/research.md",
+            "+++\n+++\nfile body\n",
+        );
+
+        let error = ProfileConfig::load_with_environment_at_workspace_root(
+            &profiles_root,
+            DEFAULT_PROFILE_NAME,
+            &HashMap::new(),
+            Some(&workspace_root),
+        )
+        .expect_err("same-scope project definitions must conflict");
+        let message = error.to_string();
+        assert!(message.contains("research"), "{message}");
+        assert!(message.contains("project"), "{message}");
+        assert!(message.contains("config.toml"), "{message}");
+        assert!(message.contains("research.md"), "{message}");
+    }
+
+    #[test]
+    fn same_scope_profile_agent_file_and_inline_table_are_rejected() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let profiles_root = home.join(PROFILES_DIRECTORY_NAME);
+        write_profile_config(
+            &profiles_root,
+            "work",
+            "[agents.research]\npersona = \"inline\"\n",
+        );
+        write_agent_type_file(
+            &home,
+            "profiles/work/agents/research.md",
+            "+++\n+++\nfile body\n",
+        );
+
+        let error = ProfileConfig::load(&profiles_root, "work")
+            .expect_err("same-scope profile definitions must conflict");
+        let message = error.to_string();
+        assert!(message.contains("research"), "{message}");
+        assert!(message.contains("profile"), "{message}");
+        assert!(message.contains("config.toml"), "{message}");
+        assert!(message.contains("research.md"), "{message}");
+    }
+
+    #[test]
+    fn inline_profile_override_of_a_global_agent_type_is_allowed() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let profiles_root = home.join(PROFILES_DIRECTORY_NAME);
+        write_profile_config(
+            &profiles_root,
+            "work",
+            "[agents.research]\npersona = \"Use concise findings.\"\n",
+        );
+        write_agent_type_file(&home, "agents/research.md", "+++\n+++\nglobal body\n");
+
+        let profile = ProfileConfig::load(&profiles_root, "work")
+            .expect("cross-scope inline adaptation is valid");
+        assert_eq!(
+            profile.agents["research"].persona.as_deref(),
+            Some("Use concise findings.")
+        );
+        assert_eq!(
+            profile.agents["research"].system_prompt.as_deref(),
+            Some("global body")
+        );
+    }
+
+    #[test]
+    fn missing_config_fallback_still_loads_project_agent_files() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let profiles_root = temp.path().join("home").join(PROFILES_DIRECTORY_NAME);
+        let workspace_root = temp.path().join("project");
+        write_agent_type_file(
+            &workspace_root,
+            ".ylva/agents/research.toml",
+            "system_prompt = \"project body\"\n",
+        );
+
+        let profile = ProfileConfig::load_or_default_with_environment_at_workspace_root(
+            &profiles_root,
+            DEFAULT_PROFILE_NAME,
+            &HashMap::new(),
+            Some(&workspace_root),
+        )
+        .expect("missing default config falls back");
+        assert_eq!(
+            profile.agents["research"].system_prompt.as_deref(),
+            Some("project body")
+        );
+        assert!(
+            profile.agents[DEFAULT_PROFILE_NAME].can_spawn,
+            "the code-owned default remains available"
+        );
+    }
+
+    #[test]
+    fn profile_config_source_path_matches_profile_layer_precedence() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home_profiles_root = temp.path().join("home").join(PROFILES_DIRECTORY_NAME);
+        let workspace_root = temp.path().join("project");
+        write_profile_config(
+            &home_profiles_root,
+            DEFAULT_PROFILE_NAME,
+            "theme = \"light\"\n",
+        );
+        let workspace_config = workspace_root
+            .join(YLVA_DIR_NAME)
+            .join(PROFILES_DIRECTORY_NAME)
+            .join(DEFAULT_PROFILE_NAME)
+            .join(PROFILE_CONFIG_FILE_NAME);
+        std::fs::create_dir_all(workspace_config.parent().expect("workspace config parent"))
+            .expect("mkdir");
+        std::fs::write(&workspace_config, "theme = \"dark\"\n").expect("write workspace config");
+
+        assert_eq!(
+            profile_config_source_path(
+                &home_profiles_root,
+                DEFAULT_PROFILE_NAME,
+                Some(&workspace_root)
+            )
+            .expect("resolve workspace profile path"),
+            Some(workspace_config.clone())
+        );
+
+        std::fs::remove_file(&workspace_config).expect("remove workspace config");
+        assert_eq!(
+            profile_config_source_path(
+                &home_profiles_root,
+                DEFAULT_PROFILE_NAME,
+                Some(&workspace_root)
+            )
+            .expect("resolve home profile path"),
+            Some(
+                home_profiles_root
+                    .join(DEFAULT_PROFILE_NAME)
+                    .join(PROFILE_CONFIG_FILE_NAME)
+            )
         );
     }
 
@@ -665,7 +1763,9 @@ engine = "ollama/local"
                     allowed_tools: Some(vec!["bash".to_string()]),
                     timeout_secs: Some(120),
                     persona: Some("You are a helpful assistant.".to_string()),
+                    system_prompt: None,
                     can_spawn: false,
+                    tools: HashMap::new(),
                 },
             )]),
             ..ProfileConfig::default()
@@ -696,7 +1796,9 @@ engine = "ollama/local"
             allowed_tools: None,
             timeout_secs: None,
             persona: None,
+            system_prompt: None,
             can_spawn: true,
+            tools: HashMap::new(),
         };
 
         assert!(agent_config.engine.is_none());

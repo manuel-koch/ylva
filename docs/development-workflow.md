@@ -1,6 +1,10 @@
 # Development workflow
 
-After implementing new functionality or fixing bugs, run the test suite and the linter.
+After implementing new functionality or fixing bugs, run `make format lint` and the
+single mandatory test gate, `make test-coverage`.
+
+`make test-coverage` runs the full test suite and enforces the coverage
+threshold, so running `make test` in addition is redundant and is not required.
 
 For new features come up with appropriate test case(s) to verify them.
 
@@ -20,9 +24,9 @@ make format                          # Enforce consistent formatting on known fi
 make format-rust                     # Enforce consistent formatting on Rust files
 make format-markdown                 # Enforce consistent formatting on Markdown files
 make lint                            # cargo check + cargo clippy — fix all warnings before committing
-make test-coverage                   # run tests + print per-file coverage summary; fails if <80%
+make test-coverage                   # mandatory final test gate: run tests + print per-file coverage summary; fails if <80%
 make test-coverage-missing           # same as test-coverage but also prints uncovered line numbers
-make test                            # cargo test — all tests must pass
+make test                            # optional: cargo test — all tests must pass (no coverage check)
 make test-e2e-persistence              # run live-provider persistence tests; missing variables fail
 make build-debug                     # cargo build (debug)
 make build-debug-and-run             # build debug binary and launch it
@@ -35,7 +39,7 @@ make outdated-dependencies           # cargo update --dry-run — show available
 make upgrade-dependencies            # cargo update — apply dependency upgrades to Cargo.lock
 ```
 
-The `Makefile` at the project root is the source of truth for `make` targets.
+The `Makefile` at the workspace root is the source of truth for `make` targets.
 This section is a documentation mirror — when a target is added, removed, renamed,
 or its command changes, update this section in the same commit (see
 [AGENTS](../AGENTS.md) → *Docs are part of the change set*).
@@ -198,7 +202,7 @@ the real binary instead:
   `tests/cli_version.rs` for the minimal form, and
   `tests/store_persistence_e2e.rs` for the full pattern).
 - Give it a `tempfile::TempDir` as **both** `YLVA_HOME` (`Command::env`) and its
-  working directory (`Command::current_dir`): `YLVA_HOME` names the state root
+  working directory (`Command::current_dir`): `YLVA_HOME` names the Ylva home
   directly (`<tempdir>/chats`, `<tempdir>/profiles`, and the fixed cwd makes
   any cwd-derived key deterministic. `YLVA_HOME` redirects Ylva's state and nothing else.
 - Point it at a `common::mock_llm_server::MockLlmServer` through the same

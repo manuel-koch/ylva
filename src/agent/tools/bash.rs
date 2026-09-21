@@ -17,9 +17,8 @@
 //!
 //! stdout and stderr are read concurrently by two separate async tasks and
 //! merged in true arrival order via an unbounded channel. Total output is
-//! capped at [`BASH_OUTPUT_LIMIT_BYTES`]; lines beyond the cap are silently
-//! discarded and the result carries `truncated` /
-//! `truncated_at_bytes` metadata.
+//! capped at [`BASH_OUTPUT_LIMIT_LINES`] whole lines; lines beyond the cap are
+//! silently discarded and the result carries `truncated` metadata.
 //!
 //! Process-group kill is performed by a [`ProcessGroupGuard`] whose `Drop`
 //! implementation sends `SIGKILL` to the whole group. The guard lives in the
@@ -49,9 +48,18 @@ pub const DEFAULT_BASH_TIMEOUT_SECS: u64 = 300;
 /// `ToolError::failed_with_output` before the outer safety-net fires.
 pub const BASH_OUTER_TIMEOUT_GRACE_SECS: u64 = 5;
 
-/// Maximum total bytes captured from stdout + stderr combined. Output beyond
-/// this limit is silently discarded; the result metadata records the truncation.
-pub const BASH_OUTPUT_LIMIT_BYTES: usize = 100 * 1024;
+/// Maximum number of whole output lines captured from stdout + stderr
+/// combined. Lines beyond this limit are silently discarded; the result
+/// metadata records the truncation.
+pub const BASH_OUTPUT_LIMIT_LINES: usize = 1000;
+
+/// Maximum number of bytes captured from stdout + stderr combined,
+/// independent of [`BASH_OUTPUT_LIMIT_LINES`]. Bounds worst-case memory/
+/// context usage when output contains very long or unterminated lines
+/// (e.g. a single huge JSON/base64 blob) that the line cap alone cannot
+/// catch. Whichever cap is hit first stops collection; the result metadata
+/// records the truncation.
+pub const BASH_OUTPUT_LIMIT_BYTES: usize = 65_536;
 
 // ── Argument schema ───────────────────────────────────────────────────────────
 
@@ -74,23 +82,18 @@ pub struct BashInputArgs {
 pub struct BashResultMetadata {
     /// Total bytes in the merged stdout + stderr returned.
     pub output_bytes: usize,
-    /// Present and `true` when output exceeded the byte cap and was truncated.
+    /// Present and `true` when output exceeded the line cap and was truncated.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truncated: Option<bool>,
-    /// Byte offset at which truncation began (only present when `truncated` is `true`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub truncated_at_bytes: Option<usize>,
 }
 
 /// Successful output from a `bash` invocation.
 #[derive(Debug)]
 pub struct BashResult {
-    /// Merged stdout + stderr up to [`BASH_OUTPUT_LIMIT_BYTES`].
+    /// Merged stdout + stderr up to [`BASH_OUTPUT_LIMIT_LINES`].
     pub output: String,
     /// `true` when the cap was hit and some output was discarded.
     pub truncated: bool,
-    /// Byte position at which truncation began (only `Some` when `truncated`).
-    pub truncated_at_bytes: Option<usize>,
 }
 
 impl ToolCallResult for BashResult {
@@ -102,7 +105,6 @@ impl ToolCallResult for BashResult {
         let metadata = BashResultMetadata {
             output_bytes: self.output.len(),
             truncated: self.truncated.then_some(true),
-            truncated_at_bytes: self.truncated.then_some(self.truncated_at_bytes).flatten(),
         };
         serde_json::to_value(metadata).ok()
     }
@@ -228,13 +230,12 @@ fn build_description(timeout_secs: u64) -> String {
          working directory, which is the workspace root. Use relative paths directly; \
          do not prefix the command with a redundant `cd` to the workspace root. Use \
          `cd` only when intentionally changing directories. stdout/stderr merged in \
-         arrival order. Output capped at {} KB (excess discarded). Times out after {} \
-         s, killing the whole process group. Never use this tool to sleep, poll, or \
-         otherwise wait for a spawned subagent to finish (e.g. `sleep`, `wait`, status- \
-         polling loops) — the harness delivers each subagent's completion automatically \
-         once it is ready.",
-        BASH_OUTPUT_LIMIT_BYTES / 1024,
-        timeout_secs,
+         arrival order. Output capped at {} lines or {} bytes, whichever is hit first \
+         (excess discarded). Times out after {} s, killing the whole process group. \
+         Never use this tool to sleep, poll, or otherwise wait for a spawned subagent \
+         to finish (e.g. `sleep`, `wait`, status-polling loops) — the harness delivers \
+         each subagent's completion automatically once it is ready.",
+        BASH_OUTPUT_LIMIT_LINES, BASH_OUTPUT_LIMIT_BYTES, timeout_secs,
     )
 }
 
@@ -285,10 +286,12 @@ impl Tool for BashTool {
         schema_for!(BashInputArgs)
     }
 
-    /// Delegates to the sandbox; the sandbox currently abstains for all
-    /// commands, so the tool's own default (`UserApprovalRequired`) applies.
-    /// When the sandbox gains command-glob rules they will be honoured here
-    /// without any change to the agent loop.
+    /// Delegates to the sandbox, which structurally analyses the command
+    /// (backgrounding, variable-assignment prefixes, unquoted glob/brace
+    /// expansion, unanalysable constructs) and combines that with any
+    /// configured `[tool.bash]` named/`CommandGlob` rules — see
+    /// `SandboxContext::check_command`. When the sandbox abstains (`None`),
+    /// the tool's own conservative default (`UserApprovalRequired`) applies.
     fn needs_approval(&self, arguments: &Value) -> ApprovalCheck {
         let command = arguments
             .get("command")
@@ -327,7 +330,7 @@ impl Tool for BashTool {
 // ── Core execution ────────────────────────────────────────────────────────────
 
 /// Execute `args.command` via `bash -c`, merging stdout + stderr in arrival
-/// order, capped at [`BASH_OUTPUT_LIMIT_BYTES`].
+/// order, capped at [`BASH_OUTPUT_LIMIT_LINES`].
 ///
 /// The spawned process runs in its own process group (`process_group(0)`).
 /// A [`ProcessGroupGuard`] (Unix only) kills that group with `SIGKILL` when
@@ -419,7 +422,7 @@ pub async fn run_bash(args: BashInputArgs, timeout_secs: u64) -> Result<BashResu
         // partial output can be shown in the bubble and communicated to the LLM.
         stdout_reader_task.abort();
         stderr_reader_task.abort();
-        let (partial_output, _, _) = collect_output(&mut line_receiver).await;
+        let (partial_output, _) = collect_output(&mut line_receiver).await;
         tracing::warn!(
             timeout_secs = effective_timeout_secs,
             partial_bytes = partial_output.len(),
@@ -437,7 +440,7 @@ pub async fn run_bash(args: BashInputArgs, timeout_secs: u64) -> Result<BashResu
     let _ = stderr_reader_task.await;
 
     // Drain the channel, applying the output cap.
-    let (output, truncated, truncated_at_bytes) = collect_output(&mut line_receiver).await;
+    let (output, truncated) = collect_output(&mut line_receiver).await;
 
     let status = exit_status
         .unwrap()
@@ -457,42 +460,37 @@ pub async fn run_bash(args: BashInputArgs, timeout_secs: u64) -> Result<BashResu
         "bash command completed"
     );
 
-    Ok(BashResult {
-        output,
-        truncated,
-        truncated_at_bytes,
-    })
+    Ok(BashResult { output, truncated })
 }
 
-/// Drain `receiver` and accumulate up to [`BASH_OUTPUT_LIMIT_BYTES`] of text.
-/// Lines beyond the cap are received (to avoid blocking senders) but discarded.
-/// Returns `(output, truncated, truncated_at_bytes)`.
+/// Drain `receiver` and accumulate up to [`BASH_OUTPUT_LIMIT_LINES`] whole
+/// lines of text, capped at [`BASH_OUTPUT_LIMIT_BYTES`] total bytes,
+/// whichever limit is hit first. Lines beyond either cap are received (to
+/// avoid blocking senders) but discarded.
+/// Returns `(output, truncated)`.
 async fn collect_output(
     receiver: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
-) -> (String, bool, Option<usize>) {
+) -> (String, bool) {
     let mut output = String::new();
     let mut truncated = false;
-    let mut truncated_at_bytes: Option<usize> = None;
+    let mut line_count: usize = 0;
 
     while let Some(line) = receiver.recv().await {
         if truncated {
             // Keep draining so senders are not blocked, but discard content.
             continue;
         }
-        let remaining_capacity = BASH_OUTPUT_LIMIT_BYTES.saturating_sub(output.len());
-        if remaining_capacity == 0 {
+        if line_count >= BASH_OUTPUT_LIMIT_LINES
+            || output.len() + line.len() > BASH_OUTPUT_LIMIT_BYTES
+        {
             truncated = true;
-            truncated_at_bytes = Some(output.len());
-        } else if line.len() > remaining_capacity {
-            output.push_str(&line[..remaining_capacity]);
-            truncated = true;
-            truncated_at_bytes = Some(output.len());
-        } else {
-            output.push_str(&line);
+            continue;
         }
+        output.push_str(&line);
+        line_count += 1;
     }
 
-    (output, truncated, truncated_at_bytes)
+    (output, truncated)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -537,8 +535,12 @@ mod tests {
             "description must include the actual timeout: {description}"
         );
         assert!(
-            description.contains(&(BASH_OUTPUT_LIMIT_BYTES / 1024).to_string()),
-            "description must include the output cap in KB: {description}"
+            description.contains(&BASH_OUTPUT_LIMIT_LINES.to_string()),
+            "description must include the output cap in lines: {description}"
+        );
+        assert!(
+            description.contains(&BASH_OUTPUT_LIMIT_BYTES.to_string()),
+            "description must include the output cap in bytes: {description}"
         );
     }
 
@@ -579,7 +581,6 @@ mod tests {
                 "output should contain 'hello'"
             );
             assert!(!result.truncated);
-            assert_eq!(result.truncated_at_bytes, None);
         });
     }
 
@@ -627,30 +628,47 @@ mod tests {
     #[test]
     fn bash_output_truncated_at_cap() {
         run_locked(async {
-            // Generate just over 100 KB of output (each 'yes' line is ~2 bytes).
-            // `head -c 200000` ensures we definitely exceed the cap.
-            let result = run_bash(make_bash_args("yes | head -c 200000"), 10)
+            // Generate more lines than the 1000-line cap so truncation kicks in.
+            let result = run_bash(make_bash_args("yes | head -n 2000"), 10)
                 .await
                 .expect("command should succeed");
             assert!(result.truncated, "output should be marked as truncated");
-            assert!(
-                result.truncated_at_bytes.is_some(),
-                "truncated_at_bytes should be set"
+            let line_count = result.output.lines().count();
+            assert_eq!(
+                line_count, BASH_OUTPUT_LIMIT_LINES,
+                "output must be capped at whole lines, never split mid-line: got {line_count} lines"
             );
-            assert!(
-                result.output.len() <= BASH_OUTPUT_LIMIT_BYTES,
-                "output must not exceed the cap: got {} bytes",
-                result.output.len()
-            );
-            // Verify metadata contains the truncation keys.
+            // Verify metadata contains the truncation key.
             let meta = result
                 .metadata()
                 .expect("truncated result must have metadata");
             let obj = meta.as_object().expect("metadata is a JSON object");
             assert!(obj.contains_key("truncated"), "truncated key missing");
+        });
+    }
+
+    #[test]
+    fn bash_output_truncated_at_byte_cap_with_few_huge_lines() {
+        run_locked(async {
+            // A handful of lines, each far larger than the byte cap divided by the
+            // line cap, so the byte cap (not the line cap) must trigger truncation.
+            let command = format!(
+                "for i in 1 2 3; do head -c {} /dev/zero | tr '\\0' 'a'; echo; done",
+                BASH_OUTPUT_LIMIT_BYTES
+            );
+            let result = run_bash(make_bash_args(&command), 10)
+                .await
+                .expect("command should succeed");
+            assert!(result.truncated, "output should be marked as truncated");
+            let line_count = result.output.lines().count();
             assert!(
-                obj.contains_key("truncated_at_bytes"),
-                "truncated_at_bytes key missing"
+                line_count < BASH_OUTPUT_LIMIT_LINES,
+                "byte cap must trigger before the line cap: got {line_count} lines"
+            );
+            assert!(
+                result.output.len() <= BASH_OUTPUT_LIMIT_BYTES,
+                "output must never exceed the byte cap: got {} bytes",
+                result.output.len()
             );
         });
     }
@@ -704,7 +722,6 @@ mod tests {
         let result = BashResult {
             output: "hello\n".to_string(),
             truncated: false,
-            truncated_at_bytes: None,
         };
         let sections = result.content_sections();
         assert_eq!(sections.len(), 1);
@@ -719,7 +736,6 @@ mod tests {
         let result = BashResult {
             output: String::new(),
             truncated: false,
-            truncated_at_bytes: None,
         };
         assert!(result.content_sections().is_empty());
     }

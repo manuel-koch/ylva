@@ -26,6 +26,7 @@
 //! Only [`ratatui::layout::Rect`] is allowed from ratatui here.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crossterm::event::KeyEvent;
@@ -108,6 +109,55 @@ fn char_range(s: &str, start: usize, end: usize) -> String {
         .skip(start)
         .take(end.saturating_sub(start))
         .collect()
+}
+
+fn extract_selection_text(
+    selection: Option<&ChatSelection>,
+    lines: &[String],
+    prefix_widths: &[usize],
+) -> Option<String> {
+    let selection = selection?;
+    if selection.is_empty() || lines.is_empty() {
+        return None;
+    }
+    let (start_line, start_col, end_line, end_col) = selection.normalized();
+    let start_line = start_line.min(lines.len().saturating_sub(1));
+    let end_line = end_line.min(lines.len().saturating_sub(1));
+    if start_line > end_line {
+        return None;
+    }
+    let prefix_width = |index: usize| -> usize { prefix_widths.get(index).copied().unwrap_or(0) };
+    if start_line == end_line {
+        let line = &lines[start_line];
+        let prefix = prefix_width(start_line);
+        Some(char_range(
+            line,
+            start_col.saturating_sub(prefix),
+            end_col.saturating_sub(prefix),
+        ))
+    } else {
+        let mut result = String::new();
+        for (absolute_index, line) in lines
+            .iter()
+            .enumerate()
+            .skip(start_line)
+            .take(end_line - start_line + 1)
+        {
+            let prefix = prefix_width(absolute_index);
+            let fragment = if absolute_index == start_line {
+                char_range(line, start_col.saturating_sub(prefix), line.chars().count())
+            } else if absolute_index == end_line {
+                char_range(line, 0, end_col.saturating_sub(prefix))
+            } else {
+                line.clone()
+            };
+            if !result.is_empty() {
+                result.push('\n');
+            }
+            result.push_str(&fragment);
+        }
+        Some(result)
+    }
 }
 
 /// The on-screen rect of the input box, written by `tui_widgets::draw` every frame and
@@ -660,6 +710,7 @@ fn project_messages_with_child_runs(
                 let finish_result = crate::agent::child_agent_manager::FinishResult {
                     run_id: child_run.run_id,
                     call_id: child_run.call_id,
+                    origin: child_run.origin,
                     status: status.clone(),
                     result: if status == "failure" {
                         None
@@ -1369,6 +1420,7 @@ impl InputAreaLayout {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HelpPopupLayout {
     pub rect: Rect,
+    pub content_area: Rect,
 }
 
 impl HelpPopupLayout {
@@ -1448,14 +1500,17 @@ pub struct AppLayout {
 // distinct types, analogous per area rather than identical.
 
 /// Help popup (`?` overlay) scroll state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct HelpPopupState {
     pub help_scroll_offset: usize,
     pub help_scroll_x: usize,
+    pub help_rendered_lines: Vec<String>,
+    pub help_selection: Option<ChatSelection>,
+    pub help_drag_active: bool,
 }
 
 /// Drill-in child-view header bubble state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ChildViewState {
     /// Current vertical scroll offset inside the child-view header bubble
     /// (lines from the top of its content), used only when the bubble's full
@@ -1463,6 +1518,16 @@ pub struct ChildViewState {
     /// range by `tui_widgets::draw` each frame; reset to 0 whenever the header bubble
     /// it applies to changes (see `presenter::domain_child_lifecycle`).
     pub header_bubble_scroll_offset: usize,
+    /// Plain text of every rendered header line, indexed before the vertical
+    /// scroll offset. Used for extracting selected text on mouse-up.
+    pub header_rendered_lines: Vec<String>,
+    /// Number of leading header chrome characters stripped from each rendered
+    /// line. Used to map terminal columns back to content columns.
+    pub header_rendered_line_prefix_widths: Vec<usize>,
+    /// Active or committed header selection.
+    pub header_selection: Option<ChatSelection>,
+    /// `true` while the left mouse button is held down in the header bubble.
+    pub header_drag_active: bool,
 }
 
 /// Clarify-tool banner scroll/drag state.
@@ -1497,8 +1562,8 @@ pub struct ConversationListState {
     /// Plain text of every rendered line from the most recent draw call.
     pub chat_rendered_lines: Vec<String>,
     /// Number of leading chrome characters stripped per line (see
-    /// `TuiState::chat_rendered_line_chrome_widths`).
-    pub chat_rendered_line_chrome_widths: Vec<usize>,
+    /// `TuiState::chat_rendered_line_prefix_widths`).
+    pub chat_rendered_line_prefix_widths: Vec<usize>,
     /// Active or committed chat selection.
     pub chat_selection: Option<ChatSelection>,
     /// `true` while the left mouse button is held down in the chat area.
@@ -1522,7 +1587,7 @@ impl Default for ConversationListState {
             scroll_locked: true,
             chat_area_height: 0,
             chat_rendered_lines: Vec::new(),
-            chat_rendered_line_chrome_widths: Vec::new(),
+            chat_rendered_line_prefix_widths: Vec::new(),
             chat_selection: None,
             chat_drag_active: false,
             bubble_title_rows: Vec::new(),
@@ -1542,6 +1607,27 @@ fn move_selection(selected: &mut usize, choices_length: usize, delta: isize) {
 
 // ─── AppState ────────────────────────────────────────────────────────────────
 
+/// Runtime identity and paths displayed in the TUI's startup logo and help
+/// popup.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TuiDisplayMetadata {
+    pub profile_name: String,
+    pub profile_path: Option<PathBuf>,
+    pub ylva_home: Option<PathBuf>,
+    pub workspace_root: Option<PathBuf>,
+}
+
+impl Default for TuiDisplayMetadata {
+    fn default() -> Self {
+        Self {
+            profile_name: crate::config::DEFAULT_PROFILE_NAME.to_string(),
+            profile_path: None,
+            ylva_home: None,
+            workspace_root: None,
+        }
+    }
+}
+
 /// The authoritative TUI view-model owned by the Driver.
 ///
 /// This is the single source of truth: `presenter::update` mutates it in
@@ -1558,6 +1644,9 @@ pub struct AppState {
     pub mode: TuiMode,
     pub focus: Focus,
     pub layout: AppLayout,
+    /// Runtime identity and paths shown by the TUI's startup logo and help
+    /// popup.
+    pub display_metadata: TuiDisplayMetadata,
     /// Provider/model identity for the root conversation. The Driver refreshes
     /// this from the live root engine before each frame so runtime model
     /// switches are reflected immediately.
@@ -1719,6 +1808,7 @@ impl AppState {
             mode: TuiMode::Idle,
             focus: Focus::MainInput,
             layout: AppLayout::default(),
+            display_metadata: TuiDisplayMetadata::default(),
             engine_display: EngineDisplayInfo::default(),
 
             chat_entries: Vec::new(),
@@ -1802,6 +1892,14 @@ impl AppState {
         }
         self.conversation.scroll_locked = true;
         self.conversation.scroll_offset = 0;
+    }
+
+    /// Prepend messages loaded from prior sessions to the current input
+    /// history without changing the hydrated conversation view.
+    pub fn prepend_input_history(&mut self, mut prior_messages: Vec<String>) {
+        prior_messages.append(&mut self.input_history);
+        self.input_history = prior_messages;
+        self.history_index = None;
     }
 
     /// Replace a replay-discovered child's empty transcript after its first
@@ -2067,6 +2165,8 @@ impl AppState {
         // navigation into the child view, regardless of where it was left
         // scrolled to on a previous visit.
         self.child_view.header_bubble_scroll_offset = 0;
+        self.child_view.header_selection = None;
+        self.child_view.header_drag_active = false;
         // The main chat area's `scroll_offset`/`scroll_locked` are shared
         // between the root and child views (single fields, not per-view) —
         // if the user had scrolled away from the bottom while viewing
@@ -2380,22 +2480,62 @@ impl AppState {
     pub fn help_scroll_up(&mut self, lines: usize) {
         self.help_popup.help_scroll_offset =
             self.help_popup.help_scroll_offset.saturating_sub(lines);
+        self.clear_help_selection();
     }
 
     /// Scroll the help popup down.
     pub fn help_scroll_down(&mut self, lines: usize) {
         self.help_popup.help_scroll_offset =
             self.help_popup.help_scroll_offset.saturating_add(lines);
+        self.clear_help_selection();
     }
 
     /// Scroll the help popup left.
     pub fn help_scroll_left(&mut self, columns: usize) {
         self.help_popup.help_scroll_x = self.help_popup.help_scroll_x.saturating_sub(columns);
+        self.clear_help_selection();
     }
 
     /// Scroll the help popup right.
     pub fn help_scroll_right(&mut self, columns: usize) {
         self.help_popup.help_scroll_x = self.help_popup.help_scroll_x.saturating_add(columns);
+        self.clear_help_selection();
+    }
+
+    pub fn clear_help_selection(&mut self) {
+        self.help_popup.help_selection = None;
+        self.help_popup.help_drag_active = false;
+    }
+
+    pub fn help_popup_content_position(&self, column: u16, row: u16) -> Option<(usize, usize)> {
+        let content_area = self.layout.help_popup.content_area;
+        if !content_area.contains((column, row).into()) {
+            return None;
+        }
+        Some((
+            self.help_popup.help_scroll_offset + row.saturating_sub(content_area.y) as usize,
+            self.help_popup.help_scroll_x + column.saturating_sub(content_area.x) as usize,
+        ))
+    }
+
+    pub fn help_popup_drag_position(&self, column: u16, row: u16) -> Option<(usize, usize)> {
+        let content_area = self.layout.help_popup.content_area;
+        if content_area.width == 0 || content_area.height == 0 {
+            return None;
+        }
+        let max_column = content_area
+            .x
+            .saturating_add(content_area.width.saturating_sub(1));
+        let max_row = content_area
+            .y
+            .saturating_add(content_area.height.saturating_sub(1));
+        let clamped_column = column.clamp(content_area.x, max_column);
+        let clamped_row = row.clamp(content_area.y, max_row);
+        Some((
+            self.help_popup.help_scroll_offset
+                + clamped_row.saturating_sub(content_area.y) as usize,
+            self.help_popup.help_scroll_x + clamped_column.saturating_sub(content_area.x) as usize,
+        ))
     }
 
     /// Scroll the clarify banner up (toward earlier content).
@@ -2431,6 +2571,37 @@ impl AppState {
             .child_view
             .header_bubble_scroll_offset
             .saturating_add(lines);
+    }
+
+    /// Return the absolute rendered-line and column position under a header
+    /// bubble cell.
+    pub fn header_bubble_content_position(&self, column: u16, row: u16) -> Option<(usize, usize)> {
+        let area = self.layout.header_bubble;
+        if !area.contains((column, row).into()) {
+            return None;
+        }
+        Some((
+            self.child_view.header_bubble_scroll_offset + row.saturating_sub(area.y) as usize,
+            column.saturating_sub(area.x) as usize,
+        ))
+    }
+
+    /// Clamp a drag endpoint to the visible header bubble content area and
+    /// return its absolute rendered-line and column position.
+    pub fn header_bubble_drag_position(&self, column: u16, row: u16) -> Option<(usize, usize)> {
+        let area = self.layout.header_bubble;
+        if area.is_empty() {
+            return None;
+        }
+        let max_column = area.x.saturating_add(area.width.saturating_sub(1));
+        let max_row = area.y.saturating_add(area.height.saturating_sub(1));
+        let clamped_column = column.clamp(area.x, max_column);
+        let clamped_row = row.clamp(area.y, max_row);
+        Some((
+            self.child_view.header_bubble_scroll_offset
+                + clamped_row.saturating_sub(area.y) as usize,
+            clamped_column.saturating_sub(area.x) as usize,
+        ))
     }
 
     /// Toggle the collapsed/expanded state of the tool bubble with the given id.
@@ -2508,55 +2679,29 @@ impl AppState {
 
     /// Extract the text covered by the current `chat_selection`.
     pub fn extract_chat_selection_text(&self) -> Option<String> {
-        let sel = self.conversation.chat_selection.as_ref()?;
-        if sel.is_empty() {
-            return None;
-        }
-        let (start_line, start_col, end_line, end_col) = sel.normalized();
-        let lines = &self.conversation.chat_rendered_lines;
-        let start_line = start_line.min(lines.len().saturating_sub(1));
-        let end_line = end_line.min(lines.len().saturating_sub(1));
-        if start_line > end_line || lines.is_empty() {
-            return None;
-        }
-        let chrome = |index: usize| -> usize {
-            self.conversation
-                .chat_rendered_line_chrome_widths
-                .get(index)
-                .copied()
-                .unwrap_or(0)
-        };
-        if start_line == end_line {
-            let line = &lines[start_line];
-            let c = chrome(start_line);
-            Some(char_range(
-                line,
-                start_col.saturating_sub(c),
-                end_col.saturating_sub(c),
-            ))
-        } else {
-            let mut result = String::new();
-            for (absolute_index, line) in lines
-                .iter()
-                .enumerate()
-                .skip(start_line)
-                .take(end_line - start_line + 1)
-            {
-                let c = chrome(absolute_index);
-                let fragment = if absolute_index == start_line {
-                    char_range(line, start_col.saturating_sub(c), line.chars().count())
-                } else if absolute_index == end_line {
-                    char_range(line, 0, end_col.saturating_sub(c))
-                } else {
-                    line.clone()
-                };
-                if !result.is_empty() {
-                    result.push('\n');
-                }
-                result.push_str(&fragment);
-            }
-            Some(result)
-        }
+        extract_selection_text(
+            self.conversation.chat_selection.as_ref(),
+            &self.conversation.chat_rendered_lines,
+            &self.conversation.chat_rendered_line_prefix_widths,
+        )
+    }
+
+    /// Extract the text covered by the current Help-popup selection.
+    pub fn extract_help_selection_text(&self) -> Option<String> {
+        extract_selection_text(
+            self.help_popup.help_selection.as_ref(),
+            &self.help_popup.help_rendered_lines,
+            &[],
+        )
+    }
+
+    /// Extract the text covered by the current child-view header selection.
+    pub fn extract_header_selection_text(&self) -> Option<String> {
+        extract_selection_text(
+            self.child_view.header_selection.as_ref(),
+            &self.child_view.header_rendered_lines,
+            &self.child_view.header_rendered_line_prefix_widths,
+        )
     }
 
     /// Show a transient toast notification.
@@ -2998,6 +3143,7 @@ mod tests {
                 status: Some("success".to_string()),
                 result: Some("patch is safe".to_string()),
                 sources: vec!["src/lib.rs".to_string()],
+                origin: crate::child_agent_manager::FinishResultOrigin::Agent,
                 duration: Some(Duration::from_secs(1)),
             },
             ChildRunRecord {
@@ -3012,6 +3158,7 @@ mod tests {
                 status: None,
                 result: None,
                 sources: vec![],
+                origin: crate::child_agent_manager::FinishResultOrigin::default(),
                 duration: None,
             },
         ];
@@ -3076,6 +3223,7 @@ mod tests {
             status: Some("success".to_string()),
             result: Some("done".to_string()),
             sources: vec![],
+            origin: crate::child_agent_manager::FinishResultOrigin::Agent,
             duration: Some(Duration::from_secs(1)),
         }];
         let root_messages = vec![Message::Assistant {
@@ -3376,6 +3524,7 @@ mod tests {
     fn help_popup_hit_detects_interior_cells() {
         let popup = HelpPopupLayout {
             rect: Rect::new(10, 5, 60, 30),
+            content_area: Rect::default(),
         };
         assert!(popup.hit(10, 5));
         assert!(popup.hit(69, 34));

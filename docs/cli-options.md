@@ -7,22 +7,29 @@ Reference for Ylva's command-line interface.
 | Flag | Type | Accepted values | Default | Description |
 | --- | --- | --- | --- | --- |
 | `--version` | none | — | — | Print build provenance (`Version`, `Commit`, `Built`, `Profile`) and exit. Takes precedence over all other arguments. |
+| `init [--workspace] [--force]` | subcommand | `--workspace`, `--force` | — | Write configuration starters and exit before provider/session startup. Without `--workspace`, writes `SOUL.md`, `profiles/default/config.toml`, and an annotated `profiles/default/.env` under `YLVA_HOME` (or `${HOME}/.ylva`); `--workspace` writes the default profile config and `.env` starters plus `.gitignore` under the discovered workspace root's `.ylva/`; both modes write-if-missing unless `--force` is supplied. Agent-type files are not seeded. |
 | `--no-tui` | none | — | — | Force headless (CLI) mode even when stdout is a terminal. Useful for scripting or debugging without the TUI. |
 | `--color=<mode>` | enum | `auto`, `no`, `yes` | `auto` | Select CLI color behavior: detect terminal support, force no colors, or force colors. Has no effect on TUI rendering. |
 | `--prompt <text>` | string | any text | *none* | Initial user turn sent to the agent. Resolved with the precedence described below. |
-| `--profile <name>` | string | any profile directory name | `default` | Load `~/.ylva/profiles/<name>/config.toml`. When `--profile` is given explicitly, a missing file is a hard error (exit code `2`) naming the profile — the user asked for that specific profile, so it is never silently substituted. With no `--profile` flag at all (the implicit `default` profile), a missing file falls back to the in-code default profile instead, so Ylva still runs out of the box. A malformed file is always an error, named or not. See `docs/configuration.md`. |
+| `--profile <name>` | string | any profile directory name | `default` | Resolve `<workspace-root>/.ylva/profiles/<name>/config.toml`, then `~/.ylva/profiles/<name>/config.toml`. When `--profile` is given explicitly, a missing file at both disk layers is a hard error (exit code `2`) naming the profile. With no `--profile` flag, the implicit `default` profile uses `ProfileConfig::default()` when no disk file exists. A malformed or unreadable file at the winning layer is always an error. See `docs/configuration.md`. |
 | `--log-file <path>` | path | any writable file path | *none* | Write logs to this file. The file is opened in truncate/overwrite mode on each start, so logs never accumulate across runs. |
 | `--log-level <level>` | enum | `trace`, `debug`, `info`, `warn`, `error` | `info` | Minimum severity written. Selecting a level includes it and all higher-severity levels (`trace < debug < info < warn < error`). |
 | `--log-format <format>` | enum | `text`, `json` | `text` | Output format. `text` is human-readable; `json` produces JSONL (one JSON object per line). |
 | `--conversation-id <uuid>` | uuid | any persisted session id | *none* | Resume the named session: its `.jsonl` file is re-attached for append instead of a fresh session being started. An unknown id is a hard error (exit code `2`) — never a silent fresh session. See `docs/persistence.md`. |
-| `--auto-approve-edit` | none | — | — | Skip the human-approval prompt for `edit` tool calls. |
+| `--auto-approve-read` | none | — | — | Skip the human-approval prompt for `read` tool calls. |
 | `--auto-approve-write` | none | — | — | Skip the human-approval prompt for `write` tool calls. |
+| `--auto-approve-glob` | none | — | — | Skip the human-approval prompt for `glob` tool calls. |
+| `--auto-approve-bash` | none | — | — | Skip the human-approval prompt for `bash` tool calls. |
+| `--auto-approve-search` | none | — | — | Skip the human-approval prompt for `search` tool calls. |
+| `--auto-approve-edit` | none | — | — | Skip the human-approval prompt for `edit` tool calls. |
 | `--auto-approve-spawn` | none | — | — | Skip the human-approval prompt for `spawn_subagent` tool calls. See `can_spawn` in `docs/configuration.md` and "Child-agent delegation" in `docs/features.md`. |
 
 An invalid `--color`, `--log-level`, `--log-format`, or `--conversation-id`
 value, a flag missing its required value, or a `--log-file` that cannot be
 opened (for example, its containing directory does not exist) prints a usage
 error to stderr and exits with code `2` — the error names the attempted path.
+The `init` subcommand also exits with code `2` when its target root cannot be
+resolved or a seeded file cannot be written.
 
 When the CLI writes to a terminal, its section headers and tool status lines
 use the same semantic colors as the TUI. Colors are disabled automatically for
@@ -88,7 +95,7 @@ environment values are never written to logs.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `YLVA_HOME` | `${HOME}/.ylva` | Ylva's state root directly (chat store `chats/` and profiles `profiles/`). Set it to redirect Ylva's own state. See [persistence](./persistence.md#relocating-the-root-with-ylva_home). |
+| `YLVA_HOME` | `${HOME}/.ylva` | Ylva's home directly (chat store `chats/` and profiles `profiles/`). Set it to redirect Ylva's own state. See [persistence](./persistence.md#relocating-the-ylva-home-with-ylva_home). |
 
 ### Debug
 

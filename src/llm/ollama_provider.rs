@@ -81,6 +81,10 @@ impl Provider for OllamaProvider {
         let client = self.inner.http_client();
         let api_key = self.inner.api_key().map(str::to_owned);
 
+        // TODO: newer version of ollama include "thinking" default and options
+        // https://github.com/ollama/ollama/pull/18473
+        // https://github.com/ollama/ollama/commit/d0c8cdb795d4640890d87c146d674cc311df4138
+
         Box::pin(async move {
             let tags_body =
                 get_json(&client, &tags_url, api_key.as_deref(), "model listing").await?;

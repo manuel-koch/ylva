@@ -4,6 +4,55 @@ Internal mechanics, module/struct/field references, and design rationale that
 back the user-facing behavior described in [features](./features.md). This
 document is for contributors working on Ylva's internals, not end users.
 
+## Layered configuration and persona assembly
+
+`config::layered` resolves each runtime-layout-relative file independently
+from the project `.ylva/` layer, the home `YLVA_HOME` layer, and the
+code-owned built-in layer. The first existing file wins without merging lower
+layers. Project discovery walks upward from the current directory, preferring
+the nearest `.ylva/` ancestor and otherwise the nearest `.git` ancestor. The
+global `YLVA_HOME` directory is excluded from `.ylva` marker detection, so a
+project beneath the user's home directory cannot select the global home as its
+workspace root.
+
+`ProfileConfig` passes the selected file's path into the existing TOML parser
+and environment interpolation code, so malformed or unreadable files still
+fail with the path that actually won. `ProfileConfig::default()` is the
+implicit default floor; explicit profile names still fail when no project or
+home layer defines them.
+
+`load_soul` uses the same resolver for the global `SOUL.md` persona.
+The code-owned `DEFAULT_SOUL` value is the resolver's built-in floor and is
+also used by `Context::new()` and `init_command`. `AgentFactory` stores the
+resolved text through both root and child factory paths. `AgentLoop::run`
+constructs the initial context from the composed global SOUL and agent-type
+prompt, then appends a child's briefing and runtime-budget constraint. Direct
+library/test loops that do not receive a resolved prompt retain
+`Context::new()` as the compatibility fallback.
+
+`agent_type_file` enumerates user-authored `.md` and `.toml` files in global,
+profile, and project agent directories. Markdown files use either TOML
+frontmatter delimited by `+++` or YAML frontmatter delimited by `---`; the
+trimmed body becomes the file-authored system prompt. The highest-precedence
+file replaces the complete lower-scope definition; inline
+`[agents.<type>]` values are deserialized as optional field overrides and
+applied afterward. A same-scope file and inline definition is rejected as
+ambiguous, while a profile override of a lower-scope file is valid. `persona`
+and the file-authored `system_prompt` are composed after the global SOUL and
+before the tool protocol. After the profile's engine set is materialized,
+`AgentFactory` validates every agent type's explicit engine reference before
+the store or CLI/TUI loop starts; environment-derived engine sets use the same
+validation path.
+
+`load_profile_environment_at_workspace_root` merges the home profile `.env`,
+the project `<workspace>/.ylva/profiles/<name>/.env`, and process variables in
+that order. This snapshot feeds both TOML interpolation and provider
+discovery; environment values are never logged. `init_command` writes the
+code-owned SOUL, shared profile starter, and annotated profile environment
+starter to the home layer. Workspace initialization also writes
+`.ylva/.gitignore` to exclude profile environment files. Both record written
+and skipped paths in `InitReport`; neither seeds agent-type files.
+
 ## Engine/provider runtime configuration
 
 `EngineConfig` contains the engine's immutable connection settings and the
@@ -122,9 +171,10 @@ environment variable.
 
 Environment discovery loads the selected profile's `.env` plus exported
 process variables, and the merged snapshot is used both for provider
-discovery and `${ENV_VAR}` interpolation in every TOML string. Process
-variables win over `.env` values, and missing interpolation variables fail
-profile loading. The merged snapshot is never logged.
+discovery and `${ENV_VAR}` interpolation in every TOML string. Typed numeric
+and boolean fields parse expanded strings after interpolation. Process
+variables win over `.env` values, and missing or invalid interpolation values
+fail profile loading. The merged snapshot is never logged.
 
 ## Tool-result wire protocol
 
@@ -215,7 +265,9 @@ so this only matters when that flag is used.
 Fixed UI colors are centralized in `theme.rs`, including message roles,
 controls, overlays, and Markdown rendering colors. `tui_widgets.rs` and
 `markdown.rs` consume that palette, so a future theme switch has one
-color-definition module to update. ANSI styling is enabled only when the
+color-definition module to update. Completed `spawn_subagent` bubbles render
+`status=failure` in the error color, and the drill-in header reuses the same
+renderer. ANSI styling is enabled only when the
 headless output writes to a terminal that is not `TERM=dumb` and `NO_COLOR` is
 unset in `--color=auto` mode. `--color=no` and `--color=yes` explicitly
 disable or enable ANSI styling for that output path.
@@ -262,6 +314,13 @@ user-facing on-disk contract; this section is the contributor view.
   without title arguments use an empty title projection. The projection is
   schema-based, so unknown input keys are omitted from CLI/TUI titles.
   System messages and implicit harness notes remain model-only.
+- **Prior-session input history.** At TUI startup, `Store::read_past_explicit_user_messages`
+  scans prior top-level sessions in newest-first order, collects at most the
+  configured `ProfileConfig::input_history_limit` explicit user messages, and
+  deduplicates exact text while retaining the newest occurrence, and returns
+  that bounded set oldest-first. The driver prepends it to the current
+  session's history without adding those messages to the transcript or model
+  context; child-agent transcripts are skipped.
 - **Tool-result payload.** `Message::ToolResult` carries a serializable
   `ToolResult` payload as its flattened value, and
   `Context::push_tool_result` forwards that value unchanged. This keeps the
@@ -346,13 +405,13 @@ user-facing on-disk contract; this section is the contributor view.
   `Option<Store>` remains available only to lower-level APIs and tests that
   intentionally run without persistence.
 - **`~/.ylva` resolution.** `src/ylva_home.rs` is the single source of truth for
-  the per-user root shared by `chats/` and `profiles/`: `ylva_root()` returns a
-  non-empty `YLVA_HOME` verbatim as the root, else `dirs::home_dir()` with
+  the Ylva home shared by `chats/` and `profiles/`: `ylva_home()` returns a
+  non-empty `YLVA_HOME` verbatim as the home, else `dirs::home_dir()` with
   `.ylva` appended. Its pure core,
-  `resolve_ylva_root(override_value, home_directory)`, takes both inputs as
+  `resolve_ylva_home(override_value, home_directory)`, takes both inputs as
   arguments so it is unit-testable without mutating the process environment.
   `store::default_chats_root()` and `config::default_profiles_root()` both build
-  on it and map a missing root to their own domain error.
+  on it and map a missing home to their own domain error.
 
 ## Child-agent delegation internals
 
@@ -381,12 +440,16 @@ user-facing on-disk contract; this section is the contributor view.
   It never rewrites or duplicates the provisional tool result; the
   tool-calling wire protocol only permits one tool-result message per
   `tool_call_id`. The notice also tells the root that the result is already
-  shown to the user verbatim in the tool bubble's Result/Error/Sources
-  sections, so it should not repeat or quote it back. Intermediate completion
-  notices do not force an acknowledgement turn. When `all_done` becomes true,
-  the root is re-prompted once (immediately if idle, or after its current
-  stream/tool round) so it can aggregate the results without waiting for a
-  new user message.
+  shown to the user in the tool bubble's Result/Error/Sources sections, so it
+  should not repeat or quote it back. Agent-reported prose is rendered as
+  Markdown, while runtime diagnostics (for example, an unknown engine) are
+  rendered literally so identifiers and punctuation are not reformatted.
+  Provider and stream failures are terminal runtime outcomes, not
+  unstructured child results.
+  Intermediate completion notices do not force an acknowledgement turn. When
+  `all_done` becomes true, the root is re-prompted once (immediately if idle,
+  or after its current stream/tool round) so it can aggregate the results
+  without waiting for a new user message.
 - `AgentCommand::Stop` on the parent cancels the running child (and drains
   the queue) via `ChildAgentManager::cancel_all`; each cancelled/queued call
   is resolved to a terminal `ToolDone` (`status: "cancelled"`) and logged
@@ -575,8 +638,11 @@ user-facing on-disk contract; this section is the contributor view.
   when the content overflows. Mouse-wheel events over the header's rect
   (`AppState.layout.header_bubble`, hit-tested in `presenter::route_mouse`
   ahead of the clarify-banner/chat-area checks) scroll the header instead of
-  the chat area. The offset resets to `0` whenever a fresh child view is
-  entered (`switch_to_child_view` / `ChildAgentStarted`).
+  the chat area. The header also keeps a plain-text line cache and selection
+  range in `AppState.child_view`; a left drag maps screen rows through the
+  independent scroll offset, highlights the visible range, and copies a
+  non-empty selection on mouse-up. The offset resets to `0` whenever a fresh
+  child view is entered (`switch_to_child_view` / `ChildAgentStarted`).
 - `switch_to_child_view` (manual drill-in via double-click) also re-pins the
   main chat area's scroll to the bottom (`conversation.scroll_offset = 0`,
   `conversation.scroll_locked = true`) — these fields are shared between the
@@ -610,10 +676,11 @@ user-facing on-disk contract; this section is the contributor view.
   lives in any `child_conversations` entry's `messages` (subagent) or
   `chat_entries` (root), independent of `active_view`.
 - Clicking anywhere on the child-view header bubble toggles its collapsed
-  state — unlike a normal chat bubble, this needs no click-vs-double-click
-  debounce, since the drill-in gesture only applies from the root
-  transcript. `AppState::header_bubble_id()` is the single source of truth
-  for which real `chat_entries` bubble the header re-renders (used by both
+  state after mouse-up when no drag range was selected — unlike a normal chat
+  bubble, this needs no click-vs-double-click debounce, since the drill-in
+  gesture only applies from the root transcript.
+  `AppState::header_bubble_id()` is the single source of truth for which real
+  `chat_entries` bubble the header re-renders (used by both
   `render::project_for_draw` and `presenter::route_mouse`), and
   `AppState::toggle_header_bubble_collapsed()` flips that bubble's
   `collapsed` flag directly — deliberately not reusing
@@ -666,7 +733,14 @@ log lines, without risking sensitive payloads in the log file.
 
 `src/render.rs` + `src/tui_widgets.rs` — `render(frame, state)` entry point.
 Writes computed geometry back to `state.layout`; delegates widget rendering
-to helpers in `tui_widgets.rs`.
+to helpers in `tui_widgets.rs`. `AppState::display_metadata` carries the
+selected runtime profile, its resolved config path, Ylva home, and workspace
+root into the startup logo and help popup. Runtime paths beneath the
+operating-system home directory are rendered with a `~` prefix; paths outside
+that directory remain absolute. The view stores the plain rendered lines and
+content geometry for both surfaces, allowing the Presenter to map mouse drags
+through centered or scrolled content and emit clipboard effects without
+coupling it to ratatui.
 
 ### Driver
 
@@ -725,6 +799,11 @@ rendered text, highlights the range while dragging, and copies the selected
 text to the clipboard on release without changing the command or model
 selection.
 
+The same selection pipeline is used by the startup wordmark and help popup:
+the View records the rendered lines and geometry, while the Presenter owns
+mouse routing and emits `Effect::CopyToClipboard` on release. Help-popup
+coordinates include the current vertical and horizontal scroll offsets.
+
 Slash effects (`Effect::ClearConversation`/`ShowTools`/`ListModels`/
 `SwitchModel`) are the only ones that need the engine, so
 `tui_driver::split_slash_effects` peels them out of each batch and
@@ -760,6 +839,20 @@ Two rules keep this consistent with blueprint §4C:
   was created — rather than reusing whatever
   `meta.provider_connection`/`meta.model` were
   written at creation.
+- `AgentCommand::ClearContext`'s handler first interrupts whatever is
+  in-flight — cancelling the current stream/tool token, calling
+  `child_agent_manager.cancel_all()`, and draining `pending_tools`/
+  `pending_steers` — the same shutdown `AgentCommand::Stop` performs. This
+  alone can't close the race: cancellation is cooperative, so an
+  already-running stream/tool/child task can still emit one more
+  `AgentEvent`/`FinishResult` after the clear, produced against the
+  soon-to-be-replaced `Context`. A per-loop `generation` counter (bumped on
+  every `ClearContext`) is stamped onto every `AgentEvent` at the moment its
+  producer is spawned; the loop drops any event whose stamped generation
+  doesn't match the current one. A `cancelled_run_ids` set records child
+  `run_id`s cancelled by `Stop`/`ClearContext` so a straggling `FinishResult`
+  for one of them is dropped by the `finish_rx` arm instead of being applied
+  to a `Context` it no longer belongs to.
 
 `AppState::available_tool_names` is captured once, at TUI startup, from the
 resolved `AgentLoop::registry()` (sorted, since the registry is a `HashMap`),

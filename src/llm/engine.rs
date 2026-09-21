@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use futures::future::{join_all, BoxFuture};
+use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -36,13 +37,13 @@ pub const DEFAULT_CONTEXT_LENGTH: usize = 128_000;
 /// delegates to the wrapped `Provider`, which is initialized from exactly
 /// this struct. [`EngineRuntimeConfig`] owns the live mutable subset.
 ///
-/// Later phases add file layers and readers on top without displacing that
-/// SSOT:
+/// The layered configuration reader adds project and home files plus
+/// code-owned built-in defaults without displacing that SSOT:
 ///
-/// - **Phase 9 (Full Configuration & Persona System)** adds the three-layer
-///   project/home/embedded fallback chain and persona/`agents/*.md` sourcing,
-///   which populate this same struct through additional layers.
-/// - **Phase 10 (Context Compaction & Token Budgeting)** reads
+/// - **Phase 10 (Full Configuration & Persona System)** supplies the
+///   project/home/built-in fallback chain and will add persona/`agents/*.md`
+///   sourcing, which populate this same struct through additional layers.
+/// - **Phase 11 (Context Compaction & Token Budgeting)** reads
 ///   `context_length` to drive `maybe_compact`'s budget; it adds no fields
 ///   here.
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -56,7 +57,7 @@ pub struct EngineConfig {
     #[serde(default)]
     pub model: String,
     /// `None` means the provider uses the model's own default; `Some(v)` overrides it.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_f32_or_string")]
     pub temperature: Option<f32>,
     /// Either a plain integer or a string carrying a `kb`/`mb` suffix (for
     /// example `"265kb"`, meaning `265 * 1024`) — the same 1024-based units
@@ -96,6 +97,30 @@ impl EngineConfig {
         self.context_length
             .or(catalog_context_length)
             .unwrap_or(DEFAULT_CONTEXT_LENGTH)
+    }
+}
+
+fn deserialize_optional_f32_or_string<'de, D>(deserializer: D) -> Result<Option<f32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum TemperatureValue {
+        Integer(i64),
+        Float(f32),
+        Text(String),
+    }
+
+    match Option::<TemperatureValue>::deserialize(deserializer)? {
+        Some(TemperatureValue::Integer(value)) => Ok(Some(value as f32)),
+        Some(TemperatureValue::Float(value)) => Ok(Some(value)),
+        Some(TemperatureValue::Text(value)) => {
+            value.trim().parse::<f32>().map(Some).map_err(|error| {
+                serde::de::Error::custom(format!("invalid temperature '{value}': {error}"))
+            })
+        }
+        None => Ok(None),
     }
 }
 

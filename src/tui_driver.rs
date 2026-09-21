@@ -52,8 +52,8 @@ use crate::render;
 use crate::session_title::{SessionTitleUpdate, TitleAttempt};
 use crate::tui_reducer_state::{
     engine_choice_label, matching_model_indices, model_choice_label, AppState, ConfirmKey,
-    DomainEvent, Effect, Focus, HistoryDirection, InputEvent, ModelChoice, SlashOverlay, TuiMode,
-    UserMessageState,
+    DomainEvent, Effect, Focus, HistoryDirection, InputEvent, ModelChoice, SlashOverlay,
+    TuiDisplayMetadata, TuiMode, UserMessageState,
 };
 use crate::tui_render_state::TuiState;
 use crate::ToolRegistry;
@@ -893,6 +893,7 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
     let slash_overlay_drag = app.slash_overlay_drag_selection();
     let active_subagent_counts = app.active_subagent_counts();
     TuiState {
+        display_metadata: app.display_metadata,
         parent_agent_mode: agent_mode,
         agent_mode,
         active_subagent_counts,
@@ -922,6 +923,10 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
             help_scroll_offset: app.help_popup.help_scroll_offset,
             help_scroll_x: app.help_popup.help_scroll_x,
             help_popup_rect: app.layout.help_popup.rect,
+            help_content_area: app.layout.help_popup.content_area,
+            help_rendered_lines: app.help_popup.help_rendered_lines,
+            help_selection: app.help_popup.help_selection,
+            help_drag_active: app.help_popup.help_drag_active,
         },
         clarify_banner_state: crate::tui_render_state::ClarifyBannerState {
             pending_clarify,
@@ -933,6 +938,10 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
             child_view_bubble: None,
             header_bubble_scroll_offset: 0,
             header_bubble_area: ratatui::layout::Rect::default(),
+            header_rendered_lines: Vec::new(),
+            header_rendered_line_prefix_widths: Vec::new(),
+            header_selection: None,
+            header_drag_active: false,
         },
         conversation: crate::tui_render_state::ConversationListState {
             scroll_offset: app.conversation.scroll_offset,
@@ -940,7 +949,7 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
             chat_area_height: app.conversation.chat_area_height,
             chat_area: chat_area_rect,
             chat_rendered_lines: app.conversation.chat_rendered_lines,
-            chat_rendered_line_chrome_widths: app.conversation.chat_rendered_line_chrome_widths,
+            chat_rendered_line_prefix_widths: app.conversation.chat_rendered_line_prefix_widths,
             chat_selection: app.conversation.chat_selection,
             chat_drag_active: app.conversation.chat_drag_active,
             bubble_title_rows: app.conversation.bubble_title_rows,
@@ -989,7 +998,7 @@ where
     B: Backend,
     B::Error: std::error::Error + Send + Sync + 'static,
 {
-    let title_runtime = TitleRuntime::disabled();
+    let tui_runtime = TuiRuntime::disabled();
     run_tui_with_title(
         terminal,
         agent,
@@ -997,7 +1006,7 @@ where
         initial_prompt,
         action_rx,
         clipboard,
-        title_runtime,
+        tui_runtime,
     )
     .await
 }
@@ -1022,17 +1031,21 @@ impl TitleDriver {
     }
 }
 
-struct TitleRuntime {
+struct TuiRuntime {
     driver: Option<TitleDriver>,
     update_rx: mpsc::UnboundedReceiver<SessionTitleUpdate>,
+    display_metadata: TuiDisplayMetadata,
+    input_history_limit: usize,
 }
 
-impl TitleRuntime {
+impl TuiRuntime {
     fn disabled() -> Self {
         let (_update_tx, update_rx) = mpsc::unbounded_channel();
         Self {
             driver: None,
             update_rx,
+            display_metadata: TuiDisplayMetadata::default(),
+            input_history_limit: ProfileConfig::default().input_history_limit,
         }
     }
 }
@@ -1109,7 +1122,7 @@ async fn run_tui_with_title<B>(
     initial_prompt: Option<String>,
     mut action_rx: mpsc::Receiver<AppAction>,
     clipboard: &mut dyn ClipboardSink,
-    title_runtime: TitleRuntime,
+    tui_runtime: TuiRuntime,
 ) -> anyhow::Result<TuiState>
 where
     B: Backend,
@@ -1117,11 +1130,14 @@ where
 {
     let mut agent = agent;
     let mut ui_rx = ui_rx;
-    let TitleRuntime {
+    let TuiRuntime {
         driver: title_driver,
         update_rx: mut title_update_rx,
-    } = title_runtime;
+        display_metadata,
+        input_history_limit,
+    } = tui_runtime;
     let mut state = AppState::new();
+    state.display_metadata = display_metadata;
     let mut textarea = TextArea::default();
     configure_textarea(&mut textarea);
     let replay_store = agent.store();
@@ -1149,6 +1165,16 @@ where
             }
         };
         state.replay_messages(&messages, &child_runs);
+        match store.read_past_explicit_user_messages(input_history_limit) {
+            Ok(prior_messages) => state.prepend_input_history(prior_messages),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    path = %store.path().display(),
+                    "could not load prior session input history"
+                );
+            }
+        }
     }
     let cmd_tx = agent.command_sender();
     let engine = agent.engine();
@@ -1595,6 +1621,7 @@ pub struct TuiApp {
     profile: ProfileConfig,
     agent_type: String,
     explicit_prompt: Option<String>,
+    display_metadata: TuiDisplayMetadata,
 }
 
 impl TuiApp {
@@ -1609,7 +1636,14 @@ impl TuiApp {
             profile,
             agent_type,
             explicit_prompt,
+            display_metadata: TuiDisplayMetadata::default(),
         }
+    }
+
+    /// Set the runtime identity and paths shown by the TUI.
+    pub fn with_display_metadata(mut self, display_metadata: TuiDisplayMetadata) -> Self {
+        self.display_metadata = display_metadata;
+        self
     }
 }
 
@@ -1656,9 +1690,11 @@ impl App for TuiApp {
             self.explicit_prompt,
             action_rx,
             &mut ArboardClipboard,
-            TitleRuntime {
+            TuiRuntime {
                 driver: title_driver,
                 update_rx: title_update_rx,
+                display_metadata: self.display_metadata,
+                input_history_limit: self.profile.input_history_limit,
             },
         )
         .await
@@ -1867,9 +1903,11 @@ mod tests {
             Some("question".to_string()),
             action_rx,
             &mut NoopClipboard,
-            TitleRuntime {
+            TuiRuntime {
                 driver: Some(title_driver),
                 update_rx: title_update_rx,
+                display_metadata: TuiDisplayMetadata::default(),
+                input_history_limit: ProfileConfig::default().input_history_limit,
             },
         )
         .await;
@@ -1880,6 +1918,94 @@ mod tests {
             "title generation should complete before the TUI is stopped"
         );
         assert_eq!(store.title(), expected_title);
+    }
+
+    #[tokio::test]
+    async fn tui_loads_prior_session_user_messages_into_input_history() {
+        use ratatui::backend::TestBackend;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let chats_root = temp.path().join("chats");
+        let previous_store = crate::store::Store::create(
+            &chats_root,
+            temp.path(),
+            Uuid::new_v4(),
+            "mock",
+            "conversation",
+        )
+        .expect("previous store created");
+        previous_store.record_message(&crate::agent::Message::User {
+            content: "previous prompt".to_string(),
+            kind: crate::agent::UserMessageKind::Explicit,
+        });
+        previous_store.record_message(&crate::agent::Message::User {
+            content: "latest previous prompt".to_string(),
+            kind: crate::agent::UserMessageKind::Explicit,
+        });
+        previous_store.flush().await;
+
+        let current_store = crate::store::Store::create(
+            &chats_root,
+            temp.path(),
+            Uuid::new_v4(),
+            "mock",
+            "conversation",
+        )
+        .expect("current store created");
+        current_store.record_message(&crate::agent::Message::User {
+            content: "current prompt".to_string(),
+            kind: crate::agent::UserMessageKind::Explicit,
+        });
+        current_store.flush().await;
+
+        let provider = Arc::new(crate::llm::MockProvider::new(Vec::new(), Duration::ZERO));
+        let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+            provider,
+            EngineConfig {
+                provider_connection: "mock".to_string(),
+                model: "conversation".to_string(),
+                temperature: None,
+                context_length: None,
+                api_base_url: None,
+                api_key: None,
+                reasoning: None,
+            },
+        ));
+        let factory = AgentFactory::new(HashMap::from([("default".to_string(), engine)]))
+            .with_allowed_tools(&[])
+            .with_store(current_store);
+        let (agent, ui_rx) = factory
+            .create(&ProfileConfig::default(), "default", Role::Root)
+            .expect("root agent created");
+        let (action_tx, action_rx) = mpsc::channel(1);
+        drop(action_tx);
+        let (_title_update_tx, title_update_rx) = mpsc::unbounded_channel();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal created");
+
+        let tui_state = run_tui_with_title(
+            &mut terminal,
+            agent,
+            ui_rx,
+            None,
+            action_rx,
+            &mut NoopClipboard,
+            TuiRuntime {
+                driver: None,
+                update_rx: title_update_rx,
+                display_metadata: TuiDisplayMetadata::default(),
+                input_history_limit: 1,
+            },
+        )
+        .await
+        .expect("TUI exits cleanly");
+
+        assert_eq!(
+            tui_state.input_history,
+            vec![
+                "latest previous prompt".to_string(),
+                "current prompt".to_string()
+            ]
+        );
     }
 
     fn setup() -> (

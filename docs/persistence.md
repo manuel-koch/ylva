@@ -20,17 +20,17 @@ home directory is unavailable.
 
 | Segment | Meaning |
 | --- | --- |
-| `~/.ylva/chats` | Root of all persisted sessions. `~/.ylva` is resolved by `ylva_home::ylva_root()`: the `YLVA_HOME` environment variable, used verbatim as the root when it is set and non-empty, otherwise `<operating-system-home>/.ylva` (`dirs::home_dir()`). |
+| `~/.ylva/chats` | Root of all persisted sessions. `~/.ylva` is resolved by `ylva_home::ylva_home()`: the `YLVA_HOME` environment variable, used verbatim as the Ylva home when it is set and non-empty, otherwise `<operating-system-home>/.ylva` (`dirs::home_dir()`). |
 | `<project_key>` | SHA-256 hex digest grouping every session launched from the same physical directory — see below. |
 | `<session_id>` | The session's UUID v4. `--conversation-id <session_id>` re-attaches it. |
 
 A child agent's transcript is a session file of its own in the **same**
 `<project_key>` directory, written once when the child finishes.
 
-### Relocating the root with `YLVA_HOME`
+### Relocating the Ylva home with `YLVA_HOME`
 
 Setting `YLVA_HOME=/some/dir` makes Ylva read and write `/some/dir` directly
-— chats *and* profiles — instead of `~/.ylva`. `YLVA_HOME` names the root
+— chats *and* profiles — instead of `~/.ylva`. `YLVA_HOME` names the Ylva home
 directly, matching the convention of `CARGO_HOME`/`RUSTUP_HOME`/`GOPATH`/
 `XDG_DATA_HOME`: it is *the* Ylva home. The dedicated variable exists so
 an isolated setup (a test harness, a throwaway sandbox) can redirect Ylva's own
@@ -60,7 +60,7 @@ is the `meta` header**; every following line is an event.
 {"type":"message","version":1,"timestamp":"2026-01-08T09:41:07.456Z","message":{"role":"user","content":"explain the store layout","kind":"explicit"}}
 {"type":"message","version":1,"timestamp":"2026-01-08T09:41:09.012Z","message":{"role":"assistant","content":"…","status":"complete","tool_calls":[]}}
 {"type":"child_start","version":1,"created_at":"…","id":"…","parent_session":"6f1e…","agent_type":"explorer","task":"…"}
-{"type":"child_result","version":1,"completed_at":"…","id":"…","parent_session":"6f1e…","status":"success","result":"…","sources":[]}
+{"type":"child_result","version":1,"completed_at":"…","id":"…","parent_session":"6f1e…","status":"success","result":"…","sources":[],"origin":"agent"}
 ```
 
 A child-agent's own session file carries `parent_session` in its own `meta`
@@ -137,7 +137,9 @@ engine — it never needs to cross-reference the parent's.
 ### `child_start` / `child_result`
 
 Written to the **parent** session when a child agent run begins and when it
-finishes. Both carry `parent_session`, so a child's records are always
+finishes. The result's `origin` is `agent` when the child called
+`agent_finish`, or `runtime` when the harness produced the outcome. Both
+carry `parent_session`, so a child's records are always
 attributable. The child's own transcript is written separately, once, at
 completion, and its own `meta` line carries `parent_session` too (see above) —
 so the link is discoverable from either file, not just top-down from the
@@ -200,6 +202,15 @@ Listing sessions takes no lock — it is a pure read.
   so reading a session never writes its messages back or duplicates them on a
   later flush. The rule is unconditional for fresh and resumed sessions; a
   new file simply has no messages to hydrate.
+- **TUI input history:** On startup, the TUI also reads explicit user messages
+  from prior top-level sessions in the same project, newest prompts first until
+  the configured `input_history_limit` is reached, then presents those
+  messages oldest to newest. Child-agent transcripts and the current session
+  are excluded from this lookup; the current session is replayed separately.
+  Exact duplicate prompts are collapsed across sessions and only the newest
+  occurrence is retained. These messages seed only the draft input history and
+  never hydrate the visible transcript or model context, so this does not
+  change the fresh-session/no-auto-resume contract.
 - **Full-fidelity tool bubbles:** `Message::ToolResult` persists `summary`,
   `content_sections`, `duration`, and specialized result-section identifiers;
   `Message::ToolError` persists `content_sections` in addition to its

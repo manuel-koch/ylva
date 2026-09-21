@@ -38,6 +38,13 @@ received"` event with a stable `command` variant field. Payloads are represented
 by lengths or correlation IDs rather than their contents; tool approval/denial
 events remain separate outcome events.
 
+When a logfile is enabled, user-visible provider/stream failures, tool
+failures, and fatal startup errors are also emitted through `tracing`. Fatal
+startup paths flush the non-blocking logfile before exiting. A provider stream
+failure is routed through the agent event loop once, so one failed request
+produces one user-facing error even though lower layers may record their own
+structured diagnostics.
+
 ## CLI Runtime
 
 Non-interactive, one-shot session: the initial user turn is sent to the
@@ -60,8 +67,11 @@ Initial user turn resolution: `--prompt <text>`, else piped stdin read to EOF
 (only when stdin is not a terminal) — e.g. `echo '…' | ylva`.
 
 Tool approval is host-driven: `read`/`glob` are auto-approved immediately;
-`write` and `edit` require explicit user approval; `bash` always requires
-user approval.
+`write` and `edit` require explicit user approval by default; `bash`
+requires user approval by default but is subject to structural sandbox
+rules (backgrounded commands, variable-assignment prefixes, unquoted glob/
+brace expansion) and configurable `[tool.bash]` rules — see "`bash` command
+rules" in [configuration](./configuration.md#bash-command-rules).
 
 Tool status lines render as `[tool] <title> …` (e.g. `[tool] Read docs/features.md [limit=32]`)
 
@@ -221,8 +231,8 @@ affect sandbox approval checks. See
   current working directory, which is the workspace root in normal runtime.
   Use relative paths directly; do not prefix commands with a redundant `cd` to
   the workspace root. Requires explicit human approval before execution. stdout
-  and stderr are merged in true arrival order. Output is capped at 100 KB
-  (`truncated` / `truncated_at_bytes` fields present in result metadata when
+  and stderr are merged in true arrival order. Output is capped at 1000 whole output
+  lines (`truncated` field present in result metadata when
   capped). Default timeout: 30 s. On timeout or cancellation the entire
   process (including any child processes it spawned) is killed. See
   [implementation notes](./implementation-notes.md#bash-tool-process-group-cleanup).
@@ -241,8 +251,8 @@ affect sandbox approval checks. See
   entry per occurrence, ignoring context lines, like `grep -o`. `files_with_matches` and
   `only_matches` are mutually exclusive. Result paths mirror the form of the input: a
   relative `path` argument produces relative result paths; an absolute argument produces
-  absolute result paths. Output is capped at 100 KB (`truncated` / `truncated_at_bytes` fields present
-  in result metadata when capped). Paths inside the
+  absolute result paths. Output is capped at 1000 whole output lines (`truncated` field
+  present in result metadata when capped). Paths inside the
   workspace are auto-approved; paths outside are auto-denied.
 - **clarify**: Ask the user a question in the TUI and wait for their answer.
   Optional `context` adds supporting detail. Optional `choices` supplies up to
@@ -271,7 +281,10 @@ affect sandbox approval checks. See
   [Child-agent delegation](#child-agent-delegation).
 - **agent_finish**: Only available to child agents (a root agent never sees
   it). Reports `status` (`"success"` or `"failure"`), an optional `result` /
-  `error`, and optional `sources`, then ends the child's turn. The parent
+  `error`, and optional `sources`, then ends the child's turn. `status` is
+  requested as mandatory but tolerated as missing: if a model omits it, it is
+  inferred as `"failure"` when `error` is set and `"success"` otherwise,
+  rather than the call being auto-denied for a schema violation. The parent
   receives this through the `spawn_subagent` lifecycle event — it never sees
   the child's own conversation, only the `result`/`error` string, so a child
   should make its `result` self-contained rather than referencing
@@ -283,7 +296,9 @@ affect sandbox approval checks. See
   result built from the child's last assistant message; if the child hits
   its max-tool-iterations cap first, the parent receives a clear failure
   instead, so it isn't mistaken for the child's own conclusion. A child is
-  told its tool-use iteration budget up front so it can pace itself.
+  told its tool-use iteration budget up front so it can pace itself. Provider
+  and stream failures are also reported as clear failures rather than being
+  synthesized as empty or unstructured results.
 
 ## Child-agent delegation
 
@@ -337,6 +352,8 @@ streaming/running tools in the background:
   drill-in is never yanked away).
 - While viewing a child's transcript, a header above it shows the original
   `spawn_subagent` bubble (task/label/agent type) so context isn't lost.
+  Completed child bubbles highlight `status=failure` in red in both the root
+  conversation and this drill-in header.
   Typing while merely *watching* a running child is a no-op rather than
   silently steering the wrong agent (root vs. child) — the footer omits
   `enter send` in that state to make this clear.
@@ -396,7 +413,13 @@ module structure (model/presenter/view/driver split).
   update before applying the selected quit-or-stay-open behavior. OS SIGINT
   stops immediately (no double-press).
 - **Help popup (`F1`):** toggles a centered popup with the full keybinding
-  table and build-info values.
+  table, the selected runtime profile and its config path, the resolved Ylva
+  home, the discovered workspace root, and build-info values. An unavailable
+  path is shown explicitly. Paths beneath the operating-system home directory
+  use `~` notation when applicable; other paths remain absolute. Mouse-dragging
+  across visible popup text copies the selection to the clipboard, including
+  text reached after scrolling. The footer switches to popup controls while
+  the popup is open.
 - **Smart auto-scroll:** the chat follows the newest output by default; the
   mouse wheel and `PageUp`/`PageDown`/`End` scroll the history directly (no
   focus needed). Scrolling up disables auto-scroll; scrolling back down to
@@ -404,11 +427,17 @@ module structure (model/presenter/view/driver split).
   whatever scroll-lock state the user left it in, rather than jumping back to
   the bottom.
 - **Wordmark:** while the conversation is empty, a centered ASCII-art "Ylva"
-  wordmark is displayed with the version and git commit shown below it. Once
-  the first message is sent, the wordmark disappears.
+  wordmark is displayed with the version and git commit on one line and the
+  selected runtime profile on the next line. Mouse-dragging across those lines
+  copies the selected text to the clipboard. Once the first message is sent,
+  the wordmark disappears.
 - **Input history:** `↑` on the first line loads the previous sent message
   (draft is saved); `↓` restores it; any edit while browsing copies the entry
-  to a fresh draft.
+  to a fresh draft. History includes explicit user messages from prior
+  top-level sessions in the same project, ordered oldest to newest, up to the
+  configured `input_history_limit` (default `50`); child-agent prompts are
+  excluded, and duplicate prompts are collapsed by exact text with the newest
+  occurrence retained.
 - **Line navigation:** `Fn+Left`/`Fn+Right` move the input cursor to the
   start/end of the current line, wrapping to the previous/next line.
 - **Starts empty:** the TUI launches with an empty input box and no auto-sent
@@ -437,9 +466,9 @@ module structure (model/presenter/view/driver split).
   1/3 height cap.
 - **Mouse editing:** a left-click in the input box places the cursor at the
   clicked character; a left-drag selects text. The same drag gesture selects
-  visible text in the slash-command overlay and copies it to the clipboard on
-  release. `read`/`glob` tool status lines and approval buttons remain
-  mouse-clickable.
+  visible text in the chat bubbles, child-view header bubble, and
+  slash-command overlay, copying it to the clipboard on release.
+  `read`/`glob` tool status lines and approval buttons remain mouse-clickable.
 - **Shift+Enter / Alt+Enter:** insert a newline through the terminal's
   modified-key encoding. Kitty keyboard protocol terminals (iTerm2, kitty,
   WezTerm) report the modifier directly; terminals that encode Shift+Enter as
@@ -494,9 +523,12 @@ model, sampling parameters, and connection details. Multiple engines can be defi
 and referenced by name, for example a fast local Ollama engine for chat and
 a more capable OpenRouter model for heavier tasks.
 
-Engines are read from one flat profile file,
-`~/.ylva/profiles/<name>/config.toml` (`--profile <name>` selects it). Without
-such a file, the backend comes from environment variables as before.
+Engines are read from the resolved profile file:
+`<workspace-root>/.ylva/profiles/<name>/config.toml`, then
+`~/.ylva/profiles/<name>/config.toml`, then the code-owned defaults for the
+implicit `default` profile. The `--profile <name>` value selects the profile
+name. With no disk file for the implicit default profile, the code defaults
+leave provider discovery to the environment variables as before.
 
 See [configuration](./configuration.md) for all available fields.
 
@@ -507,13 +539,37 @@ type may also define a model-facing `description`; root agents that can spawn
 children receive all configured agent types and descriptions in the
 `spawn_subagent` tool definition.
 
-Profiles are read from `~/.ylva/profiles/<name>/config.toml`; see
+Profiles use the project/home/built-in resolution chain described in
 [configuration](./configuration.md#profile-file) for the supported keys.
 The `default` agent type is always available; when `[agents.default]` is
 omitted, it uses the built-in root configuration with child spawning enabled.
 Defining other agent types, such as `local-discovery`, does not disable the
 default agent. If `[agents.default]` is defined, its settings replace the
 built-in defaults.
+
+Agent types can also be authored as standalone `.md` or `.toml` files in the
+global `~/.ylva/agents/`, selected profile `agents/`, or project
+`.ylva/agents/` directories. Project files shadow profile files, and profile
+files shadow global files for the same type; file definitions are replaced
+whole before inline profile fields are applied. A Markdown file uses strict
+`+++` TOML or `---` YAML frontmatter followed by its system-prompt body.
+Inline `persona` content always precedes that body.
+
+### Layered global persona and initialization
+
+The top-level conversation's global persona comes from `SOUL.md`, resolved
+from the project `.ylva/`, home `~/.ylva/`, and the code-owned built-in value
+in that order. The resolved SOUL is inherited exactly once by both root and
+child contexts. Agent-type persona and file body are then appended, followed
+by the tool protocol; a child additionally receives its task briefing and
+runtime-budget constraints.
+
+`ylva init` writes `SOUL.md`, `profiles/default/config.toml`, and an annotated
+`profiles/default/.env` starter; it does not seed agent-type files.
+`ylva init --workspace` seeds the default profile config and `.env` starters
+plus `.gitignore` in the workspace. Both support write-if-missing and
+`--force` reseeding. Richer agent-type and profile examples are documented
+rather than shipped as repository templates.
 
 ## Slash commands
 

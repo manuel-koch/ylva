@@ -16,12 +16,25 @@
 //!
 //! [`SandboxContext::check_path`] returns `None` (abstain) or an explicit
 //! `Some(`[`ApprovalCheck`]`)` verdict. Tools apply their own default when
-//! the sandbox abstains. TOML per-tool config loading is not yet implemented.
+//! the sandbox abstains.
+//!
+//! Per-tool rule lists are configurable via a `[tool.<name>]` TOML table
+//! (see [`SandboxRuleConfig`] and `docs/configuration.md`'s "Sandbox"
+//! section) that is parsed by `crate::config::profile::ProfileConfig` and
+//! wired into a tool's [`SandboxContext`] by
+//! [`crate::agent::tools::default_registry`] via
+//! [`SandboxContext::with_configured_rules`]. When a tool has no such table
+//! configured at any resolved layer, [`SandboxContext`] falls back to the
+//! unconditional built-in floor: `outside_workspace` → `AutoDenied` and
+//! `dot_path` → `AutoDenied`.
+
+mod bash_command_extractor;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use glob::Pattern;
+use serde::Deserialize;
 
 /// The verdict from a sandbox approval check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,8 +55,391 @@ pub struct SandboxRule {
     pub pattern: Pattern,
 }
 
+/// Default reason shown when the built-in (or a configured, reason-less)
+/// `outside_workspace` rule denies a path.
+const OUTSIDE_WORKSPACE_REASON: &str = "Access denied by security policy: path is outside the \
+                                         workspace root; only paths within the workspace are \
+                                         accessible";
+
+/// Default reason shown when the built-in (or a configured, reason-less)
+/// `dot_path` rule denies a path.
+const DOT_PATH_REASON: &str =
+    "Access denied by security policy: dot-files and dot-directories are not accessible";
+
+/// Default reason shown when the built-in (or a configured, reason-less)
+/// `backgrounded` rule denies a `bash` command.
+const BACKGROUNDED_REASON: &str = "Access denied by security policy: backgrounded (`&`) shell \
+                                    commands are not allowed";
+
+/// Default reason shown when a configured, reason-less
+/// `variable_assignment_prefix` rule denies a `bash` command.
+const VARIABLE_ASSIGNMENT_PREFIX_REASON: &str =
+    "Access denied by security policy: shell commands with a leading variable \
+     assignment (e.g. `FOO=bar git status`) are not allowed";
+
+/// Default reason shown when a configured, reason-less `unquoted_glob` rule
+/// denies a `bash` command.
+const UNQUOTED_GLOB_REASON: &str = "Access denied by security policy: shell commands with an \
+                                     unquoted glob (`*`, `?`, or `[...]`) argument are not \
+                                     allowed";
+
+/// Default reason shown when a configured, reason-less
+/// `unquoted_brace_expansion` rule denies a `bash` command.
+const UNQUOTED_BRACE_EXPANSION_REASON: &str =
+    "Access denied by security policy: shell commands with an unquoted brace \
+     expansion (`{...,...}`) argument are not allowed";
+
+/// Default reason shown when a configured, reason-less
+/// [`SandboxRuleConfig::PathGlob`] rule denies a path.
+const CONFIGURED_PATH_GLOB_REASON: &str =
+    "Access denied by security policy: path matched a configured sandbox rule";
+
+/// Default reason shown when a configured, reason-less
+/// [`SandboxRuleConfig::CommandGlob`] rule denies a `bash` command.
+const CONFIGURED_COMMAND_GLOB_REASON: &str = "Access denied by security policy: shell command \
+                                               matched a configured sandbox rule";
+
+/// One of the six structural sandbox checks that ship as Rust code
+/// (`SandboxContext`'s hardcoded default floor) but may also be referenced
+/// by name from a `[tool.<name>]` config table's `rules` list, so a user can
+/// reorder or change their verdict without reimplementing the underlying
+/// comparison logic. The first two ([`NamedSandboxRule::OutsideWorkspace`]/
+/// [`NamedSandboxRule::DotPath`]) are path rules, valid for any tool except
+/// `bash`; the remaining four are `bash`-only command-structure rules,
+/// evaluated per extracted command by
+/// [`SandboxContext::check_command`]/[`bash_command_extractor`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NamedSandboxRule {
+    /// Matches any path that normalizes outside the workspace root.
+    OutsideWorkspace,
+    /// Matches any content-tool path whose relative-to-root form has a
+    /// component starting with `.` (unless `allow_dot_paths` bypasses it).
+    DotPath,
+    /// Matches a `bash` command immediately followed by a bare `&`
+    /// (backgrounding).
+    Backgrounded,
+    /// Matches a `bash` command with one or more leading
+    /// `variable_assignment` children (e.g. `FOO=bar git status`).
+    VariableAssignmentPrefix,
+    /// Matches a `bash` command with an unquoted `*`, `?`, or `[...]` in any
+    /// argv token.
+    UnquotedGlob,
+    /// Matches a `bash` command with an unquoted `{...,...}` brace
+    /// expansion in any argv token.
+    UnquotedBraceExpansion,
+}
+
+/// The serde-friendly counterpart of [`ApprovalCheck`]'s variants, without
+/// the `AutoDenied` variant's mandatory `reason` field (carried as a
+/// sibling `reason` field on [`SandboxRuleConfig`] instead, so it can
+/// default per-rule via [`SandboxRuleConfig::to_approval_check`]).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalVerdictConfig {
+    AutoApproved,
+    AutoDenied,
+    UserApprovalRequired,
+}
+
+impl ApprovalVerdictConfig {
+    /// Convert into an [`ApprovalCheck`], falling back to `default_reason`
+    /// when `reason` is `None` for an `AutoDenied` verdict.
+    fn to_approval_check(&self, reason: Option<&str>, default_reason: &str) -> ApprovalCheck {
+        match self {
+            ApprovalVerdictConfig::AutoApproved => ApprovalCheck::AutoApproved,
+            ApprovalVerdictConfig::AutoDenied => ApprovalCheck::AutoDenied {
+                reason: reason.unwrap_or(default_reason).to_string(),
+            },
+            ApprovalVerdictConfig::UserApprovalRequired => ApprovalCheck::UserApprovalRequired,
+        }
+    }
+}
+
+/// A single `[tool.bash]`-only argv-shape rule: a sequence of literal argv
+/// tokens, optionally ending in a bare `*` (matches exactly one more argv
+/// token) or bare `**` (matches one or more more argv tokens). No embedded/
+/// mid-pattern globbing (YAGNI, v1) — see
+/// `docs/plans/bash-rules-plan.md`'s "Rule matching (`CommandGlob`)"
+/// section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CommandGlobTail {
+    /// No trailing wildcard: the pattern's literal tokens must equal `argv`
+    /// exactly, length included.
+    None,
+    /// Trailing bare `*`: matches when `argv` has exactly one more token
+    /// than the literal prefix, unless that one extra token contains an
+    /// unquoted glob/brace character (in which case this rule abstains,
+    /// deferring to `unquoted_glob`/`unquoted_brace_expansion`).
+    Single,
+    /// Trailing bare `**`: matches when `argv` has one or more extra tokens
+    /// beyond the literal prefix; never abstains on unquoted glob/brace
+    /// characters in the tail.
+    Multi,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommandGlobPattern {
+    literal_prefix: Vec<String>,
+    tail: CommandGlobTail,
+}
+
+impl CommandGlobPattern {
+    /// Returns `true` when `tokens` has a `*` or `**` element before the
+    /// last position. `from_tokens` only recognizes a *trailing* `*`/`**`
+    /// as a wildcard; an earlier occurrence would otherwise silently
+    /// degrade to a literal (effectively never-matching) argument instead
+    /// of being treated as a wildcard. This is the single source of truth
+    /// for that check, shared by `from_tokens`'s `debug_assert!` and
+    /// [`SandboxRuleConfig::has_misplaced_command_glob_wildcard`] (used by
+    /// `crate::config::profile::validate_tool_sandbox_rules`'s hard startup
+    /// error and [`ResolvedRule::from_config`]'s defense-in-depth check for
+    /// callers that bypass profile loading).
+    fn has_misplaced_wildcard(tokens: &[String]) -> bool {
+        tokens
+            .iter()
+            .take(tokens.len().saturating_sub(1))
+            .any(|token| token == "*" || token == "**")
+    }
+
+    fn from_tokens(tokens: &[String]) -> Self {
+        debug_assert!(
+            !Self::has_misplaced_wildcard(tokens),
+            "CommandGlobPattern::from_tokens received a `*`/`**` that isn't the last token \
+             ({tokens:?}); callers must reject this before constructing a pattern (see \
+             SandboxRuleConfig::has_misplaced_command_glob_wildcard)"
+        );
+        match tokens.last().map(String::as_str) {
+            Some("**") => CommandGlobPattern {
+                literal_prefix: tokens[..tokens.len() - 1].to_vec(),
+                tail: CommandGlobTail::Multi,
+            },
+            Some("*") => CommandGlobPattern {
+                literal_prefix: tokens[..tokens.len() - 1].to_vec(),
+                tail: CommandGlobTail::Single,
+            },
+            _ => CommandGlobPattern {
+                literal_prefix: tokens.to_vec(),
+                tail: CommandGlobTail::None,
+            },
+        }
+    }
+
+    /// Returns `true` when this pattern matches `argv`'s token texts,
+    /// applying the trailing-`*` unquoted-glob/brace abstention described on
+    /// [`CommandGlobTail::Single`].
+    fn matches(&self, argv: &[bash_command_extractor::ArgvToken]) -> bool {
+        if argv.len() < self.literal_prefix.len() {
+            return false;
+        }
+        let prefix_matches = self
+            .literal_prefix
+            .iter()
+            .zip(argv.iter())
+            .all(|(literal, token)| literal == &token.text);
+        if !prefix_matches {
+            return false;
+        }
+        match self.tail {
+            CommandGlobTail::None => argv.len() == self.literal_prefix.len(),
+            CommandGlobTail::Single => {
+                if argv.len() != self.literal_prefix.len() + 1 {
+                    return false;
+                }
+                let tail_token = &argv[self.literal_prefix.len()];
+                !bash_command_extractor::token_has_unquoted_glob(tail_token)
+                    && !bash_command_extractor::token_has_unquoted_brace_expansion(tail_token)
+            }
+            CommandGlobTail::Multi => argv.len() > self.literal_prefix.len(),
+        }
+    }
+}
+
+/// One entry of a `[tool.<name>]` table's `rules` list — either a reference
+/// to one of the built-in [`NamedSandboxRule`] checks (with a configurable
+/// verdict), a custom glob-pattern path rule (the config-parseable form of
+/// [`SandboxRule`]), or (`[tool.bash]`/`[agents.<type>.tools.bash]` only) an
+/// argv-shape [`CommandGlobPattern`] rule. Distinguished on deserialization
+/// by the presence of `rule` (named), `pattern` (path glob), or `command`
+/// (argv glob). `reason` is optional for `verdict = "auto_denied"` and
+/// defaults to the same message the built-in floor uses for that rule (or a
+/// generic message for a custom rule) when omitted.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum SandboxRuleConfig {
+    /// `{ rule = "outside_workspace" | "dot_path" | "backgrounded" | \
+    /// "variable_assignment_prefix" | "unquoted_glob" | \
+    /// "unquoted_brace_expansion", verdict = "...", reason = "..." }`.
+    Named {
+        rule: NamedSandboxRule,
+        verdict: ApprovalVerdictConfig,
+        #[serde(default)]
+        reason: Option<String>,
+    },
+    /// `{ pattern = "...", verdict = "...", reason = "..." }`.
+    PathGlob {
+        pattern: String,
+        verdict: ApprovalVerdictConfig,
+        #[serde(default)]
+        reason: Option<String>,
+    },
+    /// `{ command = ["git", "reflog", "*"], verdict = "...", reason = "..." }`.
+    /// Only valid under `[tool.bash]`/`[agents.<type>.tools.bash]`.
+    CommandGlob {
+        command: Vec<String>,
+        verdict: ApprovalVerdictConfig,
+        #[serde(default)]
+        reason: Option<String>,
+    },
+}
+
+impl SandboxRuleConfig {
+    /// Returns `true` when this is the tool-restricted [`SandboxRuleConfig::CommandGlob`]
+    /// variant, or a [`SandboxRuleConfig::Named`] variant referencing one of
+    /// the four `bash`-only [`NamedSandboxRule`] variants. Used by
+    /// `crate::config::profile::ProfileConfig`'s startup validation to
+    /// reject the wrong rule kind under the wrong tool.
+    pub fn is_bash_only(&self) -> bool {
+        match self {
+            SandboxRuleConfig::CommandGlob { .. } => true,
+            SandboxRuleConfig::Named { rule, .. } => matches!(
+                rule,
+                NamedSandboxRule::Backgrounded
+                    | NamedSandboxRule::VariableAssignmentPrefix
+                    | NamedSandboxRule::UnquotedGlob
+                    | NamedSandboxRule::UnquotedBraceExpansion
+            ),
+            SandboxRuleConfig::PathGlob { .. } => false,
+        }
+    }
+
+    /// Returns `true` when this is a path-only rule kind: [`SandboxRuleConfig::PathGlob`],
+    /// or a [`SandboxRuleConfig::Named`] variant referencing
+    /// [`NamedSandboxRule::OutsideWorkspace`]/[`NamedSandboxRule::DotPath`].
+    pub fn is_path_only(&self) -> bool {
+        match self {
+            SandboxRuleConfig::PathGlob { .. } => true,
+            SandboxRuleConfig::Named { rule, .. } => {
+                matches!(
+                    rule,
+                    NamedSandboxRule::OutsideWorkspace | NamedSandboxRule::DotPath
+                )
+            }
+            SandboxRuleConfig::CommandGlob { .. } => false,
+        }
+    }
+
+    /// Returns `true` when this is a [`SandboxRuleConfig::CommandGlob`] whose
+    /// `command` list has a `*` or `**` token anywhere but the last
+    /// position. `CommandGlobPattern::from_tokens` only recognizes `*`/`**`
+    /// as the trailing token — an earlier occurrence is otherwise silently
+    /// treated as a literal argument (matching a command that passes a
+    /// literal `*`/`**`, which never happens in practice), turning the rule
+    /// into a silent no-op. Used by `crate::config::profile`'s startup
+    /// validation to reject this footgun instead.
+    pub fn has_misplaced_command_glob_wildcard(&self) -> bool {
+        match self {
+            SandboxRuleConfig::CommandGlob { command, .. } => {
+                CommandGlobPattern::has_misplaced_wildcard(command)
+            }
+            SandboxRuleConfig::Named { .. } | SandboxRuleConfig::PathGlob { .. } => false,
+        }
+    }
+}
+
+/// An entry in [`SandboxContext`]'s resolved per-tool rule list: either a
+/// named structural check (re-evaluated dynamically against the current
+/// `workspace_root`/path) or a fixed glob pattern. Built from
+/// [`SandboxRuleConfig`] by [`SandboxContext::with_configured_rules`]; kept
+/// distinct from the public [`SandboxRule`] type (which stays glob-only) so
+/// that `SandboxRule`'s existing field shape — relied on by pre-existing
+/// tests and by the `--auto-approve-write`/`--auto-approve-edit` catch-all
+/// rules — is unaffected by this addition.
+enum ResolvedRule {
+    Named {
+        rule: NamedSandboxRule,
+        verdict: ApprovalCheck,
+    },
+    PathGlob {
+        pattern: Pattern,
+        verdict: ApprovalCheck,
+    },
+    CommandGlob {
+        command: CommandGlobPattern,
+        verdict: ApprovalCheck,
+    },
+}
+
+/// Error produced by [`ResolvedRule::from_config`] when a
+/// [`SandboxRuleConfig`] can't be resolved into a working rule.
+/// [`SandboxContext::with_configured_rules`] treats every variant the same
+/// way: skip the rule and `tracing::warn!`, since a single malformed rule
+/// must not silently disable an entire tool's protection.
+#[derive(Debug, thiserror::Error)]
+enum ResolvedRuleError {
+    #[error(transparent)]
+    InvalidGlobPattern(#[from] glob::PatternError),
+    /// A `command` rule's `*`/`**` wildcard isn't the last element — see
+    /// [`SandboxRuleConfig::has_misplaced_command_glob_wildcard`].
+    /// `crate::config::profile::validate_tool_sandbox_rules` already
+    /// rejects this as a hard startup error for profile-loaded rules; this
+    /// is defense in depth for callers that build [`SandboxRuleConfig`]s
+    /// directly and pass them to [`SandboxContext::with_configured_rules`]
+    /// without going through profile loading.
+    #[error(
+        "`*`/`**` wildcard is not the last element of `command`; it would silently degrade to \
+         a literal (never-matching) argument instead of a wildcard"
+    )]
+    MisplacedCommandGlobWildcard,
+}
+
+impl ResolvedRule {
+    fn from_config(config: SandboxRuleConfig) -> Result<Self, ResolvedRuleError> {
+        if config.has_misplaced_command_glob_wildcard() {
+            return Err(ResolvedRuleError::MisplacedCommandGlobWildcard);
+        }
+        Ok(match config {
+            SandboxRuleConfig::Named {
+                rule,
+                verdict,
+                reason,
+            } => {
+                let default_reason = match rule {
+                    NamedSandboxRule::OutsideWorkspace => OUTSIDE_WORKSPACE_REASON,
+                    NamedSandboxRule::DotPath => DOT_PATH_REASON,
+                    NamedSandboxRule::Backgrounded => BACKGROUNDED_REASON,
+                    NamedSandboxRule::VariableAssignmentPrefix => VARIABLE_ASSIGNMENT_PREFIX_REASON,
+                    NamedSandboxRule::UnquotedGlob => UNQUOTED_GLOB_REASON,
+                    NamedSandboxRule::UnquotedBraceExpansion => UNQUOTED_BRACE_EXPANSION_REASON,
+                };
+                ResolvedRule::Named {
+                    rule,
+                    verdict: verdict.to_approval_check(reason.as_deref(), default_reason),
+                }
+            }
+            SandboxRuleConfig::PathGlob {
+                pattern,
+                verdict,
+                reason,
+            } => ResolvedRule::PathGlob {
+                pattern: Pattern::new(&pattern)?,
+                verdict: verdict.to_approval_check(reason.as_deref(), CONFIGURED_PATH_GLOB_REASON),
+            },
+            SandboxRuleConfig::CommandGlob {
+                command,
+                verdict,
+                reason,
+            } => ResolvedRule::CommandGlob {
+                command: CommandGlobPattern::from_tokens(&command),
+                verdict: verdict
+                    .to_approval_check(reason.as_deref(), CONFIGURED_COMMAND_GLOB_REASON),
+            },
+        })
+    }
+}
+
 /// Shared workspace sandbox. Holds the workspace root used to evaluate
-/// path-based rules. Per-tool TOML config is not yet implemented.
+/// path-based rules.
 pub struct Sandbox {
     /// Absolute path of the workspace root (cwd at startup).
     pub workspace_root: PathBuf,
@@ -127,8 +523,19 @@ impl Default for Sandbox {
 /// applies its own default.
 pub struct SandboxContext {
     sandbox: Arc<RwLock<Sandbox>>,
-    /// Ordered rules; last match wins.
+    /// Ordered rules; last match wins. Always evaluated last, after either
+    /// `configured_rules` or the built-in default floor — this is what
+    /// `--auto-approve-write`/`--auto-approve-edit`'s catch-all rule uses so
+    /// it wins regardless of any `[tool.<name>]` config.
     rules: Vec<SandboxRule>,
+    /// When `Some`, fully replaces the built-in default floor (the two
+    /// hardcoded `outside_workspace`/`dot_path` checks) for this tool: only
+    /// this list's entries are evaluated in list order (last match wins)
+    /// before `rules`. `None` means "no `[tool.<name>]` config for this
+    /// tool" — the default floor applies instead. Populated from a
+    /// profile's `[tool.<name>]` table via
+    /// [`SandboxContext::with_configured_rules`].
+    configured_rules: Option<Vec<ResolvedRule>>,
 }
 
 impl std::fmt::Debug for SandboxContext {
@@ -136,25 +543,60 @@ impl std::fmt::Debug for SandboxContext {
         formatter
             .debug_struct("SandboxContext")
             .field("rules_count", &self.rules.len())
+            .field(
+                "configured_rules_count",
+                &self.configured_rules.as_ref().map(Vec::len),
+            )
             .finish()
     }
 }
 
 impl SandboxContext {
-    /// Build a context with an empty rule list.
-    /// Named glob rules (if any) are appended by tool constructors.
+    /// Build a context with an empty rule list and no `[tool.<name>]`
+    /// config, so the built-in default floor
+    /// (`outside_workspace`/`dot_path` → `AutoDenied`) applies. Named glob
+    /// rules (if any) are appended by tool constructors.
     pub fn new(sandbox: Arc<RwLock<Sandbox>>) -> Self {
         SandboxContext {
             sandbox,
             rules: vec![],
+            configured_rules: None,
         }
     }
 
     /// Append a rule to the end of this context's rule list. Last match wins,
     /// so appending a catch-all rule (e.g. `**` → `AutoApproved`) effectively
-    /// overrides any earlier verdict for every path.
+    /// overrides any earlier verdict for every path. Always evaluated after
+    /// `configured_rules`/the default floor, so this continues to win
+    /// regardless of `[tool.<name>]` config.
     pub fn with_rule(mut self, rule: SandboxRule) -> Self {
         self.rules.push(rule);
+        self
+    }
+
+    /// Replace this tool's built-in default floor with the rule list parsed
+    /// from a `[tool.<name>]` table's `rules` key. This *fully replaces* the
+    /// floor for this tool (it does not merge with it): a caller that still
+    /// wants `outside_workspace`/`dot_path` protection must include those as
+    /// explicit [`SandboxRuleConfig::Named`] entries in `rules`.
+    ///
+    /// Invalid rules (a malformed glob pattern, or a `command` rule with a
+    /// misplaced `*`/`**` wildcard) are skipped (with a `tracing::warn!`)
+    /// rather than causing a panic or a hard config-load failure, since
+    /// sandbox rules are safety-critical and a single malformed rule should
+    /// not silently disable outside_workspace/dot_path protection.
+    pub fn with_configured_rules(mut self, rules: Vec<SandboxRuleConfig>) -> Self {
+        let resolved = rules
+            .into_iter()
+            .filter_map(|rule| match ResolvedRule::from_config(rule) {
+                Ok(resolved) => Some(resolved),
+                Err(error) => {
+                    tracing::warn!(%error, "skipping invalid sandbox rule");
+                    None
+                }
+            })
+            .collect();
+        self.configured_rules = Some(resolved);
         self
     }
 
@@ -259,10 +701,16 @@ impl SandboxContext {
     /// `/var/folders` → `/private/var/folders`.
     ///
     /// Rule evaluation order:
-    /// 1. Outside-workspace → `Some(AutoDenied)`.
-    /// 2. Any component of the path relative to the workspace root starts with `.` → `Some(AutoDenied)`.
-    /// 3. Named glob rules (from `self.rules`) are evaluated last; last match wins.
-    /// 4. If nothing fires → `None` (sandbox abstains).
+    /// 1. When `configured_rules` is `Some` (this tool has a `[tool.<name>]`
+    ///    config table), evaluate exactly that list, in order, last match
+    ///    wins — this *replaces* the default floor rather than merging with
+    ///    it. Otherwise evaluate the built-in default floor: outside-workspace
+    ///    → `Some(AutoDenied)`, then any component of the path relative to the
+    ///    workspace root starting with `.` → `Some(AutoDenied)`.
+    /// 2. Named glob rules (from `self.rules`) are evaluated last; last match
+    ///    wins. This is what `--auto-approve-write`/`--auto-approve-edit`'s
+    ///    catch-all rule relies on to win regardless of step 1's outcome.
+    /// 3. If nothing fires → `None` (sandbox abstains).
     pub fn check_path(&self, path: &Path) -> Option<ApprovalCheck> {
         self.check_path_with_dot_path_access(path, false)
     }
@@ -272,6 +720,54 @@ impl SandboxContext {
     /// rule enforcement.
     pub fn check_path_allowing_dot_paths(&self, path: &Path) -> Option<ApprovalCheck> {
         self.check_path_with_dot_path_access(path, true)
+    }
+
+    /// Returns `true` when `effective` normalizes outside `workspace_root`.
+    /// Shared by the default floor and the `outside_workspace` named rule so
+    /// the underlying comparison exists in exactly one place.
+    fn matches_outside_workspace(workspace_root: &Path, effective: &Path) -> bool {
+        !effective.starts_with(workspace_root)
+    }
+
+    /// Returns `true` when the portion of `effective` relative to
+    /// `workspace_root` has a dot-prefixed component, unless `allow_dot_paths`
+    /// bypasses the check (used by `glob` enumeration). A path outside the
+    /// workspace (whose `strip_prefix` fails) never matches here — the
+    /// `outside_workspace` rule is responsible for that case. Shared by the
+    /// default floor and the `dot_path` named rule so the underlying
+    /// comparison exists in exactly one place.
+    fn matches_dot_path(workspace_root: &Path, effective: &Path, allow_dot_paths: bool) -> bool {
+        if allow_dot_paths {
+            return false;
+        }
+        match effective.strip_prefix(workspace_root) {
+            Ok(relative) => Self::is_dot_path(relative),
+            Err(_) => false,
+        }
+    }
+
+    /// Evaluate one of the two path-based [`NamedSandboxRule`] variants
+    /// against `workspace_root`/`effective`. The four `bash`-only variants
+    /// are never valid under a path tool (rejected by config validation);
+    /// defensively `false` here if one slips through.
+    fn evaluate_named_rule(
+        rule: NamedSandboxRule,
+        workspace_root: &Path,
+        effective: &Path,
+        allow_dot_paths: bool,
+    ) -> bool {
+        match rule {
+            NamedSandboxRule::OutsideWorkspace => {
+                Self::matches_outside_workspace(workspace_root, effective)
+            }
+            NamedSandboxRule::DotPath => {
+                Self::matches_dot_path(workspace_root, effective, allow_dot_paths)
+            }
+            NamedSandboxRule::Backgrounded
+            | NamedSandboxRule::VariableAssignmentPrefix
+            | NamedSandboxRule::UnquotedGlob
+            | NamedSandboxRule::UnquotedBraceExpansion => false,
+        }
     }
 
     fn check_path_with_dot_path_access(
@@ -291,37 +787,75 @@ impl SandboxContext {
 
         // Resolve symlinks and non-canonical prefixes (e.g. macOS /var → /private/var).
         let effective = Self::canonicalize_best_effort(&normalized);
+        let path_str = effective.to_string_lossy();
 
         // No implicit zeroth verdict — absence of a match returns None.
         let mut verdict: Option<ApprovalCheck> = None;
 
-        // Rule: outside workspace → AutoDenied.
-        // TODO: make this configurable via named rule `path_outside_workspace`.
-        if !effective.starts_with(&workspace_root) {
-            verdict = Some(ApprovalCheck::AutoDenied {
-                reason: "Access denied by security policy: path is outside the workspace root; \
-                         only paths within the workspace are accessible"
-                    .to_string(),
-            });
-        } else {
-            // Rule: any component of the relative portion starts with `.` → AutoDenied.
-            // Strip the workspace prefix so only the tool-navigated components are
-            // examined, not system directories embedded in the workspace path itself.
-            // TODO: make this configurable via named rule `dot_path`.
-            if let Ok(relative) = effective.strip_prefix(&workspace_root) {
-                if !allow_dot_paths && Self::is_dot_path(relative) {
+        match &self.configured_rules {
+            Some(configured) => {
+                // `[tool.<name>]` config fully replaces the default floor:
+                // evaluate exactly this list, in order, last match wins.
+                for rule in configured {
+                    match rule {
+                        ResolvedRule::Named {
+                            rule: named,
+                            verdict: rule_verdict,
+                        } => {
+                            if Self::evaluate_named_rule(
+                                *named,
+                                &workspace_root,
+                                &effective,
+                                allow_dot_paths,
+                            ) {
+                                verdict = Some(rule_verdict.clone());
+                            }
+                        }
+                        ResolvedRule::PathGlob {
+                            pattern,
+                            verdict: rule_verdict,
+                        } => {
+                            if pattern.matches(&path_str) {
+                                verdict = Some(rule_verdict.clone());
+                            }
+                        }
+                        // A `bash`-only `CommandGlob` rule under a path tool
+                        // is rejected by config validation; never matches a
+                        // path defensively if it slips through.
+                        ResolvedRule::CommandGlob { .. } => {}
+                    }
+                }
+            }
+            None => {
+                // Built-in default floor: outside_workspace, then dot_path.
+                if Self::evaluate_named_rule(
+                    NamedSandboxRule::OutsideWorkspace,
+                    &workspace_root,
+                    &effective,
+                    allow_dot_paths,
+                ) {
                     verdict = Some(ApprovalCheck::AutoDenied {
-                        reason: "Access denied by security policy: \
-                                 dot-files and dot-directories are not accessible"
-                            .to_string(),
+                        reason: OUTSIDE_WORKSPACE_REASON.to_string(),
+                    });
+                }
+                if Self::evaluate_named_rule(
+                    NamedSandboxRule::DotPath,
+                    &workspace_root,
+                    &effective,
+                    allow_dot_paths,
+                ) {
+                    verdict = Some(ApprovalCheck::AutoDenied {
+                        reason: DOT_PATH_REASON.to_string(),
                     });
                 }
             }
         }
 
-        // Named glob rules (appended by tool constructors).
+        // Named glob rules (appended by tool constructors, e.g.
+        // --auto-approve-write/--auto-approve-edit's catch-all). Always
+        // evaluated last so they win regardless of configured_rules/the
+        // default floor.
         for rule in &self.rules {
-            let path_str = effective.to_string_lossy();
             if rule.pattern.matches(&path_str) {
                 verdict = Some(rule.verdict.clone());
             }
@@ -347,11 +881,205 @@ impl SandboxContext {
     /// tool applies its own default (typically `UserApprovalRequired` for shell
     /// commands). Returns `Some(verdict)` when a rule has an explicit opinion.
     ///
-    /// Currently the sandbox has no command-specific rules and always abstains.
-    /// Future configuration (e.g. per-tool TOML allow/deny command globs) will
-    /// be evaluated here without changing call sites.
-    pub fn check_command(&self, _command: &str) -> Option<ApprovalCheck> {
-        None
+    /// **Extraction:** `command` is parsed via [`bash_command_extractor::extract`]
+    /// into its top-level statements (see that module's doc comment for the
+    /// exact `tree-sitter-bash` grammar facts this relies on). A statement
+    /// outside the fixed scanning scope (`list`/`pipeline`/`command`
+    /// only — subshells, redirections, substitutions, control flow,
+    /// function definitions, heredocs) contributes `UserApprovalRequired`.
+    ///
+    /// **Per-command evaluation:** each extracted `command` is evaluated
+    /// independently against this tool's resolved rule list — a configured
+    /// `[tool.bash]`/`[agents.<type>.tools.bash]` table (ordinary
+    /// last-match-wins across its entries, since list order is a deliberate
+    /// user choice there) or, absent one, the unconditional default floor
+    /// (`backgrounded` → `AutoDenied`, `variable_assignment_prefix`/
+    /// `unquoted_glob`/`unquoted_brace_expansion` → `UserApprovalRequired`),
+    /// whose matching rules are combined by worst-case ranking rather than
+    /// last-match-wins, so a stronger signal is never silently shadowed by a
+    /// weaker one that happens to also match.
+    ///
+    /// **Aggregation:** all per-statement contributions are combined across
+    /// the whole script by worst-case ranking
+    /// (`AutoDenied` > `UserApprovalRequired` > `AutoApproved`) into a single
+    /// structural verdict. `self.rules` (e.g. `--auto-approve-bash`'s
+    /// catch-all) is then evaluated once, matched against the raw `command`
+    /// string, last-match-wins against the structural verdict — so it always
+    /// wins regardless of any `[tool.bash]` config, mirroring
+    /// [`SandboxContext::check_path`]'s existing precedence.
+    ///
+    /// Returns `None` only when the script fails to parse at all, or every
+    /// extracted statement is fully analysable and legal but no rule/floor
+    /// fires and `self.rules` has no match either (pure abstention).
+    pub fn check_command(&self, command: &str) -> Option<ApprovalCheck> {
+        let structural_verdict = match bash_command_extractor::extract(command) {
+            bash_command_extractor::ExtractionResult::ParseFailed => None,
+            bash_command_extractor::ExtractionResult::Statements(statements) => {
+                let mut aggregate: Option<ApprovalCheck> = None;
+                for statement in &statements {
+                    let contribution = match statement {
+                        bash_command_extractor::ExtractedStatement::Command(extracted) => {
+                            self.evaluate_command(extracted)
+                        }
+                        bash_command_extractor::ExtractedStatement::Unanalysable => {
+                            Some(ApprovalCheck::UserApprovalRequired)
+                        }
+                    };
+                    aggregate = Self::worse_verdict(aggregate, contribution);
+                }
+                aggregate
+            }
+        };
+
+        // `self.rules` (e.g. --auto-approve-bash's catch-all) is always
+        // evaluated last, matched against the raw command string, so it wins
+        // regardless of the structural verdict above.
+        let mut verdict = structural_verdict;
+        for rule in &self.rules {
+            if rule.pattern.matches(command) {
+                verdict = Some(rule.verdict.clone());
+            }
+        }
+
+        tracing::debug!(
+            command = %command,
+            sandbox_verdict = match &verdict {
+                None => "abstain".to_string(),
+                Some(ApprovalCheck::AutoApproved) => "auto-approved".to_string(),
+                Some(ApprovalCheck::AutoDenied { reason }) => format!("auto-denied: {reason}"),
+                Some(ApprovalCheck::UserApprovalRequired) => "user-approval-required".to_string(),
+            },
+            "sandbox check_command"
+        );
+
+        verdict
+    }
+
+    /// Rank an [`ApprovalCheck`] for worst-case combination:
+    /// `AutoDenied` > `UserApprovalRequired` > `AutoApproved`.
+    fn approval_check_rank(check: &ApprovalCheck) -> u8 {
+        match check {
+            ApprovalCheck::AutoDenied { .. } => 2,
+            ApprovalCheck::UserApprovalRequired => 1,
+            ApprovalCheck::AutoApproved => 0,
+        }
+    }
+
+    /// Combine two optional verdicts by worst-case ranking (`None` losing to
+    /// any `Some`).
+    fn worse_verdict(a: Option<ApprovalCheck>, b: Option<ApprovalCheck>) -> Option<ApprovalCheck> {
+        match (a, b) {
+            (None, None) => None,
+            (Some(only), None) | (None, Some(only)) => Some(only),
+            (Some(left), Some(right)) => {
+                if Self::approval_check_rank(&left) >= Self::approval_check_rank(&right) {
+                    Some(left)
+                } else {
+                    Some(right)
+                }
+            }
+        }
+    }
+
+    /// Evaluate one extracted `command` against this tool's resolved rule
+    /// list: a configured `[tool.bash]` list (ordinary last-match-wins) or,
+    /// absent one, the unconditional default floor (worst-case combination
+    /// of the four named command rules).
+    fn evaluate_command(
+        &self,
+        command: &bash_command_extractor::ExtractedCommand,
+    ) -> Option<ApprovalCheck> {
+        match &self.configured_rules {
+            Some(configured) => {
+                let mut verdict = None;
+                for rule in configured {
+                    match rule {
+                        ResolvedRule::Named {
+                            rule: named,
+                            verdict: rule_verdict,
+                        } => {
+                            if Self::evaluate_command_named_rule(*named, command) {
+                                verdict = Some(rule_verdict.clone());
+                            }
+                        }
+                        ResolvedRule::CommandGlob {
+                            command: pattern,
+                            verdict: rule_verdict,
+                        } => {
+                            if pattern.matches(&command.argv) {
+                                verdict = Some(rule_verdict.clone());
+                            }
+                        }
+                        // A path `PathGlob` rule under `[tool.bash]` is
+                        // rejected by config validation
+                        // (`crate::config::profile::ProfileConfig`); never
+                        // matches a command defensively if it slips through.
+                        ResolvedRule::PathGlob { .. } => {}
+                    }
+                }
+                verdict
+            }
+            None => Self::evaluate_bash_default_floor(command),
+        }
+    }
+
+    /// Evaluate one of the four `bash`-only [`NamedSandboxRule`] variants
+    /// against an extracted command. `OutsideWorkspace`/`DotPath` are path
+    /// rules, never valid under `[tool.bash]` (rejected by config
+    /// validation); defensively `false` here if they slip through.
+    fn evaluate_command_named_rule(
+        rule: NamedSandboxRule,
+        command: &bash_command_extractor::ExtractedCommand,
+    ) -> bool {
+        match rule {
+            NamedSandboxRule::Backgrounded => command.backgrounded,
+            NamedSandboxRule::VariableAssignmentPrefix => command.has_variable_assignment_prefix,
+            NamedSandboxRule::UnquotedGlob => command
+                .argv
+                .iter()
+                .any(bash_command_extractor::token_has_unquoted_glob),
+            NamedSandboxRule::UnquotedBraceExpansion => command
+                .argv
+                .iter()
+                .any(bash_command_extractor::token_has_unquoted_brace_expansion),
+            NamedSandboxRule::OutsideWorkspace | NamedSandboxRule::DotPath => false,
+        }
+    }
+
+    /// The unconditional `bash` default floor (no `[tool.bash]` config):
+    /// worst-case combination of the four named command rules, not
+    /// last-match-wins — see [`SandboxContext::check_command`]'s doc
+    /// comment.
+    fn evaluate_bash_default_floor(
+        command: &bash_command_extractor::ExtractedCommand,
+    ) -> Option<ApprovalCheck> {
+        let mut verdict = None;
+        if command.backgrounded {
+            verdict = Self::worse_verdict(
+                verdict,
+                Some(ApprovalCheck::AutoDenied {
+                    reason: BACKGROUNDED_REASON.to_string(),
+                }),
+            );
+        }
+        if command.has_variable_assignment_prefix {
+            verdict = Self::worse_verdict(verdict, Some(ApprovalCheck::UserApprovalRequired));
+        }
+        if command
+            .argv
+            .iter()
+            .any(bash_command_extractor::token_has_unquoted_glob)
+        {
+            verdict = Self::worse_verdict(verdict, Some(ApprovalCheck::UserApprovalRequired));
+        }
+        if command
+            .argv
+            .iter()
+            .any(bash_command_extractor::token_has_unquoted_brace_expansion)
+        {
+            verdict = Self::worse_verdict(verdict, Some(ApprovalCheck::UserApprovalRequired));
+        }
+        verdict
     }
 }
 
@@ -568,7 +1296,7 @@ mod tests {
     }
 
     #[test]
-    fn check_command_always_abstains() {
+    fn check_command_default_floor_abstains_for_plain_safe_commands() {
         let temporary_dir = tempfile::tempdir().unwrap();
         let sandbox = make_sandbox(temporary_dir.path());
         let context = SandboxContext::new(Arc::clone(&sandbox));
@@ -576,17 +1304,285 @@ mod tests {
         assert_eq!(
             context.check_command("echo hello"),
             None,
-            "sandbox abstains for ordinary commands"
+            "sandbox abstains for ordinary commands: no default-floor rule fires"
         );
         assert_eq!(
             context.check_command("rm -rf /"),
             None,
-            "sandbox abstains even for dangerous-looking commands (no rules configured)"
+            "sandbox abstains even for dangerous-looking commands: argv-shape rules do not \
+             evaluate command semantics, only structural signals"
         );
         assert_eq!(
             context.check_command(""),
             None,
             "sandbox abstains for empty command"
+        );
+    }
+
+    #[test]
+    fn check_command_default_floor_denies_backgrounded_command() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let sandbox = make_sandbox(temporary_dir.path());
+        let context = SandboxContext::new(Arc::clone(&sandbox));
+
+        assert!(
+            matches!(
+                context.check_command("sleep 10 &"),
+                Some(ApprovalCheck::AutoDenied { .. })
+            ),
+            "a backgrounded command is denied by the unconditional default floor"
+        );
+    }
+
+    #[test]
+    fn check_command_default_floor_requires_approval_for_variable_assignment_prefix() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let sandbox = make_sandbox(temporary_dir.path());
+        let context = SandboxContext::new(Arc::clone(&sandbox));
+
+        assert_eq!(
+            context.check_command("FOO=bar git status"),
+            Some(ApprovalCheck::UserApprovalRequired)
+        );
+    }
+
+    #[test]
+    fn check_command_default_floor_requires_approval_for_unquoted_glob_or_brace() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let sandbox = make_sandbox(temporary_dir.path());
+        let context = SandboxContext::new(Arc::clone(&sandbox));
+
+        assert_eq!(
+            context.check_command("cat *.txt"),
+            Some(ApprovalCheck::UserApprovalRequired)
+        );
+        assert_eq!(
+            context.check_command("echo {a,b}"),
+            Some(ApprovalCheck::UserApprovalRequired)
+        );
+        assert_eq!(
+            context.check_command(r#"cat "*.txt""#),
+            None,
+            "a quoted glob-like token does not trigger unquoted_glob"
+        );
+    }
+
+    #[test]
+    fn check_command_unanalysable_construct_requires_approval() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let sandbox = make_sandbox(temporary_dir.path());
+        let context = SandboxContext::new(Arc::clone(&sandbox));
+
+        assert_eq!(
+            context.check_command("echo $(whoami)"),
+            Some(ApprovalCheck::UserApprovalRequired)
+        );
+    }
+
+    #[test]
+    fn check_command_parse_failure_returns_none() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let sandbox = make_sandbox(temporary_dir.path());
+        let context = SandboxContext::new(Arc::clone(&sandbox));
+
+        assert_eq!(context.check_command("cmd1 |"), None);
+    }
+
+    #[test]
+    fn check_command_aggregates_worst_case_across_multiple_commands() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let sandbox = make_sandbox(temporary_dir.path());
+        let context = SandboxContext::new(Arc::clone(&sandbox)).with_configured_rules(vec![
+            SandboxRuleConfig::CommandGlob {
+                command: vec!["git".to_string(), "status".to_string()],
+                verdict: ApprovalVerdictConfig::AutoApproved,
+                reason: None,
+            },
+        ]);
+
+        // First segment matches an AutoApproved CommandGlob rule; second
+        // segment ($(whoami)) is un-analysable -> overall UserApprovalRequired.
+        assert_eq!(
+            context.check_command("git status ; echo $(whoami)"),
+            Some(ApprovalCheck::UserApprovalRequired)
+        );
+    }
+
+    #[test]
+    fn check_command_auto_denied_in_one_segment_wins_over_others() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let sandbox = make_sandbox(temporary_dir.path());
+        let context = SandboxContext::new(Arc::clone(&sandbox));
+
+        // "echo hello" abstains (no rule fires), "sleep 10 &" is
+        // AutoDenied by the default floor -> overall AutoDenied.
+        assert!(matches!(
+            context.check_command("echo hello ; sleep 10 &"),
+            Some(ApprovalCheck::AutoDenied { .. })
+        ));
+    }
+
+    #[test]
+    fn check_command_configured_rules_lose_default_floor_protection() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let sandbox = make_sandbox(temporary_dir.path());
+        // A `[tool.bash]` config that omits the four named rules fully
+        // replaces the default floor: a backgrounded command is no longer
+        // denied.
+        let context = SandboxContext::new(Arc::clone(&sandbox)).with_configured_rules(vec![
+            SandboxRuleConfig::CommandGlob {
+                command: vec!["git".to_string(), "*".to_string()],
+                verdict: ApprovalVerdictConfig::AutoApproved,
+                reason: None,
+            },
+        ]);
+
+        assert_eq!(
+            context.check_command("sleep 10 &"),
+            None,
+            "backgrounded no longer denied once [tool.bash] fully replaces the default floor"
+        );
+    }
+
+    #[test]
+    fn check_command_default_floor_combines_named_rules_by_worst_case_not_last_match() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let sandbox = make_sandbox(temporary_dir.path());
+        let context = SandboxContext::new(Arc::clone(&sandbox));
+
+        // A single command simultaneously matches `unquoted_glob`
+        // (UserApprovalRequired) and `backgrounded` (AutoDenied); the
+        // unconfigured floor must resolve to the worse of the two
+        // regardless of which rule's condition happens to be evaluated
+        // first in the implementation.
+        assert!(matches!(
+            context.check_command("cat *.txt &"),
+            Some(ApprovalCheck::AutoDenied { .. })
+        ));
+    }
+
+    #[test]
+    fn check_command_self_rules_catch_all_wins_over_structural_auto_denied() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let sandbox = make_sandbox(temporary_dir.path());
+        let context = SandboxContext::new(Arc::clone(&sandbox)).with_rule(SandboxRule {
+            verdict: ApprovalCheck::AutoApproved,
+            pattern: Pattern::new("**").unwrap(),
+        });
+
+        // "sleep 10 &" would be AutoDenied by the default floor, but the
+        // code-appended catch-all (simulating --auto-approve-bash) wins.
+        assert_eq!(
+            context.check_command("sleep 10 &"),
+            Some(ApprovalCheck::AutoApproved)
+        );
+    }
+
+    #[test]
+    fn check_command_glob_rule_matches_trailing_single_wildcard() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let sandbox = make_sandbox(temporary_dir.path());
+        let context = SandboxContext::new(Arc::clone(&sandbox)).with_configured_rules(vec![
+            SandboxRuleConfig::CommandGlob {
+                command: vec!["git".to_string(), "reflog".to_string(), "*".to_string()],
+                verdict: ApprovalVerdictConfig::AutoApproved,
+                reason: None,
+            },
+        ]);
+
+        assert_eq!(
+            context.check_command("git reflog show"),
+            Some(ApprovalCheck::AutoApproved)
+        );
+        assert_eq!(
+            context.check_command("git reflog show extra"),
+            None,
+            "trailing * matches exactly one more token, not two"
+        );
+        assert_eq!(
+            context.check_command("git status"),
+            None,
+            "literal prefix must match exactly"
+        );
+    }
+
+    #[test]
+    fn with_configured_rules_skips_a_command_glob_rule_with_a_misplaced_wildcard() {
+        // Defense in depth: `crate::config::profile::validate_tool_sandbox_rules`
+        // already rejects this as a hard startup error for profile-loaded
+        // rules, but `with_configured_rules` is a public API that a caller
+        // could feed directly, bypassing that validation. Confirm the rule
+        // is dropped (with a warning) rather than silently degrading to a
+        // literal (never-matching) "*" token.
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let sandbox = make_sandbox(temporary_dir.path());
+        let context = SandboxContext::new(Arc::clone(&sandbox)).with_configured_rules(vec![
+            SandboxRuleConfig::CommandGlob {
+                command: vec!["git".to_string(), "*".to_string(), "status".to_string()],
+                verdict: ApprovalVerdictConfig::AutoApproved,
+                reason: None,
+            },
+        ]);
+
+        assert_eq!(
+            context.check_command("git status"),
+            None,
+            "the misplaced-wildcard rule must be dropped, leaving an empty configured list"
+        );
+        assert_eq!(
+            context.check_command("git * status"),
+            None,
+            "the rule must not survive as a literal '*' token match either"
+        );
+    }
+
+    #[test]
+    fn check_command_glob_rule_trailing_single_wildcard_abstains_on_unquoted_glob_tail() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let sandbox = make_sandbox(temporary_dir.path());
+        let context = SandboxContext::new(Arc::clone(&sandbox)).with_configured_rules(vec![
+            SandboxRuleConfig::CommandGlob {
+                command: vec!["cat".to_string(), "*".to_string()],
+                verdict: ApprovalVerdictConfig::AutoApproved,
+                reason: None,
+            },
+        ]);
+
+        // The tail token "*.txt" contains an unquoted glob char, so this
+        // CommandGlob rule abstains (never matches); since this is a fully
+        // configured list (no default floor), the whole check abstains.
+        assert_eq!(context.check_command("cat *.txt"), None);
+        assert_eq!(
+            context.check_command("cat notes.txt"),
+            Some(ApprovalCheck::AutoApproved)
+        );
+    }
+
+    #[test]
+    fn check_command_glob_rule_trailing_double_wildcard_matches_multiple_tokens() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let sandbox = make_sandbox(temporary_dir.path());
+        let context = SandboxContext::new(Arc::clone(&sandbox)).with_configured_rules(vec![
+            SandboxRuleConfig::CommandGlob {
+                command: vec!["find".to_string(), "**".to_string()],
+                verdict: ApprovalVerdictConfig::AutoApproved,
+                reason: None,
+            },
+        ]);
+
+        assert_eq!(
+            context.check_command("find . -type f"),
+            Some(ApprovalCheck::AutoApproved)
+        );
+        assert_eq!(
+            context.check_command("find *.txt -type f"),
+            Some(ApprovalCheck::AutoApproved),
+            "** never abstains on unquoted glob/brace in its tail"
+        );
+        assert_eq!(
+            context.check_command("find"),
+            None,
+            "** requires at least one extra token"
         );
     }
 
@@ -636,5 +1632,250 @@ mod tests {
         let temporary_dir = tempfile::tempdir().unwrap();
         let base = std::fs::canonicalize(temporary_dir.path()).unwrap();
         assert_eq!(to_relative_path(base.to_str().unwrap(), &base), None);
+    }
+
+    #[test]
+    fn sandbox_rule_config_named_variant_parses_from_toml() {
+        let parsed: SandboxRuleConfig = toml::from_str(
+            r#"
+            rule = "dot_path"
+            verdict = "user_approval_required"
+            "#,
+        )
+        .expect("named rule config parses");
+        assert!(matches!(
+            parsed,
+            SandboxRuleConfig::Named {
+                rule: NamedSandboxRule::DotPath,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn sandbox_rule_config_path_glob_variant_parses_from_toml() {
+        let parsed: SandboxRuleConfig = toml::from_str(
+            r#"
+            pattern = "**/*.secret"
+            verdict = "auto_denied"
+            reason = "no secrets"
+            "#,
+        )
+        .expect("glob rule config parses");
+        match parsed {
+            SandboxRuleConfig::PathGlob {
+                pattern,
+                verdict,
+                reason,
+            } => {
+                assert_eq!(pattern, "**/*.secret");
+                assert_eq!(
+                    verdict.to_approval_check(reason.as_deref(), "fallback"),
+                    ApprovalCheck::AutoDenied {
+                        reason: "no secrets".to_string()
+                    }
+                );
+            }
+            other => panic!("expected PathGlob variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn has_misplaced_command_glob_wildcard_detects_non_trailing_single_wildcard() {
+        let rule = SandboxRuleConfig::CommandGlob {
+            command: vec!["git".to_string(), "*".to_string(), "status".to_string()],
+            verdict: ApprovalVerdictConfig::AutoApproved,
+            reason: None,
+        };
+        assert!(rule.has_misplaced_command_glob_wildcard());
+    }
+
+    #[test]
+    fn has_misplaced_command_glob_wildcard_detects_non_trailing_multi_wildcard() {
+        let rule = SandboxRuleConfig::CommandGlob {
+            command: vec!["git".to_string(), "**".to_string(), "status".to_string()],
+            verdict: ApprovalVerdictConfig::AutoApproved,
+            reason: None,
+        };
+        assert!(rule.has_misplaced_command_glob_wildcard());
+    }
+
+    #[test]
+    fn has_misplaced_command_glob_wildcard_abstains_on_trailing_wildcard() {
+        let single = SandboxRuleConfig::CommandGlob {
+            command: vec!["git".to_string(), "status".to_string(), "*".to_string()],
+            verdict: ApprovalVerdictConfig::AutoApproved,
+            reason: None,
+        };
+        let multi = SandboxRuleConfig::CommandGlob {
+            command: vec!["git".to_string(), "status".to_string(), "**".to_string()],
+            verdict: ApprovalVerdictConfig::AutoApproved,
+            reason: None,
+        };
+        assert!(!single.has_misplaced_command_glob_wildcard());
+        assert!(!multi.has_misplaced_command_glob_wildcard());
+    }
+
+    #[test]
+    fn has_misplaced_command_glob_wildcard_abstains_on_non_command_glob_rules() {
+        let named = SandboxRuleConfig::Named {
+            rule: NamedSandboxRule::DotPath,
+            verdict: ApprovalVerdictConfig::AutoDenied,
+            reason: None,
+        };
+        let glob = SandboxRuleConfig::PathGlob {
+            pattern: "**".to_string(),
+            verdict: ApprovalVerdictConfig::AutoApproved,
+            reason: None,
+        };
+        assert!(!named.has_misplaced_command_glob_wildcard());
+        assert!(!glob.has_misplaced_command_glob_wildcard());
+    }
+
+    #[test]
+    fn approval_verdict_config_auto_denied_defaults_reason_when_omitted() {
+        let parsed = ApprovalVerdictConfig::AutoDenied;
+        assert_eq!(
+            parsed.to_approval_check(None, "default reason"),
+            ApprovalCheck::AutoDenied {
+                reason: "default reason".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn configured_named_rule_overrides_default_dot_path_verdict() {
+        // A `[tool.read]`-style config changing `dot_path`'s verdict to
+        // `UserApprovalRequired` for this tool only; `outside_workspace`
+        // protection is intentionally NOT included, confirming the
+        // full-replace (not merge) semantics.
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let workspace = temporary_dir.path().to_path_buf();
+        let sandbox = make_sandbox(&workspace);
+        let context = SandboxContext::new(Arc::clone(&sandbox)).with_configured_rules(vec![
+            SandboxRuleConfig::Named {
+                rule: NamedSandboxRule::DotPath,
+                verdict: ApprovalVerdictConfig::UserApprovalRequired,
+                reason: None,
+            },
+        ]);
+
+        let dot_path = workspace.join(".env");
+        assert_eq!(
+            context.check_path(&dot_path),
+            Some(ApprovalCheck::UserApprovalRequired),
+            "configured dot_path rule should override the default AutoDenied verdict"
+        );
+
+        // outside_workspace is not part of this tool's configured list, so it
+        // no longer fires (full replace, not merge) — sandbox abstains.
+        let outside = temporary_dir.path().join("other/file.rs");
+        assert_eq!(
+            context.check_path(&outside),
+            None,
+            "outside_workspace should not fire when omitted from configured_rules"
+        );
+    }
+
+    #[test]
+    fn unconfigured_tool_falls_back_to_default_floor() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let workspace = temporary_dir.path().join("workspace");
+        let sandbox = make_sandbox(&workspace);
+        // No with_configured_rules call: default floor applies to every tool.
+        let context = SandboxContext::new(Arc::clone(&sandbox));
+
+        let dot_path = workspace.join(".env");
+        assert!(matches!(
+            context.check_path(&dot_path),
+            Some(ApprovalCheck::AutoDenied { .. })
+        ));
+        let outside = temporary_dir.path().join("other/file.rs");
+        assert!(matches!(
+            context.check_path(&outside),
+            Some(ApprovalCheck::AutoDenied { .. })
+        ));
+    }
+
+    #[test]
+    fn configured_rules_mix_named_and_glob_last_match_wins() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let workspace = temporary_dir.path().to_path_buf();
+        let sandbox = make_sandbox(&workspace);
+        let canonical_workspace = sandbox.read().unwrap().workspace_root.clone();
+        let allow_pattern = format!("{}/allowed/**", canonical_workspace.to_string_lossy());
+
+        // List order: dot_path (AutoDenied) then a glob rule that re-approves
+        // one specific dot-path — last match wins, so the glob rule (later in
+        // the list) should override the earlier named rule for matching paths.
+        let dot_allow_pattern =
+            format!("{}/.allowed_dot/**", canonical_workspace.to_string_lossy());
+        let context = SandboxContext::new(Arc::clone(&sandbox)).with_configured_rules(vec![
+            SandboxRuleConfig::Named {
+                rule: NamedSandboxRule::DotPath,
+                verdict: ApprovalVerdictConfig::AutoDenied,
+                reason: None,
+            },
+            SandboxRuleConfig::PathGlob {
+                pattern: allow_pattern,
+                verdict: ApprovalVerdictConfig::AutoApproved,
+                reason: None,
+            },
+            SandboxRuleConfig::PathGlob {
+                pattern: dot_allow_pattern,
+                verdict: ApprovalVerdictConfig::AutoApproved,
+                reason: None,
+            },
+        ]);
+
+        // Regular dot-path still denied (only the named rule matches it).
+        let dot_path = workspace.join(".env");
+        assert!(matches!(
+            context.check_path(&dot_path),
+            Some(ApprovalCheck::AutoDenied { .. })
+        ));
+
+        // Dot-path under .allowed_dot: named dot_path rule matches (deny),
+        // then the later glob rule also matches and overrides to approved —
+        // proving last-match-wins across Named and Glob in one list.
+        let allowed_dot_path = workspace.join(".allowed_dot/file.txt");
+        assert_eq!(
+            context.check_path(&allowed_dot_path),
+            Some(ApprovalCheck::AutoApproved)
+        );
+
+        // Non-dot path under allowed/: only the glob rule matches.
+        let allowed_path = workspace.join("allowed/file.txt");
+        assert_eq!(
+            context.check_path(&allowed_path),
+            Some(ApprovalCheck::AutoApproved)
+        );
+    }
+
+    #[test]
+    fn auto_approve_catch_all_wins_over_configured_deny_rule() {
+        // Mirrors --auto-approve-write/--auto-approve-edit: the catch-all
+        // `with_rule` is appended after `with_configured_rules` and must win
+        // even though the configured list would otherwise deny the path.
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let workspace = temporary_dir.path().to_path_buf();
+        let sandbox = make_sandbox(&workspace);
+        let context = SandboxContext::new(Arc::clone(&sandbox))
+            .with_configured_rules(vec![SandboxRuleConfig::Named {
+                rule: NamedSandboxRule::DotPath,
+                verdict: ApprovalVerdictConfig::AutoDenied,
+                reason: None,
+            }])
+            .with_rule(SandboxRule {
+                verdict: ApprovalCheck::AutoApproved,
+                pattern: glob::Pattern::new("**").unwrap(),
+            });
+
+        let dot_path = workspace.join(".env");
+        assert_eq!(
+            context.check_path(&dot_path),
+            Some(ApprovalCheck::AutoApproved),
+            "catch-all auto-approve rule must win over a configured deny rule"
+        );
     }
 }

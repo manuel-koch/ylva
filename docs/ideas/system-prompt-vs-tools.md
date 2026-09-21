@@ -31,7 +31,7 @@ the most literal interpretation of the task ("read the file").
 
 ### 1. System prompt guidance
 
-Add an efficiency section to `DEFAULT_SYSTEM_PROMPT` (or to the per-profile
+Add an efficiency section to the built-in `DEFAULT_SOUL` (or to the per-profile
 `persona` field) that explicitly names preferred patterns:
 
 ```text
@@ -73,7 +73,7 @@ rules (search-first, batching independent reads).
 Implement option 3 as a low-risk incremental improvement:
 
 1. Update `read_file` and `search` descriptions with the nudges above.
-2. Append a short "Tool use" paragraph to `DEFAULT_SYSTEM_PROMPT`.
+2. Append a short "Tool use" paragraph to the built-in `DEFAULT_SOUL`.
 3. Observe whether the iteration-heavy prompt in `docs/ideas/sample-prompts.md`
    (module-tree tracing) completes within the limit with a capable model.
 

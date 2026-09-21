@@ -19,7 +19,8 @@ use std::sync::Arc;
 use ylva::llm::provider_registry::{ProviderEnv, ProviderRegistry, ProviderSelection};
 use ylva::logging::{init_logging, LogConfig, LogFormat};
 use ylva::{
-    AgentFactory, App, ConsoleApp, Engine, EngineImpl, ProfileConfig, TuiApp, DEFAULT_TUI_TOOLS,
+    AgentFactory, App, AutoApproveTool, ConsoleApp, Engine, EngineImpl, ProfileConfig, TuiApp,
+    DEFAULT_TUI_TOOLS,
 };
 
 /// Fallback demo prompt used when neither `--prompt` nor piped stdin supplies
@@ -31,6 +32,30 @@ enum CliColorMode {
     Auto,
     No,
     Yes,
+}
+
+fn run_init_command(arguments: &[String]) -> Result<ylva::InitReport, String> {
+    let mut workspace = false;
+    let mut force = false;
+    for argument in arguments {
+        match argument.as_str() {
+            "--workspace" => workspace = true,
+            "--force" => force = true,
+            other => return Err(format!("unknown init argument '{other}'")),
+        }
+    }
+
+    if workspace {
+        let current_directory =
+            std::env::current_dir().map_err(|error| format!("cannot resolve cwd: {error}"))?;
+        let workspace_root =
+            ylva::discover_workspace_root(&current_directory).unwrap_or(current_directory);
+        ylva::run_init_workspace(&workspace_root, force).map_err(|error| error.to_string())
+    } else {
+        let ylva_home = ylva::ylva_home()
+            .ok_or_else(|| "cannot resolve the home directory for ~/.ylva".to_string())?;
+        ylva::run_init(&ylva_home, force).map_err(|error| error.to_string())
+    }
 }
 
 /// Decide whether headless CLI status lines may use ANSI colors.
@@ -82,12 +107,23 @@ fn color_mode_from_args(args: &[String]) -> Result<CliColorMode, String> {
 }
 
 fn main() {
-    if std::env::args().any(|arg| arg == "--version") {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|arg| arg == "--version") {
         println!("{}", ylva::BUILD_INFO.render());
         return;
     }
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|argument| argument == "init") {
+        match run_init_command(&args[1..]) {
+            Ok(report) => println!("{}", report.summary()),
+            Err(message) => {
+                eprintln!("error: {message}");
+                std::process::exit(2);
+            }
+        }
+        return;
+    }
+
     let cli_color_mode = match color_mode_from_args(&args) {
         Ok(color_mode) => color_mode,
         Err(message) => {
@@ -105,7 +141,7 @@ fn main() {
     // The guard must outlive the whole run so buffered log events are flushed
     // on exit. Logging is opt-in: `init_logging` installs nothing and returns
     // `None` when no `--log-file` was given.
-    let _log_guard = match init_logging(log_config) {
+    let mut log_guard = match init_logging(log_config) {
         Ok(guard) => guard,
         Err(message) => {
             eprintln!("error: {message}");
@@ -131,26 +167,40 @@ fn main() {
     );
     tracing::info!(app = if use_tui { "tui" } else { "cli" }, "starting");
 
-    let profile_environment = match load_profile_environment_for_args(&args) {
-        Ok(environment) => environment,
-        Err(message) => {
-            eprintln!("error: {message}");
-            std::process::exit(2);
-        }
-    };
-    let mut profile = match load_profile(&args, &profile_environment) {
+    let workspace_root = std::env::current_dir()
+        .ok()
+        .and_then(|current_directory| ylva::discover_workspace_root(&current_directory));
+    let ylva_home = ylva::ylva_home();
+    let profile_environment =
+        match load_profile_environment_for_args(&args, workspace_root.as_deref()) {
+            Ok(environment) => environment,
+            Err(message) => {
+                exit_with_error(&mut log_guard, message);
+            }
+        };
+    let mut profile = match load_profile(&args, &profile_environment, workspace_root.as_deref()) {
         Ok(profile) => profile,
         Err(message) => {
-            eprintln!("error: {message}");
-            std::process::exit(2);
+            exit_with_error(&mut log_guard, message);
+        }
+    };
+    let profile_path = match selected_profile_path(&args, workspace_root.as_deref()) {
+        Ok(path) => path,
+        Err(message) => {
+            exit_with_error(&mut log_guard, message);
+        }
+    };
+    let root_system_prompt = match ylva::load_soul(workspace_root.as_deref()) {
+        Ok(system_prompt) => system_prompt,
+        Err(error) => {
+            exit_with_error(&mut log_guard, error);
         }
     };
     ylva::highlight::set_active_theme(profile.theme);
     let provider_env = match load_provider_env(&profile_environment) {
         Ok(provider_env) => provider_env,
         Err(message) => {
-            eprintln!("error: {message}");
-            std::process::exit(2);
+            exit_with_error(&mut log_guard, message);
         }
     };
     apply_provider_env_to_profile(&mut profile, &provider_env);
@@ -160,14 +210,22 @@ fn main() {
     let conversation_id = match conversation_id_from_args(&args) {
         Ok(conversation_id) => conversation_id,
         Err(message) => {
-            eprintln!("error: {message}");
-            std::process::exit(2);
+            exit_with_error(&mut log_guard, message);
         }
     };
 
-    let auto_approve_edit = args.contains(&"--auto-approve-edit".to_string());
-    let auto_approve_write = args.contains(&"--auto-approve-write".to_string());
-    let auto_approve_spawn = args.contains(&"--auto-approve-spawn".to_string());
+    // Maps each `--auto-approve-*` flag to its `AutoApproveTool` variant;
+    // `read`/`glob`/`search` mirror `write`/`edit`/`bash`/`spawn` (`clarify`
+    // has no auto-approve concept — it always requires approval).
+    let auto_approve_flags: [(&str, AutoApproveTool); 7] = [
+        ("--auto-approve-read", AutoApproveTool::Read),
+        ("--auto-approve-write", AutoApproveTool::Write),
+        ("--auto-approve-glob", AutoApproveTool::Glob),
+        ("--auto-approve-bash", AutoApproveTool::Bash),
+        ("--auto-approve-search", AutoApproveTool::Search),
+        ("--auto-approve-edit", AutoApproveTool::Edit),
+        ("--auto-approve-spawn", AutoApproveTool::Spawn),
+    ];
 
     let factory_without_store = {
         // Engines come from the profile's `[engines.*]` tables when it defines
@@ -182,8 +240,7 @@ fn main() {
             ) {
                 Ok(engines) => engines,
                 Err(error) => {
-                    eprintln!("error: {error}");
-                    std::process::exit(2);
+                    exit_with_error(&mut log_guard, error);
                 }
             };
             AgentFactory::new(engines)
@@ -191,27 +248,42 @@ fn main() {
             match AgentFactory::from_profile(&profile) {
                 Ok(factory) => factory,
                 Err(error) => {
-                    eprintln!("error: {}: {error}", selected_profile_context(&args));
-                    std::process::exit(2);
+                    exit_with_error(
+                        &mut log_guard,
+                        format!(
+                            "{}: {error}",
+                            selected_profile_context(&args, workspace_root.as_deref())
+                        ),
+                    );
                 }
             }
         };
         if use_tui {
             factory = factory.with_allowed_tools(DEFAULT_TUI_TOOLS);
         }
-        if auto_approve_edit {
-            factory = factory.with_auto_approve_edit();
+        for (flag, tool) in auto_approve_flags {
+            if args.contains(&flag.to_string()) {
+                factory = factory.with_auto_approve(tool);
+            }
         }
-        if auto_approve_write {
-            factory = factory.with_auto_approve_write();
-        }
-        if auto_approve_spawn {
-            factory = factory.with_auto_approve_spawn();
-        }
+        factory = factory.with_system_prompt(root_system_prompt.clone());
         factory
     };
 
+    if let Err(error) = factory_without_store.validate_profile_agent_engines(&profile) {
+        exit_with_error(
+            &mut log_guard,
+            format!(
+                "{}: {error}",
+                selected_profile_context(&args, workspace_root.as_deref())
+            ),
+        );
+    }
+
     let explicit_profile_name = explicit_profile_name_from_args(&args).map(str::to_string);
+    let selected_profile_name = explicit_profile_name
+        .clone()
+        .unwrap_or_else(|| ylva::DEFAULT_PROFILE_NAME.to_string());
 
     let (result, session_hint) = runtime.block_on(async {
         // Resolved once, up front, so both a fresh session's `meta` header
@@ -223,8 +295,7 @@ fn main() {
         let store = match open_store(conversation_id, initial_engine_config.as_ref()) {
             Ok(store) => store,
             Err(message) => {
-                eprintln!("error: {message}");
-                std::process::exit(2);
+                exit_with_error(&mut log_guard, message);
             }
         };
         // Recorded on every start — fresh session and resume alike — not
@@ -250,6 +321,12 @@ fn main() {
                 "default".to_string(),
                 explicit_prompt,
             )
+            .with_display_metadata(ylva::TuiDisplayMetadata {
+                profile_name: selected_profile_name.clone(),
+                profile_path: profile_path.clone(),
+                ylva_home: ylva_home.clone(),
+                workspace_root: workspace_root.clone(),
+            })
             .run()
             .await
         } else {
@@ -277,14 +354,27 @@ fn main() {
     match result {
         Ok(exit_code) => {
             if exit_code != 0 {
+                drop(log_guard.take());
                 std::process::exit(exit_code as i32);
             }
         }
         Err(error) => {
-            eprintln!("error: {error}");
-            std::process::exit(2);
+            exit_with_error(&mut log_guard, error);
         }
     }
+}
+
+/// Report a fatal error after logging has been initialized.
+///
+/// `std::process::exit` skips destructors, so explicitly dropping the
+/// non-blocking log guard is required before exiting or the diagnostic can
+/// remain buffered and never reach the selected logfile.
+fn exit_with_error(log_guard: &mut Option<ylva::LogGuards>, message: impl std::fmt::Display) -> ! {
+    let message = message.to_string();
+    tracing::error!(%message, "fatal error");
+    eprintln!("error: {message}");
+    drop(log_guard.take());
+    std::process::exit(2);
 }
 
 /// Print the session id and a copy-pasteable command that resumes it.
@@ -318,12 +408,18 @@ fn resume_hint_text(session_id: uuid::Uuid, explicit_profile_name: Option<&str>)
 fn load_profile(
     args: &[String],
     environment: &std::collections::HashMap<String, String>,
+    workspace_root: Option<&std::path::Path>,
 ) -> Result<ProfileConfig, String> {
     match explicit_profile_name_from_args(args) {
         Some(profile_name) => {
             let profiles_root = ylva::default_profiles_root().map_err(|error| error.to_string())?;
-            ProfileConfig::load_with_environment(&profiles_root, profile_name, environment)
-                .map_err(|error| error.to_string())
+            ProfileConfig::load_with_environment_at_workspace_root(
+                &profiles_root,
+                profile_name,
+                environment,
+                workspace_root,
+            )
+            .map_err(|error| error.to_string())
         }
         None => {
             let profiles_root = match ylva::default_profiles_root() {
@@ -333,10 +429,11 @@ fn load_profile(
                     return Ok(ProfileConfig::default());
                 }
             };
-            ProfileConfig::load_or_default_with_environment(
+            ProfileConfig::load_or_default_with_environment_at_workspace_root(
                 &profiles_root,
                 ylva::DEFAULT_PROFILE_NAME,
                 environment,
+                workspace_root,
             )
             .map_err(|error| error.to_string())
         }
@@ -364,15 +461,31 @@ fn explicit_profile_name_from_args(args: &[String]) -> Option<&str> {
 ///
 /// `ProfileConfig` intentionally remains independent of its on-disk source,
 /// so startup adds this context when a later profile-construction step fails.
-fn selected_profile_context(args: &[String]) -> String {
+fn selected_profile_context(args: &[String], workspace_root: Option<&std::path::Path>) -> String {
     let profile_name = explicit_profile_name_from_args(args).unwrap_or(ylva::DEFAULT_PROFILE_NAME);
-    match ylva::default_profiles_root() {
-        Ok(profiles_root) => {
-            let config_path = ylva::profile_config_path(&profiles_root, profile_name);
-            format!("profile '{profile_name}' at {}", config_path.display())
-        }
+    match selected_profile_path(args, workspace_root) {
+        Ok(Some(path)) => format!("profile '{profile_name}' at {}", path.display()),
+        Ok(None) => format!("profile '{profile_name}' (built-in default)"),
         Err(error) => format!("profile '{profile_name}' (config path unavailable: {error})"),
     }
+}
+
+/// Resolve the profile config path selected by the same layering used to load
+/// the active profile.
+fn selected_profile_path(
+    args: &[String],
+    workspace_root: Option<&std::path::Path>,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let profile_name = explicit_profile_name_from_args(args).unwrap_or(ylva::DEFAULT_PROFILE_NAME);
+    let profiles_root = match ylva::default_profiles_root() {
+        Ok(profiles_root) => profiles_root,
+        Err(error) if explicit_profile_name_from_args(args).is_some() => {
+            return Err(error.to_string());
+        }
+        Err(_) => return Ok(None),
+    };
+    ylva::profile_config_source_path(&profiles_root, profile_name, workspace_root)
+        .map_err(|error| error.to_string())
 }
 
 /// Load the merged environment belonging to the selected profile.
@@ -382,6 +495,7 @@ fn selected_profile_context(args: &[String]) -> String {
 /// values.
 fn load_profile_environment_for_args(
     args: &[String],
+    workspace_root: Option<&std::path::Path>,
 ) -> Result<std::collections::HashMap<String, String>, String> {
     let profile_name = explicit_profile_name_from_args(args).unwrap_or(ylva::DEFAULT_PROFILE_NAME);
     let profile_env_path = match ylva::default_profiles_root() {
@@ -394,8 +508,12 @@ fn load_profile_environment_for_args(
             None
         }
     };
-    ylva::load_profile_environment(profile_env_path.as_deref())
-        .map_err(|error| format!("cannot load profile environment: {error}"))
+    ylva::load_profile_environment_at_workspace_root(
+        profile_env_path.as_deref(),
+        workspace_root,
+        profile_name,
+    )
+    .map_err(|error| format!("cannot load profile environment: {error}"))
 }
 
 fn load_provider_env(

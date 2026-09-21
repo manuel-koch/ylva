@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use ylva::{
     AgentCommand, AgentLoop, EngineImpl, Message, MockProvider, ToolRegistry, UiUpdate,
-    DEFAULT_SYSTEM_PROMPT, TOOL_PROTOCOL_SYSTEM_PROMPT,
+    DEFAULT_SOUL, TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
 
 #[tokio::test]
@@ -49,7 +49,7 @@ async fn empty_prompt_is_a_noop_and_final_context_stays_seeded() {
         context.messages(),
         &[
             Message::System {
-                content: DEFAULT_SYSTEM_PROMPT.to_string(),
+                content: DEFAULT_SOUL.to_string(),
             },
             Message::System {
                 content: TOOL_PROTOCOL_SYSTEM_PROMPT.to_string(),

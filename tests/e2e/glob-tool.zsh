@@ -44,14 +44,14 @@ __EOT__
 seperator
 
 ylva << '__EOT__'
-Search for files in the project root (non-recursive).
+Search for files in the workspace root (non-recursive).
 Count the number of found files!
 __EOT__
 
 seperator
 
 ylva << '__EOT__'
-Search for files/directories in the project root (recursive).
+Search for files/directories in the workspace root (recursive).
 Clamp on 50 matched paths.
 __EOT__
 

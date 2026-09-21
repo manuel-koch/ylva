@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -20,9 +20,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent::tools::agent_finish::AgentFinishToolConfig;
 use crate::agent::tools::spawn_subagent::AgentTypeInfo;
-use crate::agent::tools::{default_registry, ToolRegistryConfig, DEFAULT_CLI_TOOLS};
+use crate::agent::tools::{
+    default_registry, AutoApproveTool, ToolRegistryConfig, DEFAULT_CLI_TOOLS, DEFAULT_TUI_TOOLS,
+};
 use crate::agent::{AgentLoop, ChildRoleConfig, Context, Message, Role, UiUpdate};
-use crate::child_agent_manager::{ChildAgentManager, FinishResult, SpawnRequest};
+use crate::child_agent_manager::{
+    ChildAgentManager, FinishResult, FinishResultOrigin, SpawnRequest,
+};
 use crate::config::ProfileConfig;
 use crate::llm::engine::{Engine, EngineConfig, EngineRouter};
 use crate::llm::ProviderRegistry;
@@ -39,32 +43,27 @@ use crate::store::Store;
 /// registry never contains `spawn_subagent`).
 pub struct AgentFactory {
     engines: HashMap<String, Arc<dyn Engine>>,
-    /// When `true`, the `edit` tool is auto-approved without user confirmation.
-    /// Intended for automated / e2e testing where no human is present to approve.
-    auto_approve_edit: bool,
-    /// When `true`, the `write` tool is auto-approved without user confirmation.
-    /// Intended for automated / e2e testing where no human is present to approve.
-    auto_approve_write: bool,
-    /// When `true`, the `spawn_subagent` tool is auto-approved without user
-    /// confirmation. Intended for automated / e2e testing where no human is
-    /// present to approve.
-    auto_approve_spawn: bool,
+    /// The set of tools whose approval prompt is bypassed (auto-approved)
+    /// without user confirmation. Intended for automated / e2e testing where
+    /// no human is present to approve.
+    auto_approve: HashSet<AutoApproveTool>,
     /// Explicit list of tool names to register. Defaults to [`DEFAULT_CLI_TOOLS`].
     allowed_tools: Vec<String>,
     /// Session store handed to every `Role::Root` agent this factory builds,
     /// when persistence is enabled.
     store: Option<Store>,
+    /// Resolved `SOUL.md` text used only for newly created root contexts.
+    system_prompt: Option<String>,
 }
 
 impl AgentFactory {
     pub fn new(engines: HashMap<String, Arc<dyn Engine>>) -> Self {
         AgentFactory {
             engines,
-            auto_approve_edit: false,
-            auto_approve_write: false,
-            auto_approve_spawn: false,
+            auto_approve: HashSet::new(),
             allowed_tools: DEFAULT_CLI_TOOLS.iter().map(|s| s.to_string()).collect(),
             store: None,
+            system_prompt: None,
         }
     }
 
@@ -145,7 +144,19 @@ impl AgentFactory {
                 "profile references engine '{required}', which no [engines.*] table defines"
             );
         }
+        validate_profile_agent_engines(&engines, profile)?;
+        validate_profile_agent_tool_names(profile)?;
         Ok(AgentFactory::new(engines))
+    }
+
+    /// Validate every configured agent type against the engines available to
+    /// this factory, and every configured tool name (profile-level and
+    /// per-agent-type) against the registered tool set. This runs during
+    /// startup so an unused agent type cannot hide an invalid engine or tool
+    /// name reference until a child is spawned.
+    pub fn validate_profile_agent_engines(&self, profile: &ProfileConfig) -> anyhow::Result<()> {
+        validate_profile_agent_engines(&self.engines, profile)?;
+        validate_profile_agent_tool_names(profile)
     }
 
     /// Snapshot of the named engine's configuration, if it exists.
@@ -176,21 +187,17 @@ impl AgentFactory {
         self
     }
 
-    /// Enable automatic approval of `write` tool calls (no user prompt).
-    pub fn with_auto_approve_write(mut self) -> Self {
-        self.auto_approve_write = true;
+    /// Set the initial system message for root agents built by this factory.
+    /// The resolved agent-type persona and system-prompt body are appended
+    /// when an agent is created. The same global text is inherited by children.
+    pub fn with_system_prompt(mut self, system_prompt: impl Into<String>) -> Self {
+        self.system_prompt = Some(system_prompt.into());
         self
     }
 
-    /// Enable automatic approval of `edit` tool calls (no user prompt).
-    pub fn with_auto_approve_edit(mut self) -> Self {
-        self.auto_approve_edit = true;
-        self
-    }
-
-    /// Enable automatic approval of `spawn_subagent` tool calls (no user prompt).
-    pub fn with_auto_approve_spawn(mut self) -> Self {
-        self.auto_approve_spawn = true;
+    /// Enable automatic approval of the given tool's calls (no user prompt).
+    pub fn with_auto_approve(mut self, tool: AutoApproveTool) -> Self {
+        self.auto_approve.insert(tool);
         self
     }
 
@@ -229,13 +236,12 @@ impl AgentFactory {
         Self::build(
             &self.engines,
             &self.allowed_tools,
-            self.auto_approve_edit,
-            self.auto_approve_write,
-            self.auto_approve_spawn,
+            &self.auto_approve,
             profile,
             agent_type,
             role,
             self.store.clone(),
+            self.system_prompt.clone(),
             None,
         )
     }
@@ -249,13 +255,12 @@ impl AgentFactory {
     fn build(
         engines: &HashMap<String, Arc<dyn Engine>>,
         allowed_tools: &[String],
-        auto_approve_edit: bool,
-        auto_approve_write: bool,
-        auto_approve_spawn: bool,
+        auto_approve: &HashSet<AutoApproveTool>,
         profile: &ProfileConfig,
         agent_type: &str,
         role: Role,
         store: Option<Store>,
+        system_prompt: Option<String>,
         inherited_engine: Option<Arc<dyn Engine>>,
     ) -> anyhow::Result<(AgentLoop, mpsc::Receiver<UiUpdate>)> {
         let engine_name = resolve_engine_name(profile, agent_type);
@@ -309,21 +314,47 @@ impl AgentFactory {
             .and_then(|agent_config| agent_config.allowed_tools.clone())
             .unwrap_or_else(|| allowed_tools.to_vec());
 
+        // Per-tool sandbox rules resolve most-specific-wins, each tier fully
+        // replacing the next (no merging across tiers): the agent type's own
+        // `[agents.<type>.tools.<name>]` table, then the profile-wide
+        // `[tool.<name>]` table, then (absent from both) the built-in default
+        // floor handled by `default_registry`/`SandboxContext`.
         let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new()));
+        let agent_type_tools = profile
+            .agents
+            .get(agent_type)
+            .map(|agent_config| &agent_config.tools);
+        let tool_sandbox_rules = profile
+            .tools
+            .keys()
+            .chain(agent_type_tools.into_iter().flat_map(|tools| tools.keys()))
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .filter_map(|tool_name| {
+                let resolved = agent_type_tools
+                    .and_then(|tools| tools.get(tool_name))
+                    .or_else(|| profile.tools.get(tool_name))?;
+                Some((tool_name.clone(), resolved.rules.clone()))
+            })
+            .collect();
         let registry = Arc::new(default_registry(
             sandbox,
             ToolRegistryConfig {
-                auto_approve_edit,
-                auto_approve_write,
-                auto_approve_spawn,
+                auto_approve: auto_approve.clone(),
                 allowed_tools: configured_allowed_tools,
                 include_spawn_subagent: can_spawn,
                 spawn_agent_types,
                 agent_finish: agent_finish_config,
+                tool_sandbox_rules,
             },
         ));
         let (agent_loop, ui_rx) = AgentLoop::new(Arc::clone(&engine), registry);
         let mut agent_loop = agent_loop.with_configured_engine_name(engine_name);
+        if let Some(system_prompt) =
+            compose_agent_system_prompt(system_prompt.as_deref(), profile.agents.get(agent_type))
+        {
+            agent_loop = agent_loop.with_system_prompt(system_prompt);
+        }
 
         if let Some(child_role_config) = child_role_config {
             agent_loop = agent_loop.with_child_role(child_role_config);
@@ -331,13 +362,12 @@ impl AgentFactory {
             let mut manager = Self::build_child_agent_manager(
                 engines.clone(),
                 allowed_tools.to_vec(),
-                auto_approve_edit,
-                auto_approve_write,
-                auto_approve_spawn,
+                auto_approve.clone(),
                 profile.clone(),
                 store.clone(),
                 engine.clone(),
                 engine_name.to_string(),
+                system_prompt,
             );
             if let Some(store) = store.clone() {
                 manager.manager = manager.manager.with_store(store);
@@ -375,13 +405,12 @@ impl AgentFactory {
     fn build_child_agent_manager(
         engines: HashMap<String, Arc<dyn Engine>>,
         allowed_tools: Vec<String>,
-        auto_approve_edit: bool,
-        auto_approve_write: bool,
-        auto_approve_spawn: bool,
+        auto_approve: HashSet<AutoApproveTool>,
         profile: ProfileConfig,
         parent_store: Option<Store>,
         parent_engine: Arc<dyn Engine>,
         parent_engine_name: String,
+        system_prompt: Option<String>,
     ) -> BuiltChildAgentManager {
         let (finish_tx, finish_rx) = mpsc::channel::<FinishResult>(16);
         let (subagent_ui_tx, subagent_ui_rx) = mpsc::channel::<UiUpdate>(100);
@@ -392,11 +421,13 @@ impl AgentFactory {
                   forward_ui_tx: mpsc::Sender<UiUpdate>| {
                 let engines = engines.clone();
                 let allowed_tools = allowed_tools.clone();
+                let auto_approve = auto_approve.clone();
                 let profile = profile.clone();
                 let finish_tx = finish_tx.clone();
                 let parent_store = parent_store.clone();
                 let parent_engine = parent_engine.clone();
                 let parent_engine_name = parent_engine_name.clone();
+                let system_prompt = system_prompt.clone();
                 let utility_engine = engines.get(profile.utility_engine_name()).cloned();
                 let child_engine_name =
                     resolve_engine_name(&profile, &request.agent_type).to_string();
@@ -425,13 +456,12 @@ impl AgentFactory {
                 let built = AgentFactory::build(
                     &engines,
                     &allowed_tools,
-                    auto_approve_edit,
-                    auto_approve_write,
-                    auto_approve_spawn,
+                    &auto_approve,
                     &profile,
                     &request.agent_type,
                     Role::Child(child_role_config),
                     None,
+                    system_prompt,
                     inherited_engine,
                 );
                 let (child_loop, child_ui_rx) = match built {
@@ -447,6 +477,7 @@ impl AgentFactory {
                         let _ = finish_tx.try_send(FinishResult {
                             run_id,
                             call_id,
+                            origin: FinishResultOrigin::Runtime,
                             status: "failure".to_string(),
                             result: None,
                             error: Some(error.to_string()),
@@ -501,6 +532,25 @@ impl AgentFactory {
             subagent_ui_rx,
         }
     }
+}
+
+fn compose_agent_system_prompt(
+    global_system_prompt: Option<&str>,
+    agent_config: Option<&crate::config::AgentConfig>,
+) -> Option<String> {
+    let mut prompt_sections = Vec::new();
+    if let Some(global_system_prompt) = global_system_prompt {
+        prompt_sections.push(global_system_prompt);
+    }
+    if let Some(agent_config) = agent_config {
+        if let Some(persona) = agent_config.persona.as_deref() {
+            prompt_sections.push(persona);
+        }
+        if let Some(system_prompt) = agent_config.system_prompt.as_deref() {
+            prompt_sections.push(system_prompt);
+        }
+    }
+    (!prompt_sections.is_empty()).then(|| prompt_sections.join("\n\n"))
 }
 
 /// Return value of [`AgentFactory::build_child_agent_manager`]: the manager
@@ -574,6 +624,48 @@ fn engine_from_profile_config(
     )))
 }
 
+fn validate_profile_agent_engines(
+    engines: &HashMap<String, Arc<dyn Engine>>,
+    profile: &ProfileConfig,
+) -> anyhow::Result<()> {
+    for (agent_type, agent_config) in &profile.agents {
+        let Some(engine_name) = agent_config.engine.as_deref() else {
+            continue;
+        };
+        anyhow::ensure!(
+            engines.contains_key(engine_name),
+            "agent type '{agent_type}' references engine '{engine_name}', but no such engine is configured"
+        );
+    }
+    Ok(())
+}
+
+/// Validate that every tool name configured in the profile's `[tool.<name>]`
+/// table and each agent type's `[agents.<type>.tools.<name>]` table is one of
+/// the registered tool names, so a typo or renamed tool fails fast at
+/// startup instead of silently never applying its configured rules.
+fn validate_profile_agent_tool_names(profile: &ProfileConfig) -> anyhow::Result<()> {
+    for tool_name in profile.tools.keys() {
+        anyhow::ensure!(
+            DEFAULT_TUI_TOOLS.contains(&tool_name.as_str()),
+            "profile-level [tool.{tool_name}] table names unknown tool '{tool_name}'; \
+             registered tools are: {}",
+            DEFAULT_TUI_TOOLS.join(", ")
+        );
+    }
+    for (agent_type, agent_config) in &profile.agents {
+        for tool_name in agent_config.tools.keys() {
+            anyhow::ensure!(
+                DEFAULT_TUI_TOOLS.contains(&tool_name.as_str()),
+                "agent type '{agent_type}' [agents.{agent_type}.tools.{tool_name}] table \
+                 names unknown tool '{tool_name}'; registered tools are: {}",
+                DEFAULT_TUI_TOOLS.join(", ")
+            );
+        }
+    }
+    Ok(())
+}
+
 fn implicit_engine_config(
     provider_connection_name: &str,
     default_model: Option<&str>,
@@ -632,6 +724,7 @@ async fn write_child_transcript(
                     .trigger_with_engine(child_store, utility_engine.clone());
             }
         }
+
         Err(error) => {
             tracing::warn!(%error, "failed to persist child agent transcript");
         }
@@ -738,6 +831,7 @@ async fn drive_child_to_completion(
                 .send(FinishResult {
                     run_id,
                     call_id,
+                    origin: FinishResultOrigin::Runtime,
                     status: "unstructured".to_string(),
                     result: Some(text),
                     error: None,
@@ -750,6 +844,7 @@ async fn drive_child_to_completion(
                 .send(FinishResult {
                     run_id,
                     call_id,
+                    origin: FinishResultOrigin::Runtime,
                     status: "failure".to_string(),
                     result: None,
                     error: Some(error.to_string()),
@@ -762,6 +857,7 @@ async fn drive_child_to_completion(
                 .send(FinishResult {
                     run_id,
                     call_id,
+                    origin: FinishResultOrigin::Runtime,
                     status: "failure".to_string(),
                     result: None,
                     error: Some(format!("child agent task panicked: {join_error}")),
@@ -803,13 +899,46 @@ fn extract_last_assistant_text(context: &Context) -> String {
 
 #[cfg(test)]
 mod tests {
+    use futures::future::BoxFuture;
     use std::time::Duration;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
+    use crate::agent::StreamEvent;
     use crate::llm::engine::{EngineConfig, EngineImpl};
-    use crate::llm::MockProvider;
+    use crate::llm::{MockProvider, ModelInfo, Provider, ToolSchema};
     use crate::{AgentConfig, AssistantStatus, ProfileConfig};
     use uuid::Uuid;
+
+    struct FailingProvider;
+
+    impl Provider for FailingProvider {
+        fn name(&self) -> &str {
+            "failing"
+        }
+
+        fn chat<'a>(
+            &'a self,
+            _messages: Vec<Message>,
+            _tools: Vec<ToolSchema>,
+            _cancel: CancellationToken,
+        ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+            Box::pin(async {
+                let (sender, receiver) = mpsc::channel(1);
+                let _ = sender
+                    .send(StreamEvent::Error(anyhow::anyhow!(
+                        "provider returned HTTP 404: model 'invalid' not found"
+                    )))
+                    .await;
+                Ok(receiver)
+            })
+        }
+
+        fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+    }
 
     fn test_engine_config() -> EngineConfig {
         EngineConfig {
@@ -838,7 +967,9 @@ mod tests {
                     allowed_tools: None,
                     timeout_secs: None,
                     persona: None,
+                    system_prompt: None,
                     can_spawn: true,
+                    tools: HashMap::new(),
                 },
             )]),
             ..ProfileConfig::default()
@@ -872,7 +1003,9 @@ mod tests {
                 allowed_tools: None,
                 timeout_secs: None,
                 persona: None,
+                system_prompt: None,
                 can_spawn: false,
+                tools: HashMap::new(),
             },
         );
 
@@ -920,7 +1053,9 @@ mod tests {
                         allowed_tools: None,
                         timeout_secs: None,
                         persona: None,
+                        system_prompt: None,
                         can_spawn: false,
+                        tools: HashMap::new(),
                     },
                 ),
                 (
@@ -931,7 +1066,9 @@ mod tests {
                         allowed_tools: None,
                         timeout_secs: None,
                         persona: None,
+                        system_prompt: None,
                         can_spawn: false,
+                        tools: HashMap::new(),
                     },
                 ),
             ]),
@@ -1085,6 +1222,51 @@ mod tests {
     }
 
     #[test]
+    fn validate_profile_agent_engines_rejects_unknown_profile_level_tool_name() {
+        let (factory, mut profile) = make_factory();
+        profile.tools.insert(
+            "not-a-real-tool".to_string(),
+            crate::config::ToolSandboxConfig { rules: vec![] },
+        );
+        let error = factory
+            .validate_profile_agent_engines(&profile)
+            .expect_err("an unknown profile-level tool name must fail startup validation");
+        let message = error.to_string();
+        assert!(message.contains("not-a-real-tool"), "{message}");
+        assert!(
+            message.contains("profile-level") || message.contains("[tool."),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn validate_profile_agent_engines_rejects_unknown_agent_type_scoped_tool_name() {
+        let (factory, mut profile) = make_factory();
+        profile.agents.insert(
+            "custom".to_string(),
+            AgentConfig {
+                engine: None,
+                description: None,
+                allowed_tools: None,
+                timeout_secs: None,
+                persona: None,
+                system_prompt: None,
+                can_spawn: false,
+                tools: HashMap::from([(
+                    "not-a-real-tool".to_string(),
+                    crate::config::ToolSandboxConfig { rules: vec![] },
+                )]),
+            },
+        );
+        let error = factory
+            .validate_profile_agent_engines(&profile)
+            .expect_err("an unknown agent-type-scoped tool name must fail startup validation");
+        let message = error.to_string();
+        assert!(message.contains("not-a-real-tool"), "{message}");
+        assert!(message.contains("custom"), "{message}");
+    }
+
+    #[test]
     fn create_returns_ok_for_child_role_with_known_engine() {
         let (factory, profile) = make_factory();
         let (finish_tx, _finish_rx) = mpsc::channel(1);
@@ -1107,6 +1289,117 @@ mod tests {
     }
 
     #[test]
+    fn root_and_child_contexts_share_global_and_agent_type_prompt_once() {
+        crate::test_support::run_locked(async {
+            let provider = Arc::new(MockProvider::new(
+                vec!["answer".to_string()],
+                Duration::from_millis(0),
+            ));
+            let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(provider, test_engine_config()));
+            let factory = AgentFactory::new(HashMap::from([("default".to_string(), engine)]))
+                .with_system_prompt("global soul");
+            let profile = ProfileConfig {
+                default_engine: "default".to_string(),
+                agents: HashMap::from([(
+                    "specialist".to_string(),
+                    AgentConfig {
+                        engine: None,
+                        description: None,
+                        allowed_tools: None,
+                        timeout_secs: None,
+                        persona: Some("specialist persona".to_string()),
+                        system_prompt: Some("specialist body".to_string()),
+                        can_spawn: false,
+                        tools: HashMap::new(),
+                    },
+                )]),
+                ..ProfileConfig::default()
+            };
+
+            let (mut root, _root_ui_rx) = factory
+                .create(&profile, "specialist", Role::Root)
+                .expect("root construction succeeds");
+            let root_handle = root.run();
+            root.send_command(crate::agent::AgentCommand::Prompt("root task".to_string()))
+                .await;
+            drop(root);
+            let root_context = tokio::time::timeout(Duration::from_secs(2), root_handle)
+                .await
+                .expect("root run completes")
+                .expect("root task does not panic")
+                .expect("root task succeeds");
+            let root_system_messages: Vec<_> = root_context
+                .messages()
+                .iter()
+                .filter_map(|message| match message {
+                    Message::System { content } => Some(content.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                root_system_messages.first().copied(),
+                Some("global soul\n\nspecialist persona\n\nspecialist body")
+            );
+            assert_eq!(
+                root_system_messages
+                    .iter()
+                    .filter(|content| content.contains("global soul"))
+                    .count(),
+                1
+            );
+
+            let (finish_tx, _finish_rx) = mpsc::channel(1);
+            let (subagent_ui_tx, _subagent_ui_rx) = mpsc::channel(1);
+            let (mut child, _child_ui_rx) = factory
+                .create(
+                    &profile,
+                    "specialist",
+                    Role::Child(ChildRoleConfig {
+                        run_id: Uuid::new_v4(),
+                        call_id: Uuid::new_v4(),
+                        briefing: Some("child briefing".to_string()),
+                        parent_cancel: CancellationToken::new(),
+                        subagent_ui_tx,
+                        finish_tx,
+                    }),
+                )
+                .expect("child construction succeeds");
+            let child_handle = child.run();
+            child
+                .send_command(crate::agent::AgentCommand::Prompt("child task".to_string()))
+                .await;
+            let child_context = tokio::time::timeout(Duration::from_secs(2), child_handle)
+                .await
+                .expect("child run completes")
+                .expect("child task does not panic")
+                .expect("child task succeeds");
+            let child_system_messages: Vec<_> = child_context
+                .messages()
+                .iter()
+                .filter_map(|message| match message {
+                    Message::System { content } => Some(content.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                child_system_messages.first().copied(),
+                Some("global soul\n\nspecialist persona\n\nspecialist body")
+            );
+            assert_eq!(
+                child_system_messages
+                    .iter()
+                    .filter(|content| content.contains("global soul"))
+                    .count(),
+                1
+            );
+            assert!(child_system_messages.contains(&"child briefing"));
+            assert!(child_system_messages
+                .iter()
+                .any(|content| content.contains("tool-use")));
+        });
+    }
+
+    #[test]
     fn create_uses_agent_config_engine_when_present() {
         let provider = Arc::new(MockProvider::new(vec![], Duration::from_millis(0)));
         let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(provider, test_engine_config()));
@@ -1122,7 +1415,9 @@ mod tests {
                     allowed_tools: None,
                     timeout_secs: None,
                     persona: None,
+                    system_prompt: None,
                     can_spawn: false,
+                    tools: HashMap::new(),
                 },
             )]),
             ..ProfileConfig::default()
@@ -1163,7 +1458,9 @@ mod tests {
                 allowed_tools: Some(vec!["read".to_string()]),
                 timeout_secs: None,
                 persona: None,
+                system_prompt: None,
                 can_spawn: false,
+                tools: HashMap::new(),
             },
         );
         let (restricted, _ui_rx) = factory
@@ -1178,6 +1475,95 @@ mod tests {
             restricted.registry().get("read").is_some(),
             "expected the per-agent_type allowed_tools override to still \
              register the tool it did configure"
+        );
+    }
+
+    #[test]
+    fn create_honors_per_agent_type_tools_sandbox_rules_override() {
+        // Two agent types share one profile where the profile-wide
+        // `[tool.write]` table only denies writes outside the workspace; one
+        // agent type additionally sets `[agents.<type>.tools.write]` with an
+        // extra glob rule auto-approving writes under `scratch/`. Only that
+        // agent type's `write` tool should auto-approve a `scratch/` path;
+        // the other agent type (profile default only) must still abstain
+        // (require user approval) for that same path.
+        let workspace_root = std::fs::canonicalize(std::env::current_dir().expect("current_dir"))
+            .expect("canonicalize cwd");
+        let scratch_path = workspace_root.join("scratch/file.txt");
+        let scratch_glob_pattern = format!("{}/scratch/**", workspace_root.to_string_lossy());
+        let write_args = serde_json::json!({
+            "path": scratch_path.to_string_lossy(),
+            "content": "hello",
+        });
+
+        let (factory, mut profile) = make_factory();
+        profile.tools.insert(
+            "write".to_string(),
+            crate::config::ToolSandboxConfig {
+                rules: vec![crate::sandbox::SandboxRuleConfig::Named {
+                    rule: crate::sandbox::NamedSandboxRule::OutsideWorkspace,
+                    verdict: crate::sandbox::ApprovalVerdictConfig::AutoDenied,
+                    reason: None,
+                }],
+            },
+        );
+        profile.agents.insert(
+            "scratch-writer".to_string(),
+            AgentConfig {
+                engine: None,
+                description: None,
+                allowed_tools: None,
+                timeout_secs: None,
+                persona: None,
+                system_prompt: None,
+                can_spawn: false,
+                tools: HashMap::from([(
+                    "write".to_string(),
+                    crate::config::ToolSandboxConfig {
+                        rules: vec![
+                            crate::sandbox::SandboxRuleConfig::Named {
+                                rule: crate::sandbox::NamedSandboxRule::OutsideWorkspace,
+                                verdict: crate::sandbox::ApprovalVerdictConfig::AutoDenied,
+                                reason: None,
+                            },
+                            crate::sandbox::SandboxRuleConfig::PathGlob {
+                                pattern: scratch_glob_pattern,
+                                verdict: crate::sandbox::ApprovalVerdictConfig::AutoApproved,
+                                reason: None,
+                            },
+                        ],
+                    },
+                )]),
+            },
+        );
+
+        let (default_agent, _ui_rx) = factory
+            .create(&profile, "default", Role::Root)
+            .expect("factory creates the default agent");
+        let default_write = default_agent
+            .registry()
+            .get("write")
+            .expect("write tool registered");
+        assert_eq!(
+            default_write.needs_approval(&write_args),
+            crate::sandbox::ApprovalCheck::UserApprovalRequired,
+            "the default agent type has no agent-scoped tools override, so it \
+             must fall back to the profile-level table alone, which does not \
+             auto-approve scratch/ paths"
+        );
+
+        let (scratch_agent, _ui_rx) = factory
+            .create(&profile, "scratch-writer", Role::Root)
+            .expect("factory creates the scratch-writer agent");
+        let scratch_write = scratch_agent
+            .registry()
+            .get("write")
+            .expect("write tool registered");
+        assert_eq!(
+            scratch_write.needs_approval(&write_args),
+            crate::sandbox::ApprovalCheck::AutoApproved,
+            "the scratch-writer agent type's own tools.write table must win \
+             over the profile-level table for that tool"
         );
     }
 
@@ -1336,7 +1722,9 @@ mod tests {
                     allowed_tools: None,
                     timeout_secs: None,
                     persona: None,
+                    system_prompt: None,
                     can_spawn: false,
+                    tools: HashMap::new(),
                 },
             )]),
             ..ProfileConfig::default()
@@ -1367,12 +1755,11 @@ mod tests {
         let (child_loop, child_ui_rx) = AgentFactory::build(
             &engines,
             &[],
-            false,
-            false,
-            false,
+            &HashSet::new(),
             &profile,
             &request.agent_type,
             Role::Child(child_role_config),
+            None,
             None,
             None,
         )
@@ -1408,6 +1795,88 @@ mod tests {
         assert_eq!(
             finish_result.result.as_deref(),
             Some("child's final answer")
+        );
+    }
+
+    #[tokio::test]
+    async fn run_child_reports_stream_error_as_failure_instead_of_unstructured_result() {
+        let provider = Arc::new(FailingProvider);
+        let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(provider, test_engine_config()));
+        let engines = HashMap::from([("default".to_string(), engine)]);
+        let profile = ProfileConfig {
+            default_engine: "default".to_string(),
+            compact_engine: None,
+            agents: HashMap::from([(
+                "default".to_string(),
+                AgentConfig {
+                    engine: None,
+                    description: None,
+                    allowed_tools: None,
+                    timeout_secs: None,
+                    persona: None,
+                    system_prompt: None,
+                    can_spawn: false,
+                    tools: HashMap::new(),
+                },
+            )]),
+            ..ProfileConfig::default()
+        };
+
+        let (finish_tx, mut finish_rx) = mpsc::channel::<FinishResult>(1);
+        let (forward_ui_tx, mut forward_ui_rx) = mpsc::channel::<UiUpdate>(16);
+        let run_id = Uuid::new_v4();
+        let call_id = Uuid::new_v4();
+        let cancel = CancellationToken::new();
+        let child_role_config = ChildRoleConfig {
+            run_id,
+            call_id,
+            briefing: None,
+            parent_cancel: cancel.clone(),
+            subagent_ui_tx: forward_ui_tx.clone(),
+            finish_tx: finish_tx.clone(),
+        };
+        let (child_loop, child_ui_rx) = AgentFactory::build(
+            &engines,
+            &[],
+            &HashSet::new(),
+            &profile,
+            "default",
+            Role::Child(child_role_config),
+            None,
+            None,
+            None,
+        )
+        .expect("child agent should construct successfully");
+
+        drive_child_to_completion(
+            child_loop,
+            child_ui_rx,
+            "do the child task".to_string(),
+            run_id,
+            call_id,
+            cancel,
+            finish_tx,
+            forward_ui_tx,
+            ChildTranscriptTarget {
+                parent_store: None,
+                engine_config: None,
+                utility_engine: None,
+            },
+        )
+        .await;
+
+        while forward_ui_rx.try_recv().is_ok() {}
+
+        let finish_result = tokio::time::timeout(Duration::from_secs(1), finish_rx.recv())
+            .await
+            .expect("finish_rx should receive promptly")
+            .expect("finish_tx should not be dropped without sending");
+        assert_eq!(finish_result.status, "failure");
+        assert_eq!(finish_result.origin, FinishResultOrigin::Runtime);
+        assert_eq!(finish_result.result, None);
+        assert_eq!(
+            finish_result.error.as_deref(),
+            Some("provider returned HTTP 404: model 'invalid' not found")
         );
     }
 }
