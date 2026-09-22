@@ -20,7 +20,7 @@ Checkmark done tasks in the plan section.
 Use subagent(s) to schedule the analysis and/or run it concurrently:
 
 Discover all `docs/ideas/*.md`.
-For each idea: analyse the intend and compare the current 
+For each idea: analyse the intend and compare the current
 state of implementation against the content/aim of the idea.
 
 Save your report with the findings to `docs/ideas/ideas-progress.md`:
@@ -28,7 +28,7 @@ Save your report with the findings to `docs/ideas/ideas-progress.md`:
 - idea is fully implemented
 - idea is partly implemented, note the gaps
 - idea is not implemented/started yet
- 
+
 ---
 
 Why is the sky blue?
@@ -129,6 +129,22 @@ Read `logs/poem.md` and ask user which other animal to use to replace existing a
 in the poem.
 Provide the current poem as context for the question.
 Give user 3 random animal options to choose from.
+
+---
+
+Create an image using a bash command:
+
+```bash
+magick -size 200x200 canvas:white \
+       -fill red -stroke none \
+       -draw "polygon 100,71 75,114 125,114" \
+       logs/sample.png
+```
+
+Read image `logs/sample.png` ( using the `read` tool only ) and describe
+the content. Estimate the edge length of the geometrical shape, if any.
+
+Write a binary file with the textual content of "hello world" to `logs/sample.txt`.
 
 ---
 

@@ -23,10 +23,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use schemars::schema::RootSchema;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::llm::ToolSchema;
 use crate::sandbox::ApprovalCheck;
+
+pub(crate) use base64::engine::general_purpose::STANDARD as STANDARD_BASE64;
+
+pub(crate) fn utf8_text_preview(bytes: &[u8]) -> Option<String> {
+    std::str::from_utf8(bytes).ok().map(str::to_owned)
+}
 
 pub mod agent_finish;
 pub mod bash;
@@ -44,6 +52,18 @@ pub mod write;
 /// here so tool modules can `use` it alongside the other tool-trait items
 /// without an extra `crate::agent::` import.
 pub use super::DEFAULT_TOOL_TIMEOUT_SECS;
+
+/// Transport encoding for file content accepted by the `read` and `write`
+/// tools.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FileEncoding {
+    /// UTF-8 text; text-oriented reads reject invalid UTF-8.
+    #[default]
+    Utf8,
+    /// Standard padded Base64 without line breaks.
+    Base64,
+}
 
 /// Failure from a single tool invocation, mapped to the flat
 /// `String`-returning [`crate::agent::PendingTool::execute`] contract and to
@@ -104,6 +124,16 @@ impl ToolError {
 pub trait ToolCallResult: Send + Sync + std::fmt::Debug {
     /// The text returned to the LLM as the tool's result message.
     fn text(&self) -> String;
+
+    /// Optional text rendered in the user-facing tool bubble's result section.
+    ///
+    /// This is separate from [`text`](ToolCallResult::text), which is always
+    /// the model-facing result. Binary transports may need to keep an encoded
+    /// result for the model while suppressing that transport representation in
+    /// the UI.
+    fn display_text(&self) -> Option<String> {
+        Some(self.text())
+    }
 
     /// Structured metadata for this result.
     ///

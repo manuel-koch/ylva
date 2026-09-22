@@ -18,9 +18,9 @@ fetching a URL; local copy and URL fetching remain out of scope. The sparse
 `read` idea is resolved here symmetrically: `read` gains the same optional
 `encoding` selector, and `encoding: "base64"` is valid with `mode: "bytes"`.
 Byte `offset`/`limit` slicing happens before Base64 encoding, so a model can
-read an exact byte range. Text-oriented `lines` and `chars` modes continue to
-use the existing lossy UTF-8 behavior and are not silently converted into a
-different unit.
+read an exact byte range. Text-oriented `lines` and `chars` modes require
+valid UTF-8 and fail on invalid bytes; `bytes` mode with the default `utf8`
+encoding retains its existing lossy compatibility behavior.
 
 Definition of done:
 
@@ -30,16 +30,19 @@ Definition of done:
 - A model can read arbitrary bytes with `mode: "bytes", encoding: "base64"`,
   including NUL bytes and invalid UTF-8, without payload corruption.
 - Omitting `encoding` preserves the current UTF-8 text behavior for both
-  tools, including existing line/character slicing, write confirmations,
-  approval behavior, and result rendering.
+  tools, including existing line/character slicing for valid UTF-8,
+  write confirmations, approval behavior, and result rendering. Binary
+  `lines`/`chars` reads fail clearly instead of rendering replacement
+  characters; exact arbitrary bytes use explicit Base64.
 - Invalid Base64 is reported as a structured tool failure without a panic or a
   partial write; incompatible read mode/encoding combinations are rejected
   before file I/O.
 - Generated tool schemas and descriptions document the new argument and its
   default. Standard Base64 payloads are never copied into tracing logs,
-  argument spans, or user-facing content sections; redacted summaries remain
-  useful for valid and invalid payloads while the complete Base64 read result
-  remains available to the model.
+  argument spans, or user-facing content sections as opaque Base64; decoded
+  bytes that are valid UTF-8 use text metadata and previews instead. Redacted
+  summaries remain useful for valid and invalid payloads while the complete
+  Base64 read result remains available to the model.
 - Unit and integration coverage verifies round trips, raw-byte ranges,
   invalid input, UTF-8 backward compatibility, schema/default behavior, and
   logging redaction.
@@ -59,7 +62,7 @@ progress remains resumable across sessions.
 
 ## Implementation Plan
 
-1. [ ] Establish one shared file-encoding contract and dependency.
+1. [x] Establish one shared file-encoding contract and dependency.
    - Add the direct `base64` dependency (using the already-resolved 0.22
      series) to `Cargo.toml` and let Cargo update `Cargo.lock`.
    - Define a shared `FileEncoding` value in the tool layer, with JSON/schema
@@ -71,22 +74,23 @@ progress remains resumable across sessions.
      Preserve `schemars` property order and descriptions used by invocation
      titles and validation.
 
-2. [ ] Extend the `read` tool with exact Base64 output while preserving text
+2. [x] Extend the `read` tool with exact Base64 output while preserving text
    reads.
    - Add an optional, defaulted `encoding` field to `ReadFileArgs` and update
      `ReadMode`, argument descriptions, `ReadTool::description`, and the
      generated schema to state that Base64 requires `mode: "bytes"`.
    - Keep the existing raw-byte read and byte-range slicing. For `utf8`,
-     retain the current `lines`, `bytes`, and `chars` behavior and line
-     metadata. For `base64`, require that the caller explicitly selected
+     retain the current `bytes` behavior and line metadata while requiring
+     valid UTF-8 for `lines` and `chars`. For `base64`, require that the caller explicitly selected
      `mode: "bytes"`, encode the selected raw bytes with the standard padded
      engine and no inserted line breaks, and return that string as the
      LLM-facing result.
    - Track the selected raw-byte count separately from the encoded string
-     length. For Base64 results, expose conditional metadata containing only
-     `read_bytes` (the selected raw-byte count), omit `read_lines`, and return
-     no `ContentSection`; the Base64 result must still be sent to the model.
-     Keep the current metadata and content-section behavior for UTF-8 results.
+     length. For Base64 results whose decoded bytes are valid UTF-8, expose
+     the normal text metadata (`read_bytes` and `read_lines`) and a decoded
+     text `ContentSection`; for opaque bytes, expose only `read_bytes` and no
+     content section. The Base64 result must still be sent to the model. Keep
+     the current metadata and content-section behavior for UTF-8 results.
    - Override `ReadTool::validate_args`, call the existing schema validator,
      and reject `encoding: "base64"` with `lines` or `chars` before sandbox
      approval or file I/O. Any encoding or conversion failure must become a
@@ -94,7 +98,7 @@ progress remains resumable across sessions.
    - Keep read logs limited to safe sizes/counts; add no content or decoded
      payload to debug/error fields.
 
-3. [ ] Extend the `write` tool with Base64 input and safe result presentation.
+3. [x] Extend the `write` tool with Base64 input and safe result presentation.
    - Add an optional, defaulted `encoding` field to `WriteFileArgs`, and update
      its doc comment, `WriteTool::description`, generated schema, and default
      argument handling so omitted/`utf8` calls remain compatible.
@@ -111,13 +115,14 @@ progress remains resumable across sessions.
      `REDACTED(bytes=<decoded length>)` when decoding succeeds and
      `REDACTED(base64_chars=<encoded length>)` when it does not; never include
      either the encoded string or decoded bytes.
-   - Prevent Base64 payloads from being copied into pending or completed
-     content previews, while retaining the current content sections for
-     UTF-8 writes. Keep the binary result useful through the byte-count
-     confirmation and metadata rather than rendering a large opaque string.
+   - Never copy the Base64 payload itself into pending or completed content
+     previews. When its decoded bytes are valid UTF-8, use the decoded text
+     for those previews; otherwise retain the byte-count confirmation and
+     metadata without rendering opaque content. Keep the current content
+     sections for UTF-8 writes.
      Preserve the existing non-empty `content` requirement for all encodings.
 
-4. [ ] Verify tool-contract and presentation wiring at the common boundaries.
+4. [x] Verify tool-contract and presentation wiring at the common boundaries.
    - Confirm the registry continues to expose the updated schemas without
      special-case registration changes and that `Tool::validate_args` rejects
      malformed/incompatible calls before approval or I/O.
@@ -130,12 +135,13 @@ progress remains resumable across sessions.
      persisted/replayed tool bubbles remain compatible with the existing
      `ToolCallResult`/`ContentSection` contract.
 
-5. [ ] Add focused unit tests for read/write behavior and redaction.
+5. [x] Add focused unit tests for read/write behavior and redaction.
    - In the module tests for `read.rs`, cover exact Base64 output for bytes
      containing NULs and invalid UTF-8, raw byte `offset`/`limit`, default
      UTF-8 text compatibility, explicit-mode validation, invalid
-     mode/encoding combinations, conditional raw-byte-only metadata, omitted
-     Base64 content sections, and schema descriptions/defaults.
+     mode/encoding combinations, strict invalid-UTF-8 failures in `lines` and
+     `chars`, conditional raw-byte-only metadata, omitted Base64 content
+     sections, and schema descriptions/defaults.
    - In the module tests for `write.rs`, cover Base64 round-trip bytes,
      decoded byte counts, invalid Base64 with no created/truncated file,
      default UTF-8 compatibility, schema/default behavior, and the
@@ -147,7 +153,7 @@ progress remains resumable across sessions.
      `run_locked` for every async test that exercises tracing-instrumented
      `read_file`/`write_file`, as required by `docs/known-test-issues.md`.
 
-6. [ ] Add an integration test through the public tool registry and call
+6. [x] Add an integration test through the public tool registry and call
    protocol.
    - Add a focused integration test file (for example,
      `tests/tools_binary_data.rs`) that creates a temporary workspace,
@@ -157,20 +163,25 @@ progress remains resumable across sessions.
    - Assert that a Base64 write followed by a Base64 read preserves a
      representative binary fixture exactly, and that invalid Base64 returns
      the public `ToolError` shape without altering the destination.
-   - Assert that binary read/write calls expose only size metadata and no
-     opaque Base64 `ContentSection`, while the Base64 read text remains
+   - Assert that opaque binary read/write calls expose only size metadata and
+     no Base64 `ContentSection`, while valid UTF-8 Base64 calls expose decoded
+     text previews and normal text metadata. The Base64 read text remains
      available through `ToolCallResult::text`.
+   - Assert that a public-registry `lines` read of invalid UTF-8 returns a
+     structured tool failure, and that a completed Base64 read stays available
+     in the model transcript while its encoded result is hidden from both live
+     and replayed tool bubbles.
    - Also exercise an omitted-encoding text write/read to guard the
      backwards-compatible wire path. Keep the integration test independent
      of ambient provider/configuration state and use the existing temporary
      directory and sandbox patterns.
 
-7. [ ] Update the documentation that describes the affected contracts.
+7. [x] Update the documentation that describes the affected contracts.
    - Update `docs/features.md` to replace the current UTF-8-only WIP wording
      with the `read`/`write` encoding arguments, byte-range/Base64 behavior,
-     default text compatibility, the model-only binary result versus
-     size-only user presentation, and the fact that configuration is per-call
-     rather than a CLI/profile setting.
+     default text compatibility, the model-only opaque binary result versus
+     decoded-UTF-8 text presentation, and the fact that configuration is
+     per-call rather than a CLI/profile setting.
    - Update the matching typed-argument/tool-contract excerpt in
      `docs/blueprint.md` so its `read` schema includes the shared encoding
      contract and the explicit bytes-mode requirement.
@@ -181,7 +192,7 @@ progress remains resumable across sessions.
    - Do not edit the two idea files; they remain the source requirements for
      this implementation plan.
 
-8. [ ] Run the repository's required formatting, lint, and coverage gates.
+8. [x] Run the repository's required formatting, lint, and coverage gates.
    - Run `make format` so Rust and Markdown changes follow repository
      formatting, then run `make lint`.
    - Run the single mandatory test gate `make test-coverage`; it must pass
@@ -209,8 +220,9 @@ progress remains resumable across sessions.
   should use `ToolRegistry::create_call` and the public `ToolCall::run` /
   `ToolCallResult` traits rather than making the helpers public.
 - `read_file` currently calls `tokio::fs::read`, slices raw bytes for
-  `ReadMode::Bytes`, and lossy-decodes for all result modes. `ReadResult` stores
-  a `String` plus path and starting-line information; metadata currently
+  `ReadMode::Bytes`, strictly decodes `ReadMode::Lines` and `ReadMode::Chars`,
+  and retains lossy decoding for default-`utf8` byte results. `ReadResult`
+  stores a `String` plus path and starting-line information; metadata currently
   derives sizes from the returned string.
 - `write_file` currently creates parent directories, calls
   `tokio::fs::write(&args.path, &args.content)`, and returns a `WriteResult`
@@ -222,9 +234,9 @@ progress remains resumable across sessions.
   that must use the same encoding-aware redaction helper.
 - `ToolCallResult` can only return an LLM-facing `String`; Base64 is therefore
   the lossless representation for binary read results. Base64 read text stays
-  in `ToolCallResult::text` for the model, while binary read/write
-  `ContentSection` previews are suppressed and only size metadata is shown to
-  the user.
+  in `ToolCallResult::text` for the model. Decoded Base64 bytes that are valid
+  UTF-8 use the ordinary text metadata and `ContentSection` preview paths;
+  opaque bytes suppress previews and expose only size metadata.
 - The default registry wires `read` and `write` automatically; sandbox
   approval and path normalization are implemented outside the tool-specific
   encoding code and must remain unchanged.

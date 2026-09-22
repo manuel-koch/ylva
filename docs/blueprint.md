@@ -1181,9 +1181,9 @@ use serde::Deserialize;
 
 #[derive(JsonSchema, Deserialize)]
 enum ReadMode {
-    Lines, // default for all reads; line offset/limit
+    Lines, // default for all reads; strict UTF-8 line offset/limit
     Bytes, // explicit byte ranges/binary data
-    Chars, // explicit character counts; UTF-8 code points (lossy decode)
+    Chars, // explicit character counts; strict UTF-8 code points
 }
 
 impl Default for ReadMode {
@@ -1193,15 +1193,44 @@ impl Default for ReadMode {
 }
 
 #[derive(JsonSchema, Deserialize)]
+enum FileEncoding {
+    Utf8,   // default; text behavior (bytes mode remains lossy for invalid bytes)
+    Base64, // standard padded Base64 transport for exact bytes
+}
+
+impl Default for FileEncoding {
+    fn default() -> Self {
+        Self::Utf8
+    }
+}
+
+#[derive(JsonSchema, Deserialize)]
 struct ReadFileArgs {
     path: String,
     #[serde(default)]
     mode: ReadMode,          // defaults to Lines for every call
     #[serde(default)]
+    encoding: FileEncoding,  // defaults to Utf8; Base64 requires explicit Bytes mode
+    #[serde(default)]
     offset: Option<usize>,   // 0-based index of the selected unit; line 1 is offset 0 in Lines mode
     #[serde(default)]
     limit: Option<usize>,    // number of selected units
 }
+
+// `encoding: Base64` is valid only with `mode: Bytes`; byte ranges are sliced
+// before encoding, and the model receives the complete Base64 result text.
+// For the user-facing tool bubble, valid UTF-8 decoded Base64 is presented
+// like text (including text metadata and a decoded preview); opaque bytes are
+// presented with size metadata only.
+
+The binary `read`/`write` implementation is currently an interim exact
+transport and UI-safety layer. It preserves arbitrary bytes and keeps opaque
+payloads out of user-facing previews, but it does not provide full binary
+interaction with an LLM: Base64 is still delivered as text in the tool result,
+and the provider serializer has no typed image or file attachment. Image and
+PDF inspection therefore require the planned provider-aware attachment and
+multimodal wire projection described in
+[Image and file input from tool results](./ideas/image-or-file-upload.md).
 
 #[derive(JsonSchema, Deserialize)]
 struct BashArgs {

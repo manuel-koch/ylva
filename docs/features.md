@@ -181,15 +181,39 @@ are displayed/executed in cwd-relative form for consistency; this does not
 affect sandbox approval checks. See
 [implementation notes](./implementation-notes.md#path-like-argument-normalization).
 
-**WIP:** `read` and `write` currently only support UTF-8 code points via lossy decode.
+- **read**: Read file content from `path` using `mode`/`offset`/`limit` and the
+  per-call `encoding` argument. `mode` can be `bytes`/`chars`/`lines` and
+  defaults to `lines` for every call. In `lines` mode, `offset` is a 0-based
+  line index and `limit` is a line count. Text-oriented `lines` and `chars`
+  reads require valid UTF-8 and fail instead of inserting replacement
+  characters. `bytes` reads with the default `utf8` encoding retain the
+  existing lossy decoding behavior. `encoding` defaults to `utf8`; set
+  `encoding: "base64"` together with an explicit `mode: "bytes"` to return
+  the selected raw bytes exactly as standard padded Base64 with no line
+  breaks. Byte `offset`/`limit` slicing happens before Base64 encoding.
+  Base64 output remains available in the model-facing result text. When the
+  selected decoded bytes are valid UTF-8, the user-facing tool bubble uses the
+  normal text metadata (`read_bytes` and `read_lines`) and a decoded content
+  preview; opaque or invalid UTF-8 bytes show only `read_bytes` metadata and no
+  content section.
+- **write**: Write `content` to `path`, with the per-call `encoding` defaulting
+  to `utf8`. Set `encoding: "base64"` to decode standard padded Base64 and
+  write the resulting arbitrary bytes; invalid input fails before any parent
+  directory or target-file change. Requires user approval before execution
+  (approval-gated). UTF-8 writes retain their content previews. Base64 writes
+  whose decoded bytes are valid UTF-8 also show the decoded text preview;
+  opaque or invalid UTF-8 bytes show only the byte-count confirmation and
+  metadata. Content payloads are redacted from logs and argument spans. There
+  is no CLI/profile configuration setting or size limit added by this feature.
 
-- **read**: Read file content from given `path` using `mode`/`offset`/`limit`.
-  Mode can be `bytes`/`chars`/`lines` and defaults to `lines` for every call.
-  In `lines` mode, `offset` is a 0-based line index and `limit` is a line
-  count. Use `chars` for character counts or set `bytes` explicitly for byte
-  ranges and binary data. Offset and limit are 0-based within the selected mode.
-- **write**: Write `content` to file at given `path`. Requires user approval before
-  execution (approval-gated). Use to create new files or overwrite existing ones.
+Binary `read`/`write` support is currently an exact transport and UI-safety
+layer, not full binary interaction with the model. Base64 remains text in the
+model-facing tool result, so image-capable models cannot inspect an image and
+document-capable models cannot interpret a PDF from that result alone. The
+provider-aware attachment and multimodal serialization needed for that
+capability is planned in [Image and file input from tool
+results](./ideas/image-or-file-upload.md).
+
 - **edit**: Patch an existing file in-place. The file must already exist (use `write`
   to create new files). Two modes:
   - **SearchReplace** — supply `old_string` and `new_string`; replaces the **first**

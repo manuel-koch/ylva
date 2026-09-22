@@ -9,11 +9,9 @@ when running auto-approve logic for the `bash` tool.
 shell commands: homograph-attack hostnames, pipe-to-shell patterns
 (`curl | bash`), base64 decode-execute chains, data exfiltration
 (`curl -d @/etc/passwd`), credential detection, and 200+ other rules
-across ~29-35 categories. It is a **content/semantic scanner**, distinct
-from — and complementary to — [bash-rules](./bash-rules.md)'s
-deterministic, config-driven argv-shape matcher: `tirith` can flag a
-command whose argv shape matches an otherwise-legitimate rule (e.g.
-`curl **`) but whose actual URL/arguments are malicious (a homograph
+across ~29-35 categories.
+`tirith` can flag a command whose argv shape matches an otherwise-legitimate
+rule (e.g. `curl **`) but whose actual URL/arguments are malicious (a homograph
 domain, an exfiltration flag), a class of attack no shape-only glob rule
 can ever catch.
 
@@ -47,19 +45,17 @@ command **stricter** (escalate toward `AutoDenied`/
 `UserApprovalRequired` result to `AutoApproved`. Two integration points,
 usable independently or together:
 
-1. **Veto layer on top of [bash-rules](./bash-rules.md)'s `CommandGlob`
-   rule evaluation** — run `tirith check` even on commands that would
-   otherwise be `AutoApproved`, to close the "shape matches, content
-   doesn't" gap described above.
-2. **Enrichment for `None`-fallback commands** — for commands
-   [bash-rules](./bash-rules.md) can't statically analyze (and which
-   therefore always require human approval), surface `tirith`'s findings
-   alongside the approval prompt as extra context, without changing that
-   safe default.
+1. **Veto layer on top of `CommandGlob` rule evaluation** — run `tirith check`
+   even on commands that would otherwise be `AutoApproved`, to close the
+   "shape matches, content doesn't" gap described above.
+2. **Enrichment for `None`-fallback commands** — for command rules
+   can't statically analyze (and which therefore always require human approval),
+   surface `tirith`'s findings alongside the approval prompt as extra context,
+   without changing that safe default.
 
 ## Status
 
 Idea only — not yet scoped into a `docs/plans/*.md` implementation plan.
-Depends on [bash-rules](./bash-rules.md) existing first, since that's
+Depends on `CommandGlob` existing first, since that's
 what establishes the `check_command` extraction/verdict pipeline this
 would hook into.

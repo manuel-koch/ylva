@@ -222,6 +222,7 @@ pub enum AgentEvent {
         id: Uuid,
         name: String,
         result: String,
+        display_result: Option<String>,
         result_metadata: Option<serde_json::Value>,
         result_metadata_schema: Option<serde_json::Value>,
         summary: Vec<(String, String)>,
@@ -877,6 +878,7 @@ impl PendingTool {
                                 .and_then(|schema| serde_json::to_value(schema).ok())
                         });
                         let result = tool_output.text();
+                        let display_result = tool_output.display_text();
                         let summary = tool_output.display_summary();
                         let content_sections = tool_output.content_sections();
                         let _ = agent_tx
@@ -886,6 +888,7 @@ impl PendingTool {
                                     id,
                                     name,
                                     result,
+                                    display_result,
                                     result_metadata,
                                     result_metadata_schema,
                                     summary,
@@ -1494,7 +1497,7 @@ impl AgentLoop {
                                 )
                                 .await;
                             }
-                            AgentEvent::ToolDone { id, name, result, result_metadata, result_metadata_schema, summary, duration, content_sections } => {
+                            AgentEvent::ToolDone { id, name, result, display_result, result_metadata, result_metadata_schema, summary, duration, content_sections } => {
                                 current_tool_cancel = None;
                                 // `agent_finish` is only ever registered on a `Role::Child`
                                 // registry; once it completes the child's ReAct loop
@@ -1502,12 +1505,20 @@ impl AgentLoop {
                                 // cap) — the tool itself already reported the
                                 // outcome to the parent via `finish_tx`.
                                 let is_finish = name == tools::agent_finish::AgentFinishTool::NAME;
+                                let result_section_id = if display_result.is_some() {
+                                    None
+                                } else {
+                                    Some(
+                                        crate::tui_reducer_state::result_section_ids::HIDDEN
+                                            .to_string(),
+                                    )
+                                };
                                 context.push_tool_result(
                                     ToolResult {
                                         id,
                                         name: name.clone(),
                                         result: result.clone(),
-                                        result_section_id: None,
+                                        result_section_id: result_section_id.clone(),
                                         result_metadata,
                                         result_metadata_schema,
                                         summary: summary.clone(),
@@ -1519,7 +1530,15 @@ impl AgentLoop {
                                     .send(UiUpdate::ToolDone {
                                         id,
                                         name,
-                                        result_section: crate::tui_reducer_state::ResultSection::plain(result),
+                                        result_section: crate::tui_reducer_state::ResultSection {
+                                            id: result_section_id
+                                                .as_deref()
+                                                .unwrap_or(
+                                                    crate::tui_reducer_state::result_section_ids::RESULT,
+                                                )
+                                                .to_string(),
+                                            content: display_result.unwrap_or_default(),
+                                        },
                                         summary,
                                         duration,
                                         content_sections,

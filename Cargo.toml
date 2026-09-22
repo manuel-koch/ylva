@@ -1,6 +1,6 @@
 [package]
 name = "ylva"
-version = "0.10.0"
+version = "0.10.1"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["Manuel Koch"]
@@ -11,6 +11,7 @@ repository = "https://github.com/manuel-koch/ylva"
 artificial-tool-delay = []
 
 [dependencies]
+base64 = "0.22"
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 futures = "0.3"

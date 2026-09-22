@@ -221,6 +221,64 @@ metadata sent to the LLM/API. `glob` omits zero-valued `files` and
 because that total is inferable, except that an empty result displays
 `total=0`.
 
+## Exact binary data in `read` and `write`
+
+`FileEncoding` is the shared per-call transport selector for the two
+file-system tools. It defaults to `utf8`, preserving the existing text
+behavior for `read`'s `bytes` mode and for text `write` calls. Text-oriented
+`lines` and `chars` reads require valid UTF-8 and fail with a structured tool
+error rather than inserting replacement characters. No CLI flag, profile key,
+or other persistent configuration controls it.
+
+`read` accepts `encoding: "base64"` only with an explicitly supplied
+`mode: "bytes"`. It reads the complete file into memory as before, applies
+the byte `offset`/`limit` range to the raw bytes, and then encodes that slice
+with the standard padded Base64 engine without line breaks. The Base64 string
+is the complete LLM-facing `ToolCallResult::text()` value, so NUL bytes and
+invalid UTF-8 are not lossy. When the selected bytes are valid UTF-8, the
+user-facing result projection uses the decoded text preview and the normal
+`read_bytes`/`read_lines` metadata. Opaque or invalid UTF-8 bytes report only
+`read_bytes`, the selected raw-byte count; they do not report the encoded
+string length or `read_lines`, and they suppress `ContentSection` previews.
+UTF-8 results retain their current line metadata and content sections. The
+default `utf8` encoding in `bytes` mode remains a compatibility path and may
+lossily decode invalid bytes; callers that need exact arbitrary bytes should
+use Base64.
+
+`ToolCallResult::text()` remains the complete model-facing result for every
+tool. `ToolCallResult::display_text()` is the optional user-facing result
+projection; Base64 `read` results return `None` so the encoded transport text
+cannot appear in the tool bubble. The agent persists that choice as the
+`result_section_ids::HIDDEN` result-section identifier, and replay applies the
+same suppression while retaining the original result for the model transcript.
+
+`write` accepts standard padded Base64 with the same engine. Decoding happens
+before parent-directory creation or target-file opening/truncation, and a
+decoder error is surfaced as a failed tool result naming the target path and
+decoder reason. `bytes_written` is the decoded byte count. Base64 writes
+whose decoded bytes are valid UTF-8 use that decoded text for pending and
+completed `ContentSection` previews; opaque or invalid UTF-8 writes retain only the
+byte-count confirmation and metadata. UTF-8 writes retain their existing text
+previews. The implementation deliberately adds no binary-transfer size limit
+or streaming behavior.
+
+The encoded `content` string is never placed in tracing fields, `tool_args`
+spans, pending previews, or completed previews. UTF-8 content uses the
+existing size/line summary. A valid Base64 write uses
+`REDACTED(bytes=<decoded length>)`; an invalid Base64 value uses
+`REDACTED(base64_chars=<encoded length>)`. Cross-field read validation runs
+after schema validation and before sandbox approval or file I/O, while the
+write decoder also guards direct execution paths before any filesystem
+mutation.
+
+This is an _interim exact-binary transport_, not full binary interaction with an
+LLM! The model-facing result still contains Base64 text, and the provider
+serializer has no typed image or file attachment to expose to a multimodal
+model. Consequently, this layer preserves and safely presents arbitrary bytes
+but does not by itself let a model inspect an image or interpret a PDF. The
+planned provider-aware attachment and wire projection is documented in
+[Image and file input from tool results](./ideas/image-or-file-upload.md).
+
 ## Path-like argument normalization
 
 Path-like arguments (`read`/`write`/`edit`/`search`'s `path`, `glob`'s

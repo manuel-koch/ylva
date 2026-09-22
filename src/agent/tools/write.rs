@@ -26,6 +26,7 @@
 
 use std::path::Path;
 
+use base64::Engine as _;
 use schemars::schema::RootSchema;
 use schemars::{schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
@@ -33,7 +34,8 @@ use serde_json::Value;
 use tracing::Instrument;
 
 use super::{
-    ContentSection, Section, Tool, ToolCall, ToolCallResult, ToolError, DEFAULT_TOOL_TIMEOUT_SECS,
+    utf8_text_preview, ContentSection, FileEncoding, Section, Tool, ToolCall, ToolCallResult,
+    ToolError, DEFAULT_TOOL_TIMEOUT_SECS, STANDARD_BASE64,
 };
 use crate::sandbox::{ApprovalCheck, SandboxContext};
 
@@ -54,8 +56,13 @@ fn require_string_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, Approva
 pub struct WriteFileArgs {
     /// Absolute or workspace-relative path of the file to create or overwrite.
     pub path: String,
-    /// Full text content to write. Overwrites any existing content at `path`.
+    /// Content to write. With `utf8` this is text; with `base64` it is standard
+    /// padded Base64 representing the exact bytes to write.
     pub content: String,
+    /// Input encoding. Defaults to `utf8`.
+    #[serde(default)]
+    #[schemars(default)]
+    pub encoding: FileEncoding,
 }
 
 /// Structured metadata for a successful `write` tool invocation.
@@ -74,12 +81,22 @@ pub struct WriteResult {
     pub bytes_written: usize,
     /// Content that was written to the file.
     pub content: String,
+    /// Encoding used for the input content.
+    pub encoding: FileEncoding,
+    /// UTF-8 text projection for user-facing previews when Base64 carries text.
+    text_preview: Option<String>,
     /// Pre-formatted LLM-facing confirmation text.
     text: String,
 }
 
 impl WriteResult {
-    fn new(path: impl Into<String>, content: impl Into<String>, bytes_written: usize) -> Self {
+    fn new(
+        path: impl Into<String>,
+        content: impl Into<String>,
+        bytes_written: usize,
+        encoding: FileEncoding,
+        text_preview: Option<String>,
+    ) -> Self {
         let path = path.into();
         let content = content.into();
         WriteResult {
@@ -87,6 +104,8 @@ impl WriteResult {
             path,
             bytes_written,
             content,
+            encoding,
+            text_preview,
         }
     }
 }
@@ -108,16 +127,20 @@ impl ToolCallResult for WriteResult {
     }
 
     fn content_sections(&self) -> Vec<Section> {
-        if self.content.is_empty() {
+        let content = match self.encoding {
+            FileEncoding::Utf8 => Some(self.content.as_str()),
+            FileEncoding::Base64 => self.text_preview.as_deref(),
+        };
+        let Some(content) = content.filter(|content| !content.is_empty()) else {
             return vec![];
-        }
+        };
         let file_extension = std::path::Path::new(&self.path)
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| e.to_lowercase());
         vec![Section::Content(ContentSection {
             label: None,
-            content: self.content.clone(),
+            content: content.to_string(),
             file_extension,
             line_number_offset: Some(0),
         })]
@@ -153,14 +176,22 @@ impl ToolCall for WriteCall {
         WriteTool::default().argument_order(key)
     }
     fn pending_content_sections(&self) -> Vec<Section> {
-        let content = self
-            .raw_arguments
-            .get("content")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        if content.is_empty() {
+        let content = match self.raw_arguments.get("encoding").and_then(Value::as_str) {
+            Some("base64") => self
+                .raw_arguments
+                .get("content")
+                .and_then(Value::as_str)
+                .and_then(|content| STANDARD_BASE64.decode(content).ok())
+                .and_then(|bytes| utf8_text_preview(&bytes)),
+            _ => self
+                .raw_arguments
+                .get("content")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        };
+        let Some(content) = content.filter(|content| !content.is_empty()) else {
             return vec![];
-        }
+        };
         let path = self
             .raw_arguments
             .get("path")
@@ -172,31 +203,13 @@ impl ToolCall for WriteCall {
             .map(|e| e.to_lowercase());
         vec![Section::Content(ContentSection {
             label: None,
-            content: content.to_string(),
+            content,
             file_extension,
             line_number_offset: Some(0),
         })]
     }
     fn non_default_redacted_arguments(&self) -> Vec<(String, serde_json::Value)> {
-        self.raw_arguments
-            .as_object()
-            .into_iter()
-            .flat_map(|map| map.iter())
-            .map(|(key, value)| match key.as_str() {
-                "content" => {
-                    let content = value.as_str().unwrap_or_default();
-                    (
-                        key.clone(),
-                        Value::String(format!(
-                            "REDACTED(size={},lines={})",
-                            content.len(),
-                            content.lines().count()
-                        )),
-                    )
-                }
-                _ => (key.clone(), value.clone()),
-            })
-            .collect()
+        WriteTool::default().non_default_redacted_arguments(&self.raw_arguments)
     }
     fn run(
         self: Box<Self>,
@@ -261,7 +274,8 @@ impl Tool for WriteTool {
     }
 
     fn description(&self) -> &str {
-        "Create or overwrite a file with the given content."
+        "Create or overwrite a file with the given content. `encoding` defaults to `utf8`; \
+        use `base64` to write exact arbitrary bytes from standard padded Base64."
     }
 
     fn input_schema(&self) -> RootSchema {
@@ -306,20 +320,14 @@ impl Tool for WriteTool {
         self.non_default_arguments(arguments)
             .into_iter()
             .map(|(key, value)| match key {
-                "content" => {
-                    let content = value.as_str().unwrap_or_default();
-                    (
-                        key.to_string(),
-                        Value::String(format!(
-                            "REDACTED(size={},lines={})",
-                            content.len(),
-                            content.lines().count()
-                        )),
-                    )
-                }
+                "content" => (key.to_string(), redact_content(arguments, value)),
                 _ => (key.to_string(), value.clone()),
             })
             .collect()
+    }
+
+    fn is_default_argument(&self, key: &str, value: &Value) -> bool {
+        matches!((key, value), ("encoding", Value::String(encoding)) if encoding == "utf8")
     }
 
     fn timeout_secs(&self) -> u64 {
@@ -340,8 +348,34 @@ impl Tool for WriteTool {
 }
 
 async fn write_file(args: WriteFileArgs) -> Result<WriteResult, ToolError> {
+    let encoding = args.encoding;
+    let bytes = match encoding {
+        FileEncoding::Utf8 => args.content.as_bytes().to_vec(),
+        FileEncoding::Base64 => {
+            STANDARD_BASE64
+                .decode(args.content.as_bytes())
+                .map_err(|error| {
+                    ToolError::failed(
+                        "write",
+                        format!(
+                            "failed to decode Base64 content for '{}': {error}",
+                            args.path
+                        ),
+                    )
+                })?
+        }
+    };
+    let content = match encoding {
+        FileEncoding::Utf8 => args.content,
+        FileEncoding::Base64 => String::new(),
+    };
+    let text_preview = match encoding {
+        FileEncoding::Utf8 => None,
+        FileEncoding::Base64 => utf8_text_preview(&bytes),
+    };
+    let path = args.path;
     tracing::debug!("writing file");
-    if let Some(parent) = Path::new(&args.path).parent() {
+    if let Some(parent) = Path::new(&path).parent() {
         if !parent.as_os_str().is_empty() {
             tokio::fs::create_dir_all(parent).await.map_err(|error| {
                 tracing::error!(
@@ -356,15 +390,36 @@ async fn write_file(args: WriteFileArgs) -> Result<WriteResult, ToolError> {
             })?;
         }
     }
-    let bytes_written = args.content.len();
-    tokio::fs::write(&args.path, &args.content)
-        .await
-        .map_err(|error| {
-            tracing::error!(error = %error, "failed to write");
-            ToolError::failed("write", format!("failed to write '{}': {error}", args.path))
-        })?;
+    let bytes_written = bytes.len();
+    tokio::fs::write(&path, bytes).await.map_err(|error| {
+        tracing::error!(error = %error, "failed to write");
+        ToolError::failed("write", format!("failed to write '{}': {error}", path))
+    })?;
     tracing::debug!("wrote file");
-    Ok(WriteResult::new(args.path, args.content, bytes_written))
+    Ok(WriteResult::new(
+        path,
+        content,
+        bytes_written,
+        encoding,
+        text_preview,
+    ))
+}
+
+fn redact_content(arguments: &Value, value: &Value) -> Value {
+    let content = value.as_str().unwrap_or_default();
+    let summary = if arguments.get("encoding").and_then(Value::as_str) == Some("base64") {
+        match STANDARD_BASE64.decode(content.as_bytes()) {
+            Ok(decoded) => format!("REDACTED(bytes={})", decoded.len()),
+            Err(_) => format!("REDACTED(base64_chars={})", content.len()),
+        }
+    } else {
+        format!(
+            "REDACTED(size={},lines={})",
+            content.len(),
+            content.lines().count()
+        )
+    };
+    Value::String(summary)
 }
 
 #[cfg(test)]
@@ -452,12 +507,81 @@ mod tests {
             let result = write_file(WriteFileArgs {
                 path: path.display().to_string(),
                 content: "abc".to_string(),
+                encoding: FileEncoding::Utf8,
             })
             .await
             .expect("write ok");
             assert!(result.text().contains("wrote 3 bytes"));
+            assert_eq!(result.content_sections().len(), 1);
             let content = std::fs::read_to_string(&path).expect("read back");
             assert_eq!(content, "abc");
+        });
+    }
+
+    #[test]
+    fn write_base64_round_trip_reports_raw_byte_count_without_preview() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            let path = dir.path().join("sub").join("binary.dat");
+            let bytes = [0x00, 0xff, 0x80, b'A', 0x00, 0xfe];
+            let encoded = STANDARD_BASE64.encode(bytes);
+            let result = write_file(WriteFileArgs {
+                path: path.display().to_string(),
+                content: encoded,
+                encoding: FileEncoding::Base64,
+            })
+            .await
+            .expect("write ok");
+
+            assert_eq!(std::fs::read(&path).expect("read back"), bytes);
+            assert_eq!(result.bytes_written, bytes.len());
+            assert_eq!(
+                result.metadata(),
+                Some(serde_json::json!({ "bytes_written": 6 }))
+            );
+            assert!(result.content_sections().is_empty());
+            assert!(result.text().contains("wrote 6 bytes"));
+        });
+    }
+
+    #[test]
+    fn invalid_base64_fails_before_directory_creation() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            let path = dir.path().join("new").join("binary.dat");
+            let parent = path.parent().expect("parent").to_path_buf();
+            let error = write_file(WriteFileArgs {
+                path: path.display().to_string(),
+                content: "not-valid!".to_string(),
+                encoding: FileEncoding::Base64,
+            })
+            .await
+            .expect_err("invalid Base64 must fail");
+
+            let message = error.to_string();
+            assert!(message.contains("failed to decode Base64 content"));
+            assert!(message.contains(&path.display().to_string()));
+            assert!(!path.exists());
+            assert!(!parent.exists());
+        });
+    }
+
+    #[test]
+    fn unpadded_base64_is_rejected() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            let path = dir.path().join("binary.dat");
+            let error = write_file(WriteFileArgs {
+                path: path.display().to_string(),
+                content: "YQ".to_string(),
+                encoding: FileEncoding::Base64,
+            })
+            .await
+            .expect_err("unpadded Base64 must fail");
+            assert!(error
+                .to_string()
+                .contains("failed to decode Base64 content"));
+            assert!(!path.exists());
         });
     }
 
@@ -469,6 +593,7 @@ mod tests {
             let result = write_file(WriteFileArgs {
                 path: path.display().to_string(),
                 content: "TOP-SECRET-DATA".to_string(),
+                encoding: FileEncoding::Utf8,
             })
             .await;
             assert!(result.is_ok());
@@ -521,6 +646,56 @@ mod tests {
     }
 
     #[test]
+    fn write_base64_redaction_hides_encoded_and_decoded_payloads() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("binary.dat");
+        let bytes = b"PRIVATE-BINARY-SENTINEL";
+        let encoded = STANDARD_BASE64.encode(bytes);
+        let arguments = serde_json::json!({
+            "path": path.display().to_string(),
+            "content": encoded,
+            "encoding": "base64",
+        });
+        let tool = WriteTool::default();
+        let redacted = tool.non_default_redacted_arguments(&arguments);
+        let content = redacted
+            .iter()
+            .find(|(key, _)| key == "content")
+            .map(|(_, value)| value.as_str().expect("redaction string"));
+        assert_eq!(content, Some("REDACTED(bytes=23)"));
+
+        let invalid_arguments = serde_json::json!({
+            "path": "binary.dat",
+            "content": "INVALID-BASE64-SENTINEL!",
+            "encoding": "base64",
+        });
+        let invalid_redacted = tool.non_default_redacted_arguments(&invalid_arguments);
+        let invalid_content = invalid_redacted
+            .iter()
+            .find(|(key, _)| key == "content")
+            .map(|(_, value)| value.as_str().expect("redaction string"));
+        assert_eq!(invalid_content, Some("REDACTED(base64_chars=24)"));
+
+        let log = capture_logs(async {
+            let call = tool.create_call(uuid::Uuid::nil(), arguments);
+            let result = call.run().await;
+            assert!(result.is_ok());
+        });
+        assert!(
+            log.contains("REDACTED(bytes=23)"),
+            "missing safe summary: {log}"
+        );
+        assert!(
+            !log.contains(&encoded),
+            "encoded payload leaked into log: {log}"
+        );
+        assert!(
+            !log.contains("PRIVATE-BINARY-SENTINEL"),
+            "decoded payload leaked into log: {log}"
+        );
+    }
+
+    #[test]
     fn write_non_default_redacted_arguments_redact_content() {
         let tool = WriteTool::default();
         let arguments = serde_json::json!({
@@ -538,8 +713,64 @@ mod tests {
 
     #[test]
     fn write_result_empty_content_has_no_sections() {
-        let result = WriteResult::new("empty.txt", "", 0);
+        let result = WriteResult::new("empty.txt", "", 0, FileEncoding::Utf8, None);
         assert!(result.content_sections().is_empty());
+    }
+
+    #[test]
+    fn write_base64_pending_preview_is_suppressed_for_non_utf8() {
+        let call = WriteTool::default().create_call(
+            uuid::Uuid::new_v4(),
+            serde_json::json!({
+                "path": "binary.dat",
+                "content": STANDARD_BASE64.encode([0x00, 0xff, 0x80]),
+                "encoding": "base64",
+            }),
+        );
+        assert!(call.pending_content_sections().is_empty());
+    }
+
+    #[test]
+    fn write_base64_text_uses_decoded_preview() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            let path = dir.path().join("source.rs");
+            let text = "fn main() {}\n";
+            let encoded = STANDARD_BASE64.encode(text);
+            let call = WriteTool::default().create_call(
+                uuid::Uuid::new_v4(),
+                serde_json::json!({
+                    "path": path.display().to_string(),
+                    "content": encoded,
+                    "encoding": "base64",
+                }),
+            );
+            let pending_sections = call.pending_content_sections();
+            assert_eq!(pending_sections.len(), 1);
+            let Section::Content(section) = &pending_sections[0] else {
+                panic!("expected a pending text content section");
+            };
+            assert_eq!(section.content, text);
+            assert_eq!(section.file_extension.as_deref(), Some("rs"));
+
+            let result = write_file(WriteFileArgs {
+                path: path.display().to_string(),
+                content: STANDARD_BASE64.encode(text),
+                encoding: FileEncoding::Base64,
+            })
+            .await
+            .expect("write ok");
+            let completed_sections = result.content_sections();
+            assert_eq!(completed_sections.len(), 1);
+            let Section::Content(section) = &completed_sections[0] else {
+                panic!("expected a completed text content section");
+            };
+            assert_eq!(section.content, text);
+            assert_eq!(section.file_extension.as_deref(), Some("rs"));
+            assert_eq!(section.line_number_offset, Some(0));
+            assert_eq!(result.bytes_written, text.len());
+            assert_eq!(std::fs::read_to_string(&path).expect("read back"), text);
+        });
     }
 
     #[test]
@@ -571,8 +802,34 @@ mod tests {
     }
 
     #[test]
+    fn write_base64_empty_content_is_auto_denied() {
+        let tool = WriteTool::default();
+        let args = serde_json::json!({
+            "path": "binary.dat",
+            "content": "",
+            "encoding": "base64",
+        });
+        assert!(matches!(
+            tool.needs_approval(&args),
+            crate::sandbox::ApprovalCheck::AutoDenied { .. }
+        ));
+    }
+
+    #[test]
     fn write_input_args_all_properties_have_descriptions() {
         let schema = WriteTool::default().input_schema();
         super::super::assert_all_properties_have_descriptions(&schema, "WriteFileArgs");
+        let schema = serde_json::to_value(schema).expect("schema serializes");
+        assert_eq!(schema["properties"]["encoding"]["default"], "utf8");
+        let description = schema["properties"]["encoding"]["description"]
+            .as_str()
+            .expect("encoding description");
+        assert!(description.contains("Defaults to `utf8`"));
+        let parsed: WriteFileArgs = serde_json::from_value(serde_json::json!({
+            "path": "out.txt",
+            "content": "hello",
+        }))
+        .expect("default encoding");
+        assert_eq!(parsed.encoding, FileEncoding::Utf8);
     }
 }

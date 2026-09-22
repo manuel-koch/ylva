@@ -188,6 +188,8 @@ pub enum UserMessageState {
 pub mod result_section_ids {
     /// Standard tool output (used by all tools that return plain text results).
     pub const RESULT: &str = "result";
+    /// Result text intentionally hidden from the user-facing tool bubble.
+    pub const HIDDEN: &str = "hidden";
     /// The user's answer to a clarify question (used by the `clarify` tool).
     pub const USER_ANSWER: &str = "user_answer";
 }
@@ -626,7 +628,13 @@ fn project_messages_with_child_runs(
                                 .as_deref()
                                 .unwrap_or(result_section_ids::RESULT)
                                 .to_string(),
-                            content: result.clone(),
+                            content: if result_section_id.as_deref()
+                                == Some(result_section_ids::HIDDEN)
+                            {
+                                String::new()
+                            } else {
+                                result.clone()
+                            },
                         },
                         content_sections: content_sections.clone(),
                         summary: summary.clone(),
@@ -3109,6 +3117,53 @@ mod tests {
                         && summary == &vec![("path".to_string(), "README.md".to_string())]
                         && *duration == Duration::from_millis(37)
                         && title_arguments == &vec![("path".to_string(), serde_json::json!("README.md"))]
+                )
+        ));
+    }
+
+    #[test]
+    fn replay_projection_hides_transport_only_tool_result() {
+        let tool_id = Uuid::new_v4();
+        let encoded = "iVBORwD/";
+        let messages = vec![
+            Message::Assistant {
+                content: String::new(),
+                status: AssistantStatus::Complete,
+                tool_calls: vec![ToolCallRequest {
+                    id: tool_id,
+                    name: "read".to_string(),
+                    arguments: serde_json::json!({
+                        "path": "image.png",
+                        "mode": "bytes",
+                        "encoding": "base64",
+                    }),
+                    persisted_title_arguments: vec![],
+                }],
+            },
+            Message::ToolResult {
+                value: crate::agent::ToolResult {
+                    id: tool_id,
+                    name: "read".to_string(),
+                    result: encoded.to_string(),
+                    result_section_id: Some(result_section_ids::HIDDEN.to_string()),
+                    result_metadata: Some(serde_json::json!({"read_bytes": 6})),
+                    result_metadata_schema: None,
+                    summary: vec![],
+                    content_sections: vec![],
+                    duration: Duration::ZERO,
+                },
+            },
+        ];
+
+        let entries = project_messages(&messages);
+        assert!(matches!(
+            entries.first(),
+            Some(ChatEntry::ToolBubble { state, .. })
+                if matches!(
+                    state.as_ref(),
+                    ToolCallState::Done { result_section, .. }
+                        if result_section.id == result_section_ids::HIDDEN
+                            && result_section.content.is_empty()
                 )
         ));
     }

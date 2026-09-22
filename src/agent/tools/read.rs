@@ -24,6 +24,7 @@
 //! enforced — there is no "no-timeout" value; `0` merely selects the module
 //! default.
 
+use base64::Engine as _;
 use schemars::schema::RootSchema;
 use schemars::{schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
@@ -31,7 +32,8 @@ use serde_json::Value;
 use tracing::Instrument;
 
 use super::{
-    ContentSection, Section, Tool, ToolCall, ToolCallResult, ToolError, DEFAULT_TOOL_TIMEOUT_SECS,
+    utf8_text_preview, validate_args_with_schema, ContentSection, FileEncoding, Section, Tool,
+    ToolCall, ToolCallResult, ToolError, DEFAULT_TOOL_TIMEOUT_SECS, STANDARD_BASE64,
 };
 use crate::sandbox::{ApprovalCheck, SandboxContext};
 
@@ -47,13 +49,29 @@ fn require_string_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, Approva
     }
 }
 
+fn decode_text(path: &str, bytes: &[u8], mode: &str) -> Result<String, ToolError> {
+    std::str::from_utf8(bytes)
+        .map(str::to_owned)
+        .map_err(|error| {
+            tracing::error!(
+                path,
+                mode,
+                error = %error,
+                "failed to decode file as UTF-8"
+            );
+            ToolError::failed(
+                "read",
+                format!("failed to read '{path}' in {mode} mode: invalid UTF-8 ({error})"),
+            )
+        })
+}
+
 /// The unit that `ReadFileArgs::offset`/`limit` count.
 ///
 /// `Lines` is the default for all reads, including ranged reads. Use `Chars`
 /// for character counts and `Bytes` explicitly for byte ranges or binary data.
-/// An encoding must be known before a char/line can be defined, so `Lines`/
-/// `Chars` lossy-decode UTF-8 first (no encoding detection is done). `Chars`
-/// counts UTF-8 code points.
+/// `Lines`/`Chars` require valid UTF-8. Exact arbitrary bytes are available
+/// with `mode: bytes` and `encoding: base64`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReadMode {
@@ -77,6 +95,11 @@ pub struct ReadFileArgs {
     pub path: String,
     #[serde(default)]
     pub mode: ReadMode,
+    /// Result encoding. Defaults to `utf8`; `base64` requires `mode: bytes`
+    /// and returns the selected raw bytes without line breaks.
+    #[serde(default)]
+    #[schemars(default)]
+    pub encoding: FileEncoding,
     /// 0-based index of the first selected unit to read; in `lines` mode,
     /// line 1 is `offset: 0`.
     #[serde(default)]
@@ -89,10 +112,17 @@ pub struct ReadFileArgs {
 /// Structured metadata for a successful `read` tool invocation.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ReadResultMetadata {
-    /// Total bytes in the file content returned.
+    /// Total bytes in the selected file content returned.
     pub read_bytes: usize,
-    /// Total lines in the file content returned.
+    /// Total lines in the selected UTF-8 text returned.
     pub read_lines: usize,
+}
+
+/// Structured metadata for a successful Base64 `read` result.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ReadBinaryResultMetadata {
+    /// Total raw bytes represented by the Base64 result.
+    pub read_bytes: usize,
 }
 
 /// Output of a successful `read` tool invocation.
@@ -104,6 +134,12 @@ pub struct ReadResult {
     pub path: String,
     /// 0-based index of the first line in `content` within the source file.
     pub starting_line: Option<usize>,
+    /// Encoding used for the returned content.
+    pub encoding: FileEncoding,
+    /// Number of raw bytes selected from the file.
+    pub read_bytes: usize,
+    /// UTF-8 text projection for user-facing previews when Base64 carries text.
+    pub text_preview: Option<String>,
 }
 
 impl ToolCallResult for ReadResult {
@@ -111,29 +147,59 @@ impl ToolCallResult for ReadResult {
         self.content.clone()
     }
 
+    fn display_text(&self) -> Option<String> {
+        match self.encoding {
+            FileEncoding::Utf8 => Some(self.text()),
+            FileEncoding::Base64 => None,
+        }
+    }
+
     fn metadata(&self) -> Option<serde_json::Value> {
-        let metadata = ReadResultMetadata {
-            read_bytes: self.content.len(),
-            read_lines: self.content.lines().count(),
-        };
-        serde_json::to_value(metadata).ok()
+        match self.encoding {
+            FileEncoding::Utf8 => serde_json::to_value(ReadResultMetadata {
+                read_bytes: self.read_bytes,
+                read_lines: self.content.lines().count(),
+            })
+            .ok(),
+            FileEncoding::Base64 => match &self.text_preview {
+                Some(text_preview) => serde_json::to_value(ReadResultMetadata {
+                    read_bytes: self.read_bytes,
+                    read_lines: text_preview.lines().count(),
+                })
+                .ok(),
+                None => serde_json::to_value(ReadBinaryResultMetadata {
+                    read_bytes: self.read_bytes,
+                })
+                .ok(),
+            },
+        }
     }
 
     fn metadata_schema(&self) -> Option<schemars::schema::RootSchema> {
-        Some(schemars::schema_for!(ReadResultMetadata))
+        match self.encoding {
+            FileEncoding::Utf8 => Some(schemars::schema_for!(ReadResultMetadata)),
+            FileEncoding::Base64 if self.text_preview.is_some() => {
+                Some(schemars::schema_for!(ReadResultMetadata))
+            }
+            FileEncoding::Base64 => Some(schemars::schema_for!(ReadBinaryResultMetadata)),
+        }
     }
 
     fn content_sections(&self) -> Vec<Section> {
-        if self.content.is_empty() {
+        let preview = match self.encoding {
+            FileEncoding::Utf8 => Some(self.content.as_str()),
+            FileEncoding::Base64 => self.text_preview.as_deref(),
+        };
+        let Some(preview) = preview.filter(|content| !content.is_empty()) else {
             return vec![];
-        }
+        };
         let file_extension = std::path::Path::new(&self.path)
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| e.to_lowercase());
         vec![Section::Content(ContentSection {
             label: None,
-            content: self.content.clone(),
+            content: preview.to_string(),
             file_extension,
             line_number_offset: self.starting_line,
         })]
@@ -168,24 +234,25 @@ impl ToolCall for ReadCall {
 
     fn non_default_redacted_arguments(&self) -> Vec<(String, serde_json::Value)> {
         let tool = ReadTool::default();
-        self.raw_arguments
-            .as_object()
-            .into_iter()
-            .flat_map(|map| map.iter())
-            .filter(|(key, value)| !tool.is_default_argument(key.as_str(), value))
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect()
+        tool.non_default_redacted_arguments(&self.raw_arguments)
     }
     fn run(
         self: Box<Self>,
     ) -> futures::future::BoxFuture<'static, Result<Box<dyn ToolCallResult>, ToolError>> {
-        let serialized = serde_json::to_string(&self.raw_arguments).unwrap_or_default();
+        let raw_arguments = self.raw_arguments;
+        let serialized = serde_json::to_string(&raw_arguments).unwrap_or_default();
         let span = tracing::info_span!("tool_args", args = %serialized);
         Box::pin(
             async move {
-                let args = serde_json::from_value::<ReadFileArgs>(self.raw_arguments).map_err(
-                    |error| ToolError::failed("read", format!("invalid arguments: {error}")),
-                )?;
+                ReadTool::default()
+                    .validate_args(&raw_arguments)
+                    .map_err(|error| {
+                        ToolError::failed("read", format!("invalid arguments: {error}"))
+                    })?;
+                let args =
+                    serde_json::from_value::<ReadFileArgs>(raw_arguments).map_err(|error| {
+                        ToolError::failed("read", format!("invalid arguments: {error}"))
+                    })?;
                 read_file(args)
                     .await
                     .map(|o| -> Box<dyn ToolCallResult> { Box::new(o) })
@@ -241,8 +308,9 @@ impl Tool for ReadTool {
         "Read a file's contents. `mode` defaults to `lines` for every call, including when \
         `offset` or `limit` is set. In `lines` mode, `offset` is a 0-based line index and \
         `limit` is a line count. Use `chars` for character counts or set `bytes` explicitly \
-        for byte ranges and binary data. `offset`/`limit` count the selected unit; omit both \
-        to read the whole file."
+        for byte ranges and binary data. `encoding` defaults to `utf8`; use `base64` with \
+        explicit `mode: bytes` for exact arbitrary bytes. `offset`/`limit` count the selected \
+        unit; omit both to read the whole file."
     }
 
     fn input_schema(&self) -> RootSchema {
@@ -283,6 +351,7 @@ impl Tool for ReadTool {
     fn is_default_argument(&self, key: &str, value: &Value) -> bool {
         match (key, value) {
             ("mode", Value::String(mode)) => mode == "lines",
+            ("encoding", Value::String(encoding)) => encoding == "utf8",
             ("offset", Value::Null) => true,
             ("offset", Value::Number(number)) => number.as_u64() == Some(0),
             ("limit", Value::Null) => true,
@@ -295,6 +364,16 @@ impl Tool for ReadTool {
             .into_iter()
             .map(|(key, value)| (key.to_string(), value.clone()))
             .collect()
+    }
+
+    fn validate_args(&self, arguments: &Value) -> Result<(), String> {
+        validate_args_with_schema(&self.input_schema(), arguments)?;
+        if arguments.get("encoding").and_then(Value::as_str) == Some("base64")
+            && arguments.get("mode").and_then(Value::as_str) != Some("bytes")
+        {
+            return Err("`encoding: \"base64\"` requires explicit `mode: \"bytes\"`".to_string());
+        }
+        Ok(())
     }
 
     fn timeout_secs(&self) -> u64 {
@@ -315,6 +394,12 @@ impl Tool for ReadTool {
 }
 
 async fn read_file(args: ReadFileArgs) -> Result<ReadResult, ToolError> {
+    if args.encoding == FileEncoding::Base64 && args.mode != ReadMode::Bytes {
+        return Err(ToolError::failed(
+            "read",
+            "`encoding: \"base64\"` requires explicit `mode: \"bytes\"`",
+        ));
+    }
     tracing::debug!("reading file");
     // TODO: should we really read the whole file into memory
     //       and get the chunks afterwards ?
@@ -330,20 +415,41 @@ async fn read_file(args: ReadFileArgs) -> Result<ReadResult, ToolError> {
             if let Some(limit) = args.limit {
                 slice = &slice[..limit.min(slice.len())];
             }
-            let content = String::from_utf8_lossy(slice).to_string();
-            tracing::debug!(
-                size = content.len(),
-                lines = content.lines().count(),
-                "read file"
-            );
-            Ok(ReadResult {
-                content,
-                path: args.path,
-                starting_line: Some(0),
-            })
+            match args.encoding {
+                FileEncoding::Utf8 => {
+                    let content = String::from_utf8_lossy(slice).to_string();
+                    tracing::debug!(
+                        size = content.len(),
+                        lines = content.lines().count(),
+                        "read file"
+                    );
+                    Ok(ReadResult {
+                        read_bytes: content.len(),
+                        content,
+                        path: args.path,
+                        starting_line: Some(0),
+                        encoding: FileEncoding::Utf8,
+                        text_preview: None,
+                    })
+                }
+                FileEncoding::Base64 => {
+                    let read_bytes = slice.len();
+                    let content = STANDARD_BASE64.encode(slice);
+                    let text_preview = utf8_text_preview(slice);
+                    tracing::debug!(read_bytes, "read file");
+                    Ok(ReadResult {
+                        read_bytes,
+                        content,
+                        path: args.path,
+                        starting_line: text_preview.as_ref().map(|_| 0),
+                        encoding: FileEncoding::Base64,
+                        text_preview,
+                    })
+                }
+            }
         }
         ReadMode::Lines => {
-            let text = String::from_utf8_lossy(&bytes).to_string();
+            let text = decode_text(&args.path, &bytes, "lines")?;
             let lines: Vec<&str> = text.split_terminator('\n').collect();
             let start = args.offset.unwrap_or(0).min(lines.len());
             let end = args
@@ -361,13 +467,16 @@ async fn read_file(args: ReadFileArgs) -> Result<ReadResult, ToolError> {
                 "read file"
             );
             Ok(ReadResult {
+                read_bytes: content.len(),
                 content,
                 path: args.path,
                 starting_line: Some(start),
+                encoding: FileEncoding::Utf8,
+                text_preview: None,
             })
         }
         ReadMode::Chars => {
-            let text = String::from_utf8_lossy(&bytes).to_string();
+            let text = decode_text(&args.path, &bytes, "chars")?;
             let chars: Vec<char> = text.chars().collect();
             let start = args.offset.unwrap_or(0).min(chars.len());
             let end = args
@@ -385,9 +494,12 @@ async fn read_file(args: ReadFileArgs) -> Result<ReadResult, ToolError> {
                 "read file"
             );
             Ok(ReadResult {
+                read_bytes: content.len(),
                 content,
                 path: args.path,
                 starting_line: Some(0),
+                encoding: FileEncoding::Utf8,
+                text_preview: None,
             })
         }
     }
@@ -487,12 +599,25 @@ mod tests {
             .description()
             .contains("`mode` defaults to `lines` for every call"));
         assert!(tool.description().contains("set `bytes` explicitly"));
+        assert!(tool.description().contains("`encoding` defaults to `utf8`"));
 
         let schema = serde_json::to_value(tool.input_schema()).expect("schema serializes");
         let mode_description = schema["definitions"]["ReadMode"]["description"]
             .as_str()
             .expect("mode schema description");
         assert!(mode_description.contains("`Lines` is the default for all reads"));
+        let encoding_description = schema["properties"]["encoding"]["description"]
+            .as_str()
+            .expect("encoding schema description");
+        assert!(encoding_description.contains("`base64` requires `mode: bytes`"));
+        assert_eq!(schema["properties"]["encoding"]["default"], "utf8");
+        let variants = schema["definitions"]["FileEncoding"]["oneOf"]
+            .as_array()
+            .expect("encoding variants")
+            .iter()
+            .filter_map(|variant| variant["enum"][0].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(variants, vec!["utf8", "base64"]);
     }
 
     #[test]
@@ -508,6 +633,32 @@ mod tests {
         let parsed: ReadFileArgs =
             serde_json::from_value(arguments).expect("arguments deserialize");
         assert_eq!(parsed.mode, ReadMode::Lines);
+        assert_eq!(parsed.encoding, FileEncoding::Utf8);
+    }
+
+    #[test]
+    fn read_rejects_base64_without_explicit_bytes_mode() {
+        let tool = ReadTool::default();
+        let missing_mode = serde_json::json!({
+            "path": "source.bin",
+            "encoding": "base64",
+        });
+        let lines_mode = serde_json::json!({
+            "path": "source.bin",
+            "mode": "lines",
+            "encoding": "base64",
+        });
+        let bytes_mode = serde_json::json!({
+            "path": "source.bin",
+            "mode": "bytes",
+            "encoding": "base64",
+        });
+
+        let missing_mode_error = tool.validate_args(&missing_mode).expect_err("must reject");
+        assert!(missing_mode_error.contains("requires explicit `mode: \"bytes\"`"));
+        let lines_mode_error = tool.validate_args(&lines_mode).expect_err("must reject");
+        assert!(lines_mode_error.contains("requires explicit `mode: \"bytes\"`"));
+        assert!(tool.validate_args(&bytes_mode).is_ok());
     }
 
     #[test]
@@ -530,6 +681,31 @@ mod tests {
     }
 
     #[test]
+    fn read_text_modes_reject_invalid_utf8() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            let path = dir.path().join("image.png");
+            std::fs::write(&path, [137, 80, 78, 71, 0, 255]).expect("write");
+
+            for mode in [ReadMode::Lines, ReadMode::Chars] {
+                let error = read_file(ReadFileArgs {
+                    path: path.display().to_string(),
+                    mode,
+                    encoding: FileEncoding::Utf8,
+                    offset: None,
+                    limit: None,
+                })
+                .await
+                .expect_err("invalid UTF-8 text reads must fail");
+                assert!(
+                    error.to_string().contains("invalid UTF-8"),
+                    "unexpected error: {error}"
+                );
+            }
+        });
+    }
+
+    #[test]
     fn read_returns_whole_file_content() {
         crate::test_support::run_locked(async {
             let dir = TempDir::new().expect("tempdir");
@@ -538,6 +714,7 @@ mod tests {
             let result = read_file(ReadFileArgs {
                 path: path.display().to_string(),
                 mode: ReadMode::Bytes,
+                encoding: FileEncoding::Utf8,
                 offset: None,
                 limit: None,
             })
@@ -554,6 +731,7 @@ mod tests {
             let result = read_file(ReadFileArgs {
                 path: dir.path().join("nope.txt").display().to_string(),
                 mode: ReadMode::Bytes,
+                encoding: FileEncoding::Utf8,
                 offset: None,
                 limit: None,
             })
@@ -571,12 +749,142 @@ mod tests {
             let result = read_file(ReadFileArgs {
                 path: path.display().to_string(),
                 mode: ReadMode::Bytes,
+                encoding: FileEncoding::Utf8,
                 offset: Some(2),
                 limit: Some(4),
             })
             .await
             .expect("read ok");
             assert_eq!(result.text(), "2345");
+        });
+    }
+
+    #[test]
+    fn read_base64_preserves_raw_bytes_and_range_metadata() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            let path = dir.path().join("binary.dat");
+            let bytes = [0x00, 0xff, 0x80, b'A', 0x00, 0xfe];
+            std::fs::write(&path, bytes).expect("write");
+
+            let result = read_file(ReadFileArgs {
+                path: path.display().to_string(),
+                mode: ReadMode::Bytes,
+                encoding: FileEncoding::Base64,
+                offset: Some(1),
+                limit: Some(4),
+            })
+            .await
+            .expect("read ok");
+
+            assert_eq!(result.text(), STANDARD_BASE64.encode(&bytes[1..5]));
+            assert_eq!(
+                result.metadata(),
+                Some(serde_json::json!({ "read_bytes": 4 }))
+            );
+            let metadata_schema =
+                serde_json::to_value(result.metadata_schema().expect("metadata schema"))
+                    .expect("schema serializes");
+            assert!(metadata_schema["properties"].get("read_bytes").is_some());
+            assert!(metadata_schema["properties"].get("read_lines").is_none());
+            assert!(result.content_sections().is_empty());
+        });
+    }
+
+    #[test]
+    fn read_base64_text_uses_text_metadata_and_preview() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            let path = dir.path().join("source.rs");
+            let text = "fn main() {}\nfn helper() {}\n";
+            std::fs::write(&path, text).expect("write");
+
+            let result = read_file(ReadFileArgs {
+                path: path.display().to_string(),
+                mode: ReadMode::Bytes,
+                encoding: FileEncoding::Base64,
+                offset: None,
+                limit: None,
+            })
+            .await
+            .expect("read ok");
+
+            assert_eq!(result.text(), STANDARD_BASE64.encode(text));
+            assert_eq!(
+                result.metadata(),
+                Some(serde_json::json!({
+                    "read_bytes": text.len(),
+                    "read_lines": 2,
+                }))
+            );
+            let metadata_schema =
+                serde_json::to_value(result.metadata_schema().expect("metadata schema"))
+                    .expect("schema serializes");
+            assert!(metadata_schema["properties"].get("read_lines").is_some());
+            let sections = result.content_sections();
+            assert_eq!(sections.len(), 1);
+            let Section::Content(section) = &sections[0] else {
+                panic!("expected a text content section");
+            };
+            assert_eq!(section.content, text);
+            assert_eq!(section.file_extension.as_deref(), Some("rs"));
+            assert_eq!(section.line_number_offset, Some(0));
+        });
+    }
+
+    #[test]
+    fn read_base64_supports_invalid_utf8_without_logging_payload() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("binary.dat");
+        let bytes = [
+            0x00, 0xff, 0x80, b'R', b'E', b'A', b'D', b'-', b'B', b'I', b'N', b'A', b'R', b'Y',
+            b'-', b'S', b'E', b'N', b'T', b'I', b'N', b'E', b'L',
+        ];
+        std::fs::write(&path, bytes).expect("write");
+        let encoded = STANDARD_BASE64.encode(bytes);
+        let log = capture_logs(async {
+            let result = read_file(ReadFileArgs {
+                path: path.display().to_string(),
+                mode: ReadMode::Bytes,
+                encoding: FileEncoding::Base64,
+                offset: None,
+                limit: None,
+            })
+            .await
+            .expect("read ok");
+            assert_eq!(result.text(), encoded);
+        });
+        assert!(
+            log.contains("read_bytes=23"),
+            "log must contain safe size: {log}"
+        );
+        assert!(
+            !log.contains(&encoded),
+            "Base64 content leaked into log: {log}"
+        );
+        assert!(
+            !log.contains("READ-BINARY-SENTINEL"),
+            "decoded content leaked into log: {log}"
+        );
+    }
+
+    #[test]
+    fn read_call_rejects_incompatible_encoding_before_file_io() {
+        crate::test_support::run_locked(async {
+            let call = ReadTool::default().create_call(
+                uuid::Uuid::nil(),
+                serde_json::json!({
+                    "path": "does-not-exist.bin",
+                    "encoding": "base64",
+                }),
+            );
+            let error = call.run().await.expect_err("incompatible call must fail");
+            assert!(
+                error
+                    .to_string()
+                    .contains("requires explicit `mode: \"bytes\"`"),
+                "unexpected error: {error}"
+            );
         });
     }
 
@@ -589,6 +897,7 @@ mod tests {
             let result = read_file(ReadFileArgs {
                 path: path.display().to_string(),
                 mode: ReadMode::Lines,
+                encoding: FileEncoding::Utf8,
                 offset: Some(1),
                 limit: Some(2),
             })
@@ -608,6 +917,7 @@ mod tests {
             let result = read_file(ReadFileArgs {
                 path: path.display().to_string(),
                 mode: ReadMode::Chars,
+                encoding: FileEncoding::Utf8,
                 offset: Some(1),
                 limit: Some(3),
             })
@@ -661,6 +971,7 @@ mod tests {
             let result = read_file(ReadFileArgs {
                 path: path.display().to_string(),
                 mode: ReadMode::Bytes,
+                encoding: FileEncoding::Utf8,
                 offset: None,
                 limit: None,
             })
@@ -732,6 +1043,7 @@ mod tests {
             let result = read_file(ReadFileArgs {
                 path: path.to_str().unwrap().to_string(),
                 mode: ReadMode::Bytes,
+                encoding: FileEncoding::Utf8,
                 offset: None,
                 limit: None,
             })
@@ -759,6 +1071,9 @@ mod tests {
             content: String::new(),
             path: "empty.txt".to_string(),
             starting_line: None,
+            encoding: FileEncoding::Utf8,
+            read_bytes: 0,
+            text_preview: None,
         };
         assert!(result.content_sections().is_empty());
     }

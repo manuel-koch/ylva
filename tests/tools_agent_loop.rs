@@ -14,6 +14,7 @@
 
 mod common;
 
+use base64::Engine as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -485,6 +486,72 @@ async fn failing_tool_emits_tool_error_and_still_reprompts() {
         .messages()
         .iter()
         .any(|m| matches!(m, Message::ToolError { name, .. } if name == "read")));
+}
+
+#[tokio::test(start_paused = true)]
+async fn base64_read_result_stays_in_model_context_but_not_tool_bubble() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("image.png");
+    let bytes = [137, 80, 78, 71, 0, 255];
+    std::fs::write(&path, bytes).expect("write fixture");
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox {
+        workspace_root: dir.path().to_path_buf(),
+    }));
+    let registry = Arc::new(default_registry(sandbox, ToolRegistryConfig::default()));
+    let interval = Duration::from_millis(5);
+    let provider = MockProvider::with_script(
+        vec![call(
+            "read",
+            0,
+            serde_json::json!({
+                "path": path.display().to_string(),
+                "mode": "bytes",
+                "encoding": "base64",
+            }),
+        )],
+        interval,
+    );
+    let (mut agent, mut ui_rx) = AgentLoop::new(
+        Arc::new(EngineImpl::new(
+            Arc::new(provider),
+            common::test_engine_config(),
+        )),
+        Arc::clone(&registry),
+    );
+
+    agent
+        .send_command(AgentCommand::Prompt("read the image".into()))
+        .await;
+    let handle = agent.run();
+    let updates = collect_until_advancing(&mut ui_rx, interval, |update| {
+        matches!(update, UiUpdate::ToolDone { .. })
+    })
+    .await;
+    let result_section = updates
+        .iter()
+        .find_map(|update| match update {
+            UiUpdate::ToolDone { result_section, .. } => Some(result_section),
+            _ => None,
+        })
+        .expect("read must produce a ToolDone update");
+    assert!(
+        result_section.content.is_empty(),
+        "opaque Base64 must not render in the tool bubble: {:?}",
+        result_section.content
+    );
+
+    drop(agent);
+    let context = handle.await.expect("loop ok").expect("context");
+    let tool_result = context
+        .messages()
+        .iter()
+        .find_map(|message| match message {
+            Message::ToolResult { value } if value.name == "read" => Some(value),
+            _ => None,
+        })
+        .expect("read result must be persisted");
+    assert_eq!(tool_result.result, encoded);
 }
 
 #[tokio::test(start_paused = true)]
