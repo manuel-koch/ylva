@@ -17,8 +17,11 @@
 //!
 //! stdout and stderr are read concurrently by two separate async tasks and
 //! merged in true arrival order via an unbounded channel. Total output is
-//! capped at [`BASH_OUTPUT_LIMIT_LINES`] whole lines; lines beyond the cap are
-//! silently discarded and the result carries `truncated` metadata.
+//! capped at [`BASH_OUTPUT_LIMIT_LINES`] whole lines or
+//! [`BASH_OUTPUT_LIMIT_BYTES`] bytes, whichever is hit first; excess is
+//! silently discarded (a line that alone exceeds the remaining byte budget is
+//! kept as a UTF-8-safe prefix up to the cap) and the result carries
+//! `truncated` metadata.
 //!
 //! Process-group kill is performed by a [`ProcessGroupGuard`] whose `Drop`
 //! implementation sends `SIGKILL` to the whole group. The guard lives in the
@@ -465,8 +468,11 @@ pub async fn run_bash(args: BashInputArgs, timeout_secs: u64) -> Result<BashResu
 
 /// Drain `receiver` and accumulate up to [`BASH_OUTPUT_LIMIT_LINES`] whole
 /// lines of text, capped at [`BASH_OUTPUT_LIMIT_BYTES`] total bytes,
-/// whichever limit is hit first. Lines beyond either cap are received (to
-/// avoid blocking senders) but discarded.
+/// whichever limit is hit first. Lines beyond the line cap are received (to
+/// avoid blocking senders) but discarded. A line that alone exceeds the
+/// remaining byte budget is kept as a UTF-8-safe prefix up to the byte cap
+/// rather than discarded wholesale (so a single oversized first line still
+/// yields non-empty output).
 /// Returns `(output, truncated)`.
 async fn collect_output(
     receiver: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
@@ -480,9 +486,17 @@ async fn collect_output(
             // Keep draining so senders are not blocked, but discard content.
             continue;
         }
-        if line_count >= BASH_OUTPUT_LIMIT_LINES
-            || output.len() + line.len() > BASH_OUTPUT_LIMIT_BYTES
-        {
+        if line_count >= BASH_OUTPUT_LIMIT_LINES {
+            truncated = true;
+            continue;
+        }
+        let remaining_bytes = BASH_OUTPUT_LIMIT_BYTES.saturating_sub(output.len());
+        if line.len() > remaining_bytes {
+            let mut prefix_end = remaining_bytes;
+            while prefix_end > 0 && !line.is_char_boundary(prefix_end) {
+                prefix_end -= 1;
+            }
+            output.push_str(&line[..prefix_end]);
             truncated = true;
             continue;
         }
@@ -670,6 +684,40 @@ mod tests {
                 "output must never exceed the byte cap: got {} bytes",
                 result.output.len()
             );
+        });
+    }
+
+    #[test]
+    fn bash_single_unterminated_line_over_byte_cap_keeps_prefix() {
+        run_locked(async {
+            // One unterminated line larger than the byte cap (the heavy-output
+            // e2e shape). The collector must keep a prefix up to the cap, not
+            // discard the whole line and report output_bytes=0 with truncated.
+            let command = format!(
+                "head -c {} /dev/zero | tr '\\0' 'a'",
+                BASH_OUTPUT_LIMIT_BYTES + 50_000
+            );
+            let result = run_bash(make_bash_args(&command), 10)
+                .await
+                .expect("command should succeed");
+            assert!(result.truncated, "output should be marked as truncated");
+            assert_eq!(
+                result.output.len(),
+                BASH_OUTPUT_LIMIT_BYTES,
+                "oversized first line must yield a full-length prefix, not empty output"
+            );
+            assert!(
+                result.output.chars().all(|c| c == 'a'),
+                "prefix must be the start of the original line"
+            );
+            let meta = result.metadata().expect("result must have metadata");
+            let obj = meta.as_object().expect("metadata is a JSON object");
+            assert_eq!(
+                obj["output_bytes"].as_u64(),
+                Some(BASH_OUTPUT_LIMIT_BYTES as u64),
+                "metadata output_bytes must reflect the retained prefix"
+            );
+            assert_eq!(obj["truncated"], serde_json::json!(true));
         });
     }
 
