@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use base64::Engine as _;
 use eventsource_stream::Eventsource;
 use futures::future::BoxFuture;
 use futures::StreamExt;
@@ -22,14 +23,153 @@ use uuid::Uuid;
 
 use crate::agent::{DeltaChunk, Message, StreamEvent};
 use crate::llm::engine::{EngineRuntimeConfig, EngineRuntimeConfigHandle, DEFAULT_CONTEXT_LENGTH};
-use crate::llm::{serialize_messages, Provider, ToolSchema};
+use crate::llm::openai_compatible_messages::{serialize_messages_with_policy, ContentPartFormat};
+use crate::llm::{InputModality, Provider, ToolSchema};
 
 type RequestBodyCustomizer = fn(&mut serde_json::Value, &EngineRuntimeConfig);
+pub(crate) type RequestBodyRedactor = fn(&serde_json::Value) -> serde_json::Value;
 
 fn no_request_body_customization(
     _request_body: &mut serde_json::Value,
     _runtime_config: &EngineRuntimeConfig,
 ) {
+}
+
+const REDACTED_BASE64_RESULT: &str = "<REDACTED_BASE64_RESULT>";
+const REDACTED_MEDIA_DATA: &str = "<REDACTED_MEDIA_DATA>";
+
+/// Redact media payloads from a Chat Completions request copy used only for
+/// request dumps. The live request body is never mutated.
+pub(crate) fn redact_chat_completion_request_body(body: &serde_json::Value) -> serde_json::Value {
+    let mut redacted = body.clone();
+    if let Some(messages) = redacted
+        .get_mut("messages")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for message in messages {
+            redact_chat_completion_message(message);
+        }
+    }
+    redacted
+}
+
+fn redact_chat_completion_message(message: &mut serde_json::Value) {
+    let Some(object) = message.as_object_mut() else {
+        return;
+    };
+    let role = object
+        .get("role")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    match role.as_deref() {
+        Some("tool") => {
+            let Some(content) = object.get_mut("content") else {
+                return;
+            };
+            let Some(content_text) = content.as_str() else {
+                return;
+            };
+            let Ok(mut envelope) = serde_json::from_str::<serde_json::Value>(content_text) else {
+                return;
+            };
+            redact_tool_envelope(&mut envelope);
+            if let Ok(serialized) = serde_json::to_string(&envelope) {
+                *content = serde_json::Value::String(serialized);
+            }
+        }
+        Some("user") => {
+            let Some(content_parts) = object
+                .get_mut("content")
+                .and_then(serde_json::Value::as_array_mut)
+            else {
+                return;
+            };
+            for content_part in content_parts {
+                redact_chat_completion_content_part(content_part);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn redact_tool_envelope(envelope: &mut serde_json::Value) {
+    let Some(object) = envelope.as_object_mut() else {
+        return;
+    };
+    let result_is_base64 = object
+        .get("result_metadata")
+        .and_then(|metadata| metadata.get("encoding"))
+        .and_then(serde_json::Value::as_str)
+        == Some("base64");
+    let result_is_probable_base64 = object
+        .get("result")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(is_probable_base64_payload);
+    if result_is_base64 || result_is_probable_base64 {
+        if let Some(result) = object.get_mut("result") {
+            if result.is_string() {
+                *result = serde_json::Value::String(REDACTED_BASE64_RESULT.to_string());
+            }
+        }
+    }
+}
+
+fn redact_chat_completion_content_part(content_part: &mut serde_json::Value) {
+    let Some(object) = content_part.as_object_mut() else {
+        return;
+    };
+    match object.get("type").and_then(serde_json::Value::as_str) {
+        Some("image_url") => {
+            if let Some(image_url) = object.get_mut("image_url") {
+                redact_image_url(image_url);
+            }
+        }
+        Some("file") => {
+            if let Some(file_data) = object
+                .get_mut("file")
+                .and_then(serde_json::Value::as_object_mut)
+                .and_then(|file| file.get_mut("file_data"))
+            {
+                redact_data_uri_in_place(file_data);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn redact_image_url(image_url: &mut serde_json::Value) {
+    if let Some(url) = image_url
+        .as_object_mut()
+        .and_then(|object| object.get_mut("url"))
+    {
+        redact_data_uri_in_place(url);
+    } else {
+        redact_data_uri_in_place(image_url);
+    }
+}
+
+fn redact_data_uri_in_place(value: &mut serde_json::Value) {
+    if let Some(data_uri) = value.as_str() {
+        if let Some(redacted_data_uri) = redact_data_uri(data_uri) {
+            *value = serde_json::Value::String(redacted_data_uri);
+        }
+    }
+}
+
+fn is_probable_base64_payload(value: &str) -> bool {
+    value.len() >= 8
+        && value.len().is_multiple_of(4)
+        && base64::engine::general_purpose::STANDARD
+            .decode(value)
+            .is_ok()
+}
+
+fn redact_data_uri(value: &str) -> Option<String> {
+    let (prefix, payload) = value.split_once(";base64,")?;
+    if !prefix.starts_with("data:") || payload.is_empty() {
+        return None;
+    }
+    Some(format!("{prefix};base64,{REDACTED_MEDIA_DATA}"))
 }
 
 /// Shared streaming transport targeting the OpenAI chat-completions spec.
@@ -55,6 +195,8 @@ pub struct OpenAiCompatibleProvider {
     api_key: Option<String>,
     client: reqwest::Client,
     request_body_customizer: RequestBodyCustomizer,
+    request_body_redactor: RequestBodyRedactor,
+    content_part_format: ContentPartFormat,
 }
 
 impl OpenAiCompatibleProvider {
@@ -72,6 +214,7 @@ impl OpenAiCompatibleProvider {
             model,
             api_key,
             no_request_body_customization,
+            redact_chat_completion_request_body,
         )
     }
 
@@ -81,6 +224,27 @@ impl OpenAiCompatibleProvider {
         model: String,
         api_key: Option<String>,
         request_body_customizer: RequestBodyCustomizer,
+        request_body_redactor: RequestBodyRedactor,
+    ) -> Self {
+        Self::new_with_request_body_customizer_and_format(
+            name,
+            base_url,
+            model,
+            api_key,
+            request_body_customizer,
+            ContentPartFormat::OpenAiCompatible,
+            request_body_redactor,
+        )
+    }
+
+    pub(crate) fn new_with_request_body_customizer_and_format(
+        name: String,
+        base_url: String,
+        model: String,
+        api_key: Option<String>,
+        request_body_customizer: RequestBodyCustomizer,
+        content_part_format: ContentPartFormat,
+        request_body_redactor: RequestBodyRedactor,
     ) -> Self {
         OpenAiCompatibleProvider {
             name,
@@ -90,10 +254,13 @@ impl OpenAiCompatibleProvider {
                 temperature: None,
                 context_length: DEFAULT_CONTEXT_LENGTH,
                 reasoning_effort: None,
+                input_modalities: None,
             })),
             api_key,
             client: reqwest::Client::new(),
             request_body_customizer,
+            request_body_redactor,
+            content_part_format,
         }
     }
 
@@ -187,6 +354,8 @@ impl Provider for OpenAiCompatibleProvider {
         let api_key = self.api_key.clone();
         let client = self.client.clone();
         let request_body_customizer = self.request_body_customizer;
+        let request_body_redactor = self.request_body_redactor;
+        let content_part_format = self.content_part_format;
         let tools: Vec<serde_json::Value> = if tools.is_empty() {
             Vec::new()
         } else {
@@ -195,7 +364,11 @@ impl Provider for OpenAiCompatibleProvider {
         Box::pin(async move {
             let mut request_body = serde_json::json!({
                 "model": model,
-                "messages": serialize_messages(&messages),
+                "messages": serialize_messages_with_policy(
+                    &messages,
+                    runtime_config.input_modalities.as_deref(),
+                    content_part_format,
+                ),
                 "stream": true,
             });
             if let Some(temperature) = runtime_config.temperature {
@@ -224,17 +397,31 @@ impl Provider for OpenAiCompatibleProvider {
                 model = %runtime_config.model,
                 temperature = ?runtime_config.temperature,
                 effective_context_length = runtime_config.context_length,
-                reasoning_effort = ?runtime_config.reasoning_effort,
+                reasoning_effort = %crate::llm::format_reasoning_effort_for_log(
+                    runtime_config.reasoning_effort.as_deref()
+                ),
+                input_modalities = %crate::llm::format_input_modalities_for_log(
+                    runtime_config.input_modalities.as_deref()
+                ),
                 dump_id = %dump_id,
                 "chat request started"
             );
             // Logged once, upfront, alongside the request dump's own
-            // "dumped request body" log line (emitted inside
-            // `post_with_retry`) — together they let a request/response pair
-            // be found from a log timestamp without guessing the paired
-            // filename from the request dump path alone.
+            // "dumped request body" log line. Together they let a
+            // request/response pair be found from a log timestamp without
+            // guessing the paired filename from the request dump path alone.
             if let Some(path) = &response_dump_path {
                 tracing::debug!(dump_id = %dump_id, path = %path.display(), "response dump path resolved");
+            }
+            if let Some(path) = &request_dump_path {
+                let redacted_headers = super::http::redacted_headers_json(&headers);
+                let redacted_body = request_body_redactor(&request_body);
+                super::http::dump_request(
+                    &completions_url,
+                    &redacted_headers,
+                    &redacted_body,
+                    path,
+                );
             }
             let response = super::http::post_with_retry(
                 &client,
@@ -242,7 +429,6 @@ impl Provider for OpenAiCompatibleProvider {
                 &headers,
                 &request_body,
                 &cancel,
-                request_dump_path.as_deref(),
             )
             .await?;
 
@@ -445,9 +631,28 @@ fn parse_model_list(body: &serde_json::Value) -> Vec<crate::llm::ModelInfo> {
                     .and_then(serde_json::Value::as_u64)
                     .map(|length| length as usize),
                 reasoning_efforts: parse_reasoning_efforts(entry),
+                input_modalities: parse_input_modalities(entry),
             })
         })
         .collect()
+}
+
+fn parse_input_modalities(entry: &serde_json::Value) -> Option<Vec<InputModality>> {
+    let values = entry
+        .pointer("/architecture/input_modalities")
+        .or_else(|| entry.get("input_modalities"))?
+        .as_array()?;
+    Some(
+        values
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .filter_map(|modality| match modality {
+                "image" => Some(InputModality::Image),
+                "file" => Some(InputModality::File),
+                _ => None,
+            })
+            .collect(),
+    )
 }
 
 fn parse_reasoning_efforts(entry: &serde_json::Value) -> Option<Vec<String>> {
@@ -500,6 +705,7 @@ mod tests {
                 id: "openai/gpt-oss-120b".to_string(),
                 context_length: Some(131072),
                 reasoning_efforts: None,
+                input_modalities: None,
             }]
         );
     }
@@ -534,6 +740,79 @@ mod tests {
                 None,
             ]
         );
+    }
+
+    #[test]
+    fn parse_model_list_extracts_supported_input_modalities_conservatively() {
+        let body = serde_json::json!({
+            "data": [
+                {
+                    "id": "vision-and-files",
+                    "architecture": {"input_modalities": ["text", "image", "file"]}
+                },
+                {
+                    "id": "known-text-only",
+                    "architecture": {"input_modalities": ["text", "audio"]}
+                },
+                {"id": "unknown"}
+            ]
+        });
+
+        let models = parse_model_list(&body);
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.input_modalities.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                Some(vec![InputModality::Image, InputModality::File]),
+                Some(vec![]),
+                None,
+            ]
+        );
+    }
+
+    #[test]
+    fn request_body_redactor_redacts_only_chat_completion_media_payloads() {
+        let encoded = "QklOQVJZX1NFQ1JFVA==";
+        let ordinary_media_marker = "TEXT_MEDIA_SENTINEL";
+        let body = serde_json::json!({
+            "model": "vision-model",
+            "messages": [
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-1",
+                    "content": serde_json::json!({
+                        "ok": true,
+                        "result": encoded,
+                        "result_metadata": {"encoding": "base64", "media_type": "image/png"}
+                    }).to_string()
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "inspect"},
+                        {"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{encoded}")}},
+                        {"type": "image_url", "image_url": format!("data:image/jpeg;base64,{encoded}")},
+                        {"type": "file", "file": {"file_data": format!("data:application/pdf;base64,{encoded}"), "filename": "report.pdf"}},
+                        {"type": "text", "url": format!("data:image/png;base64,{ordinary_media_marker}"), "file_data": "ordinary-field"}
+                    ]
+                }
+            ]
+        });
+        let original = body.clone();
+        let redacted = redact_chat_completion_request_body(&body);
+
+        assert_eq!(body, original);
+        let redacted_text = redacted.to_string();
+        assert!(!redacted_text.contains(encoded));
+        assert!(redacted_text.contains("<REDACTED_BASE64_RESULT>"));
+        assert!(redacted_text.contains("data:image/png;base64,<REDACTED_MEDIA_DATA>"));
+        assert!(redacted_text.contains("data:image/jpeg;base64,<REDACTED_MEDIA_DATA>"));
+        assert!(redacted_text.contains("data:application/pdf;base64,<REDACTED_MEDIA_DATA>"));
+        assert!(redacted_text.contains(ordinary_media_marker));
+        assert!(redacted_text.contains("ordinary-field"));
+        assert!(redacted_text.contains("report.pdf"));
     }
 
     #[test]
@@ -576,6 +855,7 @@ mod tests {
                 runtime_config.temperature = Some(0.25);
                 runtime_config.context_length = 64_000;
                 runtime_config.reasoning_effort = Some("high".to_string());
+                runtime_config.input_modalities = Some(vec![InputModality::Image]);
             }
 
             let mut receiver = provider
@@ -599,7 +879,14 @@ mod tests {
         assert!(log.contains("model=runtime-model"));
         assert!(log.contains("temperature=Some(0.25)"));
         assert!(log.contains("effective_context_length=64000"));
-        assert!(log.contains("reasoning_effort=Some(\"high\")"));
+        assert!(
+            log.contains("reasoning_effort=high"),
+            "the request log must carry the thinking mode: {log}"
+        );
+        assert!(
+            log.contains("input_modalities=image"),
+            "the request log must carry the modalities: {log}"
+        );
         assert!(log.contains("dump_id="));
         assert!(!log.contains("test-api-key"));
         assert!(!log.contains("request-body-secret"));

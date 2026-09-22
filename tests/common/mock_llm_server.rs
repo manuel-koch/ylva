@@ -98,6 +98,11 @@ struct Behavior {
     model_path: Option<String>,
     /// Context length returned by the Ollama `POST /api/show` endpoint.
     ollama_context_length: Option<usize>,
+    /// Input modalities returned in the OpenAI-compatible model catalog's
+    /// `architecture.input_modalities` field.
+    model_input_modalities: Option<Vec<String>>,
+    /// Capabilities returned by the Ollama `POST /api/show` endpoint.
+    ollama_capabilities: Option<Vec<String>>,
 }
 
 /// Configuration for a [`MockLlmServer`].
@@ -123,6 +128,10 @@ pub struct MockLlmConfig {
     pub model_path: Option<String>,
     /// Context length returned by the Ollama model-details endpoint.
     pub ollama_context_length: Option<usize>,
+    /// Optional OpenAI-compatible catalog modalities for every model.
+    pub model_input_modalities: Option<Vec<String>>,
+    /// Optional Ollama `/api/show` capabilities for every model.
+    pub ollama_capabilities: Option<Vec<String>>,
 }
 
 impl Default for MockLlmConfig {
@@ -135,6 +144,8 @@ impl Default for MockLlmConfig {
             models: Vec::new(),
             model_path: None,
             ollama_context_length: None,
+            model_input_modalities: None,
+            ollama_capabilities: None,
         }
     }
 }
@@ -149,6 +160,8 @@ impl MockLlmConfig {
             models: self.models.clone(),
             model_path: self.model_path.clone(),
             ollama_context_length: self.ollama_context_length,
+            model_input_modalities: self.model_input_modalities.clone(),
+            ollama_capabilities: self.ollama_capabilities.clone(),
         }
     }
 }
@@ -326,7 +339,12 @@ async fn handle_connection(
         .as_deref()
         .is_none_or(|model_path| request_target == model_path);
     if request_target.ends_with("/models") && model_path_matches && behavior.status == 200 {
-        write_model_list_response(&mut writer, &behavior.models).await;
+        write_model_list_response(
+            &mut writer,
+            &behavior.models,
+            behavior.model_input_modalities.as_deref(),
+        )
+        .await;
         live_connections.fetch_sub(1, Ordering::SeqCst);
         return;
     }
@@ -336,7 +354,12 @@ async fn handle_connection(
         return;
     }
     if request_target.ends_with("/api/show") && behavior.status == 200 {
-        write_ollama_show_response(&mut writer, behavior.ollama_context_length).await;
+        write_ollama_show_response(
+            &mut writer,
+            behavior.ollama_context_length,
+            behavior.ollama_capabilities.as_deref(),
+        )
+        .await;
         live_connections.fetch_sub(1, Ordering::SeqCst);
         return;
     }
@@ -407,12 +430,21 @@ Content-Length: {}\r\n\
 async fn write_model_list_response(
     writer: &mut tokio::net::tcp::OwnedWriteHalf,
     models: &[String],
+    input_modalities: Option<&[String]>,
 ) {
     let payload = serde_json::json!({
         "object": "list",
         "data": models
             .iter()
-            .map(|id| serde_json::json!({ "id": id, "object": "model" }))
+            .map(|id| {
+                let mut model = serde_json::json!({ "id": id, "object": "model" });
+                if let Some(input_modalities) = input_modalities {
+                    model["architecture"] = serde_json::json!({
+                        "input_modalities": input_modalities,
+                    });
+                }
+                model
+            })
             .collect::<Vec<serde_json::Value>>(),
     });
     let body = payload.to_string();
@@ -445,13 +477,15 @@ async fn write_ollama_tags_response(
 async fn write_ollama_show_response(
     writer: &mut tokio::net::tcp::OwnedWriteHalf,
     context_length: Option<usize>,
+    capabilities: Option<&[String]>,
 ) {
-    let payload = match context_length {
-        Some(context_length) => serde_json::json!({
-            "model_info": { "llama.context_length": context_length },
-        }),
-        None => serde_json::json!({}),
-    };
+    let mut payload = serde_json::json!({});
+    if let Some(context_length) = context_length {
+        payload["model_info"] = serde_json::json!({ "llama.context_length": context_length });
+    }
+    if let Some(capabilities) = capabilities {
+        payload["capabilities"] = serde_json::json!(capabilities);
+    }
     write_json_response(writer, &payload).await;
 }
 

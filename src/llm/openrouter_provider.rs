@@ -45,6 +45,7 @@ impl OpenRouterProvider {
                 model,
                 api_key,
                 Self::customize_request_body,
+                super::openai_compatible_provider::redact_chat_completion_request_body,
             ),
         }
     }
@@ -131,6 +132,7 @@ mod tests {
             temperature: None,
             context_length: crate::llm::engine::DEFAULT_CONTEXT_LENGTH,
             reasoning_effort: Some("high".to_string()),
+            input_modalities: None,
         };
 
         OpenRouterProvider::customize_request_body(&mut request_body, &runtime_config);

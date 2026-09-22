@@ -64,24 +64,15 @@ pub(crate) async fn post_json(
 /// successful response or a terminal [`anyhow::Error`].
 ///
 /// `headers` carries any provider-specific auth (and other) request headers;
-/// it is applied on every attempt. `request_dump_path` is computed once by
-/// the caller (via [`build_request_dump_path`] with a shared timestamp and
-/// dump ID) rather than inside this function so the caller can derive a
-/// paired response-dump path (via [`build_response_dump_path`]) using those
-/// exact same values — computing either value twice could otherwise land the
-/// request and its streamed response in differently-named files.
+/// it is applied on every attempt. Request diagnostics are handled by the
+/// caller so this function remains focused on transport and retry behavior.
 pub(crate) async fn post_with_retry(
     client: &reqwest::Client,
     url: &str,
     headers: &reqwest::header::HeaderMap,
     body: &serde_json::Value,
     cancel: &CancellationToken,
-    request_dump_path: Option<&Path>,
 ) -> anyhow::Result<reqwest::Response> {
-    if let Some(dump_path) = request_dump_path {
-        dump_request(url, headers, body, dump_path);
-    }
-
     let mut retries = 0usize;
     loop {
         let request = client.post(url).headers(headers.clone()).json(body);
@@ -192,7 +183,7 @@ fn is_sensitive_header_name(name: &str) -> bool {
 /// written to disk. Multiple values for the same header name are joined with
 /// `", "`, matching how the wire form of a repeated header is usually
 /// rendered.
-fn redacted_headers_json(headers: &reqwest::header::HeaderMap) -> serde_json::Value {
+pub(crate) fn redacted_headers_json(headers: &reqwest::header::HeaderMap) -> serde_json::Value {
     let mut redacted = serde_json::Map::new();
     for name in headers.keys() {
         let value = if is_sensitive_header_name(name.as_str()) {
@@ -211,8 +202,8 @@ fn redacted_headers_json(headers: &reqwest::header::HeaderMap) -> serde_json::Va
 }
 
 /// Dump an outgoing request to `file_path` as two JSON Lines: a metadata line
-/// (URL scheme/host/path plus headers, with any [`is_sensitive_header_name`]
-/// value redacted) followed by the request body, compact (not
+/// (URL scheme/host/path plus an already-redacted headers projection) followed
+/// by an already-redacted request body, compact (not
 /// pretty-printed, so it stays on its own single line).
 ///
 /// The parent directory of `file_path` is created if it does not yet exist.
@@ -220,8 +211,8 @@ fn redacted_headers_json(headers: &reqwest::header::HeaderMap) -> serde_json::Va
 /// never breaks a live request.
 pub(crate) fn dump_request(
     url: &str,
-    headers: &reqwest::header::HeaderMap,
-    body: &serde_json::Value,
+    redacted_headers: &serde_json::Value,
+    redacted_body: &serde_json::Value,
     file_path: &Path,
 ) {
     if let Err(error) = std::fs::create_dir_all(file_path.parent().unwrap_or(Path::new("."))) {
@@ -240,10 +231,13 @@ pub(crate) fn dump_request(
         "scheme": parsed_url.scheme(),
         "host": parsed_url.host_str().unwrap_or(""),
         "path": parsed_url.path(),
-        "headers": redacted_headers_json(headers),
+        "headers": redacted_headers,
     });
 
-    let (meta_line, body_line) = match (serde_json::to_string(&meta), serde_json::to_string(body)) {
+    let (meta_line, body_line) = match (
+        serde_json::to_string(&meta),
+        serde_json::to_string(redacted_body),
+    ) {
         (Ok(meta_line), Ok(body_line)) => (meta_line, body_line),
         (meta_result, body_result) => {
             if let Err(error) = meta_result {
@@ -651,10 +645,11 @@ mod tests {
         let body = serde_json::json!({"model": "test", "messages": []});
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("x-custom", "value".parse().expect("header value"));
+        let redacted_headers = redacted_headers_json(&headers);
 
         dump_request(
             "https://example.com/v1/chat/completions?stream=true",
-            &headers,
+            &redacted_headers,
             &body,
             &file_path,
         );
@@ -686,8 +681,14 @@ mod tests {
         );
         headers.insert("x-api-key", "another-secret".parse().expect("header value"));
         headers.insert("x-custom", "not-secret".parse().expect("header value"));
+        let redacted_headers = redacted_headers_json(&headers);
 
-        dump_request("https://example.com/v1/chat", &headers, &body, &file_path);
+        dump_request(
+            "https://example.com/v1/chat",
+            &redacted_headers,
+            &body,
+            &file_path,
+        );
 
         let contents = std::fs::read_to_string(&file_path).expect("read file");
         let meta: serde_json::Value =
@@ -706,10 +707,11 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let file_path = temp_dir.path().join("nested/dir/request.jsonl");
         let body = serde_json::json!({"nested": true});
+        let redacted_headers = redacted_headers_json(&reqwest::header::HeaderMap::new());
 
         dump_request(
             "https://example.com/v1/chat",
-            &reqwest::header::HeaderMap::new(),
+            &redacted_headers,
             &body,
             &file_path,
         );

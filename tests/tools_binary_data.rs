@@ -60,7 +60,10 @@ async fn registry_round_trips_binary_and_text_calls() {
     assert_eq!(read_result.text(), binary_content);
     assert_eq!(
         read_result.metadata(),
-        Some(serde_json::json!({ "read_bytes": binary_bytes.len() }))
+        Some(serde_json::json!({
+            "read_bytes": binary_bytes.len(),
+            "encoding": "base64",
+        }))
     );
     assert!(read_result.content_sections().is_empty());
 
@@ -105,6 +108,7 @@ async fn registry_round_trips_binary_and_text_calls() {
         Some(serde_json::json!({
             "read_bytes": text_binary.len(),
             "read_lines": 2,
+            "encoding": "base64",
         }))
     );
     assert_eq!(text_binary_read_result.content_sections().len(), 1);

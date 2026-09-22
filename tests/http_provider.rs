@@ -19,12 +19,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use ylva::llm::ProviderRegistry;
 use ylva::{
-    AgentCommand, AgentLoop, AssistantStatus, Engine, EngineConfig, EngineImpl, Message,
-    OllamaProvider, OpenAiCompatibleProvider, OpenRouterProvider, Provider,
-    ProviderConnectionConfig, StreamEvent, ToolRegistry, UiUpdate, UserMessageKind, DEFAULT_SOUL,
-    TOOL_PROTOCOL_SYSTEM_PROMPT,
+    AgentCommand, AgentLoop, AssistantStatus, Engine, EngineConfig, EngineImpl, InputModality,
+    Message, OllamaProvider, OpenAiCompatibleProvider, OpenRouterProvider, Provider,
+    ProviderConnectionConfig, ProviderModelOption, StreamEvent, ToolAttachment, ToolRegistry,
+    ToolResult, UiUpdate, UserMessageKind, DEFAULT_SOUL, TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
 
 use common::collect_until;
@@ -117,6 +118,33 @@ async fn openrouter_provider_lists_models_from_openai_catalog() {
 }
 
 #[tokio::test]
+async fn openrouter_catalog_preserves_image_and_file_capabilities() {
+    let config = MockLlmConfig {
+        models: vec!["provider/multimodal".to_string()],
+        model_path: Some("/api/v1/models".to_string()),
+        model_input_modalities: Some(vec![
+            "text".to_string(),
+            "image".to_string(),
+            "file".to_string(),
+        ]),
+        ..Default::default()
+    };
+    let server = MockLlmServer::start(config).await.expect("bind failed");
+    let provider = OpenRouterProvider::new(
+        "openrouter".to_string(),
+        server.base_url(),
+        "provider/multimodal".to_string(),
+        Some("test-key".to_string()),
+    );
+
+    let models = provider.list_models().await.expect("catalog response");
+    assert_eq!(
+        models[0].input_modalities,
+        Some(vec![InputModality::Image, InputModality::File])
+    );
+}
+
+#[tokio::test]
 async fn ollama_provider_lists_native_models_and_loads_details() {
     let config = MockLlmConfig {
         models: vec!["gemma4:latest".to_string(), "qwen3:8b".to_string()],
@@ -146,6 +174,320 @@ async fn ollama_provider_lists_native_models_and_loads_details() {
             ("qwen3:8b", Some(131_072)),
         ]
     );
+}
+
+#[tokio::test]
+async fn ollama_details_map_vision_to_image_without_file_support() {
+    let config = MockLlmConfig {
+        models: vec!["gemma4:vision".to_string()],
+        ollama_context_length: Some(131_072),
+        ollama_capabilities: Some(vec!["completion".to_string(), "vision".to_string()]),
+        ..Default::default()
+    };
+    let server = MockLlmServer::start(config).await.expect("bind failed");
+    let provider = OllamaProvider::new(
+        "ollama-local".to_string(),
+        server.base_url(),
+        "gemma4:vision".to_string(),
+        None,
+    );
+
+    let models = provider.list_models().await.expect("catalog response");
+    assert_eq!(models[0].input_modalities, Some(vec![InputModality::Image]));
+    assert!(!models[0]
+        .input_modalities
+        .as_ref()
+        .expect("known capabilities")
+        .contains(&InputModality::File));
+}
+
+fn image_tool_message(encoded: &str) -> Message {
+    Message::ToolResult {
+        value: ToolResult {
+            id: uuid::Uuid::new_v4(),
+            name: "read".to_string(),
+            result: encoded.to_string(),
+            attachments: vec![ToolAttachment::Image {
+                media_type: "image/png".to_string(),
+            }],
+            result_section_id: None,
+            result_metadata: Some(serde_json::json!({
+                "read_bytes": 8,
+                "encoding": "base64",
+                "media_type": "image/png",
+            })),
+            result_metadata_schema: None,
+            summary: vec![],
+            content_sections: vec![],
+            duration: Duration::ZERO,
+        },
+    }
+}
+
+#[tokio::test]
+async fn openrouter_request_projects_selected_image_capability_once() {
+    let config = MockLlmConfig {
+        models: vec!["provider/vision".to_string()],
+        model_path: Some("/api/v1/models".to_string()),
+        model_input_modalities: Some(vec!["image".to_string()]),
+        frames: vec![content_frame("ok")],
+        end_after_frames: true,
+        ..Default::default()
+    };
+    let server = MockLlmServer::start(config).await.expect("bind failed");
+    let provider = Arc::new(OpenRouterProvider::new(
+        "openrouter".to_string(),
+        server.base_url(),
+        "provider/vision".to_string(),
+        Some("test-key".to_string()),
+    ));
+    let engine = EngineImpl::new(
+        provider,
+        EngineConfig {
+            provider_connection: "openrouter".to_string(),
+            model: "provider/vision".to_string(),
+            temperature: None,
+            context_length: None,
+            api_base_url: Some(server.base_url()),
+            api_key: Some("test-key".to_string()),
+            reasoning: None,
+        },
+    );
+    let models = engine.list_models().await.expect("model catalog");
+    engine
+        .switch_model_option(&ProviderModelOption {
+            provider_connection: "openrouter".to_string(),
+            model: models[0].clone(),
+            reasoning_effort: None,
+        })
+        .expect("select capable model");
+    let encoded = "OPENROUTER_IMAGE_SENTINEL";
+    let mut receiver = engine
+        .chat(
+            vec![image_tool_message(encoded)],
+            vec![],
+            CancellationToken::new(),
+        )
+        .await
+        .expect("chat request");
+    let _ = drain_text_until_done(&mut receiver).await;
+
+    let request = server
+        .request_bodies()
+        .into_iter()
+        .find_map(|body| {
+            let value: serde_json::Value = serde_json::from_str(&body).ok()?;
+            if value.get("messages").is_some() {
+                Some(value)
+            } else {
+                None
+            }
+        })
+        .expect("captured chat request");
+    assert_eq!(request["messages"].as_array().expect("messages").len(), 2);
+    assert_eq!(request["messages"][0]["role"], "tool");
+    assert_eq!(request["messages"][1]["role"], "user");
+    assert_eq!(request["messages"][1]["content"][1]["type"], "image_url");
+    assert_eq!(request.to_string().matches(encoded).count(), 1);
+}
+
+#[tokio::test]
+async fn ollama_vision_request_uses_compatibility_image_shape_and_pdf_fallback() {
+    let config = MockLlmConfig {
+        models: vec!["vision-model".to_string()],
+        ollama_capabilities: Some(vec!["completion".to_string(), "vision".to_string()]),
+        frames: vec![content_frame("ok")],
+        end_after_frames: true,
+        ..Default::default()
+    };
+    let server = MockLlmServer::start(config).await.expect("bind failed");
+    let provider = Arc::new(OllamaProvider::new(
+        "ollama".to_string(),
+        server.base_url(),
+        "vision-model".to_string(),
+        None,
+    ));
+    let engine = EngineImpl::new(
+        provider,
+        EngineConfig {
+            provider_connection: "ollama".to_string(),
+            model: "vision-model".to_string(),
+            temperature: None,
+            context_length: None,
+            api_base_url: Some(server.base_url()),
+            api_key: None,
+            reasoning: None,
+        },
+    );
+    let models = engine.list_models().await.expect("model catalog");
+    engine
+        .switch_model_option(&ProviderModelOption {
+            provider_connection: "ollama".to_string(),
+            model: models[0].clone(),
+            reasoning_effort: None,
+        })
+        .expect("select vision model");
+
+    let encoded = "OLLAMA_IMAGE_SENTINEL";
+    let mut receiver = engine
+        .chat(
+            vec![image_tool_message(encoded)],
+            vec![],
+            CancellationToken::new(),
+        )
+        .await
+        .expect("image chat request");
+    let _ = drain_text_until_done(&mut receiver).await;
+
+    let image_request = server
+        .request_bodies()
+        .into_iter()
+        .filter_map(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+        .find(|value| value.get("messages").is_some())
+        .expect("captured image chat request");
+    assert!(image_request["messages"][1]["content"][1]["image_url"].is_string());
+    assert_eq!(image_request.to_string().matches(encoded).count(), 1);
+
+    let pdf = Message::ToolResult {
+        value: ToolResult {
+            id: uuid::Uuid::new_v4(),
+            name: "read".to_string(),
+            result: "OLLAMA_PDF_SENTINEL".to_string(),
+            attachments: vec![ToolAttachment::File {
+                media_type: "application/pdf".to_string(),
+                filename: "report.pdf".to_string(),
+            }],
+            result_section_id: None,
+            result_metadata: Some(serde_json::json!({"encoding": "base64"})),
+            result_metadata_schema: None,
+            summary: vec![],
+            content_sections: vec![],
+            duration: Duration::ZERO,
+        },
+    };
+    let mut receiver = engine
+        .chat(vec![pdf], vec![], CancellationToken::new())
+        .await
+        .expect("pdf fallback request");
+    let _ = drain_text_until_done(&mut receiver).await;
+    let pdf_request = server
+        .request_bodies()
+        .into_iter()
+        .filter_map(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+        .rfind(|value| value.get("messages").is_some())
+        .expect("captured pdf chat request");
+    assert_eq!(
+        pdf_request["messages"].as_array().expect("messages").len(),
+        1
+    );
+    assert!(pdf_request["messages"][0]["content"]
+        .as_str()
+        .expect("tool envelope")
+        .contains("OLLAMA_PDF_SENTINEL"));
+    assert!(pdf_request.to_string().contains("OLLAMA_PDF_SENTINEL"));
+    assert!(!pdf_request.to_string().contains("image_url"));
+}
+
+#[tokio::test]
+async fn generic_openai_compatible_provider_keeps_unknown_capability_as_text() {
+    let config = MockLlmConfig {
+        frames: vec![content_frame("ok")],
+        end_after_frames: true,
+        ..Default::default()
+    };
+    let server = MockLlmServer::start(config).await.expect("bind failed");
+    let provider = openai_compatible_provider_for(&server);
+    let encoded = "GENERIC_UNKNOWN_SENTINEL";
+    let mut receiver = provider
+        .chat(
+            vec![image_tool_message(encoded)],
+            vec![],
+            CancellationToken::new(),
+        )
+        .await
+        .expect("chat request");
+    let _ = drain_text_until_done(&mut receiver).await;
+    let request = server
+        .request_bodies()
+        .into_iter()
+        .find_map(|body| {
+            let value: serde_json::Value = serde_json::from_str(&body).ok()?;
+            if value.get("messages").is_some() {
+                Some(value)
+            } else {
+                None
+            }
+        })
+        .expect("captured chat request");
+    assert_eq!(request["messages"].as_array().expect("messages").len(), 1);
+    assert!(request["messages"][0]["content"]
+        .as_str()
+        .expect("tool envelope")
+        .contains(encoded));
+    assert!(!request.to_string().contains("image_url"));
+}
+
+#[tokio::test]
+async fn generic_openai_compatible_catalog_can_opt_into_image_projection() {
+    let config = MockLlmConfig {
+        models: vec!["generic/vision".to_string()],
+        model_input_modalities: Some(vec!["image".to_string()]),
+        frames: vec![content_frame("ok")],
+        end_after_frames: true,
+        ..Default::default()
+    };
+    let server = MockLlmServer::start(config).await.expect("bind failed");
+    let provider = Arc::new(OpenAiCompatibleProvider::new(
+        "generic".to_string(),
+        server.base_url(),
+        "generic/vision".to_string(),
+        None,
+    ));
+    let engine = EngineImpl::new(
+        provider,
+        EngineConfig {
+            provider_connection: "generic".to_string(),
+            model: "generic/vision".to_string(),
+            temperature: None,
+            context_length: None,
+            api_base_url: Some(server.base_url()),
+            api_key: None,
+            reasoning: None,
+        },
+    );
+    let models = engine.list_models().await.expect("model catalog");
+    engine
+        .switch_model_option(&ProviderModelOption {
+            provider_connection: "generic".to_string(),
+            model: models[0].clone(),
+            reasoning_effort: None,
+        })
+        .expect("select advertised image model");
+    let encoded = "GENERIC_KNOWN_SENTINEL";
+    let mut receiver = engine
+        .chat(
+            vec![image_tool_message(encoded)],
+            vec![],
+            CancellationToken::new(),
+        )
+        .await
+        .expect("chat request");
+    let _ = drain_text_until_done(&mut receiver).await;
+    let request = server
+        .request_bodies()
+        .into_iter()
+        .find_map(|body| {
+            let value: serde_json::Value = serde_json::from_str(&body).ok()?;
+            if value.get("messages").is_some() {
+                Some(value)
+            } else {
+                None
+            }
+        })
+        .expect("captured chat request");
+    assert_eq!(request["messages"][1]["content"][1]["type"], "image_url");
+    assert!(request["messages"][1]["content"][1]["image_url"]["url"].is_string());
+    assert_eq!(request.to_string().matches(encoded).count(), 1);
 }
 
 #[tokio::test]

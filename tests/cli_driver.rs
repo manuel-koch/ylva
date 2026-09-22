@@ -297,6 +297,7 @@ impl Engine for SwitchableTestEngine {
                 id: model,
                 context_length: None,
                 reasoning_efforts: None,
+                input_modalities: None,
             }])
         })
     }
@@ -378,6 +379,7 @@ async fn child_spawn_after_root_model_switch_uses_the_root_active_engine() {
                 id: "alternate-model".to_string(),
                 context_length: None,
                 reasoning_efforts: None,
+                input_modalities: None,
             },
             reasoning_effort: None,
         })
@@ -488,6 +490,7 @@ async fn running_child_uses_a_shared_engine_switch_on_its_next_request() {
                 id: "alternate-model".to_string(),
                 context_length: None,
                 reasoning_efforts: None,
+                input_modalities: None,
             },
             reasoning_effort: None,
         })
@@ -593,6 +596,7 @@ async fn child_with_explicit_engine_override_keeps_its_named_engine() {
                 id: "alternate-model".to_string(),
                 context_length: None,
                 reasoning_efforts: None,
+                input_modalities: None,
             },
             reasoning_effort: None,
         })

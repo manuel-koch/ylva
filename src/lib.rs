@@ -50,9 +50,9 @@ pub use agent::tools::{
 };
 pub use agent::{
     AgentCommand, AgentEvent, AgentLoop, AgentMode, AssembledToolCall, AssistantStatus,
-    ChildRoleConfig, Context, DeltaChunk, Message, PendingTool, Role, StreamEvent, ToolCallRequest,
-    ToolResult, UiUpdate, UserMessageKind, DEFAULT_TOOL_TIMEOUT_SECS, MAX_TOOL_USE_ITERATIONS,
-    TOOL_PROTOCOL_SYSTEM_PROMPT,
+    ChildRoleConfig, Context, DeltaChunk, Message, PendingTool, Role, StreamEvent, ToolAttachment,
+    ToolCallRequest, ToolResult, UiUpdate, UserMessageKind, DEFAULT_TOOL_TIMEOUT_SECS,
+    MAX_TOOL_USE_ITERATIONS, TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
 pub use agent_factory::AgentFactory;
 pub use app::App;
@@ -78,7 +78,7 @@ pub use llm::engine::{
     EngineRuntimeConfigHandle, ProviderModelOption, DEFAULT_CONTEXT_LENGTH,
 };
 pub use llm::{
-    MockEvent, MockProvider, ModelInfo, OllamaProvider, OpenAiCompatibleProvider,
+    InputModality, MockEvent, MockProvider, ModelInfo, OllamaProvider, OpenAiCompatibleProvider,
     OpenRouterProvider, Provider, ToolSchema,
 };
 pub use presenter::{TextareaContext, TuiEvent};

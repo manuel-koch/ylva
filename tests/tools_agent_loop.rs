@@ -31,8 +31,8 @@ use tokio_util::sync::CancellationToken;
 use ylva::{
     default_registry, AgentCommand, AgentLoop, ApprovalCheck, AssistantStatus, AutoApproveTool,
     DeltaChunk, EngineImpl, Message, MockEvent, MockProvider, Provider, Sandbox, StreamEvent, Tool,
-    ToolCall, ToolCallResult, ToolError, ToolRegistry, ToolRegistryConfig, ToolSchema, UiUpdate,
-    UserMessageKind, MAX_TOOL_USE_ITERATIONS,
+    ToolAttachment, ToolCall, ToolCallResult, ToolError, ToolRegistry, ToolRegistryConfig,
+    ToolSchema, UiUpdate, UserMessageKind, MAX_TOOL_USE_ITERATIONS,
 };
 
 /// Build a `MockEvent::Delta` carrying a complete tool call for `index`.
@@ -492,7 +492,7 @@ async fn failing_tool_emits_tool_error_and_still_reprompts() {
 async fn base64_read_result_stays_in_model_context_but_not_tool_bubble() {
     let dir = TempDir::new().expect("tempdir");
     let path = dir.path().join("image.png");
-    let bytes = [137, 80, 78, 71, 0, 255];
+    let bytes = [137, 80, 78, 71, 13, 10, 26, 10, 0, 255];
     std::fs::write(&path, bytes).expect("write fixture");
     let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
     let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox {
@@ -552,6 +552,12 @@ async fn base64_read_result_stays_in_model_context_but_not_tool_bubble() {
         })
         .expect("read result must be persisted");
     assert_eq!(tool_result.result, encoded);
+    assert_eq!(
+        tool_result.attachments,
+        vec![ToolAttachment::Image {
+            media_type: "image/png".to_string(),
+        }]
+    );
 }
 
 #[tokio::test(start_paused = true)]

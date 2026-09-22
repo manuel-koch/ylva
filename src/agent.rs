@@ -228,6 +228,7 @@ pub enum AgentEvent {
         summary: Vec<(String, String)>,
         duration: std::time::Duration,
         content_sections: Vec<crate::agent::tools::Section>,
+        attachments: Vec<ToolAttachment>,
     },
     ToolError {
         id: Uuid,
@@ -460,6 +461,24 @@ impl ToolCallRequest {
     }
 }
 
+/// Provider-neutral media returned by a successful tool call.
+///
+/// The descriptor deliberately does not own the encoded bytes. It refers to
+/// the containing successful [`ToolResult::result`] value, which remains the
+/// canonical Base64 payload for persistence, replay, and text-only fallback.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolAttachment {
+    Image {
+        media_type: String,
+    },
+    File {
+        media_type: String,
+        /// A basename safe to send to a provider as the source filename.
+        filename: String,
+    },
+}
+
 /// Persisted data for one completed tool call.
 ///
 /// This is the payload of [`Message::ToolResult`] so callers can pass the
@@ -470,6 +489,10 @@ pub struct ToolResult {
     pub id: Uuid,
     pub name: String,
     pub result: String,
+    /// Media descriptors that reference this result's Base64 `result` value.
+    /// The descriptors never store a second copy of that payload.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<ToolAttachment>,
     /// Optional UI result-section identifier. `None` means the standard
     /// plain-result section; specialized tools such as `clarify` use a
     /// different identifier so replay can preserve the live rendering.
@@ -512,6 +535,10 @@ pub enum UserMessageKind {
 /// (`#[serde(tag = "role")]`) and **no** `deny_unknown_fields` is used, so a
 /// session file written by an older or newer build still deserializes
 /// (blueprint §4H decision 4).
+///
+/// The tool-result variant intentionally stays inline so the persisted
+/// `#[serde(flatten)]` shape and the single-writer context API remain direct.
+#[expect(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "role", rename_all = "snake_case")]
 pub enum Message {
@@ -881,6 +908,7 @@ impl PendingTool {
                         let display_result = tool_output.display_text();
                         let summary = tool_output.display_summary();
                         let content_sections = tool_output.content_sections();
+                        let attachments = tool_output.attachments();
                         let _ = agent_tx
                             .send((
                                 generation,
@@ -894,6 +922,7 @@ impl PendingTool {
                                     summary,
                                     duration,
                                     content_sections,
+                                    attachments,
                                 },
                             ))
                             .await;
@@ -1497,7 +1526,7 @@ impl AgentLoop {
                                 )
                                 .await;
                             }
-                            AgentEvent::ToolDone { id, name, result, display_result, result_metadata, result_metadata_schema, summary, duration, content_sections } => {
+                            AgentEvent::ToolDone { id, name, result, display_result, result_metadata, result_metadata_schema, summary, duration, content_sections, attachments } => {
                                 current_tool_cancel = None;
                                 // `agent_finish` is only ever registered on a `Role::Child`
                                 // registry; once it completes the child's ReAct loop
@@ -1518,6 +1547,7 @@ impl AgentLoop {
                                         id,
                                         name: name.clone(),
                                         result: result.clone(),
+                                        attachments,
                                         result_section_id: result_section_id.clone(),
                                         result_metadata,
                                         result_metadata_schema,
@@ -2078,6 +2108,7 @@ impl AgentLoop {
                                             id: call_id,
                                             name: tools::clarify::ClarifyTool::NAME.to_string(),
                                             result: answer.clone(),
+                                            attachments: vec![],
                                             result_section_id: Some(
                                                 crate::tui_reducer_state::result_section_ids::USER_ANSWER
                                                     .to_string(),
@@ -2596,6 +2627,7 @@ async fn resolve_spawn_subagent(
         id: call_id,
         name,
         result: result_text,
+        attachments: vec![],
         result_section_id: None,
         result_metadata: None,
         result_metadata_schema: None,
@@ -3393,6 +3425,7 @@ mod tests {
                 id: Uuid::new_v4(),
                 name: "tool".into(),
                 result: "ok".into(),
+                attachments: vec![],
                 result_section_id: None,
                 result_metadata: None,
                 result_metadata_schema: None,
@@ -3565,6 +3598,7 @@ mod tests {
             id,
             name: "read".into(),
             result: "contents".into(),
+            attachments: vec![],
             result_section_id: None,
             result_metadata: None,
             result_metadata_schema: None,
@@ -3587,6 +3621,7 @@ mod tests {
                     id,
                     name: "read".into(),
                     result: "contents".into(),
+                    attachments: vec![],
                     result_section_id: None,
                     result_metadata: None,
                     result_metadata_schema: None,
@@ -3623,6 +3658,10 @@ mod tests {
                 id,
                 name: "read".to_string(),
                 result: "contents".to_string(),
+                attachments: vec![ToolAttachment::File {
+                    media_type: "application/pdf".to_string(),
+                    filename: "report.pdf".to_string(),
+                }],
                 result_section_id: None,
                 result_metadata: Some(serde_json::json!({"bytes": 8})),
                 result_metadata_schema: Some(serde_json::json!({"type": "object"})),
@@ -3644,6 +3683,11 @@ mod tests {
         assert_eq!(serialized_result["role"], "tool_result");
         assert_eq!(serialized_result["id"], serde_json::json!(id));
         assert_eq!(serialized_result["result"], "contents");
+        assert_eq!(serialized_result["attachments"][0]["type"], "file");
+        assert_eq!(
+            serialized_result["attachments"][0]["filename"],
+            "report.pdf"
+        );
         assert!(
             serialized_result.get("value").is_none(),
             "the canonical payload must remain flattened in the persisted schema"
@@ -3671,6 +3715,7 @@ mod tests {
                     id,
                     name: "read".to_string(),
                     result: "old contents".to_string(),
+                    attachments: vec![],
                     result_section_id: None,
                     result_metadata: None,
                     result_metadata_schema: None,
@@ -3737,7 +3782,8 @@ mod tests {
                     && content_sections.is_empty()
         ));
 
-        let wire_payload = crate::llm::serialize_messages(context.messages());
+        let wire_payload =
+            crate::llm::openai_compatible_messages::serialize_messages(context.messages());
         assert!(wire_payload
             .as_array()
             .expect("wire payload is an array")
@@ -3801,6 +3847,7 @@ mod tests {
             id,
             name: "spawn_subagent".into(),
             result: "{\"status\":\"spawned\"}".into(),
+            attachments: vec![],
             result_section_id: None,
             result_metadata: None,
             result_metadata_schema: None,
@@ -3844,6 +3891,7 @@ mod tests {
                     id,
                     name: "spawn_subagent".into(),
                     result: "{\"status\":\"spawned\"}".into(),
+                    attachments: vec![],
                     result_section_id: None,
                     result_metadata: None,
                     result_metadata_schema: None,
@@ -4245,6 +4293,7 @@ mod tests {
             id: Uuid::new_v4(),
             name: "write".to_string(),
             result: "ok".to_string(),
+            attachments: vec![],
             result_section_id: None,
             result_metadata: None,
             result_metadata_schema: None,

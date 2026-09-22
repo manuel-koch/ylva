@@ -627,6 +627,8 @@ fn apply_model_list_result(
                         context_length: Some(effective_context_length),
                         reasoning_efforts: catalog_model
                             .and_then(|model| model.reasoning_efforts.clone()),
+                        input_modalities: catalog_model
+                            .and_then(|model| model.input_modalities.clone()),
                     };
                     let reasoning_effort = if is_active {
                         active_reasoning_effort.clone()
@@ -2690,6 +2692,7 @@ mod tests {
                         id: (*id).to_string(),
                         context_length: None,
                         reasoning_efforts: None,
+                        input_modalities: None,
                     })
                     .collect(),
                 switched_to: std::sync::Mutex::new(Vec::new()),
@@ -2744,6 +2747,7 @@ mod tests {
                         } else {
                             None
                         },
+                        input_modalities: None,
                     })
                     .collect(),
                 switched_to: std::sync::Mutex::new(Vec::new()),
@@ -3453,6 +3457,7 @@ mod tests {
                 id: "thinking".to_string(),
                 context_length: None,
                 reasoning_efforts: Some(vec!["low".to_string(), "high".to_string()]),
+                input_modalities: None,
             },
             reasoning_effort: None,
         };

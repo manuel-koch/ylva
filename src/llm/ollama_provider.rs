@@ -18,7 +18,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent::{Message, StreamEvent};
 use crate::llm::engine::{EngineRuntimeConfig, EngineRuntimeConfigHandle};
-use crate::llm::{ModelInfo, Provider, ToolSchema};
+use crate::llm::openai_compatible_messages::ContentPartFormat;
+use crate::llm::{InputModality, ModelInfo, Provider, ToolSchema};
 
 use super::http::{get_json, post_json};
 use super::OpenAiCompatibleProvider;
@@ -41,12 +42,14 @@ impl OllamaProvider {
         let native_base_url = base_url.trim_end_matches('/').to_string();
         let openai_base_url = format!("{native_base_url}/v1");
         Self {
-            inner: OpenAiCompatibleProvider::new_with_request_body_customizer(
+            inner: OpenAiCompatibleProvider::new_with_request_body_customizer_and_format(
                 name,
                 openai_base_url,
                 model,
                 api_key,
                 Self::customize_request_body,
+                ContentPartFormat::OllamaCompatibility,
+                super::openai_compatible_provider::redact_chat_completion_request_body,
             ),
             native_base_url,
         }
@@ -94,7 +97,10 @@ impl Provider for OllamaProvider {
                 let api_key = api_key.clone();
                 let show_url = show_url.clone();
                 async move {
-                    if model.context_length.is_some() && model.reasoning_efforts.is_some() {
+                    if model.context_length.is_some()
+                        && model.reasoning_efforts.is_some()
+                        && model.input_modalities.is_some()
+                    {
                         return model;
                     }
                     let request_body = serde_json::json!({ "model": model.id });
@@ -113,6 +119,9 @@ impl Provider for OllamaProvider {
                             }
                             if model.reasoning_efforts.is_none() {
                                 model.reasoning_efforts = parse_reasoning_efforts(&body);
+                            }
+                            if model.input_modalities.is_none() {
+                                model.input_modalities = parse_input_modalities(&body);
                             }
                         }
                         Err(error) => {
@@ -171,6 +180,7 @@ fn parse_tags(body: &serde_json::Value) -> Vec<ModelInfo> {
                 id: id.to_string(),
                 context_length,
                 reasoning_efforts: parse_reasoning_efforts(entry),
+                input_modalities: None,
             })
         })
         .collect()
@@ -207,6 +217,21 @@ fn parse_reasoning_efforts(body: &serde_json::Value) -> Option<Vec<String>> {
         .then(Vec::new)
 }
 
+fn parse_input_modalities(body: &serde_json::Value) -> Option<Vec<InputModality>> {
+    let capabilities = body.get("capabilities")?.as_array()?;
+    Some(
+        if capabilities
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .any(|capability| capability == "vision")
+        {
+            vec![InputModality::Image]
+        } else {
+            vec![]
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,6 +255,7 @@ mod tests {
                 id: "gemma4:latest".to_string(),
                 context_length: Some(32768),
                 reasoning_efforts: None,
+                input_modalities: None,
             }]
         );
     }
@@ -259,6 +285,24 @@ mod tests {
     }
 
     #[test]
+    fn parse_input_modalities_maps_vision_without_inventing_file_support() {
+        let vision_body = serde_json::json!({
+            "capabilities": ["completion", "vision"]
+        });
+        let text_body = serde_json::json!({
+            "capabilities": ["completion"]
+        });
+        let missing_body = serde_json::json!({});
+
+        assert_eq!(
+            parse_input_modalities(&vision_body),
+            Some(vec![InputModality::Image])
+        );
+        assert_eq!(parse_input_modalities(&text_body), Some(vec![]));
+        assert_eq!(parse_input_modalities(&missing_body), None);
+    }
+
+    #[test]
     fn customizes_openai_compatible_reasoning_request_body() {
         let mut request_body = serde_json::json!({});
         let runtime_config = crate::llm::engine::EngineRuntimeConfig {
@@ -266,6 +310,7 @@ mod tests {
             temperature: None,
             context_length: crate::llm::engine::DEFAULT_CONTEXT_LENGTH,
             reasoning_effort: Some("medium".to_string()),
+            input_modalities: None,
         };
 
         OllamaProvider::customize_request_body(&mut request_body, &runtime_config);

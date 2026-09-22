@@ -27,6 +27,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::ToolAttachment;
 use crate::llm::ToolSchema;
 use crate::sandbox::ApprovalCheck;
 
@@ -146,6 +147,19 @@ pub trait ToolCallResult: Send + Sync + std::fmt::Debug {
         None
     }
 
+    /// Optional schema describing the fields returned by [`metadata`](Self::metadata).
+    ///
+    /// This is LLM-facing documentation, not Rust-side validation and not a
+    /// UI projection. When metadata is present, the agent serializes this
+    /// schema into `result_metadata_schema` in the `role:"tool"` envelope so
+    /// the model can interpret the structured result fields.
+    ///
+    /// Only fields emitted for this result instance should appear. Conditional
+    /// fields may be omitted by returning a narrower schema.
+    fn metadata_schema(&self) -> Option<RootSchema> {
+        None
+    }
+
     /// Properties to render in the CLI/TUI tool summary.
     ///
     /// The default renders every property from [`metadata`](Self::metadata).
@@ -169,15 +183,10 @@ pub trait ToolCallResult: Send + Sync + std::fmt::Debug {
             .unwrap_or_default()
     }
 
-    /// JSON Schema describing the fields that are actually present in
-    /// `metadata()` for this specific result instance.
-    ///
-    /// Return `None` (the default) when `metadata()` is `None`. Implementations
-    /// that return metadata should return `Some(schema_for!(TheirMetadataStruct))`.
-    /// Only fields emitted for this instance need to appear — conditional fields
-    /// may be omitted by returning a narrower schema.
-    fn metadata_schema(&self) -> Option<RootSchema> {
-        None
+    /// Provider-neutral media descriptors for this result. Descriptors refer
+    /// to the successful result's `text()` value and never own a payload.
+    fn attachments(&self) -> Vec<ToolAttachment> {
+        vec![]
     }
 
     /// Rich content sections produced by this result (e.g. file text, command
@@ -381,7 +390,7 @@ pub trait Tool: Send + Sync {
 
     /// Whether an argument value equals the tool's semantic default, so a host
     /// can suppress it from an invocation summary. Defaults to `false`; tools
-    /// override for optional arguments (e.g. `read`'s `mode: lines`,
+    /// override for optional arguments (e.g. `read`'s `mode: null`,
     /// `offset: 0`/`null`, `limit: null`).
     fn is_default_argument(&self, _key: &str, _value: &Value) -> bool {
         false

@@ -1051,13 +1051,27 @@ mod tests {
                 "limit": 10,
             }),
         );
-        assert_eq!(rendered, "Read some/document.md [offset=88, limit=10]");
+        assert_eq!(
+            rendered,
+            "Read some/document.md [mode=lines, offset=88, limit=10]"
+        );
     }
 
     #[test]
     fn render_suppresses_default_valued_args() {
-        // mode=lines and offset=0 are defaults and must be suppressed.
+        // An absent (null) mode and offset=0 are defaults and must be
+        // suppressed; an explicit mode is a real choice and must show.
         let rendered = render_tool_invocation(
+            read_tool().as_ref(),
+            &serde_json::json!({
+                "path": "some/document.md",
+                "mode": null,
+                "offset": 0,
+                "limit": 32,
+            }),
+        );
+        assert_eq!(rendered, "Read some/document.md [limit=32]");
+        let rendered_explicit_mode = render_tool_invocation(
             read_tool().as_ref(),
             &serde_json::json!({
                 "path": "some/document.md",
@@ -1066,7 +1080,10 @@ mod tests {
                 "limit": 32,
             }),
         );
-        assert_eq!(rendered, "Read some/document.md [limit=32]");
+        assert_eq!(
+            rendered_explicit_mode,
+            "Read some/document.md [mode=lines, limit=32]"
+        );
     }
 
     #[test]

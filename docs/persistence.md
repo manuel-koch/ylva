@@ -217,6 +217,17 @@ Listing sessions takes no lock — it is a pure read.
   duration. These additive fields use `#[serde(default)]`, so files written
   before replay support deserialize and show silently degraded (blanker) tool
   bubbles.
+- `Message::ToolResult` also has an additive `attachments` field. It defaults
+  to an empty list when an older JSONL line omits it. Each
+  `ToolAttachment` stores only provider-neutral media metadata and references
+  the containing result's canonical Base64 `result`; it does not duplicate the
+  payload in the session file.
+- Attachment-bearing results remain ordinary persisted tool messages. During a
+  capable provider request, serialization may add a synthetic user message
+  after the contiguous tool-response group, but that message is wire-only: it
+  is never committed, hydrated, rendered, or written to JSONL. Resume therefore
+  reconstructs the same media projection from the persisted descriptor and
+  Base64 result without creating a duplicate message.
 - Assistant tool calls also persist their tool-specific `title_arguments`,
   captured from the created tool call before execution. Replay uses this
   exact projection, so tools such as `write` do not show body content in the

@@ -107,6 +107,38 @@ in `ProviderModelOption` and applied when the selection is confirmed. Picker
 rows render available context lengths as `context: <size>` labels using
 integer binary `kb`/`mb` sizes.
 
+`ModelInfo.input_modalities` uses the same conservative distinction for model
+input: `None` means unknown, `Some([])` means known text-only, and supported
+values are `Image` and `File`. OpenRouter reads
+`architecture.input_modalities` from `/models`, while Ollama reads
+`capabilities` from `/api/show` and maps only `vision` to `Image`. Unsupported
+catalog names are ignored. The `/models` picker appends a bracketed marker
+segment with a fixed letter order (`[I]`, `[F]`, or `[IF]`) when a row's
+model advertises a non-text input modality; unknown and known text-only
+models get no marker segment. The selected `ModelInfo` is copied into the
+shared `EngineRuntimeConfig` when `/models` confirms a selection.
+Independently, `EngineImpl::hydrate_input_modalities` discovers the
+configured model's modalities from the provider catalog once per engine,
+lazily before the first chat request (and skips the fetch when a `/models`
+selection already supplied them); a failed attempt logs a warning and is
+not retried, so only discovery failure or absent catalog data leaves an
+initially configured model unknown until a `/models` selection resolves it.
+Both the `named engine selected for chat request` and `chat request
+started` log lines carry `reasoning_effort` and `input_modalities` fields
+rendered by `format_reasoning_effort_for_log` /
+`format_input_modalities_for_log` (`default` or the effort; `unknown`,
+`text-only`, `image`, `file`, or `image+file`). Every provider-catalog
+fetch — hydration as well as `/models` — logs `model catalog queried`
+from `EngineImpl::list_models` with `provider_connection` and
+`api_base_url`.
+
+`OpenAiCompatibleProvider` passes the runtime modality snapshot and an explicit
+content-part policy to `openai_compatible_messages::serialize_messages_with_policy`.
+OpenAI/OpenRouter use object-form `image_url` parts. Ollama selects its
+documented string-valued compatibility form for image parts. File parts retain
+the provider-neutral `application/pdf` media type and filename, and are emitted
+only when `File` is advertised.
+
 `EngineRouter` owns the configured engine set when a profile or environment
 provides more than one provider connection. It delegates chat and runtime
 configuration to the active engine, groups engines by their named provider
@@ -227,8 +259,18 @@ because that total is inferable, except that an empty result displays
 file-system tools. It defaults to `utf8`, preserving the existing text
 behavior for `read`'s `bytes` mode and for text `write` calls. Text-oriented
 `lines` and `chars` reads require valid UTF-8 and fail with a structured tool
-error rather than inserting replacement characters. No CLI flag, profile key,
-or other persistent configuration controls it.
+error that suggests retrying with `mode: "bytes"` (and `encoding: "base64"`
+for binary data) rather than inserting replacement characters. No CLI flag,
+profile key, or other persistent configuration controls it.
+
+`read`'s `mode` is optional; omission selects autodetect. Autodetect reads
+valid UTF-8 with `lines` semantics, returns a whole file whose bytes infer a
+supported attachment media type (PNG/JPEG/WebP/GIF/PDF) through the Base64
+path below — so the attachment and modality-aware projection apply without
+the model naming `mode`/`encoding` — and fails with a retry hint for any
+other binary file or ranged binary read. Explicit `mode` values are honored
+as requested: `lines`/`chars` stay strict UTF-8 and `bytes` keeps its
+documented lossy `utf8` behavior.
 
 `read` accepts `encoding: "base64"` only with an explicitly supplied
 `mode: "bytes"`. It reads the complete file into memory as before, applies
@@ -271,13 +313,33 @@ after schema validation and before sandbox approval or file I/O, while the
 write decoder also guards direct execution paths before any filesystem
 mutation.
 
-This is an _interim exact-binary transport_, not full binary interaction with an
-LLM! The model-facing result still contains Base64 text, and the provider
-serializer has no typed image or file attachment to expose to a multimodal
-model. Consequently, this layer preserves and safely presents arbitrary bytes
-but does not by itself let a model inspect an image or interpret a PDF. The
-planned provider-aware attachment and wire projection is documented in
-[Image and file input from tool results](./ideas/image-or-file-upload.md).
+Complete Base64 `read` results are inspected after byte slicing with `infer`.
+Only PNG, JPEG, WebP, GIF, and PDF signatures are accepted. A complete result
+produces a `ToolAttachment` descriptor; the descriptor stores only the media
+type and, for a PDF, a safe basename. It references the containing
+`ToolResult.result` Base64 string rather than owning another copy. Partial
+ranges never become attachments even when their leading bytes match a supported
+signature. Base64 metadata includes `encoding: "base64"` and includes
+`media_type` for recognized files. UI content sections continue to use the
+decoded UTF-8 preview when available and remain absent for opaque bytes.
+
+The provider serializer keeps the persisted/domain message model provider
+neutral. For a capability-compatible attachment it emits the normal contiguous
+`role:"tool"` envelope with a short marker, followed by one hidden,
+wire-only `role:"user"` content array with text before image or file parts. The
+leading text explicitly maps each media-part position to its originating
+`tool_call_id`, tool name, and attachment index, because Chat Completions media
+parts have no portable tool-call correlation field. Images use `image_url` data
+URIs; PDFs use Chat Completions `file` parts with inline `file_data` and the
+retained filename. Unknown, text-only, or modality-incompatible models retain
+the complete Base64 tool text and receive no synthetic user message. The
+synthetic message is never committed or rendered. Resumed sessions reconstruct
+the same projection from the persisted descriptor and canonical result.
+
+`llm::http::dump_request` sanitizes only a cloned request-body projection.
+Base64 tool results and inline image/file data become stable redaction markers;
+roles, IDs, metadata, media types, and filenames remain available for
+diagnostics. Live requests and structured tracing fields are unchanged.
 
 ## Path-like argument normalization
 
@@ -302,6 +364,16 @@ workspace root.
 On timeout or cancellation the entire process group is killed via `SIGKILL`
 (Unix) using `nix::sys::signal::killpg` — grandchildren spawned by the script
 are also cleaned up. Default timeout is `DEFAULT_BASH_TIMEOUT_SECS` (30s).
+
+Output collection (`collect_output`) drains stdout/stderr lines in arrival
+order up to `BASH_OUTPUT_LIMIT_LINES` (1000) whole lines or
+`BASH_OUTPUT_LIMIT_BYTES` (65536) bytes, whichever is hit first. Lines beyond
+the line cap are discarded. A line that alone exceeds the remaining byte
+budget (e.g. a single unterminated base64/JSON blob larger than the cap) is
+kept as a UTF-8-safe prefix up to the byte cap rather than discarded wholesale,
+so `output_bytes` in result metadata never reports 0 for non-empty command
+output that only hit the byte cap. Result metadata records `truncated: true`
+when any cap discarded or cut content.
 
 ## CLI driver
 
@@ -848,7 +920,9 @@ draft-clear/abort ladder), since leaving the draft in place would make the
 next per-action `refresh_slash_overlay` recompute reopen the very overlay
 just dismissed.
 Model rows identify reasoning as unavailable, at the default, or adjustable
-with a `⚙` marker. The user-facing fixed value is rendered as `default`. The
+with a `⚙` marker, and append `[I]`/`[F]` input-modality markers when the
+model advertises a non-text input modality. The user-facing fixed value is
+rendered as `default`. The
 footer switches from the normal `enter send` hint to the controls for the
 active command overlay, including the model picker's reasoning, switch, and
 cancel keys.

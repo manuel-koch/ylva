@@ -25,6 +25,7 @@ pub mod engine;
 pub mod http;
 pub mod mock_provider;
 pub mod ollama_provider;
+pub(crate) mod openai_compatible_messages;
 pub mod openai_compatible_provider;
 pub mod openrouter_provider;
 pub mod provider_registry;
@@ -79,6 +80,55 @@ pub struct ModelInfo {
     /// - `Some(values)` means that reasoning is supported and
     ///   `values` contains the selectable effort values.
     pub reasoning_efforts: Option<Vec<String>>,
+    /// Provider-advertised input modalities.
+    ///
+    /// `None` means that the provider did not advertise modality data.
+    /// `Some([])` is a known text-only model. Supported values are `Image`
+    /// and `File`; unknown provider modality names are ignored.
+    pub input_modalities: Option<Vec<InputModality>>,
+}
+
+/// Provider-neutral input modality advertised for a model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InputModality {
+    Image,
+    File,
+}
+
+/// Render the active reasoning effort for a `tracing` field.
+///
+/// `None` means no explicit effort is set and the provider's own default
+/// behavior applies — shown as `default` to match the `/models` picker's
+/// user-facing wording.
+pub(crate) fn format_reasoning_effort_for_log(reasoning_effort: Option<&str>) -> String {
+    reasoning_effort.unwrap_or("default").to_string()
+}
+
+/// Render provider-advertised input modalities for a `tracing` field.
+///
+/// Preserves the three-state distinction: `unknown` (not advertised),
+/// `text-only` (advertised with no non-text inputs), or a fixed-order
+/// `+`-joined list of the advertised non-text modalities — so a row reads
+/// `image`, `file`, or `image+file` regardless of the advertised order.
+pub(crate) fn format_input_modalities_for_log(
+    input_modalities: Option<&[InputModality]>,
+) -> String {
+    let Some(input_modalities) = input_modalities else {
+        return "unknown".to_string();
+    };
+    let mut modalities = Vec::new();
+    if input_modalities.contains(&InputModality::Image) {
+        modalities.push("image");
+    }
+    if input_modalities.contains(&InputModality::File) {
+        modalities.push("file");
+    }
+    if modalities.is_empty() {
+        "text-only".to_string()
+    } else {
+        modalities.join("+")
+    }
 }
 
 /// Runtime abstraction over a chat-completions-style streaming provider.
@@ -158,7 +208,7 @@ pub trait Provider: Send + Sync {
     }
 }
 
-/// Tool results arrive as `role`:"tool" messages whose `content` is a JSON
+/// Tool results arrive as `role`:`"tool"` messages whose `content` is a JSON
 /// envelope of this shape. `ok` is authoritative: when it is `false`, report
 /// the error and do not claim the operation succeeded. When `result_metadata`
 /// is present it carries structured facts about the result (e.g. byte counts,
@@ -187,104 +237,9 @@ impl ToolEnvelope {
     }
 }
 
-/// Maps the domain `Message` history onto the OpenAI chat-completions wire
-/// format. The domain model stays decoupled from the wire format (blueprint
-/// §4A): this is the only place the two communicate.
-///
-/// Phase 3 maps `System`/`User`/`Assistant` (including `Assistant.tool_calls`),
-/// and turns `ToolResult`/`ToolError` into `role:"tool"` messages carrying the
-/// matching `tool_call_id`. Both outcomes use the single [`ToolEnvelope`] so
-/// the outcome is structurally explicit, not inferred from an arbitrary reply
-/// (see `TOOL_PROTOCOL_SYSTEM_PROMPT`).
-pub fn serialize_messages(messages: &[Message]) -> serde_json::Value {
-    let serialized: Vec<serde_json::Value> = messages
-        .iter()
-        .map(|message| match message {
-            Message::System { content } => serde_json::json!({
-                "role": "system",
-                "content": content,
-            }),
-            Message::User { content, .. } => serde_json::json!({
-                "role": "user",
-                "content": content,
-            }),
-            Message::Assistant {
-                content,
-                tool_calls,
-                ..
-            } => {
-                let tool_calls_value: Vec<serde_json::Value> = tool_calls
-                    .iter()
-                    .map(|call| {
-                        let arguments = serde_json::to_string(&call.arguments)
-                            .unwrap_or_else(|_| "{}".to_string());
-                        serde_json::json!({
-                            "id": call.id.to_string(),
-                            "type": "function",
-                            "function": {
-                                "name": call.name,
-                                "arguments": arguments,
-                            }
-                        })
-                    })
-                    .collect();
-                let mut value = serde_json::json!({
-                    "role": "assistant",
-                    "content": content,
-                });
-                if !tool_calls_value.is_empty() {
-                    value["tool_calls"] = serde_json::Value::Array(tool_calls_value);
-                }
-                value
-            }
-            Message::ToolResult {
-                value:
-                    crate::agent::ToolResult {
-                        id,
-                        result,
-                        result_metadata,
-                        result_metadata_schema,
-                        ..
-                    },
-            } => {
-                let content = ToolEnvelope {
-                    ok: true,
-                    result: Some(result.clone()),
-                    error: None,
-                    result_metadata: result_metadata.clone(),
-                    result_metadata_schema: result_metadata_schema.clone(),
-                }
-                .to_string_checked();
-                serde_json::json!({
-                    "role": "tool",
-                    "tool_call_id": id.to_string(),
-                    "content": content,
-                })
-            }
-            Message::ToolError { id, error, .. } => {
-                let content = ToolEnvelope {
-                    ok: false,
-                    result: None,
-                    error: Some(error.clone()),
-                    result_metadata: None,
-                    result_metadata_schema: None,
-                }
-                .to_string_checked();
-                serde_json::json!({
-                    "role": "tool",
-                    "tool_call_id": id.to_string(),
-                    "content": content,
-                })
-            }
-        })
-        .collect();
-    serde_json::Value::Array(serialized)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::UserMessageKind;
 
     #[test]
     fn tool_schema_renders_function_envelope() {
@@ -307,97 +262,27 @@ mod tests {
     }
 
     #[test]
-    fn serialize_messages_maps_system_user_assistant() {
-        use crate::agent::AssistantStatus;
-        let messages = vec![
-            Message::System {
-                content: "sys".into(),
-            },
-            Message::User {
-                content: "usr".into(),
-                kind: UserMessageKind::Explicit,
-            },
-            Message::Assistant {
-                content: "ast".into(),
-                status: AssistantStatus::Complete,
-                tool_calls: Vec::new(),
-            },
-        ];
-        let value = serialize_messages(&messages);
-        assert_eq!(
-            value,
-            serde_json::json!([
-                { "role": "system", "content": "sys" },
-                { "role": "user", "content": "usr" },
-                { "role": "assistant", "content": "ast" },
-            ])
-        );
+    fn format_reasoning_effort_for_log_renders_default_when_unset() {
+        assert_eq!(format_reasoning_effort_for_log(None), "default");
+        assert_eq!(format_reasoning_effort_for_log(Some("high")), "high");
     }
 
     #[test]
-    fn serialize_messages_maps_assistant_tool_calls_and_tool_messages() {
-        use crate::agent::{AssistantStatus, ToolCallRequest, ToolResult};
-        let id = uuid::Uuid::new_v4();
-        let messages = vec![
-            Message::Assistant {
-                content: String::new(),
-                status: AssistantStatus::Complete,
-                tool_calls: vec![ToolCallRequest {
-                    id,
-                    name: "read".into(),
-                    arguments: serde_json::json!({ "path": "a.txt" }),
-                    persisted_title_arguments: vec![],
-                }],
-            },
-            Message::ToolResult {
-                value: ToolResult {
-                    id,
-                    name: "read".into(),
-                    result: "file contents".into(),
-                    result_section_id: None,
-                    result_metadata: None,
-                    result_metadata_schema: None,
-                    summary: vec![],
-                    content_sections: vec![],
-                    duration: std::time::Duration::ZERO,
-                },
-            },
-            Message::ToolError {
-                id,
-                name: "read".into(),
-                error: "boom".into(),
-                duration: std::time::Duration::ZERO,
-                content_sections: vec![],
-            },
-        ];
-        let value = serialize_messages(&messages);
+    fn format_input_modalities_for_log_preserves_the_three_states() {
+        assert_eq!(format_input_modalities_for_log(None), "unknown");
+        assert_eq!(format_input_modalities_for_log(Some(&[])), "text-only");
         assert_eq!(
-            value,
-            serde_json::json!([
-                {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [{
-                        "id": id.to_string(),
-                        "type": "function",
-                        "function": {
-                            "name": "read",
-                            "arguments": "{\"path\":\"a.txt\"}",
-                        }
-                    }]
-                },
-                { "role": "tool", "tool_call_id": id.to_string(), "content": "{\"ok\":true,\"result\":\"file contents\"}" },
-                {
-                    "role": "tool",
-                    "tool_call_id": id.to_string(),
-                    "content": "{\"ok\":false,\"error\":\"boom\"}",
-                },
-            ])
+            format_input_modalities_for_log(Some(&[InputModality::Image])),
+            "image"
         );
-    }
-
-    #[test]
-    fn serialize_messages_empty_slice_yields_empty_array() {
-        assert_eq!(serialize_messages(&[]), serde_json::json!([]));
+        assert_eq!(
+            format_input_modalities_for_log(Some(&[InputModality::File])),
+            "file"
+        );
+        assert_eq!(
+            format_input_modalities_for_log(Some(&[InputModality::File, InputModality::Image])),
+            "image+file",
+            "the log order must be fixed regardless of the advertised order"
+        );
     }
 }

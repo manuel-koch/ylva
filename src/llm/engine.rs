@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use futures::future::{join_all, BoxFuture};
@@ -22,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use crate::agent::{Message, StreamEvent};
-use crate::llm::{ModelInfo, Provider, ToolSchema};
+use crate::llm::{InputModality, ModelInfo, Provider, ToolSchema};
 
 /// Default context-length used when no explicit value is configured.
 pub const DEFAULT_CONTEXT_LENGTH: usize = 128_000;
@@ -231,6 +232,9 @@ pub struct EngineRuntimeConfig {
     pub temperature: Option<f32>,
     pub context_length: usize,
     pub reasoning_effort: Option<String>,
+    /// Provider-advertised input modalities for the active model. `None`
+    /// remains conservative: no media projection is enabled.
+    pub input_modalities: Option<Vec<InputModality>>,
 }
 
 impl From<&EngineConfig> for EngineRuntimeConfig {
@@ -243,6 +247,7 @@ impl From<&EngineConfig> for EngineRuntimeConfig {
             // default; see `EngineConfig::effective_context_length`.
             context_length: config.effective_context_length(None),
             reasoning_effort: config.reasoning.clone(),
+            input_modalities: None,
         }
     }
 }
@@ -353,6 +358,26 @@ pub trait Engine: Send + Sync {
         Ok(())
     }
 
+    /// Return the active model's provider-advertised input modalities.
+    fn input_modalities(&self) -> Option<Vec<InputModality>> {
+        None
+    }
+
+    /// Update the active model's provider-advertised input modalities.
+    fn set_input_modalities(&self, _input_modalities: Option<Vec<InputModality>>) {}
+
+    /// Discover the active model's provider-advertised input modalities
+    /// from the provider catalog, at most once per engine.
+    ///
+    /// The default is a no-op (there is nothing to discover).
+    /// [`EngineImpl`] performs the discovery lazily before the first chat
+    /// request, so an initially configured model gains its modality state
+    /// without requiring a `/models` re-selection. Discovery failures leave
+    /// the state `unknown`; a later `/models` selection still resolves it.
+    fn hydrate_input_modalities(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+
     /// Activate the engine and model represented by a catalog option.
     ///
     /// A regular engine can only select options for its own provider
@@ -379,7 +404,9 @@ pub trait Engine: Send + Sync {
             );
         }
         self.set_reasoning_effort(option.reasoning_effort.as_deref())?;
-        self.switch_model(&option.model.id)
+        self.switch_model(&option.model.id)?;
+        self.set_input_modalities(option.model.input_modalities.clone());
+        Ok(())
     }
 }
 
@@ -481,20 +508,32 @@ impl Engine for EngineRouter {
         tools: Vec<ToolSchema>,
         cancel: CancellationToken,
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
-        let (engine_name, engine) = self.active_engine_entry();
-        let config = engine.config();
-        tracing::debug!(
-            engine = %engine_name,
-            provider_connection = %config.provider_connection,
-            model = %config.model,
-            "named engine selected for chat request"
-        );
-        let span = tracing::debug_span!(
-            "engine_request",
-            engine = %engine_name,
-            provider_connection = %config.provider_connection,
-        );
-        Box::pin(async move { engine.chat(messages, tools, cancel).await }.instrument(span))
+        Box::pin(async move {
+            let (engine_name, engine) = self.active_engine_entry();
+            // Discover the active model's modalities before the selection is
+            // logged and before the request is serialized, so both log lines
+            // and the attachment projection see the hydrated state.
+            engine.hydrate_input_modalities().await;
+            let config = engine.config();
+            tracing::debug!(
+                engine = %engine_name,
+                provider_connection = %config.provider_connection,
+                model = %config.model,
+                reasoning_effort = %crate::llm::format_reasoning_effort_for_log(
+                    engine.reasoning_effort().as_deref()
+                ),
+                input_modalities = %crate::llm::format_input_modalities_for_log(
+                    engine.input_modalities().as_deref()
+                ),
+                "named engine selected for chat request"
+            );
+            let span = tracing::debug_span!(
+                "engine_request",
+                engine = %engine_name,
+                provider_connection = %config.provider_connection,
+            );
+            engine.chat(messages, tools, cancel).instrument(span).await
+        })
     }
 
     fn config(&self) -> EngineConfig {
@@ -507,6 +546,10 @@ impl Engine for EngineRouter {
 
     fn reasoning_effort(&self) -> Option<String> {
         self.active_engine().reasoning_effort()
+    }
+
+    fn input_modalities(&self) -> Option<Vec<InputModality>> {
+        self.active_engine().input_modalities()
     }
 
     fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
@@ -608,6 +651,11 @@ pub struct EngineImpl {
     config: EngineConfig,
     /// Shared with providers that support runtime engine settings.
     runtime_config: EngineRuntimeConfigHandle,
+    /// One-shot guard: the active model's catalog modalities are discovered
+    /// at most once per engine instance, whether the attempt succeeds or
+    /// fails. A `/models` switch writes the state directly and does not
+    /// need this guard.
+    input_modalities_hydrated: AtomicBool,
 }
 
 impl EngineImpl {
@@ -623,6 +671,7 @@ impl EngineImpl {
             provider,
             config,
             runtime_config,
+            input_modalities_hydrated: AtomicBool::new(false),
         }
     }
 }
@@ -634,7 +683,10 @@ impl Engine for EngineImpl {
         tools: Vec<ToolSchema>,
         cancel: CancellationToken,
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
-        self.provider.chat(messages, tools, cancel)
+        Box::pin(async move {
+            self.hydrate_input_modalities().await;
+            self.provider.chat(messages, tools, cancel).await
+        })
     }
 
     fn config(&self) -> EngineConfig {
@@ -650,7 +702,14 @@ impl Engine for EngineImpl {
     }
 
     fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
-        self.provider.list_models()
+        Box::pin(async move {
+            tracing::debug!(
+                provider_connection = %self.config.provider_connection,
+                api_base_url = ?self.config.api_base_url,
+                "model catalog queried"
+            );
+            self.provider.list_models().await
+        })
     }
 
     fn switch_model(&self, model: &str) -> anyhow::Result<()> {
@@ -669,6 +728,64 @@ impl Engine for EngineImpl {
             .expect("the engine runtime configuration lock is poisoned")
             .reasoning_effort
             .clone()
+    }
+
+    fn input_modalities(&self) -> Option<Vec<InputModality>> {
+        self.runtime_config
+            .read()
+            .expect("the engine runtime configuration lock is poisoned")
+            .input_modalities
+            .clone()
+    }
+
+    fn set_input_modalities(&self, input_modalities: Option<Vec<InputModality>>) {
+        self.runtime_config
+            .write()
+            .expect("the engine runtime configuration lock is poisoned")
+            .input_modalities = input_modalities;
+    }
+
+    fn hydrate_input_modalities(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            if self.input_modalities_hydrated.load(Ordering::Acquire) {
+                return;
+            }
+            if self.input_modalities().is_some() {
+                // A `/models` selection already supplied the state.
+                self.input_modalities_hydrated
+                    .store(true, Ordering::Release);
+                return;
+            }
+            let active_model = self.config().model;
+            match self.list_models().await {
+                Ok(models) => {
+                    if let Some(input_modalities) = models
+                        .iter()
+                        .find(|model| model.id == active_model)
+                        .and_then(|model| model.input_modalities.clone())
+                    {
+                        self.set_input_modalities(Some(input_modalities));
+                        tracing::debug!(
+                            model = %active_model,
+                            input_modalities = %crate::llm::format_input_modalities_for_log(
+                                self.input_modalities().as_deref()
+                            ),
+                            "active model input modalities discovered"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        model = %active_model,
+                        error = %error,
+                        "failed to discover active model input modalities; \
+                         staying unknown until a /models selection"
+                    );
+                }
+            }
+            self.input_modalities_hydrated
+                .store(true, Ordering::Release);
+        })
     }
 
     fn set_reasoning_effort(&self, reasoning_effort: Option<&str>) -> anyhow::Result<()> {
@@ -725,6 +842,7 @@ mod tests {
                         id: (*id).to_string(),
                         context_length: None,
                         reasoning_efforts: None,
+                        input_modalities: None,
                     })
                     .collect(),
                 model_list_error: None,
@@ -772,6 +890,76 @@ mod tests {
                 .expect("catalog engine config lock")
                 .model = model.to_string();
             Ok(())
+        }
+    }
+
+    /// Provider stub whose catalog can carry input modalities, for exercising
+    /// [`EngineImpl::hydrate_input_modalities`]. `chat` always fails — the
+    /// hydration tests only need the catalog fetch to run.
+    struct CatalogProvider {
+        models: Vec<ModelInfo>,
+        list_models_calls: std::sync::atomic::AtomicUsize,
+        fail_list_models: bool,
+    }
+
+    impl CatalogProvider {
+        fn new(models: Vec<ModelInfo>) -> Self {
+            CatalogProvider {
+                models,
+                list_models_calls: std::sync::atomic::AtomicUsize::new(0),
+                fail_list_models: false,
+            }
+        }
+
+        fn failing() -> Self {
+            CatalogProvider {
+                models: Vec::new(),
+                list_models_calls: std::sync::atomic::AtomicUsize::new(0),
+                fail_list_models: true,
+            }
+        }
+
+        fn list_models_calls(&self) -> usize {
+            self.list_models_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Provider for CatalogProvider {
+        fn name(&self) -> &str {
+            "catalog"
+        }
+
+        fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
+            self.list_models_calls.fetch_add(1, Ordering::SeqCst);
+            let models = self.models.clone();
+            let fail_list_models = self.fail_list_models;
+            Box::pin(async move {
+                if fail_list_models {
+                    anyhow::bail!("catalog unavailable");
+                }
+                Ok(models)
+            })
+        }
+
+        fn chat<'a>(
+            &'a self,
+            _messages: Vec<Message>,
+            _tools: Vec<ToolSchema>,
+            _cancel: CancellationToken,
+        ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+            Box::pin(async { anyhow::bail!("catalog provider does not chat") })
+        }
+    }
+
+    fn model_info_with_modalities(
+        id: &str,
+        input_modalities: Option<Vec<InputModality>>,
+    ) -> ModelInfo {
+        ModelInfo {
+            id: id.to_string(),
+            context_length: None,
+            reasoning_efforts: None,
+            input_modalities,
         }
     }
 
@@ -947,6 +1135,46 @@ model = "local"
         assert_eq!(engine.config().model, "updated-model");
     }
 
+    #[test]
+    fn selecting_a_model_carries_its_input_modalities_into_runtime_state() {
+        let provider = Arc::new(OpenAiCompatibleProvider::new(
+            "test".to_string(),
+            "http://localhost:1234/v1".to_string(),
+            "text-model".to_string(),
+            None,
+        ));
+        let engine = EngineImpl::new(provider, make_engine_config());
+        assert_eq!(engine.input_modalities(), None);
+
+        engine
+            .switch_model_option(&ProviderModelOption {
+                provider_connection: "mock".to_string(),
+                model: ModelInfo {
+                    id: "vision-model".to_string(),
+                    context_length: None,
+                    reasoning_efforts: None,
+                    input_modalities: Some(vec![InputModality::Image]),
+                },
+                reasoning_effort: None,
+            })
+            .expect("model selection succeeds");
+        assert_eq!(engine.input_modalities(), Some(vec![InputModality::Image]));
+
+        engine
+            .switch_model_option(&ProviderModelOption {
+                provider_connection: "mock".to_string(),
+                model: ModelInfo {
+                    id: "text-model".to_string(),
+                    context_length: None,
+                    reasoning_efforts: None,
+                    input_modalities: Some(vec![]),
+                },
+                reasoning_effort: None,
+            })
+            .expect("text-only model selection succeeds");
+        assert_eq!(engine.input_modalities(), Some(vec![]));
+    }
+
     #[tokio::test]
     async fn engine_impl_chat_delegates_to_mock_provider() {
         let provider = Arc::new(MockProvider::new(
@@ -971,13 +1199,145 @@ model = "local"
             let router = EngineRouter::new(HashMap::from([("local".to_string(), engine)]), "local")
                 .expect("router construction");
 
-            let _request = router.chat(vec![], vec![], CancellationToken::new());
+            let _request = router.chat(vec![], vec![], CancellationToken::new()).await;
         });
 
         assert!(log.contains("named engine selected for chat request"));
         assert!(log.contains("engine=local"));
         assert!(log.contains("provider_connection=ollama-local"));
         assert!(log.contains("model=local-model"));
+        assert!(
+            log.contains("reasoning_effort=default"),
+            "the selection log must carry the thinking mode: {log}"
+        );
+        assert!(
+            log.contains("input_modalities=unknown"),
+            "the selection log must carry the modalities: {log}"
+        );
+    }
+
+    #[test]
+    fn engine_router_logs_thinking_and_modalities_after_hydration() {
+        let log = crate::test_support::capture_logs(async {
+            let provider = Arc::new(CatalogProvider::new(vec![model_info_with_modalities(
+                "local-model",
+                Some(vec![InputModality::Image]),
+            )]));
+            let mut config = make_engine_config();
+            config.provider_connection = "ollama-local".to_string();
+            config.model = "local-model".to_string();
+            let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(provider, config));
+            let router = EngineRouter::new(HashMap::from([("local".to_string(), engine)]), "local")
+                .expect("router construction");
+
+            let _request = router.chat(vec![], vec![], CancellationToken::new()).await;
+        });
+
+        assert!(log.contains("named engine selected for chat request"));
+        assert!(
+            log.contains("input_modalities=image"),
+            "hydration must complete before the selection is logged: {log}"
+        );
+        assert!(log.contains("active model input modalities discovered"));
+    }
+
+    #[test]
+    fn engine_impl_logs_when_the_model_catalog_is_queried() {
+        let log = crate::test_support::capture_logs(async {
+            let provider = Arc::new(CatalogProvider::new(vec![]));
+            let engine = EngineImpl::new(provider, make_engine_config());
+            let _models = engine.list_models().await.expect("catalog");
+        });
+
+        assert!(
+            log.contains("model catalog queried"),
+            "the catalog fetch must be logged: {log}"
+        );
+        assert!(log.contains("provider_connection=mock"));
+    }
+
+    #[test]
+    fn engine_impl_hydrates_input_modalities_before_the_first_chat() {
+        crate::test_support::run_locked(async {
+            let provider = Arc::new(CatalogProvider::new(vec![model_info_with_modalities(
+                "test-model",
+                Some(vec![InputModality::Image]),
+            )]));
+            let engine = EngineImpl::new(
+                Arc::clone(&provider) as Arc<dyn Provider>,
+                make_engine_config(),
+            );
+            assert_eq!(engine.input_modalities(), None);
+
+            // The stub's chat fails; hydration must have run regardless.
+            let _ = engine.chat(vec![], vec![], CancellationToken::new()).await;
+
+            assert_eq!(engine.input_modalities(), Some(vec![InputModality::Image]));
+            assert_eq!(provider.list_models_calls(), 1);
+        });
+    }
+
+    #[test]
+    fn engine_impl_hydration_fetches_the_catalog_at_most_once() {
+        crate::test_support::run_locked(async {
+            let provider = Arc::new(CatalogProvider::new(vec![model_info_with_modalities(
+                "test-model",
+                Some(vec![InputModality::Image]),
+            )]));
+            let engine =
+                EngineImpl::new(provider.clone() as Arc<dyn Provider>, make_engine_config());
+
+            engine.hydrate_input_modalities().await;
+            engine.hydrate_input_modalities().await;
+
+            assert_eq!(engine.input_modalities(), Some(vec![InputModality::Image]));
+            assert_eq!(provider.list_models_calls(), 1);
+        });
+    }
+
+    #[test]
+    fn engine_impl_hydration_skips_when_modalities_are_already_known() {
+        crate::test_support::run_locked(async {
+            let provider = Arc::new(CatalogProvider::new(vec![model_info_with_modalities(
+                "test-model",
+                Some(vec![InputModality::File]),
+            )]));
+            let engine =
+                EngineImpl::new(provider.clone() as Arc<dyn Provider>, make_engine_config());
+            engine.set_input_modalities(Some(vec![InputModality::File]));
+
+            engine.hydrate_input_modalities().await;
+
+            assert_eq!(engine.input_modalities(), Some(vec![InputModality::File]));
+            assert_eq!(
+                provider.list_models_calls(),
+                0,
+                "a /models-provided state must not trigger a catalog fetch"
+            );
+        });
+    }
+
+    #[test]
+    fn engine_impl_hydration_failure_keeps_modalities_unknown_without_retries() {
+        let log = crate::test_support::capture_logs(async {
+            let provider = Arc::new(CatalogProvider::failing());
+            let engine =
+                EngineImpl::new(provider.clone() as Arc<dyn Provider>, make_engine_config());
+
+            engine.hydrate_input_modalities().await;
+            engine.hydrate_input_modalities().await;
+
+            assert_eq!(engine.input_modalities(), None);
+            assert_eq!(
+                provider.list_models_calls(),
+                1,
+                "a failed attempt must not be retried on every request"
+            );
+        });
+        assert!(
+            log.contains("failed to discover active model input modalities"),
+            "the failure must be logged: {log}"
+        );
     }
 
     #[tokio::test]

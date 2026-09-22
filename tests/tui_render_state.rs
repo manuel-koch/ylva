@@ -122,6 +122,7 @@ fn model_picker_choices(choice_count: usize) -> Vec<ylva::tui_reducer_state::Mod
                     id: format!("model-{index}"),
                     context_length: None,
                     reasoning_efforts: None,
+                    input_modalities: None,
                 },
                 reasoning_effort: None,
             },
@@ -219,6 +220,7 @@ impl Engine for DelayedCatalogEngine {
                 id: "delayed-model".to_string(),
                 context_length: None,
                 reasoning_efforts: None,
+                input_modalities: None,
             }])
         })
     }
@@ -1266,6 +1268,7 @@ fn model_picker_footer_shows_picker_controls_instead_of_send() {
                         id: "thinking".to_string(),
                         context_length: None,
                         reasoning_efforts: Some(vec!["low".to_string(), "high".to_string()]),
+                        input_modalities: None,
                     },
                     reasoning_effort: None,
                 },
@@ -1611,6 +1614,7 @@ fn model_picker_shows_a_message_instead_of_vanishing_when_the_filter_matches_not
                         id: "thinking".to_string(),
                         context_length: None,
                         reasoning_efforts: None,
+                        input_modalities: None,
                     },
                     reasoning_effort: None,
                 },

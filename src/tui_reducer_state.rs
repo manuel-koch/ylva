@@ -35,6 +35,7 @@ use uuid::Uuid;
 
 use crate::agent::{AgentMode, AssistantStatus, Message, UserMessageKind};
 use crate::llm::engine::{EngineDisplayInfo, ProviderModelOption};
+use crate::llm::InputModality;
 use crate::slash_command::{slash_command_suggestions, SlashCommandInfo};
 use crate::store::ChildRunRecord;
 
@@ -1176,10 +1177,38 @@ fn format_model_choice_label(
             option.reasoning_effort.as_deref().unwrap_or("default")
         )),
     }
+    if let Some(modality_markers) =
+        format_input_modality_markers(option.model.input_modalities.as_deref())
+    {
+        label.push_str("  ");
+        label.push_str(&modality_markers);
+    }
     if is_active {
         label.push_str("  — active");
     }
     label
+}
+
+/// Render the bracketed input-modality markers of a `/models` picker row.
+///
+/// Returns `None` both for unknown modality data (`None`) and for known
+/// text-only models (`Some([])`), so a row only gains a segment when the
+/// provider advertised a non-text input modality. The letter order is
+/// fixed (`I` before `F`) regardless of the advertised order.
+fn format_input_modality_markers(input_modalities: Option<&[InputModality]>) -> Option<String> {
+    let input_modalities = input_modalities?;
+    let mut markers = String::new();
+    if input_modalities.contains(&InputModality::Image) {
+        markers.push('I');
+    }
+    if input_modalities.contains(&InputModality::File) {
+        markers.push('F');
+    }
+    if markers.is_empty() {
+        None
+    } else {
+        Some(format!("[{markers}]"))
+    }
 }
 
 fn format_context_length(context_length: usize) -> String {
@@ -3083,6 +3112,7 @@ mod tests {
                     id: tool_id,
                     name: "read".to_string(),
                     result: "file contents".to_string(),
+                    attachments: vec![],
                     result_section_id: None,
                     result_metadata: None,
                     result_metadata_schema: None,
@@ -3145,6 +3175,7 @@ mod tests {
                     id: tool_id,
                     name: "read".to_string(),
                     result: encoded.to_string(),
+                    attachments: vec![],
                     result_section_id: Some(result_section_ids::HIDDEN.to_string()),
                     result_metadata: Some(serde_json::json!({"read_bytes": 6})),
                     result_metadata_schema: None,
@@ -3351,6 +3382,7 @@ mod tests {
                     id: model_id.to_string(),
                     context_length: None,
                     reasoning_efforts: None,
+                    input_modalities: None,
                 },
                 reasoning_effort: None,
             },
@@ -3404,6 +3436,7 @@ mod tests {
                         id: label.to_string(),
                         context_length: None,
                         reasoning_efforts: None,
+                        input_modalities: None,
                     },
                     reasoning_effort: None,
                 },
@@ -3450,6 +3483,7 @@ mod tests {
                 id: "model".to_string(),
                 context_length: None,
                 reasoning_efforts,
+                input_modalities: None,
             },
             reasoning_effort: None,
         };
@@ -3476,6 +3510,7 @@ mod tests {
                 id: "openai/gpt-oss-120b".to_string(),
                 context_length: Some(131_072),
                 reasoning_efforts: Some(vec!["low".to_string()]),
+                input_modalities: None,
             },
             reasoning_effort: None,
         };
@@ -3494,6 +3529,7 @@ mod tests {
                 id: "model".to_string(),
                 context_length: Some(context_length),
                 reasoning_efforts: None,
+                input_modalities: None,
             },
             reasoning_effort: None,
         };
@@ -3509,6 +3545,55 @@ mod tests {
         assert_eq!(
             model_choice_label(&model_option(1_023), false),
             "stub/model  context: 1023 tokens  reasoning: unavailable"
+        );
+    }
+
+    #[test]
+    fn model_choice_label_marks_advertised_non_text_input_modalities() {
+        let model_option = |input_modalities| ProviderModelOption {
+            provider_connection: "stub".to_string(),
+            model: crate::llm::ModelInfo {
+                id: "model".to_string(),
+                context_length: None,
+                reasoning_efforts: None,
+                input_modalities,
+            },
+            reasoning_effort: None,
+        };
+
+        assert_eq!(
+            model_choice_label(&model_option(None), false),
+            "stub/model  reasoning: unavailable",
+            "unknown modality data must not add a marker segment"
+        );
+        assert_eq!(
+            model_choice_label(&model_option(Some(vec![])), false),
+            "stub/model  reasoning: unavailable",
+            "a known text-only model must not add a marker segment"
+        );
+        assert_eq!(
+            model_choice_label(&model_option(Some(vec![InputModality::Image])), true),
+            "stub/model  reasoning: unavailable  [I]  — active"
+        );
+        assert_eq!(
+            model_choice_label(&model_option(Some(vec![InputModality::File])), false),
+            "stub/model  reasoning: unavailable  [F]"
+        );
+        assert_eq!(
+            model_choice_label(
+                &model_option(Some(vec![InputModality::File, InputModality::Image])),
+                false
+            ),
+            "stub/model  reasoning: unavailable  [IF]",
+            "marker order must be fixed regardless of the advertised order"
+        );
+        assert_eq!(
+            engine_choice_label(
+                "engine",
+                &model_option(Some(vec![InputModality::Image])),
+                false
+            ),
+            "engine → stub/model  reasoning: unavailable  [I]"
         );
     }
 

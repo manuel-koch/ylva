@@ -182,10 +182,17 @@ affect sandbox approval checks. See
 [implementation notes](./implementation-notes.md#path-like-argument-normalization).
 
 - **read**: Read file content from `path` using `mode`/`offset`/`limit` and the
-  per-call `encoding` argument. `mode` can be `bytes`/`chars`/`lines` and
-  defaults to `lines` for every call. In `lines` mode, `offset` is a 0-based
-  line index and `limit` is a line count. Text-oriented `lines` and `chars`
-  reads require valid UTF-8 and fail instead of inserting replacement
+  per-call `encoding` argument. When `mode` is omitted, the read autodetects:
+  valid UTF-8 text is read by lines (so `offset`/`limit` keep their 0-based
+  line meaning), a whole binary file recognized as PNG/JPEG/WebP/GIF/PDF is
+  returned as Base64 with a typed attachment, and any other binary content —
+  or a ranged read of binary content — fails with a retry hint to use an
+  explicit `mode: "bytes"`. Set `mode` to `lines`/`chars`/`bytes` to force a
+  unit; explicit modes are honored as requested and fail when they cannot
+  apply. In `lines` mode, `offset` is a 0-based line index and `limit` is a
+  line count. Text-oriented `lines` and `chars` reads require valid UTF-8 and
+  fail with an error that suggests retrying with `mode: "bytes"` (and
+  `encoding: "base64"` for binary data) instead of inserting replacement
   characters. `bytes` reads with the default `utf8` encoding retain the
   existing lossy decoding behavior. `encoding` defaults to `utf8`; set
   `encoding: "base64"` together with an explicit `mode: "bytes"` to return
@@ -206,14 +213,29 @@ affect sandbox approval checks. See
   metadata. Content payloads are redacted from logs and argument spans. There
   is no CLI/profile configuration setting or size limit added by this feature.
 
-Binary `read`/`write` support is currently an exact transport and UI-safety
-layer, not full binary interaction with the model. Base64 remains text in the
-model-facing tool result, so image-capable models cannot inspect an image and
-document-capable models cannot interpret a PDF from that result alone. The
-provider-aware attachment and multimodal serialization needed for that
-capability is planned in [Image and file input from tool
-results](./ideas/image-or-file-upload.md).
+Binary `read`/`write` support remains an exact transport and UI-safety layer,
+with provider-aware input for explicit Base64 `read` results added on top:
 
+- Complete Base64 byte reads are inspected after slicing with magic-number
+  detection. Only PNG, JPEG, WebP, GIF, and PDF signatures become typed
+  attachments; partial ranges and unrecognized bytes remain ordinary Base64.
+- `ToolResult` stores a provider-neutral image or PDF/file descriptor that
+  references the existing Base64 result. It does not own a second payload.
+- Model discovery supplies conservative input capabilities. OpenRouter reads
+  `architecture.input_modalities`; Ollama maps `/api/show`'s `vision`
+  capability to image support only. The active model's capabilities are
+  discovered automatically before the first chat request, so recognized
+  attachments are projected without requiring a `/models` re-selection.
+  Unknown and known text-only models retain text-only behavior.
+- Capable Chat Completions requests keep tool responses contiguous, replace a
+  supported result's long text with an `[image attached]` or `[file attached]`
+  marker, then add a hidden wire-only user message with text before the media
+  part. Images use `image_url`; PDFs use a `file` part and are never sent as
+  `image_url`.
+- Unsupported or unknown modalities keep the complete Base64 result in the
+  tool message. Synthetic user messages are not persisted or rendered in the
+  TUI/CLI. Request dumps redact Base64 and inline media payloads while retaining
+  safe roles, IDs, media types, and filenames.
 - **edit**: Patch an existing file in-place. The file must already exist (use `write`
   to create new files). Two modes:
   - **SearchReplace** — supply `old_string` and `new_string`; replaces the **first**
@@ -255,9 +277,12 @@ results](./ideas/image-or-file-upload.md).
   current working directory, which is the workspace root in normal runtime.
   Use relative paths directly; do not prefix commands with a redundant `cd` to
   the workspace root. Requires explicit human approval before execution. stdout
-  and stderr are merged in true arrival order. Output is capped at 1000 whole output
-  lines (`truncated` field present in result metadata when
-  capped). Default timeout: 30 s. On timeout or cancellation the entire
+  and stderr are merged in true arrival order. Output is capped at 1000 whole
+  output lines or 65536 bytes, whichever is hit first (`truncated` field
+  present in result metadata when capped). Excess lines are discarded; a line
+  that alone exceeds the remaining byte budget is kept as a UTF-8-safe prefix
+  up to the byte cap so oversized first lines still yield non-empty output.
+  Default timeout: 30 s. On timeout or cancellation the entire
   process (including any child processes it spawned) is killed. See
   [implementation notes](./implementation-notes.md#bash-tool-process-group-cleanup).
   The tool description explicitly tells the model never to use it to sleep,
@@ -608,7 +633,11 @@ character of the input.
 
 The `/models` picker displays provider-reported context lengths as
 `context: <size>` labels using integer binary sizes (`2048` appears as
-`context: 2kb`; `1_048_576` appears as `context: 1mb`).
+`context: 2kb`; `1_048_576` appears as `context: 1mb`). Rows of models that
+advertise a non-text input modality append a bracketed marker with one
+upper-case letter per modality — `[I]` for image, `[F]` for file, `[IF]` for
+both; known text-only models and models whose modalities the provider did
+not advertise get no marker.
 Submitting `/models` (with or without an initial argument, e.g.
 `/models deepseek`) fetches the full catalog once and does *not* clear the
 input — the draft stays as `/models <filter>` so the picker can be

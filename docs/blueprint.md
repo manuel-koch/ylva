@@ -439,6 +439,14 @@ trait Provider: Send + Sync {
 struct ModelInfo {
     id: String,
     context_length: Option<usize>,
+    /// `None` = unknown, `Some([])` = known text-only, otherwise the
+    /// provider-advertised supported input modalities.
+    input_modalities: Option<Vec<InputModality>>,
+}
+
+enum InputModality {
+    Image,
+    File,
 }
 
 /// Runtime abstraction an AgentLoop depends on. A thin `EngineImpl` wraps a
@@ -624,6 +632,9 @@ enum Message {
         id: uuid::Uuid,
         name: String,
         result: String,
+        /// Provider-neutral descriptors that reference `result`; they do not
+        /// own another copy of the Base64 payload.
+        attachments: Vec<ToolAttachment>,
     },
     ToolError {
         id: uuid::Uuid,
@@ -712,6 +723,11 @@ impl ToolCallAccumulator {
                 .unwrap_or(serde_json::Value::Null), // caller validates completeness before calling
         }
     }
+}
+
+enum ToolAttachment {
+    Image { media_type: String },
+    File { media_type: String, filename: String },
 }
 
 /// Pending tool awaiting approval and execution.
@@ -1181,16 +1197,13 @@ use serde::Deserialize;
 
 #[derive(JsonSchema, Deserialize)]
 enum ReadMode {
-    Lines, // default for all reads; strict UTF-8 line offset/limit
+    Lines, // explicit; strict UTF-8 line offset/limit
     Bytes, // explicit byte ranges/binary data
     Chars, // explicit character counts; strict UTF-8 code points
 }
-
-impl Default for ReadMode {
-    fn default() -> Self {
-        Self::Lines
-    }
-}
+// `mode` is omitted (None) by default: autodetect reads UTF-8 text as
+// lines, returns a whole recognized media file as Base64 (typed
+// attachment), and fails other binary content with a retry hint.
 
 #[derive(JsonSchema, Deserialize)]
 enum FileEncoding {
@@ -1208,7 +1221,7 @@ impl Default for FileEncoding {
 struct ReadFileArgs {
     path: String,
     #[serde(default)]
-    mode: ReadMode,          // defaults to Lines for every call
+    mode: Option<ReadMode>,     // None = autodetect (text→lines, whole media→Base64)
     #[serde(default)]
     encoding: FileEncoding,  // defaults to Utf8; Base64 requires explicit Bytes mode
     #[serde(default)]
@@ -1223,14 +1236,17 @@ struct ReadFileArgs {
 // like text (including text metadata and a decoded preview); opaque bytes are
 // presented with size metadata only.
 
-The binary `read`/`write` implementation is currently an interim exact
-transport and UI-safety layer. It preserves arbitrary bytes and keeps opaque
-payloads out of user-facing previews, but it does not provide full binary
-interaction with an LLM: Base64 is still delivered as text in the tool result,
-and the provider serializer has no typed image or file attachment. Image and
-PDF inspection therefore require the planned provider-aware attachment and
-multimodal wire projection described in
-[Image and file input from tool results](./ideas/image-or-file-upload.md).
+The binary `read`/`write` implementation remains an exact transport and
+UI-safety layer. Complete explicit Base64 `read` results are also inspected
+with magic-number detection for PNG, JPEG, WebP, GIF, and PDF. Recognized
+complete results carry a provider-neutral `ToolAttachment` descriptor that
+references the existing `ToolResult.result`; partial ranges and unknown
+formats remain ordinary Base64. Provider serialization projects only
+modalities advertised by the selected model: contiguous tool responses use a
+short marker followed by a wire-only user content array with text before an
+`image_url` or PDF `file` part. Unknown or incompatible models retain the
+complete Base64 tool text. The synthetic user message is never persisted or
+rendered.
 
 #[derive(JsonSchema, Deserialize)]
 struct BashArgs {
@@ -2493,10 +2509,12 @@ top of a proven agent loop.
       bullet that placed the accumulator in the provider).
 
 - [x] Implement the `OpenAiCompatibleProvider` struct (`base_url`, `model`,
-      `api_key`, `reqwest::Client`) with
-      helper function `serialize_messages(&[Message]) -> Value` (skip `ToolResult`/`ToolError`
-      silently — unreachable in Phase 2). Append `/chat/completions` to `base_url` internally per the
-      §4A `base_url` semantics note.
+      `api_key`, `reqwest::Client`) with the shared
+      `serialize_messages_with_policy` projection. It preserves the ordinary
+      text-only projection and, when runtime model capabilities allow it,
+      expands supported tool attachments into a wire-only user content array.
+      Append `/chat/completions` to `base_url` internally per the §4A
+      `base_url` semantics note.
 
 - [x] Verify provider works for both OpenRouter (`base_url` override) and Ollama
       (server-origin `base_url`, with derived `/v1` chat and `/api` catalog endpoints)
