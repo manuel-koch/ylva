@@ -44,7 +44,7 @@ pub const DEFAULT_CONTEXT_LENGTH: usize = 128_000;
 /// - **Phase 10 (Full Configuration & Persona System)** supplies the
 ///   project/home/built-in fallback chain and will add persona/`agents/*.md`
 ///   sourcing, which populate this same struct through additional layers.
-/// - **Phase 11 (Context Compaction & Token Budgeting)** reads
+/// - **Phase 12 (Context Compaction & Token Budgeting)** reads
 ///   `context_length` to drive `maybe_compact`'s budget; it adds no fields
 ///   here.
 #[derive(Clone, Debug, serde::Deserialize)]

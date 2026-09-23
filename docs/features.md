@@ -51,6 +51,9 @@ Non-interactive, one-shot session: the initial user turn is sent to the
 agent, and the assistant response is streamed to stdout as it arrives. The
 committed session is persisted incrementally.
 CLI prints the identifier of the persisted session on exit via `stderr`.
+Argument parsing is `clap`-backed (see [CLI options](./cli-options.md)):
+`--help` prints usage to stdout and exits `0`; unknown flags and missing
+values are usage errors that exit `2`.
 
 Selected automatically when stdout is not a terminal, or forced via `--no-tui`.
 

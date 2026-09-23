@@ -375,6 +375,27 @@ so `output_bytes` in result metadata never reports 0 for non-empty command
 output that only hit the byte cap. Result metadata records `truncated: true`
 when any cap discarded or cut content.
 
+## CLI option parsing
+
+Implemented in `src/cli.rs` as a `clap` derive model (`Cli`, `CliCommand`),
+re-exported from `lib.rs`. `main.rs` consumes the parsed `Cli` instead of
+scanning raw arguments:
+
+- `main()` pre-scans `std::env::args()` for `--version` so the rich
+  `BUILD_INFO` rendering pre-empts everything (clap's own version flag is
+  disabled via `disable_version_flag`).
+- Everything else goes through `Cli::try_parse_from`; clap errors are routed
+  through the binary's usage-error path (stderr, exit `2`) — clap never exits
+  on its own, so post-parse exits can still flush `LogGuards`. Parse errors
+  occur before `init_logging`, so there is no log guard on that path.
+- Value parsers in `cli.rs` own case-insensitive enum validation
+  (`--color`, `--log-level`, `--log-format`) and `--conversation-id` uuid
+  validation, preserving the distinctive error phrases the tests assert.
+- `Cli::log_config()`, `Cli::resolved_color_mode()` (the `--no-color`
+  migration hint), and `Cli::auto_approve_tools()` are the assembly points
+  `main.rs` reads; prompt precedence (`--prompt` → piped stdin → demo
+  prompt) stays in `main.rs`.
+
 ## CLI driver
 
 Implemented in `src/cli_driver.rs`; selected automatically by `main.rs` when

@@ -4218,12 +4218,13 @@ checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
 
 [[package]]
 name = "ylva"
-version = "0.10.4"
+version = "0.10.5"
 dependencies = [
  "anyhow",
  "arboard",
  "base64 0.22.1",
  "chrono",
+ "clap",
  "crossterm",
  "ctrlc",
  "dirs",

@@ -16,6 +16,7 @@ pub mod agent;
 pub mod agent_factory;
 pub mod app;
 pub mod build_info;
+pub mod cli;
 pub mod cli_driver;
 pub mod config;
 pub mod events;
@@ -58,6 +59,7 @@ pub use agent_factory::AgentFactory;
 pub use app::App;
 pub use build_info::{BuildInfo, BUILD_INFO};
 pub use child_agent_manager::{ChildAgentManager, FinishResult, SpawnRequest, SpawnStatus};
+pub use cli::{Cli, CliColorMode, CliCommand};
 pub use cli_driver::{run_cli, run_cli_to, run_cli_to_with_options, CliOutputOptions, ConsoleApp};
 pub use config::layered::{
     current_workspace_root, discover_workspace_root, ConfigLayer, ResolvedFile,

@@ -1,6 +1,6 @@
 [package]
 name = "ylva"
-version = "0.10.4"
+version = "0.10.5"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["Manuel Koch"]
@@ -49,6 +49,7 @@ dotenvy = "0.15"
 serde_yaml = "0.9"
 tree-sitter = "0.25"
 tree-sitter-bash = "0.25"
+clap = { version = "4", features = ["derive"] }
 
 [build-dependencies]
 time = { version = "0.3", features = ["formatting", "macros"] }

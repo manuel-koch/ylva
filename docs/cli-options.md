@@ -1,12 +1,15 @@
 # Ylva agent-harness CLI options
 
-Reference for Ylva's command-line interface.
+Reference for Ylva's command-line interface. Parsing is backed by `clap`
+(derive model in `src/cli.rs`); the tables below describe the resulting
+surface.
 
 ## Flags
 
 | Flag | Type | Accepted values | Default | Description |
 | --- | --- | --- | --- | --- |
 | `--version` | none | — | — | Print build provenance (`Version`, `Commit`, `Built`, `Profile`) and exit. Takes precedence over all other arguments. |
+| `--help` | none | — | — | Print usage (all flags and subcommands) to stdout and exit with code `0`. |
 | `init [--workspace] [--force]` | subcommand | `--workspace`, `--force` | — | Write configuration starters and exit before provider/session startup. Without `--workspace`, writes `SOUL.md`, `profiles/default/config.toml`, and an annotated `profiles/default/.env` under `YLVA_HOME` (or `${HOME}/.ylva`); `--workspace` writes the default profile config and `.env` starters plus `.gitignore` under the discovered workspace root's `.ylva/`; both modes write-if-missing unless `--force` is supplied. Agent-type files are not seeded. |
 | `--no-tui` | none | — | — | Force headless (CLI) mode even when stdout is a terminal. Useful for scripting or debugging without the TUI. |
 | `--color=<mode>` | enum | `auto`, `no`, `yes` | `auto` | Select CLI color behavior: detect terminal support, force no colors, or force colors. Has no effect on TUI rendering. |
@@ -25,11 +28,15 @@ Reference for Ylva's command-line interface.
 | `--auto-approve-spawn` | none | — | — | Skip the human-approval prompt for `spawn_subagent` tool calls. See `can_spawn` in `docs/configuration.md` and "Child-agent delegation" in `docs/features.md`. |
 
 An invalid `--color`, `--log-level`, `--log-format`, or `--conversation-id`
-value, a flag missing its required value, or a `--log-file` that cannot be
+value, an unknown flag, a flag missing its required value (for any
+value-taking flag, including `--profile`), or a `--log-file` that cannot be
 opened (for example, its containing directory does not exist) prints a usage
-error to stderr and exits with code `2` — the error names the attempted path.
-The `init` subcommand also exits with code `2` when its target root cannot be
-resolved or a seeded file cannot be written.
+error to stderr and exits with code `2` — the error names the attempted path
+or flag. Repeating `--color` or `--prompt` uses the last occurrence; other
+value-taking flags may not be repeated. The `init` subcommand may follow
+global flags (`ylva --no-tui init --workspace`). The `init` subcommand also
+exits with code `2` when its target root cannot be resolved or a seeded file
+cannot be written.
 
 When the CLI writes to a terminal, its section headers and tool status lines
 use the same semantic colors as the TUI. Colors are disabled automatically for

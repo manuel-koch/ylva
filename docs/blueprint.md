@@ -1056,7 +1056,7 @@ enum MessageTier {
 }
 
 struct Context {
-    messages: Vec<Message>,  // Phase 1: simple Vec.  Phase 11 adds TieredMessage + token_count.
+    messages: Vec<Message>,  // Phase 1: simple Vec.  Phase 12 adds TieredMessage + token_count.
 }
 
 impl Context {
@@ -1076,7 +1076,7 @@ impl Context {
         &self.messages
     }
     // Phase 3 adds: push_tool_result, push_tool_error, descope_pending_tools
-    // Phase 11 adds: push_system, push_initial_context, maybe_compact, token counting
+    // Phase 12 adds: push_system, push_initial_context, maybe_compact, token counting
 }
 ```
 
@@ -1094,17 +1094,17 @@ impl Context {
 - `push_assistant(content, status, tool_calls)` →
   `Message::Assistant { content, status, tool_calls }`
 
-**Phase 11 (future):** Replace `Vec<Message>` with `Vec<TieredMessage>`, add
+**Phase 12 (future):** Replace `Vec<Message>` with `Vec<TieredMessage>`, add
 `push_system`, `push_initial_context`, `push_compacted`, `maybe_compact`,
 `find_oldest_droppable`, and `find_oversized_result`.
 
 **Context ownership rule (HARD):** The outer agent loop is the **sole writer** to `Context`.
 
-**Compaction (Phase 11 future):**
+**Compaction (Phase 12 future):**
 
 Phase 1 does not implement compaction or token counting. The full algorithm
 (`maybe_compact`, `find_oldest_droppable`, `find_oversized_result`) is deferred
-until Phase 11 when `TieredMessage` and `tiktoken-rs` are introduced.
+until Phase 12 when `TieredMessage` and `tiktoken-rs` are introduced.
 
 **Compaction trigger and target:** `maybe_compact` uses a **hysteresis** model
 with a single control, `compact_target_ratio` (fraction of `context_length`):
@@ -1125,7 +1125,7 @@ with a single control, `compact_target_ratio` (fraction of `context_length`):
   in practice over-discards, add `max_drop_ratio` ("never drop more than X% of
   current in one pass") then.
 
-**Tool-result truncation (Phase 11 future):** Tool results are **truncated at
+**Tool-result truncation (Phase 12 future):** Tool results are **truncated at
 insertion** to a configurable cap (default ~8–16 KB / engine-tunable), with a
 clear marker such as `… [truncated M of K chars]`. Combined with
 `maybe_compact` preferring oversized results, a large result neither swallows
@@ -1133,7 +1133,7 @@ the window nor forces many older turns to be dropped. If the model needs more
 of a file, it re-calls `read`/`edit` with `offset`/`limit` — the
 existing tool contract.
 
-**Phase 11 (future):** Replace `find_oldest_droppable` + `remove` with a
+**Phase 12 (future):** Replace `find_oldest_droppable` + `remove` with a
 summarization pass: collect K oldest `Recent` messages, spawn a background
 summarizer model, and replace them with one `Compacted` system message.
 
@@ -1183,7 +1183,7 @@ generation is reserved for the explicit interrupt (`Ctrl+C` / `Esc`).
 **Token counting:** Use `tiktoken-rs` for OpenAI-compatible models and a byte-length
 heuristic (4 chars ≈ 1 token) for Ollama as a cheap fallback. Maintain a rolling
 window that trims the oldest user/assistant pairs (never the system prompt) when
-the total exceeds the model limit. For a more advanced solution (Phase 11), summarise
+the total exceeds the model limit. For a more advanced solution (Phase 12), summarise
 dropped messages via a cheap summariser model call and prepend a system message
 with the summary.
 
@@ -1823,7 +1823,7 @@ explicit `<role>_engine` → `default_engine` → hard error.
 ```toml
 # Future roles, added when the corresponding feature is implemented:
 utility_engine = "openrouter_small"  # session title generator (Phase 9)
-compact_engine = "openrouter_small"   # context compaction summarizer (Phase 11)
+compact_engine = "openrouter_small"   # context compaction summarizer (Phase 12)
 # curator_engine = "openrouter_small" # reserved for a future curator child agent
 ```
 
@@ -1985,10 +1985,11 @@ store (see §4H). Two JSONL record shapes are written per parent session file:
   `🔍 Child agent 'research' running... (14s / 120s)`. When finished, the panel
   shows the result summary and a link to view the full thread (loaded from the
   sub-session file for audit).
-- **Headless:** child agents are **disabled by default**. Enable with
-  `--allow-child-agents`. When enabled, stderr prints `Spawned child agent
-  'research'...` and completion status. The `--auto-approve-*` flags inherited
-  by the parent also apply to child agents.
+- **Headless:** child agents are **disabled by default** — without
+  `--auto-approve-spawn`, `spawn_subagent` is denied outright. With the flag,
+  the one-shot process stays alive until every spawned child has reported a
+  terminal outcome, and the `--auto-approve-*` flags inherited by the parent
+  also apply to child agents.
 
 Child-agent persistence is recorded via the unified store (§4H); there is **no**
 separate SQLite table.
@@ -2829,7 +2830,7 @@ See reducer-state-handling-plan.md.
 
 - [x] TUI sidebar panel for active/past child-agent runs (collapsible, shows runtime & status)
 
-- [x] Headless: `--allow-child-agents` flag (disabled by default) + stderr status lines
+- [x] Headless: `--auto-approve-spawn` flag (child agents denied without it) + stderr status lines
 
 **Key crates:** `which`, `ignore`, `tempfile`
 
@@ -2989,7 +2990,7 @@ See reducer-state-handling-plan.md.
 
 ### Phase 10: Full Configuration & Persona System
 
-- [ ] **Goal:** Replace Phase 7's single flat config file with the complete `§4G`
+- [x] **Goal:** Replace Phase 7's single flat config file with the complete `§4G`
       config-driven-types system, so behavior (agent types, persona) and
       infrastructure (engines/profiles) are both fully file-driven and
       shareable across projects/users.
@@ -3040,7 +3041,44 @@ See reducer-state-handling-plan.md.
 **Key crates:** `toml` (already added in Phase 7); evaluate `dirs`/`directories`
 for home-directory resolution when this phase starts.
 
-### Phase 11: Context Compaction & Token Budgeting
+### Phase 11: CLI Option Parsing (clap)
+
+**Decision:** Replace the handwritten, per-flag scans of the raw argument
+vector in `main.rs` with a single `clap` derive model in lib `src/cli.rs`,
+accepting clap's stricter uniform errors (unknown flags and missing values are
+hard usage errors: stderr, exit 2). Seed idea: `docs/ideas/cli-options-parsing.md`.
+
+- [x] **Goal:** Make CLI option parsing a maintained library concern instead of
+      brittle handwritten scanning with per-flag-family semantics.
+
+- [x] Add `clap` (derive) as a direct dependency; parse via
+      `Cli::try_parse_from` in `main()` with errors routed through the binary's
+      usage-error path (stderr, exit 2) so exit/flush behavior stays under our
+      control; `--version` keeps the rich `BUILD_INFO` rendering via a
+      pre-parse scan (`disable_version_flag`)
+
+- [x] Move the parser into lib `src/cli.rs` (`Cli`, `CliCommand`), re-exported
+      from `lib.rs`; `main.rs` keeps only dispatch (version, `init`
+      subcommand, mode detection, prompt precedence)
+
+- [x] Cover the existing flag surface: `init [--workspace] [--force]`,
+      `--no-tui`, `--color=<auto|no|yes>`, `--prompt`, `--profile`,
+      `--log-file`, `--log-level`, `--log-format`, `--conversation-id`, seven
+      `--auto-approve-*` booleans; add clap's `--help`
+
+- [x] Deliberate strictness: unknown flags rejected; missing values hard-error
+      (including `--profile`, previously silently ignored); duplicate
+      `--color`/`--prompt` are last-wins; `init` accepted after global flags;
+      `--no-color` keeps its migration hint via a hidden flag
+
+- [x] Migrate parsing unit tests to `src/cli.rs`, add process-level tests
+      (`--help` exit 0, unknown flag exit 2, migration hint exit 2), and
+      update `docs/cli-options.md`, `docs/features.md`,
+      `docs/implementation-notes.md`
+
+**Key crates:** `clap`
+
+### Phase 12: Context Compaction & Token Budgeting
 
 - [ ] **Goal:** Keep the context window bounded for long-running conversations
       without losing the most valuable context (§4C).
@@ -3063,34 +3101,33 @@ for home-directory resolution when this phase starts.
 - [ ] Tool-result truncation at insertion (default ~8–16 KB, engine-tunable),
       with a `"… [truncated M of K chars]"` marker
 
-- [ ] Phase 11 extension: replace "drop" with on-the-fly summarization via a
+- [ ] Phase 12 extension: replace "drop" with on-the-fly summarization via a
       cheap local model (engine = `compact_engine`, §4G/§4G config, wired in
       Phase 10)
 
 **Key crates:** `tiktoken-rs`
 
-### Phase 12: CLI Surface
+### Phase 13: CLI Surface
 
-**Decision:** Headless mode already works from Phase 1. This phase adds the full `clap` CLI interface
-for scripting and automation.
+**Decision:** Headless mode already works from Phase 1 and clap-backed
+argument parsing landed in Phase 11. This phase adds the scripting surface:
+structured output, quiet mode, exit codes, and store-management subcommands.
 
 - [ ] **Goal:** Automation and scripting support.
-
-- [ ] Add `clap` for CLI argument parsing (`--prompt`, `--profile`, `--format`, `--conversation-id`,
-      `--provider`, `--model`, `--auto-approve-*`, `--quiet`)
 
 - [ ] Implement `FakeTuiWrapper` that receives `UiUpdate` events and prints to stdout/stderr
 
 - [ ] Buffer stdout output; emit final JSON object on `--format json`
 
-- [ ] Implement granular `--auto-approve-read`, `--auto-approve-write`, `--auto-approve-bash` flags
-      (`--auto-approve-write`/`--auto-approve-edit`/`--auto-approve-bash`/`--auto-approve-spawn`
-      already implemented ahead of this phase; `--auto-approve-read` remains outstanding — see
-      `docs/cli-options.md`)
+- [x] Implement granular `--auto-approve-read`/`--auto-approve-write`/
+      `--auto-approve-glob`/`--auto-approve-bash`/`--auto-approve-search`/
+      `--auto-approve-edit`/`--auto-approve-spawn` flags (all seven implemented
+      ahead of this phase — see `docs/cli-options.md`)
 
 - [ ] Define exit codes: `0` success, `1` error, `2` interrupt, `3` tool failure, `4` approval denied
 
-- [ ] Support `--conversation-id <id>` to resume and append to existing threads
+- [x] Support `--conversation-id <id>` to resume and append to existing threads
+      (implemented ahead of this phase — see `docs/cli-options.md`)
 
 - [ ] Store-management subcommands: `ylva compress` / `ylva decompress [--all|--before <date>|<session-id>]`,
       `ylva delete [<session-id>…|--before <date>|--all] --dry-run` (§4H decisions 11–12)
@@ -3098,8 +3135,6 @@ for scripting and automation.
 - [ ] Print minimal status to stderr by default; `--quiet` to suppress
 
 - [ ] Always persist to a JSONL session file (no `--no-persist` flag)
-
-**Key crates:** `clap`
 
 ## 8. Critical Pitfalls to Avoid
 
@@ -3266,7 +3301,7 @@ where they are documented in the body of this document.
 | **TUI event loop**             | `spawn_blocking` for crossterm + `select!` on `ui_rx` + `subagent_ui_rx` + `event_rx`                                                                                                          | §4B ReAct Loop                               |
 | **TUI async context**          | `main.rs` uses `rt.block_on` for the TUI loop                                                                                                                                                  | §4B ReAct Loop                               |
 | **Token counting**             | `tiktoken-rs` for OpenAI; byte heuristic for Ollama; cached per `TieredMessage`. Counts are **approximate/advisory** (encoding is model-family dependent); rely on `context_length × 0.9` margin | §4C Context State Machine                    |
-| **Context tiers**              | `System` (never drop), `InitialContext` (never drop), `Recent` (drop oldest), `Compacted` (summarize in Phase 11)                                                                               | §4C Context State Machine                    |
+| **Context tiers**              | `System` (never drop), `InitialContext` (never drop), `Recent` (drop oldest), `Compacted` (summarize in Phase 12)                                                                               | §4C Context State Machine                    |
 | **Ollama tools**               | Dedicated Ollama provider reusing the unified raw `reqwest` streaming transport for `/v1/chat/completions`; model discovery uses native `/api/tags` and `/api/show`; no separate `ollama-rs` crate | §2 Crate Ecosystem, §5 OpenRouter vs Ollama  |
 | **OS signals**                 | `ctrlc` handler mapped to `AgentCommand::Stop`                                                                                                                                                 | §1 Vision, §2 Crate Ecosystem                |
 | **Tool binary checks**         | Lazy check at invocation with graceful fallback                                                                                                                                                | §4D Tool Registry                            |
@@ -3299,7 +3334,7 @@ where they are documented in the body of this document.
 | **Child-agent safety**          | Inherits parent safety settings                                                                                                                                                                | §4G Safety Inheritance                        |
 | **Child-agent persistence**     | `child_start` / `child_result` JSONL records in the parent session + dedicated sub-session file (§4H)                                                                                          | §4G Agent Types & Delegation, §4H            |
 | **Child-agent UI**              | Collapsible sidebar panel + status bar line                                                                                                                                                    | §4G Agent Types & Delegation                  |
-| **Child-agent headless**        | `--allow-child-agents` flag, disabled by default                                                                                                                                              | §7 CLI Surface                               |
+| **Child-agent headless**        | `--auto-approve-spawn` opt-in; `spawn_subagent` denied headless without it                                                                                                                      | §4G Agent Types & Delegation                  |
 | **Build order**                | Headless first (Phase 1–3), TUI added as rendering layer in Phase 4                                                                                                                            | §7 Phased Build Plan                         |
 | **Minimal build**              | No CLI surface, no config parsing, no TOML in Phase 1                                                                                                                                          | §7 Phase 1                                   |
 | **Provider verification**      | Mock provider before real HTTP; real `reqwest` in Phase 2                                                                                                                                      | §7 Phase 1, §7 Phase 2                       |

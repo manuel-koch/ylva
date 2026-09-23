@@ -8,6 +8,7 @@ Picking one of the agents switches the view to that agents conversation-list,
 scrolled down to the last item.
 
 Order the entries in the agents popup list by descending priority:
+
 - running: highest prio
 - scheduled/pending: medium prio
 - finished/error: low prio
