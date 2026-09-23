@@ -61,8 +61,16 @@ fn render_invocation_from_title_arguments(
     title: &str,
     title_arguments: &[(String, serde_json::Value)],
 ) -> String {
+    render_invocation_with_string_limit(title, title_arguments, STRING_ELIDE_LIMIT)
+}
+
+fn render_invocation_with_string_limit(
+    title: &str,
+    title_arguments: &[(String, serde_json::Value)],
+    string_limit: usize,
+) -> String {
     let mut line = title.to_string();
-    let is_short = |s: &str| s.len() <= STRING_ELIDE_LIMIT;
+    let is_short = |s: &str| s.len() <= string_limit;
     let scalar_primary = |v: &serde_json::Value| -> Option<String> {
         match v {
             serde_json::Value::String(s) if is_short(s) => Some(s.as_str().to_string()),
@@ -92,12 +100,37 @@ fn render_invocation_from_title_arguments(
         }
     }
     let rest: Vec<String> = iter
-        .map(|(k, v)| format!("{k}={}", render_arg_value(v)))
+        .map(|(k, v)| format!("{k}={}", render_arg_value_with_limit(v, string_limit)))
         .collect();
     if !rest.is_empty() {
         line.push_str(&format!(" [{}]", rest.join(", ")));
     }
     line
+}
+
+/// Render a tool invocation for a denial line: string arguments longer than
+/// [`DENIED_ARG_DISPLAY_LIMIT`] are truncated with a trailing `…` instead of
+/// being dropped, so the denied command is always visible.
+fn render_denied_invocation(
+    title: &str,
+    title_arguments: &[(String, serde_json::Value)],
+) -> String {
+    let truncated_arguments: Vec<(String, serde_json::Value)> = title_arguments
+        .iter()
+        .map(|(key, value)| {
+            let display_value = match value {
+                serde_json::Value::String(text) if text.len() > DENIED_ARG_DISPLAY_LIMIT => {
+                    serde_json::Value::String(truncate_with_ellipsis(
+                        text,
+                        DENIED_ARG_DISPLAY_LIMIT,
+                    ))
+                }
+                other => other.clone(),
+            };
+            (key.clone(), display_value)
+        })
+        .collect();
+    render_invocation_with_string_limit(title, &truncated_arguments, DENIED_ARG_DISPLAY_LIMIT)
 }
 
 fn render_content_sections(
@@ -163,6 +196,30 @@ fn render_content_sections(
 /// Length beyond which a string value is treated as "long" and elided when
 /// rendering a tool invocation.
 const STRING_ELIDE_LIMIT: usize = 40;
+
+/// Byte length beyond which a string argument on a CLI denial line is
+/// truncated with a trailing `…`. The denied command must always stay
+/// visible, but the line must not flood with multi-hundred-byte commands.
+const DENIED_ARG_DISPLAY_LIMIT: usize = 80;
+
+/// Truncate `text` to at most `max_bytes` UTF-8 bytes (counting whole
+/// characters only), appending `…` when truncation occurs.
+fn truncate_with_ellipsis(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    const ELLIPSIS: &str = "…";
+    let byte_budget = max_bytes.saturating_sub(ELLIPSIS.len());
+    let mut truncated = String::new();
+    for character in text.chars() {
+        if truncated.len() + character.len_utf8() > byte_budget {
+            break;
+        }
+        truncated.push(character);
+    }
+    truncated.push_str(ELLIPSIS);
+    truncated
+}
 
 /// Top-level headless (non-terminal) application entry point.
 ///
@@ -632,13 +689,7 @@ async fn run_cli_to_with_title(
                             .await;
                     }
                     ApprovalCheck::AutoDenied { reason } => {
-                        let short_args: Vec<_> = title_arguments
-                            .iter()
-                            .filter(|(_, v)| !matches!(v, serde_json::Value::String(s) if s.len() > STRING_ELIDE_LIMIT))
-                            .cloned()
-                            .collect();
-                        let denied_invocation =
-                            render_invocation_from_title_arguments(&title, &short_args);
+                        let denied_invocation = render_denied_invocation(&title, &title_arguments);
                         write_cli_styled_line(
                             out,
                             &format!("[tool] {denied_invocation} → auto-denied: {reason}"),
@@ -657,13 +708,7 @@ async fn run_cli_to_with_title(
                     }
                     ApprovalCheck::UserApprovalRequired => {
                         let reason = "tool requires approval, not supported in CLI mode";
-                        let short_args: Vec<_> = title_arguments
-                            .iter()
-                            .filter(|(_, v)| !matches!(v, serde_json::Value::String(s) if s.len() > STRING_ELIDE_LIMIT))
-                            .cloned()
-                            .collect();
-                        let denied_invocation =
-                            render_invocation_from_title_arguments(&title, &short_args);
+                        let denied_invocation = render_denied_invocation(&title, &title_arguments);
                         write_cli_styled_line(
                             out,
                             &format!("[tool] {denied_invocation} → denied: {reason}"),
@@ -1012,7 +1057,10 @@ fn render_tool_invocation(tool: &dyn Tool, arguments: &serde_json::Value) -> Str
             }
             continue;
         }
-        rest.push(format!("{key}={}", render_arg_value(value)));
+        rest.push(format!(
+            "{key}={}",
+            render_arg_value_with_limit(value, STRING_ELIDE_LIMIT)
+        ));
     }
     if !rest.is_empty() {
         line.push_str(&format!(" [{}]", rest.join(", ")));
@@ -1020,9 +1068,9 @@ fn render_tool_invocation(tool: &dyn Tool, arguments: &serde_json::Value) -> Str
     line
 }
 
-fn render_arg_value(value: &serde_json::Value) -> String {
+fn render_arg_value_with_limit(value: &serde_json::Value, string_limit: usize) -> String {
     match value {
-        serde_json::Value::String(text) if text.len() > STRING_ELIDE_LIMIT => {
+        serde_json::Value::String(text) if text.len() > string_limit => {
             format!("<{}-char string elided>", text.chars().count())
         }
         serde_json::Value::String(text) => text.clone(),
@@ -1149,6 +1197,79 @@ mod tests {
             &[("label".to_string(), serde_json::json!("Refactor"))],
         );
         assert_eq!(rendered, "Spawn Subagent Refactor");
+    }
+
+    #[test]
+    fn render_denied_invocation_keeps_short_command_inline() {
+        let rendered = render_denied_invocation(
+            "Bash",
+            &[(
+                "command".to_string(),
+                serde_json::json!("find . -mindepth 1 -type d | wc -l"),
+            )],
+        );
+        assert_eq!(rendered, "Bash find . -mindepth 1 -type d | wc -l");
+    }
+
+    #[test]
+    fn render_denied_invocation_shows_command_between_elide_and_display_limits() {
+        // 73-byte command: longer than STRING_ELIDE_LIMIT (40), so the old
+        // filter dropped it entirely; within DENIED_ARG_DISPLAY_LIMIT (80),
+        // so it must appear in full.
+        let command = "echo \"=== Top-level listing ===\"; ls -la; echo; echo \"=== pwd ===\"; pwd";
+        assert!(command.len() > STRING_ELIDE_LIMIT);
+        assert!(command.len() <= DENIED_ARG_DISPLAY_LIMIT);
+        let rendered = render_denied_invocation(
+            "Bash",
+            &[("command".to_string(), serde_json::json!(command))],
+        );
+        assert_eq!(rendered, format!("Bash {command}"));
+    }
+
+    #[test]
+    fn render_denied_invocation_truncates_very_long_command_with_ellipsis() {
+        let command =
+            "echo \"=== Files (all, incl. hidden & git-ignored) ===\"; find . -type f | wc -l; \
+                       find . -mindepth 1 -type d | wc -l; find . -mindepth 1 | wc -l";
+        assert!(command.len() > DENIED_ARG_DISPLAY_LIMIT);
+        let rendered = render_denied_invocation(
+            "Bash",
+            &[("command".to_string(), serde_json::json!(command))],
+        );
+        assert!(
+            rendered.starts_with("Bash echo \"=== Files"),
+            "command prefix must stay visible: {rendered}"
+        );
+        assert!(
+            rendered.contains('…'),
+            "over-limit command must end with an ellipsis: {rendered}"
+        );
+        let command_part = rendered.trim_start_matches("Bash ");
+        assert!(
+            command_part.len() <= DENIED_ARG_DISPLAY_LIMIT,
+            "truncated command must respect the display limit: {command_part}"
+        );
+        assert!(
+            !command_part.contains("wc -l; find"),
+            "truncated command must not include the tail: {command_part}"
+        );
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_respects_utf8_char_boundaries() {
+        let text = "日本語".repeat(50);
+        let truncated = truncate_with_ellipsis(&text, DENIED_ARG_DISPLAY_LIMIT);
+        assert!(truncated.len() <= DENIED_ARG_DISPLAY_LIMIT);
+        assert!(truncated.ends_with('…'));
+        assert!(truncated.starts_with("日本語"));
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_keeps_short_text_unchanged() {
+        assert_eq!(
+            truncate_with_ellipsis("find . | wc -l", 80),
+            "find . | wc -l"
+        );
     }
 
     #[test]
