@@ -700,6 +700,201 @@ async fn stop_while_awaiting_approval_clears_pending_tools() {
     assert_eq!(tool_error_count, 2, "expected one error per pending tool");
 }
 
+#[tokio::test(start_paused = true)]
+async fn bash_call_pending_carries_label_in_title_arguments() {
+    // A bash call with a non-empty `label` must surface it in the pending
+    // event's `title_arguments`, ordered `command` (primary) then `label`
+    // (prop), so the collapsed bubble/CLI status line can show the purpose
+    // while the call awaits approval — and the pending event's body
+    // sections must lead with `Label` then `Command` for the expanded
+    // bubble.
+    let registry = Arc::new(default_registry(
+        make_sandbox(),
+        ToolRegistryConfig::default(),
+    ));
+    let interval = Duration::from_millis(5);
+    let provider = MockProvider::with_script(
+        vec![call(
+            "bash",
+            0,
+            serde_json::json!({
+                "command": "echo hi",
+                "label": "Greet the user",
+            }),
+        )],
+        interval,
+    );
+    let (mut agent, mut ui_rx) = AgentLoop::new(
+        Arc::new(EngineImpl::new(
+            Arc::new(provider),
+            common::test_engine_config(),
+        )),
+        Arc::clone(&registry),
+    );
+
+    agent
+        .send_command(AgentCommand::Prompt("run it".into()))
+        .await;
+    let handle = agent.run();
+    let _ = collect_until_advancing(&mut ui_rx, interval, is_stream_started).await;
+
+    let pending = collect_until_advancing(&mut ui_rx, interval, is_tool_pending).await;
+    let title_arguments = match pending.last() {
+        Some(UiUpdate::ToolPending {
+            name,
+            title_arguments,
+            ..
+        }) => {
+            assert_eq!(name, "bash");
+            title_arguments.clone()
+        }
+        other => panic!("expected a bash ToolPending, got: {other:?}"),
+    };
+    assert_eq!(
+        title_arguments,
+        vec![
+            ("command".to_string(), serde_json::json!("echo hi")),
+            ("label".to_string(), serde_json::json!("Greet the user")),
+        ],
+        "pending event must carry command first, then the label prop"
+    );
+    let pending_content_sections = match pending.last().unwrap() {
+        UiUpdate::ToolPending {
+            content_sections, ..
+        } => content_sections.clone(),
+        other => panic!("expected a bash ToolPending, got: {other:?}"),
+    };
+    assert_eq!(
+        pending_content_sections
+            .iter()
+            .map(|section| match section {
+                ylva::agent::tools::Section::Content(content) => content.label.clone(),
+                other => panic!("unexpected section: {other:?}"),
+            })
+            .collect::<Vec<_>>(),
+        vec![Some("Label".to_string()), Some("Command".to_string())],
+        "expanded pending body must lead with Label then Command"
+    );
+
+    agent
+        .send_command(AgentCommand::Stop {
+            reason: "test done".into(),
+        })
+        .await;
+    let after_stop = collect_until_advancing(&mut ui_rx, interval, is_tool_error).await;
+    let error_content_sections = after_stop
+        .iter()
+        .find_map(|update| match update {
+            UiUpdate::ToolError {
+                content_sections, ..
+            } => Some(content_sections.clone()),
+            _ => None,
+        })
+        .expect("expected ToolError after stop while awaiting approval");
+    assert_eq!(
+        error_content_sections
+            .iter()
+            .map(|section| match section {
+                ylva::agent::tools::Section::Content(content) => content.label.clone(),
+                other => panic!("unexpected section: {other:?}"),
+            })
+            .collect::<Vec<_>>(),
+        vec![Some("Label".to_string()), Some("Command".to_string())],
+        "ToolError must keep the pending Label/Command sections for replay"
+    );
+
+    drop(agent);
+    handle.await.expect("loop ok").expect("context");
+}
+
+#[tokio::test(start_paused = true)]
+async fn bash_tool_done_content_sections_lead_with_label_and_command() {
+    // Approving the call runs it; the completed bubble's body must lead
+    // with `Label` then `Command`, followed by the command output.
+    let registry = Arc::new(default_registry(
+        make_sandbox(),
+        ToolRegistryConfig::default(),
+    ));
+    let interval = Duration::from_millis(5);
+    let provider = MockProvider::with_script(
+        vec![call(
+            "bash",
+            0,
+            serde_json::json!({
+                "command": "echo hi",
+                "label": "Greet the user",
+            }),
+        )],
+        interval,
+    );
+    let (mut agent, mut ui_rx) = AgentLoop::new(
+        Arc::new(EngineImpl::new(
+            Arc::new(provider),
+            common::test_engine_config(),
+        )),
+        Arc::clone(&registry),
+    );
+
+    agent
+        .send_command(AgentCommand::Prompt("run it".into()))
+        .await;
+    let handle = agent.run();
+    let _ = collect_until_advancing(&mut ui_rx, interval, is_stream_started).await;
+
+    let pending = collect_until_advancing(&mut ui_rx, interval, is_tool_pending).await;
+    let pending_id = match pending.last() {
+        Some(UiUpdate::ToolPending { id, .. }) => *id,
+        other => panic!("expected a bash ToolPending, got: {other:?}"),
+    };
+    agent
+        .send_command(AgentCommand::ApproveTool { id: pending_id })
+        .await;
+
+    let after = collect_until_advancing(&mut ui_rx, interval, |update| {
+        matches!(update, UiUpdate::ToolDone { .. })
+    })
+    .await;
+    let done_content_sections = after
+        .iter()
+        .find_map(|update| match update {
+            UiUpdate::ToolDone {
+                content_sections, ..
+            } => Some(content_sections.clone()),
+            _ => None,
+        })
+        .expect("expected ToolDone");
+    assert_eq!(done_content_sections.len(), 3);
+    let rendered_labels = done_content_sections
+        .iter()
+        .map(|section| match section {
+            ylva::agent::tools::Section::Content(content) => content.label.clone(),
+            other => panic!("unexpected section: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rendered_labels,
+        vec![
+            Some("Label".to_string()),
+            Some("Command".to_string()),
+            Some("Result".to_string())
+        ],
+        "completed body must be Label, Command, then Result"
+    );
+    match &done_content_sections[2] {
+        ylva::agent::tools::Section::Content(content) => {
+            assert!(
+                content.content.contains("hi"),
+                "output section must carry the command output: {}",
+                content.content
+            );
+        }
+        other => panic!("unexpected section: {other:?}"),
+    }
+
+    drop(agent);
+    handle.await.expect("loop ok").expect("context");
+}
+
 #[derive(JsonSchema, Deserialize)]
 struct SleepArgs {}
 

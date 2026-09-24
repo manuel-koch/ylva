@@ -76,6 +76,41 @@ pub struct BashInputArgs {
     /// changing directories. Runs in a new process group; stdout+stderr merged
     /// into one stream.
     pub command: String,
+    /// Optional 3–6 word purpose of the shell command, e.g. "List workspace
+    /// files". Shown as a dim `label=…` prop on the (possibly collapsed)
+    /// tool-call bubble title and the CLI status line while the call is
+    /// pending approval, and as the first section of the expanded
+    /// tool-call bubble body. Omit it (or pass an empty string) when no
+    /// purpose summary is needed.
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// Body sections shared by the pending bubble and the completed result:
+/// `Label` first when the model supplied a non-blank purpose string, then
+/// `Command` when the command is non-empty. The suppression rules mirror
+/// the title-argument display rules (blank label treated as omitted).
+fn label_and_command_display_sections(command: &str, label: Option<&str>) -> Vec<Section> {
+    let mut sections = Vec::new();
+    if let Some(label) = label.filter(|label| !label.trim().is_empty()) {
+        sections.push(Section::Content(ContentSection {
+            label: Some("Label".to_string()),
+            content: label.to_string(),
+            file_extension: None,
+            line_number_offset: None,
+        }));
+    }
+    if !command.is_empty() {
+        sections.push(Section::Content(ContentSection {
+            label: Some("Command".to_string()),
+            content: command.to_string(),
+            // Shell grammar for syntect so the expanded bubble renders the
+            // command with syntax highlighting (Label/Result stay plain).
+            file_extension: Some("sh".to_string()),
+            line_number_offset: None,
+        }));
+    }
+    sections
 }
 
 // ── Result ────────────────────────────────────────────────────────────────────
@@ -97,6 +132,12 @@ pub struct BashResult {
     pub output: String,
     /// `true` when the cap was hit and some output was discarded.
     pub truncated: bool,
+    /// Purpose label supplied with the call, kept so the completed bubble
+    /// can lead with the same `Label` section the pending bubble showed.
+    label: Option<String>,
+    /// The executed command, kept for the completed bubble's `Command`
+    /// section (also carried by the call's persisted arguments).
+    command: String,
 }
 
 impl ToolCallResult for BashResult {
@@ -117,15 +158,23 @@ impl ToolCallResult for BashResult {
     }
 
     fn content_sections(&self) -> Vec<Section> {
-        if self.output.is_empty() {
-            return vec![];
+        let mut sections = label_and_command_display_sections(&self.command, self.label.as_deref());
+        if !self.output.is_empty() {
+            // Truncated capture is an incomplete display of the result —
+            // same vocabulary as a failure's partial-output section.
+            let label = if self.truncated {
+                "Partial result"
+            } else {
+                "Result"
+            };
+            sections.push(Section::Content(ContentSection {
+                label: Some(label.to_string()),
+                content: self.output.clone(),
+                file_extension: None,
+                line_number_offset: Some(0),
+            }));
         }
-        vec![Section::Content(ContentSection {
-            label: None,
-            content: self.output.clone(),
-            file_extension: None,
-            line_number_offset: Some(0),
-        })]
+        sections
     }
 }
 
@@ -173,6 +222,26 @@ impl ToolCall for BashCall {
 
     fn argument_order(&self, key: &str) -> usize {
         BashTool::default().argument_order(key)
+    }
+
+    /// An absent or `null` label already drops out of
+    /// [`ToolCall::title_arguments`]; an empty/whitespace-only one is treated
+    /// like the argument being omitted so the title never renders `label=`.
+    fn is_default_argument(&self, key: &str, value: &Value) -> bool {
+        key == "label" && value.as_str().is_some_and(|label| label.trim().is_empty())
+    }
+
+    /// The expanded bubble leads with `Label` (when present) then
+    /// `Command`, in every pre-execution and post-failure state. Reads the
+    /// raw arguments directly so it works before schema validation.
+    fn pending_content_sections(&self) -> Vec<Section> {
+        let command = self
+            .raw_arguments
+            .get("command")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let label = self.raw_arguments.get("label").and_then(Value::as_str);
+        label_and_command_display_sections(command, label)
     }
 
     fn timeout_secs(&self) -> u64 {
@@ -235,9 +304,11 @@ fn build_description(timeout_secs: u64) -> String {
          `cd` only when intentionally changing directories. stdout/stderr merged in \
          arrival order. Output capped at {} lines or {} bytes, whichever is hit first \
          (excess discarded). Times out after {} s, killing the whole process group. \
-         Never use this tool to sleep, poll, or otherwise wait for a spawned subagent \
-         to finish (e.g. `sleep`, `wait`, status-polling loops) — the harness delivers \
-         each subagent's completion automatically once it is ready.",
+         You may supply an optional short `label` (3–6 words) stating the purpose of \
+         the command; it is shown on the tool-call title line while the call awaits \
+         approval. Never use this tool to sleep, poll, or otherwise wait for a spawned \
+         subagent to finish (e.g. `sleep`, `wait`, status-polling loops) — the harness \
+         delivers each subagent's completion automatically once it is ready.",
         BASH_OUTPUT_LIMIT_LINES, BASH_OUTPUT_LIMIT_BYTES, timeout_secs,
     )
 }
@@ -463,7 +534,12 @@ pub async fn run_bash(args: BashInputArgs, timeout_secs: u64) -> Result<BashResu
         "bash command completed"
     );
 
-    Ok(BashResult { output, truncated })
+    Ok(BashResult {
+        output,
+        truncated,
+        label: args.label,
+        command: args.command,
+    })
 }
 
 /// Drain `receiver` and accumulate up to [`BASH_OUTPUT_LIMIT_LINES`] whole
@@ -517,6 +593,7 @@ mod tests {
     fn make_bash_args(command: &str) -> BashInputArgs {
         BashInputArgs {
             command: command.to_string(),
+            label: None,
         }
     }
 
@@ -580,6 +657,137 @@ mod tests {
             tool.description().contains("60"),
             "custom timeout must appear in description: {}",
             tool.description()
+        );
+    }
+
+    #[test]
+    fn bash_tool_description_mentions_optional_label_and_title_line() {
+        let tool = BashTool::default();
+        let description = tool.description();
+        assert!(
+            description.contains("optional short `label`"),
+            "description must advertise the optional label: {description}"
+        );
+        assert!(
+            description.contains("tool-call title line"),
+            "description must explain where the label is shown: {description}"
+        );
+    }
+
+    // ── label schema, ranking, and title suppression ──────────────────────────
+
+    #[test]
+    fn bash_input_args_schema_declares_optional_label_after_command() {
+        let schema = BashTool::default().input_schema();
+        let schema = serde_json::to_value(schema).expect("schema serializes");
+        let properties = schema["properties"]
+            .as_object()
+            .expect("schema has properties");
+        assert!(
+            properties.contains_key("label"),
+            "schema must declare the optional label: {properties:?}"
+        );
+        let property_names: Vec<&str> = properties.keys().map(String::as_str).collect();
+        assert_eq!(
+            property_names,
+            vec!["command", "label"],
+            "command must stay rank 0 (primary); label rank 1 (prop)"
+        );
+        let required = schema["required"]
+            .as_array()
+            .map(|values| values.len())
+            .unwrap_or(0);
+        assert_eq!(required, 1, "only command is required: {schema}");
+        let label_description = schema["properties"]["label"]["description"]
+            .as_str()
+            .expect("label schema has a description");
+        assert!(!label_description.is_empty());
+    }
+
+    #[test]
+    fn command_ranks_ahead_of_label_as_primary_title_argument() {
+        let tool = BashTool::default();
+        assert_eq!(tool.argument_order("command"), 0);
+        assert_eq!(
+            tool.argument_order("label"),
+            1,
+            "label must rank after command so command stays the bare primary"
+        );
+    }
+
+    #[test]
+    fn non_empty_label_appears_in_title_arguments_after_command() {
+        let tool = BashTool::default();
+        let call = tool.create_call(
+            uuid::Uuid::new_v4(),
+            serde_json::json!({
+                "command": "ls -la",
+                "label": "List workspace files",
+            }),
+        );
+        assert_eq!(
+            call.title_arguments(),
+            vec![
+                ("command".to_string(), serde_json::json!("ls -la")),
+                (
+                    "label".to_string(),
+                    serde_json::json!("List workspace files")
+                ),
+            ],
+            "command must be the primary, label the following prop"
+        );
+    }
+
+    #[test]
+    fn absent_label_is_suppressed_from_title_arguments() {
+        let tool = BashTool::default();
+        let call = tool.create_call(
+            uuid::Uuid::new_v4(),
+            serde_json::json!({ "command": "ls -la" }),
+        );
+        assert_eq!(
+            call.title_arguments(),
+            vec![("command".to_string(), serde_json::json!("ls -la"))],
+            "calls without a label must title exactly as before"
+        );
+    }
+
+    #[test]
+    fn empty_or_whitespace_label_is_suppressed_from_title_arguments() {
+        let tool = BashTool::default();
+        for label in ["", "   ", "\t\n"] {
+            let call = tool.create_call(
+                uuid::Uuid::new_v4(),
+                serde_json::json!({ "command": "ls -la", "label": label }),
+            );
+            assert_eq!(
+                call.title_arguments(),
+                vec![("command".to_string(), serde_json::json!("ls -la"))],
+                "blank label {label:?} must be treated as omitted"
+            );
+        }
+        let null_call = tool.create_call(
+            uuid::Uuid::new_v4(),
+            serde_json::json!({ "command": "ls -la", "label": serde_json::Value::Null }),
+        );
+        assert_eq!(
+            null_call.title_arguments(),
+            vec![("command".to_string(), serde_json::json!("ls -la"))],
+            "null label must be treated as omitted"
+        );
+    }
+
+    #[test]
+    fn needs_approval_is_unaffected_by_label() {
+        let tool = BashTool::default();
+        let without_label = tool.needs_approval(&serde_json::json!({ "command": "echo hi" }));
+        let with_label = tool.needs_approval(
+            &serde_json::json!({ "command": "echo hi", "label": "Greet the user" }),
+        );
+        assert_eq!(without_label, with_label, "label must not affect verdicts");
+        assert!(
+            matches!(with_label, ApprovalCheck::UserApprovalRequired),
+            "sandbox abstains → tool falls back to UserApprovalRequired"
         );
     }
 
@@ -770,6 +978,8 @@ mod tests {
         let result = BashResult {
             output: "hello\n".to_string(),
             truncated: false,
+            label: None,
+            command: String::new(),
         };
         let sections = result.content_sections();
         assert_eq!(sections.len(), 1);
@@ -784,8 +994,162 @@ mod tests {
         let result = BashResult {
             output: String::new(),
             truncated: false,
+            label: None,
+            command: String::new(),
         };
         assert!(result.content_sections().is_empty());
+    }
+
+    #[test]
+    fn bash_result_content_sections_lead_with_label_then_command_before_output() {
+        let result = BashResult {
+            output: "lorem ipsum\n".to_string(),
+            truncated: false,
+            label: Some("Greet the user".to_string()),
+            command: "echo hi".to_string(),
+        };
+        let sections = result.content_sections();
+        assert_eq!(sections.len(), 3);
+        match &sections[0] {
+            Section::Content(section) => {
+                assert_eq!(section.label.as_deref(), Some("Label"));
+                assert_eq!(section.content, "Greet the user");
+                assert_eq!(section.file_extension, None, "Label prose stays plain");
+            }
+            other => panic!("unexpected section type: {other:?}"),
+        }
+        match &sections[1] {
+            Section::Content(section) => {
+                assert_eq!(section.label.as_deref(), Some("Command"));
+                assert_eq!(section.content, "echo hi");
+                assert_eq!(
+                    section.file_extension.as_deref(),
+                    Some("sh"),
+                    "Command must carry the shell grammar hint"
+                );
+            }
+            other => panic!("unexpected section type: {other:?}"),
+        }
+        match &sections[2] {
+            Section::Content(section) => {
+                assert_eq!(section.label.as_deref(), Some("Result"));
+                assert_eq!(section.content, "lorem ipsum\n");
+                assert_eq!(section.line_number_offset, Some(0));
+            }
+            other => panic!("unexpected section type: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bash_result_truncated_output_labels_partial_result() {
+        let truncated = BashResult {
+            output: "first thousand lines only\n".to_string(),
+            truncated: true,
+            label: Some("Greet the user".to_string()),
+            command: "echo hi".to_string(),
+        };
+        let sections = truncated.content_sections();
+        assert_eq!(sections.len(), 3);
+        match &sections[2] {
+            Section::Content(section) => {
+                assert_eq!(
+                    section.label.as_deref(),
+                    Some("Partial result"),
+                    "truncated capture must be labeled Partial result"
+                );
+                assert_eq!(section.content, "first thousand lines only\n");
+            }
+            other => panic!("unexpected section type: {other:?}"),
+        }
+        // Degenerate single-section case (no label, empty command) still
+        // reports the lifecycle via the section label.
+        let lone = BashResult {
+            output: "prefix\n".to_string(),
+            truncated: true,
+            label: None,
+            command: String::new(),
+        };
+        let sections = lone.content_sections();
+        assert_eq!(sections.len(), 1);
+        match &sections[0] {
+            Section::Content(section) => {
+                assert_eq!(section.label.as_deref(), Some("Partial result"))
+            }
+            other => panic!("unexpected section type: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bash_pending_content_sections_lead_with_label_then_command() {
+        let tool = BashTool::default();
+        let call = tool.create_call(
+            uuid::Uuid::new_v4(),
+            serde_json::json!({
+                "command": "echo hi",
+                "label": "Greet the user",
+            }),
+        );
+        let sections = call.pending_content_sections();
+        assert_eq!(sections.len(), 2);
+        match &sections[0] {
+            Section::Content(section) => {
+                assert_eq!(section.label.as_deref(), Some("Label"));
+                assert_eq!(section.content, "Greet the user");
+                assert_eq!(section.file_extension, None, "Label prose stays plain");
+            }
+            other => panic!("unexpected section type: {other:?}"),
+        }
+        match &sections[1] {
+            Section::Content(section) => {
+                assert_eq!(section.label.as_deref(), Some("Command"));
+                assert_eq!(section.content, "echo hi");
+                assert_eq!(
+                    section.file_extension.as_deref(),
+                    Some("sh"),
+                    "Command must carry the shell grammar hint"
+                );
+            }
+            other => panic!("unexpected section type: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bash_pending_content_sections_omit_blank_or_absent_label() {
+        let tool = BashTool::default();
+        for label in [serde_json::json!(""), serde_json::json!("   ")] {
+            let call = tool.create_call(
+                uuid::Uuid::new_v4(),
+                serde_json::json!({ "command": "echo hi", "label": label }),
+            );
+            let sections = call.pending_content_sections();
+            assert_eq!(sections.len(), 1, "blank label {label} must be omitted");
+            match &sections[0] {
+                Section::Content(section) => {
+                    assert_eq!(section.label.as_deref(), Some("Command"))
+                }
+                other => panic!("unexpected section type: {other:?}"),
+            }
+        }
+        let call = tool.create_call(
+            uuid::Uuid::new_v4(),
+            serde_json::json!({ "command": "echo hi" }),
+        );
+        assert_eq!(call.pending_content_sections().len(), 1);
+    }
+
+    #[test]
+    fn bash_pending_content_sections_omit_empty_command() {
+        let tool = BashTool::default();
+        let call = tool.create_call(
+            uuid::Uuid::new_v4(),
+            serde_json::json!({ "command": "", "label": "No-op" }),
+        );
+        let sections = call.pending_content_sections();
+        assert_eq!(sections.len(), 1);
+        match &sections[0] {
+            Section::Content(section) => assert_eq!(section.label.as_deref(), Some("Label")),
+            other => panic!("unexpected section type: {other:?}"),
+        }
     }
 
     #[test]

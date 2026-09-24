@@ -375,6 +375,37 @@ so `output_bytes` in result metadata never reports 0 for non-empty command
 output that only hit the byte cap. Result metadata records `truncated: true`
 when any cap discarded or cut content.
 
+`BashInputArgs` also carries a display-only optional `label`, declared after
+`command` so schema rank keeps `command` the bare title primary and `label` a
+`label=…` prop. `needs_approval` stays command-only, and
+`BashCall::is_default_argument` suppresses empty/whitespace-only labels from
+`title_arguments` as if the argument were omitted.
+
+The expanded bubble body is built from one shared section builder
+(`label_and_command_display_sections`): a `Label` section when the label is
+non-blank, then a `Command` section when the command is non-empty.
+`BashCall::pending_content_sections` feeds the pending/running/denied bodies
+from the raw arguments, and `BashResult` stores `label`/`command` purely for
+display so `content_sections()` can prepend the same sections ahead of its
+output section — a completed bubble reads `Label` → `Command` → `Result`,
+or → `Partial result` when `BashResult::truncated` is set (the output cap
+discarded content; the `truncated=true` title summary prop is unchanged).
+The `Command` section carries `file_extension: "sh"`, so the expanded
+bubble renders it through syntect with the active theme (`Label` and
+`Result`/`Partial result` stay plain; the collapsed/inline title keeps
+region styling only, and the CLI ignores the extension hint).
+`run_bash`
+executes only `command`.
+
+Tool errors merge agent-side: `PendingTool::execute` captures
+`pending_content_sections()` before `run()` consumes the call, and every
+`ToolError` emission that replaces a pending/running bubble (execution
+failure with the `Partial result` section appended after them, outer
+timeout, user denial, sandbox auto-denial, stop-while-pending) carries
+those sections ahead of its payload sections — so `Message::ToolError`
+persists exactly what the live bubble showed and replay matches without
+reducer changes.
+
 ## CLI option parsing
 
 Implemented in `src/cli.rs` as a `clap` derive model (`Cli`, `CliCommand`),
@@ -423,6 +454,11 @@ headless output writes to a terminal that is not `TERM=dumb` and `NO_COLOR` is
 unset in `--color=auto` mode. `--color=no` and `--color=yes` explicitly
 disable or enable ANSI styling for that output path.
 
+Tool-pending and tool-done bodies print the event's `content_sections`
+(`--- <label> ---` blocks), so a labeled `bash` call surfaces its
+`Label`/`Command` sections in headless output with no CLI-specific code;
+the CLI `ToolError` arm prints only the error line.
+
 ## Store & persistence
 
 Implemented in `src/store.rs`. See [persistence](./persistence.md) for the
@@ -463,7 +499,11 @@ user-facing on-disk contract; this section is the contributor view.
   body sections, and
   replayed bubbles use the same title projection as live bubbles; calls
   without title arguments use an empty title projection. The projection is
-  schema-based, so unknown input keys are omitted from CLI/TUI titles.
+  schema-based, so unknown input keys are omitted from CLI/TUI titles, and
+  rank follows the schema's field (declaration) order: `bash`'s optional
+  `label` rides the persisted `title_arguments` behind `command` as a
+  `label=…` prop, with empty/whitespace-only values suppressed via
+  `ToolCall::is_default_argument` as if omitted.
   System messages and implicit harness notes remain model-only.
 - **Prior-session input history.** At TUI startup, `Store::read_past_explicit_user_messages`
   scans prior top-level sessions in newest-first order, collects at most the
@@ -1013,6 +1053,21 @@ which is why `/tools` needs no I/O.
 
 ## TUI behavior internals
 
+- **Tool-bubble args line vs body sections:** multiline scalar title
+  arguments are additionally stashed as expandable content sections (the
+  value stays sanitized inline on the args line). In
+  `append_tool_bubble_lines`, a title-derived extra whose label
+  case-insensitively matches an existing state section label is dropped —
+  so a multiline `bash` command renders once, under the state `Command`
+  section, keeping `Label` before `Command` — and the expanded args line
+  is skipped entirely when every title key is covered by a
+  content-section label (bash: `Label`/`Command` cover `label`/`command`).
+  The collapsed title always keeps the args; tools whose sections do not
+  cover their title keys (`edit`, `write`, `spawn_subagent`) and old
+  persisted bubbles without the covering sections render the args line
+  unchanged. The gate is data-driven (content-section labels only, not a
+  tool-name check) and leaves `has_args` — which also feeds the expand
+  indicator and the `→` summary arrow — untouched.
 - **Steer bubble lifecycle:** a steer (a message typed while the agent is
   busy) is rendered `Queued` immediately, near the bottom of the chat, but is
   only *staged*, not yet committed to the conversation log — this avoids

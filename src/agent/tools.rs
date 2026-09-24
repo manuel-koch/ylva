@@ -276,6 +276,14 @@ pub trait ToolCall: Send + Sync {
         false
     }
 
+    /// Whether `value` for `key` equals the call's semantic default, so a
+    /// host can suppress it from an invocation title — e.g. `bash` hides an
+    /// empty/whitespace-only `label`. Defaults to `false`; absent and `null`
+    /// values are already filtered by [`Self::title_arguments`].
+    fn is_default_argument(&self, _key: &str, _value: &serde_json::Value) -> bool {
+        false
+    }
+
     /// Content sections produced before execution completes (e.g. argument
     /// preview). Defaults to empty.
     fn pending_content_sections(&self) -> Vec<Section> {
@@ -302,7 +310,10 @@ pub trait ToolCall: Send + Sync {
             .into_iter()
             .flat_map(|map| map.iter())
             .filter(|(k, v)| {
-                !v.is_null() && !self.is_body_argument(k) && self.argument_order(k) != usize::MAX
+                !v.is_null()
+                    && !self.is_body_argument(k)
+                    && !self.is_default_argument(k, v)
+                    && self.argument_order(k) != usize::MAX
             })
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
@@ -969,6 +980,32 @@ mod tests {
     }
 
     #[test]
+    fn bash_registry_call_orders_title_arguments_command_then_label() {
+        // The agent loop emits `UiUpdate::ToolPending { title_arguments }`
+        // straight from `front.call.title_arguments()`, so the registry-built
+        // call must already carry `command` (primary) ahead of `label` (prop).
+        let sandbox = std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new()));
+        let registry = default_registry(sandbox, ToolRegistryConfig::default());
+        let call = registry
+            .create_call(
+                bash::BashTool::NAME,
+                uuid::Uuid::new_v4(),
+                serde_json::json!({ "command": "ls -la", "label": "List workspace files" }),
+            )
+            .expect("bash tool call");
+        assert_eq!(
+            call.title_arguments(),
+            vec![
+                ("command".to_string(), serde_json::json!("ls -la")),
+                (
+                    "label".to_string(),
+                    serde_json::json!("List workspace files")
+                ),
+            ]
+        );
+    }
+
+    #[test]
     fn default_registry_respects_explicit_allowed_tools_subset() {
         let sandbox = std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new()));
         let registry = default_registry(
@@ -1385,6 +1422,7 @@ mod tests {
         };
         assert!(call.pending_content_sections().is_empty());
         assert_eq!(call.argument_order("any_key"), usize::MAX);
+        assert!(!call.is_default_argument("any_key", &serde_json::json!("value")));
     }
 
     // `TestTool` does not override `title` or `is_default_argument`, so these

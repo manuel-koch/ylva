@@ -20,6 +20,7 @@ function ylva() {
     ${YLVA} --no-tui --color=yes \
             --log-file ${LOG_PATH} \
             --log-level TRACE --log-format ${LOG_FORMAT} \
+            $* \
             | tee ${OUT_PATH}
 }
 
@@ -36,8 +37,27 @@ __EOT__
 
 seperator
 
+ylva --auto-approve-bash << '__EOT__'
+Run `python3` to find out which version it is and where the python interpreter
+is located. Supply a label for bash tool too.
+__EOT__
+
+seperator
+
 ylva << '__EOT__'
 Run the following command exactly like given (as-is, don't re-write/collapse linebreaks ) in bash:
+```shell
+for n in seq 1 5 ; do
+  echo "$(date) lorem ipsum"
+  sleep 3
+done
+```
+__EOT__
+
+seperator
+
+ylva --auto-approve-bash << '__EOT__'
+Run the following command exactly like given (as-is, don't re-write/collapse linebreaks, supply a label for it ) in bash:
 ```shell
 for n in seq 1 5 ; do
   echo "$(date) lorem ipsum"

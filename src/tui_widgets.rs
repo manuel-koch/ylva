@@ -1732,7 +1732,49 @@ fn append_tool_bubble_lines(
         } => content_sections.clone(),
         _ => vec![],
     };
-    content_sections.extend(extra_content_sections);
+    // A state section that already carries a label (e.g. bash's `Command`)
+    // supersedes the title-derived multiline extra for the same key, so a
+    // multiline command renders once and keeps the state sections' order
+    // (`Label` before `Command`) instead of re-appending `command` after them.
+    let state_section_labels: Vec<String> = content_sections
+        .iter()
+        .filter_map(|section| match section {
+            crate::agent::tools::Section::Content(content) => {
+                content.label.as_deref().map(str::to_lowercase)
+            }
+            _ => None,
+        })
+        .collect();
+    content_sections.extend(extra_content_sections.into_iter().filter(|extra| {
+        match extra {
+            crate::agent::tools::Section::Content(content) => !content
+                .label
+                .as_deref()
+                .is_some_and(|label| state_section_labels.contains(&label.to_lowercase())),
+            _ => true,
+        }
+    }));
+
+    // The expanded args line is redundant when the body sections already
+    // carry every title argument (bash: the `Label`/`Command` sections cover
+    // `label`/`command`), so it is skipped; the collapsed title line always
+    // keeps the args. Data-driven by section labels — tools whose sections
+    // don't cover their title keys (`edit`, `write`, `spawn_subagent`) keep
+    // rendering the args line as before, as do old persisted bubbles whose
+    // sections predate this rule.
+    let content_section_labels: Vec<String> = content_sections
+        .iter()
+        .filter_map(|section| match section {
+            crate::agent::tools::Section::Content(content) => {
+                content.label.as_deref().map(str::to_lowercase)
+            }
+            _ => None,
+        })
+        .collect();
+    let args_covered_by_sections = !content_sections.is_empty()
+        && title_arguments
+            .iter()
+            .all(|(key, _)| content_section_labels.contains(&key.to_lowercase()));
 
     let has_args = primary_text.as_ref().is_some_and(|s| !s.is_empty()) || !props_text.is_empty();
     let has_expandable_body = !content_sections.is_empty()
@@ -1832,7 +1874,8 @@ fn append_tool_bubble_lines(
     //   Expanded — two sections:
     //     Line 1: `{prefix} [→ {summary}]`
     //             prefix in border colour, summary in dim white.
-    //     Lines 2+: args (`{primary_arg} {props}`) only when args are present.
+    //     Lines 2+: args (`{primary_arg} {props}`) only when args are present
+    //             and not already fully covered by body sections.
     //             Hard-broken on `\n`, then width-wrapped at `wrap_width - 2`
     //             with a two-space indent. Primary arg chars → bold white;
     //             props chars → dim white.
@@ -2006,8 +2049,10 @@ fn append_tool_bubble_lines(
         }
         lines.push(Line::from(first_spans));
 
-        // Lines 2+: args, hard-broken then width-wrapped.
-        if !args_after_prefix.is_empty() {
+        // Lines 2+: args, hard-broken then width-wrapped. Skipped when the
+        // body sections already carry every title argument (see
+        // `args_covered_by_sections` above).
+        if !args_after_prefix.is_empty() && !args_covered_by_sections {
             // Strip the leading space that `args_after_prefix` carries.
             let args_text = args_after_prefix.trim_start_matches(' ');
             let arg_wrap_width = wrap_width.saturating_sub(2).max(1);

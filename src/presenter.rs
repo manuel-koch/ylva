@@ -4990,7 +4990,7 @@ mod tests {
             result_section: ResultSection::plain(result.clone()),
             summary: vec![("output_bytes".to_string(), result.len().to_string())],
             content_sections: vec![Section::Content(ContentSection {
-                label: None,
+                label: Some("Result".to_string()),
                 content: result,
                 file_extension: None,
                 line_number_offset: Some(0),

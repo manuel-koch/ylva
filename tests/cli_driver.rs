@@ -814,6 +814,53 @@ async fn run_cli_denies_write_and_fed_back_as_error() {
 }
 
 #[tokio::test]
+async fn run_cli_bash_denial_prints_label_and_command_sections() {
+    // Headless bash is auto-denied at ToolPending; the pending body
+    // sections must print automatically (no CLI code knows about them),
+    // led by `Label` then `Command`.
+    let provider = Arc::new(MockProviderWithScript {
+        phase_one: vec![tool_call(
+            "bash",
+            serde_json::json!({ "command": "echo hi", "label": "Greet the user" }),
+        )],
+        phase_two: vec![MockEvent::Text("ok".into())],
+        interval: Duration::from_millis(1),
+        calls: Arc::new(AtomicUsize::new(0)),
+    });
+    let registry = Arc::new(default_registry(
+        std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new())),
+        ToolRegistryConfig::default(),
+    ));
+    let mut output = Vec::new();
+    let engine = Arc::new(EngineImpl::new(provider, common::test_engine_config()));
+    let (agent, ui_rx) = AgentLoop::new(engine, Arc::clone(&registry));
+    run_cli_to(
+        agent,
+        ui_rx,
+        registry,
+        "run a command".to_string(),
+        &mut output,
+    )
+    .await
+    .expect("headless run succeeds");
+    let output = String::from_utf8(output).expect("utf8 output");
+
+    assert!(output.contains("denied"), "output: {output}");
+    let label_at = output
+        .find("--- Label ---")
+        .expect("label section should print, output: {output}");
+    let command_at = output
+        .find("--- Command ---")
+        .expect("command section should print, output: {output}");
+    assert!(
+        label_at < command_at,
+        "Label section must precede Command: {output}"
+    );
+    assert!(output.contains("Greet the user"), "output: {output}");
+    assert!(output.contains("echo hi"), "output: {output}");
+}
+
+#[tokio::test]
 async fn run_cli_waits_for_spawned_child_before_ending_conversation() {
     use tokio_util::sync::CancellationToken;
     use ylva::child_agent_manager::SpawnFn;

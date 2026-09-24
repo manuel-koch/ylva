@@ -76,7 +76,9 @@ rules (backgrounded commands, variable-assignment prefixes, unquoted glob/
 brace expansion) and configurable `[tool.bash]` rules — see "`bash` command
 rules" in [configuration](./configuration.md#bash-command-rules).
 
-Tool status lines render as `[tool] <title> …` (e.g. `[tool] Read docs/features.md [limit=32]`)
+Tool status lines render as `[tool] <title> …` (e.g. `[tool] Read docs/features.md [limit=32]`);
+bracketed props come from the tool's title arguments ranked by schema field
+order, so a labeled `bash` call renders `[tool] Bash echo hi [label=Greet the user]`.
 
 `--auto-approve-spawn` lets a spawned child agent (see
 [Child-agent delegation](#child-agent-delegation)) run to completion before
@@ -279,7 +281,18 @@ with provider-aware input for explicit Base64 `read` results added on top:
 - **bash**: Execute a shell command or multi-line script via `bash -c` from the
   current working directory, which is the workspace root in normal runtime.
   Use relative paths directly; do not prefix commands with a redundant `cd` to
-  the workspace root. Requires explicit human approval before execution. stdout
+  the workspace root. Requires explicit human approval before execution. An
+  optional `label` (3–6 word purpose of the command) describes what the
+  command will do: the collapsed bubble title and the CLI status line show
+  it as a `label=…` prop — including while the call is pending approval —
+  and the expanded bubble body leads with a `Label` section followed by a
+  `Command` section in every state (then a `Result` section with the
+  command output once completed — or `Partial result` when the output cap
+  truncated the capture — and a `Partial result` section after them when
+  the call fails with partial output). When those
+  sections carry both arguments the expanded args line is hidden, while
+  the collapsed title keeps them. An absent or blank `label` is omitted
+  everywhere, and approval behavior does not depend on it. stdout
   and stderr are merged in true arrival order. Output is capped at 1000 whole
   output lines or 65536 bytes, whichever is hit first (`truncated` field
   present in result metadata when capped). Excess lines are discarded; a line

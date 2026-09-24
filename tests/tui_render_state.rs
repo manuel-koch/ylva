@@ -2341,6 +2341,396 @@ fn expanded_tool_bubble_with_multiline_title_argument_stays_single_line_and_gets
     );
 }
 
+/// Render one tool bubble and return the visible rows as strings.
+fn render_tool_bubble_rows(state: &mut ylva::TuiState, width: u16, height: u16) -> Vec<String> {
+    use ratatui_textarea::TextArea;
+    use ylva::tui_widgets;
+
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    let mut textarea = TextArea::default();
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(frame, state, &mut textarea, None, None);
+        })
+        .expect("draw");
+    let buf = terminal.backend().buffer().clone();
+    (0..height)
+        .map(|y| {
+            (0..width)
+                .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
+                .collect::<String>()
+        })
+        .collect()
+}
+
+fn bash_label_command_sections() -> Vec<ylva::agent::tools::Section> {
+    use ylva::agent::tools::{ContentSection, Section};
+    vec![
+        Section::Content(ContentSection {
+            label: Some("Label".to_string()),
+            content: "Greet the user".to_string(),
+            file_extension: None,
+            line_number_offset: None,
+        }),
+        Section::Content(ContentSection {
+            label: Some("Command".to_string()),
+            content: "echo hi".to_string(),
+            file_extension: None,
+            line_number_offset: None,
+        }),
+    ]
+}
+
+#[test]
+fn expanded_bash_bubble_hides_covered_args_and_orders_label_before_command() {
+    use ylva::ToolCallState;
+
+    let tool_id = uuid::Uuid::new_v4();
+    let mut state = ylva::TuiState {
+        chat_entries: vec![ChatEntry::ToolBubble {
+            id: tool_id,
+            name: "bash".to_string(),
+            state: Box::new(ToolCallState::Pending {
+                arguments: serde_json::json!({
+                    "command": "echo hi",
+                    "label": "Greet the user",
+                }),
+                content_sections: bash_label_command_sections(),
+                title_arguments: vec![
+                    ("command".to_string(), serde_json::json!("echo hi")),
+                    ("label".to_string(), serde_json::json!("Greet the user")),
+                ],
+            }),
+            collapsed: false,
+        }],
+        ..ylva::TuiState::new()
+    };
+    let rows = render_tool_bubble_rows(&mut state, 80, 30);
+
+    let label_row = rows
+        .iter()
+        .position(|row| row.contains("Label:"))
+        .expect("Label header should render");
+    let command_row = rows
+        .iter()
+        .position(|row| row.contains("Command:"))
+        .expect("Command header should render");
+    assert!(
+        label_row < command_row,
+        "Label section must come before Command: label_row={label_row}, command_row={command_row}"
+    );
+    assert!(
+        !rows.iter().any(|row| row.contains("label=")),
+        "covered args line must be hidden when expanded, rows: {rows:?}"
+    );
+    assert_eq!(
+        rows.iter().filter(|row| row.contains("echo hi")).count(),
+        1,
+        "command must appear exactly once (section body, not args line): {rows:?}"
+    );
+}
+
+#[test]
+fn collapsed_bash_bubble_keeps_command_and_label_in_title() {
+    use ylva::ToolCallState;
+
+    let tool_id = uuid::Uuid::new_v4();
+    let mut state = ylva::TuiState {
+        chat_entries: vec![ChatEntry::ToolBubble {
+            id: tool_id,
+            name: "bash".to_string(),
+            state: Box::new(ToolCallState::Pending {
+                arguments: serde_json::json!({
+                    "command": "echo hi",
+                    "label": "Greet the user",
+                }),
+                content_sections: bash_label_command_sections(),
+                title_arguments: vec![
+                    ("command".to_string(), serde_json::json!("echo hi")),
+                    ("label".to_string(), serde_json::json!("Greet the user")),
+                ],
+            }),
+            collapsed: true,
+        }],
+        ..ylva::TuiState::new()
+    };
+    let rows = render_tool_bubble_rows(&mut state, 80, 30);
+
+    let title_row = rows
+        .iter()
+        .find(|row| row.contains("Bash"))
+        .expect("collapsed title row should render");
+    assert!(
+        title_row.contains("echo hi"),
+        "collapsed title must keep the command primary: {title_row}"
+    );
+    assert!(
+        title_row.contains("label=Greet the user"),
+        "collapsed title must keep the label prop: {title_row}"
+    );
+}
+
+#[test]
+fn expanded_bash_multiline_command_renders_one_command_section() {
+    use ylva::agent::tools::{ContentSection, Section};
+    use ylva::ToolCallState;
+
+    let multiline_command = "echo one\necho two";
+    let tool_id = uuid::Uuid::new_v4();
+    let mut state = ylva::TuiState {
+        chat_entries: vec![ChatEntry::ToolBubble {
+            id: tool_id,
+            name: "bash".to_string(),
+            state: Box::new(ToolCallState::Pending {
+                arguments: serde_json::json!({
+                    "command": multiline_command,
+                    "label": "Two echoes",
+                }),
+                content_sections: vec![
+                    Section::Content(ContentSection {
+                        label: Some("Label".to_string()),
+                        content: "Two echoes".to_string(),
+                        file_extension: None,
+                        line_number_offset: None,
+                    }),
+                    Section::Content(ContentSection {
+                        label: Some("Command".to_string()),
+                        content: multiline_command.to_string(),
+                        file_extension: None,
+                        line_number_offset: None,
+                    }),
+                ],
+                title_arguments: vec![
+                    ("command".to_string(), serde_json::json!(multiline_command)),
+                    ("label".to_string(), serde_json::json!("Two echoes")),
+                ],
+            }),
+            collapsed: false,
+        }],
+        ..ylva::TuiState::new()
+    };
+    let rows = render_tool_bubble_rows(&mut state, 80, 30);
+
+    let label_row = rows
+        .iter()
+        .position(|row| row.contains("Label:"))
+        .expect("Label header should render");
+    let command_row = rows
+        .iter()
+        .position(|row| row.contains("Command:"))
+        .expect("Command header should render");
+    assert!(label_row < command_row, "Label must precede Command");
+    assert!(
+        !rows.iter().any(|row| row.contains("label=")),
+        "covered args line must be hidden for multiline commands too: {rows:?}"
+    );
+    assert_eq!(
+        rows.iter().filter(|row| row.contains("echo one")).count(),
+        1,
+        "multiline command must render exactly once (dedup guard), rows: {rows:?}"
+    );
+    assert_eq!(
+        rows.iter().filter(|row| row.contains("echo two")).count(),
+        1,
+        "multiline command must render exactly once (dedup guard), rows: {rows:?}"
+    );
+}
+
+#[test]
+fn expanded_bash_command_section_renders_with_syntax_colors() {
+    // The Command section carries `file_extension: "sh"`, so the renderer
+    // picks the shell grammar: the command row must contain more than one
+    // foreground color (comment token vs default), which the plain-text
+    // path (single theme-default fg) never produces.
+    use ratatui_textarea::TextArea;
+    use ylva::tui_widgets;
+    use ylva::ToolCallState;
+
+    let command = "echo hi # trailing comment";
+    let registry = ylva::default_registry(
+        std::sync::Arc::new(std::sync::RwLock::new(ylva::Sandbox::new())),
+        ylva::ToolRegistryConfig::default(),
+    );
+    let call = registry
+        .create_call(
+            "bash",
+            uuid::Uuid::new_v4(),
+            serde_json::json!({
+                "command": command,
+                "label": "Greet the user",
+            }),
+        )
+        .expect("bash tool call");
+    let content_sections = call.pending_content_sections();
+
+    let tool_id = uuid::Uuid::new_v4();
+    let mut state = ylva::TuiState {
+        chat_entries: vec![ChatEntry::ToolBubble {
+            id: tool_id,
+            name: "bash".to_string(),
+            state: Box::new(ToolCallState::Pending {
+                arguments: serde_json::json!({
+                    "command": command,
+                    "label": "Greet the user",
+                }),
+                content_sections,
+                title_arguments: vec![
+                    ("command".to_string(), serde_json::json!(command)),
+                    ("label".to_string(), serde_json::json!("Greet the user")),
+                ],
+            }),
+            collapsed: false,
+        }],
+        ..ylva::TuiState::new()
+    };
+
+    let backend = TestBackend::new(80, 30);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    let mut textarea = TextArea::default();
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+        })
+        .expect("draw");
+    let buffer = terminal.backend().buffer().clone();
+
+    let rows: Vec<String> = (0..30u16)
+        .map(|y| {
+            (0..80u16)
+                .map(|x| buffer.cell((x, y)).unwrap().symbol().to_string())
+                .collect()
+        })
+        .collect();
+    let command_row = rows
+        .iter()
+        .position(|row| row.contains("trailing comment"))
+        .expect("command body row should render");
+
+    // Skip the two-cell bar+margin prefix; ignore spaces between tokens.
+    let distinct_foregrounds: std::collections::HashSet<_> = (2..80u16)
+        .map(|x| buffer.cell((x, command_row as u16)).unwrap())
+        .filter(|cell| cell.symbol() != " ")
+        .filter_map(|cell| cell.style().fg)
+        .collect();
+    assert!(
+        distinct_foregrounds.len() >= 2,
+        "command row should be syntax-highlighted (>=2 foreground colors), got {distinct_foregrounds:?} — rows: {rows:?}"
+    );
+}
+
+#[test]
+fn expanded_bash_done_bubble_renders_result_header_last() {
+    use ylva::tui_reducer_state::ResultSection;
+    use ylva::ToolCallState;
+
+    let tool_id = uuid::Uuid::new_v4();
+    let mut state = ylva::TuiState {
+        chat_entries: vec![ChatEntry::ToolBubble {
+            id: tool_id,
+            name: "bash".to_string(),
+            state: Box::new(ToolCallState::Done {
+                arguments: serde_json::json!({
+                    "command": "echo hi",
+                    "label": "Greet the user",
+                }),
+                result_section: ResultSection::plain("hi\n"),
+                content_sections: vec![
+                    ylva::agent::tools::Section::Content(ylva::agent::tools::ContentSection {
+                        label: Some("Label".to_string()),
+                        content: "Greet the user".to_string(),
+                        file_extension: None,
+                        line_number_offset: None,
+                    }),
+                    ylva::agent::tools::Section::Content(ylva::agent::tools::ContentSection {
+                        label: Some("Command".to_string()),
+                        content: "echo hi".to_string(),
+                        file_extension: None,
+                        line_number_offset: None,
+                    }),
+                    ylva::agent::tools::Section::Content(ylva::agent::tools::ContentSection {
+                        label: Some("Result".to_string()),
+                        content: "hi\n".to_string(),
+                        file_extension: None,
+                        line_number_offset: Some(0),
+                    }),
+                ],
+                summary: vec![],
+                duration: std::time::Duration::from_millis(12),
+                title_arguments: vec![
+                    ("command".to_string(), serde_json::json!("echo hi")),
+                    ("label".to_string(), serde_json::json!("Greet the user")),
+                ],
+            }),
+            collapsed: false,
+        }],
+        ..ylva::TuiState::new()
+    };
+    let rows = render_tool_bubble_rows(&mut state, 80, 30);
+
+    let label_row = rows
+        .iter()
+        .position(|row| row.contains("Label:"))
+        .expect("Label header should render");
+    let command_row = rows
+        .iter()
+        .position(|row| row.contains("Command:"))
+        .expect("Command header should render");
+    let result_row = rows
+        .iter()
+        .position(|row| row.contains("Result:"))
+        .expect("Result header should render");
+    assert!(
+        label_row < command_row && command_row < result_row,
+        "headers must render Label, Command, Result in order: {label_row} {command_row} {result_row}"
+    );
+    assert!(
+        !rows.iter().any(|row| row.contains("label=")),
+        "covered args line must stay hidden in Done: {rows:?}"
+    );
+    assert!(
+        rows[result_row..].iter().any(|row| row.contains("hi")),
+        "result content should render under the Result header: {rows:?}"
+    );
+}
+
+#[test]
+fn expanded_bubble_shows_args_when_sections_do_not_cover_title_keys() {
+    // Data-driven gate: a section whose label doesn't match the title keys
+    // (here `write`'s unlabeled content preview) must NOT hide the args line.
+    use ylva::agent::tools::{ContentSection, Section};
+    use ylva::ToolCallState;
+
+    let tool_id = uuid::Uuid::new_v4();
+    let mut state = ylva::TuiState {
+        chat_entries: vec![ChatEntry::ToolBubble {
+            id: tool_id,
+            name: "write".to_string(),
+            state: Box::new(ToolCallState::Pending {
+                arguments: serde_json::json!({
+                    "path": "src/main.rs",
+                    "content": "fn main() {}",
+                }),
+                content_sections: vec![Section::Content(ContentSection {
+                    label: None,
+                    content: "fn main() {}".to_string(),
+                    file_extension: Some("rs".to_string()),
+                    line_number_offset: Some(0),
+                })],
+                title_arguments: vec![("path".to_string(), serde_json::json!("src/main.rs"))],
+            }),
+            collapsed: false,
+        }],
+        ..ylva::TuiState::new()
+    };
+    let rows = render_tool_bubble_rows(&mut state, 80, 30);
+
+    assert!(
+        rows.iter().any(|row| row.contains("src/main.rs")),
+        "args line must still show the uncovered title key, rows: {rows:?}"
+    );
+}
+
 #[tokio::test]
 async fn escape_twice_while_streaming_stops_stream_but_keeps_tui_open() {
     // Esc+Esc must stop the agent but NOT exit the TUI (unlike Ctrl+C+Ctrl+C).

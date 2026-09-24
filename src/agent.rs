@@ -854,6 +854,10 @@ impl PendingTool {
         let id = self.call.id();
         let name = self.call.name().to_string();
         let timeout_secs = self.call.timeout_secs();
+        // Captured before `run()` consumes the call so failure events can
+        // lead with the same body sections the pending/running bubble showed
+        // (e.g. bash's `Label`/`Command`), keeping replay identical to live.
+        let pending_content_sections = self.call.pending_content_sections();
         let span = tracing::info_span!("tool_execute", tool = %name, tool_call_id = %id);
         tokio::spawn(
             async move {
@@ -932,19 +936,17 @@ impl PendingTool {
                             .partial_output()
                             .filter(|s| !s.is_empty())
                             .map(str::to_string);
-                        let content_sections: Vec<crate::agent::tools::Section> =
-                            if let Some(output) = &partial_output {
-                                vec![crate::agent::tools::Section::Content(
-                                    crate::agent::tools::ContentSection {
-                                        label: Some("partial output".to_string()),
-                                        content: output.clone(),
-                                        file_extension: None,
-                                        line_number_offset: Some(0),
-                                    },
-                                )]
-                            } else {
-                                vec![]
-                            };
+                        let mut content_sections = pending_content_sections;
+                        if let Some(output) = &partial_output {
+                            content_sections.push(crate::agent::tools::Section::Content(
+                                crate::agent::tools::ContentSection {
+                                    label: Some("Partial result".to_string()),
+                                    content: output.clone(),
+                                    file_extension: None,
+                                    line_number_offset: Some(0),
+                                },
+                            ));
+                        }
                         let _ = agent_tx
                             .send((
                                 generation,
@@ -970,7 +972,7 @@ impl PendingTool {
                                     error: message,
                                     partial_output: None,
                                     duration: Duration::from_secs(timeout_secs),
-                                    content_sections: vec![],
+                                    content_sections: pending_content_sections,
                                 },
                             ))
                             .await;
@@ -2028,6 +2030,8 @@ impl AgentLoop {
                                         pending_tools.pop_front().expect("checked front");
                                     let name = denied.call.name().to_string();
                                     let call_id = denied.call.id();
+                                    let denied_content_sections =
+                                        denied.call.pending_content_sections();
                                     tracing::info!(tool = %name, tool_call_id = %call_id, "tool denied");
                                     let mut error = format!("Tool '{name}' was denied by the user");
                                     if !reason.is_empty() {
@@ -2041,7 +2045,7 @@ impl AgentLoop {
                                         error.clone(),
                                         None,
                                         std::time::Duration::ZERO,
-                                        vec![],
+                                        denied_content_sections.clone(),
                                     );
                                     // When the user supplied a reason, also push a
                                     // `user` role message so the model reads the
@@ -2059,7 +2063,7 @@ impl AgentLoop {
                                             id: call_id,
                                             error,
                                             duration: std::time::Duration::ZERO,
-                                            content_sections: vec![],
+                                            content_sections: denied_content_sections,
                                             run_id: own_run_id,
                                         })
                                         .await;
@@ -2294,6 +2298,8 @@ impl AgentLoop {
                                     if let Some(pending) = pending_tools.pop_front() {
                                         let name = pending.call.name().to_string();
                                         let id = pending.call.id();
+                                        let content_sections =
+                                            pending.call.pending_content_sections();
                                         let mut error =
                                             format!("Tool '{name}' was denied by the user");
                                         if !reason.is_empty() {
@@ -2307,14 +2313,14 @@ impl AgentLoop {
                                             error.clone(),
                                             None,
                                             std::time::Duration::ZERO,
-                                            vec![],
+                                            content_sections.clone(),
                                         );
                                         let _ = ui_tx
                                             .send(UiUpdate::ToolError {
                                                 id,
                                                 error,
                                                 duration: std::time::Duration::ZERO,
-                                                content_sections: vec![],
+                                                content_sections,
                                                 run_id: own_run_id,
                                             })
                                             .await;
@@ -2335,7 +2341,7 @@ impl AgentLoop {
                                             error,
                                             None,
                                             std::time::Duration::ZERO,
-                                            vec![],
+                                            pending.call.pending_content_sections(),
                                         );
                                     }
                                     pending_tools.clear();
@@ -2350,6 +2356,8 @@ impl AgentLoop {
                                     for pending in pending_tools.iter() {
                                         let name = pending.call.name().to_string();
                                         let id = pending.call.id();
+                                        let content_sections =
+                                            pending.call.pending_content_sections();
                                         let mut error = format!("Tool '{name}' was denied by the user");
                                         if !reason.is_empty() {
                                             error.push_str(&format!(
@@ -2362,7 +2370,7 @@ impl AgentLoop {
                                             error.clone(),
                                             None,
                                             std::time::Duration::ZERO,
-                                            vec![],
+                                            content_sections.clone(),
                                         );
                                         if first {
                                             let _ = ui_tx
@@ -2370,7 +2378,7 @@ impl AgentLoop {
                                                     id,
                                                     error,
                                                     duration: std::time::Duration::ZERO,
-                                                    content_sections: vec![],
+                                                    content_sections,
                                                     run_id: own_run_id,
                                                 })
                                                 .await;
@@ -2596,14 +2604,14 @@ async fn resolve_spawn_subagent(
                 error.clone(),
                 None,
                 std::time::Duration::ZERO,
-                vec![],
+                content_sections.clone(),
             );
             let _ = ui_tx
                 .send(UiUpdate::ToolError {
                     id: call_id,
                     error,
                     duration: std::time::Duration::ZERO,
-                    content_sections: vec![],
+                    content_sections,
                     run_id: None,
                 })
                 .await;
@@ -2896,7 +2904,7 @@ async fn advance_tool_queue(
                             reason.clone(),
                             None,
                             std::time::Duration::ZERO,
-                            vec![],
+                            content_sections.clone(),
                         );
                         let _ = ui_tx
                             .send(UiUpdate::ToolAutoDenied {

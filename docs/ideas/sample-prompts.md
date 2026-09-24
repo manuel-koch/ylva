@@ -220,10 +220,10 @@ Run each the following task(s) in subagent(s) and let them report their findings
 - Analyze the `write` tool functionality implemented in source code
   and list currently implemented features in a brief markdown descriptions.
 
-- Analyze the TUI functionality implemented in source code
+- Analyze the `TUI` functionality implemented in source code
   and list currently implemented features in a table with brief descriptions.
 
-ONLY use "bash" tool to search for relevant files!
+ONLY use `bash` tool to search for relevant files!
 
 ---
 
