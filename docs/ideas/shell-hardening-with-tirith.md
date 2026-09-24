@@ -3,6 +3,20 @@
 Use [tirith](https://github.com/sheeki03/tirith) as an additional check
 when running auto-approve logic for the `bash` tool.
 
+`config.toml` should be enhanced with a global setting like `tirith_enabled=true|false`,
+where default is disabled.
+Maybe we should add a setting to select the executable path like
+`tirith_executable=<command>`, which will default to just `tirith`
+( allowing it to be found via `${PATH}` environment ).
+
+Should the configuration be like the following ?
+
+```toml
+[tirith]
+enabled = "true"               # default: "false"
+executable = "/usr/bin/tirith" # default: "tirith"
+```
+
 ## What it is
 
 `tirith` is a Rust CLI that performs heuristic/threat-intel scanning of
