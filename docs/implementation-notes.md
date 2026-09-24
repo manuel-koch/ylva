@@ -354,6 +354,37 @@ checks run independently on whichever path form ends up being used. Each
 tool declares its own path-like argument keys via
 `Tool::path_like_arguments()`.
 
+## Sandbox `cross_filesystem` rule
+
+The opt-in `cross_filesystem` named path rule (`src/sandbox.rs`) matches when
+the candidate path's filesystem device differs from the canonical workspace
+root's. It is evaluated from `SandboxContext::evaluate_named_rule` during the
+ordinary `check_path_with_dot_path_access` rule walk, so ordering semantics
+(configured list or default floor first, CLI catch-all glob last, last match
+wins, no match → `None`) are unchanged.
+
+Three module-level helpers implement it:
+
+- `resolve_device(path)` stats the path and returns the unix `st_dev` value
+  (`MetadataExt::dev()`); on non-unix targets it always returns `None`, so
+  `is_cross_device` never reports a difference there and the rule never
+  matches (the serde variant still parses everywhere).
+- `is_cross_device(candidate, workspace_root)` is a pure comparison: `true`
+  only when both IDs are known and differ; any `None` (metadata unavailable
+  on either side) yields `false` — the rule fires only on a positively
+  established device difference.
+- `canonicalize_existing_anchor(path)` is a sibling of
+  `SandboxContext::canonicalize_best_effort` (whose signature/behavior is
+  untouched, since `src/store.rs::project_key` and `docs/persistence.md`
+  depend on it): it returns only the canonicalized deepest existing ancestor,
+  used as the candidate's device anchor when the target itself does not
+  exist yet.
+
+Both devices are resolved **fresh per `check_path` call** — workspace root
+from the defensively re-canonicalized root, candidate from the anchor above —
+with no caching on `Sandbox`, so a mid-session remount cannot leave stale
+device IDs behind.
+
 ## `bash` tool process-group cleanup
 
 The shell inherits the process's current working directory, which is the

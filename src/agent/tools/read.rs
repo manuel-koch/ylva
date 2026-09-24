@@ -691,6 +691,40 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn read_tool_cross_filesystem_rule_requires_user_approval_for_cross_device_path() {
+        use crate::sandbox::{ApprovalVerdictConfig, NamedSandboxRule, SandboxRuleConfig};
+
+        let workspace = TempDir::new().expect("tempdir");
+        let context = SandboxContext::new(std::sync::Arc::new(std::sync::RwLock::new(
+            crate::sandbox::Sandbox::with_root(workspace.path().to_path_buf()),
+        )))
+        .with_configured_rules(vec![SandboxRuleConfig::Named {
+            rule: NamedSandboxRule::CrossFilesystem,
+            verdict: ApprovalVerdictConfig::UserApprovalRequired,
+            reason: None,
+        }]);
+        let tool = ReadTool::new(context);
+
+        assert_eq!(
+            tool.needs_approval(&serde_json::json!({ "path": "/dev/null" })),
+            ApprovalCheck::UserApprovalRequired,
+            "a cross-device path under a configured cross_filesystem rule must \
+             require user approval"
+        );
+
+        let same_device_path = workspace.path().join("notes.txt");
+        assert_eq!(
+            tool.needs_approval(&serde_json::json!({
+                "path": same_device_path.to_string_lossy()
+            })),
+            ApprovalCheck::AutoApproved,
+            "a same-device path does not match, so read auto-approves its \
+             sandbox abstention"
+        );
+    }
+
     #[test]
     fn undeclared_tool_timeout_uses_default() {
         assert_eq!(

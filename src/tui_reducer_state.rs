@@ -1755,8 +1755,7 @@ pub struct AppState {
     // ── drill-in conversation model (Phase 6.10) ─────────────────────────────
     /// Which transcript (root or child) is currently rendered in the main
     /// chat area. Independent of `running_child`: the parent stays in
-    /// `Root` view while a child streams in the background, per
-    /// `docs/plans/phase6-terminal-superpowers.md` Phase 6.10.
+    /// `Root` view while a child streams in the background.
     pub active_view: ConversationView,
     /// Every child run's own conversation transcript/partial-text
     /// accumulator, keyed by `run_id` — one entry per `spawn_subagent`
@@ -2061,10 +2060,9 @@ impl AppState {
     /// an approval belonging to a background child must never get stranded
     /// behind whatever transcript happens to be on screen. If the user is
     /// already viewing this exact running child (manually or via an earlier
-    /// auto-switch), no further switch/re-arm happens — matches
-    /// `docs/plans/phase6-terminal-superpowers.md` Phase 6.10 step 74:
-    /// "If `active_view` is already `Child`: set `auto_switched_to_child` to
-    /// `false` (user navigated manually; no auto-return)."
+    /// auto-switch), no further switch/re-arm happens — if `active_view` is
+    /// already `Child`, `auto_switched_to_child` is set to `false` (the user
+    /// navigated manually; no auto-return).
     pub(crate) fn note_child_interactive_pause(&mut self, run_id: Option<Uuid>) {
         let Some(child) = self.running_child.clone() else {
             return;

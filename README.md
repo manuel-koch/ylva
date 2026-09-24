@@ -30,7 +30,7 @@ Ylva is highly customizable to adapt to user needs.
   - [ ] `web_search` to search for terms in www
   - [ ] `web_fetch` to fetch data from a given URL
 - [x] Human-in-the-loop safety via a path-based tool-approval sandbox
-- [ ] Per-tool configurable sandbox approval rules
+- [x] Per-tool configurable sandbox approval rules
 - [x] Persistent session storage
   - [x] Ability to resume an existing session
   - [x] User message history, to reuse a message/prompt from a recent session

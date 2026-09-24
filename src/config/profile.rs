@@ -109,12 +109,13 @@ pub struct ToolSandboxConfig {
 /// `bash`-only [`crate::sandbox::NamedSandboxRule`] variants
 /// (`backgrounded`/`variable_assignment_prefix`/`unquoted_glob`/
 /// `unquoted_brace_expansion`); every other tool accepts only
-/// [`crate::sandbox::SandboxRuleConfig::PathGlob`] and the two path
+/// [`crate::sandbox::SandboxRuleConfig::PathGlob`] and the three path
 /// [`crate::sandbox::NamedSandboxRule`] variants (`outside_workspace`/
-/// `dot_path`). A mismatch is a hard startup error naming the tool, the
-/// rule's list index, and the expected kind, since a silently-ignored rule
-/// kind mismatch would be a safety-critical footgun. A `command` rule whose
-/// `*`/`**` wildcard isn't the last token is likewise a hard error (see
+/// `dot_path`/`cross_filesystem`). A mismatch is a hard startup error naming
+/// the tool, the rule's list index, and the expected kind, since a
+/// silently-ignored rule kind mismatch would be a safety-critical footgun. A
+/// `command` rule whose `*`/`**` wildcard isn't the last token is likewise a
+/// hard error (see
 /// [`crate::sandbox::SandboxRuleConfig::has_misplaced_command_glob_wildcard`]):
 /// left unchecked, it would silently degrade to a literal (never-matching)
 /// token instead of a wildcard.
@@ -137,7 +138,7 @@ fn validate_tool_sandbox_rules(
                      `unquoted_brace_expansion`)"
                 } else {
                     "a `pattern` path-glob rule or a named path rule \
-                     (`outside_workspace`/`dot_path`)"
+                     (`outside_workspace`/`dot_path`/`cross_filesystem`)"
                 };
                 return Err(ConfigError::InvalidSandboxRuleKind {
                     path: path.to_path_buf(),
@@ -1087,6 +1088,109 @@ rules = [
             2,
             "the agent-scoped table is independent of, and need not match, the \
              profile-level table for the same tool"
+        );
+    }
+
+    #[test]
+    fn tool_sandbox_rules_table_loads_cross_filesystem_rule() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "with-cross-fs",
+            r#"
+[tool.read]
+rules = [
+  { rule = "outside_workspace", verdict = "auto_denied" },
+  { rule = "dot_path", verdict = "auto_denied" },
+  { rule = "cross_filesystem", verdict = "user_approval_required" },
+]
+"#,
+        );
+
+        let profile = ProfileConfig::load(temp.path(), "with-cross-fs").expect("the fixture loads");
+        let read_rules = &profile.tools.get("read").expect("read table").rules;
+        assert_eq!(read_rules.len(), 3);
+        assert!(
+            matches!(
+                read_rules[2],
+                crate::sandbox::SandboxRuleConfig::Named {
+                    rule: crate::sandbox::NamedSandboxRule::CrossFilesystem,
+                    ..
+                }
+            ),
+            "cross_filesystem must parse as a named rule under [tool.read]: {:?}",
+            read_rules[2]
+        );
+    }
+
+    #[test]
+    fn cross_filesystem_named_rule_under_tool_bash_is_a_hard_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "bad-cross-fs-rule",
+            r#"
+[tool.bash]
+rules = [
+  { rule = "cross_filesystem", verdict = "auto_denied" },
+]
+"#,
+        );
+
+        let error = ProfileConfig::load(temp.path(), "bad-cross-fs-rule")
+            .expect_err("cross_filesystem under [tool.bash] must be rejected");
+        assert!(matches!(
+            error,
+            ConfigError::InvalidSandboxRuleKind { tool, index: 0, .. } if tool == "bash"
+        ));
+    }
+
+    #[test]
+    fn agent_scoped_cross_filesystem_rule_parses_for_read() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "agent-scoped-cross-fs",
+            r#"
+[tool.read]
+rules = [
+  { rule = "dot_path", verdict = "auto_denied" },
+]
+
+[agents.custom]
+allowed_tools = ["read"]
+
+[agents.custom.tools.read]
+rules = [
+  { rule = "outside_workspace", verdict = "auto_denied" },
+  { rule = "cross_filesystem", verdict = "user_approval_required" },
+]
+"#,
+        );
+
+        let profile =
+            ProfileConfig::load(temp.path(), "agent-scoped-cross-fs").expect("the fixture loads");
+
+        let profile_read_rules = &profile.tools.get("read").expect("read table").rules;
+        assert_eq!(profile_read_rules.len(), 1);
+
+        let custom_agent = profile.agents.get("custom").expect("the custom agent");
+        let agent_read_rules = &custom_agent
+            .tools
+            .get("read")
+            .expect("agent-scoped read table")
+            .rules;
+        assert_eq!(agent_read_rules.len(), 2);
+        assert!(
+            matches!(
+                agent_read_rules[1],
+                crate::sandbox::SandboxRuleConfig::Named {
+                    rule: crate::sandbox::NamedSandboxRule::CrossFilesystem,
+                    ..
+                }
+            ),
+            "the agent-scoped table carries its own cross_filesystem rule: {:?}",
+            agent_read_rules[1]
         );
     }
 

@@ -74,7 +74,11 @@ Tool approval is host-driven: `read`/`glob` are auto-approved immediately;
 requires user approval by default but is subject to structural sandbox
 rules (backgrounded commands, variable-assignment prefixes, unquoted glob/
 brace expansion) and configurable `[tool.bash]` rules — see "`bash` command
-rules" in [configuration](./configuration.md#bash-command-rules).
+rules" in [configuration](./configuration.md#bash-command-rules). Path tools
+additionally honor configurable `[tool.<name>]` rule lists, including the
+opt-in `cross_filesystem` rule that matches paths on a different filesystem
+(device) than the workspace root — see
+[Sandbox (tool-approval rules)](./configuration.md#sandbox-tool-approval-rules).
 
 Tool status lines render as `[tool] <title> …` (e.g. `[tool] Read docs/features.md [limit=32]`);
 bracketed props come from the tool's title arguments ranked by schema field
@@ -207,7 +211,10 @@ affect sandbox approval checks. See
   selected decoded bytes are valid UTF-8, the user-facing tool bubble uses the
   normal text metadata (`read_bytes` and `read_lines`) and a decoded content
   preview; opaque or invalid UTF-8 bytes show only `read_bytes` metadata and no
-  content section.
+  content section. Reads auto-approve when the sandbox abstains and honor any
+  explicit verdict from a configured `[tool.read]` rule list, including the
+  opt-in `cross_filesystem` rule (a path on a different filesystem than the
+  workspace root) when present.
 - **write**: Write `content` to `path`, with the per-call `encoding` defaulting
   to `utf8`. Set `encoding: "base64"` to decode standard padded Base64 and
   write the resulting arbitrary bytes; invalid input fails before any parent

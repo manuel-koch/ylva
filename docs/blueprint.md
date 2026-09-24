@@ -1389,34 +1389,36 @@ resolved) path so symlinks cannot hide their real location, name, or extension.
 For non-existent paths (e.g. a write target), lexical normalization is the
 fallback.
 
-**Tool approval rules (planned TOML config):** each tool's path-based policy is
-configurable via a `[tool.<name>]` block. Named rules act as early defaults;
-glob rules (last-match-wins) can override them:
+**Tool approval rules (shipped TOML config):** each tool's path-based policy
+is configurable via a `[tool.<name>]` block's ordered `rules` list
+(last-match-wins; a configured list fully replaces the default floor):
 
 ```toml
 [tool.read]
-path_outside_workspace = deny   # default: deny
-dot_path               = deny   # default: deny
-# cross_filesystem not set — sandbox abstains; configure to deny|user when needed
-globs = [
-    "allow:**/.*",              # re-allow dot-files inside workspace
-    "user:/**/.env",            # escalate .env files to user approval
+rules = [
+  { rule = "outside_workspace", verdict = "auto_denied" },  # default floor rule, restated
+  { rule = "dot_path", verdict = "auto_denied" },           # default floor rule, restated
+  # cross_filesystem omitted — opt-in only; add it to restrict cross-device reads:
+  # { rule = "cross_filesystem", verdict = "user_approval_required" },
+  { pattern = "**/.*", verdict = "auto_approved" },         # re-allow dot-files inside workspace
 ]
 
 [tool.write]
-path_outside_workspace = deny   # default: deny
-dot_path               = deny   # default: deny
-# cross_filesystem not set — sandbox abstains; configure to deny|user when needed
+rules = [
+  { rule = "outside_workspace", verdict = "auto_denied" },
+  { rule = "dot_path", verdict = "auto_denied" },
+  # cross_filesystem omitted — opt-in only; add it to restrict cross-device writes
+]
 ```
 
 Named rules:
 
-- `path_outside_workspace` — canonicalized path is not under the workspace root
+- `outside_workspace` — canonicalized path is not under the workspace root
 - `dot_path` — any component of the workspace-relative path starts with `.`
 - `cross_filesystem` — canonicalized path is on a different filesystem (device)
   than the workspace root; catches writes into mounted shares or volumes.
-  **Not configured by default** (sandbox abstains). Set to `deny` or `user`
-  to restrict cross-device access.
+  **Not configured by default** (sandbox abstains). Set its `verdict` to
+  `auto_denied` or `user_approval_required` to restrict cross-device access.
 
 **Flow:**
 
@@ -2856,7 +2858,7 @@ See reducer-state-handling-plan.md.
       records (shapes in §4G *Persistence* / §4H) to the parent session file via the
       same writer used for conversation messages, keyed by `parent_session` +
       `run_id`. This supersedes the child-persistence task originally planned as
-      Phase 6.12 in `docs/plans/phase6-terminal-superpowers.md`, dropped because it
+      Phase 6.12, dropped because it
       had no main-session persistence to attach to.
 
 - [x] Resume an existing session via explicit `--conversation-id` (no auto-resume, no
@@ -3035,7 +3037,8 @@ See reducer-state-handling-plan.md.
       `.ylva/` ignoring `.env`
 
 - [x] Per-tool sandbox rule configuration: load configurable `[tool.*]` rule
-      lists (including `outside_workspace`/`dot_path` overrides, §4E) from the
+      lists (including `outside_workspace`/`dot_path` overrides and the
+      opt-in `cross_filesystem` rule, §4E) from the
       layered config, replacing Phase 6's hardcoded two-rule default
 
 **Key crates:** `toml` (already added in Phase 7); evaluate `dirs`/`directories`
@@ -3046,7 +3049,7 @@ for home-directory resolution when this phase starts.
 **Decision:** Replace the handwritten, per-flag scans of the raw argument
 vector in `main.rs` with a single `clap` derive model in lib `src/cli.rs`,
 accepting clap's stricter uniform errors (unknown flags and missing values are
-hard usage errors: stderr, exit 2). Seed idea: `docs/ideas/cli-options-parsing.md`.
+hard usage errors: stderr, exit 2).
 
 - [x] **Goal:** Make CLI option parsing a maintained library concern instead of
       brittle handwritten scanning with per-flag-family semantics.

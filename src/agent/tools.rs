@@ -1294,6 +1294,50 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn default_registry_wires_cross_filesystem_rule_for_read() {
+        use crate::sandbox::{ApprovalVerdictConfig, NamedSandboxRule};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sandbox = std::sync::Arc::new(std::sync::RwLock::new(
+            crate::sandbox::Sandbox::with_root(temp.path().to_path_buf()),
+        ));
+        let mut tool_sandbox_rules = HashMap::new();
+        tool_sandbox_rules.insert(
+            read::ReadTool::NAME.to_string(),
+            vec![crate::sandbox::SandboxRuleConfig::Named {
+                rule: NamedSandboxRule::CrossFilesystem,
+                verdict: ApprovalVerdictConfig::UserApprovalRequired,
+                reason: None,
+            }],
+        );
+        let registry = default_registry(
+            sandbox,
+            ToolRegistryConfig {
+                tool_sandbox_rules,
+                ..ToolRegistryConfig::default()
+            },
+        );
+
+        let read_tool = registry.get(read::ReadTool::NAME).expect("read tool");
+        assert_eq!(
+            read_tool.needs_approval(&serde_json::json!({ "path": "/dev/null" })),
+            ApprovalCheck::UserApprovalRequired,
+            "read's configured cross_filesystem rule must surface through default_registry"
+        );
+
+        // A same-device in-workspace path does not match the rule; the
+        // configured list replaced the default floor, so the sandbox abstains
+        // and read auto-approves its own abstention.
+        let same_device_path = temp.path().join("notes.txt").to_string_lossy().to_string();
+        assert_eq!(
+            read_tool.needs_approval(&serde_json::json!({ "path": same_device_path })),
+            ApprovalCheck::AutoApproved,
+            "a same-device path must not match cross_filesystem"
+        );
+    }
+
     #[test]
     fn create_call_rewrites_absolute_path_like_argument_to_cwd_relative() {
         // Reads std::env::current_dir(); must hold SUBSCRIBER_LOCK to avoid

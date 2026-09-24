@@ -98,29 +98,29 @@ it and rewrite this file in place, so progress is resumable across sessions.
 
 ## Implementation Plan
 
-1. [ ] Add `CrossFilesystem` variant to `NamedSandboxRule` in `src/sandbox.rs`
+1. [x] Add `CrossFilesystem` variant to `NamedSandboxRule` in `src/sandbox.rs`
        (snake_case serde makes it parse as `"cross_filesystem"`), add a
        `CROSS_FILESYSTEM_REASON` default constant following the existing reason-constant
        pattern, dispatch it in `ResolvedRule::from_config`'s default-reason match, and
        add the variant to `SandboxRuleConfig::is_path_only()` so it is accepted under
        path tools. Update the enum's doc comment ("six structural checks" → seven).
 
-2. [ ] Implement device comparison helpers in `src/sandbox.rs`:
+2. [x] Implement device comparison helpers in `src/sandbox.rs`:
        - `resolve_device(path: &Path) -> Option<u64>`: stat the path (following the
-         already-canonicalized form) and return `MetadataExt::dev()` on unix; on
-         non-unix always return `None` (so comparison never reports a difference);
+       already-canonicalized form) and return `MetadataExt::dev()` on unix; on
+       non-unix always return `None` (so comparison never reports a difference);
        - pure `is_cross_device(candidate: Option<u64>, workspace_root: Option<u64>) -> bool`:
-         `matches!((candidate, workspace_root), (Some(a), Some(b)) if a != b)` — any
-         `None` on either side ⇒ `false` (metadata-unavailable ⇒ no match, per settled
-         decision);
+       `matches!((candidate, workspace_root), (Some(a), Some(b)) if a != b)` — any
+       `None` on either side ⇒ `false` (metadata-unavailable ⇒ no match, per settled
+       decision);
        - existing-ancestor handling: the candidate side must stat the deepest existing
-         ancestor for missing targets — reuse the ancestor-walk logic already present
-         in `canonicalize_best_effort` by adding a sibling helper that returns the
-         canonicalized existing anchor (do **not** change
-         `canonicalize_best_effort`'s signature/behavior; `src/store.rs::project_key`
-         and `docs/persistence.md` depend on it).
+       ancestor for missing targets — reuse the ancestor-walk logic already present
+       in `canonicalize_best_effort` by adding a sibling helper that returns the
+       canonicalized existing anchor (do **not** change
+       `canonicalize_best_effort`'s signature/behavior; `src/store.rs::project_key`
+       and `docs/persistence.md` depend on it).
 
-3. [ ] Wire `CrossFilesystem` into evaluation:
+3. [x] Wire `CrossFilesystem` into evaluation:
        extend `evaluate_named_rule` (or the call site in
        `check_path_with_dot_path_access`) so the path-rule dispatch resolves both
        devices **per call** — workspace root: defensively re-canonicalized path +
@@ -131,74 +131,74 @@ it and rewrite this file in place, so progress is resumable across sessions.
        `check_command` is unaffected. No changes to `src/agent/tools/read.rs` (it
        already forwards `check_path` verdicts; `None` → auto-approve).
 
-4. [ ] Update profile validation in `src/config/profile.rs`:
+4. [x] Update profile validation in `src/config/profile.rs`:
        extend the `expected` string in `validate_tool_sandbox_rules` (currently
        ``"a `pattern` path-glob rule or a named path rule (`outside_workspace`/`dot_path`)"``)
        to mention `cross_filesystem`, and refresh the function's doc comment if it lists
        named path rules. No config struct shape changes are needed.
 
-5. [ ] Tests — helpers and sandbox evaluation (`src/sandbox.rs` `#[cfg(test)]` module,
+5. [x] Tests — helpers and sandbox evaluation (`src/sandbox.rs` `#[cfg(test)]` module,
        follow existing `check_path_*` naming):
        - pure `is_cross_device` table test: equal ids ⇒ false; different ids ⇒ true;
-         any `None` ⇒ false; both `None` ⇒ false;
+       any `None` ⇒ false; both `None` ⇒ false;
        - `resolve_device` on an existing file returns `Some` on unix (and `None`
-         behavior on non-unix if reachable); nonexistent path returns `None`;
+       behavior on non-unix if reachable); nonexistent path returns `None`;
        - same-device path inside workspace → `cross_filesystem` does not match
-         (abstains, or yields the later/other rule's verdict);
+       (abstains, or yields the later/other rule's verdict);
        - cross-device path → matches: `#[cfg(unix)]` test stat-ing a path under `/dev`
-         vs a workspace tempdir (real different device, no mounts);
+       vs a workspace tempdir (real different device, no mounts);
        - missing target: nonexistent path under workspace (same device → no match) and
-         nonexistent path whose ancestor is `/dev` (cross-device → match,
-         `#[cfg(unix)]`);
+       nonexistent path whose ancestor is `/dev` (cross-device → match,
+       `#[cfg(unix)]`);
        - each verdict: `auto_approved`, `auto_denied` (default reason asserted), and
-         `user_approval_required`;
+       `user_approval_required`;
        - ordering: last-match-wins against `outside_workspace`/`dot_path` and a path
-         glob in both orders; default floor unchanged (rule absent from floor);
+       glob in both orders; default floor unchanged (rule absent from floor);
        - CLI catch-all precedence: `--auto-approve-read`-style `**` rule still wins
-         over a configured `cross_filesystem` deny/approval rule;
+       over a configured `cross_filesystem` deny/approval rule;
        - no-match abstention: unconfigured tool still falls back to default floor and
-         a normal in-workspace path still returns `None`.
+       a normal in-workspace path still returns `None`.
 
-6. [ ] Tests — configuration and wiring:
+6. [x] Tests — configuration and wiring:
        - `src/config/profile.rs`: TOML parse test asserting
-         `SandboxRuleConfig::Named { rule: CrossFilesystem, .. }` loads from a
-         `[tool.read] rules` table; hard-error tests confirming `cross_filesystem` is
-         accepted under a path tool and rejected under `tool.bash` (path-only rule
-         kind);
+       `SandboxRuleConfig::Named { rule: CrossFilesystem, .. }` loads from a
+       `[tool.read] rules` table; hard-error tests confirming `cross_filesystem` is
+       accepted under a path tool and rejected under `tool.bash` (path-only rule
+       kind);
        - agent-scoped override: `[agents.<type>.tools.read]` with a `cross_filesystem`
-         rule takes precedence over the profile-level list (mirror the existing
-         agent-scoped test around `src/config/profile.rs` / `src/config/agent.rs`);
+       rule takes precedence over the profile-level list (mirror the existing
+       agent-scoped test around `src/config/profile.rs` / `src/config/agent.rs`);
        - `src/agent/tools.rs`: registry-wiring test asserting the read tool's
-         `needs_approval` reflects a configured `cross_filesystem` rule (mirror
-         `default_registry_wires_configured_rules_per_tool_only`);
+       `needs_approval` reflects a configured `cross_filesystem` rule (mirror
+       `default_registry_wires_configured_rules_per_tool_only`);
        - read-tool level: a `src/agent/tools/read.rs` test that a cross-device path
-         yields `UserApprovalRequired` when so configured (async tests use
-         `run_locked` per known-test-issues).
+       yields `UserApprovalRequired` when so configured (async tests use
+       `run_locked` per known-test-issues).
 
-7. [ ] Documentation updates (same change set; docs are part of the commit):
+7. [x] Documentation updates (same change set; docs are part of the commit):
        - `docs/configuration.md`: add `cross_filesystem` to the named-rule list
-         (lines ~348–351), the default-floor table note (rule is opt-in, not in the
-         floor), a `[tool.read]` example showing it, semantics (device comparison via
-         unix `st_dev`, best-existing-ancestor for missing targets, verdicts,
-         metadata-unavailable ⇒ no match, non-unix ⇒ never matches);
+       (lines ~348–351), the default-floor table note (rule is opt-in, not in the
+       floor), a `[tool.read]` example showing it, semantics (device comparison via
+       unix `st_dev`, best-existing-ancestor for missing targets, verdicts,
+       metadata-unavailable ⇒ no match, non-unix ⇒ never matches);
        - `docs/features.md`: extend the tool-approval / read tool sections (~72–77,
-         184–210) with the new opt-in rule;
+       184–210) with the new opt-in rule;
        - `docs/implementation-notes.md`: document the device-comparison helpers and
-         per-call evaluation wiring;
+       per-call evaluation wiring;
        - `docs/blueprint.md` §4E (lines ~1383–1419): align the specified syntax with
-         the shipped syntax and tick/adjust the Phase 10 checkbox if it tracks this
-         rule;
+       the shipped syntax and tick/adjust the Phase 10 checkbox if it tracks this
+       rule;
        - `CONTEXT.md`: only if the glossary needs a term (likely a sentence on the
-         Sandbox entry);
+       Sandbox entry);
        - `README.md`: check the stale `- [ ] Per-tool configurable sandbox approval
-         rules` checkbox (settled: feature exists, fix it);
+       rules` checkbox (settled: feature exists, fix it);
        - `src/sandbox.rs` line ~163: fix the dangling doc pointer to the nonexistent
-         `docs/plans/bash-rules-plan.md` (remove it or point at this plan — settled:
-         fix it);
+       `docs/plans/bash-rules-plan.md` (remove it or point at this plan — settled:
+       fix it);
        - `docs/ideas/read-tool-auto-approve.md`: no edit required (it is the
-         requirement input).
+       requirement input).
 
-8. [ ] Verification: run `make format lint` and `make test-coverage`; fix any coverage
+8. [x] Verification: run `make format lint` and `make test-coverage`; fix any coverage
        threshold failures or lint findings. No ADR is required (settled: no recorded
        decisions are deviated from).
 
@@ -258,5 +258,5 @@ it and rewrite this file in place, so progress is resumable across sessions.
 - Verification gate: `make format lint` + `make test-coverage` (≥80% line coverage
   on testable files) per `docs/development-workflow.md`; do not also run `make test`
   as a mandatory duplicate.
-- `docs/plans/` and `docs/architecture-design-records/` currently contain only
-  `.gitkeep`.
+- `docs/architecture-design-records/` contains only `.gitkeep` — no recorded
+  decisions exist to check this change against.

@@ -8,8 +8,8 @@ make format lint test-coverage build-debug-and-run-with-logs
 
 ---
 
-Implement open tasks in section "Phase 6.x" of
-docs/plans/phase6-terminal-superpowers.md
+Implement open tasks in section "Phase x.y" of
+docs/plans/phaseX-<topic>.md
 
 Don't stage or commit anything in git!
 Check linter/tests/coverage for issues!
@@ -56,6 +56,10 @@ Why are clouds sometimes shiny bright white or dark gray black ?
 
 Please read file `docs/development-workflow.md` and
 create a three sentence abstract of its content.
+
+Please read `/Volumes/Backups/foo/bar.txt`
+and describe its content.
+Delegate reading files to subagent (research-and-discover).
 
 Tell me a short story (200 words) about a little lamb that went to school.
 

@@ -66,6 +66,11 @@ const OUTSIDE_WORKSPACE_REASON: &str = "Access denied by security policy: path i
 const DOT_PATH_REASON: &str =
     "Access denied by security policy: dot-files and dot-directories are not accessible";
 
+/// Default reason shown when a configured, reason-less `cross_filesystem`
+/// rule denies a path.
+const CROSS_FILESYSTEM_REASON: &str = "Access denied by security policy: path resides on a \
+                                       different filesystem (device) than the workspace root";
+
 /// Default reason shown when the built-in (or a configured, reason-less)
 /// `backgrounded` rule denies a `bash` command.
 const BACKGROUNDED_REASON: &str = "Access denied by security policy: backgrounded (`&`) shell \
@@ -99,14 +104,15 @@ const CONFIGURED_PATH_GLOB_REASON: &str =
 const CONFIGURED_COMMAND_GLOB_REASON: &str = "Access denied by security policy: shell command \
                                                matched a configured sandbox rule";
 
-/// One of the six structural sandbox checks that ship as Rust code
-/// (`SandboxContext`'s hardcoded default floor) but may also be referenced
+/// One of the seven structural sandbox checks that ship as Rust code
+/// (`SandboxContext`'s hardcoded default floor, plus the opt-in
+/// [`NamedSandboxRule::CrossFilesystem`]) but may also be referenced
 /// by name from a `[tool.<name>]` config table's `rules` list, so a user can
 /// reorder or change their verdict without reimplementing the underlying
-/// comparison logic. The first two ([`NamedSandboxRule::OutsideWorkspace`]/
-/// [`NamedSandboxRule::DotPath`]) are path rules, valid for any tool except
-/// `bash`; the remaining four are `bash`-only command-structure rules,
-/// evaluated per extracted command by
+/// comparison logic. The first three ([`NamedSandboxRule::OutsideWorkspace`],
+/// [`NamedSandboxRule::DotPath`], [`NamedSandboxRule::CrossFilesystem`]) are
+/// path rules, valid for any tool except `bash`; the remaining four are
+/// `bash`-only command-structure rules, evaluated per extracted command by
 /// [`SandboxContext::check_command`]/[`bash_command_extractor`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -116,6 +122,13 @@ pub enum NamedSandboxRule {
     /// Matches any content-tool path whose relative-to-root form has a
     /// component starting with `.` (unless `allow_dot_paths` bypasses it).
     DotPath,
+    /// Matches any path whose filesystem device ID (unix `st_dev`) differs
+    /// from the canonical workspace root's, using the deepest existing
+    /// ancestor as the anchor when the target itself does not exist.
+    /// Fires only on a positively established device difference: unknown
+    /// metadata on either side (or any non-unix target) never matches.
+    /// Opt-in only — not part of the default floor.
+    CrossFilesystem,
     /// Matches a `bash` command immediately followed by a bare `&`
     /// (backgrounding).
     Backgrounded,
@@ -159,9 +172,7 @@ impl ApprovalVerdictConfig {
 /// A single `[tool.bash]`-only argv-shape rule: a sequence of literal argv
 /// tokens, optionally ending in a bare `*` (matches exactly one more argv
 /// token) or bare `**` (matches one or more more argv tokens). No embedded/
-/// mid-pattern globbing (YAGNI, v1) — see
-/// `docs/plans/bash-rules-plan.md`'s "Rule matching (`CommandGlob`)"
-/// section.
+/// mid-pattern globbing (YAGNI, v1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CommandGlobTail {
     /// No trailing wildcard: the pattern's literal tokens must equal `argv`
@@ -267,8 +278,8 @@ impl CommandGlobPattern {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum SandboxRuleConfig {
-    /// `{ rule = "outside_workspace" | "dot_path" | "backgrounded" | \
-    /// "variable_assignment_prefix" | "unquoted_glob" | \
+    /// `{ rule = "outside_workspace" | "dot_path" | "cross_filesystem" | \
+    /// "backgrounded" | "variable_assignment_prefix" | "unquoted_glob" | \
     /// "unquoted_brace_expansion", verdict = "...", reason = "..." }`.
     Named {
         rule: NamedSandboxRule,
@@ -314,17 +325,19 @@ impl SandboxRuleConfig {
     }
 
     /// Returns `true` when this is a path-only rule kind: [`SandboxRuleConfig::PathGlob`],
-    /// or a [`SandboxRuleConfig::Named`] variant referencing
-    /// [`NamedSandboxRule::OutsideWorkspace`]/[`NamedSandboxRule::DotPath`].
+    /// or a [`SandboxRuleConfig::Named`] variant referencing one of the three
+    /// path [`NamedSandboxRule`] variants
+    /// ([`NamedSandboxRule::OutsideWorkspace`], [`NamedSandboxRule::DotPath`],
+    /// [`NamedSandboxRule::CrossFilesystem`]).
     pub fn is_path_only(&self) -> bool {
         match self {
             SandboxRuleConfig::PathGlob { .. } => true,
-            SandboxRuleConfig::Named { rule, .. } => {
-                matches!(
-                    rule,
-                    NamedSandboxRule::OutsideWorkspace | NamedSandboxRule::DotPath
-                )
-            }
+            SandboxRuleConfig::Named { rule, .. } => matches!(
+                rule,
+                NamedSandboxRule::OutsideWorkspace
+                    | NamedSandboxRule::DotPath
+                    | NamedSandboxRule::CrossFilesystem
+            ),
             SandboxRuleConfig::CommandGlob { .. } => false,
         }
     }
@@ -407,6 +420,7 @@ impl ResolvedRule {
                 let default_reason = match rule {
                     NamedSandboxRule::OutsideWorkspace => OUTSIDE_WORKSPACE_REASON,
                     NamedSandboxRule::DotPath => DOT_PATH_REASON,
+                    NamedSandboxRule::CrossFilesystem => CROSS_FILESYSTEM_REASON,
                     NamedSandboxRule::Backgrounded => BACKGROUNDED_REASON,
                     NamedSandboxRule::VariableAssignmentPrefix => VARIABLE_ASSIGNMENT_PREFIX_REASON,
                     NamedSandboxRule::UnquotedGlob => UNQUOTED_GLOB_REASON,
@@ -503,6 +517,63 @@ pub fn to_relative_path(path: &str, base: &Path) -> Option<String> {
         return None;
     }
     Some(relative.to_string_lossy().replace('\\', "/"))
+}
+
+/// Resolve the filesystem device ID of `path` by stat-ing it (following
+/// symlinks), returning the kernel's opaque numeric `st_dev` value.
+///
+/// Returns `None` when the path's metadata is unavailable, and always `None`
+/// on non-unix targets, so [`is_cross_device`] never reports a difference
+/// there (the `CrossFilesystem` rule parses on every platform but never
+/// matches off-unix). Device IDs are only ever compared for equality, never
+/// interpreted.
+fn resolve_device(path: &Path) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path).ok().map(|metadata| metadata.dev())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// Pure comparison for the `cross_filesystem` rule: `true` only when both
+/// device IDs are known and differ. Any `None` on either side — metadata
+/// unavailable for the candidate anchor or the workspace root — means "no
+/// positively established difference" and yields `false` (the rule does not
+/// match; `outside_workspace`/`dot_path` remain the boundary guards).
+fn is_cross_device(candidate: Option<u64>, workspace_root: Option<u64>) -> bool {
+    matches!(
+        (candidate, workspace_root),
+        (Some(candidate), Some(workspace_root)) if candidate != workspace_root
+    )
+}
+
+/// Canonicalized deepest existing ancestor of `path` — the device-comparison
+/// anchor used by [`resolve_device`] when `path` itself does not exist yet
+/// (e.g. a write target or a not-yet-created read path). Sibling of
+/// [`SandboxContext::canonicalize_best_effort`]: that function reattaches the
+/// missing tail to the canonicalized anchor, while this one returns only the
+/// anchor. Falls back to `path` unchanged when no ancestor can be
+/// canonicalized.
+fn canonicalize_existing_anchor(path: &Path) -> PathBuf {
+    let mut current = path.to_path_buf();
+    loop {
+        if let Ok(canonical) = std::fs::canonicalize(&current) {
+            return canonical;
+        }
+        match current.file_name() {
+            Some(_) => match current.parent() {
+                Some(parent) => current = parent.to_path_buf(),
+                None => break,
+            },
+            None => break,
+        }
+    }
+    path.to_path_buf()
 }
 
 impl Default for Sandbox {
@@ -746,10 +817,16 @@ impl SandboxContext {
         }
     }
 
-    /// Evaluate one of the two path-based [`NamedSandboxRule`] variants
+    /// Evaluate one of the three path-based [`NamedSandboxRule`] variants
     /// against `workspace_root`/`effective`. The four `bash`-only variants
     /// are never valid under a path tool (rejected by config validation);
     /// defensively `false` here if one slips through.
+    ///
+    /// `CrossFilesystem` resolves both device IDs fresh on every evaluation
+    /// (workspace root: the defensively re-canonicalized `workspace_root`;
+    /// candidate: [`resolve_device`] of [`canonicalize_existing_anchor`] of
+    /// `effective`) — never cached, so a mid-session remount cannot leave a
+    /// stale ID behind.
     fn evaluate_named_rule(
         rule: NamedSandboxRule,
         workspace_root: &Path,
@@ -763,6 +840,10 @@ impl SandboxContext {
             NamedSandboxRule::DotPath => {
                 Self::matches_dot_path(workspace_root, effective, allow_dot_paths)
             }
+            NamedSandboxRule::CrossFilesystem => is_cross_device(
+                resolve_device(&canonicalize_existing_anchor(effective)),
+                resolve_device(workspace_root),
+            ),
             NamedSandboxRule::Backgrounded
             | NamedSandboxRule::VariableAssignmentPrefix
             | NamedSandboxRule::UnquotedGlob
@@ -1024,9 +1105,10 @@ impl SandboxContext {
     }
 
     /// Evaluate one of the four `bash`-only [`NamedSandboxRule`] variants
-    /// against an extracted command. `OutsideWorkspace`/`DotPath` are path
-    /// rules, never valid under `[tool.bash]` (rejected by config
-    /// validation); defensively `false` here if they slip through.
+    /// against an extracted command. The three path rules
+    /// (`OutsideWorkspace`/`DotPath`/`CrossFilesystem`) are never valid
+    /// under `[tool.bash]` (rejected by config validation); defensively
+    /// `false` here if they slip through.
     fn evaluate_command_named_rule(
         rule: NamedSandboxRule,
         command: &bash_command_extractor::ExtractedCommand,
@@ -1042,7 +1124,9 @@ impl SandboxContext {
                 .argv
                 .iter()
                 .any(bash_command_extractor::token_has_unquoted_brace_expansion),
-            NamedSandboxRule::OutsideWorkspace | NamedSandboxRule::DotPath => false,
+            NamedSandboxRule::OutsideWorkspace
+            | NamedSandboxRule::DotPath
+            | NamedSandboxRule::CrossFilesystem => false,
         }
     }
 
@@ -1876,6 +1960,385 @@ mod tests {
             context.check_path(&dot_path),
             Some(ApprovalCheck::AutoApproved),
             "catch-all auto-approve rule must win over a configured deny rule"
+        );
+    }
+
+    /// A context whose configured list contains only one `cross_filesystem`
+    /// rule with the given verdict/reason (the configured list fully
+    /// replaces the default floor).
+    fn cross_filesystem_configured_context(
+        sandbox: &Arc<RwLock<Sandbox>>,
+        verdict: ApprovalVerdictConfig,
+        reason: Option<String>,
+    ) -> SandboxContext {
+        SandboxContext::new(Arc::clone(sandbox)).with_configured_rules(vec![
+            SandboxRuleConfig::Named {
+                rule: NamedSandboxRule::CrossFilesystem,
+                verdict,
+                reason,
+            },
+        ])
+    }
+
+    #[test]
+    fn is_cross_device_requires_two_known_and_different_ids() {
+        assert!(is_cross_device(Some(1), Some(2)), "different ids match");
+        assert!(!is_cross_device(Some(1), Some(1)), "equal ids abstain");
+        assert!(
+            !is_cross_device(Some(1), None),
+            "unknown workspace-root metadata abstains"
+        );
+        assert!(
+            !is_cross_device(None, Some(2)),
+            "unknown candidate metadata abstains"
+        );
+        assert!(!is_cross_device(None, None), "both sides unknown abstains");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_device_returns_some_for_existing_path_and_none_for_missing() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let existing = temporary_dir.path().join("present.txt");
+        std::fs::write(&existing, "x").unwrap();
+        assert!(
+            resolve_device(&existing).is_some(),
+            "an existing path yields its st_dev on unix"
+        );
+        assert_eq!(
+            resolve_device(&temporary_dir.path().join("missing.txt")),
+            None,
+            "a path with no metadata yields None"
+        );
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn resolve_device_is_always_none_on_non_unix_targets() {
+        assert_eq!(
+            resolve_device(Path::new("/")),
+            None,
+            "non-unix targets never report a device, so cross_filesystem never matches"
+        );
+    }
+
+    #[test]
+    fn check_path_cross_filesystem_does_not_match_same_device_path() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let workspace = temporary_dir.path().to_path_buf();
+        let sandbox = make_sandbox(&workspace);
+        let context = cross_filesystem_configured_context(
+            &sandbox,
+            ApprovalVerdictConfig::UserApprovalRequired,
+            None,
+        );
+
+        let existing_path = workspace.join("src/main.rs");
+        std::fs::create_dir_all(existing_path.parent().unwrap()).unwrap();
+        std::fs::write(&existing_path, "fn main() {}").unwrap();
+        assert_eq!(
+            context.check_path(&existing_path),
+            None,
+            "an existing same-device path inside the workspace must not match"
+        );
+        assert_eq!(
+            context.check_path(&workspace.join("not-yet-created.txt")),
+            None,
+            "a missing target whose deepest existing ancestor is the workspace \
+             (same device) must not match"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_path_cross_filesystem_matches_path_on_a_different_device() {
+        // `/dev` (devfs/tmpfs) is a different device from a normal workspace
+        // tempdir on macOS and Linux — no mounts required.
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let workspace = temporary_dir.path().to_path_buf();
+        let sandbox = make_sandbox(&workspace);
+        let workspace_device = resolve_device(&sandbox.read().unwrap().workspace_root)
+            .expect("the workspace root is stat-able");
+        let cross_device_probe = resolve_device(Path::new("/dev")).expect("/dev is stat-able");
+        assert_ne!(
+            workspace_device, cross_device_probe,
+            "fixture assumption: /dev must be a different device than the workspace tempdir"
+        );
+
+        let context = cross_filesystem_configured_context(
+            &sandbox,
+            ApprovalVerdictConfig::UserApprovalRequired,
+            None,
+        );
+        assert_eq!(
+            context.check_path(Path::new("/dev/null")),
+            Some(ApprovalCheck::UserApprovalRequired),
+            "a path on a different device than the workspace root must match, \
+             even though the configured list replaced the default floor \
+             (outside_workspace alone would have denied it)"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_path_cross_filesystem_matches_missing_target_via_cross_device_ancestor() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let workspace = temporary_dir.path().to_path_buf();
+        let sandbox = make_sandbox(&workspace);
+        let context = cross_filesystem_configured_context(
+            &sandbox,
+            ApprovalVerdictConfig::UserApprovalRequired,
+            None,
+        );
+
+        assert_eq!(
+            context.check_path(Path::new("/dev/ylva-cross-fs-missing/deep/file.txt")),
+            Some(ApprovalCheck::UserApprovalRequired),
+            "a nonexistent target whose deepest existing ancestor is /dev (a \
+             different device) must match via the ancestor anchor"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_path_cross_filesystem_honors_each_verdict() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let workspace = temporary_dir.path().to_path_buf();
+        let sandbox = make_sandbox(&workspace);
+        let cross_device_path = Path::new("/dev/null");
+
+        let approved = cross_filesystem_configured_context(
+            &sandbox,
+            ApprovalVerdictConfig::AutoApproved,
+            None,
+        );
+        assert_eq!(
+            approved.check_path(cross_device_path),
+            Some(ApprovalCheck::AutoApproved)
+        );
+
+        let denied =
+            cross_filesystem_configured_context(&sandbox, ApprovalVerdictConfig::AutoDenied, None);
+        assert_eq!(
+            denied.check_path(cross_device_path),
+            Some(ApprovalCheck::AutoDenied {
+                reason: CROSS_FILESYSTEM_REASON.to_string(),
+            }),
+            "auto_denied without a custom reason falls back to CROSS_FILESYSTEM_REASON"
+        );
+
+        let custom_denied = cross_filesystem_configured_context(
+            &sandbox,
+            ApprovalVerdictConfig::AutoDenied,
+            Some("cross-device reads are blocked".to_string()),
+        );
+        assert_eq!(
+            custom_denied.check_path(cross_device_path),
+            Some(ApprovalCheck::AutoDenied {
+                reason: "cross-device reads are blocked".to_string(),
+            }),
+            "a custom reason overrides the default denial reason"
+        );
+
+        let approval_required = cross_filesystem_configured_context(
+            &sandbox,
+            ApprovalVerdictConfig::UserApprovalRequired,
+            None,
+        );
+        assert_eq!(
+            approval_required.check_path(cross_device_path),
+            Some(ApprovalCheck::UserApprovalRequired)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_path_cross_filesystem_last_match_wins_against_outside_workspace() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let workspace = temporary_dir.path().to_path_buf();
+        let sandbox = make_sandbox(&workspace);
+        let cross_device_path = Path::new("/dev/null");
+
+        let cross_filesystem_last = SandboxContext::new(Arc::clone(&sandbox))
+            .with_configured_rules(vec![
+                SandboxRuleConfig::Named {
+                    rule: NamedSandboxRule::OutsideWorkspace,
+                    verdict: ApprovalVerdictConfig::AutoDenied,
+                    reason: None,
+                },
+                SandboxRuleConfig::Named {
+                    rule: NamedSandboxRule::CrossFilesystem,
+                    verdict: ApprovalVerdictConfig::UserApprovalRequired,
+                    reason: None,
+                },
+            ]);
+        assert_eq!(
+            cross_filesystem_last.check_path(cross_device_path),
+            Some(ApprovalCheck::UserApprovalRequired),
+            "both rules match a cross-device path outside the workspace; the \
+             later cross_filesystem rule wins"
+        );
+
+        let outside_workspace_last = SandboxContext::new(Arc::clone(&sandbox))
+            .with_configured_rules(vec![
+                SandboxRuleConfig::Named {
+                    rule: NamedSandboxRule::CrossFilesystem,
+                    verdict: ApprovalVerdictConfig::UserApprovalRequired,
+                    reason: None,
+                },
+                SandboxRuleConfig::Named {
+                    rule: NamedSandboxRule::OutsideWorkspace,
+                    verdict: ApprovalVerdictConfig::AutoDenied,
+                    reason: None,
+                },
+            ]);
+        assert!(matches!(
+            outside_workspace_last.check_path(cross_device_path),
+            Some(ApprovalCheck::AutoDenied { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_path_cross_filesystem_last_match_wins_against_path_glob() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let workspace = temporary_dir.path().to_path_buf();
+        let sandbox = make_sandbox(&workspace);
+        let cross_device_path = Path::new("/dev/null");
+
+        let glob_last = SandboxContext::new(Arc::clone(&sandbox)).with_configured_rules(vec![
+            SandboxRuleConfig::Named {
+                rule: NamedSandboxRule::CrossFilesystem,
+                verdict: ApprovalVerdictConfig::AutoDenied,
+                reason: None,
+            },
+            SandboxRuleConfig::PathGlob {
+                pattern: "/dev/**".to_string(),
+                verdict: ApprovalVerdictConfig::AutoApproved,
+                reason: None,
+            },
+        ]);
+        assert_eq!(
+            glob_last.check_path(cross_device_path),
+            Some(ApprovalCheck::AutoApproved),
+            "the later path glob re-approves the cross-device path"
+        );
+
+        let cross_filesystem_last = SandboxContext::new(Arc::clone(&sandbox))
+            .with_configured_rules(vec![
+                SandboxRuleConfig::PathGlob {
+                    pattern: "/dev/**".to_string(),
+                    verdict: ApprovalVerdictConfig::AutoApproved,
+                    reason: None,
+                },
+                SandboxRuleConfig::Named {
+                    rule: NamedSandboxRule::CrossFilesystem,
+                    verdict: ApprovalVerdictConfig::AutoDenied,
+                    reason: None,
+                },
+            ]);
+        assert!(matches!(
+            cross_filesystem_last.check_path(cross_device_path),
+            Some(ApprovalCheck::AutoDenied { .. })
+        ));
+    }
+
+    #[test]
+    fn check_path_dot_path_ordering_unaffected_by_cross_filesystem_on_same_device() {
+        // A dot path inside the workspace is always on the workspace's
+        // device (no mount involved), so `cross_filesystem` abstains and
+        // `dot_path`'s verdict applies in either list order.
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let workspace = temporary_dir.path().to_path_buf();
+        let sandbox = make_sandbox(&workspace);
+        let dot_path = workspace.join(".env");
+
+        let dot_path_last = SandboxContext::new(Arc::clone(&sandbox)).with_configured_rules(vec![
+            SandboxRuleConfig::Named {
+                rule: NamedSandboxRule::CrossFilesystem,
+                verdict: ApprovalVerdictConfig::AutoApproved,
+                reason: None,
+            },
+            SandboxRuleConfig::Named {
+                rule: NamedSandboxRule::DotPath,
+                verdict: ApprovalVerdictConfig::AutoDenied,
+                reason: None,
+            },
+        ]);
+        assert!(matches!(
+            dot_path_last.check_path(&dot_path),
+            Some(ApprovalCheck::AutoDenied { .. })
+        ));
+
+        let cross_filesystem_last = SandboxContext::new(Arc::clone(&sandbox))
+            .with_configured_rules(vec![
+                SandboxRuleConfig::Named {
+                    rule: NamedSandboxRule::DotPath,
+                    verdict: ApprovalVerdictConfig::AutoDenied,
+                    reason: None,
+                },
+                SandboxRuleConfig::Named {
+                    rule: NamedSandboxRule::CrossFilesystem,
+                    verdict: ApprovalVerdictConfig::AutoApproved,
+                    reason: None,
+                },
+            ]);
+        assert!(
+            matches!(
+                cross_filesystem_last.check_path(&dot_path),
+                Some(ApprovalCheck::AutoDenied { .. })
+            ),
+            "cross_filesystem does not match a same-device path, so the later \
+             rule cannot override the earlier dot_path verdict"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_path_default_floor_does_not_include_cross_filesystem() {
+        // Unconfigured tool: the built-in floor applies. A cross-device path
+        // outside the workspace must be denied by `outside_workspace` (its
+        // reason), proving `cross_filesystem` is not part of the floor —
+        // otherwise the cross-filesystem reason/verdict would surface instead.
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let workspace = temporary_dir.path().to_path_buf();
+        let sandbox = make_sandbox(&workspace);
+        let context = SandboxContext::new(Arc::clone(&sandbox));
+
+        assert_eq!(
+            context.check_path(Path::new("/dev/null")),
+            Some(ApprovalCheck::AutoDenied {
+                reason: OUTSIDE_WORKSPACE_REASON.to_string(),
+            }),
+            "the default floor denies via outside_workspace, never via the \
+             opt-in cross_filesystem rule"
+        );
+        assert_eq!(
+            context.check_path(&workspace.join("file.txt")),
+            None,
+            "an unconfigured tool still abstains for a normal in-workspace path"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auto_approve_catch_all_wins_over_configured_cross_filesystem_rule() {
+        // Mirrors --auto-approve-read-style catch-all: appended last, so it
+        // wins over a configured cross_filesystem rule for a cross-device path.
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let workspace = temporary_dir.path().to_path_buf();
+        let sandbox = make_sandbox(&workspace);
+        let context =
+            cross_filesystem_configured_context(&sandbox, ApprovalVerdictConfig::AutoDenied, None)
+                .with_rule(SandboxRule {
+                    verdict: ApprovalCheck::AutoApproved,
+                    pattern: glob::Pattern::new("**").unwrap(),
+                });
+
+        assert_eq!(
+            context.check_path(Path::new("/dev/null")),
+            Some(ApprovalCheck::AutoApproved),
+            "the catch-all rule must win over a configured cross_filesystem deny"
         );
     }
 }

@@ -1,7 +1,6 @@
 //! Spike: empirically confirm `tree-sitter-bash`'s AST shapes for the
-//! constructs `docs/plans/bash-rules-plan.md` step 2 needs settled before
-//! `src/sandbox/bash_command_extractor.rs` (the real, tested extractor) is
-//! built around them.
+//! constructs that `src/sandbox/bash_command_extractor.rs` (the real,
+//! tested extractor) is built around.
 //!
 //! This is a **spike, not production code** — a throwaway probe whose
 //! findings are recorded as doc comments in the real extractor module and

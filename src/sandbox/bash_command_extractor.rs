@@ -17,9 +17,9 @@
 //! [`super::SandboxRuleConfig::CommandGlob`]/named command rules without
 //! executing anything.
 //!
-//! **Scanning scope is fixed, not organically expanded** (see
-//! `docs/plans/bash-rules-plan.md`): only `list`, `pipeline` and `command`
-//! nodes are walked. Anything else (subshells, redirections, command/
+//! **Scanning scope is fixed, not organically expanded**: only `list`,
+//! `pipeline` and `command` nodes are walked. Anything else (subshells,
+//! redirections, command/
 //! parameter substitution, control-flow constructs, function definitions,
 //! heredocs) makes the enclosing statement [`ExtractedStatement::Unanalysable`],
 //! never partially supported.
@@ -300,7 +300,7 @@ fn extract_argv_token(node: Node, source: &str) -> Option<ArgvToken> {
     }
 }
 
-/// Unquoted glob metacharacters per `docs/ideas/bash-rules.md`: `*`, `?`, or
+/// Unquoted glob metacharacters: `*`, `?`, or
 /// a `[...]` bracket expression. Only meaningful for an unquoted token —
 /// callers must check [`ArgvToken::quoted`] first.
 pub(super) fn token_has_unquoted_glob(token: &ArgvToken) -> bool {
@@ -310,7 +310,7 @@ pub(super) fn token_has_unquoted_glob(token: &ArgvToken) -> bool {
 static UNQUOTED_BRACE_EXPANSION_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\{[^{}]*,[^{}]*\}").expect("valid brace-expansion regex"));
 
-/// Unquoted brace expansion (`{a,b}`) per `docs/ideas/bash-rules.md`. Only
+/// Unquoted brace expansion (`{a,b}`). Only
 /// meaningful for an unquoted token — callers must check
 /// [`ArgvToken::quoted`] first.
 pub(super) fn token_has_unquoted_brace_expansion(token: &ArgvToken) -> bool {
@@ -344,7 +344,7 @@ mod tests {
             .collect()
     }
 
-    // --- "in scope" examples from docs/ideas/bash-rules.md ---
+    // --- "in scope" examples ---
 
     #[test]
     fn extracts_semicolon_separated_commands() {

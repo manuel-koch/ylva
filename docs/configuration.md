@@ -319,6 +319,9 @@ this order, before any custom rule added by a CLI flag (e.g.
 | `outside_workspace` | `auto_denied` | Any path that normalizes outside the workspace root. |
 | `dot_path` | `auto_denied` | Any content-tool path whose relative-to-root form has a component starting with `.` (dot-files/dot-directories). `glob` enumeration may inspect dot-prefixed paths inside the workspace. |
 
+The opt-in `cross_filesystem` rule (see below) is **not** part of this
+floor — it only applies when a `[tool.<name>]` rule list configures it.
+
 This floor is built in, not parsed from any embedded TOML file, so it can
 never be broken by a missing or corrupted config file. `search` with no
 `path` given (cwd, never leaves the workspace by construction) skips the
@@ -334,6 +337,7 @@ a tool's rule list explicitly, e.g.:
 [tool.read]
 rules = [
   { rule = "dot_path", verdict = "user_approval_required" },
+  { rule = "cross_filesystem", verdict = "user_approval_required" },
 ]
 
 [tool.write]
@@ -345,10 +349,12 @@ rules = [
 
 Each `rules` entry is one of:
 
-- A **named rule**, `{ rule = "outside_workspace" | "dot_path", verdict = "...", reason = "..." }`,
-  referencing one of the two built-in structural checks above with a
-  configurable verdict — reorder them or change their verdict without
-  reimplementing the path-comparison logic in glob syntax.
+- A **named rule**, `{ rule = "<check>", verdict = "...", reason = "..." }`,
+  referencing a built-in structural check (`outside_workspace`, `dot_path`,
+  `cross_filesystem`) with a configurable verdict —
+  reorder them or change their verdict without reimplementing the
+  path-comparison logic in glob syntax. The first two are the default-floor
+  checks; `cross_filesystem` is the additional opt-in check described below.
 - A **custom glob rule**, `{ pattern = "...", verdict = "...", reason = "..." }`,
   matched against the canonicalized absolute path.
 
@@ -356,6 +362,25 @@ Each `rules` entry is one of:
 `"user_approval_required"`; `reason` is optional and only used for
 `"auto_denied"`, defaulting to the same message the built-in floor uses for
 that rule (or a generic message for a custom glob rule) when omitted.
+
+**The `cross_filesystem` rule.** Matches when the candidate path lives on a
+different filesystem (device) than the canonical workspace root — catching
+reads of files on mounted shares/volumes that `outside_workspace` cannot
+see, because the path may still be lexically inside the workspace (e.g. a
+mount point under the workspace root). Semantics:
+
+- Device comparison uses the unix `st_dev` value of each path (compared for
+  equality only). The rule parses on every platform but never matches on a
+  non-unix target.
+- When the candidate path does not exist yet, the deepest existing ancestor
+  is used as the device anchor.
+- The rule fires only on a positively established device difference: if
+  neither the target nor any ancestor yields metadata, or the workspace
+  root's device cannot be read, the rule does **not** match —
+  `outside_workspace` and `dot_path` remain the boundary guards.
+- It is **opt-in only** and not part of the default floor; add it to a
+  `rules` list (as in the `[tool.read]` example above) to use it, with any
+  of the three verdicts and an optional custom `reason`.
 
 Rules are evaluated in list order; last match wins — the same
 last-match-wins semantics as the default floor and as CLI-flag-added rules.
@@ -417,8 +442,9 @@ default floor), so the flag always wins regardless of `[tool.*]`/
 ### `bash` command rules
 
 `bash` is a command tool, not a path tool: `[tool.bash]`/
-`[agents.<type>.tools.bash]` cannot reference `outside_workspace`/`dot_path`
-(path-only) or a path-glob `pattern` rule, and no other tool's `[tool.<name>]`
+`[agents.<type>.tools.bash]` cannot reference `outside_workspace`/`dot_path`/
+`cross_filesystem` (path-only) or a path-glob `pattern` rule, and no other
+tool's `[tool.<name>]`
 table may reference `bash`'s named rules or a `command` rule. Config loading
 hard-validates this at startup, naming the offending agent type (or
 "profile-level"), the tool, the rule index, and which rule kind was expected.

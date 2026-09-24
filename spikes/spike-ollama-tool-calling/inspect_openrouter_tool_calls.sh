@@ -11,7 +11,7 @@
 #
 # Requires OPENROUTER_API_KEY.
 #
-# See: docs/plans/spike-ollama-tool-calling.md
+# See: spikes/spike-ollama-tool-calling/README.md
 #
 # Env overrides:
 #   OPENROUTER_BASE_URL   OpenRouter base URL (default https://openrouter.ai/api/v1)

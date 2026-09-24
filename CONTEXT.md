@@ -67,7 +67,7 @@ _Avoid_: root agent's initial system message
 
 **Tool**:
 A named capability that an agent can invoke, such as reading files, editing
-files, searching, running commands, or asking the user for clarification.
+files, searching, running commands, spawning agents, or asking the user for clarification.
 
 **Sandbox**:
 The filesystem boundary that governs which paths tools may access and when user

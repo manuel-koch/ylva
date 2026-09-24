@@ -1,10 +1,9 @@
 # Spike: Bash Command Rules (`tree-sitter-bash` AST shapes)
 
 A standalone proof-of-concept (spike) crate that empirically confirms the
-`tree-sitter-bash` v0.25.1 AST shapes `docs/plans/bash-rules-plan.md` step 2
-needs settled before `src/sandbox/bash_command_extractor.rs` (the real,
-tested extractor backing `SandboxContext::check_command`) is built around
-them.
+`tree-sitter-bash` v0.25.1 AST shapes that
+`src/sandbox/bash_command_extractor.rs` (the real,
+tested extractor backing `SandboxContext::check_command`) is built around.
 
 This is a **spike, not production code**. It lives in the dedicated
 `spikes/` directory, is a separate crate, and is not wired into any `src/`

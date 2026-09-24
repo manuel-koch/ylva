@@ -8,7 +8,7 @@
 # delta.tool_calls key shape (inspect_sse.py --shape) so it can be compared with
 # the OpenRouter capture.
 #
-# See: docs/plans/spike-ollama-tool-calling.md
+# See: spikes/spike-ollama-tool-calling/README.md
 #
 # Env overrides:
 #   OLLAMA_BASE_URL   base URL (default http://localhost:11434)

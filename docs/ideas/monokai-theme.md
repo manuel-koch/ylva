@@ -19,9 +19,8 @@ existing bundled name. Before implementing:
 - Decide whether to embed the raw `.tmTheme` XML (parsed at startup via
   `ThemeSet::load_from_reader`) or pre-convert it to a `syntect` binary dump
   at build time (`dump-load` feature) for faster startup.
-- Wire it into `src/highlight.rs`'s theme selection (see
-  `docs/plans/phase7-persistence.md` for the dark/light theme-selection
-  mechanism this would extend) and the `theme` config key.
+- Wire it into `src/highlight.rs`'s theme selection and the `theme`
+  config key.
 
 Not scheduled to a phase yet — pick this up when a third theme is actually
 wanted, or fold it into whichever future phase does further rendering polish.

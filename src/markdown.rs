@@ -1,5 +1,5 @@
 //! Markdown-to-`ratatui` rendering used by chat bubbles and the clarify
-//! banner (see `docs/plans/phase6-terminal-superpowers.md`, Phase 6.6).
+//! banner.
 //!
 //! [`render_markdown`] converts a Markdown string into a `Vec<Line<'static>>`
 //! hard-wrapped at a fixed column width, suitable for embedding inside a
