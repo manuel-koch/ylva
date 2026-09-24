@@ -530,6 +530,31 @@ async fn named_ollama_connection_uses_native_model_discovery() {
 }
 
 #[tokio::test]
+async fn outbound_requests_carry_the_ylva_user_agent() {
+    let config = MockLlmConfig {
+        models: vec!["small-model".to_string()],
+        ..Default::default()
+    };
+    let server = MockLlmServer::start(config).await.expect("bind failed");
+
+    let provider = openai_compatible_provider_for(&server);
+    provider
+        .list_models()
+        .await
+        .expect("the mock answers GET /models with a 200");
+
+    let expected_user_agent = format!("ylva/{}", ylva::BUILD_INFO.version);
+    let request_headers = server.request_headers();
+    let user_agent = request_headers
+        .iter()
+        .flatten()
+        .find(|(name, _)| name.eq_ignore_ascii_case("user-agent"))
+        .map(|(_, value)| value.as_str())
+        .expect("the outbound request must carry a User-Agent header");
+    assert_eq!(user_agent, expected_user_agent);
+}
+
+#[tokio::test]
 async fn list_models_reports_a_non_success_status_as_an_error() {
     let config = MockLlmConfig {
         statuses: vec![500],

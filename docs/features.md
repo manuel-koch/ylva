@@ -175,6 +175,10 @@ replaces the normal send hint with the controls for that overlay.
 The selected effort is runtime state and is not added to the session's
 provider/model metadata.
 
+- Every outbound HTTP request (model listing, chat/SSE, and Ollama metadata
+  calls) carries a dedicated `User-Agent: ylva/<version>` header so remote
+  servers can identify the client.
+
 ## Tools to be used by models
 
 The following tools can be used by AI models during a conversation turn.

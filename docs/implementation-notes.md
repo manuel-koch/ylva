@@ -98,6 +98,15 @@ the concrete provider wrapper. This keeps provider-specific wire fields in
 `OpenRouterProvider` and `OllamaProvider` rather than centralizing them in a
 format-dispatch enum.
 
+The shared `reqwest::Client` is built once at its construction site inside
+`OpenAiCompatibleProvider` with a client-level default
+`User-Agent: ylva/<version>` (version from `CARGO_PKG_VERSION`), so every
+outbound request flows through the three `llm::http` send helpers
+(`get_json`, `post_json`, `post_with_retry`) without any per-request header
+insertion. Caveat: client-level default headers are not part of the
+per-request `HeaderMap` that `dump_request` records, so they do not appear in
+`YLVA_REQUEST_DUMP_PATH` dumps — dump contents stay unchanged.
+
 `ModelInfo.reasoning_efforts` normalizes provider metadata into three states:
 `None` means no advertised reasoning support, `Some([])` means supported
 reasoning without selectable alternatives, and `Some(values)` means supported

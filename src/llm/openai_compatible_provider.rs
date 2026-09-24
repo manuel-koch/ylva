@@ -38,6 +38,10 @@ fn no_request_body_customization(
 const REDACTED_BASE64_RESULT: &str = "<REDACTED_BASE64_RESULT>";
 const REDACTED_MEDIA_DATA: &str = "<REDACTED_MEDIA_DATA>";
 
+/// `User-Agent` value applied as a client-level default on the shared HTTP
+/// client so every outbound request identifies Ylva and its package version.
+const OUTBOUND_USER_AGENT: &str = concat!("ylva/", env!("CARGO_PKG_VERSION"));
+
 /// Redact media payloads from a Chat Completions request copy used only for
 /// request dumps. The live request body is never mutated.
 pub(crate) fn redact_chat_completion_request_body(body: &serde_json::Value) -> serde_json::Value {
@@ -257,7 +261,10 @@ impl OpenAiCompatibleProvider {
                 input_modalities: None,
             })),
             api_key,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .user_agent(OUTBOUND_USER_AGENT)
+                .build()
+                .expect("shared HTTP client construction must succeed"),
             request_body_customizer,
             request_body_redactor,
             content_part_format,

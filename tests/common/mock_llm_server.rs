@@ -166,6 +166,50 @@ impl MockLlmConfig {
     }
 }
 
+/// One captured request's header lines as (`name`, `value`) pairs in the
+/// order they appeared on the wire.
+pub type RequestHeaderLines = Vec<(String, String)>;
+
+/// Request bodies and headers captured across connections, so tests can make
+/// wire-level assertions after the fact. Shared by the accept loop and every
+/// connection handler; the two captures always travel together.
+#[derive(Clone)]
+struct CapturedRequests {
+    bodies: Arc<Mutex<Vec<String>>>,
+    headers: Arc<Mutex<Vec<RequestHeaderLines>>>,
+}
+
+impl CapturedRequests {
+    fn new() -> Self {
+        CapturedRequests {
+            bodies: Arc::new(Mutex::new(Vec::new())),
+            headers: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn record_body(&self, request_body: String) {
+        self.bodies
+            .lock()
+            .expect("request body lock")
+            .push(request_body);
+    }
+
+    fn record_headers(&self, request_headers: RequestHeaderLines) {
+        self.headers
+            .lock()
+            .expect("request header lock")
+            .push(request_headers);
+    }
+
+    fn bodies(&self) -> Vec<String> {
+        self.bodies.lock().expect("request body lock").clone()
+    }
+
+    fn headers(&self) -> Vec<RequestHeaderLines> {
+        self.headers.lock().expect("request header lock").clone()
+    }
+}
+
 /// An in-process OpenAI-spec SSE mock server bound to an ephemeral loopback
 /// port, modeled on `spikes/spike-http-stream-cancel/src/mock_server.rs`.
 ///
@@ -177,7 +221,7 @@ pub struct MockLlmServer {
     pub addr: SocketAddr,
     live_connections: Arc<AtomicUsize>,
     cumulative_connections: Arc<AtomicUsize>,
-    request_bodies: Arc<Mutex<Vec<String>>>,
+    captured_requests: CapturedRequests,
     handle: JoinHandle<()>,
 }
 
@@ -210,7 +254,7 @@ impl MockLlmServer {
         let addr = listener.local_addr()?;
         let live_connections = Arc::new(AtomicUsize::new(0));
         let cumulative_connections = Arc::new(AtomicUsize::new(0));
-        let request_bodies = Arc::new(Mutex::new(Vec::new()));
+        let captured_requests = CapturedRequests::new();
         let config = Arc::new(config);
         let connection_frames = Arc::new(connection_frames);
         let request_frame_rules = Arc::new(request_frame_rules);
@@ -218,7 +262,7 @@ impl MockLlmServer {
 
         let live = Arc::clone(&live_connections);
         let cumulative = Arc::clone(&cumulative_connections);
-        let request_bodies_for_accept_loop = Arc::clone(&request_bodies);
+        let captured_requests_for_accept_loop = captured_requests.clone();
         let connection_frames_for_accept_loop = Arc::clone(&connection_frames);
         let request_frame_rules_for_accept_loop = Arc::clone(&request_frame_rules);
         let chat_request_index_for_accept_loop = Arc::clone(&chat_request_index);
@@ -234,7 +278,7 @@ impl MockLlmServer {
                 let behavior = config.next_behavior(position);
                 position += 1;
                 let live = Arc::clone(&live);
-                let request_bodies = Arc::clone(&request_bodies_for_accept_loop);
+                let captured_requests = captured_requests_for_accept_loop.clone();
                 let connection_frames = Arc::clone(&connection_frames_for_accept_loop);
                 let request_frame_rules = Arc::clone(&request_frame_rules_for_accept_loop);
                 let chat_request_index = Arc::clone(&chat_request_index_for_accept_loop);
@@ -242,7 +286,7 @@ impl MockLlmServer {
                     stream,
                     behavior,
                     live,
-                    request_bodies,
+                    captured_requests,
                     connection_frames,
                     request_frame_rules,
                     chat_request_index,
@@ -254,7 +298,7 @@ impl MockLlmServer {
             addr,
             live_connections,
             cumulative_connections,
-            request_bodies,
+            captured_requests,
             handle,
         })
     }
@@ -268,10 +312,13 @@ impl MockLlmServer {
     }
 
     pub fn request_bodies(&self) -> Vec<String> {
-        self.request_bodies
-            .lock()
-            .expect("request body lock")
-            .clone()
+        self.captured_requests.bodies()
+    }
+
+    /// Per-request header lines (`name`, `value`) as received on the wire, one
+    /// entry per accepted request, in acceptance order.
+    pub fn request_headers(&self) -> Vec<RequestHeaderLines> {
+        self.captured_requests.headers()
     }
 
     pub fn live_counter(&self) -> Arc<AtomicUsize> {
@@ -297,27 +344,26 @@ async fn handle_connection(
     stream: TcpStream,
     mut behavior: Behavior,
     live_connections: Arc<AtomicUsize>,
-    request_bodies: Arc<Mutex<Vec<String>>>,
+    captured_requests: CapturedRequests,
     connection_frames: Arc<Vec<Vec<String>>>,
     request_frame_rules: Arc<Vec<(String, Vec<String>)>>,
     chat_request_index: Arc<AtomicUsize>,
 ) {
     let (mut reader, mut writer) = stream.into_split();
-    let (request_target, request_body) = match read_request_head(&mut reader).await {
+    let (request_target, request_headers, request_body) = match read_request_head(&mut reader).await
+    {
         Ok(request) => request,
         Err(_) => {
             live_connections.fetch_sub(1, Ordering::SeqCst);
             return;
         }
     };
+    captured_requests.record_headers(request_headers);
     let request_body = String::from_utf8(request_body)
         .ok()
         .filter(|request_body| !request_body.is_empty());
     if let Some(request_body_text) = &request_body {
-        request_bodies
-            .lock()
-            .expect("request body lock")
-            .push(request_body_text.clone());
+        captured_requests.record_body(request_body_text.clone());
     }
     if request_target.contains("/chat/completions") {
         let request_index = chat_request_index.fetch_add(1, Ordering::SeqCst);
@@ -508,11 +554,12 @@ Content-Length: {}\r\n\
 /// Read the full HTTP request (head + body) so the server never responds
 /// before the client has finished sending it, which would race reqwest's
 /// request-body write. Returns the request target (path) from the request
-/// line and the request body, so callers can distinguish `/chat/completions`
-/// from `/models` and inspect captured chat payloads.
+/// line, the parsed header lines, and the request body, so callers can
+/// distinguish `/chat/completions` from `/models`, inspect captured chat
+/// payloads, and assert on wire-level headers.
 async fn read_request_head(
     reader: &mut tokio::net::tcp::OwnedReadHalf,
-) -> std::io::Result<(String, Vec<u8>)> {
+) -> std::io::Result<(String, RequestHeaderLines, Vec<u8>)> {
     let mut buffer = Vec::with_capacity(MAX_REQUEST_HEADER_BYTES);
     let mut chunk = [0u8; 512];
     let head_end = loop {
@@ -560,7 +607,11 @@ async fn read_request_head(
     } else {
         Vec::new()
     };
-    Ok((parse_request_target(&buffer[..head_end]), body))
+    Ok((
+        parse_request_target(&buffer[..head_end]),
+        parse_request_headers(&buffer[..head_end]),
+        body,
+    ))
 }
 
 /// Extract the request target from an HTTP request line ("GET /models HTTP/1.1").
@@ -571,6 +622,21 @@ fn parse_request_target(head: &[u8]) -> String {
         .and_then(|request_line| request_line.split_whitespace().nth(1))
         .unwrap_or_default()
         .to_string()
+}
+
+/// Parse the header lines of an HTTP request head into [`RequestHeaderLines`],
+/// skipping the request line. Header names keep their wire casing.
+fn parse_request_headers(head: &[u8]) -> RequestHeaderLines {
+    let Some(head) = std::str::from_utf8(head).ok() else {
+        return Vec::new();
+    };
+    head.lines()
+        .skip(1)
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            Some((name.trim().to_string(), value.trim().to_string()))
+        })
+        .collect()
 }
 
 /// Parse the `Content-Length` header (in bytes) from a request head.

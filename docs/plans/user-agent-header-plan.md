@@ -41,7 +41,7 @@ rewrite this file in place, so progress is resumable across sessions.
 
 ## Implementation Plan
 
-1. [ ] Set the User-Agent on the shared HTTP client in
+1. [x] Set the User-Agent on the shared HTTP client in
    `src/llm/openai_compatible_provider.rs` (construction at line 260): replace
    `reqwest::Client::new()` with `reqwest::Client::builder().user_agent(<ua-string>).build()`,
    handling the `Result` consistently with existing panic-on-construction style (the current
@@ -51,19 +51,19 @@ rewrite this file in place, so progress is resumable across sessions.
    `crate::build_info::BUILD_INFO.version`. Set client-level only; do not also insert into the
    per-request `HeaderMap` (decision: dumps stay unchanged).
 
-2. [ ] Extend `tests/common/mock_llm_server.rs` to capture request headers: `read_request_head`
+2. [x] Extend `tests/common/mock_llm_server.rs` to capture request headers: `read_request_head`
    (line 513) already reads the full head; parse the header lines and record them alongside the
    existing request-body capture, exposing them via an accessor following the
    `request_bodies()` pattern (line 180).
 
-3. [ ] Add one integration test in `tests/http_provider.rs` asserting that an outbound request
+3. [x] Add one integration test in `tests/http_provider.rs` asserting that an outbound request
    (e.g. `list_models`) carries `User-Agent: ylva/<version>` at the wire level, using the
    header-capturing mock server from step 2 and comparing against the same expected string the
    source uses (derive from `ylva::BUILD_INFO.version` or `env!("CARGO_PKG_VERSION")` — note
    `cfg(test)` does not reach library code from integration tests, see
    `docs/known-test-issues.md`). No unit-level test and no dump-behavior test required.
 
-4. [ ] Update documentation in the same change set:
+4. [x] Update documentation in the same change set:
    - `docs/features.md` — add a bullet under the "Model Provider" section (lines 144–176)
      stating outbound requests send a dedicated `ylva/<version>` User-Agent.
    - `docs/implementation-notes.md` — note in the "Engine/provider runtime configuration"
@@ -73,7 +73,7 @@ rewrite this file in place, so progress is resumable across sessions.
      `docs/cli-options.md` needs no change). Caveat goes here only (decision: do not touch
      `docs/cli-options.md` or `docs/ideas/user-agent-header.md`).
 
-5. [ ] Run verification: `make format lint`, then the single mandatory gate
+5. [x] Run verification: `make format lint`, then the single mandatory gate
    `make test-coverage` (do not also run `make test`). Fix any failures.
 
 ## Implementation Hints
