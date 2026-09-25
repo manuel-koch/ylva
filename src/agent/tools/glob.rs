@@ -370,6 +370,11 @@ impl Tool for GlobTool {
             Err(denied) => return denied,
         };
         let root = pattern_root(pattern_str);
+        // A single candidate path is checked: the pattern's root directory.
+        // `dot_path` is exempt (`check_path_allowing_dot_paths`) because glob
+        // only enumerates, and a configured `cross_filesystem` rule compares
+        // this root's device — a mount point nested below it is never
+        // detected, since result paths are not re-checked.
         let sandbox_verdict = self
             .sandbox_context
             .check_path_allowing_dot_paths(std::path::Path::new(&root));
@@ -1079,12 +1084,12 @@ mod tests {
     }
 
     #[test]
-    fn glob_needs_approval_denies_outside_workspace() {
+    fn glob_needs_approval_outside_workspace_requires_user_approval() {
         let tool = GlobTool::default();
         let args = serde_json::json!({ "pattern": "/tmp/**" });
         assert!(matches!(
             tool.needs_approval(&args),
-            ApprovalCheck::AutoDenied { .. }
+            ApprovalCheck::UserApprovalRequired
         ));
     }
 

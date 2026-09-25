@@ -316,8 +316,13 @@ this order, before any custom rule added by a CLI flag (e.g.
 
 | Rule | Verdict | Notes |
 |---|---|---|
-| `outside_workspace` | `auto_denied` | Any path that normalizes outside the workspace root. |
-| `dot_path` | `auto_denied` | Any content-tool path whose relative-to-root form has a component starting with `.` (dot-files/dot-directories). `glob` enumeration may inspect dot-prefixed paths inside the workspace. |
+| `outside_workspace` | `user_approval_required` | Any path that normalizes outside the workspace root. |
+| `dot_path` | `user_approval_required` | Any content-tool path whose relative-to-root form has a component starting with `.` (dot-files/dot-directories). `glob` enumeration may inspect dot-prefixed paths inside the workspace. |
+
+Both floor rules hand the call to the user instead of rejecting it outright,
+so a deliberate out-of-workspace read or a dot-file the model was pointed at
+can be granted. A configured rule list may still set either rule to
+`auto_denied` for a hard rejection.
 
 The opt-in `cross_filesystem` rule (see below) is **not** part of this
 floor — it only applies when a `[tool.<name>]` rule list configures it.
@@ -360,8 +365,8 @@ Each `rules` entry is one of:
 
 `verdict` is one of `"auto_approved"`, `"auto_denied"`, or
 `"user_approval_required"`; `reason` is optional and only used for
-`"auto_denied"`, defaulting to the same message the built-in floor uses for
-that rule (or a generic message for a custom glob rule) when omitted.
+`"auto_denied"`, defaulting to the named rule's built-in policy message (or a
+generic message for a custom glob rule) when omitted.
 
 **The `cross_filesystem` rule.** Matches when the candidate path lives on a
 different filesystem (device) than the canonical workspace root — catching
@@ -369,6 +374,14 @@ reads of files on mounted shares/volumes that `outside_workspace` cannot
 see, because the path may still be lexically inside the workspace (e.g. a
 mount point under the workspace root). Semantics:
 
+- One candidate path is compared per call: the `path` argument for
+  `read`/`write`/`edit`/`search`, and for `glob` the pattern's root
+  directory — the literal prefix before the first `*`, `?` or `[`, or `.`
+  when the pattern has none (`docs/**/*.md` → `docs`, `**/*.rs` → `.`).
+  Result paths are **not** re-checked, so a mount point nested *below* that
+  root is not detected and `glob` may still return paths on another device;
+  opening one stays gated by `read`/`write` evaluating the same rule against
+  the file they are asked to open (when their rule list configures it).
 - Device comparison uses the unix `st_dev` value of each path (compared for
   equality only). The rule parses on every platform but never matches on a
   non-unix target.

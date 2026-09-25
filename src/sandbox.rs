@@ -25,8 +25,8 @@
 //! [`crate::agent::tools::default_registry`] via
 //! [`SandboxContext::with_configured_rules`]. When a tool has no such table
 //! configured at any resolved layer, [`SandboxContext`] falls back to the
-//! unconditional built-in floor: `outside_workspace` → `AutoDenied` and
-//! `dot_path` → `AutoDenied`.
+//! unconditional built-in floor: `outside_workspace` → `UserApprovalRequired`
+//! and `dot_path` → `UserApprovalRequired`.
 
 mod bash_command_extractor;
 
@@ -625,8 +625,8 @@ impl std::fmt::Debug for SandboxContext {
 impl SandboxContext {
     /// Build a context with an empty rule list and no `[tool.<name>]`
     /// config, so the built-in default floor
-    /// (`outside_workspace`/`dot_path` → `AutoDenied`) applies. Named glob
-    /// rules (if any) are appended by tool constructors.
+    /// (`outside_workspace`/`dot_path` → `UserApprovalRequired`) applies.
+    /// Named glob rules (if any) are appended by tool constructors.
     pub fn new(sandbox: Arc<RwLock<Sandbox>>) -> Self {
         SandboxContext {
             sandbox,
@@ -776,8 +776,9 @@ impl SandboxContext {
     ///    config table), evaluate exactly that list, in order, last match
     ///    wins — this *replaces* the default floor rather than merging with
     ///    it. Otherwise evaluate the built-in default floor: outside-workspace
-    ///    → `Some(AutoDenied)`, then any component of the path relative to the
-    ///    workspace root starting with `.` → `Some(AutoDenied)`.
+    ///    → `Some(UserApprovalRequired)`, then any component of the path
+    ///    relative to the workspace root starting with `.` →
+    ///    `Some(UserApprovalRequired)`.
     /// 2. Named glob rules (from `self.rules`) are evaluated last; last match
     ///    wins. This is what `--auto-approve-write`/`--auto-approve-edit`'s
     ///    catch-all rule relies on to win regardless of step 1's outcome.
@@ -909,15 +910,18 @@ impl SandboxContext {
             }
             None => {
                 // Built-in default floor: outside_workspace, then dot_path.
+                // Both boundary checks ask the user instead of rejecting the
+                // call outright, so a legitimate out-of-workspace read (or a
+                // dot-file the model was pointed at) can be granted; the
+                // `OUTSIDE_WORKSPACE_REASON`/`DOT_PATH_REASON` texts remain
+                // the messages for a *configured* `auto_denied` named rule.
                 if Self::evaluate_named_rule(
                     NamedSandboxRule::OutsideWorkspace,
                     &workspace_root,
                     &effective,
                     allow_dot_paths,
                 ) {
-                    verdict = Some(ApprovalCheck::AutoDenied {
-                        reason: OUTSIDE_WORKSPACE_REASON.to_string(),
-                    });
+                    verdict = Some(ApprovalCheck::UserApprovalRequired);
                 }
                 if Self::evaluate_named_rule(
                     NamedSandboxRule::DotPath,
@@ -925,9 +929,7 @@ impl SandboxContext {
                     &effective,
                     allow_dot_paths,
                 ) {
-                    verdict = Some(ApprovalCheck::AutoDenied {
-                        reason: DOT_PATH_REASON.to_string(),
-                    });
+                    verdict = Some(ApprovalCheck::UserApprovalRequired);
                 }
             }
         }
@@ -1176,42 +1178,36 @@ mod tests {
     }
 
     #[test]
-    fn check_path_outside_workspace_is_denied() {
+    fn check_path_outside_workspace_requires_user_approval() {
         let temporary_dir = tempfile::tempdir().unwrap();
         let workspace = temporary_dir.path().join("workspace");
         let sandbox = make_sandbox(&workspace);
         let context = SandboxContext::new(Arc::clone(&sandbox));
         let outside = temporary_dir.path().join("other/file.rs");
-        assert!(
-            matches!(
-                context.check_path(&outside),
-                Some(ApprovalCheck::AutoDenied { .. })
-            ),
-            "path outside workspace should be Some(AutoDenied)"
+        assert_eq!(
+            context.check_path(&outside),
+            Some(ApprovalCheck::UserApprovalRequired),
+            "path outside workspace should be Some(UserApprovalRequired)"
         );
     }
 
     #[test]
-    fn check_path_dot_path_is_denied() {
+    fn check_path_dot_path_requires_user_approval() {
         let temporary_dir = tempfile::tempdir().unwrap();
         let workspace = temporary_dir.path().to_path_buf();
         let sandbox = make_sandbox(&workspace);
         let context = SandboxContext::new(Arc::clone(&sandbox));
         let dot_path = workspace.join(".env");
-        assert!(
-            matches!(
-                context.check_path(&dot_path),
-                Some(ApprovalCheck::AutoDenied { .. })
-            ),
-            "dot-path relative to workspace should be Some(AutoDenied)"
+        assert_eq!(
+            context.check_path(&dot_path),
+            Some(ApprovalCheck::UserApprovalRequired),
+            "dot-path relative to workspace should be Some(UserApprovalRequired)"
         );
         let dot_dir_path = workspace.join(".git/config");
-        assert!(
-            matches!(
-                context.check_path(&dot_dir_path),
-                Some(ApprovalCheck::AutoDenied { .. })
-            ),
-            "dot-directory relative to workspace should be Some(AutoDenied)"
+        assert_eq!(
+            context.check_path(&dot_dir_path),
+            Some(ApprovalCheck::UserApprovalRequired),
+            "dot-directory relative to workspace should be Some(UserApprovalRequired)"
         );
     }
 
@@ -1334,7 +1330,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn symlink_escaping_workspace_is_denied() {
+    fn symlink_escaping_workspace_requires_user_approval() {
         let temporary_dir = tempfile::tempdir().unwrap();
         let workspace = temporary_dir.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
@@ -1347,18 +1343,16 @@ mod tests {
 
         let sandbox = make_sandbox(&workspace);
         let context = SandboxContext::new(Arc::clone(&sandbox));
-        assert!(
-            matches!(
-                context.check_path(&link),
-                Some(ApprovalCheck::AutoDenied { .. })
-            ),
-            "symlink escaping the workspace must be AutoDenied"
+        assert_eq!(
+            context.check_path(&link),
+            Some(ApprovalCheck::UserApprovalRequired),
+            "symlink escaping the workspace must require user approval"
         );
     }
 
     #[cfg(unix)]
     #[test]
-    fn symlink_to_dot_file_inside_workspace_is_denied() {
+    fn symlink_to_dot_file_inside_workspace_requires_user_approval() {
         let temporary_dir = tempfile::tempdir().unwrap();
         let workspace = temporary_dir.path().to_path_buf();
         let real_dot_file = workspace.join(".env");
@@ -1370,12 +1364,10 @@ mod tests {
 
         let sandbox = make_sandbox(&workspace);
         let context = SandboxContext::new(Arc::clone(&sandbox));
-        assert!(
-            matches!(
-                context.check_path(&link),
-                Some(ApprovalCheck::AutoDenied { .. })
-            ),
-            "symlink whose real target is a dot-file must be AutoDenied"
+        assert_eq!(
+            context.check_path(&link),
+            Some(ApprovalCheck::UserApprovalRequired),
+            "symlink whose real target is a dot-file must require user approval"
         );
     }
 
@@ -1830,7 +1822,8 @@ mod tests {
     #[test]
     fn configured_named_rule_overrides_default_dot_path_verdict() {
         // A `[tool.read]`-style config changing `dot_path`'s verdict to
-        // `UserApprovalRequired` for this tool only; `outside_workspace`
+        // `AutoApproved` for this tool only — observable against the default
+        // floor, which asks for user approval; `outside_workspace`
         // protection is intentionally NOT included, confirming the
         // full-replace (not merge) semantics.
         let temporary_dir = tempfile::tempdir().unwrap();
@@ -1839,7 +1832,7 @@ mod tests {
         let context = SandboxContext::new(Arc::clone(&sandbox)).with_configured_rules(vec![
             SandboxRuleConfig::Named {
                 rule: NamedSandboxRule::DotPath,
-                verdict: ApprovalVerdictConfig::UserApprovalRequired,
+                verdict: ApprovalVerdictConfig::AutoApproved,
                 reason: None,
             },
         ]);
@@ -1847,8 +1840,9 @@ mod tests {
         let dot_path = workspace.join(".env");
         assert_eq!(
             context.check_path(&dot_path),
-            Some(ApprovalCheck::UserApprovalRequired),
-            "configured dot_path rule should override the default AutoDenied verdict"
+            Some(ApprovalCheck::AutoApproved),
+            "configured dot_path rule should override the default floor's \
+             user-approval verdict"
         );
 
         // outside_workspace is not part of this tool's configured list, so it
@@ -1870,15 +1864,15 @@ mod tests {
         let context = SandboxContext::new(Arc::clone(&sandbox));
 
         let dot_path = workspace.join(".env");
-        assert!(matches!(
+        assert_eq!(
             context.check_path(&dot_path),
-            Some(ApprovalCheck::AutoDenied { .. })
-        ));
+            Some(ApprovalCheck::UserApprovalRequired)
+        );
         let outside = temporary_dir.path().join("other/file.rs");
-        assert!(matches!(
+        assert_eq!(
             context.check_path(&outside),
-            Some(ApprovalCheck::AutoDenied { .. })
-        ));
+            Some(ApprovalCheck::UserApprovalRequired)
+        );
     }
 
     #[test]
@@ -2075,7 +2069,7 @@ mod tests {
             Some(ApprovalCheck::UserApprovalRequired),
             "a path on a different device than the workspace root must match, \
              even though the configured list replaced the default floor \
-             (outside_workspace alone would have denied it)"
+             (the floor's outside_workspace check never runs)"
         );
     }
 
@@ -2296,22 +2290,26 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn check_path_default_floor_does_not_include_cross_filesystem() {
-        // Unconfigured tool: the built-in floor applies. A cross-device path
-        // outside the workspace must be denied by `outside_workspace` (its
-        // reason), proving `cross_filesystem` is not part of the floor —
-        // otherwise the cross-filesystem reason/verdict would surface instead.
-        let temporary_dir = tempfile::tempdir().unwrap();
-        let workspace = temporary_dir.path().to_path_buf();
-        let sandbox = make_sandbox(&workspace);
+        // Unconfigured tool: the built-in floor applies. With `/` as the
+        // workspace root, `/dev/null` is *inside* the workspace but on a
+        // different device, so `cross_filesystem` is the only rule that could
+        // match — and because it stays opt-in, the sandbox abstains.
+        let workspace = Path::new("/");
+        let sandbox = make_sandbox(workspace);
         let context = SandboxContext::new(Arc::clone(&sandbox));
+        let workspace_device = resolve_device(workspace).expect("/ is stat-able");
+        let candidate_device =
+            resolve_device(Path::new("/dev/null")).expect("/dev/null is stat-able");
+        assert_ne!(
+            workspace_device, candidate_device,
+            "fixture assumption: /dev/null must live on a different device than /"
+        );
 
         assert_eq!(
             context.check_path(Path::new("/dev/null")),
-            Some(ApprovalCheck::AutoDenied {
-                reason: OUTSIDE_WORKSPACE_REASON.to_string(),
-            }),
-            "the default floor denies via outside_workspace, never via the \
-             opt-in cross_filesystem rule"
+            None,
+            "cross_filesystem is opt-in: the default floor abstains for a \
+             cross-device path inside the workspace"
         );
         assert_eq!(
             context.check_path(&workspace.join("file.txt")),

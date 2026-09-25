@@ -702,12 +702,12 @@ mod tests {
     }
 
     #[test]
-    fn search_tool_outside_workspace_path_is_auto_denied() {
+    fn search_tool_outside_workspace_path_requires_user_approval() {
         let tool = SearchTool::default();
         let args = serde_json::json!({ "pattern": "secret", "path": "/etc" });
         assert!(matches!(
             tool.needs_approval(&args),
-            ApprovalCheck::AutoDenied { .. }
+            ApprovalCheck::UserApprovalRequired
         ));
     }
 

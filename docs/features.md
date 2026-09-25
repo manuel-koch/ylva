@@ -69,15 +69,19 @@ invocation.
 Initial user turn resolution: `--prompt <text>`, else piped stdin read to EOF
 (only when stdin is not a terminal) — e.g. `echo '…' | ylva`.
 
-Tool approval is host-driven: `read`/`glob` are auto-approved immediately;
-`write` and `edit` require explicit user approval by default; `bash`
-requires user approval by default but is subject to structural sandbox
-rules (backgrounded commands, variable-assignment prefixes, unquoted glob/
-brace expansion) and configurable `[tool.bash]` rules — see "`bash` command
-rules" in [configuration](./configuration.md#bash-command-rules). Path tools
-additionally honor configurable `[tool.<name>]` rule lists, including the
-opt-in `cross_filesystem` rule that matches paths on a different filesystem
-(device) than the workspace root — see
+Tool approval is host-driven: `read`/`glob` are auto-approved when the
+sandbox abstains; `write` and `edit` require explicit user approval by
+default; `bash` requires user approval by default but is subject to
+structural sandbox rules (backgrounded commands, variable-assignment
+prefixes, unquoted glob/brace expansion) and configurable `[tool.bash]`
+rules — see "`bash` command rules" in
+[configuration](./configuration.md#bash-command-rules). Every path tool also
+honors a built-in floor: a path outside the workspace — or a dot-prefixed
+component, except for `glob` enumeration, which only lists paths — requires
+user approval instead of being auto-approved or rejected outright. Path
+tools additionally honor configurable `[tool.<name>]` rule lists, including
+the opt-in `cross_filesystem` rule that matches paths on a different
+filesystem (device) than the workspace root — see
 [Sandbox (tool-approval rules)](./configuration.md#sandbox-tool-approval-rules).
 
 Tool status lines render as `[tool] <title> …` (e.g. `[tool] Read docs/features.md [limit=32]`);
@@ -225,14 +229,30 @@ affect sandbox approval checks. See
   `encoding: "base64"` together with an explicit `mode: "bytes"` to return
   the selected raw bytes exactly as standard padded Base64 with no line
   breaks. Byte `offset`/`limit` slicing happens before Base64 encoding.
-  Base64 output remains available in the model-facing result text. When the
-  selected decoded bytes are valid UTF-8, the user-facing tool bubble uses the
-  normal text metadata (`read_bytes` and `read_lines`) and a decoded content
-  preview; opaque or invalid UTF-8 bytes show only `read_bytes` metadata and no
-  content section. Reads auto-approve when the sandbox abstains and honor any
-  explicit verdict from a configured `[tool.read]` rule list, including the
-  opt-in `cross_filesystem` rule (a path on a different filesystem than the
-  workspace root) when present.
+  Base64 output remains available in the model-facing result text. Memory use
+  follows the selected window rather than the file size: `bytes` seeks to
+  `offset` and reads at most `limit` bytes, and the `lines`/`chars`/autodetect
+  paths stream fixed-size chunks while validating UTF-8 to EOF — whole-file
+  buffering remains only for results returned whole (a `bytes` selection
+  within the cap and the complete recognized media read that bypasses it).
+  When the selected decoded bytes are valid UTF-8, the user-facing tool bubble
+  uses the normal text metadata (`read_bytes` and `read_lines`) and a decoded
+  content preview; opaque or invalid UTF-8 bytes show only `read_bytes`
+  metadata and no content section. Output is capped at 262144 raw selected
+  bytes (256 KiB) (`truncated` field present in result metadata when capped):
+  content past the cap is discarded silently with no in-text marker and the
+  content section is labeled `Partial result`, the same vocabulary capped
+  `bash` and `search` output uses. The cap wins over a larger explicit
+  `limit`; complete recognized media reads (PNG/JPEG/WebP/GIF/PDF Base64
+  attachments) are exempt, because a truncated image or PDF is unusable and
+  `media_type` is only recognized for complete files. An exempt whole file is
+  still limited to 8388608 bytes (8 MiB): a larger complete media file fails
+  with an explicit size error instead of being truncated or loaded unbounded.
+  Continue a capped read with `offset`/`limit`. Reads auto-approve when the sandbox abstains; a path
+  outside the workspace or with a dot-prefixed component requires user
+  approval instead. Any explicit verdict from a configured `[tool.read]`
+  rule list — including the opt-in `cross_filesystem` rule (a path on a
+  different filesystem than the workspace root) — is honored as-is.
 - **write**: Write `content` to `path`, with the per-call `encoding` defaulting
   to `utf8`. Set `encoding: "base64"` to decode standard padded Base64 and
   write the resulting arbitrary bytes; invalid input fails before any parent
@@ -302,7 +322,9 @@ with provider-aware input for explicit Base64 `read` results added on top:
   `directories` and `truncated=false`. It omits `total` when either type count is zero, because
   the total is then inferable, except that an empty result displays `total=0`; the complete
   metadata remains available to the LLM/API.
-  Paths inside the workspace are auto-approved; paths outside are denied by the sandbox.
+  Paths inside the workspace are auto-approved; paths outside require user
+  approval. A configured `cross_filesystem` rule is evaluated against the
+  pattern's root directory, not against each match.
 - **bash**: Execute a shell command or multi-line script via `bash -c` from the
   current working directory, which is the workspace root in normal runtime.
   Use relative paths directly; do not prefix commands with a redundant `cd` to
@@ -343,7 +365,7 @@ with provider-aware input for explicit Base64 `read` results added on top:
   relative `path` argument produces relative result paths; an absolute argument produces
   absolute result paths. Output is capped at 1000 whole output lines (`truncated` field
   present in result metadata when capped). Paths inside the
-  workspace are auto-approved; paths outside are auto-denied.
+  workspace are auto-approved; paths outside require user approval.
 - **clarify**: Ask the user a question in the TUI and wait for their answer.
   Optional `context` adds supporting detail. Optional `choices` supplies up to
   5 numbered answers; clicking a choice copies it into the input box,

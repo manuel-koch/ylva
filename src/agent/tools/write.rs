@@ -457,13 +457,14 @@ mod tests {
     }
 
     #[test]
-    fn write_tool_outside_workspace_is_auto_denied() {
+    fn write_tool_outside_workspace_requires_user_approval() {
         let tool = WriteTool::default();
-        // /tmp is outside the workspace root (cwd), so the sandbox denies it.
+        // /tmp is outside the workspace root (cwd), so the sandbox floor asks
+        // the user instead of approving it outright.
         let args = serde_json::json!({ "path": "/tmp/evil.sh", "content": "rm -rf /" });
         assert!(matches!(
             tool.needs_approval(&args),
-            crate::sandbox::ApprovalCheck::AutoDenied { .. }
+            crate::sandbox::ApprovalCheck::UserApprovalRequired
         ));
     }
 

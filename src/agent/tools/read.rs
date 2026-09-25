@@ -14,6 +14,30 @@
 
 //! `read` tool: read file content with optional byte, line, or character slicing.
 //!
+//! **Seek/stream I/O.** `bytes` mode seeks to `offset` and reads at most
+//! `limit` bytes, so unselected bytes are never materialized; the file's
+//! metadata length decides whether the selection is the complete file (which
+//! gates media-type recognition). `lines`, `chars` and the omitted-`mode`
+//! autodetect path stream the file in fixed-size chunks
+//! (`STREAM_CHUNK_BYTES`), validating UTF-8 incrementally and carrying only
+//! the incomplete trailing sequence between chunks: the selected line/char
+//! window is retained while the validation scan continues to EOF. Whole-file
+//! buffering remains only where a complete result is required — a `bytes`
+//! Base64 selection within the output cap, and the autodetect fallback that
+//! re-reads a complete recognized media file from the same open handle.
+//!
+//! **256 KiB output cap.** Text-oriented results carry at most
+//! [`READ_OUTPUT_LIMIT_BYTES`] of raw selected bytes. Content past the cap is
+//! cut silently (no in-text marker) and reported as `truncated: true` in the
+//! result metadata plus a `Partial result` content-section label, so the model
+//! can continue via `offset`/`limit`. Complete recognized media reads
+//! (PNG/JPEG/WebP/GIF/PDF Base64 attachments) are exempt: a truncated image or
+//! PDF is unusable, and `media_type` is only ever recognized for complete
+//! files. They are bounded instead by [`READ_MEDIA_MAX_BYTES`] — a whole file
+//! above that ceiling fails with an explicit size error rather than loading
+//! unbounded, because neither provider input limits nor any model's transcript
+//! can absorb an arbitrary Base64 payload.
+//!
 //! All file I/O uses `tokio::fs`; execution is bounded upstream by
 //! [`crate::agent::DEFAULT_TOOL_TIMEOUT_SECS`] (5s). Typed argument structs
 //! derive both `JsonSchema` (for the wire schema) and `Deserialize` (for
@@ -29,6 +53,7 @@ use schemars::schema::RootSchema;
 use schemars::{schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tracing::Instrument;
 
 use super::{
@@ -57,6 +82,28 @@ const SUPPORTED_MEDIA_TYPES: &[&str] = &[
     MEDIA_TYPE_APPLICATION_PDF,
 ];
 
+/// Hard cap on the raw selected bytes returned by a text-oriented `read`
+/// result: `bytes` + `utf8`, non-media `bytes` + `base64`, `lines`, `chars`
+/// and autodetect text. Content past the cap is discarded silently (no in-text
+/// marker): the result metadata carries `truncated: true` and the UI content
+/// section is labeled `Partial result`, the same vocabulary `bash` and
+/// `search` use. The cap wins over a larger explicit `limit`.
+///
+/// Complete recognized media reads (PNG/JPEG/WebP/GIF/PDF Base64 attachments)
+/// bypass it — a truncated image or PDF is unusable, and `media_type` is only
+/// ever recognized for complete files. Precedent: `SEARCH_OUTPUT_LIMIT_BYTES`.
+pub const READ_OUTPUT_LIMIT_BYTES: usize = 256 * 1024;
+
+/// Hard ceiling on the raw byte length of a **complete** recognized media
+/// read — the one path exempt from [`READ_OUTPUT_LIMIT_BYTES`]. A whole file
+/// larger than this is rejected with a tool error instead of being returned:
+/// a partial file cannot be attached, and an unbounded Base64 payload would
+/// blow past provider input limits, request size, and any model's transcript
+/// budget. Ranged media reads are already bounded by
+/// [`READ_OUTPUT_LIMIT_BYTES`]; `bytes` + `utf8` has no attachment and is
+/// capped too.
+pub const READ_MEDIA_MAX_BYTES: usize = 8 * 1024 * 1024;
+
 fn require_string_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, ApprovalCheck> {
     match args.get(key).and_then(|v| v.as_str()) {
         Some(value) if !value.is_empty() => Ok(value),
@@ -69,25 +116,176 @@ fn require_string_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, Approva
     }
 }
 
-fn decode_text(path: &str, bytes: &[u8], mode: &str) -> Result<String, ToolError> {
-    std::str::from_utf8(bytes)
-        .map(str::to_owned)
-        .map_err(|error| {
-            tracing::error!(
-                path,
-                mode,
-                error = %error,
-                "failed to decode file as UTF-8"
-            );
-            ToolError::failed(
-                "read",
-                format!(
-                    "failed to read '{path}' in {mode} mode: invalid UTF-8 ({error}) — \
-                     the file is not UTF-8 text; retry with mode: \"bytes\" \
-                     (use encoding: \"base64\" for binary data)"
-                ),
-            )
-        })
+/// Build the tool error for a failed file I/O operation, naming the path and
+/// the underlying OS error.
+fn read_io_error(path: &str, error: impl std::fmt::Display) -> ToolError {
+    tracing::error!(error = %error, "failed to read");
+    ToolError::failed("read", format!("failed to read '{path}': {error}"))
+}
+
+/// Build the tool error for a byte stream that is not valid UTF-8, keeping the
+/// strict-text remedy hint. `utf8_error` is rendered like
+/// [`std::str::Utf8Error`]'s `Display`.
+fn decode_error(path: &str, mode: &str, utf8_error: &str) -> ToolError {
+    tracing::error!(
+        path,
+        mode,
+        error = %utf8_error,
+        "failed to decode file as UTF-8"
+    );
+    ToolError::failed(
+        "read",
+        format!(
+            "failed to read '{path}' in {mode} mode: invalid UTF-8 ({utf8_error}) — \
+             the file is not UTF-8 text; retry with mode: \"bytes\" \
+             (use encoding: \"base64\" for binary data)"
+        ),
+    )
+}
+
+/// Build the tool error for a complete recognized media file that exceeds
+/// [`READ_MEDIA_MAX_BYTES`]. Truncation is not an option: a partial file is
+/// never attachable, so the read fails with the size, the limit, and the
+/// range-read remedy.
+fn read_media_too_large_error(path: &str, media_type: &str, file_length: usize) -> ToolError {
+    ToolError::failed(
+        "read",
+        format!(
+            "failed to read '{path}': complete {media_type} file is {file_length} bytes, over \
+             the {READ_MEDIA_MAX_BYTES}-byte limit for whole-file reads (a partial file cannot \
+             be attached); inspect ranges with mode: \"bytes\" and offset/limit \
+             (use encoding: \"base64\" for binary data)"
+        ),
+    )
+}
+
+/// The first byte of a streamed file that is not valid UTF-8, located by
+/// absolute offset within the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Utf8StreamError {
+    /// A definitively invalid byte sequence starting at `offset`.
+    Invalid { offset: usize, error_len: usize },
+    /// The file ended in the middle of a sequence starting at `offset`.
+    Incomplete { offset: usize },
+}
+
+impl Utf8StreamError {
+    /// Render exactly like [`std::str::Utf8Error`]'s `Display`, so a streamed
+    /// read reports byte-identical error text to whole-file validation.
+    fn description(&self) -> String {
+        match self {
+            Self::Invalid { offset, error_len } => {
+                format!("invalid utf-8 sequence of {error_len} bytes from index {offset}")
+            }
+            Self::Incomplete { offset } => {
+                format!("incomplete utf-8 byte sequence from index {offset}")
+            }
+        }
+    }
+}
+
+/// Failure modes of [`stream_validated_utf8`], kept separate so callers can
+/// react to invalid UTF-8 (autodetect classifies the file instead of failing).
+enum StreamError {
+    /// I/O failure while reading the file.
+    Io(std::io::Error),
+    /// The stream is not valid UTF-8 at the reported absolute offset.
+    Utf8(Utf8StreamError),
+}
+
+fn stream_error_to_tool_error(path: &str, mode: &str, error: StreamError) -> ToolError {
+    match error {
+        StreamError::Io(error) => read_io_error(path, error),
+        StreamError::Utf8(error) => decode_error(path, mode, &error.description()),
+    }
+}
+
+/// Fill `chunk` completely unless the reader hits EOF; returns bytes read
+/// (`0` means EOF).
+async fn fill_chunk<R>(reader: &mut R, chunk: &mut [u8]) -> Result<usize, std::io::Error>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut filled = 0;
+    while filled < chunk.len() {
+        let read = reader.read(&mut chunk[filled..]).await?;
+        if read == 0 {
+            break;
+        }
+        filled += read;
+    }
+    Ok(filled)
+}
+
+/// Stream a file in fixed-size chunks, validating UTF-8 incrementally instead
+/// of buffering the whole file.
+///
+/// Only the incomplete trailing sequence of a chunk is carried over to the next
+/// chunk, so memory stays O(chunk). Every byte range that is now known to be
+/// valid UTF-8 is passed to `consume_validated`, which may discard it (the
+/// output cap, the selection window) — the scan still runs to EOF so
+/// whole-file validation semantics are preserved. `observe_chunk` sees each
+/// raw chunk before validation — autodetect sniffs media types from the first
+/// one, which may contain bytes that are not valid UTF-8.
+async fn stream_validated_utf8<R, O, C>(
+    reader: &mut R,
+    chunk_size: usize,
+    mut observe_chunk: O,
+    mut consume_validated: C,
+) -> Result<(), StreamError>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    O: FnMut(&[u8]),
+    C: FnMut(&str),
+{
+    let mut chunk = vec![0u8; chunk_size];
+    let mut scratch: Vec<u8> = Vec::with_capacity(chunk_size + 4);
+    let mut carry: Vec<u8> = Vec::new();
+    let mut base_offset = 0usize;
+    loop {
+        let filled = fill_chunk(reader, &mut chunk)
+            .await
+            .map_err(StreamError::Io)?;
+        if filled == 0 {
+            break;
+        }
+        observe_chunk(&chunk[..filled]);
+        scratch.clear();
+        scratch.extend_from_slice(&carry);
+        scratch.extend_from_slice(&chunk[..filled]);
+        match std::str::from_utf8(&scratch) {
+            Ok(valid) => {
+                consume_validated(valid);
+                base_offset += scratch.len();
+                carry.clear();
+            }
+            Err(error) => match error.error_len() {
+                Some(error_len) => {
+                    return Err(StreamError::Utf8(Utf8StreamError::Invalid {
+                        offset: base_offset + error.valid_up_to(),
+                        error_len,
+                    }));
+                }
+                None => {
+                    let valid_up_to = error.valid_up_to();
+                    let valid = std::str::from_utf8(&scratch[..valid_up_to])
+                        .expect("bytes before an incomplete sequence are valid UTF-8");
+                    consume_validated(valid);
+                    base_offset += valid_up_to;
+                    carry.clear();
+                    carry.extend_from_slice(&scratch[valid_up_to..]);
+                }
+            },
+        }
+    }
+    if !carry.is_empty() {
+        if let Err(error) = std::str::from_utf8(&carry) {
+            return Err(StreamError::Utf8(Utf8StreamError::Incomplete {
+                offset: base_offset + error.valid_up_to(),
+            }));
+        }
+    }
+    Ok(())
 }
 
 /// The unit that `ReadFileArgs::offset`/`limit` count when `mode` is set
@@ -100,6 +298,12 @@ fn decode_text(path: &str, bytes: &[u8], mode: &str) -> Result<String, ToolError
 /// character counts and `Bytes` explicitly for byte ranges or raw binary
 /// data. `Lines`/`Chars` require valid UTF-8. Exact arbitrary bytes are
 /// available with `mode: bytes` and `encoding: base64`.
+///
+/// Text results carry at most [`READ_OUTPUT_LIMIT_BYTES`] raw bytes; a capped
+/// result is flagged `truncated` in the result metadata (complete recognized
+/// media files are exempt up to [`READ_MEDIA_MAX_BYTES`] — a larger whole file
+/// fails instead of being truncated) and can be continued with
+/// `offset`/`limit`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReadMode {
@@ -111,6 +315,11 @@ pub enum ReadMode {
 /// `read` arguments: a path plus an optional `mode` (unit selector) and
 /// `offset`/`limit` that count that unit. When `mode` is omitted, the read
 /// autodetects text versus binary content.
+///
+/// A result carries at most [`READ_OUTPUT_LIMIT_BYTES`] of raw selected bytes;
+/// a longer selection is cut silently, flagged `truncated` in the result
+/// metadata (complete recognized media files are exempt), and can be
+/// continued with `offset`/`limit`.
 #[derive(Debug, Clone, JsonSchema, Deserialize)]
 pub struct ReadFileArgs {
     /// Absolute or workspace-relative path of the file to read.
@@ -132,7 +341,9 @@ pub struct ReadFileArgs {
     /// line 1 is `offset: 0`.
     #[serde(default)]
     pub offset: Option<usize>,
-    /// Max selected units to read from `offset`. Omit to read to EOF.
+    /// Max selected units to read from `offset`. Omit to read to EOF. The
+    /// result still carries at most [`READ_OUTPUT_LIMIT_BYTES`] raw bytes;
+    /// capped results are flagged `truncated`, so resume via `offset`/`limit`.
     #[serde(default)]
     pub limit: Option<usize>,
 }
@@ -153,6 +364,10 @@ pub struct ReadResultMetadata {
     /// Recognized media type for a complete Base64 file, when available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub media_type: Option<String>,
+    /// Present and `true` when [`READ_OUTPUT_LIMIT_BYTES`] cut the returned
+    /// content.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
 }
 
 /// Output of a successful `read` tool invocation.
@@ -173,6 +388,9 @@ pub struct ReadResult {
     /// Recognized supported media type when the selected Base64 range is the
     /// complete source file.
     pub media_type: Option<String>,
+    /// `true` when [`READ_OUTPUT_LIMIT_BYTES`] cut `content`; reported as
+    /// `truncated: true` metadata and the `Partial result` section label.
+    pub truncated: bool,
 }
 
 fn metadata_read_lines(result: &ReadResult) -> Option<usize> {
@@ -203,6 +421,7 @@ impl ToolCallResult for ReadResult {
             read_lines: metadata_read_lines(self),
             encoding: (self.encoding == FileEncoding::Base64).then_some(self.encoding),
             media_type: self.media_type.clone(),
+            truncated: self.truncated.then_some(true),
         })
         .ok()
     }
@@ -218,6 +437,9 @@ impl ToolCallResult for ReadResult {
         }
         if self.media_type.is_none() {
             properties.remove("media_type");
+        }
+        if !self.truncated {
+            properties.remove("truncated");
         }
         serde_json::from_value(schema).ok()
     }
@@ -250,8 +472,11 @@ impl ToolCallResult for ReadResult {
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| e.to_lowercase());
+        // Truncated content is an incomplete display of the result — same
+        // vocabulary as bash's partial-output section.
+        let label = self.truncated.then(|| "Partial result".to_string());
         vec![Section::Content(ContentSection {
-            label: None,
+            label,
             content: preview.to_string(),
             file_extension,
             line_number_offset: self.starting_line,
@@ -366,7 +591,12 @@ impl Tool for ReadTool {
         valid UTF-8), `chars` for character counts, or `bytes` for byte ranges \
         and raw binary data. `encoding` defaults to `utf8`; use `base64` with \
         explicit `mode: bytes` for exact arbitrary bytes. `offset`/`limit` \
-        count the selected unit; omit both to read the whole file."
+        count the selected unit; omit both to read the whole file. Results \
+        carry at most 256 KiB of raw selected bytes: longer selections are \
+        cut silently and flagged `truncated` in the result metadata \
+        (complete recognized media files are exempt, up to 8 MiB — a larger \
+        whole file fails with an explicit error), so continue reading \
+        with `offset`/`limit` to page through the rest."
     }
 
     fn input_schema(&self) -> RootSchema {
@@ -449,7 +679,28 @@ impl Tool for ReadTool {
     }
 }
 
+/// Chunk size used to stream a file for `lines`/`chars`/autodetect reads.
+/// Parameterized so chunk-boundary tests stay deterministic.
+const STREAM_CHUNK_BYTES: usize = 8 * 1024;
+
+/// Read size used while materializing a selected byte range.
+const RANGE_READ_CHUNK_BYTES: usize = 64 * 1024;
+
 async fn read_file(args: ReadFileArgs) -> Result<ReadResult, ToolError> {
+    read_file_streaming(args, STREAM_CHUNK_BYTES).await
+}
+
+/// Resolve a read by streaming the file instead of loading it whole.
+///
+/// `bytes` mode seeks to `offset` and reads at most `limit` bytes, so
+/// unselected bytes are never materialized. `lines`, `chars` and autodetect
+/// read fixed-size chunks and retain only the selected window while still
+/// validating UTF-8 to EOF. `chunk_size` is a parameter so chunk-boundary
+/// tests can pin the behavior.
+async fn read_file_streaming(
+    args: ReadFileArgs,
+    chunk_size: usize,
+) -> Result<ReadResult, ToolError> {
     if args.encoding == FileEncoding::Base64 && args.mode != Some(ReadMode::Bytes) {
         return Err(ToolError::failed(
             "read",
@@ -457,62 +708,109 @@ async fn read_file(args: ReadFileArgs) -> Result<ReadResult, ToolError> {
         ));
     }
     tracing::debug!("reading file");
-    // TODO: should we really read the whole file into memory
-    //       and get the chunks afterwards ?
-    //       Could eat much memory on really big files !?
-    let bytes = tokio::fs::read(&args.path).await.map_err(|error| {
-        tracing::error!(error = %error,"failed to read");
-        ToolError::failed("read", format!("failed to read '{}': {error}", args.path))
-    })?;
+    let chunk_size = chunk_size.max(1);
+    let path = args.path;
+    let file = tokio::fs::File::open(&path)
+        .await
+        .map_err(|error| read_io_error(&path, error))?;
+    let file_length = file
+        .metadata()
+        .await
+        .map_err(|error| read_io_error(&path, error))?
+        .len();
+    let file_length = usize::try_from(file_length).unwrap_or(usize::MAX);
     match args.mode {
-        None => autodetect_read(&bytes, &args.path, args.offset, args.limit),
-        Some(ReadMode::Bytes) => match args.encoding {
-            FileEncoding::Utf8 => {
-                let start = args.offset.unwrap_or(0).min(bytes.len());
-                let mut slice = &bytes[start..];
-                if let Some(limit) = args.limit {
-                    slice = &slice[..limit.min(slice.len())];
-                }
-                let content = String::from_utf8_lossy(slice).to_string();
-                tracing::debug!(
-                    size = content.len(),
-                    lines = content.lines().count(),
-                    "read file"
-                );
-                Ok(ReadResult {
-                    read_bytes: content.len(),
-                    content,
-                    path: args.path,
-                    starting_line: Some(0),
-                    encoding: FileEncoding::Utf8,
-                    text_preview: None,
-                    media_type: None,
-                })
-            }
-            FileEncoding::Base64 => Ok(base64_read_result(
-                &bytes,
-                args.offset.unwrap_or(0),
+        Some(ReadMode::Bytes) => {
+            bytes_read(
+                file,
+                file_length,
+                path,
+                args.offset,
                 args.limit,
-                args.path,
-            )),
-        },
-        Some(ReadMode::Lines) => {
-            let text = decode_text(&args.path, &bytes, "lines")?;
-            Ok(lines_read_result(&text, args.path, args.offset, args.limit))
+                args.encoding,
+            )
+            .await
         }
-        Some(ReadMode::Chars) => {
-            let text = decode_text(&args.path, &bytes, "chars")?;
-            let chars: Vec<char> = text.chars().collect();
-            let start = args.offset.unwrap_or(0).min(chars.len());
-            let end = args
-                .limit
-                .map(|limit| (start + limit).min(chars.len()))
-                .unwrap_or(chars.len());
-            let content: String = if start < end {
-                chars[start..end].iter().collect()
-            } else {
-                String::new()
-            };
+        Some(ReadMode::Lines) => lines_read(file, chunk_size, path, args.offset, args.limit).await,
+        Some(ReadMode::Chars) => chars_read(file, chunk_size, path, args.offset, args.limit).await,
+        None => autodetect_read(file, chunk_size, file_length, path, args.offset, args.limit).await,
+    }
+}
+
+/// Read at most `max_bytes` from the current position of `file`.
+async fn read_up_to(
+    file: &mut tokio::fs::File,
+    max_bytes: usize,
+    path: &str,
+) -> Result<Vec<u8>, ToolError> {
+    let mut buffer = Vec::with_capacity(max_bytes.min(RANGE_READ_CHUNK_BYTES));
+    (&mut *file)
+        .take(u64::try_from(max_bytes).unwrap_or(u64::MAX))
+        .read_to_end(&mut buffer)
+        .await
+        .map_err(|error| read_io_error(path, error))?;
+    Ok(buffer)
+}
+
+/// Seek-and-range read backing `bytes` mode: only the selected byte range is
+/// loaded (never the whole file), then decoded or encoded once.
+async fn bytes_read(
+    mut file: tokio::fs::File,
+    file_length: usize,
+    path: String,
+    offset: Option<usize>,
+    limit: Option<usize>,
+    encoding: FileEncoding,
+) -> Result<ReadResult, ToolError> {
+    let start = offset.unwrap_or(0).min(file_length);
+    let selected_length = match limit {
+        Some(limit) => limit.min(file_length - start),
+        None => file_length - start,
+    };
+    // Media-type recognition requires the selection to be the complete file;
+    // with range reads that is checked against the file's metadata length.
+    let is_complete_selection = start == 0 && selected_length == file_length;
+    file.seek(SeekFrom::Start(u64::try_from(start).unwrap_or(u64::MAX)))
+        .await
+        .map_err(|error| read_io_error(&path, error))?;
+    // Read at most the output cap first so oversized selections never
+    // materialize in full.
+    let mut selected = read_up_to(
+        &mut file,
+        selected_length.min(READ_OUTPUT_LIMIT_BYTES),
+        &path,
+    )
+    .await?;
+    let mut truncated = selected.len() < selected_length;
+    if truncated && encoding == FileEncoding::Base64 && is_complete_selection {
+        // A complete recognized media read bypasses the output cap: a
+        // truncated image or PDF is unusable. It is still bounded by
+        // READ_MEDIA_MAX_BYTES so a whole file never loads unbounded.
+        if let Some(media_type) = supported_media_type(&selected) {
+            if selected_length > READ_MEDIA_MAX_BYTES {
+                return Err(read_media_too_large_error(
+                    &path,
+                    &media_type,
+                    selected_length,
+                ));
+            }
+            let remainder = read_up_to(&mut file, selected_length - selected.len(), &path).await?;
+            selected.extend_from_slice(&remainder);
+            truncated = selected.len() < selected_length;
+        }
+    }
+    if truncated && encoding == FileEncoding::Utf8 {
+        // Cut cleanly at the cap: back off a trailing partial character so the
+        // lossy decode never starts a multi-byte sequence it cannot finish.
+        if let Err(error) = std::str::from_utf8(&selected) {
+            if error.error_len().is_none() {
+                selected.truncate(error.valid_up_to());
+            }
+        }
+    }
+    match encoding {
+        FileEncoding::Utf8 => {
+            let content = String::from_utf8_lossy(&selected).to_string();
             tracing::debug!(
                 size = content.len(),
                 lines = content.lines().count(),
@@ -521,14 +819,306 @@ async fn read_file(args: ReadFileArgs) -> Result<ReadResult, ToolError> {
             Ok(ReadResult {
                 read_bytes: content.len(),
                 content,
-                path: args.path,
+                path,
                 starting_line: Some(0),
                 encoding: FileEncoding::Utf8,
                 text_preview: None,
                 media_type: None,
+                truncated,
             })
         }
+        FileEncoding::Base64 => Ok(base64_read_result(
+            &selected,
+            is_complete_selection && !truncated,
+            path,
+            truncated,
+        )),
     }
+}
+
+/// Assemble the selected line window of a `lines` read while the file streams
+/// by.
+///
+/// Mirrors `text.split_terminator('\n')` + `join("\n")`: a trailing newline
+/// does not create a final empty line, `"\n"` is one empty line, CRLF endings
+/// keep their `'\r'`, and exactly one `'\n'` separates selected lines in the
+/// joined content.
+struct LineWindowScanner {
+    /// 0-based index of the first selected line.
+    window_start: usize,
+    /// 0-based index after the last selected line (`None` = to EOF).
+    window_end: Option<usize>,
+    /// 0-based index of the line currently being scanned.
+    line_index: usize,
+    /// Number of selected lines already started.
+    collected_lines: usize,
+    /// `true` while no byte of the current line has been seen yet.
+    at_line_start: bool,
+    /// `true` while the current line belongs to the selected window.
+    collecting: bool,
+    /// `true` once the current line is known to exist and has been counted.
+    line_confirmed: bool,
+    content: String,
+    /// `true` when [`READ_OUTPUT_LIMIT_BYTES`] cut off selected content.
+    truncated: bool,
+}
+
+impl LineWindowScanner {
+    fn new(offset: Option<usize>, limit: Option<usize>) -> Self {
+        let window_start = offset.unwrap_or(0);
+        Self {
+            window_start,
+            window_end: limit.map(|limit| window_start.saturating_add(limit)),
+            line_index: 0,
+            collected_lines: 0,
+            at_line_start: true,
+            collecting: false,
+            line_confirmed: false,
+            content: String::new(),
+            truncated: false,
+        }
+    }
+
+    /// `true` once every selected line has been collected — nothing more can
+    /// be added, so callers may skip to the validation scan.
+    fn window_completed(&self) -> bool {
+        self.window_end
+            .is_some_and(|window_end| self.line_index >= window_end)
+    }
+
+    fn in_window(&self) -> bool {
+        self.line_index >= self.window_start
+            && self
+                .window_end
+                .is_none_or(|window_end| self.line_index < window_end)
+    }
+
+    /// Count the current line and separate it from the previously collected
+    /// one. A line exists once it has content or its `'\n'` terminator is
+    /// seen; the empty remainder of a file ending in `'\n'` is not a line.
+    ///
+    /// Returns `false` when the output cap leaves no room for the separator.
+    fn confirm_line(&mut self) -> bool {
+        if self.line_confirmed {
+            return true;
+        }
+        if self.collected_lines > 0 {
+            if self.content.len() >= READ_OUTPUT_LIMIT_BYTES {
+                self.truncated = true;
+                return false;
+            }
+            self.content.push('\n');
+        }
+        self.line_confirmed = true;
+        self.collected_lines += 1;
+        true
+    }
+
+    /// Append as much of `segment` as fits the output cap, cutting on a
+    /// UTF-8 char boundary. Returns `false` when content was left behind.
+    fn push_segment(&mut self, segment: &str) -> bool {
+        let remaining = READ_OUTPUT_LIMIT_BYTES.saturating_sub(self.content.len());
+        let mut take = segment.len().min(remaining);
+        while take > 0 && !segment.is_char_boundary(take) {
+            take -= 1;
+        }
+        self.content.push_str(&segment[..take]);
+        if take < segment.len() {
+            self.truncated = true;
+            return false;
+        }
+        true
+    }
+
+    /// Consume the next validated UTF-8 range of the file, keeping only the
+    /// selected window. Once the output cap cut selected content the window
+    /// stops growing, while the caller's validation scan runs to EOF.
+    fn process(&mut self, text: &str) {
+        if self.window_completed() || self.truncated {
+            return;
+        }
+        let mut rest = text;
+        loop {
+            let (segment, tail) = match rest.find('\n') {
+                Some(index) => (&rest[..index], Some(&rest[index + 1..])),
+                None => (rest, None),
+            };
+            let starts_line = self.at_line_start;
+            if starts_line {
+                self.at_line_start = false;
+                self.collecting = self.in_window();
+                self.line_confirmed = false;
+            }
+            if self.collecting && (!segment.is_empty() || tail.is_some()) && !self.confirm_line() {
+                return;
+            }
+            if self.collecting && !segment.is_empty() && !self.push_segment(segment) {
+                return;
+            }
+            match tail {
+                Some(tail) => {
+                    self.line_index += 1;
+                    self.at_line_start = true;
+                    self.collecting = false;
+                    rest = tail;
+                }
+                None => {
+                    if starts_line && segment.is_empty() {
+                        // Nothing of this line was consumed — stay at its start.
+                        self.at_line_start = true;
+                        self.collecting = false;
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    fn finish(self, path: String) -> ReadResult {
+        // Lines seen so far: completed lines plus a pending final line that
+        // was not terminated by `'\n'`. At EOF this is the file's line count;
+        // after the output cap stopped collection it is a lower bound that is
+        // already ≥ the window start, so the `min` below still clamps to the
+        // window start.
+        let lines_seen = self.line_index + usize::from(!self.at_line_start);
+        let starting_line = Some(self.window_start.min(lines_seen));
+        let content = self.content;
+        tracing::debug!(
+            size = content.len(),
+            lines = content.lines().count(),
+            "read file"
+        );
+        ReadResult {
+            read_bytes: content.len(),
+            content,
+            path,
+            starting_line,
+            encoding: FileEncoding::Utf8,
+            text_preview: None,
+            media_type: None,
+            truncated: self.truncated,
+        }
+    }
+}
+
+/// Assemble the selected character window of a `chars` read while the file
+/// streams by, counting UTF-8 code points from the start of the file.
+struct CharWindowScanner {
+    /// 0-based index of the first selected character.
+    window_start: usize,
+    /// 0-based index after the last selected character (`None` = to EOF).
+    window_end: Option<usize>,
+    /// Number of code points seen so far.
+    char_index: usize,
+    content: String,
+    /// `true` when [`READ_OUTPUT_LIMIT_BYTES`] cut off selected content.
+    truncated: bool,
+}
+
+impl CharWindowScanner {
+    fn new(offset: Option<usize>, limit: Option<usize>) -> Self {
+        let window_start = offset.unwrap_or(0);
+        Self {
+            window_start,
+            window_end: limit.map(|limit| window_start.saturating_add(limit)),
+            char_index: 0,
+            content: String::new(),
+            truncated: false,
+        }
+    }
+
+    /// `true` once every selected character has been collected.
+    fn window_completed(&self) -> bool {
+        self.window_end
+            .is_some_and(|window_end| self.char_index >= window_end)
+    }
+
+    /// Consume the next validated UTF-8 range of the file, keeping only the
+    /// selected characters. Once the output cap cut selected content the
+    /// window stops growing, while the caller's validation scan runs to EOF.
+    fn process(&mut self, text: &str) {
+        if self.window_completed() || self.truncated {
+            return;
+        }
+        for character in text.chars() {
+            if self.char_index >= self.window_start
+                && self
+                    .window_end
+                    .is_none_or(|window_end| self.char_index < window_end)
+            {
+                if self.content.len() + character.len_utf8() > READ_OUTPUT_LIMIT_BYTES {
+                    self.truncated = true;
+                    return;
+                }
+                self.content.push(character);
+            }
+            self.char_index += 1;
+        }
+    }
+
+    fn finish(self, path: String) -> ReadResult {
+        let content = self.content;
+        tracing::debug!(
+            size = content.len(),
+            lines = content.lines().count(),
+            "read file"
+        );
+        ReadResult {
+            read_bytes: content.len(),
+            content,
+            path,
+            starting_line: Some(0),
+            encoding: FileEncoding::Utf8,
+            text_preview: None,
+            media_type: None,
+            truncated: self.truncated,
+        }
+    }
+}
+
+/// Streaming `lines` read: decode complete lines from fixed-size chunks,
+/// skip `offset` lines, collect up to `limit` lines, then keep scanning to EOF
+/// so whole-file UTF-8 validation is preserved.
+async fn lines_read(
+    file: tokio::fs::File,
+    chunk_size: usize,
+    path: String,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<ReadResult, ToolError> {
+    let mut reader = tokio::io::BufReader::with_capacity(chunk_size, file);
+    let mut scanner = LineWindowScanner::new(offset, limit);
+    stream_validated_utf8(
+        &mut reader,
+        chunk_size,
+        |_| {},
+        |text| scanner.process(text),
+    )
+    .await
+    .map_err(|error| stream_error_to_tool_error(&path, "lines", error))?;
+    Ok(scanner.finish(path))
+}
+
+/// Streaming `chars` read: count code points from the start of the file and
+/// keep only the selected characters, validating UTF-8 to EOF.
+async fn chars_read(
+    file: tokio::fs::File,
+    chunk_size: usize,
+    path: String,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<ReadResult, ToolError> {
+    let mut reader = tokio::io::BufReader::with_capacity(chunk_size, file);
+    let mut scanner = CharWindowScanner::new(offset, limit);
+    stream_validated_utf8(
+        &mut reader,
+        chunk_size,
+        |_| {},
+        |text| scanner.process(text),
+    )
+    .await
+    .map_err(|error| stream_error_to_tool_error(&path, "chars", error))?;
+    Ok(scanner.finish(path))
 }
 
 /// Resolve a read that was called without an explicit `mode`.
@@ -539,80 +1129,86 @@ async fn read_file(args: ReadFileArgs) -> Result<ReadResult, ToolError> {
 /// (and the later modality-aware projection) is produced without the caller
 /// naming `mode`/`encoding`. Every other binary file — including a ranged
 /// read of a recognized one — fails with the explicit-mode retry hint.
-fn autodetect_read(
-    bytes: &[u8],
-    path: &str,
+///
+/// Classification streams: UTF-8 is validated chunk by chunk while the line
+/// window is collected, and a single invalid byte settles the decision. The
+/// media sniff runs against the first chunk only; the fallback then re-reads
+/// the whole file from the same open handle — unless it is longer than
+/// [`READ_MEDIA_MAX_BYTES`], which fails before any whole-file load.
+async fn autodetect_read(
+    file: tokio::fs::File,
+    chunk_size: usize,
+    file_length: usize,
+    path: String,
     offset: Option<usize>,
     limit: Option<usize>,
 ) -> Result<ReadResult, ToolError> {
-    if let Ok(text) = std::str::from_utf8(bytes) {
-        return Ok(lines_read_result(text, path.to_string(), offset, limit));
+    let mut reader = tokio::io::BufReader::with_capacity(chunk_size, file);
+    let mut scanner = LineWindowScanner::new(offset, limit);
+    let mut first_chunk: Vec<u8> = Vec::new();
+    let outcome = stream_validated_utf8(
+        &mut reader,
+        chunk_size,
+        |chunk| {
+            if first_chunk.is_empty() {
+                first_chunk.extend_from_slice(chunk);
+            }
+        },
+        |text| scanner.process(text),
+    )
+    .await;
+    match outcome {
+        Ok(()) => Ok(scanner.finish(path)),
+        Err(StreamError::Io(error)) => Err(read_io_error(&path, error)),
+        Err(StreamError::Utf8(_)) => {
+            let recognized_media_type = (offset.is_none() && limit.is_none())
+                .then(|| supported_media_type(&first_chunk))
+                .flatten();
+            match recognized_media_type {
+                Some(media_type) if file_length > READ_MEDIA_MAX_BYTES => {
+                    Err(read_media_too_large_error(&path, &media_type, file_length))
+                }
+                Some(_) => {
+                    reader
+                        .seek(SeekFrom::Start(0))
+                        .await
+                        .map_err(|error| read_io_error(&path, error))?;
+                    let mut bytes = Vec::new();
+                    reader
+                        .read_to_end(&mut bytes)
+                        .await
+                        .map_err(|error| read_io_error(&path, error))?;
+                    Ok(base64_read_result(&bytes, true, path, false))
+                }
+                None => Err(ToolError::failed(
+                    "read",
+                    format!(
+                        "failed to read '{path}': autodetect supports UTF-8 text and whole \
+                         image/PDF files only; retry with explicit mode: \"bytes\" \
+                         (use encoding: \"base64\" for binary data)"
+                    ),
+                )),
+            }
+        }
     }
-    if offset.is_none() && limit.is_none() && supported_media_type(bytes).is_some() {
-        return Ok(base64_read_result(bytes, 0, None, path.to_string()));
-    }
-    Err(ToolError::failed(
-        "read",
-        format!(
-            "failed to read '{path}': autodetect supports UTF-8 text and whole \
-             image/PDF files only; retry with explicit mode: \"bytes\" \
-             (use encoding: \"base64\" for binary data)"
-        ),
-    ))
 }
 
-/// Build the result of a `lines`-unit read over already-decoded UTF-8 text.
-fn lines_read_result(
-    text: &str,
-    path: String,
-    offset: Option<usize>,
-    limit: Option<usize>,
-) -> ReadResult {
-    let lines: Vec<&str> = text.split_terminator('\n').collect();
-    let start = offset.unwrap_or(0).min(lines.len());
-    let end = limit
-        .map(|limit| (start + limit).min(lines.len()))
-        .unwrap_or(lines.len());
-    let content = if start < end {
-        lines[start..end].join("\n")
-    } else {
-        String::new()
-    };
-    tracing::debug!(
-        size = content.len(),
-        lines = content.lines().count(),
-        "read file"
-    );
-    ReadResult {
-        read_bytes: content.len(),
-        content,
-        path,
-        starting_line: Some(start),
-        encoding: FileEncoding::Utf8,
-        text_preview: None,
-        media_type: None,
-    }
-}
-
-/// Build the result of a Base64 read of `full_bytes[start..]`, optionally
-/// limited to `limit` bytes. The media type is recognized only when the
-/// selected range is the complete file.
+/// Build the result of a Base64 read of the already-selected `bytes`.
+///
+/// The media type is recognized only when `is_complete_file` says the
+/// selection covers the complete source file — a truncated result is never a
+/// complete file, so the cap and the attachment rules compose.
 fn base64_read_result(
-    full_bytes: &[u8],
-    start: usize,
-    limit: Option<usize>,
+    selected: &[u8],
+    is_complete_file: bool,
     path: String,
+    truncated: bool,
 ) -> ReadResult {
-    let start = start.min(full_bytes.len());
-    let mut slice = &full_bytes[start..];
-    if let Some(limit) = limit {
-        slice = &slice[..limit.min(slice.len())];
-    }
-    let read_bytes = slice.len();
-    let content = STANDARD_BASE64.encode(slice);
-    let text_preview = utf8_text_preview(slice);
-    let media_type = (start == 0 && slice.len() == full_bytes.len())
-        .then(|| supported_media_type(slice))
+    let read_bytes = selected.len();
+    let content = STANDARD_BASE64.encode(selected);
+    let text_preview = utf8_text_preview(selected);
+    let media_type = is_complete_file
+        .then(|| supported_media_type(selected))
         .flatten();
     tracing::debug!(read_bytes, "read file");
     ReadResult {
@@ -623,6 +1219,7 @@ fn base64_read_result(
         encoding: FileEncoding::Base64,
         text_preview,
         media_type,
+        truncated,
     }
 }
 
@@ -1266,6 +1863,7 @@ mod tests {
             read_bytes: 8,
             text_preview: None,
             media_type: Some(MEDIA_TYPE_APPLICATION_PDF.to_string()),
+            truncated: false,
         };
         assert_eq!(
             result.attachments(),
@@ -1484,6 +2082,7 @@ mod tests {
             read_bytes: 0,
             text_preview: None,
             media_type: None,
+            truncated: false,
         };
         assert!(result.content_sections().is_empty());
     }
@@ -1506,5 +2105,733 @@ mod tests {
     fn read_input_args_all_properties_have_descriptions() {
         let schema = ReadTool::default().input_schema();
         super::super::assert_all_properties_have_descriptions(&schema, "ReadFileArgs");
+    }
+
+    // ── Range-boundary characterization tests ─────────────────────────────────
+    //
+    // These pin the *current* selection semantics at the boundaries of
+    // `offset`/`limit`: past EOF, `limit: 0`, and ranges that cross EOF.
+
+    const BOUNDARY_TEXT: &str = "one\ntwo\nthree";
+
+    #[test]
+    fn read_bytes_utf8_range_boundaries() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            let path = dir.path().join("a.txt");
+            std::fs::write(&path, BOUNDARY_TEXT).expect("write");
+
+            let read = |offset: Option<usize>, limit: Option<usize>| ReadFileArgs {
+                path: path.display().to_string(),
+                mode: Some(ReadMode::Bytes),
+                encoding: FileEncoding::Utf8,
+                offset,
+                limit,
+            };
+
+            let offset_past_eof = read_file(read(Some(20), None)).await.expect("read");
+            assert_eq!(offset_past_eof.text(), "");
+            assert_eq!(offset_past_eof.read_bytes, 0);
+            assert_eq!(offset_past_eof.starting_line, Some(0));
+
+            let offset_past_eof_no_limit = read_file(read(Some(100), None)).await.expect("read");
+            assert_eq!(offset_past_eof_no_limit.text(), "");
+            assert_eq!(offset_past_eof_no_limit.read_bytes, 0);
+
+            let limit_zero = read_file(read(None, Some(0))).await.expect("read");
+            assert_eq!(limit_zero.text(), "");
+            assert_eq!(limit_zero.read_bytes, 0);
+
+            let crossing_eof = read_file(read(Some(11), Some(5))).await.expect("read");
+            assert_eq!(crossing_eof.text(), "ee");
+            assert_eq!(crossing_eof.read_bytes, 2);
+            assert_eq!(crossing_eof.starting_line, Some(0));
+        });
+    }
+
+    #[test]
+    fn read_bytes_base64_range_boundaries() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            let path = dir.path().join("a.txt");
+            std::fs::write(&path, BOUNDARY_TEXT).expect("write");
+
+            let read = |offset: Option<usize>, limit: Option<usize>| ReadFileArgs {
+                path: path.display().to_string(),
+                mode: Some(ReadMode::Bytes),
+                encoding: FileEncoding::Base64,
+                offset,
+                limit,
+            };
+
+            let offset_past_eof = read_file(read(Some(20), None)).await.expect("read");
+            assert_eq!(offset_past_eof.text(), "");
+            assert_eq!(offset_past_eof.read_bytes, 0);
+            assert_eq!(offset_past_eof.starting_line, Some(0));
+            assert_eq!(
+                offset_past_eof.metadata(),
+                Some(serde_json::json!({
+                    "read_bytes": 0,
+                    "read_lines": 0,
+                    "encoding": "base64",
+                }))
+            );
+
+            let limit_zero = read_file(read(None, Some(0))).await.expect("read");
+            assert_eq!(limit_zero.text(), "");
+            assert_eq!(limit_zero.read_bytes, 0);
+            assert!(limit_zero.content_sections().is_empty());
+
+            let crossing_eof = read_file(read(Some(11), Some(5))).await.expect("read");
+            assert_eq!(
+                crossing_eof.text(),
+                STANDARD_BASE64.encode(&BOUNDARY_TEXT.as_bytes()[11..])
+            );
+            assert_eq!(crossing_eof.read_bytes, 2);
+            assert_eq!(crossing_eof.starting_line, Some(0));
+        });
+    }
+
+    #[test]
+    fn read_lines_range_boundaries() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            let path = dir.path().join("a.txt");
+            std::fs::write(&path, BOUNDARY_TEXT).expect("write");
+
+            let read = |offset: Option<usize>, limit: Option<usize>| ReadFileArgs {
+                path: path.display().to_string(),
+                mode: Some(ReadMode::Lines),
+                encoding: FileEncoding::Utf8,
+                offset,
+                limit,
+            };
+
+            let offset_past_eof = read_file(read(Some(20), None)).await.expect("read");
+            assert_eq!(offset_past_eof.text(), "");
+            assert_eq!(offset_past_eof.read_bytes, 0);
+            assert_eq!(offset_past_eof.starting_line, Some(3));
+
+            let limit_zero = read_file(read(None, Some(0))).await.expect("read");
+            assert_eq!(limit_zero.text(), "");
+            assert_eq!(limit_zero.read_bytes, 0);
+            assert_eq!(limit_zero.starting_line, Some(0));
+
+            let limit_zero_after_offset = read_file(read(Some(2), Some(0))).await.expect("read");
+            assert_eq!(limit_zero_after_offset.text(), "");
+            assert_eq!(limit_zero_after_offset.read_bytes, 0);
+            assert_eq!(limit_zero_after_offset.starting_line, Some(2));
+
+            let crossing_eof = read_file(read(Some(1), Some(10))).await.expect("read");
+            assert_eq!(crossing_eof.text(), "two\nthree");
+            assert_eq!(crossing_eof.read_bytes, 9);
+            assert_eq!(crossing_eof.starting_line, Some(1));
+        });
+    }
+
+    #[test]
+    fn read_chars_range_boundaries() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            let path = dir.path().join("a.txt");
+            std::fs::write(&path, "héllo").expect("write");
+
+            let read = |offset: Option<usize>, limit: Option<usize>| ReadFileArgs {
+                path: path.display().to_string(),
+                mode: Some(ReadMode::Chars),
+                encoding: FileEncoding::Utf8,
+                offset,
+                limit,
+            };
+
+            let offset_past_eof = read_file(read(Some(10), None)).await.expect("read");
+            assert_eq!(offset_past_eof.text(), "");
+            assert_eq!(offset_past_eof.read_bytes, 0);
+            assert_eq!(offset_past_eof.starting_line, Some(0));
+
+            let limit_zero = read_file(read(None, Some(0))).await.expect("read");
+            assert_eq!(limit_zero.text(), "");
+            assert_eq!(limit_zero.read_bytes, 0);
+            assert_eq!(limit_zero.starting_line, Some(0));
+
+            let crossing_eof = read_file(read(Some(3), Some(10))).await.expect("read");
+            assert_eq!(crossing_eof.text(), "lo");
+            assert_eq!(crossing_eof.read_bytes, 2);
+            assert_eq!(crossing_eof.starting_line, Some(0));
+        });
+    }
+
+    #[test]
+    fn read_autodetect_text_range_boundaries() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            let path = dir.path().join("a.txt");
+            std::fs::write(&path, BOUNDARY_TEXT).expect("write");
+
+            let read = |offset: Option<usize>, limit: Option<usize>| ReadFileArgs {
+                path: path.display().to_string(),
+                mode: None,
+                encoding: FileEncoding::Utf8,
+                offset,
+                limit,
+            };
+
+            let offset_past_eof = read_file(read(Some(20), None)).await.expect("read");
+            assert_eq!(offset_past_eof.text(), "");
+            assert_eq!(offset_past_eof.encoding, FileEncoding::Utf8);
+            assert_eq!(offset_past_eof.read_bytes, 0);
+            assert_eq!(offset_past_eof.starting_line, Some(3));
+
+            let limit_zero = read_file(read(None, Some(0))).await.expect("read");
+            assert_eq!(limit_zero.text(), "");
+            assert_eq!(limit_zero.read_bytes, 0);
+            assert_eq!(limit_zero.starting_line, Some(0));
+
+            let crossing_eof = read_file(read(Some(1), Some(10))).await.expect("read");
+            assert_eq!(crossing_eof.text(), "two\nthree");
+            assert_eq!(crossing_eof.read_bytes, 9);
+            assert_eq!(crossing_eof.starting_line, Some(1));
+        });
+    }
+
+    // ── Chunk-boundary tests ──────────────────────────────────────────────────
+    //
+    // `read_file_streaming` takes the chunk size as a parameter so these stay
+    // fast and deterministic: no large fixtures, no timing assertions.
+
+    /// A line that starts in one chunk and ends in another is reassembled.
+    #[test]
+    fn read_lines_reassembles_lines_split_across_chunks() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            let path = dir.path().join("a.txt");
+            std::fs::write(&path, "aaa\nbbb\nccc").expect("write");
+            let arguments = ReadFileArgs {
+                path: path.display().to_string(),
+                mode: Some(ReadMode::Lines),
+                encoding: FileEncoding::Utf8,
+                offset: None,
+                limit: None,
+            };
+
+            let whole = read_file_streaming(arguments.clone(), 6)
+                .await
+                .expect("read");
+            assert_eq!(whole.text(), "aaa\nbbb\nccc");
+            assert_eq!(whole.starting_line, Some(0));
+
+            let only_second = read_file_streaming(
+                ReadFileArgs {
+                    offset: Some(1),
+                    limit: Some(1),
+                    ..arguments.clone()
+                },
+                6,
+            )
+            .await
+            .expect("read");
+            assert_eq!(only_second.text(), "bbb");
+            assert_eq!(only_second.starting_line, Some(1));
+
+            let only_first = read_file_streaming(
+                ReadFileArgs {
+                    offset: None,
+                    limit: Some(1),
+                    ..arguments
+                },
+                6,
+            )
+            .await
+            .expect("read");
+            assert_eq!(only_first.text(), "aaa");
+        });
+    }
+
+    /// A chunk size of one byte splits every multi-byte sequence.
+    #[test]
+    fn read_chars_counts_code_points_split_across_chunks() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            let path = dir.path().join("a.txt");
+            // `é` is 2 bytes, `😀` is 4 bytes, both split by chunk size 1.
+            std::fs::write(&path, "aé😀z").expect("write");
+            let arguments = ReadFileArgs {
+                path: path.display().to_string(),
+                mode: Some(ReadMode::Chars),
+                encoding: FileEncoding::Utf8,
+                offset: None,
+                limit: None,
+            };
+
+            let whole = read_file_streaming(arguments.clone(), 1)
+                .await
+                .expect("read");
+            assert_eq!(whole.text(), "aé😀z");
+            assert_eq!(whole.read_bytes, "aé😀z".len());
+
+            let window = read_file_streaming(
+                ReadFileArgs {
+                    offset: Some(1),
+                    limit: Some(2),
+                    ..arguments
+                },
+                1,
+            )
+            .await
+            .expect("read");
+            assert_eq!(window.text(), "é😀");
+            assert_eq!(window.read_bytes, "é😀".len());
+        });
+    }
+
+    /// Invalid UTF-8 is reported with its absolute file offset, whether the
+    /// bad byte starts a chunk or arrives as part of a carried sequence.
+    #[test]
+    fn read_lines_reports_invalid_utf8_at_chunk_boundaries() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+
+            let starts_chunk = dir.path().join("starts-chunk.txt");
+            std::fs::write(&starts_chunk, [b'a', b'b', b'c', 0xff, b'd']).expect("write");
+            let error = read_file_streaming(
+                ReadFileArgs {
+                    path: starts_chunk.display().to_string(),
+                    mode: Some(ReadMode::Lines),
+                    encoding: FileEncoding::Utf8,
+                    offset: None,
+                    limit: None,
+                },
+                3,
+            )
+            .await
+            .expect_err("invalid UTF-8 must fail");
+            assert!(
+                error
+                    .to_string()
+                    .contains("invalid utf-8 sequence of 1 bytes from index 3"),
+                "unexpected error: {error}"
+            );
+
+            let carried = dir.path().join("carried.txt");
+            std::fs::write(&carried, [b'a', 0xc3, 0x28, b'b']).expect("write");
+            let error = read_file_streaming(
+                ReadFileArgs {
+                    path: carried.display().to_string(),
+                    mode: Some(ReadMode::Chars),
+                    encoding: FileEncoding::Utf8,
+                    offset: None,
+                    limit: None,
+                },
+                2,
+            )
+            .await
+            .expect_err("invalid UTF-8 must fail");
+            assert!(
+                error
+                    .to_string()
+                    .contains("invalid utf-8 sequence of 1 bytes from index 1"),
+                "unexpected error: {error}"
+            );
+
+            let trailing = dir.path().join("trailing.txt");
+            std::fs::write(&trailing, [b'a', 0xc3]).expect("write");
+            let error = read_file_streaming(
+                ReadFileArgs {
+                    path: trailing.display().to_string(),
+                    mode: Some(ReadMode::Lines),
+                    encoding: FileEncoding::Utf8,
+                    offset: None,
+                    limit: None,
+                },
+                1,
+            )
+            .await
+            .expect_err("truncated sequence must fail");
+            assert!(
+                error
+                    .to_string()
+                    .contains("incomplete utf-8 byte sequence from index 1"),
+                "unexpected error: {error}"
+            );
+        });
+    }
+
+    #[test]
+    fn utf8_stream_error_description_matches_std_display() {
+        let invalid_bytes: Vec<u8> = vec![b'a', b'b', 0xff, b'c'];
+        let error = std::str::from_utf8(&invalid_bytes).expect_err("invalid fixture");
+        let stream_error = Utf8StreamError::Invalid {
+            offset: error.valid_up_to(),
+            error_len: error.error_len().expect("definitive invalid byte"),
+        };
+        assert_eq!(stream_error.description(), error.to_string());
+
+        let incomplete_bytes: Vec<u8> = vec![b'a', b'b', 0xc3];
+        let error = std::str::from_utf8(&incomplete_bytes).expect_err("incomplete fixture");
+        let stream_error = Utf8StreamError::Incomplete {
+            offset: error.valid_up_to(),
+        };
+        assert_eq!(stream_error.description(), error.to_string());
+    }
+
+    #[test]
+    fn read_autodetect_keeps_utf8_first_ordering_and_sniffs_the_first_chunk() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+
+            // ASCII `%PDF…` is valid UTF-8, so it stays a text result.
+            let pdf_text = dir.path().join("ascii.pdf.txt");
+            std::fs::write(&pdf_text, b"%PDF-1.7\n42\n").expect("write");
+            let text_result = read_file_streaming(
+                ReadFileArgs {
+                    path: pdf_text.display().to_string(),
+                    mode: None,
+                    encoding: FileEncoding::Utf8,
+                    offset: None,
+                    limit: None,
+                },
+                4,
+            )
+            .await
+            .expect("ASCII PDF header is text");
+            assert_eq!(text_result.encoding, FileEncoding::Utf8);
+            assert_eq!(text_result.text(), "%PDF-1.7\n42");
+            assert_eq!(text_result.media_type, None);
+
+            // The GIF signature is ASCII, so classification completes from the
+            // first chunk even though a later chunk is invalid UTF-8.
+            let gif = dir.path().join("late-binary.gif");
+            let mut gif_bytes = b"GIF89a".to_vec();
+            gif_bytes.extend(std::iter::repeat_n(b'x', 40));
+            gif_bytes.push(0xff);
+            gif_bytes.extend(std::iter::repeat_n(b'y', 10));
+            std::fs::write(&gif, &gif_bytes).expect("write");
+            let media_result = read_file_streaming(
+                ReadFileArgs {
+                    path: gif.display().to_string(),
+                    mode: None,
+                    encoding: FileEncoding::Utf8,
+                    offset: None,
+                    limit: None,
+                },
+                8,
+            )
+            .await
+            .expect("media classification from the first chunk");
+            assert_eq!(media_result.encoding, FileEncoding::Base64);
+            assert_eq!(
+                media_result.media_type.as_deref(),
+                Some(MEDIA_TYPE_IMAGE_GIF)
+            );
+            assert_eq!(media_result.text(), STANDARD_BASE64.encode(&gif_bytes));
+        });
+    }
+
+    #[test]
+    fn read_autodetect_streams_only_the_selected_window() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            let path = dir.path().join("a.txt");
+            std::fs::write(&path, "one\ntwo\nthree\nfour").expect("write");
+            let result = read_file_streaming(
+                ReadFileArgs {
+                    path: path.display().to_string(),
+                    mode: None,
+                    encoding: FileEncoding::Utf8,
+                    offset: Some(2),
+                    limit: Some(1),
+                },
+                3,
+            )
+            .await
+            .expect("read");
+            assert_eq!(result.text(), "three");
+            assert_eq!(result.starting_line, Some(2));
+        });
+    }
+
+    // ── Output-cap tests ──────────────────────────────────────────────────────
+
+    /// Fixture just over [`READ_OUTPUT_LIMIT_BYTES`].
+    fn over_cap_text_bytes() -> Vec<u8> {
+        let mut bytes = vec![b'a'; READ_OUTPUT_LIMIT_BYTES + 1024];
+        bytes[READ_OUTPUT_LIMIT_BYTES / 2] = b'\n';
+        bytes
+    }
+
+    /// Assert the shared truncation contract: content cut at the cap, the
+    /// model-facing `truncated: true` metadata, the schema property kept only
+    /// when present, and the `Partial result` section label.
+    fn assert_truncated_read(result: &ReadResult, expected_bytes: usize) {
+        assert!(result.truncated, "result must be flagged truncated");
+        assert_eq!(result.read_bytes, expected_bytes);
+        assert!(
+            result.read_bytes <= READ_OUTPUT_LIMIT_BYTES,
+            "raw selected bytes must not exceed the cap"
+        );
+        let metadata = result.metadata().expect("metadata");
+        assert_eq!(
+            metadata["truncated"],
+            serde_json::json!(true),
+            "metadata must report truncation: {metadata}"
+        );
+        let schema = serde_json::to_value(result.metadata_schema().expect("metadata schema"))
+            .expect("schema serializes");
+        assert!(
+            schema["properties"].get("truncated").is_some(),
+            "truncated must stay in the schema for a truncated result: {schema}"
+        );
+        // Base64 results without a UTF-8 projection carry no section at all.
+        if let Some(Section::Content(section)) = result.content_sections().first() {
+            assert_eq!(
+                section.label.as_deref(),
+                Some("Partial result"),
+                "truncated content must be labeled Partial result"
+            );
+        }
+    }
+
+    #[test]
+    fn read_caps_text_results_at_the_output_limit() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            let path = dir.path().join("large.txt");
+            let bytes = over_cap_text_bytes();
+            std::fs::write(&path, &bytes).expect("write");
+            let expected_bytes = READ_OUTPUT_LIMIT_BYTES;
+
+            let cases = [
+                ReadFileArgs {
+                    path: path.display().to_string(),
+                    mode: Some(ReadMode::Lines),
+                    encoding: FileEncoding::Utf8,
+                    offset: None,
+                    limit: None,
+                },
+                ReadFileArgs {
+                    path: path.display().to_string(),
+                    mode: Some(ReadMode::Chars),
+                    encoding: FileEncoding::Utf8,
+                    offset: None,
+                    limit: None,
+                },
+                ReadFileArgs {
+                    path: path.display().to_string(),
+                    mode: None,
+                    encoding: FileEncoding::Utf8,
+                    offset: None,
+                    limit: None,
+                },
+                ReadFileArgs {
+                    path: path.display().to_string(),
+                    mode: Some(ReadMode::Bytes),
+                    encoding: FileEncoding::Utf8,
+                    offset: None,
+                    limit: None,
+                },
+            ];
+            for arguments in cases {
+                let result = read_file(arguments).await.expect("read");
+                assert_eq!(
+                    result.content_sections().len(),
+                    1,
+                    "capped text results keep one content section"
+                );
+                assert_truncated_read(&result, expected_bytes);
+            }
+        });
+    }
+
+    #[test]
+    fn read_output_cap_beats_an_oversized_explicit_limit() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            let path = dir.path().join("large.txt");
+            std::fs::write(&path, vec![b'b'; READ_OUTPUT_LIMIT_BYTES + 4096]).expect("write");
+            let result = read_file(ReadFileArgs {
+                path: path.display().to_string(),
+                mode: Some(ReadMode::Bytes),
+                encoding: FileEncoding::Utf8,
+                offset: None,
+                limit: Some(READ_OUTPUT_LIMIT_BYTES + 4096),
+            })
+            .await
+            .expect("read");
+            assert_truncated_read(&result, READ_OUTPUT_LIMIT_BYTES);
+
+            let lines_result = read_file(ReadFileArgs {
+                path: path.display().to_string(),
+                mode: Some(ReadMode::Lines),
+                encoding: FileEncoding::Utf8,
+                offset: None,
+                limit: Some(usize::MAX),
+            })
+            .await
+            .expect("read");
+            assert_truncated_read(&lines_result, READ_OUTPUT_LIMIT_BYTES);
+        });
+    }
+
+    #[test]
+    fn read_base64_text_is_truncated_at_the_output_limit() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            let path = dir.path().join("large.txt");
+            let bytes = over_cap_text_bytes();
+            std::fs::write(&path, &bytes).expect("write");
+            let result = read_file(ReadFileArgs {
+                path: path.display().to_string(),
+                mode: Some(ReadMode::Bytes),
+                encoding: FileEncoding::Base64,
+                offset: None,
+                limit: None,
+            })
+            .await
+            .expect("read");
+
+            assert_truncated_read(&result, READ_OUTPUT_LIMIT_BYTES);
+            assert_eq!(
+                result.text(),
+                STANDARD_BASE64.encode(&bytes[..READ_OUTPUT_LIMIT_BYTES])
+            );
+            assert_eq!(result.media_type, None, "truncated is never complete");
+            assert!(result.attachments().is_empty());
+        });
+    }
+
+    #[test]
+    fn read_recognized_media_just_over_the_output_limit_stays_complete() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            let mut png = vec![137u8, 80, 78, 71, 13, 10, 26, 10];
+            png.extend(std::iter::repeat_n(
+                0u8,
+                READ_OUTPUT_LIMIT_BYTES + 1024 - png.len(),
+            ));
+            let path = dir.path().join("large.png");
+            std::fs::write(&path, &png).expect("write");
+
+            let explicit = read_file(ReadFileArgs {
+                path: path.display().to_string(),
+                mode: Some(ReadMode::Bytes),
+                encoding: FileEncoding::Base64,
+                offset: None,
+                limit: None,
+            })
+            .await
+            .expect("complete media read");
+            assert!(!explicit.truncated, "media reads bypass the cap");
+            assert_eq!(explicit.read_bytes, png.len());
+            assert_eq!(
+                explicit.media_type.as_deref(),
+                Some(MEDIA_TYPE_IMAGE_PNG),
+                "complete media stays attached past the cap"
+            );
+            assert_eq!(explicit.attachments().len(), 1);
+            let metadata = explicit.metadata().expect("metadata");
+            assert!(
+                metadata.get("truncated").is_none(),
+                "untruncated metadata must omit truncated: {metadata}"
+            );
+
+            let autodetected = read_file(ReadFileArgs {
+                path: path.display().to_string(),
+                mode: None,
+                encoding: FileEncoding::Utf8,
+                offset: None,
+                limit: None,
+            })
+            .await
+            .expect("autodetected media read");
+            assert!(!autodetected.truncated);
+            assert_eq!(
+                autodetected.media_type.as_deref(),
+                Some(MEDIA_TYPE_IMAGE_PNG)
+            );
+            assert_eq!(autodetected.read_bytes, png.len());
+        });
+    }
+
+    #[test]
+    fn read_complete_media_over_the_size_ceiling_is_rejected() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            let mut bytes = vec![137u8, 80, 78, 71, 13, 10, 26, 10];
+            bytes.resize(READ_MEDIA_MAX_BYTES + 1, 0);
+            let path = dir.path().join("huge.png");
+            std::fs::write(&path, &bytes).expect("write");
+            let path_string = path.display().to_string();
+
+            let cases = [
+                ReadFileArgs {
+                    path: path_string.clone(),
+                    mode: Some(ReadMode::Bytes),
+                    encoding: FileEncoding::Base64,
+                    offset: None,
+                    limit: None,
+                },
+                ReadFileArgs {
+                    path: path_string.clone(),
+                    mode: None,
+                    encoding: FileEncoding::Utf8,
+                    offset: None,
+                    limit: None,
+                },
+            ];
+            for arguments in cases {
+                let error = read_file(arguments)
+                    .await
+                    .expect_err("an oversized complete media read must fail");
+                let message = error.to_string();
+                assert!(
+                    message.contains("over the 8388608-byte limit"),
+                    "error must state the ceiling: {message}"
+                );
+                assert!(
+                    message.contains(&path_string),
+                    "error must name the path: {message}"
+                );
+                assert!(
+                    message.contains(r#"mode: "bytes""#),
+                    "error must carry the range-read remedy: {message}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn read_untruncated_result_omits_truncated_metadata_and_section_label() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            let path = dir.path().join("small.txt");
+            std::fs::write(&path, "one\ntwo").expect("write");
+            let result = read_file(ReadFileArgs {
+                path: path.display().to_string(),
+                mode: Some(ReadMode::Lines),
+                encoding: FileEncoding::Utf8,
+                offset: None,
+                limit: None,
+            })
+            .await
+            .expect("read");
+
+            assert!(!result.truncated);
+            let metadata = result.metadata().expect("metadata");
+            assert!(
+                metadata.get("truncated").is_none(),
+                "untruncated metadata must omit truncated: {metadata}"
+            );
+            let schema = serde_json::to_value(result.metadata_schema().expect("metadata schema"))
+                .expect("schema serializes");
+            assert!(
+                schema["properties"].get("truncated").is_none(),
+                "truncated must be pruned from the schema when absent: {schema}"
+            );
+            let sections = result.content_sections();
+            let Section::Content(section) = &sections[0] else {
+                panic!("expected a text content section");
+            };
+            assert_eq!(section.label, None, "uncapped reads keep no label");
+        });
     }
 }

@@ -321,19 +321,44 @@ as requested: `lines`/`chars` stay strict UTF-8 and `bytes` keeps its
 documented lossy `utf8` behavior.
 
 `read` accepts `encoding: "base64"` only with an explicitly supplied
-`mode: "bytes"`. It reads the complete file into memory as before, applies
-the byte `offset`/`limit` range to the raw bytes, and then encodes that slice
-with the standard padded Base64 engine without line breaks. The Base64 string
-is the complete LLM-facing `ToolCallResult::text()` value, so NUL bytes and
-invalid UTF-8 are not lossy. When the selected bytes are valid UTF-8, the
-user-facing result projection uses the decoded text preview and the normal
-`read_bytes`/`read_lines` metadata. Opaque or invalid UTF-8 bytes report only
-`read_bytes`, the selected raw-byte count; they do not report the encoded
-string length or `read_lines`, and they suppress `ContentSection` previews.
-UTF-8 results retain their current line metadata and content sections. The
-default `utf8` encoding in `bytes` mode remains a compatibility path and may
-lossily decode invalid bytes; callers that need exact arbitrary bytes should
-use Base64.
+`mode: "bytes"`. `bytes` mode seeks to `offset` and reads at most `limit`
+bytes, so unselected bytes are never materialized; the file's metadata length
+decides whether the selection is the complete file before that slice is
+encoded with the standard padded Base64 engine without line breaks. The
+Base64 string is the complete LLM-facing `ToolCallResult::text()` value, so
+NUL bytes and invalid UTF-8 are not lossy. When the selected bytes are valid
+UTF-8, the user-facing result projection uses the decoded text preview and the
+normal `read_bytes`/`read_lines` metadata. Opaque or invalid UTF-8 bytes
+report only `read_bytes`, the selected raw-byte count; they do not report the
+encoded string length or `read_lines`, and they suppress `ContentSection`
+previews. UTF-8 results retain their current line metadata and content
+sections. The default `utf8` encoding in `bytes` mode remains a compatibility
+path and may lossily decode invalid bytes; callers that need exact arbitrary
+bytes should use Base64.
+
+Text-oriented reads (`lines`, `chars` and the omitted-`mode` path) stream
+fixed-size chunks instead of buffering the file: UTF-8 is validated
+incrementally with only an incomplete trailing sequence carried between
+chunks, the selected line or character window is retained, and the scan
+continues to EOF so whole-file validation semantics are preserved. Whole-file
+buffering remains only for results that are returned whole — a `bytes`
+selection within the output cap, and the complete recognized media read that
+bypasses the cap, whose media type is sniffed from the first chunk before the
+complete file is re-read from the same open handle.
+
+Every text-oriented `read` result is capped at 262144 raw selected bytes
+(256 KiB) before decoding or Base64 encoding. Content past the cap is cut at
+the cap — backed off to a UTF-8 char boundary for `utf8` results — with no
+in-text marker, reported as `truncated: true` in `ReadResultMetadata` (the
+property is pruned from the metadata schema when absent), and labeled
+`Partial result` in the content section, matching `bash` and `search`. The cap
+wins over a larger explicit `limit`. Complete recognized media reads bypass it
+entirely: a truncated image or PDF is unusable, and `media_type` is only ever
+recognized for a complete file, so a truncated result never carries a
+`media_type` or an attachment. They are bounded instead by
+`READ_MEDIA_MAX_BYTES` (8 MiB): a larger whole file fails with an explicit
+size error — naming the size, the limit, and the range-read remedy — before
+any whole-file load, in both the `bytes` and the autodetect paths.
 
 `ToolCallResult::text()` remains the complete model-facing result for every
 tool. `ToolCallResult::display_text()` is the optional user-facing result

@@ -83,7 +83,7 @@ existing unit and integration tests must pass unchanged.
 
 ## Implementation Plan
 
-1. [ ] Add characterization tests for range boundaries in
+1. [x] Add characterization tests for range boundaries in
    `src/agent/tools/read.rs` (`mod tests`), pinning *current* behavior before
    refactoring: `offset` past EOF, `limit: 0`, `offset + limit` crossing EOF,
    and `offset` past EOF with no `limit`, for `bytes` (both encodings),
@@ -91,7 +91,7 @@ existing unit and integration tests must pass unchanged.
    `starting_line`, and error/emptiness outcomes. Verify:
    `cargo test --lib agent::tools::read`.
 
-2. [ ] Rework the `bytes` branch of `read_file()` to a seek-and-range read:
+2. [x] Rework the `bytes` branch of `read_file()` to a seek-and-range read:
    open `tokio::fs::File`, `seek(Start(offset))`, `take(limit)`,
    `read_to_end`, so only the selected byte range is loaded; obtain the file
    length from metadata to keep the "selection == complete file" check that
@@ -106,7 +106,7 @@ existing unit and integration tests must pass unchanged.
    `read_base64_preserves_raw_bytes_and_range_metadata`, and
    `read_base64_recognizes_supported_complete_media_signatures` stay green.
 
-3. [ ] Implement a streaming `lines` reader used by `ReadMode::Lines`:
+3. [x] Implement a streaming `lines` reader used by `ReadMode::Lines`:
    `tokio::io::BufReader<tokio::fs::File>` reading fixed-size chunks (chunk
    size a `const`, overridable in tests), decoding complete lines, skipping
    `offset` lines and collecting up to `limit` lines, stripping exactly one
@@ -122,7 +122,7 @@ existing unit and integration tests must pass unchanged.
    `read_lines_honors_offset_and_limit` and
    `read_text_modes_reject_invalid_utf8` stay green.
 
-4. [ ] Implement a streaming `chars` reader used by `ReadMode::Chars`:
+4. [x] Implement a streaming `chars` reader used by `ReadMode::Chars`:
    read fixed-size chunks, decode incrementally (`str::from_utf8` on chunk +
    carried incomplete tail; `error_len: Some` → strict UTF-8 error), count
    code points from the start of the file, retain only characters with index
@@ -132,7 +132,7 @@ existing unit and integration tests must pass unchanged.
    Tests: step 1 tests plus existing `read_chars_counts_utf8_code_points`
    stay green.
 
-5. [ ] Rework `autodetect_read()` to stream: validate UTF-8 over the whole
+5. [x] Rework `autodetect_read()` to stream: validate UTF-8 over the whole
    file in chunks while collecting the lines window (discarding unselected
    lines, O(chunk) memory), classifying as soon as the file is fully valid or
    the first invalid byte appears. On full validity return the lines result;
@@ -146,21 +146,21 @@ existing unit and integration tests must pass unchanged.
    valid UTF-8 file with `offset`/`limit` returns only the window and that a
    binary file's classification completes from the first chunk.
 
-6. [ ] Reuse the already-open file handle in the autodetect invalid-UTF-8
+6. [x] Reuse the already-open file handle in the autodetect invalid-UTF-8
    fallback: for the no-range supported-media path, seek the open handle back
    to the start and read the whole file from it (the buffered first chunk
    still feeds the `infer` sniff) instead of re-opening the path or calling
    `tokio::fs::read` a second time. Output stays byte-identical; the existing
    `read_omitted_mode_*` tests must stay green.
 
-7. [ ] Add chunk-boundary correctness tests using the test-only chunk-size
+7. [x] Add chunk-boundary correctness tests using the test-only chunk-size
    knob: a line split across chunks, a multi-byte UTF-8 sequence (`é`,
    emoji) split across chunks, invalid UTF-8 exactly at a chunk boundary,
    and a `limit` window ending mid-chunk. Fast, deterministic, no
    timing/memory/large-file assertions (per plan decision: no sparse-file
    tests).
 
-8. [ ] Implement the 256 KiB hard cap:
+8. [x] Implement the 256 KiB hard cap:
    - Add `pub const READ_OUTPUT_LIMIT_BYTES: usize = 256 * 1024;` in
      `read.rs` (precedent: `SEARCH_OUTPUT_LIMIT_LINES`/`_BYTES` at
      search.rs:41/49).
@@ -191,7 +191,7 @@ existing unit and integration tests must pass unchanged.
    base64 truncation, and a recognized media file just over the cap staying
    complete/attached.
 
-9. [ ] Disclose the cap in the model-facing contract: extend
+9. [x] Disclose the cap in the model-facing contract: extend
    `ReadTool::description()` (read.rs:360-370) and the `ReadFileArgs`/output
    docs with the 256 KiB cap, the fact that capped results are flagged
    `truncated` in result metadata, and the hint to continue via
@@ -199,14 +199,14 @@ existing unit and integration tests must pass unchanged.
    green (`read_schema_explains_autodetect_and_explicit_modes`,
    `read_input_args_all_properties_have_descriptions`).
 
-10. [ ] Remove the `TODO` at src/agent/tools/read.rs:460-462 and update the
+10. [x] Remove the `TODO` at src/agent/tools/read.rs:460-462 and update the
    module-level doc comment (src/agent/tools/read.rs:15-25) to document the
    seek/stream design, the chunked validation scan, the 256 KiB cap with the
    complete-media exemption, and where whole-file buffering remains
    (Base64 whole-file/media reads). No other public API or schema changes
    beyond the additive `truncated` metadata field.
 
-11. [ ] Documentation step — update every affected doc in the same change:
+11. [x] Documentation step — update every affected doc in the same change:
     - `docs/features.md` (**read** bullet, lines ~211-235): streaming/seek
       memory behavior; the 256 KiB cap with silent truncation, the
       `truncated` metadata field and `Partial result` section label (same
@@ -226,7 +226,7 @@ existing unit and integration tests must pass unchanged.
     - Run `rumdl fmt` on the touched Markdown files
       (`.rumdl.toml` configuration).
 
-12. [ ] Verification gate: run `make format lint` and the single mandatory
+12. [x] Verification gate: run `make format lint` and the single mandatory
     test gate `make test-coverage` (≥80% line coverage enforced; do not also
     run `make test`). Fix any lint/coverage failures, then mark all
     checkboxes in this file `[x]` and rewrite it in place.

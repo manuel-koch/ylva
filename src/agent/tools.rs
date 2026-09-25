@@ -658,8 +658,8 @@ pub struct ToolRegistryConfig {
     /// Per-tool sandbox rule lists parsed from the profile's `[tool.<name>]`
     /// tables (`ProfileConfig::tools`), keyed by tool name. A tool name with
     /// no entry here falls back to `SandboxContext`'s built-in default floor
-    /// (`outside_workspace`/`dot_path` → `AutoDenied`); an entry fully
-    /// replaces that floor for its tool. See `docs/configuration.md`'s
+    /// (`outside_workspace`/`dot_path` → `UserApprovalRequired`); an entry
+    /// fully replaces that floor for its tool. See `docs/configuration.md`'s
     /// "Sandbox" section.
     pub tool_sandbox_rules: HashMap<String, Vec<crate::sandbox::SandboxRuleConfig>>,
 }
@@ -694,7 +694,8 @@ pub fn default_registry(
     // Builds a tool's SandboxContext, replacing the built-in default floor
     // with `config.tool_sandbox_rules`'s entry for `tool_name` (a profile's
     // `[tool.<name>]` table) when one is configured; otherwise the default
-    // floor (`outside_workspace`/`dot_path` → `AutoDenied`) applies. When
+    // floor (`outside_workspace`/`dot_path` → `UserApprovalRequired`) applies.
+    // When
     // `auto_approve_tool` is set in `config.auto_approve`, a catch-all
     // `AutoApproved` rule is appended last, so it always wins regardless of
     // `[tool.<name>]` config.
@@ -1037,7 +1038,7 @@ mod tests {
             read::ReadTool::NAME.to_string(),
             vec![crate::sandbox::SandboxRuleConfig::Named {
                 rule: NamedSandboxRule::DotPath,
-                verdict: ApprovalVerdictConfig::UserApprovalRequired,
+                verdict: ApprovalVerdictConfig::AutoApproved,
                 reason: None,
             }],
         );
@@ -1054,17 +1055,18 @@ mod tests {
         let read_tool = registry.get(read::ReadTool::NAME).expect("read tool");
         assert_eq!(
             read_tool.needs_approval(&serde_json::json!({ "path": dot_path })),
-            ApprovalCheck::UserApprovalRequired,
-            "read's [tool.read] config overrides the default AutoDenied dot_path verdict"
+            ApprovalCheck::AutoApproved,
+            "read's [tool.read] config replaces the default floor's \
+             dot_path verdict"
         );
 
         // write has no [tool.write] entry: unaffected, still uses the
-        // default floor (dot_path -> AutoDenied).
+        // default floor (dot_path -> user approval required).
         let write_tool = registry.get(write::WriteTool::NAME).expect("write tool");
-        assert!(matches!(
+        assert_eq!(
             write_tool.needs_approval(&serde_json::json!({ "path": dot_path, "content": "x" })),
-            ApprovalCheck::AutoDenied { .. }
-        ));
+            ApprovalCheck::UserApprovalRequired
+        );
     }
 
     #[test]

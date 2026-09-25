@@ -1396,8 +1396,8 @@ is configurable via a `[tool.<name>]` block's ordered `rules` list
 ```toml
 [tool.read]
 rules = [
-  { rule = "outside_workspace", verdict = "auto_denied" },  # default floor rule, restated
-  { rule = "dot_path", verdict = "auto_denied" },           # default floor rule, restated
+  { rule = "outside_workspace", verdict = "user_approval_required" },  # default floor rule, restated
+  { rule = "dot_path", verdict = "user_approval_required" },           # default floor rule, restated
   # cross_filesystem omitted — opt-in only; add it to restrict cross-device reads:
   # { rule = "cross_filesystem", verdict = "user_approval_required" },
   { pattern = "**/.*", verdict = "auto_approved" },         # re-allow dot-files inside workspace

@@ -214,9 +214,10 @@ impl Provider for SequencedMockProvider {
 
 #[tokio::test(start_paused = true)]
 async fn tool_call_pauses_for_approval_then_reprompts_after_result() {
-    // Phase 6.0: reads are auto-approved for in-workspace files and auto-denied for
-    // files outside the workspace. Writes always require explicit user approval
-    // (UserApprovalRequired). This test uses `write` to exercise the ToolPending flow.
+    // Phase 6.0: reads are auto-approved for in-workspace files; a path outside
+    // the workspace (or a dot-path) requires user approval. Writes always
+    // require explicit user approval (UserApprovalRequired). This test uses
+    // `write` to exercise the ToolPending flow.
     let dir = TempDir::new().expect("tempdir");
     let output_path = dir.path().join("out.txt").to_string_lossy().to_string();
     let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox {
@@ -631,7 +632,7 @@ async fn stop_while_awaiting_approval_clears_pending_tools() {
     let b = dir.path().join("b.txt").to_string_lossy().to_string();
     // Phase 6.0: writes always require user approval (UserApprovalRequired), so
     // both calls will produce ToolPending.  Use tmpdir as workspace root so
-    // the sandbox does not auto-deny the paths.
+    // the sandbox abstains for these paths.
     let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox {
         workspace_root: dir.path().to_path_buf(),
     }));

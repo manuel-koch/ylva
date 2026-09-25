@@ -85,7 +85,7 @@ pub struct ProfileConfig {
     /// Map of tool name (e.g. `read`, `write`) to its `[tool.<name>]`
     /// sandbox rule list. When a tool name has no entry here, its
     /// `SandboxContext` falls back to the built-in default floor
-    /// (`outside_workspace`/`dot_path` → `AutoDenied`, see
+    /// (`outside_workspace`/`dot_path` → `UserApprovalRequired`, see
     /// `docs/configuration.md`'s "Sandbox" section and
     /// [`crate::sandbox::SandboxContext`]); when it does, that entry's rule
     /// list fully replaces the default floor for that tool.
