@@ -84,10 +84,6 @@ impl Provider for OllamaProvider {
         let client = self.inner.http_client();
         let api_key = self.inner.api_key().map(str::to_owned);
 
-        // TODO: newer version of ollama include "thinking" default and options
-        // https://github.com/ollama/ollama/pull/18473
-        // https://github.com/ollama/ollama/commit/d0c8cdb795d4640890d87c146d674cc311df4138
-
         Box::pin(async move {
             let tags_body =
                 get_json(&client, &tags_url, api_key.as_deref(), "model listing").await?;
@@ -97,12 +93,9 @@ impl Provider for OllamaProvider {
                 let api_key = api_key.clone();
                 let show_url = show_url.clone();
                 async move {
-                    if model.context_length.is_some()
-                        && model.reasoning_efforts.is_some()
-                        && model.input_modalities.is_some()
-                    {
-                        return model;
-                    }
+                    // `/api/tags` carries no `thinking` object, so the
+                    // show-response enrichment below is the only source of
+                    // thinking levels and the advertised default.
                     let request_body = serde_json::json!({ "model": model.id });
                     match post_json(
                         &client,
@@ -117,9 +110,13 @@ impl Provider for OllamaProvider {
                             if model.context_length.is_none() {
                                 model.context_length = parse_context_length(&body);
                             }
-                            if model.reasoning_efforts.is_none() {
-                                model.reasoning_efforts = parse_reasoning_efforts(&body);
-                            }
+                            let (reasoning_efforts, reasoning_default) = merge_reasoning_metadata(
+                                model.reasoning_efforts.clone(),
+                                model.reasoning_default.clone(),
+                                &body,
+                            );
+                            model.reasoning_efforts = reasoning_efforts;
+                            model.reasoning_default = reasoning_default;
                             if model.input_modalities.is_none() {
                                 model.input_modalities = parse_input_modalities(&body);
                             }
@@ -180,6 +177,7 @@ fn parse_tags(body: &serde_json::Value) -> Vec<ModelInfo> {
                 id: id.to_string(),
                 context_length,
                 reasoning_efforts: parse_reasoning_efforts(entry),
+                reasoning_default: None,
                 input_modalities: None,
             })
         })
@@ -209,12 +207,77 @@ fn json_usize(value: &serde_json::Value) -> Option<usize> {
 }
 
 fn parse_reasoning_efforts(body: &serde_json::Value) -> Option<Vec<String>> {
+    if let Some(efforts) = parse_thinking_values(body) {
+        return Some(efforts);
+    }
     let capabilities = body.get("capabilities")?.as_array()?;
     capabilities
         .iter()
         .filter_map(serde_json::Value::as_str)
         .any(|capability| capability == "thinking")
         .then(Vec::new)
+}
+
+/// Parse the selectable reasoning levels of `/api/show`'s top-level
+/// `thinking.values` array.
+///
+/// Upstream: https://github.com/ollama/ollama/pull/18473 and
+/// https://github.com/ollama/ollama/commit/d0c8cdb795d4640890d87c146d674cc311df4138.
+///
+/// De-duplicates while preserving the server's order. Returns `None` when
+/// `thinking`/`values` is absent or when no entry maps to an effort name, so
+/// callers fall through to the capability-based logic.
+fn parse_thinking_values(body: &serde_json::Value) -> Option<Vec<String>> {
+    let values = body.pointer("/thinking/values")?.as_array()?;
+    let mut efforts: Vec<String> = Vec::new();
+    for value in values {
+        if let Some(effort) = map_thinking_value(value) {
+            if !efforts.contains(&effort) {
+                efforts.push(effort);
+            }
+        }
+    }
+    (!efforts.is_empty()).then_some(efforts)
+}
+
+/// Parse `/api/show`'s `thinking.default` — the effort a request falls back
+/// to when it omits thinking controls — or `None` when it is absent or does
+/// not map to an effort name.
+fn parse_reasoning_default(body: &serde_json::Value) -> Option<String> {
+    map_thinking_value(body.pointer("/thinking/default")?)
+}
+
+/// Map one `thinking.values`/`thinking.default` JSON entry to an effort name.
+///
+/// Non-empty strings pass through as-is; `false` maps to `"none"` (Ollama
+/// resolves it to `think: false`) and `true` to `"high"` (a boolean-only
+/// model treats any non-`none` effort as `think: true`, and `"high"` is also
+/// a real level for named models). Every other JSON type is skipped.
+fn map_thinking_value(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(effort) if !effort.is_empty() => Some(effort.clone()),
+        serde_json::Value::Bool(true) => Some("high".to_string()),
+        serde_json::Value::Bool(false) => Some("none".to_string()),
+        _ => None,
+    }
+}
+
+/// Upgrade a `/api/tags`-derived entry's reasoning metadata from an
+/// `/api/show` body.
+///
+/// Fills `None`/`Some([])` efforts and a `None` default from the body; an
+/// already-populated effort list is never downgraded nor replaced.
+fn merge_reasoning_metadata(
+    current_efforts: Option<Vec<String>>,
+    current_default: Option<String>,
+    body: &serde_json::Value,
+) -> (Option<Vec<String>>, Option<String>) {
+    let reasoning_efforts = match current_efforts {
+        Some(efforts) if !efforts.is_empty() => Some(efforts),
+        current => parse_reasoning_efforts(body).or(current),
+    };
+    let reasoning_default = current_default.or_else(|| parse_reasoning_default(body));
+    (reasoning_efforts, reasoning_default)
 }
 
 fn parse_input_modalities(body: &serde_json::Value) -> Option<Vec<InputModality>> {
@@ -255,6 +318,7 @@ mod tests {
                 id: "gemma4:latest".to_string(),
                 context_length: Some(32768),
                 reasoning_efforts: None,
+                reasoning_default: None,
                 input_modalities: None,
             }]
         );
@@ -279,9 +343,155 @@ mod tests {
         let regular_body = serde_json::json!({
             "capabilities": ["completion"]
         });
+        let empty_values_body = serde_json::json!({
+            "capabilities": ["completion", "thinking"],
+            "thinking": { "values": [] }
+        });
+        let unmappable_values_body = serde_json::json!({
+            "capabilities": ["completion", "thinking"],
+            "thinking": { "values": [1, null, {}] }
+        });
+        let empty_object_body = serde_json::json!({
+            "capabilities": ["completion", "thinking"],
+            "thinking": {}
+        });
+        let unmappable_without_capability_body = serde_json::json!({
+            "thinking": { "values": [1, null] }
+        });
 
         assert_eq!(parse_reasoning_efforts(&thinking_body), Some(Vec::new()));
         assert_eq!(parse_reasoning_efforts(&regular_body), None);
+        assert_eq!(
+            parse_reasoning_efforts(&empty_values_body),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            parse_reasoning_efforts(&unmappable_values_body),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            parse_reasoning_efforts(&empty_object_body),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            parse_reasoning_efforts(&unmappable_without_capability_body),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_reasoning_efforts_passes_named_thinking_levels_through_in_server_order() {
+        let body = serde_json::json!({
+            "capabilities": ["completion", "thinking"],
+            "thinking": { "values": [false, "low", "medium", "xhigh"], "default": "medium" }
+        });
+
+        assert_eq!(
+            parse_reasoning_efforts(&body),
+            Some(vec![
+                "none".to_string(),
+                "low".to_string(),
+                "medium".to_string(),
+                "xhigh".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_reasoning_efforts_maps_boolean_thinking_values_and_deduplicates() {
+        let booleans_only = serde_json::json!({ "thinking": { "values": [false, true] } });
+        let with_duplicate_name = serde_json::json!({
+            "thinking": { "values": [false, true, "high"] }
+        });
+
+        assert_eq!(
+            parse_reasoning_efforts(&booleans_only),
+            Some(vec!["none".to_string(), "high".to_string()])
+        );
+        assert_eq!(
+            parse_reasoning_efforts(&with_duplicate_name),
+            Some(vec!["none".to_string(), "high".to_string()])
+        );
+    }
+
+    #[test]
+    fn parse_reasoning_efforts_reads_thinking_values_without_a_capabilities_key() {
+        let body = serde_json::json!({
+            "thinking": { "values": ["medium"], "default": "medium" }
+        });
+
+        assert_eq!(
+            parse_reasoning_efforts(&body),
+            Some(vec!["medium".to_string()])
+        );
+    }
+
+    #[test]
+    fn parse_reasoning_default_reads_provider_defaults() {
+        assert_eq!(
+            parse_reasoning_default(&serde_json::json!({ "thinking": { "default": "medium" } })),
+            Some("medium".to_string())
+        );
+        assert_eq!(
+            parse_reasoning_default(&serde_json::json!({ "thinking": { "default": true } })),
+            Some("high".to_string())
+        );
+        assert_eq!(
+            parse_reasoning_default(&serde_json::json!({ "thinking": { "default": false } })),
+            Some("none".to_string())
+        );
+        assert_eq!(
+            parse_reasoning_default(&serde_json::json!({ "thinking": { "default": "" } })),
+            None
+        );
+        assert_eq!(
+            parse_reasoning_default(&serde_json::json!({ "thinking": { "default": 3 } })),
+            None
+        );
+        assert_eq!(
+            parse_reasoning_default(&serde_json::json!({ "capabilities": ["thinking"] })),
+            None
+        );
+        assert_eq!(parse_reasoning_default(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn merge_reasoning_metadata_upgrades_unset_reasoning_without_touching_populated_lists() {
+        let show_body = serde_json::json!({
+            "capabilities": ["completion", "thinking"],
+            "thinking": { "values": ["low", "high"], "default": "low" }
+        });
+
+        assert_eq!(
+            merge_reasoning_metadata(None, None, &show_body),
+            (
+                Some(vec!["low".to_string(), "high".to_string()]),
+                Some("low".to_string())
+            ),
+            "unset metadata must be filled from the show response"
+        );
+        assert_eq!(
+            merge_reasoning_metadata(Some(Vec::new()), Some("medium".to_string()), &show_body),
+            (
+                Some(vec!["low".to_string(), "high".to_string()]),
+                Some("medium".to_string())
+            ),
+            "a capability-derived empty list must be upgraded, a known default kept"
+        );
+        assert_eq!(
+            merge_reasoning_metadata(Some(vec!["xhigh".to_string()]), None, &show_body),
+            (Some(vec!["xhigh".to_string()]), Some("low".to_string()),),
+            "a populated list must never be replaced"
+        );
+        assert_eq!(
+            merge_reasoning_metadata(
+                Some(Vec::new()),
+                None,
+                &serde_json::json!({ "capabilities": ["completion"] })
+            ),
+            (Some(Vec::new()), None),
+            "a body without reasoning metadata must leave the current state alone"
+        );
     }
 
     #[test]

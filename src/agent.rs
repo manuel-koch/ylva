@@ -260,6 +260,14 @@ pub enum UiUpdate {
         /// `AgentLoop::own_run_id`). See `UiUpdate::ToolPending::run_id`.
         run_id: Option<Uuid>,
     },
+    /// A one-shot engine-generated notice (for example a profile reasoning
+    /// effort the pre-chat catalog validation dropped), surfaced as a
+    /// transcript notice via `AppState` rather than as an error line.
+    Notice {
+        text: String,
+        /// See `UiUpdate::Error::run_id`.
+        run_id: Option<Uuid>,
+    },
     ToolStart {
         name: String,
         id: Uuid,
@@ -3041,6 +3049,18 @@ fn start_request(
                     return;
                 }
             };
+            // `engine.chat` completed the one-shot catalog hydration, so any
+            // notices it queued (e.g. a dropped profile reasoning effort) are
+            // ready — surface them before the stream events so they render
+            // above this turn's response.
+            for text in engine.take_pending_notices() {
+                let _ = ui_tx
+                    .send(UiUpdate::Notice {
+                        text,
+                        run_id: own_run_id,
+                    })
+                    .await;
+            }
             let _ = ui_tx.send(UiUpdate::StreamStarted).await;
             let mut partial = String::new();
             let mut accumulators: HashMap<usize, ToolCallAccumulator> = HashMap::new();
@@ -3228,6 +3248,100 @@ mod tests {
                 reasoning: None,
             },
         ))
+    }
+
+    /// Engine double that reports one pending notice, for asserting the
+    /// agent loop forwards engine notices ahead of the stream.
+    struct NoticeEngine {
+        inner: EngineImpl,
+        pending: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl Engine for NoticeEngine {
+        fn chat<'a>(
+            &'a self,
+            messages: Vec<Message>,
+            tools: Vec<ToolSchema>,
+            cancel: CancellationToken,
+        ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+            self.inner.chat(messages, tools, cancel)
+        }
+
+        fn config(&self) -> EngineConfig {
+            self.inner.config()
+        }
+
+        fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
+            self.inner.list_models()
+        }
+
+        fn switch_model(&self, model: &str) -> anyhow::Result<()> {
+            self.inner.switch_model(model)
+        }
+
+        fn take_pending_notices(&self) -> Vec<String> {
+            std::mem::take(
+                &mut *self
+                    .pending
+                    .lock()
+                    .expect("the engine notice lock is poisoned"),
+            )
+        }
+    }
+
+    #[test]
+    fn engine_notices_are_forwarded_before_the_stream_starts() {
+        crate::test_support::run_locked(async {
+            let engine: Arc<dyn Engine> = Arc::new(NoticeEngine {
+                inner: EngineImpl::new(
+                    Arc::new(MockProvider::new(
+                        vec!["hi".to_string()],
+                        Duration::from_millis(0),
+                    )),
+                    EngineConfig {
+                        provider_connection: "mock".to_string(),
+                        model: "test-model".to_string(),
+                        temperature: None,
+                        context_length: None,
+                        api_base_url: None,
+                        api_key: None,
+                        reasoning: None,
+                    },
+                ),
+                pending: std::sync::Mutex::new(vec![
+                    "Model mock/test-model does not advertise reasoning effort \"max\"; using the provider default.".to_string(),
+                ]),
+            });
+            let (mut agent, mut ui_rx) = AgentLoop::new(engine, Arc::new(ToolRegistry::new()));
+            let handle = agent.run();
+            agent
+                .send_command(AgentCommand::Prompt("hello".to_string()))
+                .await;
+
+            let first = tokio::time::timeout(Duration::from_millis(500), ui_rx.recv())
+                .await
+                .expect("the first update arrives")
+                .expect("the UI channel stays open");
+            let second = tokio::time::timeout(Duration::from_millis(500), ui_rx.recv())
+                .await
+                .expect("the second update arrives")
+                .expect("the UI channel stays open");
+            assert!(
+                matches!(&first, UiUpdate::Notice { text, run_id: None }
+                    if text.contains("does not advertise reasoning effort")),
+                "the engine notice must be forwarded first: {first:?}"
+            );
+            assert!(
+                matches!(second, UiUpdate::StreamStarted),
+                "the notice must precede the stream: {second:?}"
+            );
+
+            drop(agent);
+            handle
+                .await
+                .expect("agent task should not panic")
+                .expect("agent should stop cleanly after the channel closes");
+        });
     }
 
     #[test]

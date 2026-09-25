@@ -33,8 +33,8 @@ use crate::llm::Provider;
 use crate::sandbox::{ApprovalCheck, Sandbox};
 use crate::session_title::TitleAttempt;
 use crate::theme::{
-    ASSISTANT_STREAM_BORDER_COLOR, ERROR_COLOR, INTERRUPTED_COLOR, THINKING_BORDER_COLOR,
-    TOOL_BUBBLE_BORDER_COLOR, USER_MESSAGE_BORDER_COLOR,
+    ASSISTANT_STREAM_BORDER_COLOR, ERROR_COLOR, INTERRUPTED_COLOR, NOTICE_COLOR,
+    THINKING_BORDER_COLOR, TOOL_BUBBLE_BORDER_COLOR, USER_MESSAGE_BORDER_COLOR,
 };
 use crate::ToolRegistry;
 
@@ -901,6 +901,40 @@ async fn run_cli_to_with_title(
             // for its TUI-only purpose). The eventual `ToolDone` still
             // prints the real outcome once the child actually finishes.
             Some(UiUpdate::ToolProgress { .. }) => {}
+            Some(UiUpdate::Notice { text, run_id }) => {
+                // A notice (for example a dropped profile reasoning effort)
+                // is a real configuration fact, not a transcript-only
+                // bubble: print it ahead of the response, tagged when it
+                // came from a child loop. It never ends the turn, so unlike
+                // a root `Error` it leaves `response_finished` alone.
+                flush_stream_section(
+                    out,
+                    &mut current_section,
+                    &mut thinking_started_at,
+                    output_options,
+                )?;
+                match run_id {
+                    None => {
+                        write_cli_styled_line(
+                            out,
+                            "---[ Notice ]---",
+                            NOTICE_COLOR,
+                            false,
+                            output_options,
+                        )?;
+                        writeln!(out, "{text}")?;
+                    }
+                    Some(run_id) => {
+                        write_cli_styled_line(
+                            out,
+                            &format!("[child {run_id}] notice: {text}"),
+                            NOTICE_COLOR,
+                            false,
+                            output_options,
+                        )?;
+                    }
+                }
+            }
             Some(UiUpdate::StreamDone) => {
                 let previous_section = current_section;
                 flush_stream_section(

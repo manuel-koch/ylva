@@ -85,7 +85,19 @@ fn default_frame(index: usize) -> String {
     content_frame(&format!("token-{index} "))
 }
 
-/// Per-connection behavior a [`MockLlmServerConfig`] describes.
+/// The `thinking` object Ollama's `POST /api/show` returns for a model with
+/// selectable reasoning levels (upstream `api.ShowResponse.Thinking`).
+#[derive(Debug, Clone)]
+pub struct OllamaThinking {
+    /// The selectable values in server order — booleans (`false`/`true`)
+    /// and/or model-defined level names.
+    pub values: Vec<serde_json::Value>,
+    /// The value used when a request omits thinking controls; a member of
+    /// `values`.
+    pub default: serde_json::Value,
+}
+
+/// Per-connection behavior a [`MockLlmConfig`] describes.
 #[derive(Debug, Clone)]
 struct Behavior {
     status: u16,
@@ -101,8 +113,11 @@ struct Behavior {
     /// Input modalities returned in the OpenAI-compatible model catalog's
     /// `architecture.input_modalities` field.
     model_input_modalities: Option<Vec<String>>,
-    /// Capabilities returned by the Ollama `POST /api/show` endpoint.
+    /// Capabilities returned by the Ollama `/api/tags` and `/api/show`
+    /// endpoints.
     ollama_capabilities: Option<Vec<String>>,
+    /// `thinking` metadata returned by the Ollama `/api/show` endpoint.
+    ollama_thinking: Option<OllamaThinking>,
 }
 
 /// Configuration for a [`MockLlmServer`].
@@ -130,8 +145,12 @@ pub struct MockLlmConfig {
     pub ollama_context_length: Option<usize>,
     /// Optional OpenAI-compatible catalog modalities for every model.
     pub model_input_modalities: Option<Vec<String>>,
-    /// Optional Ollama `/api/show` capabilities for every model.
+    /// Optional Ollama `/api/tags` and `/api/show` capabilities for every
+    /// model.
     pub ollama_capabilities: Option<Vec<String>>,
+    /// Optional Ollama `/api/show` `thinking` metadata (selectable levels
+    /// plus the advertised default) for every model.
+    pub ollama_thinking: Option<OllamaThinking>,
 }
 
 impl Default for MockLlmConfig {
@@ -146,6 +165,7 @@ impl Default for MockLlmConfig {
             ollama_context_length: None,
             model_input_modalities: None,
             ollama_capabilities: None,
+            ollama_thinking: None,
         }
     }
 }
@@ -162,6 +182,7 @@ impl MockLlmConfig {
             ollama_context_length: self.ollama_context_length,
             model_input_modalities: self.model_input_modalities.clone(),
             ollama_capabilities: self.ollama_capabilities.clone(),
+            ollama_thinking: self.ollama_thinking.clone(),
         }
     }
 }
@@ -395,7 +416,12 @@ async fn handle_connection(
         return;
     }
     if request_target.ends_with("/api/tags") && behavior.status == 200 {
-        write_ollama_tags_response(&mut writer, &behavior.models).await;
+        write_ollama_tags_response(
+            &mut writer,
+            &behavior.models,
+            behavior.ollama_capabilities.as_deref(),
+        )
+        .await;
         live_connections.fetch_sub(1, Ordering::SeqCst);
         return;
     }
@@ -404,6 +430,7 @@ async fn handle_connection(
             &mut writer,
             behavior.ollama_context_length,
             behavior.ollama_capabilities.as_deref(),
+            behavior.ollama_thinking.as_ref(),
         )
         .await;
         live_connections.fetch_sub(1, Ordering::SeqCst);
@@ -473,6 +500,11 @@ Content-Length: {}\r\n\
 }
 
 /// Write an OpenAI-spec `GET /models` response listing `models`.
+///
+/// Every entry advertises reasoning metadata in OpenRouter's shape —
+/// `reasoning.supported_efforts` (including `"max"`) plus
+/// `reasoning.default_effort` — so a profile `reasoning` value survives the
+/// engine's strict pre-chat validation against this catalog.
 async fn write_model_list_response(
     writer: &mut tokio::net::tcp::OwnedWriteHalf,
     models: &[String],
@@ -489,6 +521,10 @@ async fn write_model_list_response(
                         "input_modalities": input_modalities,
                     });
                 }
+                model["reasoning"] = serde_json::json!({
+                    "supported_efforts": ["low", "medium", "high", "max"],
+                    "default_effort": "medium",
+                });
                 model
             })
             .collect::<Vec<serde_json::Value>>(),
@@ -506,14 +542,25 @@ Content-Length: {}\r\n\
 }
 
 /// Write a minimal native Ollama `GET /api/tags` response.
+///
+/// When `capabilities` is set, every entry carries them — mirroring real
+/// Ollama, whose tags entries advertise capabilities while the `thinking`
+/// object only exists on `/api/show`.
 async fn write_ollama_tags_response(
     writer: &mut tokio::net::tcp::OwnedWriteHalf,
     models: &[String],
+    capabilities: Option<&[String]>,
 ) {
     let payload = serde_json::json!({
         "models": models
             .iter()
-            .map(|id| serde_json::json!({ "name": id, "model": id }))
+            .map(|id| {
+                let mut model = serde_json::json!({ "name": id, "model": id });
+                if let Some(capabilities) = capabilities {
+                    model["capabilities"] = serde_json::json!(capabilities);
+                }
+                model
+            })
             .collect::<Vec<serde_json::Value>>(),
     });
     write_json_response(writer, &payload).await;
@@ -524,6 +571,7 @@ async fn write_ollama_show_response(
     writer: &mut tokio::net::tcp::OwnedWriteHalf,
     context_length: Option<usize>,
     capabilities: Option<&[String]>,
+    thinking: Option<&OllamaThinking>,
 ) {
     let mut payload = serde_json::json!({});
     if let Some(context_length) = context_length {
@@ -531,6 +579,12 @@ async fn write_ollama_show_response(
     }
     if let Some(capabilities) = capabilities {
         payload["capabilities"] = serde_json::json!(capabilities);
+    }
+    if let Some(thinking) = thinking {
+        payload["thinking"] = serde_json::json!({
+            "values": thinking.values,
+            "default": thinking.default,
+        });
     }
     write_json_response(writer, &payload).await;
 }

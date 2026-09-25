@@ -82,12 +82,23 @@ root or child run correlation.
 metadata-rich `/models` catalog. Its selected effort is sent as
 `reasoning.effort`. `OllamaProvider` accepts the Ollama server origin as its
 base URL, derives `/v1/chat/completions` for chat, lists models from
-`/api/tags`, and enriches each entry with `/api/show` model metadata when
-available. An explicit Ollama effort is sent as the OpenAI-compatible
-`reasoning_effort` field; models that only advertise the `thinking`
-capability use Ollama's own default because they have no selectable effort
-alternatives. The Ollama base URL must be the server origin and must not
-include the `/v1` path.
+`/api/tags`, and enriches each entry with `/api/show` model metadata. Since
+`/api/tags` entries carry no `thinking` object, every model goes through
+`/api/show`: its top-level `thinking` object — a `values` array plus a
+`default` — provides the selectable levels and the advertised default. Each
+`values` element maps to an effort name (non-empty strings pass through
+unchanged, `false` maps to `none`, `true` maps to `high`, other JSON types
+are skipped, duplicates are removed in server order) and `thinking.default`
+uses the same mapping. The show response only upgrades what `/api/tags`
+could not provide: an already-populated effort list is never replaced, so a
+capability-derived `Some([])` becomes `Some(values)` when the show response
+carries `thinking.values`, and a missing advertised default is filled from
+`thinking.default`. Without mappable `thinking` metadata the capability
+fallback applies (`thinking` capability → `Some([])`, no `capabilities` key →
+`None`). An explicit Ollama effort is sent as the OpenAI-compatible
+`reasoning_effort` field; models without a mappable `thinking` object expose
+no selectable effort alternatives and use Ollama's own default. The Ollama
+base URL must be the server origin and must not include the `/v1` path.
 
 `OpenRouterProvider` likewise accepts only the OpenRouter origin and derives
 `/api/v1` before constructing the shared OpenAI-compatible transport. A
@@ -110,7 +121,15 @@ per-request `HeaderMap` that `dump_request` records, so they do not appear in
 `ModelInfo.reasoning_efforts` normalizes provider metadata into three states:
 `None` means no advertised reasoning support, `Some([])` means supported
 reasoning without selectable alternatives, and `Some(values)` means supported
-reasoning with those alternatives. The `/models` picker adds an implicit
+reasoning with those alternatives. `ModelInfo.reasoning_default` carries the
+provider-advertised default effort — Ollama's `thinking.default`,
+OpenRouter's `reasoning.default_effort` — independently of those states: it
+is rendered only in the picker's default slot (`reasoning: default
+(medium)`) and never changes what counts as advertised. OpenRouter's
+`reasoning` object also carries `mandatory` and `default_enabled`, which Ylva
+intentionally does not consume (YAGNI): they do not change what is sent, and
+`default_effort` already surfaces the fallback behavior. The `/models` picker
+adds an implicit
 provider-default choice before `values`; the chosen explicit value is carried
 in `ProviderModelOption` and applied when the selection is confirmed. Picker
 rows render available context lengths as `context: <size>` labels using
@@ -126,12 +145,32 @@ segment with a fixed letter order (`[I]`, `[F]`, or `[IF]`) when a row's
 model advertises a non-text input modality; unknown and known text-only
 models get no marker segment. The selected `ModelInfo` is copied into the
 shared `EngineRuntimeConfig` when `/models` confirms a selection.
-Independently, `EngineImpl::hydrate_input_modalities` discovers the
-configured model's modalities from the provider catalog once per engine,
-lazily before the first chat request (and skips the fetch when a `/models`
-selection already supplied them); a failed attempt logs a warning and is
-not retried, so only discovery failure or absent catalog data leaves an
-initially configured model unknown until a `/models` selection resolves it.
+Independently, `EngineImpl::hydrate_catalog_metadata` discovers the
+configured model's catalog metadata — input modalities plus the
+profile-seeded reasoning effort — from the provider catalog once per engine,
+lazily before the first chat request; it skips the fetch when a `/models`
+selection already supplied the modalities, because such a selection also
+validated the effort itself, and a failed attempt logs a warning and is not
+retried, so only discovery failure or absent catalog data leaves an initially
+configured model's modalities unknown until a `/models` selection resolves
+them. The same pass validates the profile `reasoning` value against the
+model's advertised efforts with the rule shared with the `/models` switch
+(`ModelInfo::advertises_reasoning_effort`): an effort that is a member of the
+model's `Some(values)` list is kept silently; an effort the model does not
+advertise — including `None`/`Some([])` efforts, which expose no sendable
+alternative — is dropped to the provider default with a warning naming the
+model, the effort, and the advertised alternatives; a model missing from the
+catalog, or a failed catalog fetch, keeps the value unvalidated (logged at
+debug and warning level respectively), mirroring modality hydration's
+one-shot posture. A dropped effort is a user-facing event, not just a log
+line: `EngineImpl` queues a one-shot notice that
+`Engine::take_pending_notices` hands out (the router drains every configured
+engine, so a connection switch cannot strand one), the agent loop drains it
+in `start_request` right after `engine.chat(...)` resolves and forwards it
+as `UiUpdate::Notice { text, run_id }` before `StreamStarted`, and each
+driver surfaces it — the TUI as a routed `ChatEntry::Notice` handled directly
+by `process_one_update` like `UiUpdate::ToolError` (no `DomainEvent`), the
+CLI as a `---[ Notice ]---` marker printed ahead of the response.
 Both the `named engine selected for chat request` and `chat request
 started` log lines carry `reasoning_effort` and `input_modalities` fields
 rendered by `format_reasoning_effort_for_log` /
@@ -497,7 +536,11 @@ disable or enable ANSI styling for that output path.
 Tool-pending and tool-done bodies print the event's `content_sections`
 (`--- <label> ---` blocks), so a labeled `bash` call surfaces its
 `Label`/`Command` sections in headless output with no CLI-specific code;
-the CLI `ToolError` arm prints only the error line.
+the CLI `ToolError` arm prints only the error line. `UiUpdate::Notice` —
+for example a profile reasoning effort the pre-chat validation dropped —
+prints a `---[ Notice ]---` marker (theme `NOTICE_COLOR`) plus the notice
+text ahead of the response, tagged `[child <id>] notice: …` when a child
+loop raised it, and never ends the turn.
 
 ## Store & persistence
 
@@ -1020,10 +1063,12 @@ the selected connection, model, and effort;
 draft-clear/abort ladder), since leaving the draft in place would make the
 next per-action `refresh_slash_overlay` recompute reopen the very overlay
 just dismissed.
-Model rows identify reasoning as unavailable, at the default, or adjustable
-with a `⚙` marker, and append `[I]`/`[F]` input-modality markers when the
-model advertises a non-text input modality. The user-facing fixed value is
-rendered as `default`. The
+Model rows identify reasoning as unavailable, at the default (naming the
+provider-advertised default when one is known, e.g. `default (medium)`), or
+adjustable with a `⚙` marker, and append `[I]`/`[F]` input-modality markers
+when the model advertises a non-text input modality. The user-facing fixed
+value is rendered as `default`, suffixed with the advertised default in
+parentheses when the catalog provides one. The
 footer switches from the normal `enter send` hint to the controls for the
 active command overlay, including the model picker's reasoning, switch, and
 cancel keys.

@@ -80,12 +80,33 @@ pub struct ModelInfo {
     /// - `Some(values)` means that reasoning is supported and
     ///   `values` contains the selectable effort values.
     pub reasoning_efforts: Option<Vec<String>>,
+    /// Provider-advertised default reasoning effort, when the provider
+    /// exposes one; `None` otherwise.
+    ///
+    /// Rendered only in the picker's default slot; it never changes the
+    /// [`ModelInfo::reasoning_efforts`] three-state semantics.
+    pub reasoning_default: Option<String>,
     /// Provider-advertised input modalities.
     ///
     /// `None` means that the provider did not advertise modality data.
     /// `Some([])` is a known text-only model. Supported values are `Image`
     /// and `File`; unknown provider modality names are ignored.
     pub input_modalities: Option<Vec<InputModality>>,
+}
+
+impl ModelInfo {
+    /// Whether `reasoning_effort` is one of the advertised selectable
+    /// efforts — the single membership rule shared by the `/models` switch
+    /// validation and the pre-first-chat profile validation.
+    ///
+    /// Only a populated [`ModelInfo::reasoning_efforts`] `Some(values)` list
+    /// containing the effort is sendable: `None` (not advertised) and
+    /// `Some([])` (supported without alternatives) both fail.
+    pub(crate) fn advertises_reasoning_effort(&self, reasoning_effort: &str) -> bool {
+        self.reasoning_efforts
+            .as_ref()
+            .is_some_and(|efforts| efforts.iter().any(|effort| effort == reasoning_effort))
+    }
 }
 
 /// Provider-neutral input modality advertised for a model.

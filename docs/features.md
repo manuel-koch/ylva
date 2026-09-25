@@ -165,6 +165,15 @@ three provider-neutral states:
 - `Some(values)`: reasoning is supported and `values` are the selectable
   effort alternatives.
 
+Ollama models that advertise the `/api/show` `thinking` metadata expose
+concrete thinking levels as `Some(values)` (booleans map to `none`/`high`,
+level names pass through); models that only advertise the `thinking`
+capability keep `Some([])`.
+
+When a provider also advertises a default effort (Ollama's `thinking.default`,
+OpenRouter's `reasoning.default_effort`), the picker's default slot renders it
+as `default (medium)`; without one the slot stays `default`.
+
 When alternatives are available, `←`/`→` in the `/models` picker cycles
 between the provider default and the advertised values for the highlighted
 model. Each picker row labels reasoning as `unavailable`, `default`, or the
@@ -173,7 +182,12 @@ respond to `←`/`→` are distinguishable. While an overlay is open, the footer
 replaces the normal send hint with the controls for that overlay.
 `Enter` applies both the model and the selected effort to subsequent requests.
 The selected effort is runtime state and is not added to the session's
-provider/model metadata.
+provider/model metadata. A profile's `reasoning` value is validated against
+the catalog once, lazily before the first chat: a value the model does not
+advertise is dropped to the provider default and surfaced as a notice above
+the first response — a transcript notice in the TUI, a `---[ Notice ]---`
+marker in headless output — alongside a `tracing` warning in the log (see
+[configuration](./configuration.md#profile-configuration)).
 
 - Every outbound HTTP request (model listing, chat/SSE, and Ollama metadata
   calls) carries a dedicated `User-Agent: ylva/<version>` header so remote

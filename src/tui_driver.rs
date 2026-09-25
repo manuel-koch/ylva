@@ -292,9 +292,12 @@ fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
             status: status.clone(),
             result: result.clone(),
         }),
-        // ToolError and ToolAutoDenied are handled directly by the Driver via
-        // AppState; no corresponding DomainEvent exists in the Presenter's surface.
-        UiUpdate::ToolError { .. } | UiUpdate::ToolAutoDenied { .. } => None,
+        // ToolError, ToolAutoDenied and Notice are handled directly by the
+        // Driver via AppState; no corresponding DomainEvent exists in the
+        // Presenter's surface.
+        UiUpdate::ToolError { .. } | UiUpdate::ToolAutoDenied { .. } | UiUpdate::Notice { .. } => {
+            None
+        }
     }
 }
 
@@ -627,6 +630,8 @@ fn apply_model_list_result(
                         context_length: Some(effective_context_length),
                         reasoning_efforts: catalog_model
                             .and_then(|model| model.reasoning_efforts.clone()),
+                        reasoning_default: catalog_model
+                            .and_then(|model| model.reasoning_default.clone()),
                         input_modalities: catalog_model
                             .and_then(|model| model.input_modalities.clone()),
                     };
@@ -840,6 +845,10 @@ async fn process_one_update(
             reason.clone(),
             *run_id,
         );
+        return ActionOutcome::Continue;
+    }
+    if let UiUpdate::Notice { text, run_id } = update {
+        state.push_notice_to(*run_id, text.clone());
         return ActionOutcome::Continue;
     }
     // Record which child (if any) raised this pending approval *before*
@@ -2412,6 +2421,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn engine_notices_render_as_transcript_notices() {
+        let (mut state, mut textarea, cmd_tx, _cmd_rx) = setup();
+        let textarea_context = textarea_ctx_from(&textarea);
+
+        let outcome = process_one_update(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            &textarea_context,
+            &UiUpdate::Notice {
+                text: "Model mock/test-model does not advertise reasoning effort \"max\"; using the provider default.".to_string(),
+                run_id: None,
+            },
+            &mut MouseDrag::default(),
+            &mut NoopClipboard,
+            &mut PendingRunIds::default(),
+        )
+        .await;
+
+        assert_eq!(outcome, ActionOutcome::Continue);
+        let Some(ChatEntry::Notice { text }) = state.chat_entries.last() else {
+            panic!("expected a notice bubble, got {:?}", state.chat_entries);
+        };
+        assert!(
+            text.contains("does not advertise reasoning effort"),
+            "the notice must carry the engine's wording: {text}"
+        );
+    }
+
+    #[tokio::test]
     async fn busy_ctrl_c_with_draft_clears_input_without_stopping() {
         let (mut state, _, cmd_tx, mut cmd_rx) = setup();
         state.mode = TuiMode::Streaming;
@@ -2692,6 +2731,7 @@ mod tests {
                         id: (*id).to_string(),
                         context_length: None,
                         reasoning_efforts: None,
+                        reasoning_default: None,
                         input_modalities: None,
                     })
                     .collect(),
@@ -2747,6 +2787,7 @@ mod tests {
                         } else {
                             None
                         },
+                        reasoning_default: None,
                         input_modalities: None,
                     })
                     .collect(),
@@ -3207,6 +3248,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn models_lists_an_engine_shortcut_with_its_catalog_reasoning_default() {
+        // The catalog's provider-advertised default effort must reach the
+        // shortcut row, so its default slot reads `default (medium)` instead
+        // of a bare `default`.
+        let (mut state, _textarea, cmd_tx, _cmd_rx) = setup();
+        let mut stub = StubEngine::with_named_engine(
+            &["small", "thinking"],
+            "small",
+            "openrouter",
+            "thinking",
+            &["low", "high"],
+            None,
+            Some(32_000),
+            None,
+        );
+        for model in Arc::get_mut(&mut stub)
+            .expect("the stub engine is uniquely owned")
+            .models
+            .iter_mut()
+        {
+            if model.id == "thinking" {
+                model.reasoning_default = Some("medium".to_string());
+            }
+        }
+        let engine: Arc<dyn Engine> = stub;
+
+        execute_slash_effects(
+            &mut state,
+            vec![Effect::ListModels { filter: None }],
+            &engine,
+            &cmd_tx,
+        )
+        .await;
+
+        let SlashOverlay::ModelPicker { choices, .. } = &state.slash_overlay else {
+            panic!("expected a model picker, got {:?}", state.slash_overlay);
+        };
+        let shortcut = choices
+            .iter()
+            .find(|choice| choice.engine_name.is_some())
+            .expect("the named engine must appear as a shortcut");
+        assert_eq!(
+            shortcut.selection.model.reasoning_default,
+            Some("medium".to_string()),
+            "the shortcut's model must carry the catalog's advertised default effort"
+        );
+        assert_eq!(
+            shortcut.label,
+            "openrouter → stub/thinking  context: 31kb  reasoning: default (medium) ⚙",
+            "the shortcut's default slot must name the advertised default"
+        );
+    }
+
+    #[tokio::test]
     async fn models_lists_an_engine_shortcut_falling_back_to_the_catalogs_context_length() {
         // When the profile's `[engines.<name>]` table doesn't set
         // `context_length`, the shortcut must show the provider's advertised
@@ -3457,6 +3552,7 @@ mod tests {
                 id: "thinking".to_string(),
                 context_length: None,
                 reasoning_efforts: Some(vec!["low".to_string(), "high".to_string()]),
+                reasoning_default: None,
                 input_modalities: None,
             },
             reasoning_effort: None,

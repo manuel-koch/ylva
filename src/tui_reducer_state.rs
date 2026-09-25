@@ -1169,13 +1169,25 @@ fn format_model_choice_label(
             format_context_length(context_length)
         ));
     }
+    // The provider-advertised default effort, rendered only in the picker's
+    // default slot as `default (X)`.
+    let provider_default = option
+        .model
+        .reasoning_default
+        .as_deref()
+        .map(|reasoning_default| format!(" ({reasoning_default})"))
+        .unwrap_or_default();
     match option.model.reasoning_efforts.as_deref() {
         None => label.push_str("  reasoning: unavailable"),
-        Some([]) => label.push_str("  reasoning: default"),
-        Some(_) => label.push_str(&format!(
-            "  reasoning: {} ⚙",
-            option.reasoning_effort.as_deref().unwrap_or("default")
-        )),
+        Some([]) => label.push_str(&format!("  reasoning: default{provider_default}")),
+        Some(_) => match option.reasoning_effort.as_deref() {
+            Some(reasoning_effort) => {
+                label.push_str(&format!("  reasoning: {reasoning_effort} ⚙"));
+            }
+            None => {
+                label.push_str(&format!("  reasoning: default{provider_default} ⚙"));
+            }
+        },
     }
     if let Some(modality_markers) =
         format_input_modality_markers(option.model.input_modalities.as_deref())
@@ -2316,7 +2328,15 @@ impl AppState {
 
     /// Append an informational bubble produced by a slash command.
     pub fn push_notice(&mut self, text: String) {
-        self.chat_entries.push(ChatEntry::Notice { text });
+        self.push_notice_to(None, text);
+    }
+
+    /// Push a transcript notice into the root transcript, or — when
+    /// `run_id` identifies a child — into that child's transcript, the same
+    /// routing [`DomainEvent`]s use via [`AppState::target_messages_mut`].
+    pub fn push_notice_to(&mut self, run_id: Option<Uuid>, text: String) {
+        self.target_messages_mut(run_id)
+            .push(ChatEntry::Notice { text });
     }
 
     /// Recompute the suggestion overlay from the live draft.
@@ -3380,6 +3400,7 @@ mod tests {
                     id: model_id.to_string(),
                     context_length: None,
                     reasoning_efforts: None,
+                    reasoning_default: None,
                     input_modalities: None,
                 },
                 reasoning_effort: None,
@@ -3434,6 +3455,7 @@ mod tests {
                         id: label.to_string(),
                         context_length: None,
                         reasoning_efforts: None,
+                        reasoning_default: None,
                         input_modalities: None,
                     },
                     reasoning_effort: None,
@@ -3481,6 +3503,7 @@ mod tests {
                 id: "model".to_string(),
                 context_length: None,
                 reasoning_efforts,
+                reasoning_default: None,
                 input_modalities: None,
             },
             reasoning_effort: None,
@@ -3501,6 +3524,47 @@ mod tests {
     }
 
     #[test]
+    fn model_choice_label_shows_the_provider_advertised_default_effort() {
+        let option = |reasoning_efforts, reasoning_effort| ProviderModelOption {
+            provider_connection: "stub".to_string(),
+            model: crate::llm::ModelInfo {
+                id: "model".to_string(),
+                context_length: None,
+                reasoning_efforts,
+                reasoning_default: Some("medium".to_string()),
+                input_modalities: None,
+            },
+            reasoning_effort,
+        };
+
+        assert_eq!(
+            model_choice_label(&option(Some(vec![]), None), false),
+            "stub/model  reasoning: default (medium)"
+        );
+        assert_eq!(
+            model_choice_label(
+                &option(Some(vec!["low".to_string(), "high".to_string()]), None),
+                false
+            ),
+            "stub/model  reasoning: default (medium) ⚙",
+            "the default slot of a selectable model names the advertised default"
+        );
+        assert_eq!(
+            model_choice_label(
+                &option(Some(vec!["low".to_string()]), Some("low".to_string())),
+                false
+            ),
+            "stub/model  reasoning: low ⚙",
+            "an explicit effort must not show the default suffix"
+        );
+        assert_eq!(
+            model_choice_label(&option(None, None), false),
+            "stub/model  reasoning: unavailable",
+            "an unavailable model must ignore the advertised default"
+        );
+    }
+
+    #[test]
     fn model_choice_label_keeps_context_and_reasoning_metadata_visible() {
         let option = ProviderModelOption {
             provider_connection: "openrouter".to_string(),
@@ -3508,6 +3572,7 @@ mod tests {
                 id: "openai/gpt-oss-120b".to_string(),
                 context_length: Some(131_072),
                 reasoning_efforts: Some(vec!["low".to_string()]),
+                reasoning_default: None,
                 input_modalities: None,
             },
             reasoning_effort: None,
@@ -3527,6 +3592,7 @@ mod tests {
                 id: "model".to_string(),
                 context_length: Some(context_length),
                 reasoning_efforts: None,
+                reasoning_default: None,
                 input_modalities: None,
             },
             reasoning_effort: None,
@@ -3554,6 +3620,7 @@ mod tests {
                 id: "model".to_string(),
                 context_length: None,
                 reasoning_efforts: None,
+                reasoning_default: None,
                 input_modalities,
             },
             reasoning_effort: None,

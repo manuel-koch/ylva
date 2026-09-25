@@ -29,7 +29,9 @@ use ylva::{
 };
 
 use common::collect_until;
-use common::mock_llm_server::{content_frame, tool_call_frame, MockLlmConfig, MockLlmServer};
+use common::mock_llm_server::{
+    content_frame, tool_call_frame, MockLlmConfig, MockLlmServer, OllamaThinking,
+};
 
 /// A provider (`Provider` trait object) pointed at a running [`MockLlmServer`]
 /// with a fixed model. Trait-typed so consumers are decoupled from the concrete
@@ -199,6 +201,106 @@ async fn ollama_details_map_vision_to_image_without_file_support() {
         .as_ref()
         .expect("known capabilities")
         .contains(&InputModality::File));
+}
+
+/// A fixture exercising Ollama's `/api/show` `thinking` metadata: the
+/// `thinking` capability advertised on `/api/tags` first yields `Some([])`,
+/// which the show response must upgrade to the selectable levels plus the
+/// advertised default.
+#[tokio::test]
+async fn ollama_show_thinking_levels_upgrade_the_capability_derived_catalog() {
+    let config = MockLlmConfig {
+        models: vec!["qwen3:8b".to_string()],
+        ollama_capabilities: Some(vec!["completion".to_string(), "thinking".to_string()]),
+        ollama_thinking: Some(OllamaThinking {
+            values: vec![
+                serde_json::json!(false),
+                serde_json::json!("medium"),
+                serde_json::json!("xhigh"),
+            ],
+            default: serde_json::json!("medium"),
+        }),
+        ..Default::default()
+    };
+    let server = MockLlmServer::start(config).await.expect("bind failed");
+    let provider = OllamaProvider::new(
+        "ollama-local".to_string(),
+        server.base_url(),
+        "qwen3:8b".to_string(),
+        None,
+    );
+
+    let models = provider.list_models().await.expect("catalog response");
+
+    assert_eq!(
+        models[0].reasoning_efforts,
+        Some(vec![
+            "none".to_string(),
+            "medium".to_string(),
+            "xhigh".to_string(),
+        ]),
+        "the capability-derived Some([]) must be upgraded by thinking.values"
+    );
+    assert_eq!(models[0].reasoning_default, Some("medium".to_string()));
+}
+
+/// The configured reasoning effort reaches the wire: Ollama's
+/// OpenAI-compatible chat endpoint receives the top-level
+/// `reasoning_effort` field, and the value survives the engine's pre-chat
+/// catalog validation because the mock advertises it as a level.
+#[tokio::test]
+async fn ollama_chat_request_carries_the_runtime_reasoning_effort() {
+    let config = MockLlmConfig {
+        models: vec!["qwen3:8b".to_string()],
+        ollama_capabilities: Some(vec!["completion".to_string(), "thinking".to_string()]),
+        ollama_thinking: Some(OllamaThinking {
+            values: vec![
+                serde_json::json!("low"),
+                serde_json::json!("medium"),
+                serde_json::json!("high"),
+            ],
+            default: serde_json::json!("low"),
+        }),
+        frames: vec![content_frame("ok")],
+        end_after_frames: true,
+        ..Default::default()
+    };
+    let server = MockLlmServer::start(config).await.expect("bind failed");
+    let provider = Arc::new(OllamaProvider::new(
+        "ollama".to_string(),
+        server.base_url(),
+        "qwen3:8b".to_string(),
+        None,
+    ));
+    let engine = EngineImpl::new(
+        provider,
+        EngineConfig {
+            provider_connection: "ollama".to_string(),
+            model: "qwen3:8b".to_string(),
+            temperature: None,
+            context_length: None,
+            api_base_url: Some(server.base_url()),
+            api_key: None,
+            reasoning: Some("medium".to_string()),
+        },
+    );
+
+    let mut receiver = engine
+        .chat(Vec::new(), Vec::new(), CancellationToken::new())
+        .await
+        .expect("chat request");
+    let _ = drain_text_until_done(&mut receiver).await;
+
+    let request = server
+        .request_bodies()
+        .into_iter()
+        .filter_map(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+        .find(|value| value.get("messages").is_some())
+        .expect("captured chat request");
+    assert_eq!(
+        request["reasoning_effort"], "medium",
+        "the top-level reasoning_effort field must be serialized: {request}"
+    );
 }
 
 fn image_tool_message(encoded: &str) -> Message {

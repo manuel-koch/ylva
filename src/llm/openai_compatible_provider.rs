@@ -638,6 +638,7 @@ fn parse_model_list(body: &serde_json::Value) -> Vec<crate::llm::ModelInfo> {
                     .and_then(serde_json::Value::as_u64)
                     .map(|length| length as usize),
                 reasoning_efforts: parse_reasoning_efforts(entry),
+                reasoning_default: parse_reasoning_default(entry),
                 input_modalities: parse_input_modalities(entry),
             })
         })
@@ -680,6 +681,21 @@ fn parse_reasoning_efforts(entry: &serde_json::Value) -> Option<Vec<String>> {
     )
 }
 
+/// Read an entry's provider-advertised default effort
+/// (`reasoning.default_effort`, OpenRouter's shape) — `None` when absent or
+/// not a non-empty string.
+///
+/// The same `reasoning` object also carries `mandatory` and
+/// `default_enabled`, which Ylva intentionally does not consume (see
+/// `docs/implementation-notes.md`).
+fn parse_reasoning_default(entry: &serde_json::Value) -> Option<String> {
+    entry
+        .pointer("/reasoning/default_effort")?
+        .as_str()
+        .filter(|effort| !effort.is_empty())
+        .map(String::from)
+}
+
 #[cfg(test)]
 mod tests {
     use tokio::io::AsyncWriteExt;
@@ -712,6 +728,7 @@ mod tests {
                 id: "openai/gpt-oss-120b".to_string(),
                 context_length: Some(131072),
                 reasoning_efforts: None,
+                reasoning_default: None,
                 input_modalities: None,
             }]
         );
@@ -746,6 +763,49 @@ mod tests {
                 Some(Vec::new()),
                 None,
             ]
+        );
+    }
+
+    #[test]
+    fn parse_model_list_extracts_the_provider_advertised_default_effort() {
+        let body = serde_json::json!({
+            "data": [
+                {
+                    "id": "provider/with-default",
+                    "reasoning": {
+                        "supported_efforts": ["low", "high"],
+                        "default_effort": "high"
+                    }
+                },
+                {
+                    "id": "provider/without-default",
+                    "reasoning": {"supported_efforts": ["low"]}
+                },
+                {
+                    "id": "provider/non-string-default",
+                    "reasoning": {"default_effort": 3}
+                },
+                {
+                    "id": "provider/empty-default",
+                    "reasoning": {"default_effort": ""}
+                },
+                {"id": "provider/no-reasoning"}
+            ]
+        });
+
+        let models = parse_model_list(&body);
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.reasoning_default.clone())
+                .collect::<Vec<_>>(),
+            vec![Some("high".to_string()), None, None, None, None,],
+            "only a non-empty string default_effort becomes a reasoning_default"
+        );
+        assert_eq!(
+            models[0].reasoning_efforts,
+            Some(vec!["low".to_string(), "high".to_string()]),
+            "supported_efforts parsing must be unchanged"
         );
     }
 

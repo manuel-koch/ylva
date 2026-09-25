@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use futures::future::{join_all, BoxFuture};
 use serde::Deserialize;
@@ -79,9 +79,12 @@ pub struct EngineConfig {
     #[serde(default)]
     pub api_key: Option<String>,
     /// Initial explicit reasoning effort, or `None` to use the provider's
-    /// own default. Applied once at construction — later changes go through
-    /// `/models`, which validates the effort against the model's advertised
-    /// options before switching.
+    /// own default. Validated once, lazily before the first chat, against
+    /// the model catalog: an effort the catalog proves is not advertised is
+    /// dropped to the provider default with a warning (unverifiable cases —
+    /// model absent, catalog fetch failed — keep the value). Later changes
+    /// go through `/models`, which validates the effort against the model's
+    /// advertised options before switching.
     #[serde(default)]
     pub reasoning: Option<String>,
 }
@@ -366,16 +369,30 @@ pub trait Engine: Send + Sync {
     /// Update the active model's provider-advertised input modalities.
     fn set_input_modalities(&self, _input_modalities: Option<Vec<InputModality>>) {}
 
-    /// Discover the active model's provider-advertised input modalities
-    /// from the provider catalog, at most once per engine.
+    /// Discover the active model's provider-advertised catalog metadata —
+    /// input modalities and a reasoning-effort validation pass — from the
+    /// provider catalog, at most once per engine.
     ///
     /// The default is a no-op (there is nothing to discover).
     /// [`EngineImpl`] performs the discovery lazily before the first chat
     /// request, so an initially configured model gains its modality state
-    /// without requiring a `/models` re-selection. Discovery failures leave
-    /// the state `unknown`; a later `/models` selection still resolves it.
-    fn hydrate_input_modalities(&self) -> BoxFuture<'_, ()> {
+    /// without requiring a `/models` re-selection, and a profile-configured
+    /// reasoning effort is validated against the catalog exactly once.
+    /// Discovery failures leave the modality state `unknown`; a later
+    /// `/models` selection still resolves it.
+    fn hydrate_catalog_metadata(&self) -> BoxFuture<'_, ()> {
         Box::pin(async {})
+    }
+
+    /// Drain engine-generated notices that have not been surfaced yet.
+    ///
+    /// The engine keeps such notices until a driver asks for them:
+    /// [`EngineImpl`] records one when the pre-chat validation drops a
+    /// profile reasoning effort, and the agent loop forwards whatever is
+    /// pending before the stream starts. The default is empty — there is
+    /// nothing to surface.
+    fn take_pending_notices(&self) -> Vec<String> {
+        Vec::new()
     }
 
     /// Activate the engine and model represented by a catalog option.
@@ -391,13 +408,8 @@ pub trait Engine: Send + Sync {
             option.provider_connection
         );
         if let Some(reasoning_effort) = option.reasoning_effort.as_deref() {
-            let supported_efforts = option
-                .model
-                .reasoning_efforts
-                .as_ref()
-                .is_some_and(|efforts| efforts.iter().any(|effort| effort == reasoning_effort));
             anyhow::ensure!(
-                supported_efforts,
+                option.model.advertises_reasoning_effort(reasoning_effort),
                 "model '{}' does not advertise reasoning effort '{}'",
                 option.model.id,
                 reasoning_effort
@@ -510,10 +522,11 @@ impl Engine for EngineRouter {
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
         Box::pin(async move {
             let (engine_name, engine) = self.active_engine_entry();
-            // Discover the active model's modalities before the selection is
-            // logged and before the request is serialized, so both log lines
-            // and the attachment projection see the hydrated state.
-            engine.hydrate_input_modalities().await;
+            // Discover the active model's catalog metadata (modalities and
+            // the profile reasoning effort) before the selection is logged
+            // and before the request is serialized, so both log lines and
+            // the attachment projection see the hydrated state.
+            engine.hydrate_catalog_metadata().await;
             let config = engine.config();
             tracing::debug!(
                 engine = %engine_name,
@@ -550,6 +563,16 @@ impl Engine for EngineRouter {
 
     fn input_modalities(&self) -> Option<Vec<InputModality>> {
         self.active_engine().input_modalities()
+    }
+
+    /// Drain pending notices from every configured engine, not just the
+    /// active one: a chat may have hydrated one connection while a `/models`
+    /// switch made another connection active before the notice was taken.
+    fn take_pending_notices(&self) -> Vec<String> {
+        self.engines
+            .values()
+            .flat_map(|engine| engine.take_pending_notices())
+            .collect()
     }
 
     fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
@@ -651,11 +674,18 @@ pub struct EngineImpl {
     config: EngineConfig,
     /// Shared with providers that support runtime engine settings.
     runtime_config: EngineRuntimeConfigHandle,
-    /// One-shot guard: the active model's catalog modalities are discovered
-    /// at most once per engine instance, whether the attempt succeeds or
-    /// fails. A `/models` switch writes the state directly and does not
-    /// need this guard.
-    input_modalities_hydrated: AtomicBool,
+    /// One-shot guard: the active model's catalog metadata — input
+    /// modalities plus the profile reasoning-effort validation — is
+    /// discovered at most once per engine instance, whether the attempt
+    /// succeeds or fails. A `/models` switch writes the state directly and
+    /// validates the effort itself, so it does not need this guard.
+    catalog_hydrated: AtomicBool,
+    /// One-shot notices accumulated by the engine — currently only a
+    /// profile reasoning effort dropped by the pre-chat validation — and
+    /// handed out via [`Engine::take_pending_notices`], so the agent loop
+    /// can surface them as transcript notices without the engine knowing
+    /// anything about the UI.
+    pending_notices: Mutex<Vec<String>>,
 }
 
 impl EngineImpl {
@@ -671,7 +701,67 @@ impl EngineImpl {
             provider,
             config,
             runtime_config,
-            input_modalities_hydrated: AtomicBool::new(false),
+            catalog_hydrated: AtomicBool::new(false),
+            pending_notices: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Validate the current (profile-seeded) reasoning effort against the
+    /// catalog, once, lazily before the first chat.
+    ///
+    /// - `active_model` advertises the effort as a member of its
+    ///   `Some(values)` list → keep it silently;
+    /// - `active_model` is present but does not advertise it (including
+    ///   `None` / `Some([])`, which advertise no sendable alternative) →
+    ///   drop to the provider default with a warning, strictly matching the
+    ///   `/models` switch rule, and queue a notice for
+    ///   [`Engine::take_pending_notices`];
+    /// - `active_model` is absent from the catalog → keep the effort (the
+    ///   catalog cannot disprove it) and log at debug level.
+    ///
+    /// A failed catalog fetch never reaches this method — the hydration
+    /// caller keeps its existing warn-and-set-guard behavior, so the effort
+    /// is then validated only by a later `/models` switch.
+    fn validate_profile_reasoning_effort(&self, active_model: Option<&ModelInfo>) {
+        let Some(reasoning_effort) = self.reasoning_effort() else {
+            return;
+        };
+        let Some(model) = active_model else {
+            tracing::debug!(
+                model = %self.config().model,
+                reasoning_effort = %reasoning_effort,
+                "profile reasoning effort kept: the catalog does not list the active model"
+            );
+            return;
+        };
+        if model.advertises_reasoning_effort(&reasoning_effort) {
+            return;
+        }
+        tracing::warn!(
+            model = %model.id,
+            reasoning_effort = %reasoning_effort,
+            advertised_reasoning_efforts = ?model.reasoning_efforts,
+            "profile reasoning effort is not advertised by the model; \
+             falling back to the provider default"
+        );
+        match self.set_reasoning_effort(None) {
+            Ok(()) => {
+                self.pending_notices
+                    .lock()
+                    .expect("the engine pending-notices lock is poisoned")
+                    .push(format!(
+                        "Model {}/{} does not advertise reasoning effort \"{}\"; \
+                         using the provider default.",
+                        self.config.provider_connection, model.id, reasoning_effort
+                    ));
+            }
+            Err(error) => {
+                tracing::warn!(
+                    model = %model.id,
+                    %error,
+                    "failed to reset the unadvertised profile reasoning effort"
+                );
+            }
         }
     }
 }
@@ -684,7 +774,7 @@ impl Engine for EngineImpl {
         cancel: CancellationToken,
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
         Box::pin(async move {
-            self.hydrate_input_modalities().await;
+            self.hydrate_catalog_metadata().await;
             self.provider.chat(messages, tools, cancel).await
         })
     }
@@ -745,24 +835,23 @@ impl Engine for EngineImpl {
             .input_modalities = input_modalities;
     }
 
-    fn hydrate_input_modalities(&self) -> BoxFuture<'_, ()> {
+    fn hydrate_catalog_metadata(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move {
-            if self.input_modalities_hydrated.load(Ordering::Acquire) {
+            if self.catalog_hydrated.load(Ordering::Acquire) {
                 return;
             }
             if self.input_modalities().is_some() {
-                // A `/models` selection already supplied the state.
-                self.input_modalities_hydrated
-                    .store(true, Ordering::Release);
+                // A `/models` selection already supplied the state — and it
+                // validated the reasoning effort, so neither needs a fetch.
+                self.catalog_hydrated.store(true, Ordering::Release);
                 return;
             }
             let active_model = self.config().model;
             match self.list_models().await {
                 Ok(models) => {
-                    if let Some(input_modalities) = models
-                        .iter()
-                        .find(|model| model.id == active_model)
-                        .and_then(|model| model.input_modalities.clone())
+                    let active_model_info = models.iter().find(|model| model.id == active_model);
+                    if let Some(input_modalities) =
+                        active_model_info.and_then(|model| model.input_modalities.clone())
                     {
                         self.set_input_modalities(Some(input_modalities));
                         tracing::debug!(
@@ -773,6 +862,7 @@ impl Engine for EngineImpl {
                             "active model input modalities discovered"
                         );
                     }
+                    self.validate_profile_reasoning_effort(active_model_info);
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -783,9 +873,17 @@ impl Engine for EngineImpl {
                     );
                 }
             }
-            self.input_modalities_hydrated
-                .store(true, Ordering::Release);
+            self.catalog_hydrated.store(true, Ordering::Release);
         })
+    }
+
+    fn take_pending_notices(&self) -> Vec<String> {
+        std::mem::take(
+            &mut *self
+                .pending_notices
+                .lock()
+                .expect("the engine pending-notices lock is poisoned"),
+        )
     }
 
     fn set_reasoning_effort(&self, reasoning_effort: Option<&str>) -> anyhow::Result<()> {
@@ -842,6 +940,7 @@ mod tests {
                         id: (*id).to_string(),
                         context_length: None,
                         reasoning_efforts: None,
+                        reasoning_default: None,
                         input_modalities: None,
                     })
                     .collect(),
@@ -893,8 +992,8 @@ mod tests {
         }
     }
 
-    /// Provider stub whose catalog can carry input modalities, for exercising
-    /// [`EngineImpl::hydrate_input_modalities`]. `chat` always fails — the
+    /// Provider stub whose catalog can carry input modalities and reasoning
+    /// efforts, for exercising [`EngineImpl::hydrate_catalog_metadata`]. `chat` always fails — the
     /// hydration tests only need the catalog fetch to run.
     struct CatalogProvider {
         models: Vec<ModelInfo>,
@@ -959,8 +1058,32 @@ mod tests {
             id: id.to_string(),
             context_length: None,
             reasoning_efforts: None,
+            reasoning_default: None,
             input_modalities,
         }
+    }
+
+    fn model_info_with_reasoning_efforts(
+        id: &str,
+        reasoning_efforts: Option<Vec<String>>,
+    ) -> ModelInfo {
+        ModelInfo {
+            id: id.to_string(),
+            context_length: None,
+            reasoning_efforts,
+            reasoning_default: None,
+            input_modalities: None,
+        }
+    }
+
+    /// An engine seeded with a profile `reasoning` effort on top of the
+    /// standard `test-model` engine config.
+    fn engine_with_profile_reasoning(provider: Arc<dyn Provider>, reasoning: &str) -> EngineImpl {
+        let config = EngineConfig {
+            reasoning: Some(reasoning.to_string()),
+            ..make_engine_config()
+        };
+        EngineImpl::new(provider, config)
     }
 
     #[test]
@@ -1153,6 +1276,7 @@ model = "local"
                     id: "vision-model".to_string(),
                     context_length: None,
                     reasoning_efforts: None,
+                    reasoning_default: None,
                     input_modalities: Some(vec![InputModality::Image]),
                 },
                 reasoning_effort: None,
@@ -1167,6 +1291,7 @@ model = "local"
                     id: "text-model".to_string(),
                     context_length: None,
                     reasoning_efforts: None,
+                    reasoning_default: None,
                     input_modalities: Some(vec![]),
                 },
                 reasoning_effort: None,
@@ -1257,7 +1382,7 @@ model = "local"
     }
 
     #[test]
-    fn engine_impl_hydrates_input_modalities_before_the_first_chat() {
+    fn engine_impl_hydrates_catalog_metadata_before_the_first_chat() {
         crate::test_support::run_locked(async {
             let provider = Arc::new(CatalogProvider::new(vec![model_info_with_modalities(
                 "test-model",
@@ -1287,8 +1412,8 @@ model = "local"
             let engine =
                 EngineImpl::new(provider.clone() as Arc<dyn Provider>, make_engine_config());
 
-            engine.hydrate_input_modalities().await;
-            engine.hydrate_input_modalities().await;
+            engine.hydrate_catalog_metadata().await;
+            engine.hydrate_catalog_metadata().await;
 
             assert_eq!(engine.input_modalities(), Some(vec![InputModality::Image]));
             assert_eq!(provider.list_models_calls(), 1);
@@ -1302,17 +1427,26 @@ model = "local"
                 "test-model",
                 Some(vec![InputModality::File]),
             )]));
+            // The catalog stub advertises no reasoning efforts at all, so a
+            // validation pass would drop this effort. A `/models` selection
+            // supplied both the modalities and the (validated) effort, so
+            // the skip path must leave it untouched without fetching.
             let engine =
-                EngineImpl::new(provider.clone() as Arc<dyn Provider>, make_engine_config());
+                engine_with_profile_reasoning(provider.clone() as Arc<dyn Provider>, "max");
             engine.set_input_modalities(Some(vec![InputModality::File]));
 
-            engine.hydrate_input_modalities().await;
+            engine.hydrate_catalog_metadata().await;
 
             assert_eq!(engine.input_modalities(), Some(vec![InputModality::File]));
             assert_eq!(
                 provider.list_models_calls(),
                 0,
                 "a /models-provided state must not trigger a catalog fetch"
+            );
+            assert_eq!(
+                engine.reasoning_effort().as_deref(),
+                Some("max"),
+                "the skip path must not re-validate a switch-validated effort"
             );
         });
     }
@@ -1324,8 +1458,8 @@ model = "local"
             let engine =
                 EngineImpl::new(provider.clone() as Arc<dyn Provider>, make_engine_config());
 
-            engine.hydrate_input_modalities().await;
-            engine.hydrate_input_modalities().await;
+            engine.hydrate_catalog_metadata().await;
+            engine.hydrate_catalog_metadata().await;
 
             assert_eq!(engine.input_modalities(), None);
             assert_eq!(
@@ -1338,6 +1472,196 @@ model = "local"
             log.contains("failed to discover active model input modalities"),
             "the failure must be logged: {log}"
         );
+    }
+
+    #[test]
+    fn engine_impl_keeps_a_profile_reasoning_effort_the_model_advertises() {
+        crate::test_support::run_locked(async {
+            let provider = Arc::new(CatalogProvider::new(vec![
+                model_info_with_reasoning_efforts(
+                    "test-model",
+                    Some(vec!["low".to_string(), "max".to_string()]),
+                ),
+            ]));
+            let engine =
+                engine_with_profile_reasoning(provider.clone() as Arc<dyn Provider>, "max");
+
+            engine.hydrate_catalog_metadata().await;
+
+            assert_eq!(
+                engine.reasoning_effort().as_deref(),
+                Some("max"),
+                "an advertised effort must survive validation untouched"
+            );
+            assert!(
+                engine.take_pending_notices().is_empty(),
+                "a kept effort must not produce a notice"
+            );
+            assert_eq!(provider.list_models_calls(), 1);
+        });
+    }
+
+    #[test]
+    fn engine_impl_drops_a_profile_reasoning_effort_the_model_does_not_advertise() {
+        let log = crate::test_support::capture_logs(async {
+            let provider = Arc::new(CatalogProvider::new(vec![
+                model_info_with_reasoning_efforts("test-model", Some(vec!["low".to_string()])),
+            ]));
+            let engine =
+                engine_with_profile_reasoning(provider.clone() as Arc<dyn Provider>, "max");
+
+            engine.hydrate_catalog_metadata().await;
+
+            assert_eq!(
+                engine.reasoning_effort(),
+                None,
+                "an effort outside the advertised list must fall back to the provider default"
+            );
+            assert_eq!(
+                engine.take_pending_notices(),
+                vec![
+                    "Model mock/test-model does not advertise reasoning effort \"max\"; using the provider default."
+                        .to_string()
+                ],
+                "the drop must be queued as a one-shot notice"
+            );
+            assert!(
+                engine.take_pending_notices().is_empty(),
+                "a notice must be handed out only once"
+            );
+        });
+        assert!(
+            log.contains("profile reasoning effort is not advertised by the model"),
+            "the drop must be logged as a warning: {log}"
+        );
+        assert!(
+            log.contains("model=test-model") && log.contains("reasoning_effort=max"),
+            "the warning must name the model and the dropped effort: {log}"
+        );
+    }
+
+    #[test]
+    fn engine_impl_drops_a_profile_reasoning_effort_when_the_model_advertises_no_alternatives() {
+        let log = crate::test_support::capture_logs(async {
+            for advertised_efforts in [Some(Vec::new()), None::<Vec<String>>] {
+                let provider = Arc::new(CatalogProvider::new(vec![
+                    model_info_with_reasoning_efforts("test-model", advertised_efforts),
+                ]));
+                let engine =
+                    engine_with_profile_reasoning(provider.clone() as Arc<dyn Provider>, "max");
+
+                engine.hydrate_catalog_metadata().await;
+
+                assert_eq!(
+                    engine.reasoning_effort(),
+                    None,
+                    "a model without selectable alternatives must not keep an explicit effort"
+                );
+            }
+        });
+        assert!(
+            log.contains("profile reasoning effort is not advertised by the model"),
+            "both drops must be logged: {log}"
+        );
+    }
+
+    #[test]
+    fn engine_impl_keeps_a_profile_reasoning_effort_when_the_model_is_absent_from_the_catalog() {
+        let log = crate::test_support::capture_logs(async {
+            let provider = Arc::new(CatalogProvider::new(vec![
+                model_info_with_reasoning_efforts("other-model", Some(vec!["low".to_string()])),
+            ]));
+            let engine =
+                engine_with_profile_reasoning(provider.clone() as Arc<dyn Provider>, "max");
+
+            engine.hydrate_catalog_metadata().await;
+
+            assert_eq!(
+                engine.reasoning_effort().as_deref(),
+                Some("max"),
+                "an unlisted model cannot disprove the effort, so it must be kept"
+            );
+        });
+        assert!(
+            log.contains("the catalog does not list the active model"),
+            "the unverifiable case must be logged: {log}"
+        );
+    }
+
+    #[test]
+    fn engine_impl_keeps_a_profile_reasoning_effort_when_the_catalog_fetch_fails() {
+        let log = crate::test_support::capture_logs(async {
+            let provider = Arc::new(CatalogProvider::failing());
+            let engine =
+                engine_with_profile_reasoning(provider.clone() as Arc<dyn Provider>, "max");
+
+            engine.hydrate_catalog_metadata().await;
+            engine.hydrate_catalog_metadata().await;
+
+            assert_eq!(
+                engine.reasoning_effort().as_deref(),
+                Some("max"),
+                "a failed fetch cannot validate, so the effort must be kept"
+            );
+            assert_eq!(
+                provider.list_models_calls(),
+                1,
+                "a failed attempt must not be retried on every request"
+            );
+        });
+        assert!(
+            log.contains("failed to discover active model input modalities"),
+            "the failure must be logged: {log}"
+        );
+    }
+
+    #[test]
+    fn switch_model_option_rejects_a_reasoning_effort_the_model_does_not_advertise() {
+        let provider = Arc::new(MockProvider::new(vec![], Duration::from_millis(0)));
+        let engine = EngineImpl::new(provider, make_engine_config());
+
+        let error = engine
+            .switch_model_option(&ProviderModelOption {
+                provider_connection: "mock".to_string(),
+                model: model_info_with_reasoning_efforts(
+                    "test-model",
+                    Some(vec!["low".to_string()]),
+                ),
+                reasoning_effort: Some("max".to_string()),
+            })
+            .expect_err("an unadvertised effort must be rejected at switch time");
+        assert!(
+            error
+                .to_string()
+                .contains("does not advertise reasoning effort 'max'"),
+            "the error must name the rejected effort: {error}"
+        );
+    }
+
+    #[test]
+    fn engine_router_drains_pending_notices_from_its_engines() {
+        crate::test_support::run_locked(async {
+            let provider = Arc::new(CatalogProvider::new(vec![
+                model_info_with_reasoning_efforts("test-model", Some(vec!["low".to_string()])),
+            ]));
+            let engine = engine_with_profile_reasoning(provider as Arc<dyn Provider>, "max");
+            engine.hydrate_catalog_metadata().await;
+            let router = EngineRouter::new(
+                HashMap::from([("mock".to_string(), Arc::new(engine) as Arc<dyn Engine>)]),
+                "mock",
+            )
+            .expect("router construction");
+
+            assert_eq!(
+                router.take_pending_notices().len(),
+                1,
+                "the router must surface the notice its engine queued"
+            );
+            assert!(
+                router.take_pending_notices().is_empty(),
+                "draining must be one-shot through the router too"
+            );
+        });
     }
 
     #[tokio::test]

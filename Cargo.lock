@@ -4218,7 +4218,7 @@ checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
 
 [[package]]
 name = "ylva"
-version = "0.10.7"
+version = "0.10.8"
 dependencies = [
  "anyhow",
  "arboard",

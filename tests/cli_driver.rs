@@ -297,6 +297,7 @@ impl Engine for SwitchableTestEngine {
                 id: model,
                 context_length: None,
                 reasoning_efforts: None,
+                reasoning_default: None,
                 input_modalities: None,
             }])
         })
@@ -342,6 +343,92 @@ async fn run_cli_streams_user_and_assistant_without_history_dump() {
     );
 }
 
+/// Engine double that reports one pending notice, for asserting the
+/// headless driver prints engine notices instead of dropping them.
+struct NoticingEngine {
+    inner: EngineImpl,
+    pending: Mutex<Vec<String>>,
+}
+
+impl Engine for NoticingEngine {
+    fn chat<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        self.inner.chat(messages, tools, cancel)
+    }
+
+    fn config(&self) -> EngineConfig {
+        self.inner.config()
+    }
+
+    fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
+        self.inner.list_models()
+    }
+
+    fn switch_model(&self, model: &str) -> anyhow::Result<()> {
+        self.inner.switch_model(model)
+    }
+
+    fn take_pending_notices(&self) -> Vec<String> {
+        std::mem::take(
+            &mut *self
+                .pending
+                .lock()
+                .expect("the engine notice lock is poisoned"),
+        )
+    }
+}
+
+/// A dropped profile reasoning effort must be visible in headless output —
+/// printed ahead of the response as a `---[ Notice ]---` marker, not just
+/// logged.
+#[tokio::test]
+async fn run_cli_prints_engine_notices_ahead_of_the_response() {
+    let provider = Arc::new(MockProviderWithScript {
+        phase_one: vec![MockEvent::Text("the answer".into())],
+        phase_two: Vec::new(),
+        interval: Duration::from_millis(1),
+        calls: Arc::new(AtomicUsize::new(0)),
+    });
+    let registry = Arc::new(ToolRegistry::new());
+    let mut output = Vec::new();
+    let engine: Arc<dyn Engine> = Arc::new(NoticingEngine {
+        inner: EngineImpl::new(provider, common::test_engine_config()),
+        pending: Mutex::new(vec![
+            "Model stub/model does not advertise reasoning effort \"max\"; using the provider default."
+                .to_string(),
+        ]),
+    });
+    let (agent, ui_rx) = AgentLoop::new(engine, Arc::clone(&registry));
+
+    run_cli_to(agent, ui_rx, registry, "question".to_string(), &mut output)
+        .await
+        .expect("headless run succeeds");
+    let output = String::from_utf8(output).expect("utf8 output");
+
+    let notice_position = output
+        .find("---[ Notice ]---")
+        .unwrap_or_else(|| panic!("notice marker missing: {output}"));
+    assert!(
+        output.contains("using the provider default"),
+        "the notice text must be printed: {output}"
+    );
+    let response_position = output
+        .find("---[ Assistant ]---")
+        .unwrap_or_else(|| panic!("assistant marker missing: {output}"));
+    assert!(
+        notice_position < response_position,
+        "the notice must print ahead of the response: {output}"
+    );
+    assert!(
+        output.contains("the answer"),
+        "the notice must not end the turn: {output}"
+    );
+}
+
 #[tokio::test]
 async fn child_spawn_after_root_model_switch_uses_the_root_active_engine() {
     let default_engine = SwitchableTestEngine::new("default-provider", "default-model");
@@ -379,6 +466,7 @@ async fn child_spawn_after_root_model_switch_uses_the_root_active_engine() {
                 id: "alternate-model".to_string(),
                 context_length: None,
                 reasoning_efforts: None,
+                reasoning_default: None,
                 input_modalities: None,
             },
             reasoning_effort: None,
@@ -490,6 +578,7 @@ async fn running_child_uses_a_shared_engine_switch_on_its_next_request() {
                 id: "alternate-model".to_string(),
                 context_length: None,
                 reasoning_efforts: None,
+                reasoning_default: None,
                 input_modalities: None,
             },
             reasoning_effort: None,
@@ -596,6 +685,7 @@ async fn child_with_explicit_engine_override_keeps_its_named_engine() {
                 id: "alternate-model".to_string(),
                 context_length: None,
                 reasoning_efforts: None,
+                reasoning_default: None,
                 input_modalities: None,
             },
             reasoning_effort: None,
