@@ -57,11 +57,11 @@ Acceptance criteria:
   contribute in the documented order: global SOUL, Ylva home files, then the
   workspace chain root→working-directory, so the most specific content wins
   conflicts by position. Every section is wrapped in sentinel markers
-  `[instructions from <source> (Ylva home)]` /
-  `[instructions from <source> (workspace)]` …
-  `[end of instructions from <source> (Ylva home|workspace)]`, where `<source>`
-  is the bare filename at a scope root and the workspace-relative path (e.g.
-  `sub/AGENTS.md`) otherwise.
+  `[instructions from <source>]` … `[end of instructions from <source>]`,
+  where `<source>` is `$YLVA_HOME/<filename>` for a Ylva home file (e.g.
+  `$YLVA_HOME/AGENTS.md`) and the workspace-relative path for a workspace
+  file (bare filename at the workspace root, e.g. `AGENTS.md`, or with
+  subdirectory prefix, e.g. `sub/AGENTS.md`).
 - With zero eligible instruction files, the composed prompt equals the
   `load_soul` output exactly (no preamble, no sentinels).
 - `SOUL.md` layered replacement stays byte-for-byte unchanged; existing soul
@@ -70,6 +70,9 @@ Acceptance criteria:
   Markdown and tool-specific rule formats are never loaded.
 - A trusted filename that resolves outside the workspace root / Ylva home
   trust boundary (e.g. via a symlink escape) is rejected fail-closed.
+- Path arguments to path-like tools expand `~` and `$NAME`/`${NAME}`
+  envvars before sandbox evaluation, so a sentinel source such as
+  `$YLVA_HOME/AGENTS.md` can be passed verbatim to `read`.
 - Failure behavior is defined and covered by tests: oversized (> 64 KiB raw),
   unreadable, non-UTF-8, unreadable chain directory (hard startup errors);
   empty/whitespace-only files and byte-identical duplicates are skipped.
@@ -87,7 +90,7 @@ Key constraints:
 - Trusted instruction files use ecosystem-standard concatenation semantics,
   which deliberately differ from `config::layered`'s whole-file replacement;
   the divergence must be stated in the docs so it is not "fixed"
-  later (see Consistency Issues).
+  later (step 6 states it explicitly in `docs/configuration.md`).
 - The two leading system messages installed by `Context::with_system_prompt`
   are deliberately not persisted (`src/agent.rs` → `Context::set_store`);
   instruction content is therefore re-read from disk on every run and resume,
@@ -98,6 +101,9 @@ Key constraints:
   prompt keep the built-in `DEFAULT_SOUL` fallback and are out of scope.
 - No configuration knobs: the trusted set and all rules stay code-owned
   constants (configurability would reintroduce "load arbitrary Markdown").
+- Path-token expansion is string substitution in Rust performed before
+  sandbox evaluation — never a shell — and never bypasses approval checks;
+  the sandbox sees only the expanded, canonicalized path.
 
 ## Implementation Plan
 
@@ -115,7 +121,14 @@ Key constraints:
    - `pub const MAX_INSTRUCTION_FILE_BYTES: usize = 64 * 1024;` — per-file cap
      on raw on-disk bytes, checked before BOM-strip/trim; no combined cap.
    - `pub struct InstructionFile` with fields `path: PathBuf`,
-     `file_name: &'static str`, `contents: String`.
+     `file_name: &'static str`, `contents: String`, `source: String` —
+     `source` is the sentinel `<source>` string, computed during discovery
+     where both roots are known: `$YLVA_HOME/<file_name>` for a Ylva home
+     file (envvar name, never the expanded value), the workspace-relative
+     path otherwise (bare filename at the workspace root, prefixed
+     subdirectory path below it). Keep `path` as the non-canonical
+     discovered path so `strip_prefix`-style comparisons match the roots
+     as given.
    - `pub fn load_trusted_instructions(workspace_root: Option<&Path>,
      working_directory: Option<&Path>) -> Result<Vec<InstructionFile>,
      ConfigError>`, plus a pure inner core taking explicit roots (mirroring
@@ -156,8 +169,16 @@ Key constraints:
        skipped (exact dedupe only — near-duplicates load as authored; first
        occurrence in composition order wins), matching Claude Code's
        identical-file dedupe for symlinked or copied instruction files;
-     - unreadable or non-UTF-8 files are hard startup errors
-       (`ConfigError::Unreadable`), consistent with `read_external_file`.
+      - unreadable or non-UTF-8 files are hard startup errors
+        (`ConfigError::Unreadable`), consistent with `read_external_file`.
+   - Emit one `tracing::info!` line per contributing instruction file at
+     startup, naming path and raw byte size (structured fields, in the style
+     of the profile-environment log in `src/config.rs`), from the outer
+     `load_trusted_instructions` — not from the pure inner core, so unit
+     tests never depend on subscriber state. Skipped files (empty, deduped)
+     get no info line. No test asserts these lines; if that ever changes,
+     follow `docs/known-test-issues.md` → *Tracing subscriber isolation in
+     tests*.
    - Unit tests: composition order across Ylva home / workspace root / a chain
      subdirectory (home first, root before subdirectory); both names in one
      directory contribute with `CLAUDE.md` before `AGENTS.md`; a
@@ -166,7 +187,10 @@ Key constraints:
      near-duplicate content is not merged; empty and whitespace-only files are
      skipped; a BOM is stripped; oversize, unreadable, and unreadable
      directory cases produce the documented errors; `NotFound` on a chain
-     directory is treated as empty; no files present yields an empty vector.
+     directory is treated as empty; the `source` strings are
+     `$YLVA_HOME/AGENTS.md` (home scope), `AGENTS.md` (workspace root),
+     `sub/AGENTS.md` (chain subdirectory); no files present yields an
+     empty vector.
      Use tempdirs and the pure core (see `docs/known-test-issues.md`).
 2. [ ] Add `pub fn compose_root_system_prompt(workspace_root: Option<&Path>,
    working_directory: Option<&Path>) -> Result<String, ConfigError>`
@@ -181,29 +205,75 @@ Key constraints:
 
    Each section is its content wrapped in bracketed sentinel markers in the
    style of `HARNESS_NOTICE_MARKER` (`src/agent.rs`) — a start marker naming
-   source and scope, the verbatim content, and an explicit end marker (the
-   next section or agent-type text follows immediately, so a start-only
+   the source, the verbatim content, and an explicit end marker (the next
+   section or agent-type text follows immediately, so a start-only
    delimiter is not enough):
 
    ```text
-   [instructions from AGENTS.md (Ylva home)]
+   [instructions from $YLVA_HOME/AGENTS.md]
    …verbatim content…
-   [end of instructions from AGENTS.md (Ylva home)]
+   [end of instructions from $YLVA_HOME/AGENTS.md]
    ```
 
-   `<source>` is the bare filename at a scope root (Ylva home, workspace
-   root) and the workspace-relative path otherwise (e.g. `sub/AGENTS.md`),
-   never an absolute path; the scope label is `Ylva home` or `workspace`;
-   content is `trim_end()`-ed. Sentinels are plain bracketed lines rather
-   than Markdown headings or `---` rules because instruction files contain
-   their own `#`/`##` headings and frontmatter separators, which would
-   collide with either. With no instruction files the result equals the
-   `load_soul` output exactly (no preamble). Unit tests:
-   composition order and framing (SOUL, preamble, `CLAUDE.md`/`AGENTS.md`
-   sentinel pairs with Ylva home/workspace labels and subdir-relative
-   source), equivalence with `load_soul` when no instruction files exist,
-   whitespace contract.
-3. [ ] Re-export the new public items from `src/lib.rs`
+   `<source>` is `InstructionFile::source` (computed in step 1). There is
+   no separate scope label: the `$YLVA_HOME` envvar prefix identifies the
+   Ylva home scope — without disclosing the value, so no username or home
+   path enters the prompt — and its absence identifies the workspace
+   scope. A `$YLVA_HOME/…` source can be passed verbatim to path-like
+   tools, which expand it at dispatch (step 3); workspace-relative sources
+   need no expansion in the default case (workspace root = tool path
+   anchor = cwd). Content is `trim_end()`-ed. Sentinels are plain
+   bracketed lines rather than Markdown headings or `---` rules because
+   instruction files contain their own `#`/`##` headings and frontmatter
+   separators, which would collide with either. With no instruction files
+   the result equals the `load_soul` output exactly (no preamble). Unit
+   tests: composition order and framing (SOUL, preamble,
+   `CLAUDE.md`/`AGENTS.md` sentinel pairs with `$YLVA_HOME/` and
+   workspace-relative sources), equivalence with `load_soul` when no
+   instruction files exist, whitespace contract.
+3. [ ] Add path-token expansion for path-like tool arguments, making the
+   `$YLVA_HOME` sentinel source usable verbatim end to end.
+   - Pure helper in `src/sandbox.rs` next to `to_relative_path` (the single
+     path-normalization module), e.g.
+     `pub fn expand_path_tokens(value: &str, lookup: &dyn Fn(&str) -> Option<String>) -> String`:
+     - `$NAME` and `${NAME}` tokens (`NAME` = `[A-Za-z_][A-Za-z0-9_]*`)
+       are replaced by `lookup(NAME)` when defined and left literal when
+       undefined (a literal `$` in a filename survives); substitution runs
+       once — substituted values are not rescanned for further tokens;
+     - after envvar substitution, a leading `~` or `~/` prefix expands via
+       `lookup("HOME")` (`~user/…` is deliberately unsupported);
+     - the `lookup` parameter keeps unit tests free of process-environment
+       mutation (the established pure-core pattern).
+   - Wire it into `ToolRegistry::create_call` (`src/agent/tools.rs`, the
+     existing `path_like_arguments()` loop): expand each value first, then
+     run the existing `to_relative_path` rewrite, so sandbox approval
+     checks evaluate the expanded path. Expansion is string substitution
+     in Rust only — no shell is involved — and the sandbox's canonicalized
+     containment check still gates the result (fail-closed: a value
+     pointing outside the workspace still hits the `outside_workspace`
+     approval floor, `src/sandbox.rs`).
+   - Append one contract sentence to each path-like tool description
+     (`read`/`write`/`edit`/`search` `path`, `glob` `pattern`), e.g.
+     "`~` and `$ENVVAR`/`${ENVVAR}` prefixes are expanded before use."
+     The safety preamble only exists when instruction sections exist, so
+     tool descriptions are the only always-present place the model reads
+     this contract.
+   - Startup: in `src/main.rs`, after resolving the Ylva home, ensure
+     `YLVA_HOME` is present in the process environment
+     (`std::env::set_var` to the resolved `ylva_home()` value — idempotent
+     when already set, a safe function on edition 2021) so verbatim
+     `$YLVA_HOME/…` arguments expand for file tools and for bash child
+     processes alike. No `YLVA_WORKSPACE` variable is introduced: the
+     workspace root is the tool path anchor (cwd) in the default case, so
+     workspace-relative sources already resolve verbatim — a variable
+     equal to the default base would add no information (YAGNI).
+   - Unit tests: pure-helper cases — defined `$NAME`, `${NAME}` form,
+     undefined name left literal, no recursive expansion, leading `~` and
+     `~/`, `~user` untouched, token-free string unchanged — plus one
+     `create_call` test proving the rewrite runs before dispatch (set and
+     unset a uniquely named env var inside the test so no shared variable
+     is touched).
+4. [ ] Re-export the new public items from `src/lib.rs`
    (`config::instructions::{load_trusted_instructions,
    compose_root_system_prompt, InstructionFile,
    TRUSTED_INSTRUCTION_FILE_NAMES, MAX_INSTRUCTION_FILE_BYTES}`)
@@ -215,42 +285,56 @@ Key constraints:
    both. `load_soul` stays public and unchanged; `AgentFactory::with_system_prompt`
    and `compose_agent_system_prompt` keep their signatures. Verify with the
    existing test suite that no caller behavior changed.
-4. [ ] Integration test: new `tests/system_prompt_instructions.rs`, using the
+5. [ ] Integration test: new `tests/system_prompt_instructions.rs`, using the
    `tests/common` helpers and the pattern of `tests/cli_init.rs`
    (`run_ylva_with_provider`, `assert_request_uses_system_prompt` against
    `MockLlmServer::request_bodies`). Cases: (a) workspace `SOUL.md` plus root
    `AGENTS.md` and `CLAUDE.md` plus a home-layer `AGENTS.md` — the leading
    `system` message contains SOUL text, then the safety preamble, then home
-   `AGENTS.md` content inside `[instructions from AGENTS.md (Ylva home)]` …
-   `[end of instructions from AGENTS.md (Ylva home)]`, then root `CLAUDE.md`,
-   then root `AGENTS.md` under `(workspace)` sentinel pairs, in that order
-   (assert by substring index order); (b) running with the working directory
+   `AGENTS.md` content inside `[instructions from $YLVA_HOME/AGENTS.md]` …
+   `[end of instructions from $YLVA_HOME/AGENTS.md]`, then root `CLAUDE.md`
+   under `[instructions from CLAUDE.md]` …
+   `[end of instructions from CLAUDE.md]`, then root `AGENTS.md` under
+   `[instructions from AGENTS.md]` …
+   `[end of instructions from AGENTS.md]`, in that order (assert by
+   substring index order); (b) running with the working directory
    at `sub/` holding its own `AGENTS.md` — root content precedes the
-   `[instructions from sub/AGENTS.md (workspace)]` section; (c) `CLAUDE.md`
+   `[instructions from sub/AGENTS.md]` section; (c) `CLAUDE.md`
    byte-identical to `AGENTS.md` — content appears exactly once; (d) only
    home-layer instruction files — they are used, with the preamble and
-   `(Ylva home)` sentinels; (e) workspace `SOUL.md` alone — request unchanged
+   `$YLVA_HOME/` sentinels; (e) workspace `SOUL.md` alone — request unchanged
    versus today's behavior (no preamble, no sentinels).
-5. [ ] Documentation (must land in the same commit as the code):
+6. [ ] Documentation (must land in the same commit as the code):
    - `docs/configuration.md` → *Global persona (`SOUL.md`)*: document the
      initial system-prompt contract — trusted filenames and the exclusion of
      `AGENT.md`, `GEMINI.md`, and tool-specific names, case-sensitive
      matching, eligible directories (Ylva home, then workspace root down to
      the working directory), composition order (global SOUL, safety preamble,
      Ylva home sections, workspace chain root→working-directory, agent-type
-   `persona`, agent-type file body, tool protocol), sentinel markers and
-   the position-based conflict rule (closer to the working directory wins),
-   the 64 KiB raw-bytes limit with no combined cap, and the
-   empty/duplicate/BOM/unreadable/non-UTF-8/symlink-escape/unreadable-directory
-   behaviors; state explicitly that this concatenation differs from
-   `SOUL.md`'s whole-file replacement and that instruction content cannot
-   override runtime safety constraints.
+     `persona`, agent-type file body, tool protocol), sentinel markers —
+     `$YLVA_HOME/<filename>` for home sources (envvar name, value never
+     disclosed), workspace-relative paths for workspace sources, no scope
+     label — the verbatim-to-tools expansion contract and the fact that
+     startup ensures `YLVA_HOME` is set in the process environment, the
+     position-based conflict rule (closer to the working directory wins),
+     the 64 KiB raw-bytes limit with no combined cap, and the
+     empty/duplicate/BOM/unreadable/non-UTF-8/symlink-escape/unreadable-directory
+     behaviors; state explicitly that this concatenation differs from
+     `SOUL.md`'s whole-file replacement and that instruction content cannot
+     override runtime safety constraints.
    - `docs/features.md` → *Layered global persona and initialization*: the
-     same contract in user-facing wording.
+     same contract in user-facing wording; → *Tools to be used by models*:
+     extend the path-argument paragraph (the one linking to
+     `implementation-notes.md#path-like-argument-normalization`) with the
+     `~`/envvar expansion contract.
    - `docs/implementation-notes.md` → *Layered configuration and persona
      assembly*: `instructions.rs` mechanics, directory-entry case matching
      rationale, canonicalized containment, exact-dedupe scope, BOM/empty
-     handling, raw-bytes cap, and the rebuilt-on-resume note.
+     handling, raw-bytes cap, `source`-string derivation, and the
+     rebuilt-on-resume note; → *Path-like argument normalization*:
+     `expand_path_tokens` mechanics (token grammar, once-only substitution,
+     leading-tilde rule, undefined-left-literal, expansion before
+     `to_relative_path` and sandbox evaluation) and the `create_call` wiring.
    - `CONTEXT.md`: add the domain term **Trusted instruction file**; adjust
      **Global SOUL** and **System prompt** to state that trusted instruction
      content is part of the global baseline.
@@ -258,28 +342,13 @@ Key constraints:
      instruction-file discovery.
    - `docs/ideas/enrich-system-prompt.md`: mark as implemented, pointing at
      the docs above.
-6. [ ] Final verification: `make format lint`, the mandatory gate
+   - `docs/ideas/slash-commands.md`: add a `/status` section in the file's
+     existing style describing the proposed command — show the composed
+     system-prompt sources for transparency (the resolved SOUL layer path,
+     each trusted instruction file loaded with its size). Recording the
+     idea only; implementing `/status` stays out of scope.
+7. [ ] Final verification: `make format lint`, the mandatory gate
    `make test-coverage`, and `rumdl fmt` on touched Markdown files.
-
-## Proposed Improvements
-
-- Emit a `tracing::info!` line at startup naming each loaded instruction file
-  and its size, so discovery is observable in the CLI/TUI log without a new UI.
-- A future `/status`-style view could show the composed system-prompt sources
-  (SOUL path, instruction paths) for transparency; out of scope now.
-- Later, the allowlist could grow (e.g. `GEMINI.md`) or add lazy
-  per-directory loading while a tool works in a subdirectory (Claude Code /
-  Gemini CLI behavior); keep the set code-owned and startup-only for now
-  (YAGNI).
-
-## Consistency Issues
-
-- [low] Trusted instruction files resolve by ecosystem-standard concatenation
-  (every eligible file contributes; closer to the working directory wins by
-  position), while the rest of `config` resolves by whole-file replacement
-  (`src/config/layered.rs`). Step 5 must document this divergence so a
-  later change does not "align" one semantics to the other and silently alter
-  prompt composition.
 
 ## Implementation Hints
 
@@ -347,11 +416,26 @@ Resolved design decisions (settled review):
 - Section framing (not bare join): one fixed safety preamble before the first
   instruction section (exact text in step 2), then per file a bracketed
   sentinel pair in `HARNESS_NOTICE_MARKER` style —
-  `[instructions from <source> (Ylva home|workspace)]` …
-  `[end of instructions from <source> (Ylva home|workspace)]` — where
-  `<source>` is the bare filename at a scope root and the workspace-relative
-  path otherwise; no absolute paths (portability, no username leaks). The
-  scope label is `Ylva home`, not `user`, to differ from the OS user home.
+  `[instructions from <source>]` … `[end of instructions from <source>]` —
+  where `<source>` is `$YLVA_HOME/<filename>` for a Ylva home file and the
+  workspace-relative path (bare filename at the workspace root, prefixed
+  subdirectory path otherwise) for a workspace file. No absolute paths
+  (portability, no username leaks) and no separate scope label: the
+  `$YLVA_HOME` envvar name encodes the home scope without disclosing the
+  value, and its absence encodes the workspace scope.
+- Sentinels are executable locators, not just provenance: `$YLVA_HOME/…`
+  sources can be passed verbatim to path-like tools because startup ensures
+  `YLVA_HOME` is set in the process environment and `create_call` expands
+  `~`/envvar tokens before sandbox evaluation (step 3). Workspace-relative
+  sources need no expansion. `YLVA_WORKSPACE` is deliberately not
+  introduced: the workspace root is the tool path anchor (cwd) in the
+  default case, so a variable equal to that default base adds no
+  information (YAGNI). Accepted edge: when cwd ≠ discovered workspace root,
+  workspace sentinel sources are relative to the root while tools anchor at
+  cwd, so a sidecar reference can resolve one level off; this is rare (runs
+  start at the repo root) and recoverable (section content is already
+  inlined in the prompt), and fixing it properly would require the variable
+  just rejected.
 - Dedupe is exact and byte-identical only (BOM-stripped, first occurrence in
   composition order wins). Near-duplicates that differ mid-text are loaded as
   authored; partial-overlap merging is deliberately not attempted.
@@ -379,7 +463,23 @@ Codebase facts:
   home via `is_ylva_home_path`) or `.git` marker wins.
 - `src/ylva_home.rs`: `YLVA_HOME_ENVIRONMENT_VARIABLE = "YLVA_HOME"`,
   `YLVA_DIR_NAME = ".ylva"`; `ylva_home()` is `$YLVA_HOME` verbatim when set
-  and non-empty, else `<operating-system-home>/.ylva`.
+  and non-empty, else `<operating-system-home>/.ylva`. Today `YLVA_HOME` is
+  only present in the process environment when the user exported it — the
+  default `~/.ylva` value exists only inside `ylva_home()`'s return value,
+  so verbatim `$YLVA_HOME/…` tool arguments need startup to export it.
+- `src/agent/tools.rs` → `ToolRegistry::create_call` is the single
+  path-normalization choke point: it rewrites every
+  `Tool::path_like_arguments()` value through
+  `crate::sandbox::to_relative_path` (keyed on the process cwd) before
+  dispatch. Path-like tools: `read`/`write`/`edit`/`search` declare `path`,
+  `glob` declares `pattern`. `expand_path_tokens` plugs into the same loop.
+- `src/sandbox.rs`: `Sandbox::new()` roots the sandbox at the cwd at
+  startup; the module-doc approval floor sets `outside_workspace` to
+  `UserApprovalRequired` — reads outside the workspace are reachable via
+  approval, not hard-denied, so a `$YLVA_HOME/…` read is gated by
+  configuration rather than impossible.
+- Cargo.toml: Rust edition 2021 — `std::env::set_var` is a safe function
+  (it becomes `unsafe` only on edition 2024).
 - `src/main.rs` resolves `workspace_root` from the current directory via
   `ylva::discover_workspace_root`, loads the root system prompt, then passes
   `factory.with_system_prompt(root_system_prompt.clone())`. The current
@@ -416,7 +516,10 @@ Codebase facts:
   (`SOUL.md`)* (the effective prompt order sentence),
   `docs/features.md` → *Layered global persona and initialization*,
   `docs/implementation-notes.md` → *Layered configuration and persona
-  assembly*, `CONTEXT.md` → *Global SOUL* / *System prompt*.
+  assembly*, `CONTEXT.md` → *Global SOUL* / *System prompt*. Existing anchors
+  for the expansion contract: `docs/features.md` → *Tools to be used by
+  models* (the path-argument paragraph) links
+  `docs/implementation-notes.md` → *Path-like argument normalization*.
 - `docs/architecture-design-records/` contains only `.gitkeep`; no recorded
   decision constrains this change.
 - Repo gates (`docs/development-workflow.md`): `make format`, `make lint`, and
