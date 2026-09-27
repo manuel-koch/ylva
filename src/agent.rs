@@ -40,7 +40,7 @@ use tools::{ToolCall, ToolRegistry};
 /// attributed back to whichever loop (root or child) actually exceeded it.
 /// Per-engine configurability is a later (Phase 5) concern; this
 /// module-level default is the Phase 3 SSOT.
-pub const MAX_TOOL_USE_ITERATIONS: usize = 30;
+pub const MAX_TOOL_USE_ITERATIONS: usize = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentMode {
