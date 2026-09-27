@@ -21,6 +21,7 @@ use crate::ylva_home::{ylva_home, YLVA_DIR_NAME};
 
 mod agent;
 pub mod agent_type_file;
+pub mod instructions;
 pub mod layered;
 mod profile;
 mod provider;
@@ -63,6 +64,18 @@ pub enum ConfigError {
         #[source]
         source: std::io::Error,
     },
+    #[error(
+        "trusted instruction file {} exceeds the {}-byte limit",
+        path.display(),
+        limit
+    )]
+    OversizedInstructionFile { path: PathBuf, limit: usize },
+    #[error(
+        "trusted instruction file {} resolves outside the trust boundary {}",
+        path.display(),
+        root.display()
+    )]
+    InstructionFileOutsideTrustBoundary { path: PathBuf, root: PathBuf },
     #[error("malformed profile config at {}: {source}", path.display())]
     Malformed {
         path: PathBuf,

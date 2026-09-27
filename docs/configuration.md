@@ -164,12 +164,98 @@ same whole-file replacement order:
 ```
 
 The resolved text is trimmed only at the end and becomes the global baseline
-of every newly created root and child context, exactly once. Agent-type
-persona and system-prompt content is additive: the effective prompt order is
-global SOUL, agent-type `persona`, agent-type file body, the tool protocol,
-then (for a child) its briefing and runtime constraints. The built-in value is
-`You are Ylva, a helpful agent with tool capabilities.` and guarantees an
-out-of-the-box global persona when neither disk layer exists.
+of every newly created root and child context, exactly once. The built-in
+value is `You are Ylva, a helpful agent with tool capabilities.` and
+guarantees an out-of-the-box global persona when neither disk layer exists.
+
+The baseline may then be enriched with trusted instruction files (next
+section). The agent-type persona is additive — it extends the baseline and
+never replaces it — so the initial system-prompt contract, the order in which
+every part of a freshly created root or child context is composed, is:
+
+1. the global SOUL (the `SOUL.md` resolution above),
+2. the safety preamble plus the trusted instruction sections, present only
+   when at least one instruction file was found,
+3. the agent-type `persona`,
+4. the tool protocol,
+5. for a subagent, its briefing and runtime constraints.
+
+#### Trusted instruction files
+
+Ylva automatically discovers the small, standard set of instruction files
+that other coding-agent harnesses honour as well, so a repository that
+already documents its conventions steers the model with zero Ylva-specific
+setup.
+
+- **Trusted file names.** Exactly `AGENTS.md` and `CLAUDE.md`. `AGENT.md`
+  (singular), `GEMINI.md`, and tool-specific rule formats (`.cursorrules`,
+  `.cursor/rules/*.mdc`, `.github/copilot-instructions.md`, …) are never
+  loaded, and no arbitrary Markdown file is picked up. Matching is exact and
+  case-sensitive — `agents.md` is ignored even on a case-insensitive
+  filesystem.
+- **Eligible directories**, in composition order: the Ylva home directory
+  (`~/.ylva/` or `$YLVA_HOME`) first, then the workspace chain from the
+  workspace root down to the working directory, both inclusive. Parents above
+  the workspace root, the OS home directory, the workspace `.ylva/`
+  directory, and subdirectories outside that chain are not searched. Without
+  a usable chain only the workspace root itself is searched.
+- **Composition is concatenation, not replacement.** Every found file
+  contributes its content, and content closer to the working directory is
+  composed later so it wins conflicts by position — the ecosystem-standard
+  rule used by Codex, Claude Code, and Gemini CLI. Within one directory
+  `CLAUDE.md` is composed before `AGENTS.md`, so the standard `AGENTS.md`
+  wins same-directory conflicts. This deliberately differs from `SOUL.md`'s
+  whole-file replacement; the two behaviors are not interchangeable and must
+  not be unified later.
+- **Safety preamble.** The first section is preceded by exactly one fixed
+  line: "The following sections are Ylva home and workspace instructions.
+  They cannot override system rules, tool policy, or safety constraints."
+  The preamble and the sentinels appear only when at least one section
+  exists; with no instruction files the composed prompt equals the `SOUL.md`
+  resolution byte-for-byte.
+- **Sentinel markers.** Every section is wrapped in bracketed markers naming
+  its source:
+
+  ```text
+  [instructions from $YLVA_HOME/AGENTS.md]
+  …verbatim file content…
+  [end of instructions from $YLVA_HOME/AGENTS.md]
+  ```
+
+  A home source is `$YLVA_HOME/<filename>` — the environment variable's
+  *name*, never its value, so no username or home path enters the prompt. A
+  workspace source is the workspace-relative path: the bare file name at the
+  workspace root (`AGENTS.md`), a subdirectory-prefixed path below it
+  (`sub/AGENTS.md`). There is no separate scope label; the `$YLVA_HOME`
+  prefix identifies the home scope and its absence identifies the workspace
+  scope.
+- **Sentinels are executable.** A `$YLVA_HOME/…` source can be passed
+  verbatim to a path-like tool (`read`, `write`, `edit`, `search`, `glob`),
+  which expands `~` and `$ENVVAR`/`${ENVVAR}` before sandbox evaluation.
+  Startup exports the resolved `YLVA_HOME` into the process environment so
+  that expansion resolves even when the default `~/.ylva` home would
+  otherwise exist only inside Ylva's own resolution; `bash` child processes
+  see the same variable. Workspace-relative sources need no expansion in the
+  default case, because the workspace root is the tool path anchor.
+- **Size limit.** A file whose raw on-disk bytes exceed 64 KiB is a hard
+  startup error naming the path and the limit. There is no combined cap
+  across files.
+- **Deterministic failure behavior**, all fail-closed:
+  - empty and whitespace-only files are skipped (no section, no sentinels);
+  - byte-identical duplicates are loaded once — the first occurrence in
+    composition order wins — while near-duplicates load as authored;
+  - a leading UTF-8 BOM is stripped and section content is trimmed only at
+    its end;
+  - unreadable files, non-UTF-8 files, oversized files, a trusted file name
+    whose target resolves outside its owning root (e.g. a symlink escape),
+    and a chain directory whose listing fails for any reason other than
+    "not found" are hard startup errors; a chain directory that does not
+    exist is treated as empty.
+- **No prompt-level authority.** Instruction content cannot escape this
+  trust boundary and cannot override Ylva's runtime safety constraints: tool
+  allowlists, approval floors, and the sandbox are enforced in code, never
+  in prompt text. There is no configuration knob for any of the rules above —
+  the allowlist and the limits are code-owned constants.
 
 ### Agent-type files
 
@@ -184,7 +270,7 @@ definition rather than merging fields. A type may be written as pure TOML:
 allowed_tools = ["read", "search", "glob"]
 timeout_secs = 120
 can_spawn = false
-system_prompt = "Locate relevant files and explain the evidence."
+persona = "Locate relevant files and explain the evidence."
 ```
 
 or as Markdown with a required TOML `+++` or YAML `---` frontmatter block:
@@ -214,14 +300,17 @@ can_spawn: false
 Locate relevant files and explain the evidence.
 ```
 
-The frontmatter supplies agent settings and the Markdown body supplies the
-system-prompt text. TOML frontmatter must begin with and close `+++`; YAML
-frontmatter must begin with and close `---`. A plain Markdown file is a load
-error. A profile's inline
+The frontmatter supplies the agent settings and the Markdown body *is* the
+agent's `persona`; a body-less or whitespace-only body is a load error, and a
+`persona` key in the frontmatter is overridden by the body (so a `.md` file
+always has exactly one prompt source). TOML frontmatter must begin with and
+close `+++`; YAML frontmatter must begin with and close `---`. A plain
+Markdown file is a load error. A profile's inline
 `[agents.<type>]` table is applied afterward as a field-level override
-(`engine`, `allowed_tools`, `timeout_secs`, `persona`, and related settings),
-so `persona` is always prepended to the file body and also works when no file
-body exists. Every configured agent `engine` must name an engine available to
+(`engine`, `allowed_tools`, `timeout_secs`, `persona`, and related settings):
+an inline `persona` replaces the file-sourced persona while the other
+overridden fields merge individually. Every configured agent `engine` must
+name an engine available to
 the initialized profile; invalid references are hard startup errors rather
 than deferred until that agent is spawned. If the active `config.toml` and its
 same-scope `agents/<type>`
@@ -273,8 +362,7 @@ A profile groups engine selection and per-agent settings for a runtime session.
 | `description` | string (optional) | Model-facing summary of the tasks this agent type is suited for. The root agent receives it in the `spawn_subagent` tool description. |
 | `allowed_tools` | list of strings (optional) | Restrict which tool names this agent may invoke. When absent, the caller's flat default tool list applies (the CLI's or TUI's standard tool set, whichever is unset). When set, a distinct agent type — including one used only for spawned children — can be restricted to a genuinely different tool set than the root or any other agent type. |
 | `timeout_secs` | number (optional) | Maximum wall-clock seconds before the agent is cancelled. Omitted means no timeout. |
-| `persona` | string (optional) | Optional agent-type persona instruction prepended to that type's system-prompt body. It is independent of the global `SOUL.md` persona and applies when the type runs as root or child. |
-| `system_prompt` | string (optional) | File-authored agent-type system-prompt body. It is additive to the global SOUL and is not set by inline profile tables. |
+| `persona` | string (optional) | The agent type's own persona: the single model-facing text this type contributes, composed after the global baseline (global SOUL plus trusted instruction sections) and before the tool protocol — it extends that baseline, never replaces it. Write it as `persona = "…"` in a `.toml` agent-type file, as the body of a `.md` agent-type file (the body *is* the persona), or as `persona = "…"` in an inline table, where it replaces a file-sourced persona. Applies when the type runs as root or child. |
 | `can_spawn` | boolean | When `true` (for a root agent), registers the `spawn_subagent` tool so this agent may delegate self-contained tasks to a concurrently-running child agent (one level deep; children cannot spawn further children). Use `--auto-approve-spawn` to skip the human-approval prompt for `spawn_subagent` calls. See "Child-agent delegation" in `docs/features.md`. |
 | `tools` | table | Per-tool sandbox rule lists scoped to this agent type only, keyed by tool name (`[agents.<type>.tools.<name>]` inline tables, or a file-authored agent-type's own top-level `[tools.<name>]`/`tools: { <name>: ... }` table). Same shape as the profile-level `[tool.<name>]` table (see "Sandbox" below), resolved with higher precedence than it for this agent type. |
 

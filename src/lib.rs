@@ -61,6 +61,10 @@ pub use build_info::{BuildInfo, BUILD_INFO};
 pub use child_agent_manager::{ChildAgentManager, FinishResult, SpawnRequest, SpawnStatus};
 pub use cli::{Cli, CliColorMode, CliCommand};
 pub use cli_driver::{run_cli, run_cli_to, run_cli_to_with_options, CliOutputOptions, ConsoleApp};
+pub use config::instructions::{
+    compose_root_system_prompt, load_trusted_instructions, InstructionFile,
+    INSTRUCTION_SAFETY_PREAMBLE, MAX_INSTRUCTION_FILE_BYTES, TRUSTED_INSTRUCTION_FILE_NAMES,
+};
 pub use config::layered::{
     current_workspace_root, discover_workspace_root, ConfigLayer, ResolvedFile,
 };

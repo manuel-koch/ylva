@@ -31,3 +31,13 @@ Display the following info for each session:
 - title
 
 Sort sessions by descending last-used timestamp ( i.e. newest first ).
+
+## /status
+
+Show the sources of the composed system prompt in a popup, so it is visible
+where the model's instructions came from:
+
+- the resolved `SOUL.md` layer path ( workspace `.ylva/SOUL.md`, Ylva home
+  `SOUL.md`, or the built-in value )
+- every trusted instruction file that was loaded, with its sentinel source
+  ( e.g. `$YLVA_HOME/AGENTS.md`, `sub/AGENTS.md` ) and its file size

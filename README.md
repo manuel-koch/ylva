@@ -13,7 +13,8 @@ Ylva is highly customizable to adapt to user needs.
 
 - [x] Global and workspace scoped configurations
 - [x] Customize behavior using `profiles` on global and and workspace scope
-- [x] Layered global/workspace configuration with `ylva init` scaffolding and a `SOUL.md` persona
+- [x] Layered global/workspace configuration with `ylva init` scaffolding, a `SOUL.md`
+  persona, and trusted `AGENTS.md`/`CLAUDE.md` instruction files folded into the system prompt
 - [x] Multiple LLM providers built-in
   - [x] Ollama
   - [x] Openrouter

@@ -353,7 +353,8 @@ impl Tool for GlobTool {
         directories recursively. Result metadata contains \
         flat `files`, `directories`, and `total` counts plus a boolean `truncated`, which is \
         `false` when all matching paths are returned and `true` when `limit` omits additional \
-        paths."
+        paths. The `pattern` argument accepts `~` and `$ENVVAR`/`${ENVVAR}` tokens; they are \
+        expanded before use."
     }
 
     fn input_schema(&self) -> RootSchema {

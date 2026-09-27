@@ -167,7 +167,20 @@ fn parse_markdown(path: &Path, contents: &str) -> Result<AgentTypeDefinition, Co
         AgentFrontmatterFormat::Yaml => serde_yaml::from_str::<AgentConfig>(&frontmatter)
             .map_err(|source| malformed(path, format!("invalid frontmatter YAML: {source}")))?,
     };
-    config.system_prompt = Some(body.trim().to_string());
+    // The body *is* the persona: it overrides whatever `persona` value the
+    // frontmatter carried (both deserialize through the same standard
+    // `AgentConfig`), so a Markdown file has exactly one prompt source. A
+    // body-less Markdown file has nothing to say — its settings belong in a
+    // `.toml` file.
+    let persona = body.trim();
+    if persona.is_empty() {
+        return Err(malformed(
+            path,
+            "Markdown agent-type file has no body; the body is the agent persona (use a `.toml` \
+             file for settings-only definitions)",
+        ));
+    }
+    config.persona = Some(persona.to_string());
     Ok(AgentTypeDefinition { config })
 }
 
@@ -294,14 +307,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pure_toml_agent_type_files_parse_settings_and_system_prompt() {
+    fn pure_toml_agent_type_files_parse_settings_and_persona() {
         let definition = parse_agent_type_contents(
             Path::new("research.toml"),
             r#"
 allowed_tools = ["read", "search"]
 timeout_secs = "120"
 can_spawn = false
-system_prompt = "Investigate the evidence."
+persona = "Investigate the evidence."
 "#,
         )
         .expect("pure TOML parses");
@@ -313,7 +326,7 @@ system_prompt = "Investigate the evidence."
         assert_eq!(definition.config.timeout_secs, Some(120));
         assert!(!definition.config.can_spawn);
         assert_eq!(
-            definition.config.system_prompt.as_deref(),
+            definition.config.persona.as_deref(),
             Some("Investigate the evidence.")
         );
     }
@@ -332,7 +345,7 @@ system_prompt = "Investigate the evidence."
         );
         assert!(!definition.config.can_spawn);
         assert_eq!(
-            definition.config.system_prompt.as_deref(),
+            definition.config.persona.as_deref(),
             Some("Investigate the evidence.")
         );
     }
@@ -352,8 +365,54 @@ system_prompt = "Investigate the evidence."
         assert_eq!(definition.config.timeout_secs, Some(120));
         assert!(!definition.config.can_spawn);
         assert_eq!(
-            definition.config.system_prompt.as_deref(),
+            definition.config.persona.as_deref(),
             Some("Investigate the evidence.")
+        );
+    }
+
+    #[test]
+    fn a_markdown_body_overrides_a_frontmatter_persona() {
+        let definition = parse_agent_type_contents(
+            Path::new("research.md"),
+            "+++\npersona = \"frontmatter persona\"\n+++\nBody persona.\n",
+        )
+        .expect("Markdown file parses");
+
+        assert_eq!(
+            definition.config.persona.as_deref(),
+            Some("Body persona."),
+            "the body is the persona; a frontmatter `persona` never wins"
+        );
+    }
+
+    #[test]
+    fn a_bodyless_markdown_agent_type_file_is_rejected() {
+        let error = parse_agent_type_contents(
+            Path::new("research.md"),
+            "+++\nallowed_tools = [\"read\"]\npersona = \"frontmatter persona\"\n+++\n",
+        )
+        .expect_err("a Markdown agent-type file must have a body");
+
+        match error {
+            ConfigError::MalformedAgentType { path, message } => {
+                assert_eq!(path, Path::new("research.md"));
+                assert!(
+                    message.contains("no body"),
+                    "the error names the missing body: {message}"
+                );
+            }
+            other => panic!("expected a malformed agent-type error, got {other}"),
+        }
+    }
+
+    #[test]
+    fn a_whitespace_only_markdown_body_is_rejected() {
+        let error = parse_agent_type_contents(Path::new("research.md"), "+++\n+++\n   \n\t\n")
+            .expect_err("a whitespace-only body counts as no body");
+
+        assert!(
+            matches!(error, ConfigError::MalformedAgentType { .. }),
+            "expected a malformed agent-type error, got {error}"
         );
     }
 
@@ -471,7 +530,7 @@ rules = [
         .expect("write Markdown definition");
         std::fs::write(
             temporary_directory.path().join("research.toml"),
-            "system_prompt = \"TOML body\"\n",
+            "persona = \"TOML persona\"\n",
         )
         .expect("write TOML definition");
 

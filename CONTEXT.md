@@ -23,6 +23,12 @@ or built-in.
 A code-owned fallback used when no workspace or Ylva home configuration
 supplies a value.
 
+**Trusted instruction file**:
+An `AGENTS.md` or `CLAUDE.md` whose content is appended to the global baseline
+of the system prompt. Which file names are trusted, where they are discovered,
+and how they are composed is code-owned; arbitrary Markdown is never loaded.
+_Avoid_: agents file, conventions file
+
 **Profile**:
 A named runtime configuration that selects engines and supplies settings for
 agents.
@@ -35,12 +41,14 @@ ability, and runtime settings.
 
 **Global SOUL**:
 The shared Ylva identity and behavioral baseline for every agent context. It is
-separate from an agent type and is combined with type-specific instructions.
+separate from an agent type and is combined with trusted instruction content
+and type-specific instructions.
 _Avoid_: default system prompt
 
 **Persona**:
 Identity and behavioral guidance presented to a model. The global SOUL is the
-shared persona; an agent type may add a specialization.
+shared persona; an agent type may add one specialization that extends the
+global SOUL rather than replacing it.
 
 **Agent role**:
 The execution position of an agent: root for the user's conversation or
@@ -62,7 +70,8 @@ The ordered model-facing message history belonging to one agent run.
 
 **System prompt**:
 The complete instruction message presented to a model for an agent context,
-including the global SOUL and any applicable agent-type guidance.
+including the global SOUL with its trusted instruction content and any
+applicable agent-type guidance.
 _Avoid_: root agent's initial system message
 
 **Tool**:

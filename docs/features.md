@@ -209,7 +209,15 @@ for the wire format.
 
 Path arguments given as absolute paths inside the current working directory
 are displayed/executed in cwd-relative form for consistency; this does not
-affect sandbox approval checks. See
+affect sandbox approval checks. A `~`/`~/` prefix or any
+`$ENVVAR`/`${ENVVAR}` token in a path argument is expanded before use —
+plain string substitution in Rust, never a shell — so a sentinel source such
+as `$YLVA_HOME/AGENTS.md` can
+be passed verbatim. Only path-like arguments (`path`, and `glob`'s
+`pattern`) are expanded; free-form values such as `bash`'s `command` or
+`write`'s `content` are passed through verbatim. Expansion happens before
+sandbox evaluation and never
+bypasses an approval check. See
 [implementation notes](./implementation-notes.md#path-like-argument-normalization).
 
 - **read**: Read file content from `path` using `mode`/`offset`/`limit` and the
@@ -664,17 +672,42 @@ global `~/.ylva/agents/`, selected profile `agents/`, or project
 `.ylva/agents/` directories. Project files shadow profile files, and profile
 files shadow global files for the same type; file definitions are replaced
 whole before inline profile fields are applied. A Markdown file uses strict
-`+++` TOML or `---` YAML frontmatter followed by its system-prompt body.
-Inline `persona` content always precedes that body.
+`+++` TOML or `---` YAML frontmatter followed by its body, which *is* the
+agent's `persona`; a body-less Markdown file is a load error. The same
+`persona` is written as `persona = "…"` in a `.toml` file or in an inline
+table, where an inline value replaces the file-sourced persona.
 
 ### Layered global persona and initialization
 
 The top-level conversation's global persona comes from `SOUL.md`, resolved
 from the project `.ylva/`, home `~/.ylva/`, and the code-owned built-in value
-in that order. The resolved SOUL is inherited exactly once by both root and
-child contexts. Agent-type persona and file body are then appended, followed
-by the tool protocol; a child additionally receives its task briefing and
-runtime-budget constraints.
+in that order — whole-file replacement, the first existing layer wins. The
+resolved SOUL is inherited exactly once by both root and child contexts.
+
+Ylva then appends the trusted instruction files it discovers: exactly
+`AGENTS.md` and `CLAUDE.md`, matched case-sensitively, first from the Ylva
+home and then along the workspace chain from the workspace root down to the
+working directory. This is concatenation rather than replacement, so the file
+closest to the working directory is composed last and wins conflicts. A fixed
+safety preamble precedes the first section, and every section is wrapped in
+`[instructions from <source>]` … `[end of instructions from <source>]`
+markers whose `<source>` is `$YLVA_HOME/<filename>` for a home file (the
+variable's name only, never its value) or the workspace-relative path for a
+workspace file. Those sources are executable: path-like tools expand
+`~`/`$ENVVAR` before use, and startup exports the resolved `YLVA_HOME` so
+`$YLVA_HOME/AGENTS.md` can be passed to `read` verbatim. Empty,
+whitespace-only, and byte-identical duplicate files are skipped; oversized
+(over 64 KiB), unreadable, non-UTF-8, symlink-escaping, and unlistable-chain
+files fail startup. With no instruction file the prompt is the resolved SOUL
+alone, byte-for-byte. Instruction content steers the model but can never
+override tool policy, approval floors, or the sandbox, which are enforced in
+code.
+
+The agent-type `persona` — one section, extending the baseline rather than
+replacing it — is then appended, followed by the tool protocol; a child
+additionally receives its task briefing and runtime-budget constraints. See
+[configuration](./configuration.md#global-persona-soulmd) for the complete
+initial system-prompt contract.
 
 `ylva init` writes `SOUL.md`, `profiles/default/config.toml`, and an annotated
 `profiles/default/.env` starter; it does not seed agent-type files.

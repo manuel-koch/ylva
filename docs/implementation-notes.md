@@ -30,16 +30,68 @@ prompt, then appends a child's briefing and runtime-budget constraint. Direct
 library/test loops that do not receive a resolved prompt retain
 `Context::new()` as the compatibility fallback.
 
+`config::instructions` **appends** to that baseline instead of replacing it:
+`compose_root_system_prompt` = `load_soul` + `load_trusted_instructions`,
+joined by blank lines with one fixed safety preamble and, per file, a
+`[instructions from <source>]` … `[end of instructions from <source>]`
+sentinel pair. Discovery lives in a pure inner core
+(`load_trusted_instructions_from_roots(workspace_root, working_directory,
+ylva_home)` — the `load_soul_from_layers` pattern, so unit tests never mutate
+the process environment); the public `load_trusted_instructions` resolves
+`ylva_home()` and emits one `tracing::info!` line (path, raw byte size) per
+contributing file, keeping unit tests independent of subscriber state.
+
+Mechanics worth knowing:
+
+- The allowlist `TRUSTED_INSTRUCTION_FILE_NAMES` is ordered `CLAUDE.md`,
+  `AGENTS.md`, and each directory's entries are consumed in that order, so
+  `AGENTS.md` wins same-directory conflicts by position.
+- Matching compares the *directory-entry* name (`file_name() == "AGENTS.md"`),
+  never a path lookup: a case-insensitive filesystem (macOS, Windows) would
+  otherwise satisfy `agents.md` for `AGENTS.md`.
+- Containment canonicalizes both the file and its owning root (workspace root
+  or Ylva home) and requires `starts_with`, so a symlink resolving outside
+  its root is a hard error (`ConfigError::InstructionFileOutsideTrustBoundary`)
+  rather than a silently trusted path. `InstructionFile` keeps the
+  **non-canonical** discovered path so `strip_prefix` comparisons match the
+  roots as given.
+- `read_to_string` maps I/O failures *and* non-UTF-8 content to
+  `ConfigError::Unreadable`, matching `layered::read_external_file`; an
+  unlistable chain directory fails the same way, while a `NotFound` listing
+  is treated as empty. A raw-size check (`metadata.len()` over
+  `MAX_INSTRUCTION_FILE_BYTES`) runs before the content is read, so an
+  oversized file never allocates.
+- One leading UTF-8 BOM is stripped after reading; content that is empty or
+  whitespace-only is skipped without a section. Dedupe compares the
+  **BOM-stripped content byte-for-byte** against files already collected in
+  composition order — exact duplicates only, first occurrence wins;
+  near-duplicates and partial overlaps load as authored.
+- `InstructionFile::source` is derived during discovery, where both roots are
+  known: `$YLVA_HOME/<file_name>` for the home scope (the variable's name, so
+  no username or home path enters the prompt) and the workspace-relative path
+  joined with `/` for the workspace scope.
+- The composed prompt is not persisted (`Context::set_store`): the two
+  leading system messages are rebuilt from the running binary on every run
+  and resume, so instruction files are re-read from disk exactly like the
+  SOUL.
+
 `agent_type_file` enumerates user-authored `.md` and `.toml` files in global,
 profile, and project agent directories. Markdown files use either TOML
 frontmatter delimited by `+++` or YAML frontmatter delimited by `---`; the
-trimmed body becomes the file-authored system prompt. The highest-precedence
+frontmatter deserializes through the standard `AgentConfig`, then the trimmed
+body **overrides** `persona` — the body *is* the persona, so a body-less or
+whitespace-only Markdown file fails with `ConfigError::MalformedAgentType`
+instead of contributing an empty section. The highest-precedence
 file replaces the complete lower-scope definition; inline
 `[agents.<type>]` values are deserialized as optional field overrides and
 applied afterward. A same-scope file and inline definition is rejected as
-ambiguous, while a profile override of a lower-scope file is valid. `persona`
-and the file-authored `system_prompt` are composed after the global SOUL and
-before the tool protocol. After the profile's engine set is materialized,
+ambiguous, while a profile override of a lower-scope file is valid — an
+inline `persona` therefore *replaces* the file-sourced persona while the
+other overridden fields merge individually. The one agent `persona` is
+composed after the global SOUL
+(with its trusted instruction sections) and before the tool protocol;
+`compose_agent_system_prompt` emits it as a single section. After
+the profile's engine set is materialized,
 `AgentFactory` validates every agent type's explicit engine reference before
 the store or CLI/TUI loop starts; environment-derived engine sets use the same
 validation path.
@@ -426,6 +478,30 @@ display/consistency nicety, not a security boundary — sandbox approval
 checks run independently on whichever path form ends up being used. Each
 tool declares its own path-like argument keys via
 `Tool::path_like_arguments()`.
+
+The same loop first expands the value's path tokens with
+`sandbox::expand_path_tokens(value, lookup)` — a pure helper whose `lookup`
+closure is supplied by the caller, so unit tests never mutate the process
+environment:
+
+- `$NAME` and `${NAME}` (`NAME` = `[A-Za-z_][A-Za-z0-9_]*`) are replaced by
+  `lookup(NAME)` when defined and left literal when undefined — a literal
+  `$` in a file name survives, as do malformed or unterminated forms;
+- substitution runs exactly once: a substituted value is never rescanned for
+  further tokens;
+- after environment substitution, a leading `~` or `~/` expands through
+  `lookup("HOME")`; `~user/…` is deliberately unsupported.
+
+`ToolRegistry::create_call` performs expansion first and then rewrites the
+expanded value with `to_relative_path`, storing whichever of the two results
+differs from the original — so an expansion landing outside the cwd keeps its
+absolute form instead of being dropped. Expansion is string substitution in
+Rust, never a shell, and it runs before sandbox evaluation: the sandbox sees
+only the expanded, canonicalized path, and the `outside_workspace` approval
+floor still applies. `src/main.rs` exports the resolved `YLVA_HOME` into the
+process environment at startup, which is what makes a verbatim
+`$YLVA_HOME/AGENTS.md` sentinel source work for file tools and `bash` child
+processes alike.
 
 ## Sandbox `cross_filesystem` rule
 

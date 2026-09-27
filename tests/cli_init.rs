@@ -16,12 +16,12 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
-use serde_json::Value;
 use tempfile::TempDir;
 
 mod common;
 
 use common::mock_llm_server::{content_frame, MockLlmConfig, MockLlmServer};
+use common::{assert_request_uses_system_prompt, run_ylva_with_provider};
 
 fn run_ylva(ylva_home: &Path, working_directory: &Path, arguments: &[&str]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ylva"));
@@ -31,22 +31,6 @@ fn run_ylva(ylva_home: &Path, working_directory: &Path, arguments: &[&str]) -> O
         .env(ylva::YLVA_HOME_ENVIRONMENT_VARIABLE, ylva_home)
         .current_dir(working_directory)
         .args(arguments);
-    command.output().expect("spawn the ylva binary")
-}
-
-fn run_ylva_with_provider(
-    ylva_home: &Path,
-    working_directory: &Path,
-    provider_base_url: &str,
-) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_ylva"));
-    command
-        .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env(ylva::YLVA_HOME_ENVIRONMENT_VARIABLE, ylva_home)
-        .env("OLLAMA_BASE_URL", provider_base_url)
-        .current_dir(working_directory)
-        .args(["--no-tui", "--prompt", "hello"]);
     command.output().expect("spawn the ylva binary")
 }
 
@@ -244,24 +228,4 @@ async fn root_persona_uses_project_then_home_then_embedded_precedence() {
     assert!(third.status.success(), "built-in run succeeds");
     assert_request_uses_system_prompt(&server, "You are Ylva");
     server.abort();
-}
-
-fn assert_request_uses_system_prompt(server: &MockLlmServer, expected: &str) {
-    let found = server.request_bodies().into_iter().filter_map(|body| {
-        let value = serde_json::from_str::<Value>(&body).ok()?;
-        let messages = value.get("messages")?.as_array()?;
-        let first = messages.first()?;
-        let content = first.get("content")?.as_str()?;
-        Some((
-            first.get("role")?.as_str()?.to_string(),
-            content.to_string(),
-        ))
-    });
-    assert!(
-        found
-            .into_iter()
-            .any(|(role, content)| role == "system" && content.contains(expected)),
-        "a chat request must contain system prompt {expected:?}; requests: {:?}",
-        server.request_bodies()
-    );
 }

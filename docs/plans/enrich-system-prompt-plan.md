@@ -107,7 +107,7 @@ Key constraints:
 
 ## Implementation Plan
 
-1. [ ] Add `src/config/instructions.rs` (register `pub mod instructions;` in
+1. [x] Add `src/config/instructions.rs` (register `pub mod instructions;` in
    `src/config.rs`) with the trusted-instruction-file discovery core and its
    unit tests. Extend `ConfigError` in `src/config.rs` with failure variants in
    the existing style (e.g. `OversizedInstructionFile { path, limit }`,
@@ -192,7 +192,7 @@ Key constraints:
      `sub/AGENTS.md` (chain subdirectory); no files present yields an
      empty vector.
      Use tempdirs and the pure core (see `docs/known-test-issues.md`).
-2. [ ] Add `pub fn compose_root_system_prompt(workspace_root: Option<&Path>,
+2. [x] Add `pub fn compose_root_system_prompt(workspace_root: Option<&Path>,
    working_directory: Option<&Path>) -> Result<String, ConfigError>`
    in `src/config/instructions.rs`: the result is `load_soul(workspace_root)`
    (unchanged, without sentinels) followed by the collected instruction
@@ -231,7 +231,7 @@ Key constraints:
    `CLAUDE.md`/`AGENTS.md` sentinel pairs with `$YLVA_HOME/` and
    workspace-relative sources), equivalence with `load_soul` when no
    instruction files exist, whitespace contract.
-3. [ ] Add path-token expansion for path-like tool arguments, making the
+3. [x] Add path-token expansion for path-like tool arguments, making the
    `$YLVA_HOME` sentinel source usable verbatim end to end.
    - Pure helper in `src/sandbox.rs` next to `to_relative_path` (the single
      path-normalization module), e.g.
@@ -273,7 +273,7 @@ Key constraints:
      `create_call` test proving the rewrite runs before dispatch (set and
      unset a uniquely named env var inside the test so no shared variable
      is touched).
-4. [ ] Re-export the new public items from `src/lib.rs`
+4. [x] Re-export the new public items from `src/lib.rs`
    (`config::instructions::{load_trusted_instructions,
    compose_root_system_prompt, InstructionFile,
    TRUSTED_INSTRUCTION_FILE_NAMES, MAX_INSTRUCTION_FILE_BYTES}`)
@@ -285,7 +285,7 @@ Key constraints:
    both. `load_soul` stays public and unchanged; `AgentFactory::with_system_prompt`
    and `compose_agent_system_prompt` keep their signatures. Verify with the
    existing test suite that no caller behavior changed.
-5. [ ] Integration test: new `tests/system_prompt_instructions.rs`, using the
+5. [x] Integration test: new `tests/system_prompt_instructions.rs`, using the
    `tests/common` helpers and the pattern of `tests/cli_init.rs`
    (`run_ylva_with_provider`, `assert_request_uses_system_prompt` against
    `MockLlmServer::request_bodies`). Cases: (a) workspace `SOUL.md` plus root
@@ -304,7 +304,7 @@ Key constraints:
    home-layer instruction files — they are used, with the preamble and
    `$YLVA_HOME/` sentinels; (e) workspace `SOUL.md` alone — request unchanged
    versus today's behavior (no preamble, no sentinels).
-6. [ ] Documentation (must land in the same commit as the code):
+6. [x] Documentation (must land in the same commit as the code):
    - `docs/configuration.md` → *Global persona (`SOUL.md`)*: document the
      initial system-prompt contract — trusted filenames and the exclusion of
      `AGENT.md`, `GEMINI.md`, and tool-specific names, case-sensitive
@@ -347,7 +347,7 @@ Key constraints:
      system-prompt sources for transparency (the resolved SOUL layer path,
      each trusted instruction file loaded with its size). Recording the
      idea only; implementing `/status` stays out of scope.
-7. [ ] Final verification: `make format lint`, the mandatory gate
+7. [x] Final verification: `make format lint`, the mandatory gate
    `make test-coverage`, and `rumdl fmt` on touched Markdown files.
 
 ## Implementation Hints

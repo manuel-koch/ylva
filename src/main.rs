@@ -139,10 +139,20 @@ fn main() {
     );
     tracing::info!(app = if use_tui { "tui" } else { "cli" }, "starting");
 
-    let workspace_root = std::env::current_dir()
-        .ok()
-        .and_then(|current_directory| ylva::discover_workspace_root(&current_directory));
+    let current_directory = std::env::current_dir().ok();
+    let workspace_root = current_directory
+        .as_deref()
+        .and_then(ylva::discover_workspace_root);
     let ylva_home = ylva::ylva_home();
+    // Export the resolved Ylva home so `$YLVA_HOME/…` sentinel sources expand
+    // verbatim for path-like tools (`create_call`) and for `bash` child
+    // processes alike. `ylva_home()` already answered the same question, but
+    // the default `~/.ylva` value existed only inside its return value while
+    // `YLVA_HOME` stayed unset in the process environment. Idempotent when the
+    // variable was already set explicitly.
+    if let Some(ylva_home) = ylva_home.as_deref() {
+        std::env::set_var(ylva::YLVA_HOME_ENVIRONMENT_VARIABLE, ylva_home);
+    }
     let explicit_profile_name = cli.profile.as_deref();
     let profile_environment =
         match load_selected_profile_environment(explicit_profile_name, workspace_root.as_deref()) {
@@ -168,7 +178,10 @@ fn main() {
             exit_with_error(&mut log_guard, message);
         }
     };
-    let root_system_prompt = match ylva::load_soul(workspace_root.as_deref()) {
+    let root_system_prompt = match ylva::compose_root_system_prompt(
+        workspace_root.as_deref(),
+        current_directory.as_deref(),
+    ) {
         Ok(system_prompt) => system_prompt,
         Err(error) => {
             exit_with_error(&mut log_guard, error);

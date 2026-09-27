@@ -195,7 +195,6 @@ fn default_agent_config() -> AgentConfig {
         allowed_tools: None,
         timeout_secs: None,
         persona: None,
-        system_prompt: None,
         can_spawn: true,
         tools: HashMap::new(),
     }
@@ -534,7 +533,6 @@ fn load_agent_types(
             allowed_tools: None,
             timeout_secs: None,
             persona: None,
-            system_prompt: None,
             can_spawn: false,
             tools: HashMap::new(),
         });
@@ -1397,10 +1395,7 @@ api_key = "${MISSING_API_KEY}"
         let profile = ProfileConfig::load(&profiles_root, "work").expect("profile loads");
         let research = profile.agents.get("research").expect("global agent type");
         assert!(!research.can_spawn);
-        assert_eq!(
-            research.system_prompt.as_deref(),
-            Some("Investigate evidence.")
-        );
+        assert_eq!(research.persona.as_deref(), Some("Investigate evidence."));
     }
 
     #[test]
@@ -1432,25 +1427,19 @@ api_key = "${MISSING_API_KEY}"
         write_agent_type_file(
             &home,
             "agents/research.toml",
-            "system_prompt = \"global\"\ncan_spawn = true\n",
+            "persona = \"global\"\ncan_spawn = true\n",
         );
         write_agent_type_file(
             &home,
             "profiles/work/agents/research.toml",
-            "system_prompt = \"profile\"\ncan_spawn = false\n",
+            "persona = \"profile\"\ncan_spawn = false\n",
         );
 
         let work = ProfileConfig::load(&profiles_root, "work").expect("work profile loads");
         let other = ProfileConfig::load(&profiles_root, "other").expect("other profile loads");
-        assert_eq!(
-            work.agents["research"].system_prompt.as_deref(),
-            Some("profile")
-        );
+        assert_eq!(work.agents["research"].persona.as_deref(), Some("profile"));
         assert!(!work.agents["research"].can_spawn);
-        assert_eq!(
-            other.agents["research"].system_prompt.as_deref(),
-            Some("global")
-        );
+        assert_eq!(other.agents["research"].persona.as_deref(), Some("global"));
         assert!(other.agents["research"].can_spawn);
     }
 
@@ -1469,20 +1458,16 @@ api_key = "${MISSING_API_KEY}"
         std::fs::create_dir_all(project_config.parent().expect("project config parent"))
             .expect("mkdir");
         std::fs::write(&project_config, "theme = \"dark\"\n").expect("write project config");
-        write_agent_type_file(
-            &home,
-            "agents/research.toml",
-            "system_prompt = \"global\"\n",
-        );
+        write_agent_type_file(&home, "agents/research.toml", "persona = \"global\"\n");
         write_agent_type_file(
             &home,
             "profiles/default/agents/research.toml",
-            "system_prompt = \"profile\"\n",
+            "persona = \"profile\"\n",
         );
         write_agent_type_file(
             &workspace_root,
             ".ylva/agents/research.toml",
-            "system_prompt = \"project\"\n",
+            "persona = \"project\"\n",
         );
 
         let profile = ProfileConfig::load_with_environment_at_workspace_root(
@@ -1493,7 +1478,7 @@ api_key = "${MISSING_API_KEY}"
         )
         .expect("project profile loads");
         assert_eq!(
-            profile.agents["research"].system_prompt.as_deref(),
+            profile.agents["research"].persona.as_deref(),
             Some("project")
         );
     }
@@ -1559,7 +1544,7 @@ api_base_url = "${YLVA_PHASE10_2_PROJECT_URL}"
     }
 
     #[test]
-    fn inline_agent_fields_override_a_file_definition_without_replacing_its_body() {
+    fn inline_agent_fields_override_a_file_definition() {
         let temp = tempfile::tempdir().expect("tempdir");
         let profiles_root = temp.path().join("home").join(PROFILES_DIRECTORY_NAME);
         write_profile_config(
@@ -1579,13 +1564,13 @@ timeout_secs = 30
 
         let profile = ProfileConfig::load(&profiles_root, "work").expect("profile loads");
         let research = profile.agents.get("research").expect("research agent type");
-        assert_eq!(research.persona.as_deref(), Some("Be concise."));
+        assert_eq!(
+            research.persona.as_deref(),
+            Some("Be concise."),
+            "the inline persona replaces the file-sourced persona"
+        );
         assert_eq!(research.timeout_secs, Some(30));
         assert!(research.can_spawn);
-        assert_eq!(
-            research.system_prompt.as_deref(),
-            Some("Investigate evidence.")
-        );
     }
 
     #[test]
@@ -1663,11 +1648,8 @@ timeout_secs = 30
             .expect("cross-scope inline adaptation is valid");
         assert_eq!(
             profile.agents["research"].persona.as_deref(),
-            Some("Use concise findings.")
-        );
-        assert_eq!(
-            profile.agents["research"].system_prompt.as_deref(),
-            Some("global body")
+            Some("Use concise findings."),
+            "the inline persona replaces the file-sourced persona"
         );
     }
 
@@ -1679,7 +1661,7 @@ timeout_secs = 30
         write_agent_type_file(
             &workspace_root,
             ".ylva/agents/research.toml",
-            "system_prompt = \"project body\"\n",
+            "persona = \"project body\"\n",
         );
 
         let profile = ProfileConfig::load_or_default_with_environment_at_workspace_root(
@@ -1690,7 +1672,7 @@ timeout_secs = 30
         )
         .expect("missing default config falls back");
         assert_eq!(
-            profile.agents["research"].system_prompt.as_deref(),
+            profile.agents["research"].persona.as_deref(),
             Some("project body")
         );
         assert!(
@@ -1867,7 +1849,6 @@ engine = "ollama/local"
                     allowed_tools: Some(vec!["bash".to_string()]),
                     timeout_secs: Some(120),
                     persona: Some("You are a helpful assistant.".to_string()),
-                    system_prompt: None,
                     can_spawn: false,
                     tools: HashMap::new(),
                 },
@@ -1900,7 +1881,6 @@ engine = "ollama/local"
             allowed_tools: None,
             timeout_secs: None,
             persona: None,
-            system_prompt: None,
             can_spawn: true,
             tools: HashMap::new(),
         };

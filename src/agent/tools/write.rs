@@ -275,7 +275,8 @@ impl Tool for WriteTool {
 
     fn description(&self) -> &str {
         "Create or overwrite a file with the given content. `encoding` defaults to `utf8`; \
-        use `base64` to write exact arbitrary bytes from standard padded Base64."
+        use `base64` to write exact arbitrary bytes from standard padded Base64. The `path` \
+        argument accepts `~` and `$ENVVAR`/`${ENVVAR}` tokens; they are expanded before use."
     }
 
     fn input_schema(&self) -> RootSchema {

@@ -308,7 +308,8 @@ impl Tool for SearchTool {
         skipped; output capped at 64 KB. `glob` (e.g. `**/*.rs`) restricts searched files. \
         `files_with_matches: true` returns only file paths. `only_matches: true` returns only \
         matched substrings, like `grep -o`. `files_with_matches`/`only_matches` are mutually \
-        exclusive."
+        exclusive. The `path` argument accepts `~` and `$ENVVAR`/`${ENVVAR}` tokens; they are \
+        expanded before use."
     }
 
     fn input_schema(&self) -> schemars::schema::RootSchema {

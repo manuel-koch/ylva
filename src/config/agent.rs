@@ -47,15 +47,17 @@ pub struct AgentConfig {
     /// `None` means no timeout is enforced.
     #[serde(default, deserialize_with = "deserialize_optional_u64_or_string")]
     pub timeout_secs: Option<u64>,
-    /// Optional persona instruction prepended to the system prompt.
+    /// The agent type's own persona: the one model-facing text this type
+    /// contributes. It is composed as a single section after the global
+    /// baseline (global SOUL plus trusted instruction sections) and before
+    /// the tool protocol — it extends that baseline, never replaces it.
+    ///
+    /// Written as `persona = "…"` in a `.toml` agent-type file, as
+    /// `persona = "…"` in an inline `[agents.<type>]` table (a field-level
+    /// override that replaces a file-sourced persona), or as the body of a
+    /// `.md` agent-type file — the body *is* the persona.
     #[serde(default)]
     pub persona: Option<String>,
-    /// File-authored agent-type system-prompt body. Inline
-    /// `config.toml` `[agents.<type>]` tables do not set this field; they
-    /// provide profile-level overrides such as `persona`, `engine`, and
-    /// `allowed_tools`.
-    #[serde(default)]
-    pub system_prompt: Option<String>,
     /// When `true` the agent is permitted to spawn child agents via
     /// `AgentFactory::create` with `Role::Child`. Checked in Phase 6.
     #[serde(default, deserialize_with = "deserialize_bool_or_string")]

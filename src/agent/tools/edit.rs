@@ -359,7 +359,8 @@ impl Tool for EditTool {
         "Edit an existing file (must already exist) by replacing text. `mode: search_replace` — \
         replace `old_string` with `new_string` (first occurrence only, unless `replace_all: true`). \
         `mode: line_range_replace` — replace lines `start_line`..`end_line` (1-based, inclusive) \
-        with `new_string`."
+        with `new_string`. The `path` argument accepts `~` and `$ENVVAR`/`${ENVVAR}` tokens; \
+        they are expanded before use."
     }
 
     fn input_schema(&self) -> RootSchema {

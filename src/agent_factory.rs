@@ -546,9 +546,6 @@ fn compose_agent_system_prompt(
         if let Some(persona) = agent_config.persona.as_deref() {
             prompt_sections.push(persona);
         }
-        if let Some(system_prompt) = agent_config.system_prompt.as_deref() {
-            prompt_sections.push(system_prompt);
-        }
     }
     (!prompt_sections.is_empty()).then(|| prompt_sections.join("\n\n"))
 }
@@ -967,7 +964,6 @@ mod tests {
                     allowed_tools: None,
                     timeout_secs: None,
                     persona: None,
-                    system_prompt: None,
                     can_spawn: true,
                     tools: HashMap::new(),
                 },
@@ -1003,7 +999,6 @@ mod tests {
                 allowed_tools: None,
                 timeout_secs: None,
                 persona: None,
-                system_prompt: None,
                 can_spawn: false,
                 tools: HashMap::new(),
             },
@@ -1053,7 +1048,6 @@ mod tests {
                         allowed_tools: None,
                         timeout_secs: None,
                         persona: None,
-                        system_prompt: None,
                         can_spawn: false,
                         tools: HashMap::new(),
                     },
@@ -1066,7 +1060,6 @@ mod tests {
                         allowed_tools: None,
                         timeout_secs: None,
                         persona: None,
-                        system_prompt: None,
                         can_spawn: false,
                         tools: HashMap::new(),
                     },
@@ -1250,7 +1243,6 @@ mod tests {
                 allowed_tools: None,
                 timeout_secs: None,
                 persona: None,
-                system_prompt: None,
                 can_spawn: false,
                 tools: HashMap::from([(
                     "not-a-real-tool".to_string(),
@@ -1308,7 +1300,6 @@ mod tests {
                         allowed_tools: None,
                         timeout_secs: None,
                         persona: Some("specialist persona".to_string()),
-                        system_prompt: Some("specialist body".to_string()),
                         can_spawn: false,
                         tools: HashMap::new(),
                     },
@@ -1338,7 +1329,7 @@ mod tests {
                 .collect();
             assert_eq!(
                 root_system_messages.first().copied(),
-                Some("global soul\n\nspecialist persona\n\nspecialist body")
+                Some("global soul\n\nspecialist persona")
             );
             assert_eq!(
                 root_system_messages
@@ -1383,7 +1374,7 @@ mod tests {
                 .collect();
             assert_eq!(
                 child_system_messages.first().copied(),
-                Some("global soul\n\nspecialist persona\n\nspecialist body")
+                Some("global soul\n\nspecialist persona")
             );
             assert_eq!(
                 child_system_messages
@@ -1415,7 +1406,6 @@ mod tests {
                     allowed_tools: None,
                     timeout_secs: None,
                     persona: None,
-                    system_prompt: None,
                     can_spawn: false,
                     tools: HashMap::new(),
                 },
@@ -1458,7 +1448,6 @@ mod tests {
                 allowed_tools: Some(vec!["read".to_string()]),
                 timeout_secs: None,
                 persona: None,
-                system_prompt: None,
                 can_spawn: false,
                 tools: HashMap::new(),
             },
@@ -1515,7 +1504,6 @@ mod tests {
                 allowed_tools: None,
                 timeout_secs: None,
                 persona: None,
-                system_prompt: None,
                 can_spawn: false,
                 tools: HashMap::from([(
                     "write".to_string(),
@@ -1724,7 +1712,6 @@ mod tests {
                     allowed_tools: None,
                     timeout_secs: None,
                     persona: None,
-                    system_prompt: None,
                     can_spawn: false,
                     tools: HashMap::new(),
                 },
@@ -1816,7 +1803,6 @@ mod tests {
                     allowed_tools: None,
                     timeout_secs: None,
                     persona: None,
-                    system_prompt: None,
                     can_spawn: false,
                     tools: HashMap::new(),
                 },

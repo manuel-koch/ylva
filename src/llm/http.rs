@@ -423,13 +423,21 @@ fn provider_status_error(
 /// when present; otherwise exponential backoff (`base * 2^(attempt-1)`) capped
 /// at [`RETRY_MAX_SECONDS`], with a small jitter.
 pub(crate) fn retry_delay(attempt: usize, retry_after: Option<u64>) -> Duration {
+    retry_delay_with_jitter(attempt, retry_after, jitter_fraction())
+}
+
+/// Pure core of [`retry_delay`] with the jitter fraction injected, so the
+/// delay bounds are asserted deterministically instead of depending on the
+/// wall clock (the established pure-core test pattern). Full jitter is
+/// sampled from `[0, 1)`, so the wrapper may legally produce a near-zero
+/// delay; bounds that must always hold are stated against fixed fractions.
+fn retry_delay_with_jitter(attempt: usize, retry_after: Option<u64>, jitter: f64) -> Duration {
     if let Some(seconds) = retry_after {
         return Duration::from_secs(seconds.min(RETRY_MAX_SECONDS));
     }
     let exponent = attempt.saturating_sub(1).min(63);
     let base = RETRY_BASE_SECONDS.saturating_mul(1u64 << exponent);
     let capped = base.min(RETRY_MAX_SECONDS);
-    let jitter = jitter_fraction();
     Duration::from_millis((capped as f64 * jitter * 1000.0) as u64)
 }
 
@@ -472,11 +480,31 @@ mod tests {
 
     #[test]
     fn retry_delay_backs_off_bounded_by_max() {
-        assert!(retry_delay(1, None) < Duration::from_secs(2));
-        let first = retry_delay(2, None);
-        assert!(first >= Duration::from_millis(1));
-        let late = retry_delay(40, None);
-        assert!(late <= Duration::from_secs(RETRY_MAX_SECONDS));
+        // Deterministic bounds against injected jitter: the wall-clock
+        // wrapper samples full jitter from `[0, 1)` and may legally land on
+        // a near-zero delay, so the backoff contract is asserted on fixed
+        // fractions rather than on a lucky clock reading.
+        assert!(
+            retry_delay_with_jitter(1, None, 0.9999) < Duration::from_secs(2),
+            "the first attempt stays below twice its 1s base"
+        );
+        assert_eq!(
+            retry_delay_with_jitter(2, None, 0.5),
+            Duration::from_millis(1000),
+            "the second attempt backs off half of its 2s cap"
+        );
+        assert_eq!(
+            retry_delay_with_jitter(40, None, 1.0),
+            Duration::from_secs(RETRY_MAX_SECONDS),
+            "the exponential backoff saturates at the cap"
+        );
+        assert!(
+            retry_delay_with_jitter(40, None, 0.9999) <= Duration::from_secs(RETRY_MAX_SECONDS),
+            "no jitter can exceed the cap"
+        );
+        // Structural bounds that hold for any clock-derived jitter.
+        assert!(retry_delay(1, None) <= Duration::from_secs(RETRY_BASE_SECONDS));
+        assert!(retry_delay(40, None) <= Duration::from_secs(RETRY_MAX_SECONDS));
     }
 
     #[test]

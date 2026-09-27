@@ -1,27 +1,34 @@
 # Enrich system prompt
 
-Extend the existing global `SOUL.md` loading without changing its layered
-replacement behavior. Automatically discover a small, explicit set of trusted
-instruction filenames, such as:
+**Implemented.** The design questions this idea raised were settled in a
+design review and shipped together with the rest of the work. The contract
+lives in:
 
-- `AGENTS.md`
-- `CLAUDE.md`
-- other compatible instruction files selected deliberately rather than
-  loading arbitrary Markdown files
+- [configuration](../configuration.md#global-persona-soulmd) → *Global
+  persona (`SOUL.md`)* → *Trusted instruction files* — the initial
+  system-prompt contract, including composition order, sentinel markers,
+  limits, and failure behavior;
+- [features](../features.md#layered-global-persona-and-initialization) — the
+  user-facing wording, plus the `~`/`$ENVVAR` expansion contract under
+  *Tools to be used by models*;
+- [implementation notes](../implementation-notes.md#layered-configuration-and-persona-assembly)
+  — `config::instructions` mechanics and *Path-like argument normalization*;
+- [plans](../plans/enrich-system-prompt-plan.md) — the executed plan.
 
-The missing design and implementation work is:
+Summary of the settled decisions:
 
-- define the exact trusted filename set and whether filename matching is
-  case-sensitive;
-- define discovery locations and workspace boundaries, including whether
-  instruction files in parent directories, the workspace root, or the user's
-  home directory are eligible;
-- define precedence and merge order when multiple files are found, including
-  files with different names at the same location;
-- prevent instruction content from escaping the intended workspace trust
-  boundary or overriding Ylva's runtime safety constraints; and
-- specify behavior for unreadable, malformed, oversized, or duplicated files.
-
-The resolved instruction content should be composed deterministically with the
-existing `SOUL.md` prompt and documented as part of the initial system-prompt
-contract.
+- the trusted filename set is exactly `AGENTS.md` and `CLAUDE.md`, matched
+  case-sensitively; `AGENT.md`, `GEMINI.md`, and tool-specific rule formats
+  stay out of scope, so arbitrary Markdown is never loaded;
+- eligible locations are the Ylva home directory and the workspace chain from
+  the workspace root down to the working directory — not parents above the
+  workspace root, the OS home directory, the workspace `.ylva/`, or
+  subdirectories outside that chain;
+- composition is concatenation with position-based precedence (closer to the
+  working directory wins conflicts), each section wrapped in bracketed
+  sentinel markers behind one fixed safety-preamble line;
+- instruction content cannot escape the workspace trust boundary and cannot
+  override Ylva's runtime safety constraints (tool allowlists, approval
+  floors, sandbox), which remain enforced in code;
+- oversized (> 64 KiB raw bytes), unreadable, non-UTF-8, empty, and
+  duplicated files have deterministic, test-covered behavior.

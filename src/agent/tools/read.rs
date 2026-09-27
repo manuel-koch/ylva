@@ -596,7 +596,9 @@ impl Tool for ReadTool {
         cut silently and flagged `truncated` in the result metadata \
         (complete recognized media files are exempt, up to 8 MiB — a larger \
         whole file fails with an explicit error), so continue reading \
-        with `offset`/`limit` to page through the rest."
+        with `offset`/`limit` to page through the rest. The `path` argument \
+        accepts `~` and `$ENVVAR`/`${ENVVAR}` tokens; they are expanded \
+        before use."
     }
 
     fn input_schema(&self) -> RootSchema {

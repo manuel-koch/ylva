@@ -515,18 +515,23 @@ impl ToolRegistry {
     /// registered.
     ///
     /// Before dispatch, rewrites each of the tool's
-    /// [`Tool::path_like_arguments`] string values that is an absolute path
-    /// inside the current working directory to its cwd-relative form (see
-    /// [`crate::sandbox::to_relative_path`]). Some LLMs emit absolute paths
-    /// even where a relative one would do; normalizing here means the
-    /// rewritten path is both what actually executes and what the UI renders
-    /// for the call, rather than just cosmetic. Paths outside the current
-    /// directory, and already-relative paths, pass through unchanged — this
-    /// is not a security boundary, just a display/consistency nicety;
-    /// sandbox approval checks run independently on whatever path is used.
-    /// Normalization is keyed off the process's actual cwd rather than a
-    /// sandbox's configured workspace root, because that is what relative
-    /// paths in tool execution (e.g. `std::fs::read`) resolve against.
+    /// [`Tool::path_like_arguments`] string values in two steps: first the
+    /// value's `~`/`$ENVVAR` tokens are expanded (see
+    /// [`crate::sandbox::expand_path_tokens`]), then an absolute result that
+    /// falls inside the current working directory is rewritten to its
+    /// cwd-relative form (see [`crate::sandbox::to_relative_path`]). Some
+    /// LLMs emit absolute paths — including verbatim sentinel sources such as
+    /// `$YLVA_HOME/AGENTS.md` — even where a relative one would do;
+    /// normalizing here means the expanded path is both what actually
+    /// executes and what the UI renders for the call, rather than just
+    /// cosmetic. A value that expands to a path outside the current
+    /// directory, and an already-relative value, keep the expanded form
+    /// unchanged — this is not a security boundary, just a
+    /// display/consistency nicety; sandbox approval checks run independently
+    /// on whatever expanded path is used. Normalization is keyed off the
+    /// process's actual cwd rather than a sandbox's configured workspace
+    /// root, because that is what relative paths in tool execution (e.g.
+    /// `std::fs::read`) resolve against.
     pub fn create_call(
         &self,
         name: &str,
@@ -537,14 +542,18 @@ impl ToolRegistry {
         if let Some(object) = arguments.as_object_mut() {
             if let Ok(current_dir) = std::env::current_dir() {
                 for key in tool.path_like_arguments() {
-                    let relative = match object.get(*key) {
-                        Some(Value::String(path_str)) => {
-                            crate::sandbox::to_relative_path(path_str, &current_dir)
-                        }
-                        _ => None,
+                    let path_str = match object.get(*key) {
+                        Some(Value::String(path_str)) => path_str.clone(),
+                        _ => continue,
                     };
-                    if let Some(relative) = relative {
-                        object.insert((*key).to_string(), Value::String(relative));
+                    let expanded =
+                        crate::sandbox::expand_path_tokens(&path_str, &|variable_name| {
+                            std::env::var(variable_name).ok()
+                        });
+                    let normalized = crate::sandbox::to_relative_path(&expanded, &current_dir)
+                        .unwrap_or(expanded);
+                    if normalized != path_str {
+                        object.insert((*key).to_string(), Value::String(normalized));
                     }
                 }
             }
@@ -1406,6 +1415,38 @@ mod tests {
             )
             .expect("test tool is registered");
         assert_eq!(call.arguments()["other"], serde_json::json!("/etc/hosts"));
+    }
+
+    #[test]
+    fn create_call_expands_path_tokens_before_dispatch() {
+        // Reads std::env::current_dir(); must hold SUBSCRIBER_LOCK to avoid
+        // racing the logging test that temporarily mutates process cwd (see
+        // docs/known-test-issues.md "Process-global cwd mutation in tests").
+        let _lock = crate::test_support::SUBSCRIBER_LOCK
+            .lock()
+            .expect("subscriber mutex poisoned");
+        // A uniquely named variable, set and unset inside this test only, so
+        // no shared process-environment entry is touched.
+        let variable_name = "YLVA_TEST_PATH_TOKEN_EXPANSION";
+        let temporary_dir = tempfile::tempdir().expect("tempdir");
+        std::env::set_var(variable_name, temporary_dir.path());
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(TestTool));
+        let call = registry
+            .create_call(
+                "test",
+                uuid::Uuid::new_v4(),
+                serde_json::json!({ "field": format!("${{{variable_name}}}/notes.md") }),
+            )
+            .expect("test tool is registered");
+        std::env::remove_var(variable_name);
+
+        assert_eq!(
+            call.arguments()["field"],
+            serde_json::json!(format!("{}/notes.md", temporary_dir.path().display())),
+            "the token must be expanded before the argument reaches the tool"
+        );
     }
 
     #[test]
