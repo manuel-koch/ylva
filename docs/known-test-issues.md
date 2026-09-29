@@ -101,3 +101,30 @@ Abstract the side-effectful operation behind a trait or callback parameter and
 inject a no-op implementation from integration test call sites. Do not rely on
 `#[cfg(not(test))]` in library code to suppress behaviour from integration
 tests.
+
+## Undrained `AgentLoop` ui channel stalls `run()`
+
+### Issue
+
+`AgentLoop::new` gives the loop a **bounded** `ui_tx` (capacity 100), and each
+tool round emits several `UiUpdate`s (`StreamStarted`, `StreamDone`,
+`ToolDone`, …). The TUI and CLI drivers drain `ui_rx` while the agent runs, so
+production never fills the channel. A test that instead drains `ui_rx` only
+**after** `run()` returns does: after roughly 34 tool rounds
+`ui_tx.send().await` parks the whole agent loop, the iteration cap never trips,
+and `run()` never returns — the test shows up as a timeout hang.
+
+Because such a test usually runs inside `run_locked` (it panics while holding
+`SUBSCRIBER_LOCK`), the hang's timeout panic poisons the mutex and cascades
+into unrelated tests failing with `subscriber mutex poisoned`.
+
+Raising `MAX_TOOL_USE_ITERATIONS` moves the stall point: a test that fit under
+the limit at 30 iterations (31 rounds ≈ 93 of 100 slots) can stall at 50.
+
+### Workaround
+
+Drain `ui_rx` **concurrently** with `run()`, mirroring the drivers: a
+`tokio::select!` loop over the run handle and `ui_rx.recv()`, followed by a
+non-blocking `try_recv` drain to pick up updates `run()` posted just before it
+returned. See `child_role_iteration_cap_exceeded_returns_err_not_unstructured_ok`
+in `src/agent.rs` for the pattern.

@@ -115,6 +115,10 @@ pub struct Cli {
     #[arg(long)]
     pub auto_approve_edit: bool,
 
+    /// Auto-approve web_search tool calls
+    #[arg(long)]
+    pub auto_approve_web_search: bool,
+
     /// Auto-approve spawning child agents
     #[arg(long)]
     pub auto_approve_spawn: bool,
@@ -189,6 +193,9 @@ impl Cli {
         }
         if self.auto_approve_edit {
             tools.push(AutoApproveTool::Edit);
+        }
+        if self.auto_approve_web_search {
+            tools.push(AutoApproveTool::WebSearch);
         }
         if self.auto_approve_spawn {
             tools.push(AutoApproveTool::Spawn);
@@ -496,6 +503,7 @@ mod tests {
             "--auto-approve-bash",
             "--auto-approve-search",
             "--auto-approve-edit",
+            "--auto-approve-web-search",
             "--auto-approve-spawn",
         ])
         .expect("parses");
@@ -508,6 +516,7 @@ mod tests {
                 AutoApproveTool::Bash,
                 AutoApproveTool::Search,
                 AutoApproveTool::Edit,
+                AutoApproveTool::WebSearch,
                 AutoApproveTool::Spawn,
             ]
         );

@@ -73,13 +73,13 @@ Tool approval is host-driven: `read`/`glob` are auto-approved when the
 sandbox abstains; `write` and `edit` require explicit user approval by
 default; `bash` requires user approval by default but is subject to
 structural sandbox rules (backgrounded commands, variable-assignment
-prefixes, unquoted glob/brace expansion) and configurable `[tool.bash]`
+prefixes, unquoted glob/brace expansion) and configurable `[tools.bash]`
 rules — see "`bash` command rules" in
 [configuration](./configuration.md#bash-command-rules). Every path tool also
 honors a built-in floor: a path outside the workspace — or a dot-prefixed
 component, except for `glob` enumeration, which only lists paths — requires
 user approval instead of being auto-approved or rejected outright. Path
-tools additionally honor configurable `[tool.<name>]` rule lists, including
+tools additionally honor configurable `[tools.<name>]` rule lists, including
 the opt-in `cross_filesystem` rule that matches paths on a different
 filesystem (device) than the workspace root — see
 [Sandbox (tool-approval rules)](./configuration.md#sandbox-tool-approval-rules).
@@ -258,7 +258,7 @@ bypasses an approval check. See
   with an explicit size error instead of being truncated or loaded unbounded.
   Continue a capped read with `offset`/`limit`. Reads auto-approve when the sandbox abstains; a path
   outside the workspace or with a dot-prefixed component requires user
-  approval instead. Any explicit verdict from a configured `[tool.read]`
+  approval instead. Any explicit verdict from a configured `[tools.read]`
   rule list — including the opt-in `cross_filesystem` rule (a path on a
   different filesystem than the workspace root) — is honored as-is.
 - **write**: Write `content` to `path`, with the per-call `encoding` defaulting

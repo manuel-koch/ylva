@@ -156,6 +156,23 @@ pub(crate) fn run_locked(body: impl std::future::Future<Output = ()>) {
         .block_on(body);
 }
 
+/// Like [`run_locked`], but on a runtime whose clock starts **paused**: time
+/// auto-advances to the next timer when the runtime is idle, so tests can
+/// assert on throttling/timeout behavior deterministically without wall-clock
+/// sleeps. `SUBSCRIBER_LOCK` is held for the whole body for the same reason
+/// [`run_locked`] holds it — see `docs/known-test-issues.md`.
+pub(crate) fn run_locked_paused(body: impl std::future::Future<Output = ()>) {
+    let _lock = SUBSCRIBER_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .expect("build paused runtime")
+        .block_on(body);
+}
+
 pub(crate) fn capture_logs(body: impl std::future::Future<Output = ()>) -> String {
     let _lock = SUBSCRIBER_LOCK
         .lock()

@@ -23,6 +23,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use schemars::{schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
@@ -50,6 +51,20 @@ pub const SEARCH_OUTPUT_LIMIT_BYTES: usize = 65_536;
 
 /// Number of bytes inspected to detect binary files (null-byte heuristic).
 const BINARY_PROBE_BYTES: usize = 8 * 1024;
+
+static SEARCH_DESCRIPTION: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "Search files under a directory tree for a regex `pattern` (grep-style: \
+        `filepath:lineno: content` matches, `filepath-lineno- content` context). Alternation is \
+        `|`, e.g. `foo|bar` (not the English words `OR`/`AND`, which are matched as literal \
+        text). Binary files skipped; output capped at {} bytes. `glob` (e.g. `**/*.rs`) restricts \
+        searched files. `files_with_matches: true` returns only file paths. `only_matches: true` \
+        returns only matched substrings, like `grep -o`. `files_with_matches`/`only_matches` are \
+        mutually exclusive. The `path` argument accepts `~` and `$ENVVAR`/`${{ENVVAR}}` tokens; \
+        they are expanded before use.",
+        SEARCH_OUTPUT_LIMIT_BYTES
+    )
+});
 
 // ── Argument schema ───────────────────────────────────────────────────────────
 
@@ -301,15 +316,7 @@ impl Tool for SearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search files under a directory tree for a regex `pattern` (grep-style: \
-        `filepath:lineno: content` matches, `filepath-lineno- content` context). Alternation is \
-        `|`, e.g. `foo|bar` (not the English words `OR`/`AND`, which are matched as literal \
-        text). Binary files \
-        skipped; output capped at 64 KB. `glob` (e.g. `**/*.rs`) restricts searched files. \
-        `files_with_matches: true` returns only file paths. `only_matches: true` returns only \
-        matched substrings, like `grep -o`. `files_with_matches`/`only_matches` are mutually \
-        exclusive. The `path` argument accepts `~` and `$ENVVAR`/`${ENVVAR}` tokens; they are \
-        expanded before use."
+        &SEARCH_DESCRIPTION
     }
 
     fn input_schema(&self) -> schemars::schema::RootSchema {
@@ -1185,5 +1192,12 @@ mod tests {
     fn search_input_args_all_properties_have_descriptions() {
         let schema = SearchTool::default().input_schema();
         super::super::assert_all_properties_have_descriptions(&schema, "SearchInputArgs");
+    }
+
+    #[test]
+    fn description_uses_the_output_byte_limit_constant() {
+        let tool = SearchTool::default();
+        let description = tool.description();
+        assert!(description.contains(&format!("{} bytes", SEARCH_OUTPUT_LIMIT_BYTES)));
     }
 }

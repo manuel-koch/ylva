@@ -108,4 +108,26 @@ environment values are never written to logs.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `YLVA_REQUEST_DUMP_PATH` | — | When set, each outgoing HTTP request is written to a timestamped JSON Lines file, and the paired streamed response is written alongside it as a raw SSE transcript. The value is a path template: the directory and filename stem are extracted and the request is written as `<stem>_<timestamp>_<dump_id>_request.jsonl` — line 1 is the request's `scheme`/`host`/`path`/`headers` (any `Authorization`/`Cookie`/API-key-style header value is redacted as `<REDACTED>`), line 2 is the compact JSON body. Base64 tool-result payloads and inline image/file data are replaced with stable redaction markers in the dump while roles, IDs, media types, filenames, and other safe metadata remain. The live request is not changed. The response is written as `<stem>_<timestamp>_<dump_id>_response.jsonl` (one line per SSE `data:` payload, or a `[transport] ...` marker for non-payload events such as cancellation or a transport error), sharing the exact same timestamp and per-request `<dump_id>` as its request so concurrent requests cannot overwrite each other's dumps. A relative directory is resolved against the process working directory. Used by `make build-debug-and-run-with-logs`. |
+| `YLVA_REQUEST_DUMP_PATH` | — | When set, every outbound HTTP request is dumped, including model catalogs, Ollama metadata, chat/SSE, and web search. Request and response files share a timestamp and per-request id. A relative directory is resolved against the process working directory. Used by `make build-debug-and-run-with-logs`. |
+
+The value is a path template: the directory and filename stem are extracted and
+the request is written as
+`<stem>_<timestamp>_<dump_id>_request.jsonl`. Its first line contains the
+request's `scheme`/`host`/`path`/`query`/`headers`; `Authorization`, `Cookie`,
+and API-key-style header values are redacted as `<REDACTED>`. Its second line is
+the compact JSON request body, or `null` for a request without a body. Base64
+tool-result payloads and inline image/file data are replaced with stable
+redaction markers while roles, IDs, media types, filenames, and other safe
+metadata remain. Client-level default headers, such as Ylva's `User-Agent`, are
+not included in the header projection. The live request is not changed.
+
+The paired response is written as
+`<stem>_<timestamp>_<dump_id>_response.<extension>`. The extension and file
+contents follow the response `Content-Type`: `text/event-stream` uses `.jsonl`
+with one line per SSE `data:` payload, `application/json` uses `.json` with the
+original buffered bytes, `text/html` uses `.html`, `text/plain` uses `.txt`,
+and common XML, JavaScript, image, and PDF types use their corresponding
+extensions. Unknown buffered types use `.bin`. Buffered responses are written
+as their original bytes rather than JSON-encoded strings. Transport failures
+without response headers use `.jsonl` and are recorded as `[transport] ...`
+markers.

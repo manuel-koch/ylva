@@ -42,7 +42,7 @@ use crate::sandbox::{ApprovalCheck, SandboxContext};
 
 /// Default timeout for bash commands (seconds). Separate from
 /// [`crate::agent::DEFAULT_TOOL_TIMEOUT_SECS`] because shell commands
-/// routinely take longer than 5 s.
+/// routinely take longer than the file-system-tool default.
 pub const DEFAULT_BASH_TIMEOUT_SECS: u64 = 300;
 
 /// Grace period added to [`BashCall::timeout_secs`] so the outer
@@ -363,7 +363,7 @@ impl Tool for BashTool {
     /// Delegates to the sandbox, which structurally analyses the command
     /// (backgrounding, variable-assignment prefixes, unquoted glob/brace
     /// expansion, unanalysable constructs) and combines that with any
-    /// configured `[tool.bash]` named/`CommandGlob` rules — see
+    /// configured `[tools.bash]` named/`CommandGlob` rules — see
     /// `SandboxContext::check_command`. When the sandbox abstains (`None`),
     /// the tool's own conservative default (`UserApprovalRequired`) applies.
     fn needs_approval(&self, arguments: &Value) -> ApprovalCheck {

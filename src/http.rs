@@ -12,10 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! HTTP constants and helpers shared by every outbound request Ylva
+//! triggers, regardless of which subsystem issues it (LLM providers,
+//! web-search backends, …).
+
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
+
+/// `User-Agent` value applied as a client-level default on every outbound
+/// HTTP request so remote servers identify Ylva and its package version.
+///
+/// Single source of truth: never re-declare the `ylva/<version>` pattern at a
+/// call site.
+pub const OUTBOUND_USER_AGENT: &str = concat!("ylva/", env!("CARGO_PKG_VERSION"));
 
 /// Maximum number of retries (after the initial attempt).
 pub(crate) const MAX_RETRIES: usize = 3;
@@ -24,6 +36,84 @@ pub(crate) const RETRY_BASE_SECONDS: u64 = 1;
 /// Upper bound on a single backoff delay, in seconds.
 pub(crate) const RETRY_MAX_SECONDS: u64 = 30;
 
+/// Source for a request-dump path template.
+#[derive(Debug, Clone, Default)]
+pub(crate) enum RequestDumpSource {
+    /// Resolve `YLVA_REQUEST_DUMP_PATH` when the request starts.
+    #[default]
+    Environment,
+    /// Use this explicit template instead of the process environment.
+    Template(PathBuf),
+}
+
+impl RequestDumpSource {
+    /// Use an explicit path template for request and response dumps.
+    pub(crate) fn from_template(path: impl Into<PathBuf>) -> Self {
+        RequestDumpSource::Template(path.into())
+    }
+
+    fn template_path(&self) -> Option<PathBuf> {
+        match self {
+            RequestDumpSource::Environment => {
+                std::env::var_os("YLVA_REQUEST_DUMP_PATH").map(PathBuf::from)
+            }
+            RequestDumpSource::Template(path) => Some(path.clone()),
+        }
+    }
+}
+
+/// Identity shared by the request dump and its paired response dump.
+#[derive(Debug, Clone)]
+pub(crate) struct RequestDumpContext {
+    template: Option<String>,
+    timestamp: String,
+    dump_id: String,
+}
+
+impl RequestDumpContext {
+    /// Resolve the source once at request start so request and response dumps
+    /// cannot be split across different environment values.
+    pub(crate) fn new(source: &RequestDumpSource) -> Self {
+        let template = source
+            .template_path()
+            .and_then(|path| path.to_str().map(str::to_owned));
+        RequestDumpContext {
+            template,
+            timestamp: current_dump_timestamp(),
+            dump_id: Uuid::new_v4().simple().to_string(),
+        }
+    }
+
+    pub(crate) fn dump_id(&self) -> &str {
+        &self.dump_id
+    }
+
+    pub(crate) fn request_path(&self) -> Option<PathBuf> {
+        self.path("request", "jsonl")
+    }
+
+    pub(crate) fn response_path_for_content_type(
+        &self,
+        content_type: Option<&str>,
+        fallback_extension: &str,
+    ) -> Option<PathBuf> {
+        self.path(
+            "response",
+            response_dump_extension(content_type, fallback_extension),
+        )
+    }
+
+    fn path(&self, kind: &str, extension: &str) -> Option<PathBuf> {
+        build_dump_path_from_template(
+            self.template.as_deref()?,
+            &self.timestamp,
+            &self.dump_id,
+            kind,
+            extension,
+        )
+    }
+}
+
 /// Perform a JSON `GET` request with optional bearer authentication.
 pub(crate) async fn get_json(
     client: &reqwest::Client,
@@ -31,14 +121,46 @@ pub(crate) async fn get_json(
     api_key: Option<&str>,
     operation: &str,
 ) -> anyhow::Result<serde_json::Value> {
-    let mut request = client.get(url);
-    if let Some(api_key) = api_key {
-        request = request.bearer_auth(api_key);
+    get_json_with_dump_source(
+        client,
+        url,
+        api_key,
+        operation,
+        &RequestDumpSource::Environment,
+    )
+    .await
+}
+
+pub(crate) async fn get_json_with_dump_source(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: Option<&str>,
+    operation: &str,
+    dump_source: &RequestDumpSource,
+) -> anyhow::Result<serde_json::Value> {
+    let headers = bearer_headers(api_key)?;
+    let dump_context = RequestDumpContext::new(dump_source);
+    let request_dump_path = dump_context.request_path();
+    if let Some(path) = &request_dump_path {
+        dump_request(
+            url,
+            &redacted_headers_json(&headers),
+            &serde_json::Value::Null,
+            path,
+        );
     }
-    let response = request.send().await?;
+    let response = match client.get(url).headers(headers).send().await {
+        Ok(response) => response,
+        Err(error) => {
+            let response_dump_path = dump_context.response_path_for_content_type(None, "jsonl");
+            dump_response_transport_error(&response_dump_path, &error);
+            return Err(error.into());
+        }
+    };
     let status = response.status();
+    let body = read_buffered_response(response, &dump_context).await?;
     anyhow::ensure!(status.is_success(), "{operation} failed with HTTP {status}");
-    Ok(response.json().await?)
+    Ok(serde_json::from_slice(&body)?)
 }
 
 /// Perform a JSON `POST` request with optional bearer authentication.
@@ -49,21 +171,153 @@ pub(crate) async fn post_json(
     api_key: Option<&str>,
     operation: &str,
 ) -> anyhow::Result<serde_json::Value> {
-    let mut request = client.post(url).json(body);
-    if let Some(api_key) = api_key {
-        request = request.bearer_auth(api_key);
+    post_json_with_dump_source(
+        client,
+        url,
+        body,
+        api_key,
+        operation,
+        &RequestDumpSource::Environment,
+    )
+    .await
+}
+
+pub(crate) async fn post_json_with_dump_source(
+    client: &reqwest::Client,
+    url: &str,
+    body: &serde_json::Value,
+    api_key: Option<&str>,
+    operation: &str,
+    dump_source: &RequestDumpSource,
+) -> anyhow::Result<serde_json::Value> {
+    let headers = bearer_headers(api_key)?;
+    let dump_context = RequestDumpContext::new(dump_source);
+    let request_dump_path = dump_context.request_path();
+    if let Some(path) = &request_dump_path {
+        dump_request(url, &redacted_headers_json(&headers), body, path);
     }
-    let response = request.send().await?;
+    let response = match client.post(url).headers(headers).json(body).send().await {
+        Ok(response) => response,
+        Err(error) => {
+            let response_dump_path = dump_context.response_path_for_content_type(None, "jsonl");
+            dump_response_transport_error(&response_dump_path, &error);
+            return Err(error.into());
+        }
+    };
     let status = response.status();
+    let response_body = read_buffered_response(response, &dump_context).await?;
     anyhow::ensure!(status.is_success(), "{operation} failed with HTTP {status}");
-    Ok(response.json().await?)
+    Ok(serde_json::from_slice(&response_body)?)
+}
+
+fn bearer_headers(api_key: Option<&str>) -> anyhow::Result<reqwest::header::HeaderMap> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    if let Some(api_key) = api_key {
+        let authorization = format!("Bearer {api_key}");
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            authorization
+                .parse()
+                .map_err(|error| anyhow::anyhow!("invalid authorization header value: {error}"))?,
+        );
+    }
+    Ok(headers)
+}
+
+/// Read and dump a complete non-streaming response body before the caller
+/// checks its status or parses its content.
+async fn read_buffered_response(
+    response: reqwest::Response,
+    dump_context: &RequestDumpContext,
+) -> anyhow::Result<Vec<u8>> {
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok());
+    let response_dump_path = dump_context.response_path_for_content_type(content_type, "bin");
+    match response.bytes().await {
+        Ok(body) => {
+            dump_buffered_response(&body, response_dump_path.as_deref());
+            Ok(body.to_vec())
+        }
+        Err(error) => {
+            dump_response_transport_error(&response_dump_path, &error);
+            Err(error.into())
+        }
+    }
+}
+
+/// Return the file extension appropriate for a response `Content-Type`.
+///
+/// The fallback is used when the server omits or provides an unrecognized
+/// media type. It is chosen by the caller because streaming and buffered
+/// responses have different safe fallbacks.
+pub(crate) fn response_dump_extension<'a>(
+    content_type: Option<&str>,
+    fallback_extension: &'a str,
+) -> &'a str {
+    let Some(media_type) = content_type
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return fallback_extension;
+    };
+    let media_type = media_type.to_ascii_lowercase();
+    match media_type.as_str() {
+        "text/event-stream" | "application/ndjson" | "application/x-ndjson" => "jsonl",
+        "application/json" | "application/problem+json" => "json",
+        value if value.ends_with("+json") => "json",
+        "text/html" | "application/xhtml+xml" => "html",
+        "text/plain" => "txt",
+        "text/css" => "css",
+        "text/javascript" | "application/javascript" => "js",
+        "text/xml" | "application/xml" => "xml",
+        "application/pdf" => "pdf",
+        "image/gif" => "gif",
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/svg+xml" => "svg",
+        "image/webp" => "webp",
+        _ => fallback_extension,
+    }
+}
+
+/// Write a complete buffered response as its original bytes.
+///
+/// The response path's extension is selected from its `Content-Type` before
+/// this function is called. Unlike SSE response dumps, buffered bodies are not
+/// converted to JSON Lines or otherwise escaped.
+pub(crate) fn dump_buffered_response(body: &[u8], response_dump_path: Option<&Path>) {
+    let Some(path) = response_dump_path else {
+        return;
+    };
+    if let Err(error) = std::fs::create_dir_all(path.parent().unwrap_or(Path::new("."))) {
+        tracing::warn!(path = %path.display(), error = %error, "failed to create response dump dir");
+        return;
+    }
+    match std::fs::write(path, body) {
+        Ok(()) => tracing::debug!(path = %path.display(), "dumped buffered response"),
+        Err(error) => {
+            tracing::warn!(path = %path.display(), error = %error, "failed to write response dump file");
+        }
+    }
+}
+
+pub(crate) fn dump_response_transport_error(
+    response_dump_path: &Option<PathBuf>,
+    error: &impl std::fmt::Display,
+) {
+    if let Some(path) = response_dump_path {
+        append_response_dump_line(&format!("[transport] response error: {error}"), path);
+    }
 }
 
 /// Perform a `POST` with bounded exponential backoff retry for `429`/`5xx`/
 /// connect failures, honoring `Retry-After` when present. Returns the first
 /// successful response or a terminal [`anyhow::Error`].
 ///
-/// `headers` carries any provider-specific auth (and other) request headers;
+/// `headers` carries any caller-specific auth (and other) request headers;
 /// it is applied on every attempt. Request diagnostics are handled by the
 /// caller so this function remains focused on transport and retry behavior.
 pub(crate) async fn post_with_retry(
@@ -78,7 +332,7 @@ pub(crate) async fn post_with_retry(
         let request = client.post(url).headers(headers.clone()).json(body);
 
         // Honour the cancel token during the initial HTTP round-trip.  The
-        // LLM server may take tens of seconds before sending back 200 +
+        // remote server may take tens of seconds before sending back 200 +
         // headers; without this check an in-flight `request.send()` would
         // keep the request alive until the server finally responds, making
         // cancellation appear stuck for the entire server-side think time.
@@ -118,7 +372,7 @@ pub(crate) async fn post_with_retry(
         if !should_retry(status) {
             let detail = response_body_detail(response).await;
             tracing::error!(url, status = status.as_u16(), "non-retryable status");
-            return Err(provider_status_error(status, url, &detail, retries));
+            return Err(status_error(status, url, &detail, retries));
         }
 
         if retries >= MAX_RETRIES {
@@ -129,7 +383,7 @@ pub(crate) async fn post_with_retry(
                 retry = retries,
                 "retryable status but retries exhausted"
             );
-            return Err(provider_status_error(status, url, &detail, retries));
+            return Err(status_error(status, url, &detail, retries));
         }
 
         let retry_after = response
@@ -202,7 +456,7 @@ pub(crate) fn redacted_headers_json(headers: &reqwest::header::HeaderMap) -> ser
 }
 
 /// Dump an outgoing request to `file_path` as two JSON Lines: a metadata line
-/// (URL scheme/host/path plus an already-redacted headers projection) followed
+/// (URL scheme/host/path/query plus an already-redacted headers projection) followed
 /// by an already-redacted request body, compact (not
 /// pretty-printed, so it stays on its own single line).
 ///
@@ -231,6 +485,7 @@ pub(crate) fn dump_request(
         "scheme": parsed_url.scheme(),
         "host": parsed_url.host_str().unwrap_or(""),
         "path": parsed_url.path(),
+        "query": parsed_url.query(),
         "headers": redacted_headers,
     });
 
@@ -262,9 +517,9 @@ pub(crate) fn dump_request(
 /// directory) on first write.
 ///
 /// Writes append-and-flush per call so a partial/cancelled stream still
-/// leaves whatever was received on disk. Mirrors [`dump_request_body`]'s
-/// failure handling: I/O errors are logged at `warn` and silently ignored so
-/// a dump failure never breaks a live response.
+/// leaves whatever was received on disk. Mirrors [`dump_request`]'s failure
+/// handling: I/O errors are logged at `warn` and silently ignored so a dump
+/// failure never breaks a live response.
 pub(crate) fn append_response_dump_line(line: &str, file_path: &Path) {
     use std::io::Write;
 
@@ -289,33 +544,8 @@ pub(crate) fn append_response_dump_line(line: &str, file_path: &Path) {
     }
 }
 
-/// Derive the dump file path for the outgoing request (metadata + body, as
-/// two JSON Lines — see [`dump_request`]) from the `YLVA_REQUEST_DUMP_PATH`
-/// environment variable, embedding `timestamp` and the per-request `dump_id`
-/// so it can be paired with a response dump built from the same values via
-/// [`build_response_dump_path`].
-///
-/// Returns `None` when the envvar is unset, empty, or whitespace-only.
-/// Delegates path construction to [`build_dump_path_from_template`].
-pub(crate) fn build_request_dump_path(timestamp: &str, dump_id: &str) -> Option<PathBuf> {
-    let template = std::env::var("YLVA_REQUEST_DUMP_PATH").ok()?;
-    build_dump_path_from_template(&template, timestamp, dump_id, "request", "jsonl")
-}
-
-/// Derive the dump file path for the raw SSE transcript of a streamed
-/// response from the `YLVA_REQUEST_DUMP_PATH` environment variable, embedding
-/// `timestamp` and the per-request `dump_id` so it can be paired with the
-/// request dump built from the same values via [`build_request_dump_path`].
-///
-/// Returns `None` when the envvar is unset, empty, or whitespace-only.
-/// Delegates path construction to [`build_dump_path_from_template`].
-pub(crate) fn build_response_dump_path(timestamp: &str, dump_id: &str) -> Option<PathBuf> {
-    let template = std::env::var("YLVA_REQUEST_DUMP_PATH").ok()?;
-    build_dump_path_from_template(&template, timestamp, dump_id, "response", "jsonl")
-}
-
 /// A human-readable `<unix_seconds>_<millis>` timestamp component, computed
-/// once per chat exchange and embedded in both dump paths for easy sorting.
+/// once per request and embedded in both dump paths for easy sorting.
 pub(crate) fn current_dump_timestamp() -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -386,20 +616,24 @@ pub(crate) async fn response_body_detail(response: reqwest::Response) -> String 
     }
 }
 
-/// Format a bounded snippet (≤512 chars) from a raw response body for use in an
-/// error message. Returns an empty string for a blank body.
+/// Maximum characters of a response-body snippet attached to an error message.
+const RESPONSE_BODY_SNIPPET_MAX_CHARS: usize = 512;
+
+/// Format a bounded snippet (≤[`RESPONSE_BODY_SNIPPET_MAX_CHARS`] chars) from
+/// a raw response body for use in an error message. Returns an empty string
+/// for a blank body.
 fn snippet_from_body(body: &[u8]) -> String {
     let text = String::from_utf8_lossy(body);
     let text = text.trim();
     if text.is_empty() {
         return String::new();
     }
-    text.chars().take(512).collect()
+    text.chars().take(RESPONSE_BODY_SNIPPET_MAX_CHARS).collect()
 }
 
 /// Build a terminal error for an HTTP `status`.
 /// Records the number of `retries` already performed when non-zero.
-fn provider_status_error(
+fn status_error(
     status: reqwest::StatusCode,
     url: &str,
     body_snippet: &str,
@@ -416,7 +650,7 @@ fn provider_status_error(
     } else {
         String::new()
     };
-    anyhow::anyhow!["provider returned HTTP {status_number}{body} for {url}{retry_note}"]
+    anyhow::anyhow!["server returned HTTP {status_number}{body} for {url}{retry_note}"]
 }
 
 /// Compute the next backoff delay. `Retry-After` (in seconds) wins
@@ -441,9 +675,19 @@ fn retry_delay_with_jitter(attempt: usize, retry_after: Option<u64>, jitter: f64
     Duration::from_millis((capped as f64 * jitter * 1000.0) as u64)
 }
 
+/// Sleep for `delay` unless `cancel` fires first; returns `Some` only when the
+/// full delay elapsed, so a stop aborts a retry wait promptly.
+pub(crate) async fn sleep_cancel_aware(cancel: &CancellationToken, delay: Duration) -> Option<()> {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => None,
+        _ = tokio::time::sleep(delay) => Some(()),
+    }
+}
+
 /// A tiny deterministic-per-call jitter in `[0, 1)`, seeded from the wall clock
-/// so successive attempts back off differently without a dedicated RNG crate.
-fn jitter_fraction() -> f64 {
+/// so successive requests back off differently without a dedicated RNG crate.
+pub(crate) fn jitter_fraction() -> f64 {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
@@ -455,19 +699,57 @@ fn jitter_fraction() -> f64 {
     state.wrapping_mul(0x2545_F491_4F6C_DD1D) as f64 / u64::MAX as f64
 }
 
-/// Sleep for `delay` unless `cancel` fires first; returns `Some` only when the
-/// full delay elapsed, so a stop aborts a retry wait promptly.
-pub(crate) async fn sleep_cancel_aware(cancel: &CancellationToken, delay: Duration) -> Option<()> {
-    tokio::select! {
-        biased;
-        _ = cancel.cancelled() => None,
-        _ = tokio::time::sleep(delay) => Some(()),
-    }
+/// A random delay in `[0, fraction * interval)` — the shared jitter primitive
+/// for pacing outbound requests (retry backoff, web-search throttling).
+pub(crate) fn jitter_duration(interval: Duration, fraction: f64) -> Duration {
+    Duration::from_secs_f64(interval.as_secs_f64() * fraction * jitter_fraction())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
+
+    async fn start_json_response_server() -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind server");
+        let address = listener.local_addr().expect("server address");
+        let handle = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.expect("accept request");
+                let mut request_head = [0_u8; 4096];
+                let bytes_read = stream.read(&mut request_head).await.expect("read request");
+                let response_body = if request_head[..bytes_read].starts_with(b"GET ") {
+                    "{\n  \"kind\": \"get\"\n}"
+                } else {
+                    "{\n  \"kind\": \"post\"\n}"
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response_body.len(),
+                    response_body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write response");
+            }
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    fn dump_paths(directory: &std::path::Path, suffix: &str) -> Vec<PathBuf> {
+        let mut paths = std::fs::read_dir(directory)
+            .expect("dump directory")
+            .map(|entry| entry.expect("dump entry").path())
+            .filter(|path| path.to_string_lossy().ends_with(suffix))
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
+    }
 
     #[test]
     fn retry_delay_honors_retry_after() {
@@ -519,16 +801,16 @@ mod tests {
     }
 
     #[test]
-    fn snippet_from_body_is_bounded_to_512_chars() {
-        let long_body = "x".repeat(2000);
-        let snippet = snippet_from_body(long_body.as_bytes());
-        assert!(snippet.chars().count() == 512);
-        assert_eq!(snippet, "x".repeat(512));
+    fn snippet_from_body_is_bounded_to_max_chars() {
+        let long = "x".repeat(RESPONSE_BODY_SNIPPET_MAX_CHARS + 100);
+        let snippet = snippet_from_body(long.as_bytes());
+        assert!(snippet.chars().count() == RESPONSE_BODY_SNIPPET_MAX_CHARS);
+        assert_eq!(snippet, "x".repeat(RESPONSE_BODY_SNIPPET_MAX_CHARS));
     }
 
     #[test]
-    fn provider_status_error_joins_snippet_only_when_present() {
-        let message = provider_status_error(
+    fn status_error_joins_snippet_only_when_present() {
+        let message = status_error(
             reqwest::StatusCode::NOT_FOUND,
             "http://example/api",
             "not found on server",
@@ -537,15 +819,14 @@ mod tests {
         .to_string();
         assert_eq!(
             message,
-            "provider returned HTTP 404: not found on server for http://example/api"
+            "server returned HTTP 404: not found on server for http://example/api"
         );
 
         let blank =
-            provider_status_error(reqwest::StatusCode::NOT_FOUND, "http://example/api", "", 0)
-                .to_string();
-        assert_eq!(blank, "provider returned HTTP 404 for http://example/api");
+            status_error(reqwest::StatusCode::NOT_FOUND, "http://example/api", "", 0).to_string();
+        assert_eq!(blank, "server returned HTTP 404 for http://example/api");
 
-        let exhausted = provider_status_error(
+        let exhausted = status_error(
             reqwest::StatusCode::SERVICE_UNAVAILABLE,
             "http://example/api",
             "down",
@@ -555,16 +836,16 @@ mod tests {
         assert_eq!(
             exhausted,
             format!(
-                "provider returned HTTP 503: down for http://example/api after {MAX_RETRIES} retries"
+                "server returned HTTP 503: down for http://example/api after {MAX_RETRIES} retries"
             )
         );
     }
 
     #[test]
-    fn provider_status_error_reports_prior_retries_on_non_retryable_status() {
+    fn status_error_reports_prior_retries_on_non_retryable_status() {
         // Two retries happened before a final non-retryable 400; the message
         // must not claim no retry was performed.
-        let message = provider_status_error(
+        let message = status_error(
             reqwest::StatusCode::BAD_REQUEST,
             "http://example/api",
             "bad",
@@ -573,7 +854,7 @@ mod tests {
         .to_string();
         assert_eq!(
             message,
-            "provider returned HTTP 400: bad for http://example/api after 2 retries"
+            "server returned HTTP 400: bad for http://example/api after 2 retries"
         );
     }
 
@@ -622,13 +903,97 @@ mod tests {
     }
 
     #[test]
-    fn build_request_dump_path_returns_none_when_env_var_unset() {
-        // Guard: ensure the var is absent for this check. Because we are not
-        // setting it, there is no race with other tests.
-        if std::env::var("YLVA_REQUEST_DUMP_PATH").is_ok() {
-            return; // var happens to be set in this process — skip rather than flake
+    fn whitespace_dump_template_returns_no_paths() {
+        let context = RequestDumpContext::new(&RequestDumpSource::from_template("   "));
+        assert!(context.request_path().is_none());
+        assert!(context
+            .response_path_for_content_type(Some("text/html"), "bin")
+            .is_none());
+    }
+
+    #[test]
+    fn response_dump_extension_follows_content_type() {
+        assert_eq!(
+            response_dump_extension(Some("text/html; charset=UTF-8"), "bin"),
+            "html"
+        );
+        assert_eq!(
+            response_dump_extension(Some("application/json"), "bin"),
+            "json"
+        );
+        assert_eq!(
+            response_dump_extension(Some("text/event-stream"), "bin"),
+            "jsonl"
+        );
+        assert_eq!(response_dump_extension(None, "bin"), "bin");
+        assert_eq!(
+            response_dump_extension(Some("application/octet-stream"), "bin"),
+            "bin"
+        );
+    }
+
+    #[test]
+    fn non_streaming_json_helpers_dump_requests_and_responses() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let dump_source = RequestDumpSource::from_template(temp_dir.path().join("requests.jsonl"));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        let (base_url, server) = runtime.block_on(start_json_response_server());
+        let (get_body, post_body) = runtime.block_on(async {
+            let client = reqwest::Client::new();
+            let get_body = get_json_with_dump_source(
+                &client,
+                &format!("{base_url}/get"),
+                Some("secret-key"),
+                "get",
+                &dump_source,
+            )
+            .await
+            .expect("GET response");
+            let post_body = post_json_with_dump_source(
+                &client,
+                &format!("{base_url}/post"),
+                &serde_json::json!({"request": "body"}),
+                Some("secret-key"),
+                "post",
+                &dump_source,
+            )
+            .await
+            .expect("POST response");
+            (get_body, post_body)
+        });
+        runtime.block_on(server).expect("server task");
+
+        assert_eq!(get_body["kind"], "get");
+        assert_eq!(post_body["kind"], "post");
+
+        let request_paths = dump_paths(temp_dir.path(), "_request.jsonl");
+        assert_eq!(request_paths.len(), 2, "one request dump per helper call");
+        let mut request_bodies = Vec::new();
+        for path in request_paths {
+            let contents = std::fs::read_to_string(path).expect("request dump");
+            let mut lines = contents.lines();
+            let metadata: serde_json::Value =
+                serde_json::from_str(lines.next().expect("request metadata")).expect("metadata");
+            request_bodies
+                .push(serde_json::from_str(lines.next().expect("request body")).expect("body"));
+            assert_eq!(metadata["headers"]["authorization"], REDACTED_HEADER_VALUE);
+            assert!(lines.next().is_none(), "request dump has exactly two lines");
         }
-        assert!(build_request_dump_path("1_002", "dump-a").is_none());
+        assert!(request_bodies.contains(&serde_json::Value::Null));
+        assert!(request_bodies.contains(&serde_json::json!({"request": "body"})));
+
+        let response_paths = dump_paths(temp_dir.path(), "_response.json");
+        assert_eq!(response_paths.len(), 2, "one response dump per helper call");
+        let response_contents = response_paths
+            .into_iter()
+            .map(|path| std::fs::read_to_string(path).expect("response dump"))
+            .collect::<Vec<_>>();
+        assert!(response_contents.contains(&"{\n  \"kind\": \"get\"\n}".to_string()));
+        assert!(response_contents.contains(&"{\n  \"kind\": \"post\"\n}".to_string()));
     }
 
     #[test]
@@ -693,6 +1058,7 @@ mod tests {
         assert_eq!(meta["scheme"], "https");
         assert_eq!(meta["host"], "example.com");
         assert_eq!(meta["path"], "/v1/chat/completions");
+        assert_eq!(meta["query"], "stream=true");
         assert_eq!(meta["headers"]["x-custom"], "value");
         assert_eq!(written_body, body);
     }

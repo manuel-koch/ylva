@@ -27,7 +27,7 @@ use super::{
     },
     layered::{current_workspace_root, resolve_file_at_paths, ConfigLayer, ResolvedFile},
     load_profile_environment_at_workspace_root, AgentConfig, ConfigError, ProviderConnectionConfig,
-    DEFAULT_PROFILE_NAME, PROFILES_DIRECTORY_NAME, PROFILE_CONFIG_FILE_NAME,
+    WebSearchConfig, DEFAULT_PROFILE_NAME, PROFILES_DIRECTORY_NAME, PROFILE_CONFIG_FILE_NAME,
 };
 
 /// Top-level runtime profile that groups engine selection and per-agent settings.
@@ -82,18 +82,23 @@ pub struct ProfileConfig {
     /// Map of agent-type name to its configuration.
     #[serde(default)]
     pub agents: HashMap<String, AgentConfig>,
-    /// Map of tool name (e.g. `read`, `write`) to its `[tool.<name>]`
+    /// Map of tool name (e.g. `read`, `write`) to its `[tools.<name>]`
     /// sandbox rule list. When a tool name has no entry here, its
     /// `SandboxContext` falls back to the built-in default floor
     /// (`outside_workspace`/`dot_path` → `UserApprovalRequired`, see
     /// `docs/configuration.md`'s "Sandbox" section and
     /// [`crate::sandbox::SandboxContext`]); when it does, that entry's rule
     /// list fully replaces the default floor for that tool.
-    #[serde(default, rename = "tool")]
+    #[serde(default)]
     pub tools: HashMap<String, ToolSandboxConfig>,
+    /// `[web_search]` section: which search backend serves the `web_search`
+    /// tool, its internal HTTP timeout, and its default result limit. The
+    /// `backend` value is validated when the profile loads.
+    #[serde(default)]
+    pub web_search: WebSearchConfig,
 }
 
-/// A single `[tool.<name>]` TOML table: currently just the ordered
+/// A single `[tools.<name>]` TOML table: currently just the ordered
 /// `rules` list evaluated by [`crate::sandbox::SandboxContext`] for that
 /// tool (last match wins). See [`crate::sandbox::SandboxRuleConfig`].
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -103,12 +108,16 @@ pub struct ToolSandboxConfig {
     pub rules: Vec<crate::sandbox::SandboxRuleConfig>,
 }
 
-/// Validate that every `[tool.<name>]`/`[agents.<type>.tools.<name>]` rule
+/// Validate that every `[tools.<name>]`/`[agents.<type>.tools.<name>]` rule
 /// list uses the rule kind appropriate for its tool: `bash` accepts only
 /// [`crate::sandbox::SandboxRuleConfig::CommandGlob`] and the four
 /// `bash`-only [`crate::sandbox::NamedSandboxRule`] variants
 /// (`backgrounded`/`variable_assignment_prefix`/`unquoted_glob`/
-/// `unquoted_brace_expansion`); every other tool accepts only
+/// `unquoted_brace_expansion`); `web_search` accepts only the
+/// network-tool [`crate::sandbox::NamedSandboxRule::NetworkRequest`] rule
+/// (`network_request`) — it has neither a path nor a command argument, so
+/// path and `command` rules would be silently ignored there; every other
+/// tool accepts only
 /// [`crate::sandbox::SandboxRuleConfig::PathGlob`] and the three path
 /// [`crate::sandbox::NamedSandboxRule`] variants (`outside_workspace`/
 /// `dot_path`/`cross_filesystem`). A mismatch is a hard startup error naming
@@ -125,26 +134,39 @@ fn validate_tool_sandbox_rules(
 ) -> Result<(), ConfigError> {
     for (tool_name, tool_config) in tools {
         let is_bash = tool_name == crate::agent::tools::bash::BashTool::NAME;
+        let is_web_search = tool_name == crate::agent::tools::web_search::WebSearchTool::NAME;
         for (index, rule) in tool_config.rules.iter().enumerate() {
-            let mismatched = if is_bash {
-                rule.is_path_only()
-            } else {
-                rule.is_bash_only()
-            };
-            if mismatched {
-                let expected = if is_bash {
-                    "a `command` argv-glob rule or a named command rule \
-                     (`backgrounded`/`variable_assignment_prefix`/`unquoted_glob`/\
-                     `unquoted_brace_expansion`)"
-                } else {
-                    "a `pattern` path-glob rule or a named path rule \
-                     (`outside_workspace`/`dot_path`/`cross_filesystem`)"
-                };
+            if is_bash {
+                if rule.is_path_only() || rule.is_network_only() {
+                    return Err(ConfigError::InvalidSandboxRuleKind {
+                        path: path.to_path_buf(),
+                        tool: tool_name.clone(),
+                        index,
+                        expected: "a `command` argv-glob rule or a named command rule \
+                                   (`backgrounded`/`variable_assignment_prefix`/\
+                                   `unquoted_glob`/`unquoted_brace_expansion`)"
+                            .to_string(),
+                    });
+                }
+            } else if is_web_search {
+                if rule.is_bash_only() || rule.is_path_only() {
+                    return Err(ConfigError::InvalidSandboxRuleKind {
+                        path: path.to_path_buf(),
+                        tool: tool_name.clone(),
+                        index,
+                        expected: "a named `network_request` rule (the only rule kind \
+                                   [tools.web_search] accepts)"
+                            .to_string(),
+                    });
+                }
+            } else if rule.is_bash_only() || rule.is_network_only() {
                 return Err(ConfigError::InvalidSandboxRuleKind {
                     path: path.to_path_buf(),
                     tool: tool_name.clone(),
                     index,
-                    expected: expected.to_string(),
+                    expected: "a `pattern` path-glob rule or a named path rule \
+                               (`outside_workspace`/`dot_path`/`cross_filesystem`)"
+                        .to_string(),
                 });
             }
             if rule.has_misplaced_command_glob_wildcard() {
@@ -217,6 +239,7 @@ impl Default for ProfileConfig {
             keybindings: HashMap::new(),
             agents: HashMap::from([(DEFAULT_PROFILE_NAME.to_string(), default_agent_config())]),
             tools: HashMap::new(),
+            web_search: WebSearchConfig::default(),
         }
     }
 }
@@ -382,6 +405,7 @@ impl ProfileConfig {
             inline_agents,
         )?;
         validate_tool_sandbox_rules(&profile.tools, &path)?;
+        profile.web_search.validate(&path)?;
         for agent in profile.agents.values() {
             validate_tool_sandbox_rules(&agent.tools, &path)?;
         }
@@ -808,12 +832,12 @@ persona = "You explore code."
             temp.path(),
             "with-tools",
             r#"
-[tool.read]
+[tools.read]
 rules = [
   { rule = "dot_path", verdict = "user_approval_required" },
 ]
 
-[tool.write]
+[tools.write]
 rules = [
   { rule = "outside_workspace", verdict = "auto_denied" },
   { pattern = "**/build/**", verdict = "auto_approved" },
@@ -848,7 +872,7 @@ rules = [
 
         assert!(
             !profile.tools.contains_key("edit"),
-            "a tool with no [tool.<name>] table has no entry, falling back to the default floor"
+            "a tool with no [tools.<name>] table has no entry, falling back to the default floor"
         );
     }
 
@@ -859,7 +883,7 @@ rules = [
             temp.path(),
             "with-bash-tools",
             r#"
-[tool.bash]
+[tools.bash]
 rules = [
   { rule = "backgrounded", verdict = "auto_denied" },
   { command = ["git", "reflog", "*"], verdict = "auto_approved" },
@@ -892,7 +916,7 @@ rules = [
             temp.path(),
             "bad-command-glob",
             r#"
-[tool.read]
+[tools.read]
 rules = [
   { command = ["git", "status"], verdict = "auto_approved" },
 ]
@@ -900,7 +924,7 @@ rules = [
         );
 
         let error = ProfileConfig::load(temp.path(), "bad-command-glob")
-            .expect_err("a CommandGlob rule under [tool.read] must be rejected");
+            .expect_err("a CommandGlob rule under [tools.read] must be rejected");
         assert!(matches!(
             error,
             ConfigError::InvalidSandboxRuleKind { tool, index: 0, .. } if tool == "read"
@@ -914,7 +938,7 @@ rules = [
             temp.path(),
             "bad-path-glob",
             r#"
-[tool.bash]
+[tools.bash]
 rules = [
   { pattern = "**/build/**", verdict = "auto_approved" },
 ]
@@ -922,7 +946,7 @@ rules = [
         );
 
         let error = ProfileConfig::load(temp.path(), "bad-path-glob")
-            .expect_err("a PathGlob rule under [tool.bash] must be rejected");
+            .expect_err("a PathGlob rule under [tools.bash] must be rejected");
         assert!(matches!(
             error,
             ConfigError::InvalidSandboxRuleKind { tool, index: 0, .. } if tool == "bash"
@@ -936,7 +960,7 @@ rules = [
             temp.path(),
             "bad-command-wildcard-position",
             r#"
-[tool.bash]
+[tools.bash]
 rules = [
   { command = ["git", "*", "status"], verdict = "auto_approved" },
 ]
@@ -958,7 +982,7 @@ rules = [
             temp.path(),
             "bad-command-double-wildcard-position",
             r#"
-[tool.bash]
+[tools.bash]
 rules = [
   { command = ["git", "**", "status"], verdict = "auto_approved" },
 ]
@@ -980,7 +1004,7 @@ rules = [
             temp.path(),
             "good-command-wildcard-position",
             r#"
-[tool.bash]
+[tools.bash]
 rules = [
   { command = ["git", "status", "*"], verdict = "auto_approved" },
 ]
@@ -998,7 +1022,7 @@ rules = [
             temp.path(),
             "bad-named-rule",
             r#"
-[tool.bash]
+[tools.bash]
 rules = [
   { rule = "outside_workspace", verdict = "auto_denied" },
 ]
@@ -1006,7 +1030,7 @@ rules = [
         );
 
         let error = ProfileConfig::load(temp.path(), "bad-named-rule")
-            .expect_err("outside_workspace under [tool.bash] must be rejected");
+            .expect_err("outside_workspace under [tools.bash] must be rejected");
         assert!(matches!(
             error,
             ConfigError::InvalidSandboxRuleKind { tool, index: 0, .. } if tool == "bash"
@@ -1020,7 +1044,7 @@ rules = [
             temp.path(),
             "bad-named-rule-path-tool",
             r#"
-[tool.write]
+[tools.write]
 rules = [
   { rule = "backgrounded", verdict = "auto_denied" },
 ]
@@ -1028,7 +1052,7 @@ rules = [
         );
 
         let error = ProfileConfig::load(temp.path(), "bad-named-rule-path-tool")
-            .expect_err("backgrounded under [tool.write] must be rejected");
+            .expect_err("backgrounded under [tools.write] must be rejected");
         assert!(matches!(
             error,
             ConfigError::InvalidSandboxRuleKind { tool, index: 0, .. } if tool == "write"
@@ -1042,7 +1066,7 @@ rules = [
         let profile = ProfileConfig::load(temp.path(), "no-tools").expect("the fixture loads");
         assert!(
             profile.tools.is_empty(),
-            "no [tool.*] tables means no configured overrides for any tool"
+            "no [tools.*] tables means no configured overrides for any tool"
         );
     }
 
@@ -1053,7 +1077,7 @@ rules = [
             temp.path(),
             "agent-scoped-tools",
             r#"
-[tool.write]
+[tools.write]
 rules = [
   { rule = "outside_workspace", verdict = "auto_denied" },
 ]
@@ -1096,7 +1120,7 @@ rules = [
             temp.path(),
             "with-cross-fs",
             r#"
-[tool.read]
+[tools.read]
 rules = [
   { rule = "outside_workspace", verdict = "auto_denied" },
   { rule = "dot_path", verdict = "auto_denied" },
@@ -1116,7 +1140,7 @@ rules = [
                     ..
                 }
             ),
-            "cross_filesystem must parse as a named rule under [tool.read]: {:?}",
+            "cross_filesystem must parse as a named rule under [tools.read]: {:?}",
             read_rules[2]
         );
     }
@@ -1128,7 +1152,7 @@ rules = [
             temp.path(),
             "bad-cross-fs-rule",
             r#"
-[tool.bash]
+[tools.bash]
 rules = [
   { rule = "cross_filesystem", verdict = "auto_denied" },
 ]
@@ -1136,7 +1160,7 @@ rules = [
         );
 
         let error = ProfileConfig::load(temp.path(), "bad-cross-fs-rule")
-            .expect_err("cross_filesystem under [tool.bash] must be rejected");
+            .expect_err("cross_filesystem under [tools.bash] must be rejected");
         assert!(matches!(
             error,
             ConfigError::InvalidSandboxRuleKind { tool, index: 0, .. } if tool == "bash"
@@ -1150,7 +1174,7 @@ rules = [
             temp.path(),
             "agent-scoped-cross-fs",
             r#"
-[tool.read]
+[tools.read]
 rules = [
   { rule = "dot_path", verdict = "auto_denied" },
 ]
@@ -1890,5 +1914,225 @@ engine = "ollama/local"
         assert!(agent_config.timeout_secs.is_none());
         assert!(agent_config.persona.is_none());
         assert!(agent_config.can_spawn);
+    }
+
+    // ── `network_request` rule-kind validation ────────────────────────────────
+
+    #[test]
+    fn network_request_rule_loads_under_tool_web_search() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "network-web-search",
+            r#"
+[tools.web_search]
+rules = [
+  { rule = "network_request", verdict = "auto_approved" },
+]
+"#,
+        );
+
+        let profile =
+            ProfileConfig::load(temp.path(), "network-web-search").expect("the fixture loads");
+        let rules = &profile
+            .tools
+            .get("web_search")
+            .expect("web_search table")
+            .rules;
+        assert_eq!(rules.len(), 1);
+        assert!(matches!(
+            rules[0],
+            crate::sandbox::SandboxRuleConfig::Named {
+                rule: crate::sandbox::NamedSandboxRule::NetworkRequest,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn network_request_rule_loads_under_agent_scoped_web_search() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "agent-scoped-network",
+            r#"
+[agents.custom]
+allowed_tools = ["web_search"]
+
+[agents.custom.tools.web_search]
+rules = [
+  { rule = "network_request", verdict = "auto_denied", reason = "off" },
+]
+"#,
+        );
+
+        let profile =
+            ProfileConfig::load(temp.path(), "agent-scoped-network").expect("the fixture loads");
+        let custom = profile.agents.get("custom").expect("the custom agent");
+        let rules = &custom
+            .tools
+            .get("web_search")
+            .expect("web_search table")
+            .rules;
+        assert_eq!(rules.len(), 1);
+    }
+
+    #[test]
+    fn path_glob_rule_under_tool_web_search_is_a_hard_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "bad-path-rule-for-web-search",
+            r#"
+[tools.web_search]
+rules = [
+  { pattern = "**", verdict = "auto_approved" },
+]
+"#,
+        );
+
+        let error = ProfileConfig::load(temp.path(), "bad-path-rule-for-web-search")
+            .expect_err("a path rule under [tools.web_search] must be rejected");
+        let message = error.to_string();
+        assert!(matches!(
+            error,
+            ConfigError::InvalidSandboxRuleKind { tool, index: 0, .. } if tool == "web_search"
+        ));
+        assert!(
+            message.contains("network_request"),
+            "the message must name the accepted rule kind: {message}"
+        );
+    }
+
+    #[test]
+    fn command_glob_rule_under_tool_web_search_is_a_hard_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "bad-command-rule-for-web-search",
+            r#"
+[tools.web_search]
+rules = [
+  { command = ["git", "status"], verdict = "auto_approved" },
+]
+"#,
+        );
+
+        let error = ProfileConfig::load(temp.path(), "bad-command-rule-for-web-search")
+            .expect_err("a command rule under [tools.web_search] must be rejected");
+        assert!(matches!(
+            error,
+            ConfigError::InvalidSandboxRuleKind { tool, index: 0, .. } if tool == "web_search"
+        ));
+    }
+
+    #[test]
+    fn network_request_rule_under_a_path_tool_is_a_hard_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "bad-network-rule-for-read",
+            r#"
+[tools.read]
+rules = [
+  { rule = "network_request", verdict = "auto_approved" },
+]
+"#,
+        );
+
+        let error = ProfileConfig::load(temp.path(), "bad-network-rule-for-read")
+            .expect_err("a network_request rule under [tools.read] must be rejected");
+        assert!(matches!(
+            error,
+            ConfigError::InvalidSandboxRuleKind { tool, index: 0, .. } if tool == "read"
+        ));
+    }
+
+    #[test]
+    fn network_request_rule_under_tool_bash_is_a_hard_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "bad-network-rule-for-bash",
+            r#"
+[tools.bash]
+rules = [
+  { rule = "network_request", verdict = "auto_approved" },
+]
+"#,
+        );
+
+        let error = ProfileConfig::load(temp.path(), "bad-network-rule-for-bash")
+            .expect_err("a network_request rule under [tools.bash] must be rejected");
+        assert!(matches!(
+            error,
+            ConfigError::InvalidSandboxRuleKind { tool, index: 0, .. } if tool == "bash"
+        ));
+    }
+
+    // ── `[web_search]` section ────────────────────────────────────────────────
+
+    #[test]
+    fn web_search_section_loads_explicit_values() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "explicit-web-search",
+            r#"
+[web_search]
+backend = "duckduckgo"
+timeout_secs = 5
+result_limit = 4
+"#,
+        );
+
+        let profile =
+            ProfileConfig::load(temp.path(), "explicit-web-search").expect("the fixture loads");
+        assert_eq!(profile.web_search.backend, "duckduckgo");
+        assert_eq!(profile.web_search.timeout_secs, 5);
+        assert_eq!(profile.web_search.result_limit, 4);
+    }
+
+    #[test]
+    fn absent_web_search_section_defaults_to_duckduckgo() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(temp.path(), "no-web-search", "default_engine = \"fast\"\n");
+
+        let profile = ProfileConfig::load(temp.path(), "no-web-search").expect("the fixture loads");
+        assert_eq!(
+            profile.web_search,
+            crate::config::WebSearchConfig::default(),
+            "an absent [web_search] section behaves like the written-out default"
+        );
+        assert_eq!(profile.web_search.backend, "duckduckgo");
+        assert_eq!(profile.web_search.timeout_secs, 30);
+        assert_eq!(
+            profile.web_search.result_limit,
+            crate::web_search::WEB_SEARCH_DEFAULT_RESULT_LIMIT
+        );
+    }
+
+    #[test]
+    fn unknown_web_search_backend_is_rejected_naming_the_config_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "bad-web-search-backend",
+            "[web_search]\nbackend = \"startpage\"\n",
+        );
+
+        let error = ProfileConfig::load(temp.path(), "bad-web-search-backend")
+            .expect_err("an unsupported backend must fail profile loading");
+        let message = error.to_string();
+        assert!(matches!(
+            error,
+            ConfigError::InvalidWebSearchBackend { backend, .. } if backend == "startpage"
+        ));
+        assert!(message.contains("startpage"), "{message}");
+        assert!(message.contains("duckduckgo"), "{message}");
+        assert!(
+            message.contains("config.toml"),
+            "the error must name the config path: {message}"
+        );
     }
 }

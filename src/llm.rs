@@ -22,7 +22,6 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 pub mod engine;
-pub mod http;
 pub mod mock_provider;
 pub mod ollama_provider;
 pub(crate) mod openai_compatible_messages;

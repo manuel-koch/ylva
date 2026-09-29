@@ -50,13 +50,13 @@ use crate::markdown::render_markdown;
 use crate::tui_reducer_state::{
     matching_model_indices, model_picker_row_entries, slash_overlay_text_rows,
     ActiveSubagentCounts, BannerDragSelection, ChatEntry, SlashOverlay, SlashOverlayLayout,
-    ToolCallState, UserMessageState,
+    ToolCallState, UserMessageState, CONFIRM_TIMEOUT, HELP_HORIZONTAL_SCROLL_COLUMNS,
 };
 use crate::tui_render_state::TuiState;
 
 /// The user-message input field grows with content but is capped at this
-/// fraction of the terminal height (e.g. 3 → one-third).  Adjust here to
-/// change the maximum visible height of the input area.
+/// fraction of the terminal height. Adjust here to change the maximum visible
+/// height of the input area.
 const USER_MESSAGE_INPUT_HEIGHT_TERMINAL_FRACTION: u16 = 3;
 
 /// Braille spinner animation frames, cycled while the agent is busy.
@@ -3200,8 +3200,8 @@ fn draw_approval_footer(
 }
 
 /// Render a transient notification in the bottom-centre of the screen.
-/// The popup is 3 rows tall (border + text + border) and wide enough for the
-/// message plus 4 chars of horizontal padding.
+/// The popup is one line of text between its border rows and includes
+/// horizontal padding around the message.
 fn draw_toast(frame: &mut Frame, area: Rect, message: &str) {
     let content = format!(" ✓ {message} ");
     let popup_width = (content.chars().count() as u16 + 2).min(area.width);
@@ -3227,6 +3227,88 @@ fn draw_toast(frame: &mut Frame, area: Rect, message: &str) {
         .alignment(Alignment::Center),
         inner,
     );
+}
+
+struct HelpSection {
+    heading: &'static str,
+    entries: Vec<(String, String)>,
+}
+
+fn help_entry(key: impl Into<String>, description: impl Into<String>) -> (String, String) {
+    (key.into(), description.into())
+}
+
+fn help_sections() -> Vec<HelpSection> {
+    let confirm_timeout_secs = CONFIRM_TIMEOUT.as_secs();
+    vec![
+        HelpSection {
+            heading: "General",
+            entries: vec![
+                help_entry("F1", "Toggle this help"),
+                help_entry("ctrl-c (x1)", "Show \"Press again to quit\" hint (idle)"),
+                help_entry(
+                    format!("ctrl-c (x2, <={confirm_timeout_secs}s)"),
+                    "Quit TUI",
+                ),
+                help_entry(
+                    "esc (x1)",
+                    "Show \"Press again to cancel\" hint (busy, empty input)",
+                ),
+                help_entry(
+                    format!("esc (x2, <={confirm_timeout_secs}s)"),
+                    "Interrupt generation, TUI stays open",
+                ),
+                help_entry(
+                    "ctrl-c (x1, busy)",
+                    "Show \"Press again to cancel & quit\" hint (empty input)",
+                ),
+                help_entry(
+                    format!("ctrl-c (x2, <={confirm_timeout_secs}s, busy)"),
+                    "Interrupt generation, then quit",
+                ),
+                help_entry("esc", "Close popup"),
+            ],
+        },
+        HelpSection {
+            heading: "Draft message",
+            entries: vec![
+                help_entry("enter", "Send message; queue steer if busy"),
+                help_entry("shift-enter / alt-enter", "Insert newline"),
+                help_entry("ctrl-c / esc", "Clear input field (busy, non-empty input)"),
+                help_entry("esc", "Clear input (idle)"),
+                help_entry("↑ (on first line)", "Load previous message from history"),
+                help_entry("↓ (on last line)", "Load next message from history"),
+                help_entry(
+                    "home / fn-left",
+                    "Line start; at col 0: end of previous line",
+                ),
+                help_entry(
+                    "end / fn-right",
+                    "Line end; at line end: start of next line",
+                ),
+            ],
+        },
+        HelpSection {
+            heading: "Help popup",
+            entries: vec![
+                help_entry("↑ / ↓", "Scroll up / down one line"),
+                help_entry(
+                    "← / →",
+                    format!("Scroll left / right by {HELP_HORIZONTAL_SCROLL_COLUMNS} columns"),
+                ),
+                help_entry("page-up / page-down", "Scroll up / down"),
+                help_entry("mouse wheel", "Scroll up / down"),
+            ],
+        },
+        HelpSection {
+            heading: "Runtime",
+            entries: vec![],
+        },
+        HelpSection {
+            heading: "Build",
+            entries: vec![],
+        },
+    ]
 }
 
 fn draw_help_popup(frame: &mut Frame, state: &mut TuiState) {
@@ -3258,68 +3340,7 @@ fn draw_help_popup(frame: &mut Frame, state: &mut TuiState) {
         .fg(HELP_POPUP_HEADING_COLOR)
         .add_modifier(Modifier::BOLD);
 
-    struct Section<'a> {
-        heading: &'a str,
-        entries: &'a [(&'a str, &'a str)],
-    }
-
-    let sections = [
-        Section {
-            heading: "General",
-            entries: &[
-                ("F1", "Toggle this help"),
-                ("ctrl-c (x1)", "Show \"Press again to quit\" hint (idle)"),
-                ("ctrl-c (x2, <=2s)", "Quit TUI"),
-                (
-                    "esc (x1)",
-                    "Show \"Press again to cancel\" hint (busy, empty input)",
-                ),
-                ("esc (x2, <=2s)", "Interrupt generation, TUI stays open"),
-                (
-                    "ctrl-c (x1, busy)",
-                    "Show \"Press again to cancel & quit\" hint (empty input)",
-                ),
-                ("ctrl-c (x2, <=2s, busy)", "Interrupt generation, then quit"),
-                ("esc", "Close popup"),
-            ],
-        },
-        Section {
-            heading: "Draft message",
-            entries: &[
-                ("enter", "Send message; queue steer if busy"),
-                ("shift-enter / alt-enter", "Insert newline"),
-                ("ctrl-c / esc", "Clear input field (busy, non-empty input)"),
-                ("esc", "Clear input (idle)"),
-                ("↑ (on first line)", "Load previous message from history"),
-                ("↓ (on last line)", "Load next message from history"),
-                (
-                    "home / fn-left",
-                    "Line start; at col 0: end of previous line",
-                ),
-                (
-                    "end / fn-right",
-                    "Line end; at line end: start of next line",
-                ),
-            ],
-        },
-        Section {
-            heading: "Help popup",
-            entries: &[
-                ("↑ / ↓", "Scroll up / down one line"),
-                ("← / →", "Scroll left / right by 4 columns"),
-                ("page-up / page-down", "Scroll up / down"),
-                ("mouse wheel", "Scroll up / down"),
-            ],
-        },
-        Section {
-            heading: "Runtime",
-            entries: &[],
-        },
-        Section {
-            heading: "Build",
-            entries: &[],
-        },
-    ];
+    let sections = help_sections();
 
     let mut all_lines: Vec<Line> = Vec::new();
     for section in &sections {
@@ -3393,7 +3414,7 @@ fn draw_help_popup(frame: &mut Frame, state: &mut TuiState) {
                     .map(|(key, _)| key.chars().count())
                     .max()
                     .unwrap_or(0);
-                for (key, desc) in section.entries {
+                for (key, desc) in &section.entries {
                     all_lines.push(Line::from(format!("  {key:<key_width$}  {desc}")));
                 }
             }
@@ -3517,7 +3538,7 @@ fn format_home_relative_path(path: &Path, home_directory: Option<&Path>) -> Stri
 mod tests {
     use super::{
         apply_selection_highlight_to_line, compute_scrollbar_thumb, format_home_relative_path,
-        plural_noun,
+        help_sections, plural_noun,
     };
     use crate::theme::CHAT_SELECTION_BG;
     use ratatui::text::{Line, Span};
@@ -3532,6 +3553,23 @@ mod tests {
         assert_eq!(plural_noun(1, "message", "messages"), "message");
         assert_eq!(plural_noun(0, "message", "messages"), "messages");
         assert_eq!(plural_noun(2, "message", "messages"), "messages");
+    }
+
+    #[test]
+    fn help_text_uses_shared_confirmation_and_scroll_values() {
+        let sections = help_sections();
+        let entries = sections
+            .iter()
+            .flat_map(|section| section.entries.iter())
+            .collect::<Vec<_>>();
+        let confirmation_label = format!("ctrl-c (x2, <={}s)", super::CONFIRM_TIMEOUT.as_secs());
+        assert!(entries.iter().any(|(key, _)| key == &confirmation_label));
+        assert!(entries.iter().any(|(_, description)| {
+            description.contains(&format!(
+                "by {} columns",
+                super::HELP_HORIZONTAL_SCROLL_COLUMNS
+            ))
+        }));
     }
 
     #[test]

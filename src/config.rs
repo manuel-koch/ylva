@@ -26,11 +26,13 @@ pub mod layered;
 mod profile;
 mod provider;
 pub mod soul;
+mod web_search;
 
 pub use agent::AgentConfig;
 pub use agent_type_file::AgentTypeDefinition;
 pub use profile::{profile_config_source_path, ProfileConfig, ToolSandboxConfig};
 pub use provider::{ProviderConfig, ProviderConnectionConfig};
+pub use web_search::WebSearchConfig;
 
 /// File name of a profile's configuration inside its profile directory.
 pub const PROFILE_CONFIG_FILE_NAME: &str = "config.toml";
@@ -128,7 +130,7 @@ pub enum ConfigError {
     InvalidEnvironmentReference { path: PathBuf, reference: String },
     #[error(
         "profile config at {} has an invalid sandbox rule for tool '{tool}' \
-         ([tool.{tool}].rules[{index}]): expected {expected}",
+         ([tools.{tool}].rules[{index}]): expected {expected}",
         path.display()
     )]
     InvalidSandboxRuleKind {
@@ -138,7 +140,7 @@ pub enum ConfigError {
         expected: String,
     },
     #[error(
-        "profile config at {} has a misplaced wildcard in [tool.{tool}].rules[{index}].command: \
+        "profile config at {} has a misplaced wildcard in [tools.{tool}].rules[{index}].command: \
          `*`/`**` only match trailing arguments, so they may only appear as the last element",
         path.display()
     )]
@@ -146,6 +148,15 @@ pub enum ConfigError {
         path: PathBuf,
         tool: String,
         index: usize,
+    },
+    #[error(
+        "profile config at {} has an invalid [web_search] backend '{backend}'; expected one of: {expected}",
+        path.display()
+    )]
+    InvalidWebSearchBackend {
+        path: PathBuf,
+        backend: String,
+        expected: String,
     },
     #[error("cannot resolve the home directory for ~/.ylva")]
     HomeDirectoryNotFound,

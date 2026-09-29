@@ -8,6 +8,16 @@ make format lint test-coverage build-debug-and-run-with-logs
 
 ---
 
+There are magic numbers in docstring/string that should refer to constants, like
+src/agent/tools/web_search.rs:80: "(max 20; omit it for the configured default)"
+src/agent/tools/web_search.rs:92: "(max 20; omit it for the configured default)"
+
+Those get out of sync when constants are changed.
+Search current implementation for similar lines where magic numbers in docstring/string
+should be replaced by constants instead.
+
+---
+
 Implement open tasks in section "Phase x.y" of
 docs/plans/phaseX-<topic>.md
 
@@ -282,3 +292,18 @@ report its findings back as structure JSON:
   ]
 }
 ```
+
+---
+
+Do a web research about agent-harnesses that can be run on MacOS.
+
+Do a web research about agent-harnesses, overview of available agents,
+best performance/usability.
+
+Do a web research about search-website that can be used to search for
+given terms.
+Check whether they can return structured data or just html.
+Check whether they have contrains like rate-limits, bot-detection,
+need authentification/api-key etc.
+
+---

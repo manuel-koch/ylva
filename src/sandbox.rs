@@ -18,7 +18,7 @@
 //! `Some(`[`ApprovalCheck`]`)` verdict. Tools apply their own default when
 //! the sandbox abstains.
 //!
-//! Per-tool rule lists are configurable via a `[tool.<name>]` TOML table
+//! Per-tool rule lists are configurable via a `[tools.<name>]` TOML table
 //! (see [`SandboxRuleConfig`] and `docs/configuration.md`'s "Sandbox"
 //! section) that is parsed by `crate::config::profile::ProfileConfig` and
 //! wired into a tool's [`SandboxContext`] by
@@ -48,6 +48,7 @@ pub enum ApprovalCheck {
 }
 
 /// A single rule in the sandbox rule list.
+#[derive(Debug, Clone)]
 pub struct SandboxRule {
     /// The verdict this rule produces when matched.
     pub verdict: ApprovalCheck,
@@ -94,6 +95,18 @@ const UNQUOTED_BRACE_EXPANSION_REASON: &str =
     "Access denied by security policy: shell commands with an unquoted brace \
      expansion (`{...,...}`) argument are not allowed";
 
+/// Default reason shown when a configured, reason-less `network_request`
+/// rule denies a network-tool call.
+const NETWORK_REQUEST_REASON: &str = "Access denied by security policy: network request \
+                                      matched a configured sandbox rule";
+
+/// Opaque match target for the rules appended to a network tool's context
+/// (e.g. `--auto-approve-web-search`'s `**` catch-all). Network calls have
+/// no path or command string to match a glob against, so appended rules are
+/// matched against this constant instead — see
+/// [`SandboxContext::check_network_request`].
+const NETWORK_REQUEST_MATCH_KEY: &str = "network_request";
+
 /// Default reason shown when a configured, reason-less
 /// [`SandboxRuleConfig::PathGlob`] rule denies a path.
 const CONFIGURED_PATH_GLOB_REASON: &str =
@@ -104,16 +117,21 @@ const CONFIGURED_PATH_GLOB_REASON: &str =
 const CONFIGURED_COMMAND_GLOB_REASON: &str = "Access denied by security policy: shell command \
                                                matched a configured sandbox rule";
 
-/// One of the seven structural sandbox checks that ship as Rust code
+/// One of the structural sandbox checks that ship as Rust code
 /// (`SandboxContext`'s hardcoded default floor, plus the opt-in
 /// [`NamedSandboxRule::CrossFilesystem`]) but may also be referenced
-/// by name from a `[tool.<name>]` config table's `rules` list, so a user can
+/// by name from a `[tools.<name>]` config table's `rules` list, so a user can
 /// reorder or change their verdict without reimplementing the underlying
-/// comparison logic. The first three ([`NamedSandboxRule::OutsideWorkspace`],
+/// comparison logic. They fall into three families, each restricted to the
+/// tool kinds it applies to (enforced at config load by
+/// [`SandboxRuleConfig::is_path_only`]/[`is_bash_only`]/[`is_network_only`]):
+/// the three path rules ([`NamedSandboxRule::OutsideWorkspace`],
 /// [`NamedSandboxRule::DotPath`], [`NamedSandboxRule::CrossFilesystem`]) are
-/// path rules, valid for any tool except `bash`; the remaining four are
+/// valid for every tool except `bash` and the network tools; the four
 /// `bash`-only command-structure rules, evaluated per extracted command by
-/// [`SandboxContext::check_command`]/[`bash_command_extractor`].
+/// [`SandboxContext::check_command`]/[`bash_command_extractor`]; and
+/// [`NamedSandboxRule::NetworkRequest`], valid only under a network tool's
+/// config table (today `[tools.web_search]`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NamedSandboxRule {
@@ -141,6 +159,15 @@ pub enum NamedSandboxRule {
     /// Matches a `bash` command with an unquoted `{...,...}` brace
     /// expansion in any argv token.
     UnquotedBraceExpansion,
+    /// Matches **every** call of a network tool that has no path or command
+    /// to structurally inspect (`web_search`): the call's destination is
+    /// fixed by the tool's configured backend, so there is no target to
+    /// evaluate — the rule is the tool's per-call approval switch (e.g.
+    /// `verdict = "auto_approved"` without the CLI flag). Valid only under
+    /// `[tools.web_search]`/`[agents.<type>.tools.web_search]`; the planned
+    /// `web_fetch` tool reuses it once implemented, where target-based
+    /// matching (schema/host/path) may be added on top.
+    NetworkRequest,
 }
 
 /// The serde-friendly counterpart of [`ApprovalCheck`]'s variants, without
@@ -169,7 +196,7 @@ impl ApprovalVerdictConfig {
     }
 }
 
-/// A single `[tool.bash]`-only argv-shape rule: a sequence of literal argv
+/// A single `[tools.bash]`-only argv-shape rule: a sequence of literal argv
 /// tokens, optionally ending in a bare `*` (matches exactly one more argv
 /// token) or bare `**` (matches one or more more argv tokens). No embedded/
 /// mid-pattern globbing (YAGNI, v1).
@@ -266,10 +293,10 @@ impl CommandGlobPattern {
     }
 }
 
-/// One entry of a `[tool.<name>]` table's `rules` list — either a reference
+/// One entry of a `[tools.<name>]` table's `rules` list — either a reference
 /// to one of the built-in [`NamedSandboxRule`] checks (with a configurable
 /// verdict), a custom glob-pattern path rule (the config-parseable form of
-/// [`SandboxRule`]), or (`[tool.bash]`/`[agents.<type>.tools.bash]` only) an
+/// [`SandboxRule`]), or (`[tools.bash]`/`[agents.<type>.tools.bash]` only) an
 /// argv-shape [`CommandGlobPattern`] rule. Distinguished on deserialization
 /// by the presence of `rule` (named), `pattern` (path glob), or `command`
 /// (argv glob). `reason` is optional for `verdict = "auto_denied"` and
@@ -278,9 +305,7 @@ impl CommandGlobPattern {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum SandboxRuleConfig {
-    /// `{ rule = "outside_workspace" | "dot_path" | "cross_filesystem" | \
-    /// "backgrounded" | "variable_assignment_prefix" | "unquoted_glob" | \
-    /// "unquoted_brace_expansion", verdict = "...", reason = "..." }`.
+    /// `{ rule = "<named_rule>", verdict = "...", reason = "..." }`.
     Named {
         rule: NamedSandboxRule,
         verdict: ApprovalVerdictConfig,
@@ -295,7 +320,7 @@ pub enum SandboxRuleConfig {
         reason: Option<String>,
     },
     /// `{ command = ["git", "reflog", "*"], verdict = "...", reason = "..." }`.
-    /// Only valid under `[tool.bash]`/`[agents.<type>.tools.bash]`.
+    /// Only valid under `[tools.bash]`/`[agents.<type>.tools.bash]`.
     CommandGlob {
         command: Vec<String>,
         verdict: ApprovalVerdictConfig,
@@ -342,6 +367,24 @@ impl SandboxRuleConfig {
         }
     }
 
+    /// Returns `true` when this is a network-tool-only rule: a
+    /// [`SandboxRuleConfig::Named`] variant referencing
+    /// [`NamedSandboxRule::NetworkRequest`]. Valid only under a network
+    /// tool's config table — today `[tools.web_search]` /
+    /// `[agents.<type>.tools.web_search]` (the planned `web_fetch` tool
+    /// joins that set when implemented). Used by
+    /// `crate::config::profile::ProfileConfig`'s startup validation to
+    /// reject the rule under every other tool, and vice versa.
+    pub fn is_network_only(&self) -> bool {
+        matches!(
+            self,
+            SandboxRuleConfig::Named {
+                rule: NamedSandboxRule::NetworkRequest,
+                ..
+            }
+        )
+    }
+
     /// Returns `true` when this is a [`SandboxRuleConfig::CommandGlob`] whose
     /// `command` list has a `*` or `**` token anywhere but the last
     /// position. `CommandGlobPattern::from_tokens` only recognizes `*`/`**`
@@ -368,6 +411,7 @@ impl SandboxRuleConfig {
 /// that `SandboxRule`'s existing field shape — relied on by pre-existing
 /// tests and by the `--auto-approve-write`/`--auto-approve-edit` catch-all
 /// rules — is unaffected by this addition.
+#[derive(Debug, Clone)]
 enum ResolvedRule {
     Named {
         rule: NamedSandboxRule,
@@ -425,6 +469,7 @@ impl ResolvedRule {
                     NamedSandboxRule::VariableAssignmentPrefix => VARIABLE_ASSIGNMENT_PREFIX_REASON,
                     NamedSandboxRule::UnquotedGlob => UNQUOTED_GLOB_REASON,
                     NamedSandboxRule::UnquotedBraceExpansion => UNQUOTED_BRACE_EXPANSION_REASON,
+                    NamedSandboxRule::NetworkRequest => NETWORK_REQUEST_REASON,
                 };
                 ResolvedRule::Named {
                     rule,
@@ -719,19 +764,20 @@ impl Default for Sandbox {
 ///
 /// Returns `None` when no rule fires (sandbox abstains); the calling tool
 /// applies its own default.
+#[derive(Clone)]
 pub struct SandboxContext {
     sandbox: Arc<RwLock<Sandbox>>,
     /// Ordered rules; last match wins. Always evaluated last, after either
     /// `configured_rules` or the built-in default floor — this is what
     /// `--auto-approve-write`/`--auto-approve-edit`'s catch-all rule uses so
-    /// it wins regardless of any `[tool.<name>]` config.
+    /// it wins regardless of any `[tools.<name>]` config.
     rules: Vec<SandboxRule>,
     /// When `Some`, fully replaces the built-in default floor (the two
     /// hardcoded `outside_workspace`/`dot_path` checks) for this tool: only
     /// this list's entries are evaluated in list order (last match wins)
-    /// before `rules`. `None` means "no `[tool.<name>]` config for this
+    /// before `rules`. `None` means "no `[tools.<name>]` config for this
     /// tool" — the default floor applies instead. Populated from a
-    /// profile's `[tool.<name>]` table via
+    /// profile's `[tools.<name>]` table via
     /// [`SandboxContext::with_configured_rules`].
     configured_rules: Option<Vec<ResolvedRule>>,
 }
@@ -750,7 +796,7 @@ impl std::fmt::Debug for SandboxContext {
 }
 
 impl SandboxContext {
-    /// Build a context with an empty rule list and no `[tool.<name>]`
+    /// Build a context with an empty rule list and no `[tools.<name>]`
     /// config, so the built-in default floor
     /// (`outside_workspace`/`dot_path` → `UserApprovalRequired`) applies.
     /// Named glob rules (if any) are appended by tool constructors.
@@ -766,14 +812,14 @@ impl SandboxContext {
     /// so appending a catch-all rule (e.g. `**` → `AutoApproved`) effectively
     /// overrides any earlier verdict for every path. Always evaluated after
     /// `configured_rules`/the default floor, so this continues to win
-    /// regardless of `[tool.<name>]` config.
+    /// regardless of `[tools.<name>]` config.
     pub fn with_rule(mut self, rule: SandboxRule) -> Self {
         self.rules.push(rule);
         self
     }
 
     /// Replace this tool's built-in default floor with the rule list parsed
-    /// from a `[tool.<name>]` table's `rules` key. This *fully replaces* the
+    /// from a `[tools.<name>]` table's `rules` key. This *fully replaces* the
     /// floor for this tool (it does not merge with it): a caller that still
     /// wants `outside_workspace`/`dot_path` protection must include those as
     /// explicit [`SandboxRuleConfig::Named`] entries in `rules`.
@@ -899,7 +945,7 @@ impl SandboxContext {
     /// `/var/folders` → `/private/var/folders`.
     ///
     /// Rule evaluation order:
-    /// 1. When `configured_rules` is `Some` (this tool has a `[tool.<name>]`
+    /// 1. When `configured_rules` is `Some` (this tool has a `[tools.<name>]`
     ///    config table), evaluate exactly that list, in order, last match
     ///    wins — this *replaces* the default floor rather than merging with
     ///    it. Otherwise evaluate the built-in default floor: outside-workspace
@@ -975,7 +1021,8 @@ impl SandboxContext {
             NamedSandboxRule::Backgrounded
             | NamedSandboxRule::VariableAssignmentPrefix
             | NamedSandboxRule::UnquotedGlob
-            | NamedSandboxRule::UnquotedBraceExpansion => false,
+            | NamedSandboxRule::UnquotedBraceExpansion
+            | NamedSandboxRule::NetworkRequest => false,
         }
     }
 
@@ -1003,7 +1050,7 @@ impl SandboxContext {
 
         match &self.configured_rules {
             Some(configured) => {
-                // `[tool.<name>]` config fully replaces the default floor:
+                // `[tools.<name>]` config fully replaces the default floor:
                 // evaluate exactly this list, in order, last match wins.
                 for rule in configured {
                     match rule {
@@ -1100,7 +1147,7 @@ impl SandboxContext {
     ///
     /// **Per-command evaluation:** each extracted `command` is evaluated
     /// independently against this tool's resolved rule list — a configured
-    /// `[tool.bash]`/`[agents.<type>.tools.bash]` table (ordinary
+    /// `[tools.bash]`/`[agents.<type>.tools.bash]` table (ordinary
     /// last-match-wins across its entries, since list order is a deliberate
     /// user choice there) or, absent one, the unconditional default floor
     /// (`backgrounded` → `AutoDenied`, `variable_assignment_prefix`/
@@ -1115,7 +1162,7 @@ impl SandboxContext {
     /// structural verdict. `self.rules` (e.g. `--auto-approve-bash`'s
     /// catch-all) is then evaluated once, matched against the raw `command`
     /// string, last-match-wins against the structural verdict — so it always
-    /// wins regardless of any `[tool.bash]` config, mirroring
+    /// wins regardless of any `[tools.bash]` config, mirroring
     /// [`SandboxContext::check_path`]'s existing precedence.
     ///
     /// Returns `None` only when the script fails to parse at all, or every
@@ -1165,6 +1212,76 @@ impl SandboxContext {
         verdict
     }
 
+    /// Check whether a network-tool call (`web_search`) is allowed.
+    ///
+    /// No path and no command are inspected: a `web_search` call's
+    /// destination is fixed by the tool's configured backend, so there is no
+    /// target to evaluate — [`NamedSandboxRule::NetworkRequest`] matches
+    /// every call, which makes a configured `[tools.web_search]` rule the
+    /// tool's per-call approval switch. There is **no default floor** (the
+    /// path-based floor rules have no path here): returning `None` means the
+    /// sandbox abstains and the calling tool applies its own default
+    /// (`UserApprovalRequired`).
+    ///
+    /// Precedence mirrors [`check_path`](Self::check_path) and
+    /// [`check_command`](Self::check_command): configured rules in list
+    /// order (last match wins), then the appended rules — the `**`
+    /// catch-all `--auto-approve-web-search` adds — matched against
+    /// [`NETWORK_REQUEST_MATCH_KEY`], so the CLI flag always wins regardless
+    /// of `[tools.web_search]` config. Path/command rule kinds under a
+    /// network tool's config are rejected at config load and defensively
+    /// never match here.
+    pub fn check_network_request(&self) -> Option<ApprovalCheck> {
+        let mut verdict: Option<ApprovalCheck> = None;
+        // No `[tools.web_search]` config → no floor; the tool's own default
+        // (`UserApprovalRequired`) applies on abstention.
+        if let Some(configured) = &self.configured_rules {
+            for rule in configured {
+                match rule {
+                    ResolvedRule::Named {
+                        rule: named,
+                        verdict: rule_verdict,
+                    } => {
+                        if Self::evaluate_network_named_rule(*named) {
+                            verdict = Some(rule_verdict.clone());
+                        }
+                    }
+                    // Path/command rules under `[tools.web_search]` are
+                    // rejected by config validation; never match a
+                    // network call defensively if they slip through.
+                    ResolvedRule::PathGlob { .. } | ResolvedRule::CommandGlob { .. } => {}
+                }
+            }
+        }
+
+        // Appended rules (e.g. `--auto-approve-web-search`'s catch-all).
+        // Always evaluated last so they win regardless of configured rules.
+        for rule in &self.rules {
+            if rule.pattern.matches(NETWORK_REQUEST_MATCH_KEY) {
+                verdict = Some(rule.verdict.clone());
+            }
+        }
+
+        tracing::debug!(
+            sandbox_verdict = match &verdict {
+                None => "abstain".to_string(),
+                Some(ApprovalCheck::AutoApproved) => "auto-approved".to_string(),
+                Some(ApprovalCheck::AutoDenied { reason }) => format!("auto-denied: {reason}"),
+                Some(ApprovalCheck::UserApprovalRequired) => "user-approval-required".to_string(),
+            },
+            "sandbox check_network_request"
+        );
+
+        verdict
+    }
+
+    /// Only [`NamedSandboxRule::NetworkRequest`] matches a network call;
+    /// path and `bash` named rules never do (config validation rejects them
+    /// under network-tool tables; defense in depth if they slip through).
+    fn evaluate_network_named_rule(rule: NamedSandboxRule) -> bool {
+        matches!(rule, NamedSandboxRule::NetworkRequest)
+    }
+
     /// Rank an [`ApprovalCheck`] for worst-case combination:
     /// `AutoDenied` > `UserApprovalRequired` > `AutoApproved`.
     fn approval_check_rank(check: &ApprovalCheck) -> u8 {
@@ -1192,7 +1309,7 @@ impl SandboxContext {
     }
 
     /// Evaluate one extracted `command` against this tool's resolved rule
-    /// list: a configured `[tool.bash]` list (ordinary last-match-wins) or,
+    /// list: a configured `[tools.bash]` list (ordinary last-match-wins) or,
     /// absent one, the unconditional default floor (worst-case combination
     /// of the four named command rules).
     fn evaluate_command(
@@ -1220,7 +1337,7 @@ impl SandboxContext {
                                 verdict = Some(rule_verdict.clone());
                             }
                         }
-                        // A path `PathGlob` rule under `[tool.bash]` is
+                        // A path `PathGlob` rule under `[tools.bash]` is
                         // rejected by config validation
                         // (`crate::config::profile::ProfileConfig`); never
                         // matches a command defensively if it slips through.
@@ -1236,7 +1353,7 @@ impl SandboxContext {
     /// Evaluate one of the four `bash`-only [`NamedSandboxRule`] variants
     /// against an extracted command. The three path rules
     /// (`OutsideWorkspace`/`DotPath`/`CrossFilesystem`) are never valid
-    /// under `[tool.bash]` (rejected by config validation); defensively
+    /// under `[tools.bash]` (rejected by config validation); defensively
     /// `false` here if they slip through.
     fn evaluate_command_named_rule(
         rule: NamedSandboxRule,
@@ -1255,11 +1372,12 @@ impl SandboxContext {
                 .any(bash_command_extractor::token_has_unquoted_brace_expansion),
             NamedSandboxRule::OutsideWorkspace
             | NamedSandboxRule::DotPath
-            | NamedSandboxRule::CrossFilesystem => false,
+            | NamedSandboxRule::CrossFilesystem
+            | NamedSandboxRule::NetworkRequest => false,
         }
     }
 
-    /// The unconditional `bash` default floor (no `[tool.bash]` config):
+    /// The unconditional `bash` default floor (no `[tools.bash]` config):
     /// worst-case combination of the four named command rules, not
     /// last-match-wins — see [`SandboxContext::check_command`]'s doc
     /// comment.
@@ -1629,7 +1747,7 @@ mod tests {
     fn check_command_configured_rules_lose_default_floor_protection() {
         let temporary_dir = tempfile::tempdir().unwrap();
         let sandbox = make_sandbox(temporary_dir.path());
-        // A `[tool.bash]` config that omits the four named rules fully
+        // A `[tools.bash]` config that omits the four named rules fully
         // replaces the default floor: a backgrounded command is no longer
         // denied.
         let context = SandboxContext::new(Arc::clone(&sandbox)).with_configured_rules(vec![
@@ -1643,7 +1761,7 @@ mod tests {
         assert_eq!(
             context.check_command("sleep 10 &"),
             None,
-            "backgrounded no longer denied once [tool.bash] fully replaces the default floor"
+            "backgrounded no longer denied once [tools.bash] fully replaces the default floor"
         );
     }
 
@@ -2038,7 +2156,7 @@ mod tests {
 
     #[test]
     fn configured_named_rule_overrides_default_dot_path_verdict() {
-        // A `[tool.read]`-style config changing `dot_path`'s verdict to
+        // A `[tools.read]`-style config changing `dot_path`'s verdict to
         // `AutoApproved` for this tool only — observable against the default
         // floor, which asks for user approval; `outside_workspace`
         // protection is intentionally NOT included, confirming the
@@ -2555,5 +2673,125 @@ mod tests {
             Some(ApprovalCheck::AutoApproved),
             "the catch-all rule must win over a configured cross_filesystem deny"
         );
+    }
+
+    // ── network_request rule ──────────────────────────────────────────────────
+
+    /// A configured rule entry for the network-tool-only `network_request`
+    /// named rule.
+    fn network_request_rule(
+        verdict: ApprovalVerdictConfig,
+        reason: Option<&str>,
+    ) -> SandboxRuleConfig {
+        SandboxRuleConfig::Named {
+            rule: NamedSandboxRule::NetworkRequest,
+            verdict,
+            reason: reason.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn check_network_request_abstains_without_config() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let context = SandboxContext::new(make_sandbox(temporary_dir.path()));
+        assert_eq!(
+            context.check_network_request(),
+            None,
+            "no [tools.web_search] config → no floor; the tool's own default applies"
+        );
+    }
+
+    #[test]
+    fn configured_network_request_rule_applies_to_every_call() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let context =
+            SandboxContext::new(make_sandbox(temporary_dir.path())).with_configured_rules(vec![
+                network_request_rule(ApprovalVerdictConfig::AutoApproved, None),
+            ]);
+        assert_eq!(
+            context.check_network_request(),
+            Some(ApprovalCheck::AutoApproved),
+            "the rule matches every web_search call — there is no target to inspect"
+        );
+    }
+
+    #[test]
+    fn configured_network_request_last_match_wins() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let context = SandboxContext::new(make_sandbox(temporary_dir.path()))
+            .with_configured_rules(vec![
+                network_request_rule(ApprovalVerdictConfig::AutoApproved, None),
+                network_request_rule(ApprovalVerdictConfig::AutoDenied, Some("disabled")),
+            ]);
+        assert_eq!(
+            context.check_network_request(),
+            Some(ApprovalCheck::AutoDenied {
+                reason: "disabled".to_string()
+            }),
+            "rule lists are ordinary last-match-wins for network tools"
+        );
+    }
+
+    #[test]
+    fn reasonless_network_request_deny_uses_the_default_reason() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let context =
+            SandboxContext::new(make_sandbox(temporary_dir.path())).with_configured_rules(vec![
+                network_request_rule(ApprovalVerdictConfig::AutoDenied, None),
+            ]);
+        assert_eq!(
+            context.check_network_request(),
+            Some(ApprovalCheck::AutoDenied {
+                reason: NETWORK_REQUEST_REASON.to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn auto_approve_catch_all_wins_over_configured_network_deny() {
+        // Mirrors --auto-approve-web-search: `sandbox_context_for` appends
+        // the `**` catch-all last, so the flag wins over [tools.web_search].
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let context = SandboxContext::new(make_sandbox(temporary_dir.path()))
+            .with_configured_rules(vec![network_request_rule(
+                ApprovalVerdictConfig::AutoDenied,
+                None,
+            )])
+            .with_rule(SandboxRule {
+                verdict: ApprovalCheck::AutoApproved,
+                pattern: glob::Pattern::new("**").unwrap(),
+            });
+        assert_eq!(
+            context.check_network_request(),
+            Some(ApprovalCheck::AutoApproved),
+            "the CLI catch-all must win regardless of [tools.web_search] config"
+        );
+    }
+
+    #[test]
+    fn path_and_command_rules_never_match_network_calls() {
+        // Defense in depth: config validation rejects both kinds under
+        // [tools.web_search]; if one slips through it must still abstain
+        // rather than auto-approve a call it cannot evaluate.
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let context = SandboxContext::new(make_sandbox(temporary_dir.path()))
+            .with_configured_rules(vec![
+                SandboxRuleConfig::PathGlob {
+                    pattern: "**".to_string(),
+                    verdict: ApprovalVerdictConfig::AutoApproved,
+                    reason: None,
+                },
+                SandboxRuleConfig::CommandGlob {
+                    command: vec!["git".to_string()],
+                    verdict: ApprovalVerdictConfig::AutoApproved,
+                    reason: None,
+                },
+                SandboxRuleConfig::Named {
+                    rule: NamedSandboxRule::OutsideWorkspace,
+                    verdict: ApprovalVerdictConfig::AutoApproved,
+                    reason: None,
+                },
+            ]);
+        assert_eq!(context.check_network_request(), None);
     }
 }

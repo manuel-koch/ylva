@@ -26,7 +26,8 @@
 //! Base64 selection within the output cap, and the autodetect fallback that
 //! re-reads a complete recognized media file from the same open handle.
 //!
-//! **256 KiB output cap.** Text-oriented results carry at most
+//! **Output cap** (see [`READ_OUTPUT_LIMIT_BYTES`]): Text-oriented results
+//! carry at most
 //! [`READ_OUTPUT_LIMIT_BYTES`] of raw selected bytes. Content past the cap is
 //! cut silently (no in-text marker) and reported as `truncated: true` in the
 //! result metadata plus a `Partial result` content-section label, so the model
@@ -39,7 +40,7 @@
 //! can absorb an arbitrary Base64 payload.
 //!
 //! All file I/O uses `tokio::fs`; execution is bounded upstream by
-//! [`crate::agent::DEFAULT_TOOL_TIMEOUT_SECS`] (5s). Typed argument structs
+//! [`crate::agent::DEFAULT_TOOL_TIMEOUT_SECS`]. Typed argument structs
 //! derive both `JsonSchema` (for the wire schema) and `Deserialize` (for
 //! parsing incoming arguments).
 //!
@@ -53,6 +54,7 @@ use schemars::schema::RootSchema;
 use schemars::{schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::LazyLock;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tracing::Instrument;
 
@@ -141,6 +143,16 @@ fn decode_error(path: &str, mode: &str, utf8_error: &str) -> ToolError {
              (use encoding: \"base64\" for binary data)"
         ),
     )
+}
+
+/// Format a byte count as a human-readable KiB value.
+fn format_kibibytes(bytes: usize) -> String {
+    format!("{} KiB", bytes / 1024)
+}
+
+/// Format a byte count as a human-readable MiB value.
+fn format_mebibytes(bytes: usize) -> String {
+    format!("{} MiB", bytes / (1024 * 1024))
 }
 
 /// Build the tool error for a complete recognized media file that exceeds
@@ -583,22 +595,29 @@ impl Tool for ReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read a file's contents. Omit `mode` to autodetect: UTF-8 text is read \
-        by lines, a whole binary file recognized as PNG/JPEG/WebP/GIF/PDF is \
-        returned as Base64 (attached for models that support it), and other \
-        binary files fail with a retry hint. Set `mode` explicitly to force a \
-        unit: `lines` (0-based `offset` index, `limit` line count; requires \
-        valid UTF-8), `chars` for character counts, or `bytes` for byte ranges \
-        and raw binary data. `encoding` defaults to `utf8`; use `base64` with \
-        explicit `mode: bytes` for exact arbitrary bytes. `offset`/`limit` \
-        count the selected unit; omit both to read the whole file. Results \
-        carry at most 256 KiB of raw selected bytes: longer selections are \
-        cut silently and flagged `truncated` in the result metadata \
-        (complete recognized media files are exempt, up to 8 MiB — a larger \
-        whole file fails with an explicit error), so continue reading \
-        with `offset`/`limit` to page through the rest. The `path` argument \
-        accepts `~` and `$ENVVAR`/`${ENVVAR}` tokens; they are expanded \
-        before use."
+        static DESCRIPTION: LazyLock<String> = LazyLock::new(|| {
+            format!(
+                "Read a file's contents. Omit `mode` to autodetect: UTF-8 text is read \
+                by lines, a whole binary file recognized as PNG/JPEG/WebP/GIF/PDF is \
+                returned as Base64 (attached for models that support it), and other \
+                binary files fail with a retry hint. Set `mode` explicitly to force a \
+                unit: `lines` (0-based `offset` index, `limit` line count; requires \
+                valid UTF-8), `chars` for character counts, or `bytes` for byte ranges \
+                and raw binary data. `encoding` defaults to `utf8`; use `base64` with \
+                explicit `mode: bytes` for exact arbitrary bytes. `offset`/`limit` \
+                count the selected unit; omit both to read the whole file. Results \
+                carry at most {} of raw selected bytes: longer selections are \
+                cut silently and flagged `truncated` in the result metadata \
+                (complete recognized media files are exempt, up to {} — a larger \
+                whole file fails with an explicit error), so continue reading \
+                with `offset`/`limit` to page through the rest. The `path` argument \
+                accepts `~` and `$ENVVAR`/`${{ENVVAR}}` tokens; they are expanded \
+                before use.",
+                format_kibibytes(READ_OUTPUT_LIMIT_BYTES),
+                format_mebibytes(READ_MEDIA_MAX_BYTES),
+            )
+        });
+        &DESCRIPTION
     }
 
     fn input_schema(&self) -> RootSchema {
@@ -1390,6 +1409,12 @@ mod tests {
         assert!(tool.description().contains("Omit `mode` to autodetect"));
         assert!(tool.description().contains("`bytes` for byte ranges"));
         assert!(tool.description().contains("`encoding` defaults to `utf8`"));
+        assert!(tool
+            .description()
+            .contains(&format_kibibytes(READ_OUTPUT_LIMIT_BYTES)));
+        assert!(tool
+            .description()
+            .contains(&format_mebibytes(READ_MEDIA_MAX_BYTES)));
 
         let schema = serde_json::to_value(tool.input_schema()).expect("schema serializes");
         let mode_description = schema["definitions"]["ReadMode"]["description"]
@@ -2786,7 +2811,7 @@ mod tests {
                     .expect_err("an oversized complete media read must fail");
                 let message = error.to_string();
                 assert!(
-                    message.contains("over the 8388608-byte limit"),
+                    message.contains(&format!("over the {}-byte limit", READ_MEDIA_MAX_BYTES)),
                     "error must state the ceiling: {message}"
                 );
                 assert!(

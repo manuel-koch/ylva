@@ -11,7 +11,6 @@ Local implementation:
 
 - Use Ylva user-agent for `GET` requests
 - Convert fetched output ( likely html/text ) to markdown ?
-
 - Use CLI tools like _camofox browser_ ?
   - Other headless browser implemenations ? Ideally one that is less detected as a
     bot to reduce being banned or rejected on web servers.

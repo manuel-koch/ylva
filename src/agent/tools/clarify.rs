@@ -22,6 +22,10 @@ use super::{
 };
 use crate::sandbox::ApprovalCheck;
 
+/// Maximum number of choices a `clarify` call may offer. The schema
+/// `maxItems`, field description, and validation all derive from this.
+pub const CLARIFY_MAX_CHOICES: usize = 5;
+
 #[derive(JsonSchema, Deserialize)]
 #[expect(dead_code)]
 struct ClarifyArgs {
@@ -35,11 +39,7 @@ struct ClarifyArgs {
     )]
     context: Option<String>,
     #[serde(default)]
-    #[schemars(
-        description = "Up to 5 choices for the user to pick from (max 5). Free-text answers are still accepted.",
-        length(max = 5)
-    )]
-    choices: Option<Vec<String>>,
+    pub choices: Option<Vec<String>>,
 }
 
 pub struct ClarifyTool;
@@ -105,14 +105,28 @@ impl Tool for ClarifyTool {
     }
 
     fn input_schema(&self) -> schemars::schema::RootSchema {
-        schema_for!(ClarifyArgs)
+        let mut schema = schema_for!(ClarifyArgs);
+        if let Some(object) = schema.schema.object.as_mut() {
+            if let Some(schemars::schema::Schema::Object(choices)) =
+                object.properties.get_mut("choices")
+            {
+                choices.array().max_items = Some(CLARIFY_MAX_CHOICES as u32);
+                choices.metadata().description = Some(format!(
+                    "Up to {CLARIFY_MAX_CHOICES} choices for the user to pick from \
+                     (max {CLARIFY_MAX_CHOICES}). Free-text answers are still accepted."
+                ));
+            }
+        }
+        schema
     }
 
     fn validate_args(&self, arguments: &Value) -> Result<(), String> {
         validate_args_with_schema(&self.input_schema(), arguments)?;
         if let Some(choices) = arguments.get("choices").and_then(|value| value.as_array()) {
-            if choices.len() > 5 {
-                return Err("`choices` must contain at most 5 items".to_string());
+            if choices.len() > CLARIFY_MAX_CHOICES {
+                return Err(format!(
+                    "`choices` must contain at most {CLARIFY_MAX_CHOICES} items"
+                ));
             }
         }
         Ok(())
@@ -193,9 +207,10 @@ mod tests {
     #[test]
     fn choice_count_within_limit_is_accepted() {
         let tool = ClarifyTool;
+        let choices: Vec<String> = (0..CLARIFY_MAX_CHOICES).map(|i| i.to_string()).collect();
         let args = serde_json::json!({
             "question": "Pick one",
-            "choices": ["a", "b", "c", "d", "e"]
+            "choices": choices
         });
         let result = tool.validate_args(&args);
         assert!(result.is_ok());
@@ -204,12 +219,31 @@ mod tests {
     #[test]
     fn choice_count_exceeding_limit_is_rejected() {
         let tool = ClarifyTool;
+        let mut choices: Vec<String> = (0..CLARIFY_MAX_CHOICES).map(|i| i.to_string()).collect();
+        choices.push("extra".to_string());
         let args = serde_json::json!({
             "question": "Pick one",
-            "choices": ["a", "b", "c", "d", "e", "f"]
+            "choices": choices
         });
         let result = tool.validate_args(&args);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn schema_choices_max_items_and_description_match_the_constant() {
+        let schema = serde_json::to_value(ClarifyTool.input_schema()).expect("serialize");
+        assert_eq!(
+            schema["properties"]["choices"]["maxItems"].as_u64(),
+            Some(CLARIFY_MAX_CHOICES as u64),
+            "schema maxItems must come from CLARIFY_MAX_CHOICES"
+        );
+        let description = schema["properties"]["choices"]["description"]
+            .as_str()
+            .expect("choices description");
+        assert!(
+            description.contains(&CLARIFY_MAX_CHOICES.to_string()),
+            "description must advertise CLARIFY_MAX_CHOICES: {description}"
+        );
     }
 
     #[test]

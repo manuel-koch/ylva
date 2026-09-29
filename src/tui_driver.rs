@@ -53,7 +53,7 @@ use crate::session_title::{SessionTitleUpdate, TitleAttempt};
 use crate::tui_reducer_state::{
     engine_choice_label, matching_model_indices, model_choice_label, AppState, ConfirmKey,
     DomainEvent, Effect, Focus, HistoryDirection, InputEvent, ModelChoice, SlashOverlay,
-    TuiDisplayMetadata, TuiMode, UserMessageState,
+    TuiDisplayMetadata, TuiMode, UserMessageState, CONFIRM_TIMEOUT,
 };
 use crate::tui_render_state::TuiState;
 use crate::ToolRegistry;
@@ -88,9 +88,6 @@ impl ClipboardSink for NoopClipboard {
         true
     }
 }
-
-/// Window (seconds) for the key-agnostic double-press confirm on `Ctrl+C`/`Esc`.
-const CONFIRM_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Interval between spinner frame advances while the agent is busy.
 const SPINNER_TICK_INTERVAL: Duration = Duration::from_millis(150);

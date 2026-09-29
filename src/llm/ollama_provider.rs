@@ -21,8 +21,8 @@ use crate::llm::engine::{EngineRuntimeConfig, EngineRuntimeConfigHandle};
 use crate::llm::openai_compatible_messages::ContentPartFormat;
 use crate::llm::{InputModality, ModelInfo, Provider, ToolSchema};
 
-use super::http::{get_json, post_json};
 use super::OpenAiCompatibleProvider;
+use crate::http::{get_json, post_json};
 
 /// Ollama provider.
 ///

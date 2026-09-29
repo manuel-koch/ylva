@@ -15,7 +15,7 @@
 //! `glob` tool: enumerate filesystem paths matching one glob pattern.
 //!
 //! Pattern validation and traversal stay within this module; execution is
-//! bounded upstream by [`crate::agent::DEFAULT_TOOL_TIMEOUT_SECS`] (5s). The
+//! bounded upstream by [`crate::agent::DEFAULT_TOOL_TIMEOUT_SECS`]. The
 //! `git_ignore=true` path walks with `ignore::WalkBuilder`, while
 //! `git_ignore=false` uses the `glob` crate directly.
 //!

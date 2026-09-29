@@ -1,6 +1,7 @@
 # Add `web_search` tool
 
-An implementing agent must flip `[ ]` to `[x]` immediately after completing each step and rewrite this sidecar file in place, so progress is resumable across sessions.
+An implementing agent must flip `[ ]` to `[x]` immediately after completing each
+step and rewrite this sidecar file in place, so progress is resumable across sessions.
 
 ## Context
 
@@ -27,6 +28,8 @@ idea have been decided — see **Implementation Hints** for the settled decision
 - Consecutive requests are throttled: minimum interval 5000 ms between request
   starts plus 0–10% jitter; calls already spaced farther apart are not delayed.
 - Fail fast on HTTP errors/blocks (clear `ToolError`, no retry).
+- When `YLVA_REQUEST_DUMP_PATH` is set, the DuckDuckGo request and its buffered
+  HTML response are dumped alongside the other non-streaming HTTP paths.
 - Approval: user approval by default; opt-in via `--auto-approve-web-search`.
 - Tool is in `DEFAULT_TUI_TOOLS` and `DEFAULT_CLI_TOOLS`.
 - Network access is injectable; tests run offline (fixtures + local mock HTTP
@@ -44,14 +47,14 @@ idea have been decided — see **Implementation Hints** for the settled decision
 **Key constraints:**
 
 - Project is fully tokio-async; `ToolCall::run` returns `BoxFuture`; outer timeout
-  + `CancellationToken` are enforced by `PendingTool::execute` (`src/agent.rs:872-886`).
+  - `CancellationToken` are enforced by `PendingTool::execute` (`src/agent.rs:872-886`).
 - `reqwest 0.12` already exists (`Cargo.toml:23`), currently used only in `src/llm/`.
 - `DEFAULT_TUI_TOOLS` doubles as the config-validation allowlist
   (`src/agent_factory.rs:644-664`); both default lists must include the new tool.
 - Default tool timeout is 5 s (`DEFAULT_TOOL_TIMEOUT_SECS`, `src/agent.rs:848`);
   this tool overrides it: internal HTTP timeout 30 s, tool `timeout_secs` 40 s so
   the outer timeout fires after max delay (5000 ms + 10% = 5500 ms) + 30 s request
-  + grace (bash grace pattern, `BASH_OUTER_TIMEOUT_GRACE_SECS`).
+  - grace (bash grace pattern, `BASH_OUTER_TIMEOUT_GRACE_SECS`).
 - Secrets must never be logged; no secrets are needed for DDG, but keep the
   `${ENV_VAR}` pattern in mind for future backends.
 - Implementation + tests + doc updates land in one commit; plans in `docs/plans/`
@@ -62,7 +65,7 @@ idea have been decided — see **Implementation Hints** for the settled decision
 
 ## Implementation Plan
 
-1. [ ] Define the backend seam. Create `src/web_search.rs` with a
+1. [x] Define the backend seam. Create `src/web_search.rs` with a
    `WebSearchBackend` trait (`async fn search(&self, terms: &str, limit: usize)
    -> Result<Vec<WebSearchHit>, WebSearchError>`), a `WebSearchHit { title, url,
    snippet }` struct, and a `WebSearchError` enum. The backend is injected into the
@@ -71,21 +74,27 @@ idea have been decided — see **Implementation Hints** for the settled decision
    re-exports as needed by tests.
    Verify: unit test with a stub backend returns hits unchanged.
 
-2. [ ] Implement the DuckDuckGo HTTP backend in `src/web_search.rs`: own `reqwest`
-   requests against `html.duckduckgo.com/html`, parse result HTML with the
+2. [x] Implement the DuckDuckGo HTTP backend in `src/web_search.rs`: own `reqwest`
+   requests against `html.duckduckgo.com/html`, using a form POST shaped like
+   `ddgr` (including `DNT: 1` and gzip negotiation), parse result HTML with the
    `scraper` crate (new dependency in `Cargo.toml`), extract title/URL/snippet,
    cap at `limit`. Fail fast: any non-success status (incl. 403/captcha) or parse
    failure returns `WebSearchError` mapped to `ToolError` with the HTTP status —
-   no retries. Send the GET with Ylva's existing outbound user-agent constant
-   `OUTBOUND_USER_AGENT` (`src/llm/openai_compatible_provider.rs:43`, currently
-   private): make it `pub` and re-export it (or move it to a shared module) so the
+   no retries. Send the request with Ylva's outbound user-agent constant
+   `OUTBOUND_USER_AGENT`: it moved from the module-private declaration at
+   `src/llm/openai_compatible_provider.rs:43` into the shared HTTP module
+   `src/http.rs` (together with the rest of the former `src/llm/http.rs`), so the
    search backend uses the same SSOT constant instead of re-declaring the
-   `concat!("ylva/", …)` pattern. Expose a test-only base-URL override on the
-   constructor so a local mock server can be targeted.
+   `concat!("ylva/", …)` pattern. Expose base-URL and dump-path overrides on
+   the constructor so a local mock server can be targeted without mutating the
+   process environment. When
+   `YLVA_REQUEST_DUMP_PATH` is set, use the shared non-streaming dump lifecycle
+   and write the decoded HTML response as `.html` bytes.
    Verify: fixture-based unit tests (canned DDG HTML per result shape + error
-   pages) through the parser; no network in tests.
+   pages) through the parser; no network in tests. The local HTTP path also
+   verifies request/response dumps through an explicit temporary dump template.
 
-3. [ ] Implement the `web_search` tool file `src/agent/tools/web_search.rs`
+3. [x] Implement the `web_search` tool file `src/agent/tools/web_search.rs`
    following the `search` tool pattern (`src/agent/tools/search.rs`):
    - `WebSearchInputArgs`: `terms` (required single string), `limit` (optional,
      default 10, max 20) with schema descriptions; `input_schema = schema_for!(...)`.
@@ -102,7 +111,7 @@ idea have been decided — see **Implementation Hints** for the settled decision
    Verify: schema test calling `assert_all_properties_have_descriptions`;
    truncation/limit unit tests.
 
-4. [ ] Implement the consecutive-request throttle inside `WebSearchTool`: state is
+4. [x] Implement the consecutive-request throttle inside `WebSearchTool`: state is
    `Mutex<Option<Instant>>` on the tool struct (registry holds one
    `Arc<dyn Tool>` per process → process-wide naturally; fresh instances in tests
    avoid cross-test interference). Before each HTTP request, if the previous
@@ -124,7 +133,7 @@ idea have been decided — see **Implementation Hints** for the settled decision
    `--auto-approve-web-search` CLI flag wired through `src/cli.rs` and
    `src/main.rs`.
    Verify: registry test asserts `web_search` present with non-empty schema;
-   `[tool.web_search]` config validates (allowlist updated).
+   `[tools.web_search]` config validates (allowlist updated).
 
 6. [ ] Add configuration: `[web_search]` profile section with `backend`
    (string, explicit default `"duckduckgo"`, validated at load — unknown value is
@@ -160,7 +169,7 @@ idea have been decided — see **Implementation Hints** for the settled decision
      (5000 ms + 0–10% jitter, recorded at request start), timeout relationship
      (40 s outer / 30 s internal / max 5.5 s pre-delay).
    - `docs/configuration.md`: `[web_search]` key table + example; re-check the
-     tool-name validation list (lines 531-535); note `[tool.web_search]` sandbox
+     tool-name validation list (lines 531-535); note `[tools.web_search]` sandbox
      rules are unsupported (tool has neither path nor command arguments —
      `clarify` precedent).
    - `docs/cli-options.md`: `--auto-approve-web-search`.
@@ -186,7 +195,7 @@ idea have been decided — see **Implementation Hints** for the settled decision
 - Approval: user approval by default; `--auto-approve-web-search` opts out.
 - `web_search` is in both default tool lists from day one.
 - Fail fast on HTTP errors/blocks — no retry, no partial-result plumbing.
-- The DDG GET reuses Ylva's existing `OUTBOUND_USER_AGENT` constant
+- The DDG form POST reuses Ylva's existing `OUTBOUND_USER_AGENT` constant
   (`src/llm/openai_compatible_provider.rs:43`) — promote/relocate it rather than
   duplicating the value.
 - Throttle: min interval 5000 ms between request starts + jitter 0–10% (of the
@@ -210,13 +219,12 @@ idea have been decided — see **Implementation Hints** for the settled decision
   `AutoApproveTool` (631-639), `assert_all_properties_have_descriptions` (788-811).
 - End-to-end pattern to copy: `src/agent/tools/search.rs` (args struct with schema
   doc comments, metadata struct, `Tool` impl with `with_timeout`, colocated tests).
-- HTTP: `reqwest = "0.12"` (features `json`, `stream`) in `Cargo.toml:23`;
-  helpers in `src/llm/http.rs`. User-agent: `OUTBOUND_USER_AGENT` is
-  `const … = concat!("ylva/", env!("CARGO_PKG_VERSION"))` at
-  `src/llm/openai_compatible_provider.rs:43`, used at line 265 and currently
-  module-private — the DDG GET must reuse this constant (promote to `pub` and
-  re-export, or relocate to a shared module), not duplicate the concat.
-  `scraper` is a new dependency — add it to `Cargo.toml` and re-run the build.
+- HTTP: `reqwest = "0.12"` (features `json`, `stream`, `gzip`) in `Cargo.toml:23`;
+  helpers in `src/http.rs` (the former `src/llm/http.rs`, relocated to the
+  crate-wide HTTP module). User-agent: `OUTBOUND_USER_AGENT` is
+  `const … = concat!("ylva/", env!("CARGO_PKG_VERSION"))` at `src/http.rs`,
+  used by the providers and by the DDG form POST — not duplicated anywhere.
+  `scraper` is a new dependency — added to `Cargo.toml`.
 - Timeouts/cancellation: outer timeout in `PendingTool::execute`
   (`src/agent.rs:886`), default 5 s (`agent.rs:848`); `tokio::select!` over
   `CancellationToken` (`agent.rs:872-885`) cancels the whole `run` future,
@@ -228,13 +236,13 @@ idea have been decided — see **Implementation Hints** for the settled decision
   `src/config.rs:22-33`; `ConfigError` variants name the config path
   (`src/config.rs:57-152`); `${ENV_VAR}` interpolation rules in
   `docs/configuration.md:136-143`.
-- Hard validation: unknown `[tool.<name>]` keys fail startup
+- Hard validation: unknown `[tools.<name>]` keys fail startup
   (`src/agent_factory.rs:644-664`); error message lists allowed tools — update
   both allowlist and message source together (both derive from the default lists).
 - Approval: `Tool::needs_approval` defaults to `UserApprovalRequired`
   (`tools.rs:397-400`); `clarify` is the precedent for a non-sandboxed tool
   (`tools.rs:757-762`) — `web_search` has neither path nor command arguments, so
-  `[tool.web_search]` sandbox rules are unsupported.
+  `[tools.web_search]` sandbox rules are unsupported.
 - CLI auto-approve flags: pattern in `src/cli.rs:96-120, 173-195`, wired in
   `src/main.rs:240-241`.
 - Testing: colocated `#[cfg(test)]` tests; `src/test_support.rs` (`run_locked`,

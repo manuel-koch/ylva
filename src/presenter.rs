@@ -33,6 +33,7 @@ use crate::tui_reducer_state::{
     model_picker_row_entries, slash_overlay_text_rows, AppState, ChatEntry, ChatSelection,
     ChildRunInfo, ConfirmKey, ConversationView, DomainEvent, Effect, Focus, HistoryDirection,
     InputEvent, SlashOverlay, ToolCallState, TuiMode, UserMessageState,
+    HELP_HORIZONTAL_SCROLL_COLUMNS,
 };
 
 // ─── Public surface ───────────────────────────────────────────────────────────
@@ -102,10 +103,10 @@ fn keyboard_help(state: &mut AppState, event: InputEvent) -> Vec<Effect> {
                     state.help_scroll_down(1);
                 }
                 KeyCode::Left => {
-                    state.help_scroll_left(4);
+                    state.help_scroll_left(HELP_HORIZONTAL_SCROLL_COLUMNS);
                 }
                 KeyCode::Right => {
-                    state.help_scroll_right(4);
+                    state.help_scroll_right(HELP_HORIZONTAL_SCROLL_COLUMNS);
                 }
                 KeyCode::PageUp => {
                     state.help_scroll_up(3);

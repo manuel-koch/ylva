@@ -163,12 +163,25 @@ format-dispatch enum.
 
 The shared `reqwest::Client` is built once at its construction site inside
 `OpenAiCompatibleProvider` with a client-level default
-`User-Agent: ylva/<version>` (version from `CARGO_PKG_VERSION`), so every
-outbound request flows through the three `llm::http` send helpers
-(`get_json`, `post_json`, `post_with_retry`) without any per-request header
-insertion. Caveat: client-level default headers are not part of the
-per-request `HeaderMap` that `dump_request` records, so they do not appear in
-`YLVA_REQUEST_DUMP_PATH` dumps — dump contents stay unchanged.
+`User-Agent: ylva/<version>` (version from `CARGO_PKG_VERSION`). The
+non-streaming model/catalog requests use the shared `crate::http` helpers
+(`get_json` and `post_json`); chat uses `post_with_retry`; the DuckDuckGo
+backend owns a client for its HTML endpoint and submits a `ddgr`-shaped form
+`POST` with `DNT: 1` and gzip negotiation; the `reqwest` `gzip` feature decodes
+compressed responses before HTML parsing. The non-streaming helpers and
+DuckDuckGo create paired dump paths through `RequestDumpSource`, dump the
+request before sending, buffer the response once, and dump it before status or
+JSON/HTML parsing. `Environment` resolves `YLVA_REQUEST_DUMP_PATH` in
+production; an explicit `Template` source lets tests use a temporary path
+without mutating process-global environment state. A `RequestDumpContext`
+retains the timestamp and dump id while the response path is selected after
+headers arrive. After `reqwest` content decoding, buffered response bytes
+remain unmodified; the extension maps the media type (`.json`, `.html`, `.txt`,
+`.xml`, common media extensions, or `.bin` fallback), while SSE retains its
+`.jsonl` event transcript. Transport failures leave a `[transport]` marker in
+the `.jsonl` fallback when no response headers exist.
+Client-level default headers are not part of the per-request `HeaderMap` that
+`dump_request` records, so they do not appear in `YLVA_REQUEST_DUMP_PATH` dumps.
 
 `ModelInfo.reasoning_efforts` normalizes provider metadata into three states:
 `None` means no advertised reasoning support, `Some([])` means supported
@@ -461,10 +474,14 @@ the complete Base64 tool text and receive no synthetic user message. The
 synthetic message is never committed or rendered. Resumed sessions reconstruct
 the same projection from the persisted descriptor and canonical result.
 
-`llm::http::dump_request` sanitizes only a cloned request-body projection.
+`crate::http::dump_request` sanitizes only a cloned request-body projection.
 Base64 tool results and inline image/file data become stable redaction markers;
 roles, IDs, metadata, media types, and filenames remain available for
-diagnostics. Live requests and structured tracing fields are unchanged.
+diagnostics. `crate::http::dump_buffered_response` writes complete
+non-streaming responses as their original bytes; only streaming event
+transcripts are line-oriented JSONL. Request metadata retains the encoded URL
+query string so search terms and other query parameters remain diagnosable.
+Live requests and structured tracing fields are unchanged.
 
 ## Path-like argument normalization
 

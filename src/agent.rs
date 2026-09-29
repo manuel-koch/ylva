@@ -844,7 +844,7 @@ impl std::fmt::Debug for PendingTool {
     }
 }
 
-/// Default execution timeout for file-system tools (blueprint §4D: 5s).
+/// Default execution timeout for file-system tools (blueprint §4D).
 pub const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 5;
 
 impl PendingTool {
@@ -4884,10 +4884,39 @@ mod tests {
                 .send_command(AgentCommand::Prompt("child task".into()))
                 .await;
 
-            let result = tokio::time::timeout(Duration::from_secs(5), handle)
-                .await
-                .expect("child run() should return promptly once the iteration cap trips")
-                .expect("run() task should not panic");
+            // Drain `ui_rx` *while* `run()` is in flight, exactly like the
+            // TUI/CLI drivers do. The channel is bounded (capacity 100) and
+            // every tool round emits several `UiUpdate`s, so an undrained
+            // receiver fills it long before `MAX_TOOL_USE_ITERATIONS` rounds
+            // elapse — `ui_tx.send().await` then parks the whole loop, the
+            // iteration cap never trips, and `run()` never returns.
+            let mut handle = handle;
+            let mut collected_updates: Vec<UiUpdate> = Vec::new();
+            let result = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    tokio::select! {
+                        biased;
+                        joined = &mut handle => break joined,
+                        update = ui_rx.recv() => match update {
+                            Some(update) => collected_updates.push(update),
+                            // The loop itself keeps a sender alive for the
+                            // whole test, so the channel never closes here;
+                            // park on `handle` instead of spinning.
+                            None => std::future::pending::<()>().await,
+                        },
+                    }
+                }
+            })
+            .await
+            .expect("child run() should return promptly once the iteration cap trips")
+            .expect("run() task should not panic");
+
+            // Collect anything `run()` posted just before returning that the
+            // loop above had not polled yet (both branches were ready, and
+            // `biased` preferred `handle`).
+            while let Ok(update) = ui_rx.try_recv() {
+                collected_updates.push(update);
+            }
 
             let error = result.expect_err(
                 "a child hitting the iteration cap must return Err, not Ok(context) \
@@ -4901,13 +4930,13 @@ mod tests {
             // No boilerplate assistant bubble should have been pushed to the
             // child's own context (that message is reserved for a human reading
             // the root's transcript directly).
-            while let Ok(update) = ui_rx.try_recv() {
+            for update in &collected_updates {
                 if let UiUpdate::Error {
                     message,
                     run_id: got_run_id,
                 } = update
                 {
-                    assert_eq!(got_run_id, Some(run_id));
+                    assert_eq!(got_run_id, &Some(run_id));
                     assert!(message.contains("iterations"));
                 }
             }

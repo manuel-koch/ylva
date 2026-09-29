@@ -15,7 +15,7 @@
 //! `write` tool: create or overwrite a file with model-provided text content.
 //!
 //! All file I/O uses `tokio::fs`; execution is bounded upstream by
-//! [`crate::agent::DEFAULT_TOOL_TIMEOUT_SECS`] (5s). Typed argument structs
+//! [`crate::agent::DEFAULT_TOOL_TIMEOUT_SECS`]. Typed argument structs
 //! derive both `JsonSchema` (for the wire schema) and `Deserialize` (for
 //! parsing incoming arguments).
 //!

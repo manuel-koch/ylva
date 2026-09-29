@@ -317,7 +317,7 @@ impl AgentFactory {
         // Per-tool sandbox rules resolve most-specific-wins, each tier fully
         // replacing the next (no merging across tiers): the agent type's own
         // `[agents.<type>.tools.<name>]` table, then the profile-wide
-        // `[tool.<name>]` table, then (absent from both) the built-in default
+        // `[tools.<name>]` table, then (absent from both) the built-in default
         // floor handled by `default_registry`/`SandboxContext`.
         let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new()));
         let agent_type_tools = profile
@@ -346,6 +346,7 @@ impl AgentFactory {
                 spawn_agent_types,
                 agent_finish: agent_finish_config,
                 tool_sandbox_rules,
+                web_search: profile.web_search.clone(),
             },
         ));
         let (agent_loop, ui_rx) = AgentLoop::new(Arc::clone(&engine), registry);
@@ -637,7 +638,7 @@ fn validate_profile_agent_engines(
     Ok(())
 }
 
-/// Validate that every tool name configured in the profile's `[tool.<name>]`
+/// Validate that every tool name configured in the profile's `[tools.<name>]`
 /// table and each agent type's `[agents.<type>.tools.<name>]` table is one of
 /// the registered tool names, so a typo or renamed tool fails fast at
 /// startup instead of silently never applying its configured rules.
@@ -645,7 +646,7 @@ fn validate_profile_agent_tool_names(profile: &ProfileConfig) -> anyhow::Result<
     for tool_name in profile.tools.keys() {
         anyhow::ensure!(
             DEFAULT_TUI_TOOLS.contains(&tool_name.as_str()),
-            "profile-level [tool.{tool_name}] table names unknown tool '{tool_name}'; \
+            "profile-level [tools.{tool_name}] table names unknown tool '{tool_name}'; \
              registered tools are: {}",
             DEFAULT_TUI_TOOLS.join(", ")
         );
@@ -1227,7 +1228,7 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("not-a-real-tool"), "{message}");
         assert!(
-            message.contains("profile-level") || message.contains("[tool."),
+            message.contains("profile-level") || message.contains("[tools."),
             "{message}"
         );
     }
@@ -1470,7 +1471,7 @@ mod tests {
     #[test]
     fn create_honors_per_agent_type_tools_sandbox_rules_override() {
         // Two agent types share one profile where the profile-wide
-        // `[tool.write]` table only denies writes outside the workspace; one
+        // `[tools.write]` table only denies writes outside the workspace; one
         // agent type additionally sets `[agents.<type>.tools.write]` with an
         // extra glob rule auto-approving writes under `scratch/`. Only that
         // agent type's `write` tool should auto-approve a `scratch/` path;

@@ -16,12 +16,12 @@ use base64::Engine as _;
 use eventsource_stream::Eventsource;
 use futures::future::BoxFuture;
 use futures::StreamExt;
-use reqwest::header::{HeaderMap, AUTHORIZATION};
+use reqwest::header::{HeaderMap, AUTHORIZATION, CONTENT_TYPE};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 
 use crate::agent::{DeltaChunk, Message, StreamEvent};
+use crate::http::OUTBOUND_USER_AGENT;
 use crate::llm::engine::{EngineRuntimeConfig, EngineRuntimeConfigHandle, DEFAULT_CONTEXT_LENGTH};
 use crate::llm::openai_compatible_messages::{serialize_messages_with_policy, ContentPartFormat};
 use crate::llm::{InputModality, Provider, ToolSchema};
@@ -37,10 +37,6 @@ fn no_request_body_customization(
 
 const REDACTED_BASE64_RESULT: &str = "<REDACTED_BASE64_RESULT>";
 const REDACTED_MEDIA_DATA: &str = "<REDACTED_MEDIA_DATA>";
-
-/// `User-Agent` value applied as a client-level default on the shared HTTP
-/// client so every outbound request identifies Ylva and its package version.
-const OUTBOUND_USER_AGENT: &str = concat!("ylva/", env!("CARGO_PKG_VERSION"));
 
 /// Redact media payloads from a Chat Completions request copy used only for
 /// request dumps. The live request body is never mutated.
@@ -330,7 +326,7 @@ impl Provider for OpenAiCompatibleProvider {
         let api_key = self.api_key.clone();
         Box::pin(async move {
             let body =
-                super::http::get_json(&client, &models_url, api_key.as_deref(), "model listing")
+                crate::http::get_json(&client, &models_url, api_key.as_deref(), "model listing")
                     .await?;
             Ok(parse_model_list(&body))
         })
@@ -391,11 +387,10 @@ impl Provider for OpenAiCompatibleProvider {
                 let authorization = format!("{} {}", "Bearer", value);
                 headers.insert(AUTHORIZATION, authorization.parse()?);
             }
-            let dump_id = Uuid::new_v4().simple().to_string();
-            let dump_timestamp = super::http::current_dump_timestamp();
-            let request_dump_path = super::http::build_request_dump_path(&dump_timestamp, &dump_id);
-            let response_dump_path =
-                super::http::build_response_dump_path(&dump_timestamp, &dump_id);
+            let dump_context =
+                crate::http::RequestDumpContext::new(&crate::http::RequestDumpSource::Environment);
+            let dump_id = dump_context.dump_id().to_string();
+            let request_dump_path = dump_context.request_path();
             // Log the effective request snapshot, never request headers (which
             // carry the Authorization/API-key value) or the request body.
             tracing::debug!(
@@ -413,31 +408,42 @@ impl Provider for OpenAiCompatibleProvider {
                 dump_id = %dump_id,
                 "chat request started"
             );
-            // Logged once, upfront, alongside the request dump's own
-            // "dumped request body" log line. Together they let a
-            // request/response pair be found from a log timestamp without
-            // guessing the paired filename from the request dump path alone.
-            if let Some(path) = &response_dump_path {
-                tracing::debug!(dump_id = %dump_id, path = %path.display(), "response dump path resolved");
-            }
             if let Some(path) = &request_dump_path {
-                let redacted_headers = super::http::redacted_headers_json(&headers);
+                let redacted_headers = crate::http::redacted_headers_json(&headers);
                 let redacted_body = request_body_redactor(&request_body);
-                super::http::dump_request(
+                crate::http::dump_request(
                     &completions_url,
                     &redacted_headers,
                     &redacted_body,
                     path,
                 );
             }
-            let response = super::http::post_with_retry(
+            let response = match crate::http::post_with_retry(
                 &client,
                 &completions_url,
                 &headers,
                 &request_body,
                 &cancel,
             )
-            .await?;
+            .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    let response_dump_path =
+                        dump_context.response_path_for_content_type(None, "jsonl");
+                    crate::http::dump_response_transport_error(&response_dump_path, &error);
+                    return Err(error);
+                }
+            };
+            let response_content_type = response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok());
+            let response_dump_path =
+                dump_context.response_path_for_content_type(response_content_type, "jsonl");
+            if let Some(path) = &response_dump_path {
+                tracing::debug!(dump_id = %dump_id, path = %path.display(), "response dump path resolved");
+            }
 
             let (tx, rx) = mpsc::channel(16);
             tokio::spawn(async move {
@@ -450,7 +456,7 @@ impl Provider for OpenAiCompatibleProvider {
                         biased;
                         _ = cancel.cancelled() => {
                             if let Some(dump_path) = &response_dump_path {
-                                super::http::append_response_dump_line(
+                                crate::http::append_response_dump_line(
                                     "[transport] cancelled",
                                     dump_path,
                                 );
@@ -463,7 +469,7 @@ impl Provider for OpenAiCompatibleProvider {
                         event = stream.next() => {
                             let Some(event) = event else {
                                 if let Some(dump_path) = &response_dump_path {
-                                    super::http::append_response_dump_line(
+                                    crate::http::append_response_dump_line(
                                         "[transport] stream ended without [DONE]",
                                         dump_path,
                                     );
@@ -475,7 +481,7 @@ impl Provider for OpenAiCompatibleProvider {
                             match event {
                                 Ok(event) => {
                                     if let Some(dump_path) = &response_dump_path {
-                                        super::http::append_response_dump_line(&event.data, dump_path);
+                                        crate::http::append_response_dump_line(&event.data, dump_path);
                                     }
                                     match parse_sse_payload(&event.data) {
                                         Some(StreamEvent::Done) => {
@@ -493,7 +499,7 @@ impl Provider for OpenAiCompatibleProvider {
                                 }
                                 Err(error) => {
                                     if let Some(dump_path) = &response_dump_path {
-                                        super::http::append_response_dump_line(
+                                        crate::http::append_response_dump_line(
                                             &format!("[transport] SSE error: {error}"),
                                             dump_path,
                                         );

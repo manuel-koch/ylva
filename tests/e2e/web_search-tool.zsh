@@ -1,0 +1,46 @@
+#!/bin/zsh
+YLVA=${CARGO_TARGET_DIR:-./target}/debug/ylva
+ROOT_DIR=$(git rev-parse --show-toplevel)
+LOG_DIR=${ROOT_DIR}/logs
+LOG_FORMAT=text
+PREFIX=$(basename $0 .zsh)
+
+cd ${ROOT_DIR}
+
+make build-debug
+
+test -d "${LOG_DIR}" || mkdir -p "${LOG_DIR}"
+echo "**" > "${LOG_DIR}/.gitignore"
+
+function ylva() {
+    PREFIX_TIMESTAMPED="${LOG_DIR}/${PREFIX}_$(date +%Y%m%d%H%M%S)"
+    LOG_PATH="${PREFIX_TIMESTAMPED}.log"
+    OUT_PATH="${PREFIX_TIMESTAMPED}.txt"
+    export YLVA_REQUEST_DUMP_PATH=${PREFIX_TIMESTAMPED}.json
+    ${YLVA} --no-tui --color=yes \
+            --log-file ${LOG_PATH} \
+            --log-level TRACE --log-format ${LOG_FORMAT} \
+            --auto-approve-web-search \
+            | tee ${OUT_PATH}
+}
+
+function seperator() {
+    echo
+    echo "----------------------------------------------------------"
+    echo
+}
+
+ylva << '__EOT__'
+Do a web research about agent-harnesses, overview of available agents,
+best performance/usability.
+__EOT__
+
+seperator
+
+ylva << '__EOT__'
+Do a web research about search-website that can be used to search for
+given terms.
+Check whether they can return structured data or just html.
+Check whether they have contrains like rate-limits, bot-detection,
+need authentification/api-key etc.
+__EOT__

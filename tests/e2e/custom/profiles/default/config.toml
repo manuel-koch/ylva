@@ -39,5 +39,9 @@ reasoning = "max"
 [agents.local-discovery]
 description = "An agent that can perform read-only discovery tasks in workspace solely using builtin tools and a local AI-Model."
 engine = "local-discovery"
-# TODO: allowed_tools not yet supported !
 allowed_tools = ["read", "glob", "search"]
+
+[tools.web_search]
+rules = [
+    { rule = "network_request", verdict = "auto_approved" },
+]

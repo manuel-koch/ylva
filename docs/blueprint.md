@@ -1390,11 +1390,11 @@ For non-existent paths (e.g. a write target), lexical normalization is the
 fallback.
 
 **Tool approval rules (shipped TOML config):** each tool's path-based policy
-is configurable via a `[tool.<name>]` block's ordered `rules` list
+is configurable via a `[tools.<name>]` block's ordered `rules` list
 (last-match-wins; a configured list fully replaces the default floor):
 
 ```toml
-[tool.read]
+[tools.read]
 rules = [
   { rule = "outside_workspace", verdict = "user_approval_required" },  # default floor rule, restated
   { rule = "dot_path", verdict = "user_approval_required" },           # default floor rule, restated
@@ -1403,7 +1403,7 @@ rules = [
   { pattern = "**/.*", verdict = "auto_approved" },         # re-allow dot-files inside workspace
 ]
 
-[tool.write]
+[tools.write]
 rules = [
   { rule = "outside_workspace", verdict = "auto_denied" },
   { rule = "dot_path", verdict = "auto_denied" },
@@ -3036,7 +3036,7 @@ See reducer-state-handling-plan.md.
       `ylva init --workspace` also deploys a `.gitignore` inside the project's
       `.ylva/` ignoring `.env`
 
-- [x] Per-tool sandbox rule configuration: load configurable `[tool.*]` rule
+- [x] Per-tool sandbox rule configuration: load configurable `[tools.*]` rule
       lists (including `outside_workspace`/`dot_path` overrides and the
       opt-in `cross_filesystem` rule, §4E) from the
       layered config, replacing Phase 6's hardcoded two-rule default

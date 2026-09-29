@@ -39,7 +39,7 @@ use crate::llm::InputModality;
 use crate::slash_command::{slash_command_suggestions, SlashCommandInfo};
 use crate::store::ChildRunRecord;
 
-// ─── Duration constant ───────────────────────────────────────────────────────
+// ─── Shared TUI constants ────────────────────────────────────────────────────
 
 /// Duration a toast notification remains visible before it auto-dismisses.
 const TOAST_DURATION: Duration = Duration::from_millis(1500);
@@ -48,6 +48,12 @@ const TOAST_DURATION: Duration = Duration::from_millis(1500);
 /// the second click to count as a double-click (the drill-into-subagent
 /// gesture) rather than a second, independent single click (collapse toggle).
 pub(crate) const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(250);
+
+/// Window for confirming the second press of a `Ctrl+C`/`Esc` action.
+pub(crate) const CONFIRM_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Number of columns moved by one horizontal help-popup scroll action.
+pub(crate) const HELP_HORIZONTAL_SCROLL_COLUMNS: usize = 4;
 
 /// Sentinel `entry_index` used in `thinking_title_rows` for the in-flight
 /// (not yet flushed) thinking bubble rendered from `partial_thinking_text`.

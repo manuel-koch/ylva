@@ -364,7 +364,7 @@ A profile groups engine selection and per-agent settings for a runtime session.
 | `timeout_secs` | number (optional) | Maximum wall-clock seconds before the agent is cancelled. Omitted means no timeout. |
 | `persona` | string (optional) | The agent type's own persona: the single model-facing text this type contributes, composed after the global baseline (global SOUL plus trusted instruction sections) and before the tool protocol — it extends that baseline, never replaces it. Write it as `persona = "…"` in a `.toml` agent-type file, as the body of a `.md` agent-type file (the body *is* the persona), or as `persona = "…"` in an inline table, where it replaces a file-sourced persona. Applies when the type runs as root or child. |
 | `can_spawn` | boolean | When `true` (for a root agent), registers the `spawn_subagent` tool so this agent may delegate self-contained tasks to a concurrently-running child agent (one level deep; children cannot spawn further children). Use `--auto-approve-spawn` to skip the human-approval prompt for `spawn_subagent` calls. See "Child-agent delegation" in `docs/features.md`. |
-| `tools` | table | Per-tool sandbox rule lists scoped to this agent type only, keyed by tool name (`[agents.<type>.tools.<name>]` inline tables, or a file-authored agent-type's own top-level `[tools.<name>]`/`tools: { <name>: ... }` table). Same shape as the profile-level `[tool.<name>]` table (see "Sandbox" below), resolved with higher precedence than it for this agent type. |
+| `tools` | table | Per-tool sandbox rule lists scoped to this agent type only, keyed by tool name (`[agents.<type>.tools.<name>]` inline tables, or a file-authored agent-type's own top-level `[tools.<name>]`/`tools: { <name>: ... }` table). Same shape as the profile-level `[tools.<name>]` table (see "Sandbox" below), resolved with higher precedence than it for this agent type. |
 
 Every loaded profile has a `default` agent type. If `[agents.default]` is
 absent, Ylva supplies the built-in default configuration: it uses
@@ -397,7 +397,7 @@ touching the filesystem, resolving symlinked prefixes such as macOS's
 `/var` → `/private/var`) and either gets an explicit verdict or no rule
 applies, letting the calling tool fall back to its own default.
 
-**Default floor.** When a tool has no `[tool.<name>]` config table (see
+**Default floor.** When a tool has no `[tools.<name>]` config table (see
 below) at any resolved layer, two rules apply unconditionally, evaluated in
 this order, before any custom rule added by a CLI flag (e.g.
 `--auto-approve-write`/`--auto-approve-edit`, last match wins):
@@ -413,7 +413,7 @@ can be granted. A configured rule list may still set either rule to
 `auto_denied` for a hard rejection.
 
 The opt-in `cross_filesystem` rule (see below) is **not** part of this
-floor — it only applies when a `[tool.<name>]` rule list configures it.
+floor — it only applies when a `[tools.<name>]` rule list configures it.
 
 This floor is built in, not parsed from any embedded TOML file, so it can
 never be broken by a missing or corrupted config file. `search` with no
@@ -423,17 +423,17 @@ through the same `dot_path`/`outside_workspace` evaluation as `read`,
 `write`, and `edit`. `glob` uses the same workspace boundary and named-rule
 checks but allows dot-prefixed paths because it only enumerates paths.
 
-**Per-tool `[tool.<name>]` config.** A profile's `config.toml` may configure
+**Per-tool `[tools.<name>]` config.** A profile's `config.toml` may configure
 a tool's rule list explicitly, e.g.:
 
 ```toml
-[tool.read]
+[tools.read]
 rules = [
   { rule = "dot_path", verdict = "user_approval_required" },
   { rule = "cross_filesystem", verdict = "user_approval_required" },
 ]
 
-[tool.write]
+[tools.write]
 rules = [
   { rule = "outside_workspace", verdict = "auto_denied" },
   { pattern = "**/build/**", verdict = "auto_approved" },
@@ -480,26 +480,26 @@ mount point under the workspace root). Semantics:
   root's device cannot be read, the rule does **not** match —
   `outside_workspace` and `dot_path` remain the boundary guards.
 - It is **opt-in only** and not part of the default floor; add it to a
-  `rules` list (as in the `[tool.read]` example above) to use it, with any
+  `rules` list (as in the `[tools.read]` example above) to use it, with any
   of the three verdicts and an optional custom `reason`.
 
 Rules are evaluated in list order; last match wins — the same
 last-match-wins semantics as the default floor and as CLI-flag-added rules.
 
-**A configured `[tool.<name>]` table fully replaces the default floor for
+**A configured `[tools.<name>]` table fully replaces the default floor for
 that tool — it does not merge with it.** A profile that configures
-`[tool.read]` must include its own `{ rule = "outside_workspace", ... }`/
+`[tools.read]` must include its own `{ rule = "outside_workspace", ... }`/
 `{ rule = "dot_path", ... }` entries if it still wants those protections for
-`read`; a tool with no `[tool.<name>]` table at all keeps the unconditional
+`read`; a tool with no `[tools.<name>]` table at all keeps the unconditional
 default floor.
 
 **Per-agent-type `[agents.<type>.tools.<name>]` override.** An agent type
 may configure its own rule list for a tool, taking precedence over the
-profile-level `[tool.<name>]` table for that tool, for that agent type only
+profile-level `[tools.<name>]` table for that tool, for that agent type only
 — other agent types in the same profile are unaffected:
 
 ```toml
-[tool.write]
+[tools.write]
 rules = [
   { rule = "outside_workspace", verdict = "auto_denied" },
 ]
@@ -525,10 +525,10 @@ next (no merging across tiers):
 
 1. `[agents.<type>.tools.<name>]` (or the agent-type file's `[tools.<name>]`/
    `tools: { <name>: ... }`), if present.
-2. The profile-level `[tool.<name>]` table, if present.
+2. The profile-level `[tools.<name>]` table, if present.
 3. The unconditional default floor described above.
 
-Both `[tool.<name>]` and `[agents.<type>.tools.<name>]` (and their
+Both `[tools.<name>]` and `[agents.<type>.tools.<name>]` (and their
 file-authored equivalents) hard-validate their tool name against the
 registered tool set (`read`, `write`, `glob`, `bash`, `search`, `edit`,
 `clarify`) at startup; an unrecognized name is a hard error naming the
@@ -537,15 +537,15 @@ offending agent type (or "profile-level"), the unknown name, and its source.
 `--auto-approve-write`/`--auto-approve-edit` continue to work unchanged:
 each still adds its own catch-all `auto_approved` rule (`pattern = "**"`)
 after whichever rule list applies (agent-type-scoped, profile-level, or the
-default floor), so the flag always wins regardless of `[tool.*]`/
+default floor), so the flag always wins regardless of `[tools.*]`/
 `[agents.<type>.tools.*]` config.
 
 ### `bash` command rules
 
-`bash` is a command tool, not a path tool: `[tool.bash]`/
+`bash` is a command tool, not a path tool: `[tools.bash]`/
 `[agents.<type>.tools.bash]` cannot reference `outside_workspace`/`dot_path`/
 `cross_filesystem` (path-only) or a path-glob `pattern` rule, and no other
-tool's `[tool.<name>]`
+tool's `[tools.<name>]`
 table may reference `bash`'s named rules or a `command` rule. Config loading
 hard-validates this at startup, naming the offending agent type (or
 "profile-level"), the tool, the rule index, and which rule kind was expected.
@@ -566,11 +566,11 @@ through. A script that fails to parse at all is left to `bash`'s own default
 | `unquoted_glob` | Any argument contains an unquoted `*`, `?`, or `[...]`. | `user_approval_required` |
 | `unquoted_brace_expansion` | Any argument contains an unquoted `{a,b}` brace expansion. | `user_approval_required` |
 
-**Command-shape rule.** `[tool.bash]`-only; matches a command's argument
+**Command-shape rule.** `[tools.bash]`-only; matches a command's argument
 shape rather than a path:
 
 ```toml
-[tool.bash]
+[tools.bash]
 rules = [
   { rule = "backgrounded", verdict = "auto_denied" },
   { command = ["git", "status"], verdict = "auto_approved" },
@@ -593,7 +593,7 @@ argument instead of a wildcard.
 **Per-command evaluation and aggregation.** Each command in the script is
 evaluated independently:
 
-- With a configured `[tool.bash]`/`[agents.<type>.tools.bash]` rule list,
+- With a configured `[tools.bash]`/`[agents.<type>.tools.bash]` rule list,
   evaluation is ordinary last-match-wins across its entries (list order is
   a deliberate user choice), and that configured list **fully replaces**
   the default floor for `bash` — the four named rules above no longer apply
@@ -606,7 +606,7 @@ evaluated independently:
 
 All commands in the script are then combined the same way (strictest
 verdict wins) into one overall verdict for the script. `--auto-approve-bash`
-is evaluated last and always wins regardless of `[tool.bash]` config,
+is evaluated last and always wins regardless of `[tools.bash]` config,
 mirroring `--auto-approve-write`/`--auto-approve-edit`'s existing precedence
 for `write`/`edit`.
 

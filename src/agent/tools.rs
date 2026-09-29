@@ -45,6 +45,7 @@ pub mod glob;
 pub mod read;
 pub mod search;
 pub mod spawn_subagent;
+pub mod web_search;
 pub mod write;
 
 /// Default execution timeout for tools.
@@ -609,6 +610,7 @@ pub const DEFAULT_CLI_TOOLS: &[&str] = &[
     bash::BashTool::NAME,
     search::SearchTool::NAME,
     edit::EditTool::NAME,
+    web_search::WebSearchTool::NAME,
 ];
 
 /// Names of the tools available in a TUI (interactive) context.
@@ -621,6 +623,7 @@ pub const DEFAULT_TUI_TOOLS: &[&str] = &[
     search::SearchTool::NAME,
     edit::EditTool::NAME,
     clarify::ClarifyTool::NAME,
+    web_search::WebSearchTool::NAME,
 ];
 
 /// One tool whose approval prompt can be bypassed via a `--auto-approve-*`
@@ -635,6 +638,7 @@ pub enum AutoApproveTool {
     Bash,
     Search,
     Edit,
+    WebSearch,
     Spawn,
 }
 
@@ -664,17 +668,21 @@ pub struct ToolRegistryConfig {
     /// Present only for `Role::Child` agents: registers `agent_finish`, wired to
     /// send its result through this config's channel/ids.
     pub agent_finish: Option<agent_finish::AgentFinishToolConfig>,
-    /// Per-tool sandbox rule lists parsed from the profile's `[tool.<name>]`
+    /// Per-tool sandbox rule lists parsed from the profile's `[tools.<name>]`
     /// tables (`ProfileConfig::tools`), keyed by tool name. A tool name with
     /// no entry here falls back to `SandboxContext`'s built-in default floor
     /// (`outside_workspace`/`dot_path` → `UserApprovalRequired`); an entry
     /// fully replaces that floor for its tool. See `docs/configuration.md`'s
     /// "Sandbox" section.
     pub tool_sandbox_rules: HashMap<String, Vec<crate::sandbox::SandboxRuleConfig>>,
+    /// The profile's `[web_search]` section: which backend serves
+    /// `web_search`, its internal HTTP timeout, and its default result
+    /// limit.
+    pub web_search: crate::config::WebSearchConfig,
 }
 
 impl Default for ToolRegistryConfig {
-    /// Defaults to [`DEFAULT_CLI_TOOLS`] (the six standard headless tools).
+    /// Defaults to [`DEFAULT_CLI_TOOLS`] (the standard headless tool set).
     fn default() -> Self {
         Self {
             auto_approve: std::collections::HashSet::new(),
@@ -683,13 +691,13 @@ impl Default for ToolRegistryConfig {
             spawn_agent_types: Vec::new(),
             agent_finish: None,
             tool_sandbox_rules: HashMap::new(),
+            web_search: crate::config::WebSearchConfig::default(),
         }
     }
 }
 
 /// Build the default tool registry configured by [`ToolRegistryConfig`].
 ///
-/// The full candidate pool is: `read`, `write`, `glob`, `bash`, `search`, `edit`, `clarify`.
 /// Only tools whose name appears in `config.allowed_tools` are registered.
 pub fn default_registry(
     sandbox: std::sync::Arc<std::sync::RwLock<crate::sandbox::Sandbox>>,
@@ -702,12 +710,12 @@ pub fn default_registry(
 
     // Builds a tool's SandboxContext, replacing the built-in default floor
     // with `config.tool_sandbox_rules`'s entry for `tool_name` (a profile's
-    // `[tool.<name>]` table) when one is configured; otherwise the default
+    // `[tools.<name>]` table) when one is configured; otherwise the default
     // floor (`outside_workspace`/`dot_path` → `UserApprovalRequired`) applies.
     // When
     // `auto_approve_tool` is set in `config.auto_approve`, a catch-all
     // `AutoApproved` rule is appended last, so it always wins regardless of
-    // `[tool.<name>]` config.
+    // `[tools.<name>]` config.
     let sandbox_context_for = |tool_name: &str, auto_approve_tool: AutoApproveTool| {
         let mut context = SandboxContext::new(Arc::clone(&sandbox));
         if let Some(rules) = config.tool_sandbox_rules.get(tool_name) {
@@ -753,6 +761,21 @@ pub fn default_registry(
     register_sandboxed_tool(edit::EditTool::NAME, AutoApproveTool::Edit, &|context| {
         Arc::new(edit::EditTool::new(context))
     });
+
+    // `web_search` has no path or command argument, but it still resolves a
+    // sandbox context: that context carries its `[tools.web_search]`
+    // `network_request` rules and the `--auto-approve-web-search`
+    // catch-all (see `SandboxContext::check_network_request`).
+    if allowed
+        .iter()
+        .any(|name| name == web_search::WebSearchTool::NAME)
+    {
+        registry.register(Arc::new(web_search::WebSearchTool::new(
+            config.web_search.build_backend(),
+            &config.web_search,
+            sandbox_context_for(web_search::WebSearchTool::NAME, AutoApproveTool::WebSearch),
+        )));
+    }
 
     if allowed
         .iter()
@@ -937,13 +960,14 @@ mod tests {
     fn default_registry_registers_cli_tools() {
         let sandbox = std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new()));
         let registry = default_registry(sandbox, ToolRegistryConfig::default());
-        assert_eq!(registry.names().len(), 6);
+        assert_eq!(registry.names().len(), 7);
         assert!(registry.get(read::ReadTool::NAME).is_some());
         assert!(registry.get(write::WriteTool::NAME).is_some());
         assert!(registry.get(glob::GlobTool::NAME).is_some());
         assert!(registry.get(bash::BashTool::NAME).is_some());
         assert!(registry.get(search::SearchTool::NAME).is_some());
         assert!(registry.get(edit::EditTool::NAME).is_some());
+        assert!(registry.get(web_search::WebSearchTool::NAME).is_some());
         assert!(registry.get(clarify::ClarifyTool::NAME).is_none());
     }
 
@@ -957,8 +981,95 @@ mod tests {
                 ..ToolRegistryConfig::default()
             },
         );
-        assert_eq!(registry.names().len(), 7);
+        assert_eq!(registry.names().len(), 8);
         assert!(registry.get(clarify::ClarifyTool::NAME).is_some());
+        assert!(registry.get(web_search::WebSearchTool::NAME).is_some());
+    }
+
+    #[test]
+    fn default_registry_registers_web_search_with_a_non_empty_schema() {
+        let sandbox = std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new()));
+        let registry = default_registry(sandbox, ToolRegistryConfig::default());
+
+        let schema = registry
+            .schemas()
+            .into_iter()
+            .find(|schema| schema.name == web_search::WebSearchTool::NAME)
+            .expect("web_search must expose a schema");
+        assert!(
+            schema
+                .parameters
+                .get("properties")
+                .and_then(|properties| properties.as_object())
+                .is_some_and(|properties| !properties.is_empty()),
+            "the schema must describe the tool's arguments: {}",
+            schema.parameters
+        );
+        assert!(schema.description.contains("terms"));
+    }
+
+    #[test]
+    fn auto_approve_web_search_wins_over_configured_deny_rule() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sandbox = std::sync::Arc::new(std::sync::RwLock::new(
+            crate::sandbox::Sandbox::with_root(temp.path().to_path_buf()),
+        ));
+        let mut tool_sandbox_rules = HashMap::new();
+        tool_sandbox_rules.insert(
+            web_search::WebSearchTool::NAME.to_string(),
+            vec![crate::sandbox::SandboxRuleConfig::Named {
+                rule: crate::sandbox::NamedSandboxRule::NetworkRequest,
+                verdict: crate::sandbox::ApprovalVerdictConfig::AutoDenied,
+                reason: Some("disabled by policy".to_string()),
+            }],
+        );
+        let registry = default_registry(
+            sandbox,
+            ToolRegistryConfig {
+                auto_approve: std::collections::HashSet::from([AutoApproveTool::WebSearch]),
+                tool_sandbox_rules,
+                ..ToolRegistryConfig::default()
+            },
+        );
+
+        let web_search_tool = registry
+            .get(web_search::WebSearchTool::NAME)
+            .expect("web_search tool");
+        assert_eq!(
+            web_search_tool.needs_approval(&serde_json::json!({ "terms": "query" })),
+            ApprovalCheck::AutoApproved,
+            "--auto-approve-web-search's catch-all rule must win over a configured deny rule"
+        );
+    }
+
+    #[test]
+    fn configured_web_search_rule_applies_through_default_registry() {
+        let sandbox = std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new()));
+        let mut tool_sandbox_rules = HashMap::new();
+        tool_sandbox_rules.insert(
+            web_search::WebSearchTool::NAME.to_string(),
+            vec![crate::sandbox::SandboxRuleConfig::Named {
+                rule: crate::sandbox::NamedSandboxRule::NetworkRequest,
+                verdict: crate::sandbox::ApprovalVerdictConfig::AutoApproved,
+                reason: None,
+            }],
+        );
+        let registry = default_registry(
+            sandbox,
+            ToolRegistryConfig {
+                tool_sandbox_rules,
+                ..ToolRegistryConfig::default()
+            },
+        );
+
+        let web_search_tool = registry
+            .get(web_search::WebSearchTool::NAME)
+            .expect("web_search tool");
+        assert_eq!(
+            web_search_tool.needs_approval(&serde_json::json!({ "terms": "query" })),
+            ApprovalCheck::AutoApproved,
+            "[tools.web_search]'s configured network_request rule must resolve through default_registry"
+        );
     }
 
     #[test]
@@ -1065,11 +1176,11 @@ mod tests {
         assert_eq!(
             read_tool.needs_approval(&serde_json::json!({ "path": dot_path })),
             ApprovalCheck::AutoApproved,
-            "read's [tool.read] config replaces the default floor's \
+            "read's [tools.read] config replaces the default floor's \
              dot_path verdict"
         );
 
-        // write has no [tool.write] entry: unaffected, still uses the
+        // write has no [tools.write] entry: unaffected, still uses the
         // default floor (dot_path -> user approval required).
         let write_tool = registry.get(write::WriteTool::NAME).expect("write tool");
         assert_eq!(
@@ -1293,7 +1404,7 @@ mod tests {
         assert_eq!(
             bash_tool.needs_approval(&serde_json::json!({ "command": "git status" })),
             ApprovalCheck::AutoApproved,
-            "[tool.bash]'s configured CommandGlob rule must resolve through default_registry"
+            "[tools.bash]'s configured CommandGlob rule must resolve through default_registry"
         );
         // A different command not matched by the configured rule falls back
         // to the (now fully-replaced, empty-otherwise) configured list, which
@@ -1301,7 +1412,7 @@ mod tests {
         assert_eq!(
             bash_tool.needs_approval(&serde_json::json!({ "command": "git log" })),
             ApprovalCheck::UserApprovalRequired,
-            "[tool.bash]'s configured rules fully replace the default floor"
+            "[tools.bash]'s configured rules fully replace the default floor"
         );
     }
 

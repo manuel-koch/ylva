@@ -21,6 +21,7 @@ pub mod cli_driver;
 pub mod config;
 pub mod events;
 pub mod highlight;
+pub mod http;
 pub mod init_command;
 pub mod llm;
 pub mod logging;
@@ -36,6 +37,7 @@ pub mod tui_driver;
 pub mod tui_reducer_state;
 pub mod tui_render_state;
 pub mod tui_widgets;
+pub mod web_search;
 pub mod ylva_home;
 
 #[cfg(test)]
@@ -72,7 +74,7 @@ pub use config::soul::{load_soul, DEFAULT_SOUL};
 pub use config::{
     default_profiles_root, load_profile_environment, load_profile_environment_at_workspace_root,
     profile_config_path, profile_config_source_path, profile_env_path, AgentConfig, ConfigError,
-    ProfileConfig, ProviderConfig, ProviderConnectionConfig, DEFAULT_PROFILE_NAME,
+    ProfileConfig, ProviderConfig, ProviderConnectionConfig, WebSearchConfig, DEFAULT_PROFILE_NAME,
     PROFILES_DIRECTORY_NAME, PROFILE_CONFIG_FILE_NAME, PROFILE_ENV_FILE_NAME,
 };
 pub use events::AppAction;
