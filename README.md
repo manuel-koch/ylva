@@ -7,8 +7,6 @@ that coordinates model tool calls and schedules subagent runs.
 
 Ylva aims to support lean set of features.
 
-Yvla is not loaded with bloat of barely used functionality you may find in other agent harness implementations.
-
 Ylva is highly customizable to adapt to user needs.
 
 - [x] Global and workspace scoped configurations
@@ -19,6 +17,7 @@ Ylva is highly customizable to adapt to user needs.
   - [x] Ollama
   - [x] Openrouter
   - [ ] Copilot
+  - [ ] AnthropicQ
 - [x] Configurable `engines` ( combination of provider + model + config )
 - [x] Ability to run main and subagent(s)
 - [x] Support LLM calling tools:
@@ -28,7 +27,7 @@ Ylva is highly customizable to adapt to user needs.
   - [x] `bash` to run arbitrary commands in a shell
   - [x] `clarify` to ask user interactive question
   - [x] `spawn_subagent` to deligate workload to a spawned subagents
-  - [ ] `web_search` to search for terms in www
+  - [x] `web_search` to search for terms in www
   - [ ] `web_fetch` to fetch data from a given URL
 - [x] Human-in-the-loop safety via a path-based tool-approval sandbox
 - [x] Per-tool configurable sandbox approval rules
