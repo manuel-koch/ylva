@@ -431,6 +431,26 @@ fn is_sensitive_header_name(name: &str) -> bool {
         .any(|sensitive| name.eq_ignore_ascii_case(sensitive))
 }
 
+/// Derive the `scheme://host` network-sandbox match key of a URL — the
+/// string [`crate::sandbox::SandboxContext::check_network_request`] matches
+/// `network_request` rule `target` patterns against (explicit port included
+/// when present in the URL).
+///
+/// Returns `None` for URLs ylva may not request: unparsable URLs, URLs
+/// without a host, and everything that is not an absolute `http`/`https`
+/// URL (the only schemes the web backends fetch).
+pub(crate) fn network_target(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = parsed.host_str()?;
+    Some(match parsed.port() {
+        Some(port) => format!("{}://{}:{}", parsed.scheme(), host, port),
+        None => format!("{}://{}", parsed.scheme(), host),
+    })
+}
+
 /// Render `headers` as a JSON object for the request dump, replacing the
 /// value of any [`is_sensitive_header_name`] header with
 /// [`REDACTED_HEADER_VALUE`] so an `Authorization`/API-key value is never

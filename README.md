@@ -28,7 +28,7 @@ Ylva is highly customizable to adapt to user needs.
   - [x] `clarify` to ask user interactive question
   - [x] `spawn_subagent` to deligate workload to a spawned subagents
   - [x] `web_search` to search for terms in www
-  - [ ] `web_fetch` to fetch data from a given URL
+  - [x] `web_fetch` to fetch data from a given URL
 - [x] Human-in-the-loop safety via a path-based tool-approval sandbox
 - [x] Per-tool configurable sandbox approval rules
 - [x] Persistent session storage

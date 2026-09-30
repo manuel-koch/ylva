@@ -39,6 +39,7 @@ fn help_flag_prints_usage_and_exits_zero() {
         "--log-format",
         "--conversation-id",
         "--auto-approve-read",
+        "--auto-approve-web-fetch",
         "--auto-approve-spawn",
         "init",
     ] {

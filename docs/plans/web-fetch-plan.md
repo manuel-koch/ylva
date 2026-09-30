@@ -50,8 +50,8 @@ Scope of this iteration (grilled and settled):
     `truncated` metadata field and the `Partial result` content-section
     label, no in-text marker.
 - Approval follows the network sandbox pattern with a new capability: the
-  `network_request` rule gains an optional `target` parameter (glob over
-  `scheme://host`) so users can scope verdicts per host. Absent `target`
+  `network_request` rule gains an optional `target` parameter (pattern over
+  `scheme://host[:port]`) so users can scope verdicts per host. Absent `target`
   means any target (today's meaning, backward compatible). No rule
   parameterization for path/bash tools.
 - Redirects are followed normally; host-scoped rules evaluate the requested
@@ -97,9 +97,10 @@ Key constraints:
 
 ## Implementation Plan
 
-1. [ ] Create the `web_fetch` backend seam in `src/web_fetch.rs` (register the
-   module in `src/lib.rs` alongside `pub mod web_search`), mirroring
-   `src/web_search.rs`'s structure:
+1. [x] Create the `web_fetch` backend seam in
+   `src/agent/tools/backends/web_fetch.rs` (registered via
+   `src/agent/tools/backends.rs`), mirroring
+   `src/agent/tools/backends/web_search.rs`'s structure:
    - `pub enum WebFetchBody { Text { text: String }, Media { bytes: Vec<u8>, media_type: String } }`.
    - `pub struct WebFetchResponse` with fields `final_url: String`,
      `status: u16`, `content_type: Option<String>`, `body: WebFetchBody`,
@@ -136,7 +137,8 @@ Key constraints:
    JSON/xml/text passthrough), unrecognized-binary rejection, and UTF-8-safe
    text output truncation.
 
-2. [ ] Implement `HttpFetchBackend` in `src/web_fetch.rs`:
+2. [x] Implement `HttpFetchBackend` in
+   `src/agent/tools/backends/web_fetch/native.rs`:
    - `reqwest` GET with `OUTBOUND_USER_AGENT` (`src/http.rs`) as user-agent,
      request timeout from `WebFetchConfig::timeout_secs`, default redirect
      following (documented caveat: host-scoped `target` rules evaluate the
@@ -160,7 +162,7 @@ Key constraints:
    `final_url`, and invalid-scheme rejection before any socket work. No
    external network.
 
-3. [ ] Extend the `network_request` sandbox rule with an optional `target`
+3. [x] Extend the `network_request` sandbox rule with an optional `target`
    parameter:
    - `src/sandbox.rs`: `SandboxRuleConfig::Named` variant for
      `NamedSandboxRule::NetworkRequest` gains `target: Option<String>` —
@@ -168,7 +170,7 @@ Key constraints:
      port included when present in the URL). Absent `target` matches any
      target (backward compatible). `SandboxContext::check_network_request`
      takes the match key (`scheme://host` string) and matches configured
-     `target` globs against it; rules without `target` match every call.
+     `target` patterns against it; rules without `target` match every call.
      Existing precedence is kept: configured rules in list order (last match
      wins), then appended catch-all rules (`--auto-approve-*`) which always
      win.
@@ -180,14 +182,14 @@ Key constraints:
      `web_search` passes its configured backend endpoint's `scheme://host`
      (e.g. `https://html.duckduckgo.com`) so `target` works uniformly.
    Tests (in `src/sandbox.rs` / `src/config/profile.rs`): target-less rule
-   still matches any call (existing tests keep passing); `target` glob
+   still matches any call (existing tests keep passing); `target` pattern
    matching (`https://docs.rs`, `https://*.example.com`, `*://host`); non-
    matching `target` abstains; list-order last-match-wins; appended
    catch-all still wins; `target` under `[tools.read]`/`[tools.bash]` is a
    config error; `tests/e2e/custom/profiles/default/config.toml` keeps
    loading.
 
-4. [ ] Add the `[web_fetch]` profile configuration:
+4. [x] Add the `[web_fetch]` profile configuration:
    - `src/config/web_fetch.rs`: `pub struct WebFetchConfig` with fields
      `pub backend: String` and `pub timeout_secs: u64`
      with defaults `backend = "native"` (validated at config load; unknown
@@ -205,7 +207,7 @@ Key constraints:
    `[tools.web_fetch] network_request` (with and without `target`) loads
    while other rule kinds are rejected.
 
-5. [ ] Implement the tool in `src/agent/tools/web_fetch.rs`:
+5. [x] Implement the tool in `src/agent/tools/web_fetch.rs`:
    - `pub struct WebFetchTool` with `NAME = "web_fetch"`,
      `WebFetchInputArgs { url: String }` (`JsonSchema` + `Deserialize`,
      field description), and `WebFetchResult` implementing `ToolCallResult`.
@@ -241,7 +243,7 @@ Key constraints:
    each `WebFetchError` mapped to `ToolError` (including `TooLarge` with
    `read`-style explicit size wording), missing/empty `url` rejected.
 
-6. [ ] Register and wire the tool end to end:
+6. [x] Register and wire the tool end to end:
    - `src/agent/tools.rs`: `pub mod web_fetch`; add
      `web_fetch::WebFetchTool::NAME` to `DEFAULT_CLI_TOOLS` and
      `DEFAULT_TUI_TOOLS`; `AutoApproveTool::WebFetch`; `ToolRegistryConfig`
@@ -259,7 +261,7 @@ Key constraints:
    registry keeps `web_fetch` out when absent from `allowed_tools`;
    auto-approve flag wiring; `tests/cli_help.rs` if it snapshots flags.
 
-7. [ ] Documentation (same commit as the feature):
+7. [x] Documentation (same commit as the feature):
    - `README.md`: check the `web_fetch` checklist item.
    - `docs/features.md` → "Tools to be used by models": add a `web_fetch`
      bullet (arguments, text conversion behavior, media attachment behavior
@@ -268,8 +270,8 @@ Key constraints:
      `target` rules, redirect caveat).
    - `docs/configuration.md`: document the `[web_fetch]` table
      (`backend`, `timeout_secs`) and `[tools.web_fetch]` `network_request`
-     sandbox rules including the optional `target` parameter (glob over
-     `scheme://host`, absent = any target) and its `web_search` applicability.
+     sandbox rules including the optional `target` parameter (pattern over
+     `scheme://host[:port]`, absent = any target) and its `web_search` applicability.
    - `docs/cli-options.md`: add the `--auto-approve-web-fetch` row to the
      auto-approve flag table.
    - `docs/implementation-notes.md`: add a `web_fetch` section covering the
@@ -278,11 +280,11 @@ Key constraints:
      text output cap), and `network_request` `target` matching.
    - Run `rumdl fmt` on every touched markdown file and check with `rumdl`.
 
-8. [ ] Optional manual e2e script `tests/e2e/web_fetch-tool.zsh`, mirroring
+8. [x] Optional manual e2e script `tests/e2e/web_fetch-tool.zsh`, mirroring
    `tests/e2e/web_search-tool.zsh` (live network + live LLM; not part of
    `make test-coverage`).
 
-9. [ ] Final verification: `make format lint`, then `make test-coverage`
+9. [x] Final verification: `make format lint`, then `make test-coverage`
    (must pass at ≥80%); fix any fallout; ensure this plan's checkboxes match
    reality.
 
@@ -316,7 +318,8 @@ Key constraints:
     (around line 399), outer timeout = internal timeout +
     `WEB_SEARCH_OUTER_TIMEOUT_GRACE_SECS`, stub-backend unit tests using
     `crate::test_support::run_locked`.
-  - `src/web_search.rs` — backend seam (`BoxFuture`-returning method),
+  - `src/agent/tools/backends/web_search.rs` — backend seam
+    (`BoxFuture`-returning method),
     `WebSearchError` via `thiserror`, `reqwest` client with
     `.user_agent(OUTBOUND_USER_AGENT)`, HTML parsing with `scraper`.
   - `src/config/web_search.rs` — `[web_search]` profile table
@@ -353,7 +356,8 @@ Key constraints:
   { rule = "network_request", target = "https://docs.rs", verdict = "auto_approved" }  # scoped
   ```
 
-  `target` is a `glob::Pattern` over `scheme://host` (explicit port
+  `target` is a host-aware `NetworkTargetPattern` over `scheme://host[:port]`
+  (not a path glob — see `docs/implementation-notes.md`; explicit port
   included when present in the URL; e.g. `https://docs.rs`,
   `https://*.example.com`, `*://docs.rs`). Absent `target` = any target.
   The name `network_request` is kept (no rename). Match keys:

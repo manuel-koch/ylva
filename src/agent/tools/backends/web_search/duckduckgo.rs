@@ -11,153 +11,21 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
-//! Web-search backend seam and the DuckDuckGo HTML backend.
+//! DuckDuckGo HTML backend for the [`WebSearchBackend`] seam: a form
+//! `POST` against the endpoint, using the request shape accepted by
+//! `ddgr`, and parsed with `scraper`.
 //!
-//! [`WebSearchBackend`] is the injectable seam the `web_search` tool depends
-//! on: the tool receives an `Arc<dyn WebSearchBackend>` from its constructor,
-//! so tests pass a stub and no unit/integration test touches the network
-//! (see `docs/known-test-issues.md` — network side effects must be
-//! caller-injected). [`DuckDuckGoBackend`] is the only backend shipped today;
-//! it issues its own `reqwest` form POST against DuckDuckGo's HTML endpoint and
-//! parses the response with `scraper`.
-//!
-//! Every backend fails fast: a transport error, a non-success HTTP status
+//! Every request fails fast: a transport error, a non-success HTTP status
 //! (including bot-detection/captcha responses), or an unparseable body is a
 //! [`WebSearchError`] — never a retry and never a silently-empty result set.
 
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::BoxFuture;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 
+use super::{WebSearchBackend, WebSearchError, WebSearchHit};
 use crate::http::OUTBOUND_USER_AGENT;
-
-/// Result count used when a `web_search` call omits `limit`.
-pub const WEB_SEARCH_DEFAULT_RESULT_LIMIT: usize = 15;
-
-/// Schema-enforced maximum number of results a single `web_search` call may
-/// request (`limit`).
-pub const WEB_SEARCH_MAX_RESULT_LIMIT: usize = 20;
-
-/// Maximum number of characters of a result snippet carried in the tool's
-/// structured metadata.
-pub const WEB_SEARCH_SNIPPET_MAX_CHARS: usize = 300;
-
-// ── Backend selection ─────────────────────────────────────────────────────────
-
-/// A search backend selectable through `[web_search] backend`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WebSearchBackendKind {
-    /// DuckDuckGo's HTML endpoint (`html.duckduckgo.com`).
-    DuckDuckGo,
-}
-
-impl WebSearchBackendKind {
-    /// Every backend name accepted as `[web_search] backend`, in display
-    /// order. The error text for an unknown value is built from this list, so
-    /// config validation cannot drift from what is actually implemented.
-    pub const SUPPORTED_NAMES: &'static [&'static str] = &["duckduckgo"];
-
-    /// The wire/config name of this backend.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::DuckDuckGo => "duckduckgo",
-        }
-    }
-
-    /// Human-readable backend name for user-facing labels (e.g. the
-    /// `Web Search (…)` tool title).
-    pub fn display_name(self) -> &'static str {
-        match self {
-            Self::DuckDuckGo => "DuckDuckGo",
-        }
-    }
-
-    /// Look up a backend by its config name; `None` for an unsupported name.
-    pub fn from_name(name: &str) -> Option<Self> {
-        Self::SUPPORTED_NAMES
-            .iter()
-            .find(|supported| **supported == name)
-            .map(|_| match name {
-                "duckduckgo" => Self::DuckDuckGo,
-                _ => unreachable!("SUPPORTED_NAMES only lists known backends"),
-            })
-    }
-
-    /// The human-readable list of supported names for error messages.
-    pub fn supported_names_display() -> String {
-        Self::SUPPORTED_NAMES.join(", ")
-    }
-}
-
-// ── Seam ──────────────────────────────────────────────────────────────────────
-
-/// One ranked web-search result.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct WebSearchHit {
-    /// Title of the result page.
-    pub title: String,
-    /// Absolute URL of the result page.
-    pub url: String,
-    /// Excerpt from the result page; whitespace-normalized, may be empty when
-    /// the backend provides none.
-    pub snippet: String,
-}
-
-/// A web-search failure. Mapped by the `web_search` tool to a
-/// [`ToolError`](crate::agent::tools::ToolError) with this message; never
-/// retried.
-#[derive(Debug, thiserror::Error)]
-pub enum WebSearchError {
-    /// The HTTP request could not be sent or its body could not be read.
-    #[error("web search request failed: {0}")]
-    Request(String),
-    /// The backend answered with a non-success HTTP status (e.g. `403`
-    /// captcha pages, `429` rate limits, `5xx` errors).
-    #[error("web search backend responded with HTTP {status}")]
-    Status { status: u16 },
-    /// The response body was not the expected search-results markup — e.g.
-    /// DuckDuckGo's bot-detection challenge page, which answers with HTTP
-    /// `202`.
-    #[error("web search response could not be parsed: {0}")]
-    Parse(String),
-}
-
-/// A search backend the `web_search` tool can call.
-///
-/// Boxed-future return keeps the trait `dyn`-compatible (the same pattern as
-/// [`crate::llm::Provider::chat`]).
-pub trait WebSearchBackend: Send + Sync + std::fmt::Debug {
-    /// Search for `terms` and return at most `limit` ranked results.
-    fn search<'a>(
-        &'a self,
-        terms: &'a str,
-        limit: usize,
-    ) -> BoxFuture<'a, Result<Vec<WebSearchHit>, WebSearchError>>;
-}
-
-/// Build the backend named by `backend_name`.
-///
-/// `[web_search] backend` is validated at config load, so an unknown name is
-/// a defensive-only path: registration must never fail over it. Returns an
-/// `Arc` so the caller can hand the instance straight to the tool.
-pub fn backend_for(backend_name: &str, http_timeout: Duration) -> Arc<dyn WebSearchBackend> {
-    match WebSearchBackendKind::from_name(backend_name) {
-        Some(WebSearchBackendKind::DuckDuckGo) => Arc::new(DuckDuckGoBackend::new(http_timeout)),
-        None => {
-            tracing::error!(
-                backend = backend_name,
-                supported = WebSearchBackendKind::SUPPORTED_NAMES.join(", "),
-                "unsupported web search backend; falling back to duckduckgo"
-            );
-            Arc::new(DuckDuckGoBackend::new(http_timeout))
-        }
-    }
-}
 
 // ── DuckDuckGo HTML backend ───────────────────────────────────────────────────
 
@@ -232,6 +100,10 @@ impl DuckDuckGoBackend {
 }
 
 impl WebSearchBackend for DuckDuckGoBackend {
+    fn network_target(&self) -> String {
+        crate::http::network_target(&self.base_url).unwrap_or_else(|| self.base_url.clone())
+    }
+
     fn search<'a>(
         &'a self,
         terms: &'a str,
@@ -403,8 +275,6 @@ fn normalize_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -545,9 +415,6 @@ mod tests {
         assert_eq!(response_contents, RESULTS_HTML);
     }
 
-    /// A canned DuckDuckGo results page in the real endpoint's shape:
-    /// redirect-wrapped and plain links, markup inside a snippet, and a
-    /// result without a snippet.
     const RESULTS_HTML: &str = r#"
 <html><body>
 <div id="links" class="results">
@@ -604,70 +471,6 @@ mod tests {
     /// A `200` body that is neither results nor a recognized empty answer.
     const UNEXPECTED_HTML: &str =
         r#"<html><body><p>Service temporarily unavailable.</p></body></html>"#;
-
-    /// Minimal backend whose canned response proves the seam passes hits
-    /// through unchanged.
-    #[derive(Debug)]
-    struct StubBackend {
-        hits: Vec<WebSearchHit>,
-        error: Option<String>,
-    }
-
-    impl WebSearchBackend for StubBackend {
-        fn search<'a>(
-            &'a self,
-            _terms: &'a str,
-            _limit: usize,
-        ) -> BoxFuture<'a, Result<Vec<WebSearchHit>, WebSearchError>> {
-            let hits = self.hits.clone();
-            let error = self.error.clone();
-            Box::pin(async move {
-                match error {
-                    Some(message) => Err(WebSearchError::Request(message)),
-                    None => Ok(hits),
-                }
-            })
-        }
-    }
-
-    fn hit(title: &str, url: &str, snippet: &str) -> WebSearchHit {
-        WebSearchHit {
-            title: title.to_string(),
-            url: url.to_string(),
-            snippet: snippet.to_string(),
-        }
-    }
-
-    #[test]
-    fn stub_backend_returns_hits_unchanged_through_the_seam() {
-        let expected = vec![hit("Title", "https://example.com", "snippet")];
-        let backend: Arc<dyn WebSearchBackend> = Arc::new(StubBackend {
-            hits: expected.clone(),
-            error: None,
-        });
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-        let actual = runtime.block_on(backend.search("anything", 5)).expect("ok");
-        assert_eq!(actual, expected, "the seam must not alter backend hits");
-    }
-
-    #[test]
-    fn stub_backend_error_surfaces_through_the_seam() {
-        let backend: Arc<dyn WebSearchBackend> = Arc::new(StubBackend {
-            hits: Vec::new(),
-            error: Some("boom".to_string()),
-        });
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-        let error = runtime
-            .block_on(backend.search("anything", 5))
-            .expect_err("the stub error must pass through");
-        assert_eq!(error.to_string(), "web search request failed: boom");
-    }
 
     #[test]
     fn parses_titles_urls_and_snippets_from_a_results_page() {
@@ -765,30 +568,12 @@ mod tests {
     }
 
     #[test]
-    fn backend_kind_names_roundtrip() {
-        assert_eq!(
-            WebSearchBackendKind::from_name("duckduckgo"),
-            Some(WebSearchBackendKind::DuckDuckGo)
-        );
-        assert_eq!(WebSearchBackendKind::from_name("searxng"), None);
-        assert_eq!(WebSearchBackendKind::DuckDuckGo.as_str(), "duckduckgo");
-        assert_eq!(
-            WebSearchBackendKind::DuckDuckGo.display_name(),
-            "DuckDuckGo"
-        );
-        assert_eq!(
-            WebSearchBackendKind::supported_names_display(),
-            "duckduckgo"
-        );
-    }
-
-    #[test]
-    fn backend_for_builds_the_configured_backend() {
-        let backend = backend_for("duckduckgo", Duration::from_secs(1));
-        assert!(format!("{backend:?}").contains("DuckDuckGoBackend"));
-        // Defensive fallback for an unsupported name (config load rejects it).
-        let fallback = backend_for("something-else", Duration::from_secs(1));
-        assert!(format!("{fallback:?}").contains("DuckDuckGoBackend"));
+    fn duckduckgo_network_target_is_the_endpoint_authority() {
+        let backend = DuckDuckGoBackend::new(Duration::from_secs(1));
+        assert_eq!(backend.network_target(), "https://html.duckduckgo.com");
+        let custom =
+            DuckDuckGoBackend::with_base_url("http://127.0.0.1:8080/html", Duration::from_secs(1));
+        assert_eq!(custom.network_target(), "http://127.0.0.1:8080");
     }
 
     #[test]

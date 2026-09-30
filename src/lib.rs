@@ -37,7 +37,6 @@ pub mod tui_driver;
 pub mod tui_reducer_state;
 pub mod tui_render_state;
 pub mod tui_widgets;
-pub mod web_search;
 pub mod ylva_home;
 
 #[cfg(test)]

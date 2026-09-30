@@ -19,6 +19,7 @@ use serde::Deserialize;
 
 use crate::highlight::ThemeName;
 use crate::llm::engine::EngineConfig;
+use crate::sandbox::network_target_pattern::NetworkTargetPattern;
 use crate::ylva_home::YLVA_DIR_NAME;
 
 use super::{
@@ -27,7 +28,8 @@ use super::{
     },
     layered::{current_workspace_root, resolve_file_at_paths, ConfigLayer, ResolvedFile},
     load_profile_environment_at_workspace_root, AgentConfig, ConfigError, ProviderConnectionConfig,
-    WebSearchConfig, DEFAULT_PROFILE_NAME, PROFILES_DIRECTORY_NAME, PROFILE_CONFIG_FILE_NAME,
+    WebFetchConfig, WebSearchConfig, DEFAULT_PROFILE_NAME, PROFILES_DIRECTORY_NAME,
+    PROFILE_CONFIG_FILE_NAME,
 };
 
 /// Top-level runtime profile that groups engine selection and per-agent settings.
@@ -96,6 +98,11 @@ pub struct ProfileConfig {
     /// `backend` value is validated when the profile loads.
     #[serde(default)]
     pub web_search: WebSearchConfig,
+    /// `[web_fetch]` section: which fetch backend serves the `web_fetch`
+    /// tool and its internal HTTP timeout. The `backend` value is validated
+    /// when the profile loads.
+    #[serde(default)]
+    pub web_fetch: WebFetchConfig,
 }
 
 /// A single `[tools.<name>]` TOML table: currently just the ordered
@@ -113,14 +120,19 @@ pub struct ToolSandboxConfig {
 /// [`crate::sandbox::SandboxRuleConfig::CommandGlob`] and the four
 /// `bash`-only [`crate::sandbox::NamedSandboxRule`] variants
 /// (`backgrounded`/`variable_assignment_prefix`/`unquoted_glob`/
-/// `unquoted_brace_expansion`); `web_search` accepts only the
-/// network-tool [`crate::sandbox::NamedSandboxRule::NetworkRequest`] rule
-/// (`network_request`) — it has neither a path nor a command argument, so
-/// path and `command` rules would be silently ignored there; every other
-/// tool accepts only
+/// `unquoted_brace_expansion`); the network tools `web_search` and
+/// `web_fetch` accept only the network-tool
+/// [`crate::sandbox::NamedSandboxRule::NetworkRequest`] rule
+/// (`network_request`, optionally scoped by its `target` pattern) — they have
+/// neither a path nor a command argument, so path and `command` rules would
+/// be silently ignored there; every other tool accepts only
 /// [`crate::sandbox::SandboxRuleConfig::PathGlob`] and the three path
 /// [`crate::sandbox::NamedSandboxRule`] variants (`outside_workspace`/
-/// `dot_path`/`cross_filesystem`). A mismatch is a hard startup error naming
+/// `dot_path`/`cross_filesystem`). A `target` parameter is likewise valid
+/// only on a `network_request` rule — it scopes that rule to request targets
+/// whose `scheme://host[:port]` key matches its target pattern, so on every
+/// other rule kind it
+/// would be a silent no-op. A mismatch is a hard startup error naming
 /// the tool, the rule's list index, and the expected kind, since a
 /// silently-ignored rule kind mismatch would be a safety-critical footgun. A
 /// `command` rule whose `*`/`**` wildcard isn't the last token is likewise a
@@ -134,8 +146,26 @@ fn validate_tool_sandbox_rules(
 ) -> Result<(), ConfigError> {
     for (tool_name, tool_config) in tools {
         let is_bash = tool_name == crate::agent::tools::bash::BashTool::NAME;
-        let is_web_search = tool_name == crate::agent::tools::web_search::WebSearchTool::NAME;
+        let is_network_tool = tool_name == crate::agent::tools::web_search::WebSearchTool::NAME
+            || tool_name == crate::agent::tools::web_fetch::WebFetchTool::NAME;
         for (index, rule) in tool_config.rules.iter().enumerate() {
+            if rule.has_target() && !rule.is_network_only() {
+                return Err(ConfigError::MisplacedSandboxRuleTarget {
+                    path: path.to_path_buf(),
+                    tool: tool_name.clone(),
+                    index,
+                });
+            }
+            if let Some(target) = rule.target() {
+                NetworkTargetPattern::parse(target).map_err(|error| {
+                    ConfigError::InvalidSandboxRuleTarget {
+                        path: path.to_path_buf(),
+                        tool: tool_name.clone(),
+                        index,
+                        detail: error.to_string(),
+                    }
+                })?;
+            }
             if is_bash {
                 if rule.is_path_only() || rule.is_network_only() {
                     return Err(ConfigError::InvalidSandboxRuleKind {
@@ -148,14 +178,15 @@ fn validate_tool_sandbox_rules(
                             .to_string(),
                     });
                 }
-            } else if is_web_search {
+            } else if is_network_tool {
                 if rule.is_bash_only() || rule.is_path_only() {
                     return Err(ConfigError::InvalidSandboxRuleKind {
                         path: path.to_path_buf(),
                         tool: tool_name.clone(),
                         index,
                         expected: "a named `network_request` rule (the only rule kind \
-                                   [tools.web_search] accepts)"
+                                   [tools.web_search] and [tools.web_fetch] accept; its \
+                                   optional `target` scopes it to request targets)"
                             .to_string(),
                     });
                 }
@@ -240,6 +271,7 @@ impl Default for ProfileConfig {
             agents: HashMap::from([(DEFAULT_PROFILE_NAME.to_string(), default_agent_config())]),
             tools: HashMap::new(),
             web_search: WebSearchConfig::default(),
+            web_fetch: WebFetchConfig::default(),
         }
     }
 }
@@ -406,6 +438,7 @@ impl ProfileConfig {
         )?;
         validate_tool_sandbox_rules(&profile.tools, &path)?;
         profile.web_search.validate(&path)?;
+        profile.web_fetch.validate(&path)?;
         for agent in profile.agents.values() {
             validate_tool_sandbox_rules(&agent.tools, &path)?;
         }
@@ -2070,6 +2103,262 @@ rules = [
         ));
     }
 
+    #[test]
+    fn target_on_a_non_network_rule_is_a_hard_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "target-on-path-rule",
+            r#"
+[tools.read]
+rules = [
+  { rule = "outside_workspace", target = "https://docs.rs", verdict = "auto_approved" },
+]
+"#,
+        );
+
+        let error = ProfileConfig::load(temp.path(), "target-on-path-rule")
+            .expect_err("target on a path rule must be rejected");
+        let message = error.to_string();
+        assert!(matches!(
+            error,
+            ConfigError::MisplacedSandboxRuleTarget { tool, index: 0, .. } if tool == "read"
+        ));
+        assert!(
+            message.contains("network_request"),
+            "the message must name the only rule kind accepting target: {message}"
+        );
+    }
+
+    #[test]
+    fn target_on_a_command_rule_under_tool_bash_is_a_hard_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "target-on-command-rule",
+            r#"
+[tools.bash]
+rules = [
+  { rule = "backgrounded", target = "https://docs.rs", verdict = "auto_denied" },
+]
+"#,
+        );
+
+        let error = ProfileConfig::load(temp.path(), "target-on-command-rule")
+            .expect_err("target on a command rule must be rejected");
+        assert!(matches!(
+            error,
+            ConfigError::MisplacedSandboxRuleTarget { tool, index: 0, .. } if tool == "bash"
+        ));
+    }
+
+    #[test]
+    fn network_request_rules_with_and_without_target_load_under_tool_web_fetch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "web-fetch-targets",
+            r#"
+[tools.web_fetch]
+rules = [
+  { rule = "network_request", verdict = "user_approval_required" },
+  { rule = "network_request", target = "https://docs.rs", verdict = "auto_approved" },
+]
+"#,
+        );
+
+        let profile =
+            ProfileConfig::load(temp.path(), "web-fetch-targets").expect("the fixture loads");
+        let rules = &profile
+            .tools
+            .get("web_fetch")
+            .expect("web_fetch table")
+            .rules;
+        assert_eq!(rules.len(), 2);
+        assert!(matches!(
+            rules[0],
+            crate::sandbox::SandboxRuleConfig::Named {
+                rule: crate::sandbox::NamedSandboxRule::NetworkRequest,
+                target: None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            rules[1],
+            crate::sandbox::SandboxRuleConfig::Named {
+                rule: crate::sandbox::NamedSandboxRule::NetworkRequest,
+                ref target,
+                ..
+            } if target.as_deref() == Some("https://docs.rs")
+        ));
+    }
+
+    #[test]
+    fn schemeless_and_wildcard_targets_load_under_tool_web_fetch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "web-fetch-target-vocabulary",
+            r#"
+[tools.web_fetch]
+rules = [
+  { rule = "network_request", target = "github.com", verdict = "auto_approved" },
+  { rule = "network_request", target = "https://*.github.com", verdict = "auto_approved" },
+  { rule = "network_request", target = "https://**.github.com", verdict = "auto_approved" },
+  { rule = "network_request", target = "https://github.com:*", verdict = "auto_approved" },
+]
+"#,
+        );
+
+        let profile = ProfileConfig::load(temp.path(), "web-fetch-target-vocabulary")
+            .expect("the full target vocabulary loads");
+        let rules = &profile
+            .tools
+            .get("web_fetch")
+            .expect("web_fetch table")
+            .rules;
+        assert_eq!(rules.len(), 4);
+    }
+
+    #[test]
+    fn invalid_target_is_a_hard_error() {
+        for (name, target) in [
+            ("catch-all-target", "*"),
+            ("mixed-wildcard-target", "https://a**b.example.com"),
+            ("path-target", "https://github.com/owner"),
+            ("bad-port-target", "https://github.com:https"),
+        ] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            write_profile_config(
+                temp.path(),
+                name,
+                &format!(
+                    r#"
+[tools.web_fetch]
+rules = [
+  {{ rule = "network_request", target = "{target}", verdict = "auto_approved" }},
+]
+"#
+                ),
+            );
+
+            let error = ProfileConfig::load(temp.path(), name)
+                .expect_err("an invalid target must be rejected at startup");
+            assert!(
+                matches!(
+                    &error,
+                    ConfigError::InvalidSandboxRuleTarget { tool, index: 0, detail, .. }
+                        if tool == "web_fetch" && !detail.is_empty()
+                ),
+                "expected InvalidSandboxRuleTarget for '{target}', got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn path_rule_under_tool_web_fetch_is_a_hard_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "bad-path-rule-for-web-fetch",
+            r#"
+[tools.web_fetch]
+rules = [
+  { pattern = "**", verdict = "auto_approved" },
+]
+"#,
+        );
+
+        let error = ProfileConfig::load(temp.path(), "bad-path-rule-for-web-fetch")
+            .expect_err("a path rule under [tools.web_fetch] must be rejected");
+        assert!(matches!(
+            error,
+            ConfigError::InvalidSandboxRuleKind { tool, index: 0, .. } if tool == "web_fetch"
+        ));
+    }
+
+    #[test]
+    fn the_e2e_custom_profile_keeps_loading_with_target_rules() {
+        // tests/e2e/custom/profiles/default/config.toml is a live e2e fixture;
+        // its [tools.web_fetch] `target` rule must parse and validate.
+        let profiles_root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/e2e/custom/profiles");
+        let environment = HashMap::from([
+            ("OLLAMA_CLOUD_API_KEY".to_string(), "test-key".to_string()),
+            ("OPENROUTER_API_KEY".to_string(), "test-key".to_string()),
+        ]);
+        let profile = ProfileConfig::load_with_environment(&profiles_root, "default", &environment)
+            .expect("the e2e custom profile must keep loading");
+        let rules = &profile
+            .tools
+            .get("web_fetch")
+            .expect("web_fetch table")
+            .rules;
+        assert!(
+            rules.iter().any(|rule| rule.has_target()),
+            "the fixture's target rule must survive parsing: {rules:?}"
+        );
+    }
+
+    // ── `[web_fetch]` section ─────────────────────────────────────────────────
+
+    #[test]
+    fn web_fetch_section_loads_explicit_values() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "explicit-web-fetch",
+            r#"
+[web_fetch]
+backend = "native"
+timeout_secs = 5
+"#,
+        );
+
+        let profile =
+            ProfileConfig::load(temp.path(), "explicit-web-fetch").expect("the fixture loads");
+        assert_eq!(profile.web_fetch.backend, "native");
+        assert_eq!(profile.web_fetch.timeout_secs, 5);
+    }
+
+    #[test]
+    fn absent_web_fetch_section_defaults_to_native() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(temp.path(), "no-web-fetch", "default_engine = \"fast\"\n");
+
+        let profile = ProfileConfig::load(temp.path(), "no-web-fetch").expect("the fixture loads");
+        assert_eq!(
+            profile.web_fetch,
+            crate::config::WebFetchConfig::default(),
+            "an absent [web_fetch] section behaves like the written-out default"
+        );
+    }
+
+    #[test]
+    fn unknown_web_fetch_backend_is_a_hard_error_naming_the_supported_names() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "bad-web-fetch-backend",
+            r#"
+[web_fetch]
+backend = "camofox"
+"#,
+        );
+
+        let error = ProfileConfig::load(temp.path(), "bad-web-fetch-backend")
+            .expect_err("an unknown backend must be rejected");
+        let message = error.to_string();
+        assert!(matches!(
+            error,
+            ConfigError::InvalidWebFetchBackend { ref backend, .. } if backend == "camofox"
+        ));
+        assert!(
+            message.contains("native"),
+            "names accepted values: {message}"
+        );
+    }
+
     // ── `[web_search]` section ────────────────────────────────────────────────
 
     #[test]
@@ -2108,7 +2397,7 @@ result_limit = 4
         assert_eq!(profile.web_search.timeout_secs, 30);
         assert_eq!(
             profile.web_search.result_limit,
-            crate::web_search::WEB_SEARCH_DEFAULT_RESULT_LIMIT
+            crate::agent::tools::backends::web_search::WEB_SEARCH_DEFAULT_RESULT_LIMIT
         );
     }
 

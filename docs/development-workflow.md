@@ -109,6 +109,16 @@ single-use, and the function's responsibility is already minimal — suppress
 the lint with `#[expect(clippy::too_many_arguments)]` as shown above, rather
 than inventing a throwaway struct.
 
+### Anti-pattern: magic values in docstring and strings
+
+We should not add magic values to docstring or string when the real value
+is actually a known constant we use in the implementation.
+Thos texts will drift when the constant value gets changed !
+
+Either rephrase the text without the constant value ( if that still makes
+sense ) or embed the constant value in the docstring ( by reference ) or
+format the string at runtime ( to include the constant value ).
+
 ## Logging
 
 Diagnostics are emitted through the `tracing` facade macros

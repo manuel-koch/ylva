@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::web_search::{
+use crate::agent::tools::backends::web_search::{
     backend_for, WebSearchBackend, WebSearchBackendKind, WEB_SEARCH_DEFAULT_RESULT_LIMIT,
     WEB_SEARCH_MAX_RESULT_LIMIT,
 };

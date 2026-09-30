@@ -483,6 +483,74 @@ transcripts are line-oriented JSONL. Request metadata retains the encoded URL
 query string so search terms and other query parameters remain diagnosable.
 Live requests and structured tracing fields are unchanged.
 
+## Web fetch tool
+
+`web_fetch` fetches www content through the injectable `WebFetchBackend`
+seam, like `web_search` goes through `WebSearchBackend`: the tool receives
+an `Arc<dyn WebFetchBackend>` from `default_registry` (built by the
+profile's `[web_fetch]` `build_backend()`), so tests substitute a stub and
+the network stays caller-injected (`docs/known-test-issues.md`). Seam and
+implementations live under `src/agent/tools/backends/` — the seam module
+(`web_fetch.rs`: trait, `WebFetchBody`/`WebFetchResponse`/`WebFetchError`,
+`WebFetchBackendKind`, `backend_for`) and one module per backend kind
+(`web_fetch/native.rs`: `HttpFetchBackend`, the plain `reqwest` GET with
+`OUTBOUND_USER_AGENT`).
+
+Content classification (`convert_body_to_result`) mirrors `read`'s
+autodetect: magic numbers win over the Content-Type header (headers can
+lie) via `infer::get`, promoting only the supported media set
+(PNG/JPEG/WebP/GIF/PDF — `read`'s `SUPPORTED_MEDIA_TYPES`) to
+`WebFetchBody::Media`; `text/html` is converted to markdown with `htmd`
+via `convert_html_to_markdown` (builder config `skip_tags(["script",
+"style"])` and `scripting_enabled(false)`, mirroring a no-JS browser:
+script/style payloads — inline JS, `application/json` script blobs, CSS —
+never reach the model-facing text, and `<noscript>` fallback is parsed as
+normal DOM instead of leaking as raw text; inert `<template>` subtrees are
+not walked);
+`text/*`, `application/json`, `application/xml`, and `+json`/`+xml`
+suffixed types pass through verbatim as UTF-8. Anything else — other
+content types (including a missing one) or non-UTF-8 bodies — is
+`WebFetchError::UnsupportedContentType` naming what stood in the way.
+
+Size constraints are `read`-aligned with two ceilings: the raw response
+limit is `read`'s `READ_MEDIA_MAX_BYTES` (8 MiB, shared constant — never
+duplicated), and model-facing text output is capped at
+`WEB_FETCH_MAX_OUTPUT_BYTES` (64 KiB). Media must arrive complete (like
+`read`'s whole-file media policy): a Content-Length or streamed body over
+the raw limit fails with `WebFetchError::TooLarge` (explicit size wording,
+no truncation) — a partial image or PDF is unusable. Text bodies over the
+raw limit are read to the limit on a UTF-8 character boundary and flagged
+`truncated`; the output cap flags the same way. Truncated results carry
+`truncated: true` metadata and the `Partial result` content-section label,
+with no in-text marker — the vocabulary capped `read`/`bash`/`search`
+output uses. The body kind is sniffed from a small prefix before the bulk
+read, so a known-oversize media response fails before it is downloaded in
+full.
+
+Bubble presentation is curated by `WebFetchResult`'s `display_summary()`/
+`content_sections()` overrides instead of the default metadata flatten:
+response facts render as a `Response` content-section of `key=value` lines
+(`url`; `final_url` only when a redirect was followed; `status`;
+`content_type`; the sniffed `media_type` only when it differs from the sent
+type), so they wrap readably instead of being truncated in the bubble
+title, which keeps only the `truncated` flag. The model-facing
+`metadata()`/`metadata_schema()` keep every field.
+
+Approval runs through `SandboxContext::check_network_request(target)`,
+where `target` is the call's `scheme://host` match key (explicit port
+included when present): `web_fetch` derives it from the requested URL
+(`crate::http::network_target`, rejecting non-`http(s)` schemes before any
+request), `web_search` from its configured backend endpoint's base URL. A
+`network_request` rule without a `target` parameter matches every call; a
+`target` is compiled into a `NetworkTargetPattern`
+(`src/sandbox/network_target_pattern.rs`) and matched against the key with
+host-shaped semantics — `*`/`**` label wildcards, effective-port
+comparison (scheme defaults equal no port), and schemeless patterns
+defaulting to `https` (vocabulary in `docs/configuration.md`). Redirects are followed with
+`reqwest`'s default policy, but the rule is evaluated against the
+requested URL only — not re-checked per hop (documented caveat). See
+`docs/configuration.md` → "Network tool rules".
+
 ## Path-like argument normalization
 
 Path-like arguments (`read`/`write`/`edit`/`search`'s `path`, `glob`'s

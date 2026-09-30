@@ -45,3 +45,8 @@ allowed_tools = ["read", "glob", "search"]
 rules = [
     { rule = "network_request", verdict = "auto_approved" },
 ]
+
+[tools.web_fetch]
+rules = [
+    { rule = "network_request", target = "https://github.com", verdict = "auto_approved" },
+]

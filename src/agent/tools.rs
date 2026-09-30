@@ -38,6 +38,7 @@ pub(crate) fn utf8_text_preview(bytes: &[u8]) -> Option<String> {
 }
 
 pub mod agent_finish;
+pub mod backends;
 pub mod bash;
 pub mod clarify;
 pub mod edit;
@@ -45,6 +46,7 @@ pub mod glob;
 pub mod read;
 pub mod search;
 pub mod spawn_subagent;
+pub mod web_fetch;
 pub mod web_search;
 pub mod write;
 
@@ -611,6 +613,7 @@ pub const DEFAULT_CLI_TOOLS: &[&str] = &[
     search::SearchTool::NAME,
     edit::EditTool::NAME,
     web_search::WebSearchTool::NAME,
+    web_fetch::WebFetchTool::NAME,
 ];
 
 /// Names of the tools available in a TUI (interactive) context.
@@ -624,6 +627,7 @@ pub const DEFAULT_TUI_TOOLS: &[&str] = &[
     edit::EditTool::NAME,
     clarify::ClarifyTool::NAME,
     web_search::WebSearchTool::NAME,
+    web_fetch::WebFetchTool::NAME,
 ];
 
 /// One tool whose approval prompt can be bypassed via a `--auto-approve-*`
@@ -639,6 +643,7 @@ pub enum AutoApproveTool {
     Search,
     Edit,
     WebSearch,
+    WebFetch,
     Spawn,
 }
 
@@ -679,6 +684,9 @@ pub struct ToolRegistryConfig {
     /// `web_search`, its internal HTTP timeout, and its default result
     /// limit.
     pub web_search: crate::config::WebSearchConfig,
+    /// The profile's `[web_fetch]` section: which backend serves
+    /// `web_fetch` and its internal HTTP timeout.
+    pub web_fetch: crate::config::WebFetchConfig,
 }
 
 impl Default for ToolRegistryConfig {
@@ -692,6 +700,7 @@ impl Default for ToolRegistryConfig {
             agent_finish: None,
             tool_sandbox_rules: HashMap::new(),
             web_search: crate::config::WebSearchConfig::default(),
+            web_fetch: crate::config::WebFetchConfig::default(),
         }
     }
 }
@@ -774,6 +783,21 @@ pub fn default_registry(
             config.web_search.build_backend(),
             &config.web_search,
             sandbox_context_for(web_search::WebSearchTool::NAME, AutoApproveTool::WebSearch),
+        )));
+    }
+
+    // `web_fetch` has no path or command argument, but it still resolves a
+    // sandbox context: that context carries its `[tools.web_fetch]`
+    // `network_request` rules and the `--auto-approve-web-fetch`
+    // catch-all (see `SandboxContext::check_network_request`).
+    if allowed
+        .iter()
+        .any(|name| name == web_fetch::WebFetchTool::NAME)
+    {
+        registry.register(Arc::new(web_fetch::WebFetchTool::new(
+            config.web_fetch.build_backend(),
+            &config.web_fetch,
+            sandbox_context_for(web_fetch::WebFetchTool::NAME, AutoApproveTool::WebFetch),
         )));
     }
 
@@ -960,7 +984,7 @@ mod tests {
     fn default_registry_registers_cli_tools() {
         let sandbox = std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new()));
         let registry = default_registry(sandbox, ToolRegistryConfig::default());
-        assert_eq!(registry.names().len(), 7);
+        assert_eq!(registry.names().len(), 8);
         assert!(registry.get(read::ReadTool::NAME).is_some());
         assert!(registry.get(write::WriteTool::NAME).is_some());
         assert!(registry.get(glob::GlobTool::NAME).is_some());
@@ -968,6 +992,7 @@ mod tests {
         assert!(registry.get(search::SearchTool::NAME).is_some());
         assert!(registry.get(edit::EditTool::NAME).is_some());
         assert!(registry.get(web_search::WebSearchTool::NAME).is_some());
+        assert!(registry.get(web_fetch::WebFetchTool::NAME).is_some());
         assert!(registry.get(clarify::ClarifyTool::NAME).is_none());
     }
 
@@ -981,9 +1006,94 @@ mod tests {
                 ..ToolRegistryConfig::default()
             },
         );
-        assert_eq!(registry.names().len(), 8);
+        assert_eq!(registry.names().len(), 9);
         assert!(registry.get(clarify::ClarifyTool::NAME).is_some());
         assert!(registry.get(web_search::WebSearchTool::NAME).is_some());
+        assert!(registry.get(web_fetch::WebFetchTool::NAME).is_some());
+    }
+
+    #[test]
+    fn default_registry_keeps_web_fetch_out_when_not_allowed() {
+        let sandbox = std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new()));
+        let registry = default_registry(
+            sandbox,
+            ToolRegistryConfig {
+                allowed_tools: vec![web_search::WebSearchTool::NAME.to_string()],
+                ..ToolRegistryConfig::default()
+            },
+        );
+        assert!(registry.get(web_fetch::WebFetchTool::NAME).is_none());
+    }
+
+    #[test]
+    fn auto_approve_web_fetch_wins_over_configured_deny_rule() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sandbox = std::sync::Arc::new(std::sync::RwLock::new(
+            crate::sandbox::Sandbox::with_root(temp.path().to_path_buf()),
+        ));
+        let mut tool_sandbox_rules = HashMap::new();
+        tool_sandbox_rules.insert(
+            web_fetch::WebFetchTool::NAME.to_string(),
+            vec![crate::sandbox::SandboxRuleConfig::Named {
+                rule: crate::sandbox::NamedSandboxRule::NetworkRequest,
+                verdict: crate::sandbox::ApprovalVerdictConfig::AutoDenied,
+                reason: Some("disabled by policy".to_string()),
+                target: None,
+            }],
+        );
+        let registry = default_registry(
+            sandbox,
+            ToolRegistryConfig {
+                auto_approve: std::collections::HashSet::from([AutoApproveTool::WebFetch]),
+                tool_sandbox_rules,
+                ..ToolRegistryConfig::default()
+            },
+        );
+
+        let web_fetch_tool = registry
+            .get(web_fetch::WebFetchTool::NAME)
+            .expect("web_fetch tool");
+        assert_eq!(
+            web_fetch_tool.needs_approval(&serde_json::json!({ "url": "https://docs.rs/" })),
+            ApprovalCheck::AutoApproved,
+            "--auto-approve-web-fetch's catch-all rule must win over a configured deny rule"
+        );
+    }
+
+    #[test]
+    fn configured_web_fetch_target_rule_applies_through_default_registry() {
+        let sandbox = std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new()));
+        let mut tool_sandbox_rules = HashMap::new();
+        tool_sandbox_rules.insert(
+            web_fetch::WebFetchTool::NAME.to_string(),
+            vec![crate::sandbox::SandboxRuleConfig::Named {
+                rule: crate::sandbox::NamedSandboxRule::NetworkRequest,
+                verdict: crate::sandbox::ApprovalVerdictConfig::AutoApproved,
+                reason: None,
+                target: Some("https://docs.rs".to_string()),
+            }],
+        );
+        let registry = default_registry(
+            sandbox,
+            ToolRegistryConfig {
+                tool_sandbox_rules,
+                ..ToolRegistryConfig::default()
+            },
+        );
+
+        let web_fetch_tool = registry
+            .get(web_fetch::WebFetchTool::NAME)
+            .expect("web_fetch tool");
+        assert_eq!(
+            web_fetch_tool.needs_approval(&serde_json::json!({ "url": "https://docs.rs/htmd/" })),
+            ApprovalCheck::AutoApproved,
+            "a matching target rule must resolve through default_registry"
+        );
+        assert_eq!(
+            web_fetch_tool.needs_approval(&serde_json::json!({ "url": "https://example.com/" })),
+            ApprovalCheck::UserApprovalRequired,
+            "a non-matching target must abstain"
+        );
     }
 
     #[test]
@@ -1021,6 +1131,7 @@ mod tests {
                 rule: crate::sandbox::NamedSandboxRule::NetworkRequest,
                 verdict: crate::sandbox::ApprovalVerdictConfig::AutoDenied,
                 reason: Some("disabled by policy".to_string()),
+                target: None,
             }],
         );
         let registry = default_registry(
@@ -1052,6 +1163,7 @@ mod tests {
                 rule: crate::sandbox::NamedSandboxRule::NetworkRequest,
                 verdict: crate::sandbox::ApprovalVerdictConfig::AutoApproved,
                 reason: None,
+                target: None,
             }],
         );
         let registry = default_registry(
@@ -1160,6 +1272,7 @@ mod tests {
                 rule: NamedSandboxRule::DotPath,
                 verdict: ApprovalVerdictConfig::AutoApproved,
                 reason: None,
+                target: None,
             }],
         );
         let registry = default_registry(
@@ -1204,6 +1317,7 @@ mod tests {
                 rule: NamedSandboxRule::DotPath,
                 verdict: ApprovalVerdictConfig::AutoDenied,
                 reason: None,
+                target: None,
             }],
         );
         let registry = default_registry(
@@ -1239,6 +1353,7 @@ mod tests {
                 rule: NamedSandboxRule::Backgrounded,
                 verdict: ApprovalVerdictConfig::AutoDenied,
                 reason: None,
+                target: None,
             }],
         );
         let registry = default_registry(
@@ -1273,6 +1388,7 @@ mod tests {
                 rule: NamedSandboxRule::DotPath,
                 verdict: ApprovalVerdictConfig::AutoDenied,
                 reason: None,
+                target: None,
             }],
         );
         let registry = default_registry(
@@ -1308,6 +1424,7 @@ mod tests {
                 rule: NamedSandboxRule::OutsideWorkspace,
                 verdict: ApprovalVerdictConfig::AutoDenied,
                 reason: None,
+                target: None,
             }],
         );
         let registry = default_registry(
@@ -1349,6 +1466,7 @@ mod tests {
                 rule: NamedSandboxRule::OutsideWorkspace,
                 verdict: ApprovalVerdictConfig::AutoDenied,
                 reason: None,
+                target: None,
             }],
         );
         let registry = default_registry(
@@ -1432,6 +1550,7 @@ mod tests {
                 rule: NamedSandboxRule::CrossFilesystem,
                 verdict: ApprovalVerdictConfig::UserApprovalRequired,
                 reason: None,
+                target: None,
             }],
         );
         let registry = default_registry(

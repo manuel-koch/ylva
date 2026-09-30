@@ -388,6 +388,44 @@ agent's next request, which may be another request in the same child run after
 a tool call. The selection is dynamic rather than pinned at spawn time. Use
 separate named engines when the root and a child must remain independent.
 
+### Web search configuration
+
+The `[web_search]` table configures the `web_search` tool (see
+`docs/features.md`):
+
+| Field | Type | Description |
+|---|---|---|
+| `backend` | string | Search backend serving `web_search`. Only `"duckduckgo"` (DuckDuckGo's HTML endpoint) is supported today; an unknown value is a hard config error naming the accepted values. |
+| `timeout_secs` | number | Internal HTTP timeout for one search request, in seconds (default `30`, floored at `1`). The tool's outer execution timeout is this value plus a small grace period, so the backend's own timeout fires first. |
+| `result_limit` | number | Result count a `web_search` call returns when it omits `limit` (default `15`). Clamped to `1..=20` so config can never disagree with the tool schema's maximum. |
+
+```toml
+[web_search]
+backend = "duckduckgo"
+timeout_secs = 30
+result_limit = 15
+```
+
+An absent `[web_search]` table behaves exactly like the written-out default.
+
+### Web fetch configuration
+
+The `[web_fetch]` table configures the `web_fetch` tool (see
+`docs/features.md`):
+
+| Field | Type | Description |
+|---|---|---|
+| `backend` | string | Fetch backend serving `web_fetch`. Only `"native"` (a plain local HTTP `GET`) is supported today; an unknown value is a hard config error naming the accepted values. |
+| `timeout_secs` | number | Internal HTTP timeout for one fetch request, in seconds (default `30`, floored at `1`). The tool's outer execution timeout is this value plus a small grace period, so the backend's own timeout fires first. |
+
+```toml
+[web_fetch]
+backend = "native"
+timeout_secs = 30
+```
+
+An absent `[web_fetch]` table behaves exactly like the written-out default.
+
 ## Sandbox (tool-approval rules)
 
 The sandbox holds the workspace root (canonicalized cwd at
@@ -531,8 +569,9 @@ next (no merging across tiers):
 Both `[tools.<name>]` and `[agents.<type>.tools.<name>]` (and their
 file-authored equivalents) hard-validate their tool name against the
 registered tool set (`read`, `write`, `glob`, `bash`, `search`, `edit`,
-`clarify`) at startup; an unrecognized name is a hard error naming the
-offending agent type (or "profile-level"), the unknown name, and its source.
+`clarify`, `web_search`, `web_fetch`) at startup; an unrecognized name is a
+hard error naming the offending agent type (or "profile-level"), the unknown
+name, and its source.
 
 `--auto-approve-write`/`--auto-approve-edit` continue to work unchanged:
 each still adds its own catch-all `auto_approved` rule (`pattern = "**"`)
@@ -613,3 +652,66 @@ for `write`/`edit`.
 When the script fails to parse, or every command in it is understood and
 legal but no rule fires, `bash` falls back to its own default of
 `user_approval_required`.
+
+### Network tool rules (`network_request`)
+
+`web_search` and `web_fetch` are network tools: their calls have neither a
+path nor a command argument, so path/command rules are rejected under
+`[tools.web_search]`/`[tools.web_fetch]` (and their
+`[agents.<type>.tools.<name>]` equivalents) at startup, just like `bash`'s
+rule-kind restrictions work in reverse. The only rule kind these tables
+accept is the network-tool named rule `network_request`, with an optional
+`target` parameter:
+
+```toml
+[tools.web_search]
+rules = [
+  { rule = "network_request", verdict = "auto_approved" },
+]
+
+[tools.web_fetch]
+rules = [
+  { rule = "network_request", verdict = "user_approval_required" },
+  { rule = "network_request", target = "https://docs.rs", verdict = "auto_approved" },
+  { rule = "network_request", target = "https://*.example.com", verdict = "auto_approved" },
+  { rule = "network_request", target = "https://**.example.org", verdict = "auto_approved" },
+]
+```
+
+`network_request` matches every call of the tool when it has no `target`.
+With `target`, the verdict is scoped to request targets whose
+`scheme://host[:port]` key matches the target pattern. The pattern is
+host-shaped (never a path):
+
+- **Scheme** — a literal scheme (case-insensitive) or `*` (any scheme).
+  Omitting the scheme assumes `https`, which can only narrow a match —
+  `github.com` is `https://github.com`, and an `http://github.com` call
+  still falls through to the floor. Use `*://github.com` for any scheme.
+- **Host** — dot-separated labels; each label is a literal
+  (case-insensitive), `*` (exactly one label), or `**` (one or more
+  labels). `https://*.github.com` matches `api.github.com` but neither
+  `github.com` nor `a.b.github.com`; `https://**.github.com` matches
+  subdomains of any depth but not the apex `github.com` — give the apex
+  its own rule.
+- **Port** — `*` (any port, including URLs without one) or digits. Ports
+  match *effectively*: the scheme's default port equals no port, so
+  `https://github.com` matches `https://github.com:443` and
+  `https://github.com:443` matches `https://github.com`.
+  `https://github.com:*` allows any port on `github.com`.
+
+A non-matching `target` abstains — the tool's own default
+(`user_approval_required`) then applies. The bare patterns `*`/`**` are
+rejected (omit `target` to match every call), and an invalid pattern is a
+hard startup error. `target` is only valid on a `network_request` rule; on
+any other rule kind it is a hard startup error. Which key a call is matched
+against: `web_fetch` uses the requested URL's key, `web_search` its
+configured backend endpoint's key (e.g. `https://html.duckduckgo.com`).
+
+`verdict`/`reason` behave like every other named rule, rules are evaluated
+in list order with last-match-wins, and `--auto-approve-web-search`/
+`--auto-approve-web-fetch` append their `auto_approved` catch-all last so
+the flag always wins. Redirect caveat: `web_fetch` follows HTTP redirects
+normally (and reports the final URL in its result metadata), but a
+`target` rule is evaluated against the **requested** URL only and is not
+re-evaluated per redirect hop — an auto-approved host can redirect to
+another host.

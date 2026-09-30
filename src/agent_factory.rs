@@ -347,6 +347,7 @@ impl AgentFactory {
                 agent_finish: agent_finish_config,
                 tool_sandbox_rules,
                 web_search: profile.web_search.clone(),
+                web_fetch: profile.web_fetch.clone(),
             },
         ));
         let (agent_loop, ui_rx) = AgentLoop::new(Arc::clone(&engine), registry);
@@ -1494,6 +1495,7 @@ mod tests {
                     rule: crate::sandbox::NamedSandboxRule::OutsideWorkspace,
                     verdict: crate::sandbox::ApprovalVerdictConfig::AutoDenied,
                     reason: None,
+                    target: None,
                 }],
             },
         );
@@ -1514,6 +1516,7 @@ mod tests {
                                 rule: crate::sandbox::NamedSandboxRule::OutsideWorkspace,
                                 verdict: crate::sandbox::ApprovalVerdictConfig::AutoDenied,
                                 reason: None,
+                                target: None,
                             },
                             crate::sandbox::SandboxRuleConfig::PathGlob {
                                 pattern: scratch_glob_pattern,

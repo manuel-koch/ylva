@@ -25,6 +25,8 @@ surface.
 | `--auto-approve-bash` | none | — | — | Skip the human-approval prompt for `bash` tool calls. |
 | `--auto-approve-search` | none | — | — | Skip the human-approval prompt for `search` tool calls. |
 | `--auto-approve-edit` | none | — | — | Skip the human-approval prompt for `edit` tool calls. |
+| `--auto-approve-web-search` | none | — | — | Skip the human-approval prompt for `web_search` tool calls. |
+| `--auto-approve-web-fetch` | none | — | — | Skip the human-approval prompt for `web_fetch` tool calls. |
 | `--auto-approve-spawn` | none | — | — | Skip the human-approval prompt for `spawn_subagent` tool calls. See `can_spawn` in `docs/configuration.md` and "Child-agent delegation" in `docs/features.md`. |
 
 An invalid `--color`, `--log-level`, `--log-format`, or `--conversation-id`

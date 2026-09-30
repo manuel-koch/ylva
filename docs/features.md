@@ -374,6 +374,45 @@ with provider-aware input for explicit Base64 `read` results added on top:
   absolute result paths. Output is capped at 1000 whole output lines (`truncated` field
   present in result metadata when capped). Paths inside the
   workspace are auto-approved; paths outside require user approval.
+- **web_search**: Search the web for `terms` and return ranked results from
+  the configured search backend (`docs/configuration.md`). `text` lists each
+  hit as a numbered title with its URL; the structured result metadata
+  carries one `{title, url, snippet}` entry per hit, with snippets
+  whitespace-normalized and truncated to 300 characters. Optional `limit`
+  caps the number of results (schema maximum 20; omit it for the configured
+  default — `[web_search] result_limit`, 15 unless overridden). A search
+  with no recognizable results returns an empty result list; a backend
+  block/challenge page or unparseable response fails with an error instead
+  of a silently-empty answer. Requires user approval before execution
+  unless a `[tools.web_search]` `network_request` rule (optionally scoped
+  to the backend endpoint's `scheme://host` with `target`, see
+  `docs/configuration.md`) or `--auto-approve-web-search` states a verdict.
+- **web_fetch**: Fetch the web content at `url` over HTTP `GET` and return it
+  as text. Only absolute `http://`/`https://` URLs are accepted; other schemes
+  fail before any request is made. HTML is converted to markdown as a no-JS
+  reading: `<script>`/`<style>` payloads (inline JavaScript, JSON config
+  blobs, CSS) are dropped and `<noscript>` fallback text is kept as visible
+  content. Text/JSON/XML bodies (`text/*`, `application/json`,
+  `application/xml`, and
+  `+json`/`+xml` suffixes) pass through verbatim; the magic-number-sniffed
+  media types PNG/JPEG/WebP/GIF/PDF are returned as a Base64 result with a
+  typed attachment exactly like a whole-file `read` — complete response only,
+  up to 8388608 bytes (8 MiB); a larger response fails with an explicit size
+  error, never a truncated attachment. Other binary or non-UTF-8 bodies fail
+  with a clear error naming the content type. Returned text (markdown or
+  verbatim) is capped at 65536 bytes (64 KiB): longer output is truncated
+  with `truncated: true` result metadata and a `Partial result` content
+  section, the same vocabulary capped `read`/`bash`/`search` output uses.
+  Result metadata carries `url`, `final_url` (after redirects), `status`,
+  `content_type`, and `media_type` for media results. The done tool bubble
+  renders these response facts as a wrapped `Response` content section
+  (`final_url` only when a redirect was followed) instead of truncating
+  them into the one-line summary, which keeps only the `truncated` flag.
+  Redirects are followed
+  normally, but host-scoped `network_request` `target` rules evaluate the
+  requested URL only (see `docs/configuration.md`). Requires user approval
+  before execution unless a `[tools.web_fetch]` `network_request` rule or
+  `--auto-approve-web-fetch` states a verdict.
 - **clarify**: Ask the user a question in the TUI and wait for their answer.
   Optional `context` adds supporting detail. Optional `choices` supplies up to
   5 numbered answers; clicking a choice copies it into the input box,

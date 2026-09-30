@@ -29,11 +29,13 @@
 //! and `dot_path` → `UserApprovalRequired`.
 
 mod bash_command_extractor;
+pub(crate) mod network_target_pattern;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use glob::Pattern;
+use network_target_pattern::NetworkTargetPattern;
 use serde::Deserialize;
 
 /// The verdict from a sandbox approval check.
@@ -159,14 +161,16 @@ pub enum NamedSandboxRule {
     /// Matches a `bash` command with an unquoted `{...,...}` brace
     /// expansion in any argv token.
     UnquotedBraceExpansion,
-    /// Matches **every** call of a network tool that has no path or command
-    /// to structurally inspect (`web_search`): the call's destination is
-    /// fixed by the tool's configured backend, so there is no target to
-    /// evaluate — the rule is the tool's per-call approval switch (e.g.
-    /// `verdict = "auto_approved"` without the CLI flag). Valid only under
-    /// `[tools.web_search]`/`[agents.<type>.tools.web_search]`; the planned
-    /// `web_fetch` tool reuses it once implemented, where target-based
-    /// matching (schema/host/path) may be added on top.
+    /// Matches a call of a network tool that has no path or command to
+    /// structurally inspect (`web_search`, `web_fetch`): the rule is the
+    /// tool's per-call approval switch (e.g. `verdict = "auto_approved"`
+    /// without the CLI flag). An optional `target` parameter scopes the
+    /// verdict to request targets whose `scheme://host[:port]` key matches
+    /// its [`NetworkTargetPattern`] (e.g. `https://docs.rs`,
+    /// `https://*.example.com`, `*://host`); absent
+    /// `target` matches every call. Valid only under
+    /// `[tools.web_search]`/`[tools.web_fetch]`/
+    /// `[agents.<type>.tools.web_search]`/`[agents.<type>.tools.web_fetch]`.
     NetworkRequest,
 }
 
@@ -305,12 +309,19 @@ impl CommandGlobPattern {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum SandboxRuleConfig {
-    /// `{ rule = "<named_rule>", verdict = "...", reason = "..." }`.
+    /// `{ rule = "<named_rule>", verdict = "...", reason = "...", target = "..." }`.
     Named {
         rule: NamedSandboxRule,
         verdict: ApprovalVerdictConfig,
         #[serde(default)]
         reason: Option<String>,
+        /// Optional [`NetworkTargetPattern`] matched against the request's
+        /// `scheme://host[:port]` match key (see
+        /// [`SandboxContext::check_network_request`]); absent `target` matches
+        /// any request target. Only meaningful on
+        /// [`NamedSandboxRule::NetworkRequest`].
+        #[serde(default)]
+        target: Option<String>,
     },
     /// `{ pattern = "...", verdict = "...", reason = "..." }`.
     PathGlob {
@@ -370,9 +381,9 @@ impl SandboxRuleConfig {
     /// Returns `true` when this is a network-tool-only rule: a
     /// [`SandboxRuleConfig::Named`] variant referencing
     /// [`NamedSandboxRule::NetworkRequest`]. Valid only under a network
-    /// tool's config table — today `[tools.web_search]` /
-    /// `[agents.<type>.tools.web_search]` (the planned `web_fetch` tool
-    /// joins that set when implemented). Used by
+    /// tool's config table — `[tools.web_search]`/`[tools.web_fetch]` /
+    /// `[agents.<type>.tools.web_search]`/`[agents.<type>.tools.web_fetch]`.
+    /// Used by
     /// `crate::config::profile::ProfileConfig`'s startup validation to
     /// reject the rule under every other tool, and vice versa.
     pub fn is_network_only(&self) -> bool {
@@ -383,6 +394,28 @@ impl SandboxRuleConfig {
                 ..
             }
         )
+    }
+
+    /// Returns `true` when this rule carries a `target` parameter. Only
+    /// meaningful on [`NamedSandboxRule::NetworkRequest`]; used by
+    /// `crate::config::profile::ProfileConfig`'s startup validation to reject
+    /// `target` on every other rule kind (there is nothing to match it
+    /// against there).
+    pub fn has_target(&self) -> bool {
+        match self {
+            SandboxRuleConfig::Named { target, .. } => target.is_some(),
+            SandboxRuleConfig::PathGlob { .. } | SandboxRuleConfig::CommandGlob { .. } => false,
+        }
+    }
+
+    /// Returns this rule's `target` parameter, when it carries one. Used by
+    /// `crate::config::profile::ProfileConfig`'s startup validation to
+    /// compile-check the pattern (see [`NetworkTargetPattern::parse`]).
+    pub fn target(&self) -> Option<&str> {
+        match self {
+            SandboxRuleConfig::Named { target, .. } => target.as_deref(),
+            SandboxRuleConfig::PathGlob { .. } | SandboxRuleConfig::CommandGlob { .. } => None,
+        }
     }
 
     /// Returns `true` when this is a [`SandboxRuleConfig::CommandGlob`] whose
@@ -416,6 +449,10 @@ enum ResolvedRule {
     Named {
         rule: NamedSandboxRule,
         verdict: ApprovalCheck,
+        /// Compiled [`NetworkTargetPattern`] for
+        /// [`NamedSandboxRule::NetworkRequest`]: `None` matches every request
+        /// target.
+        target: Option<NetworkTargetPattern>,
     },
     PathGlob {
         pattern: Pattern,
@@ -436,6 +473,8 @@ enum ResolvedRule {
 enum ResolvedRuleError {
     #[error(transparent)]
     InvalidGlobPattern(#[from] glob::PatternError),
+    #[error(transparent)]
+    InvalidNetworkTargetPattern(#[from] network_target_pattern::NetworkTargetPatternError),
     /// A `command` rule's `*`/`**` wildcard isn't the last element — see
     /// [`SandboxRuleConfig::has_misplaced_command_glob_wildcard`].
     /// `crate::config::profile::validate_tool_sandbox_rules` already
@@ -460,6 +499,7 @@ impl ResolvedRule {
                 rule,
                 verdict,
                 reason,
+                target,
             } => {
                 let default_reason = match rule {
                     NamedSandboxRule::OutsideWorkspace => OUTSIDE_WORKSPACE_REASON,
@@ -474,6 +514,9 @@ impl ResolvedRule {
                 ResolvedRule::Named {
                     rule,
                     verdict: verdict.to_approval_check(reason.as_deref(), default_reason),
+                    target: target
+                        .map(|pattern| NetworkTargetPattern::parse(&pattern))
+                        .transpose()?,
                 }
             }
             SandboxRuleConfig::PathGlob {
@@ -1057,6 +1100,7 @@ impl SandboxContext {
                         ResolvedRule::Named {
                             rule: named,
                             verdict: rule_verdict,
+                            target: _,
                         } => {
                             if Self::evaluate_named_rule(
                                 *named,
@@ -1212,41 +1256,44 @@ impl SandboxContext {
         verdict
     }
 
-    /// Check whether a network-tool call (`web_search`) is allowed.
+    /// Check whether a network-tool call (`web_search`, `web_fetch`) is
+    /// allowed.
     ///
-    /// No path and no command are inspected: a `web_search` call's
-    /// destination is fixed by the tool's configured backend, so there is no
-    /// target to evaluate — [`NamedSandboxRule::NetworkRequest`] matches
-    /// every call, which makes a configured `[tools.web_search]` rule the
-    /// tool's per-call approval switch. There is **no default floor** (the
-    /// path-based floor rules have no path here): returning `None` means the
-    /// sandbox abstains and the calling tool applies its own default
-    /// (`UserApprovalRequired`).
+    /// `target` is the call's `scheme://host[:port]` match key (an explicit
+    /// port is included when present in the URL): `web_fetch` passes the
+    /// requested URL's key, `web_search` its configured backend endpoint's
+    /// key. A configured [`NamedSandboxRule::NetworkRequest`] rule without a
+    /// `target` parameter matches every call; with a [`NetworkTargetPattern`]
+    /// `target` it matches only calls whose key the pattern matches. There is
+    /// **no default floor** (the path-based floor rules have no path here):
+    /// returning `None` means the sandbox abstains and the calling tool
+    /// applies its own default (`UserApprovalRequired`).
     ///
     /// Precedence mirrors [`check_path`](Self::check_path) and
     /// [`check_command`](Self::check_command): configured rules in list
     /// order (last match wins), then the appended rules — the `**`
-    /// catch-all `--auto-approve-web-search` adds — matched against
-    /// [`NETWORK_REQUEST_MATCH_KEY`], so the CLI flag always wins regardless
-    /// of `[tools.web_search]` config. Path/command rule kinds under a
-    /// network tool's config are rejected at config load and defensively
-    /// never match here.
-    pub fn check_network_request(&self) -> Option<ApprovalCheck> {
+    /// catch-all `--auto-approve-web-search`/`--auto-approve-web-fetch`
+    /// adds — matched against [`NETWORK_REQUEST_MATCH_KEY`], so the CLI
+    /// flag always wins regardless of `[tools.web_search]`/`[tools.web_fetch]`
+    /// config. Path/command rule kinds under a network tool's config are
+    /// rejected at config load and defensively never match here.
+    pub fn check_network_request(&self, target: &str) -> Option<ApprovalCheck> {
         let mut verdict: Option<ApprovalCheck> = None;
-        // No `[tools.web_search]` config → no floor; the tool's own default
-        // (`UserApprovalRequired`) applies on abstention.
+        // No `[tools.web_search]`/`[tools.web_fetch]` config → no floor; the
+        // tool's own default (`UserApprovalRequired`) applies on abstention.
         if let Some(configured) = &self.configured_rules {
             for rule in configured {
                 match rule {
                     ResolvedRule::Named {
                         rule: named,
                         verdict: rule_verdict,
+                        target: rule_target,
                     } => {
-                        if Self::evaluate_network_named_rule(*named) {
+                        if Self::evaluate_network_named_rule(*named, rule_target.as_ref(), target) {
                             verdict = Some(rule_verdict.clone());
                         }
                     }
-                    // Path/command rules under `[tools.web_search]` are
+                    // Path/command rules under a network tool table are
                     // rejected by config validation; never match a
                     // network call defensively if they slip through.
                     ResolvedRule::PathGlob { .. } | ResolvedRule::CommandGlob { .. } => {}
@@ -1277,9 +1324,20 @@ impl SandboxContext {
 
     /// Only [`NamedSandboxRule::NetworkRequest`] matches a network call;
     /// path and `bash` named rules never do (config validation rejects them
-    /// under network-tool tables; defense in depth if they slip through).
-    fn evaluate_network_named_rule(rule: NamedSandboxRule) -> bool {
-        matches!(rule, NamedSandboxRule::NetworkRequest)
+    /// under network-tool tables; defense in depth if they slip through). A
+    /// `network_request` rule without a `target` matches every call; with a
+    /// `target` it matches only when the call's `scheme://host[:port]` key
+    /// matches the [`NetworkTargetPattern`].
+    fn evaluate_network_named_rule(
+        rule: NamedSandboxRule,
+        rule_target: Option<&NetworkTargetPattern>,
+        call_target: &str,
+    ) -> bool {
+        match (rule, rule_target) {
+            (NamedSandboxRule::NetworkRequest, None) => true,
+            (NamedSandboxRule::NetworkRequest, Some(pattern)) => pattern.matches(call_target),
+            _ => false,
+        }
     }
 
     /// Rank an [`ApprovalCheck`] for worst-case combination:
@@ -1324,6 +1382,7 @@ impl SandboxContext {
                         ResolvedRule::Named {
                             rule: named,
                             verdict: rule_verdict,
+                            target: _,
                         } => {
                             if Self::evaluate_command_named_rule(*named, command) {
                                 verdict = Some(rule_verdict.clone());
@@ -2133,6 +2192,7 @@ mod tests {
             rule: NamedSandboxRule::DotPath,
             verdict: ApprovalVerdictConfig::AutoDenied,
             reason: None,
+            target: None,
         };
         let glob = SandboxRuleConfig::PathGlob {
             pattern: "**".to_string(),
@@ -2169,6 +2229,7 @@ mod tests {
                 rule: NamedSandboxRule::DotPath,
                 verdict: ApprovalVerdictConfig::AutoApproved,
                 reason: None,
+                target: None,
             },
         ]);
 
@@ -2228,6 +2289,7 @@ mod tests {
                 rule: NamedSandboxRule::DotPath,
                 verdict: ApprovalVerdictConfig::AutoDenied,
                 reason: None,
+                target: None,
             },
             SandboxRuleConfig::PathGlob {
                 pattern: allow_pattern,
@@ -2278,6 +2340,7 @@ mod tests {
                 rule: NamedSandboxRule::DotPath,
                 verdict: ApprovalVerdictConfig::AutoDenied,
                 reason: None,
+                target: None,
             }])
             .with_rule(SandboxRule {
                 verdict: ApprovalCheck::AutoApproved,
@@ -2305,6 +2368,7 @@ mod tests {
                 rule: NamedSandboxRule::CrossFilesystem,
                 verdict,
                 reason,
+                target: None,
             },
         ])
     }
@@ -2494,11 +2558,13 @@ mod tests {
                     rule: NamedSandboxRule::OutsideWorkspace,
                     verdict: ApprovalVerdictConfig::AutoDenied,
                     reason: None,
+                    target: None,
                 },
                 SandboxRuleConfig::Named {
                     rule: NamedSandboxRule::CrossFilesystem,
                     verdict: ApprovalVerdictConfig::UserApprovalRequired,
                     reason: None,
+                    target: None,
                 },
             ]);
         assert_eq!(
@@ -2514,11 +2580,13 @@ mod tests {
                     rule: NamedSandboxRule::CrossFilesystem,
                     verdict: ApprovalVerdictConfig::UserApprovalRequired,
                     reason: None,
+                    target: None,
                 },
                 SandboxRuleConfig::Named {
                     rule: NamedSandboxRule::OutsideWorkspace,
                     verdict: ApprovalVerdictConfig::AutoDenied,
                     reason: None,
+                    target: None,
                 },
             ]);
         assert!(matches!(
@@ -2540,6 +2608,7 @@ mod tests {
                 rule: NamedSandboxRule::CrossFilesystem,
                 verdict: ApprovalVerdictConfig::AutoDenied,
                 reason: None,
+                target: None,
             },
             SandboxRuleConfig::PathGlob {
                 pattern: "/dev/**".to_string(),
@@ -2564,6 +2633,7 @@ mod tests {
                     rule: NamedSandboxRule::CrossFilesystem,
                     verdict: ApprovalVerdictConfig::AutoDenied,
                     reason: None,
+                    target: None,
                 },
             ]);
         assert!(matches!(
@@ -2587,11 +2657,13 @@ mod tests {
                 rule: NamedSandboxRule::CrossFilesystem,
                 verdict: ApprovalVerdictConfig::AutoApproved,
                 reason: None,
+                target: None,
             },
             SandboxRuleConfig::Named {
                 rule: NamedSandboxRule::DotPath,
                 verdict: ApprovalVerdictConfig::AutoDenied,
                 reason: None,
+                target: None,
             },
         ]);
         assert!(matches!(
@@ -2605,11 +2677,13 @@ mod tests {
                     rule: NamedSandboxRule::DotPath,
                     verdict: ApprovalVerdictConfig::AutoDenied,
                     reason: None,
+                    target: None,
                 },
                 SandboxRuleConfig::Named {
                     rule: NamedSandboxRule::CrossFilesystem,
                     verdict: ApprovalVerdictConfig::AutoApproved,
                     reason: None,
+                    target: None,
                 },
             ]);
         assert!(
@@ -2678,40 +2752,50 @@ mod tests {
     // ── network_request rule ──────────────────────────────────────────────────
 
     /// A configured rule entry for the network-tool-only `network_request`
-    /// named rule.
+    /// named rule; `target` optionally scopes it to request targets whose
+    /// `scheme://host` key matches the glob.
     fn network_request_rule(
         verdict: ApprovalVerdictConfig,
         reason: Option<&str>,
+        target: Option<&str>,
     ) -> SandboxRuleConfig {
         SandboxRuleConfig::Named {
             rule: NamedSandboxRule::NetworkRequest,
             verdict,
             reason: reason.map(str::to_string),
+            target: target.map(str::to_string),
         }
     }
+
+    /// A representative `scheme://host` key of a network call.
+    const CALL_TARGET: &str = "https://stub.example";
 
     #[test]
     fn check_network_request_abstains_without_config() {
         let temporary_dir = tempfile::tempdir().unwrap();
         let context = SandboxContext::new(make_sandbox(temporary_dir.path()));
         assert_eq!(
-            context.check_network_request(),
+            context.check_network_request(CALL_TARGET),
             None,
             "no [tools.web_search] config → no floor; the tool's own default applies"
         );
     }
 
     #[test]
-    fn configured_network_request_rule_applies_to_every_call() {
+    fn configured_targetless_network_request_rule_applies_to_every_call() {
         let temporary_dir = tempfile::tempdir().unwrap();
         let context =
             SandboxContext::new(make_sandbox(temporary_dir.path())).with_configured_rules(vec![
-                network_request_rule(ApprovalVerdictConfig::AutoApproved, None),
+                network_request_rule(ApprovalVerdictConfig::AutoApproved, None, None),
             ]);
         assert_eq!(
-            context.check_network_request(),
+            context.check_network_request("https://docs.rs/anything"),
             Some(ApprovalCheck::AutoApproved),
-            "the rule matches every web_search call — there is no target to inspect"
+            "a rule without target matches every call — there is no target to inspect"
+        );
+        assert_eq!(
+            context.check_network_request("http://example.com:8080"),
+            Some(ApprovalCheck::AutoApproved)
         );
     }
 
@@ -2720,11 +2804,11 @@ mod tests {
         let temporary_dir = tempfile::tempdir().unwrap();
         let context = SandboxContext::new(make_sandbox(temporary_dir.path()))
             .with_configured_rules(vec![
-                network_request_rule(ApprovalVerdictConfig::AutoApproved, None),
-                network_request_rule(ApprovalVerdictConfig::AutoDenied, Some("disabled")),
+                network_request_rule(ApprovalVerdictConfig::AutoApproved, None, None),
+                network_request_rule(ApprovalVerdictConfig::AutoDenied, Some("disabled"), None),
             ]);
         assert_eq!(
-            context.check_network_request(),
+            context.check_network_request(CALL_TARGET),
             Some(ApprovalCheck::AutoDenied {
                 reason: "disabled".to_string()
             }),
@@ -2737,10 +2821,10 @@ mod tests {
         let temporary_dir = tempfile::tempdir().unwrap();
         let context =
             SandboxContext::new(make_sandbox(temporary_dir.path())).with_configured_rules(vec![
-                network_request_rule(ApprovalVerdictConfig::AutoDenied, None),
+                network_request_rule(ApprovalVerdictConfig::AutoDenied, None, None),
             ]);
         assert_eq!(
-            context.check_network_request(),
+            context.check_network_request(CALL_TARGET),
             Some(ApprovalCheck::AutoDenied {
                 reason: NETWORK_REQUEST_REASON.to_string()
             })
@@ -2756,13 +2840,14 @@ mod tests {
             .with_configured_rules(vec![network_request_rule(
                 ApprovalVerdictConfig::AutoDenied,
                 None,
+                None,
             )])
             .with_rule(SandboxRule {
                 verdict: ApprovalCheck::AutoApproved,
                 pattern: glob::Pattern::new("**").unwrap(),
             });
         assert_eq!(
-            context.check_network_request(),
+            context.check_network_request(CALL_TARGET),
             Some(ApprovalCheck::AutoApproved),
             "the CLI catch-all must win regardless of [tools.web_search] config"
         );
@@ -2790,8 +2875,257 @@ mod tests {
                     rule: NamedSandboxRule::OutsideWorkspace,
                     verdict: ApprovalVerdictConfig::AutoApproved,
                     reason: None,
+                    target: None,
                 },
             ]);
-        assert_eq!(context.check_network_request(), None);
+        assert_eq!(context.check_network_request(CALL_TARGET), None);
+    }
+
+    #[test]
+    fn targeted_network_request_rule_matches_only_its_target() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let context = SandboxContext::new(make_sandbox(temporary_dir.path()))
+            .with_configured_rules(vec![network_request_rule(
+                ApprovalVerdictConfig::AutoApproved,
+                None,
+                Some("https://docs.rs"),
+            )]);
+        assert_eq!(
+            context.check_network_request("https://docs.rs"),
+            Some(ApprovalCheck::AutoApproved),
+            "an exact scheme://host target matches"
+        );
+        assert_eq!(
+            context.check_network_request("http://docs.rs"),
+            None,
+            "a scheme mismatch abstains"
+        );
+        assert_eq!(
+            context.check_network_request("https://docs.rs.evil.example"),
+            None,
+            "a different host abstains"
+        );
+    }
+
+    #[test]
+    fn targeted_network_request_rule_supports_wildcard_globs() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let context = SandboxContext::new(make_sandbox(temporary_dir.path()))
+            .with_configured_rules(vec![network_request_rule(
+                ApprovalVerdictConfig::AutoApproved,
+                None,
+                Some("https://*.example.com"),
+            )]);
+        assert_eq!(
+            context.check_network_request("https://api.example.com"),
+            Some(ApprovalCheck::AutoApproved),
+            "a host wildcard matches"
+        );
+        assert_eq!(
+            context.check_network_request("https://example.com"),
+            None,
+            "the wildcard does not match the bare host"
+        );
+        assert_eq!(
+            context.check_network_request("https://a.b.example.com"),
+            None,
+            "`*` matches exactly one host label"
+        );
+
+        let any_depth = SandboxContext::new(make_sandbox(temporary_dir.path()))
+            .with_configured_rules(vec![network_request_rule(
+                ApprovalVerdictConfig::AutoApproved,
+                None,
+                Some("https://**.example.com"),
+            )]);
+        assert_eq!(
+            any_depth.check_network_request("https://api.example.com"),
+            Some(ApprovalCheck::AutoApproved)
+        );
+        assert_eq!(
+            any_depth.check_network_request("https://a.b.example.com"),
+            Some(ApprovalCheck::AutoApproved),
+            "`**` matches subdomains of any depth"
+        );
+        assert_eq!(
+            any_depth.check_network_request("https://example.com"),
+            None,
+            "`**` matches one or more labels — the apex needs its own rule"
+        );
+
+        let any_scheme =
+            SandboxContext::new(make_sandbox(temporary_dir.path())).with_configured_rules(vec![
+                network_request_rule(ApprovalVerdictConfig::AutoApproved, None, Some("*://host")),
+            ]);
+        assert_eq!(
+            any_scheme.check_network_request("http://host"),
+            Some(ApprovalCheck::AutoApproved)
+        );
+        assert_eq!(
+            any_scheme.check_network_request("https://host"),
+            Some(ApprovalCheck::AutoApproved)
+        );
+        assert_eq!(any_scheme.check_network_request("https://other"), None);
+    }
+
+    #[test]
+    fn targeted_network_request_rule_matches_effective_ports() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let context = SandboxContext::new(make_sandbox(temporary_dir.path()))
+            .with_configured_rules(vec![network_request_rule(
+                ApprovalVerdictConfig::AutoApproved,
+                None,
+                Some("https://github.com"),
+            )]);
+        assert_eq!(
+            context.check_network_request("https://github.com:443"),
+            Some(ApprovalCheck::AutoApproved),
+            "an explicitly spelled default port matches an absent port"
+        );
+        assert_eq!(
+            context.check_network_request("https://github.com:8443"),
+            None,
+            "a non-default port does not match"
+        );
+
+        let explicit_default = SandboxContext::new(make_sandbox(temporary_dir.path()))
+            .with_configured_rules(vec![network_request_rule(
+                ApprovalVerdictConfig::AutoApproved,
+                None,
+                Some("https://github.com:443"),
+            )]);
+        assert_eq!(
+            explicit_default.check_network_request("https://github.com"),
+            Some(ApprovalCheck::AutoApproved),
+            "the default-port spelling matches the bare key too"
+        );
+
+        let any_port = SandboxContext::new(make_sandbox(temporary_dir.path()))
+            .with_configured_rules(vec![network_request_rule(
+                ApprovalVerdictConfig::AutoApproved,
+                None,
+                Some("https://github.com:*"),
+            )]);
+        assert_eq!(
+            any_port.check_network_request("https://github.com:8443"),
+            Some(ApprovalCheck::AutoApproved),
+            "`:*` matches any port"
+        );
+        assert_eq!(
+            any_port.check_network_request("https://github.com"),
+            Some(ApprovalCheck::AutoApproved),
+            "`:*` matches keys without an explicit port too"
+        );
+    }
+
+    #[test]
+    fn targeted_network_request_rule_defaults_a_schemeless_target_to_https() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let context = SandboxContext::new(make_sandbox(temporary_dir.path()))
+            .with_configured_rules(vec![network_request_rule(
+                ApprovalVerdictConfig::AutoApproved,
+                None,
+                Some("github.com"),
+            )]);
+        assert_eq!(
+            context.check_network_request("https://github.com"),
+            Some(ApprovalCheck::AutoApproved),
+            "a schemeless target means https"
+        );
+        assert_eq!(
+            context.check_network_request("http://github.com"),
+            None,
+            "http still abstains — the https default can only narrow"
+        );
+    }
+
+    #[test]
+    fn non_matching_target_abstains() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let context = SandboxContext::new(make_sandbox(temporary_dir.path()))
+            .with_configured_rules(vec![network_request_rule(
+                ApprovalVerdictConfig::AutoDenied,
+                Some("blocked"),
+                Some("https://ads.example.com"),
+            )]);
+        assert_eq!(
+            context.check_network_request("https://docs.rs"),
+            None,
+            "a non-matching target abstains instead of applying the verdict"
+        );
+    }
+
+    #[test]
+    fn targeted_network_request_rules_follow_last_match_wins() {
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let context = SandboxContext::new(make_sandbox(temporary_dir.path()))
+            .with_configured_rules(vec![
+                network_request_rule(
+                    ApprovalVerdictConfig::AutoApproved,
+                    None,
+                    Some("*://docs.rs"),
+                ),
+                network_request_rule(
+                    ApprovalVerdictConfig::AutoDenied,
+                    Some("https only"),
+                    Some("https://docs.rs"),
+                ),
+            ]);
+        assert_eq!(
+            context.check_network_request("https://docs.rs"),
+            Some(ApprovalCheck::AutoDenied {
+                reason: "https only".to_string()
+            }),
+            "the later matching rule wins"
+        );
+        assert_eq!(
+            context.check_network_request("http://docs.rs"),
+            Some(ApprovalCheck::AutoApproved),
+            "only the earlier rule matches this target"
+        );
+    }
+
+    #[test]
+    fn catch_all_wins_over_a_matching_target_rule() {
+        // Mirrors --auto-approve-web-fetch: the appended `**` catch-all is
+        // evaluated last and wins over any configured target rule.
+        let temporary_dir = tempfile::tempdir().unwrap();
+        let context = SandboxContext::new(make_sandbox(temporary_dir.path()))
+            .with_configured_rules(vec![network_request_rule(
+                ApprovalVerdictConfig::AutoDenied,
+                None,
+                Some("https://docs.rs"),
+            )]);
+        let context = context.with_rule(SandboxRule {
+            verdict: ApprovalCheck::AutoApproved,
+            pattern: glob::Pattern::new("**").unwrap(),
+        });
+        assert_eq!(
+            context.check_network_request("https://docs.rs"),
+            Some(ApprovalCheck::AutoApproved),
+            "the CLI catch-all must win regardless of a matching target rule"
+        );
+    }
+
+    #[test]
+    fn target_parameter_is_rejected_on_non_network_rule_kinds() {
+        assert!(network_request_rule(
+            ApprovalVerdictConfig::AutoApproved,
+            None,
+            Some("https://docs.rs")
+        )
+        .has_target());
+        assert!(
+            !network_request_rule(ApprovalVerdictConfig::AutoApproved, None, None).has_target()
+        );
+        assert!(
+            !SandboxRuleConfig::PathGlob {
+                pattern: "**".to_string(),
+                verdict: ApprovalVerdictConfig::AutoApproved,
+                reason: None,
+            }
+            .has_target(),
+            "path rules cannot carry a target"
+        );
     }
 }

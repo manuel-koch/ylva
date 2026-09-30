@@ -41,15 +41,15 @@ use serde_json::Value;
 use tokio::time::Instant;
 use tracing::Instrument;
 
+use super::backends::web_search::{
+    WebSearchBackend, WebSearchBackendKind, WebSearchHit, WEB_SEARCH_MAX_RESULT_LIMIT,
+    WEB_SEARCH_SNIPPET_MAX_CHARS,
+};
 use super::{
     title_case_tool_name, ContentSection, Section, Tool, ToolCall, ToolCallResult, ToolError,
 };
 use crate::config::WebSearchConfig;
 use crate::sandbox::{ApprovalCheck, SandboxContext};
-use crate::web_search::{
-    WebSearchBackend, WebSearchBackendKind, WebSearchHit, WEB_SEARCH_MAX_RESULT_LIMIT,
-    WEB_SEARCH_SNIPPET_MAX_CHARS,
-};
 
 /// Seconds added to the configured internal HTTP timeout to derive the
 /// tool's outer timeout, so the outer safety net always fires *after* the
@@ -94,8 +94,8 @@ pub struct WebSearchInputArgs {
     /// Search terms to look up on the web, e.g. `rust async traits`.
     pub terms: String,
     /// Maximum number of results to return, capped at
-    /// [`crate::web_search::WEB_SEARCH_MAX_RESULT_LIMIT`]. Omit it for the
-    /// configured default ([`crate::web_search::WEB_SEARCH_DEFAULT_RESULT_LIMIT`],
+    /// [`super::backends::web_search::WEB_SEARCH_MAX_RESULT_LIMIT`]. Omit it for the
+    /// configured default ([`super::backends::web_search::WEB_SEARCH_DEFAULT_RESULT_LIMIT`],
     /// overridable via `[web_search] result_limit`).
     ///
     /// The schema `maximum` and field description are injected in
@@ -393,12 +393,13 @@ impl Tool for WebSearchTool {
 
     /// User approval by default: the sandbox abstains (no floor for network
     /// tools) until a `[tools.web_search]` `network_request` rule or the
-    /// `--auto-approve-web-search` catch-all states an explicit verdict.
-    /// The tool has neither path nor command arguments, so no path/command
-    /// rule can ever apply to it.
+    /// `--auto-approve-web-search` catch-all states an explicit verdict. A
+    /// rule's optional `target` pattern is matched against the configured
+    /// backend endpoint's `scheme://host[:port]` key. The tool has neither path nor
+    /// command arguments, so no path/command rule can ever apply to it.
     fn needs_approval(&self, _arguments: &Value) -> ApprovalCheck {
         self.sandbox_context
-            .check_network_request()
+            .check_network_request(&self.backend.network_target())
             .unwrap_or(ApprovalCheck::UserApprovalRequired)
     }
 
@@ -429,8 +430,10 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+    use crate::agent::tools::backends::web_search::{
+        WebSearchError, WEB_SEARCH_DEFAULT_RESULT_LIMIT,
+    };
     use crate::sandbox::{ApprovalVerdictConfig, NamedSandboxRule, SandboxRule, SandboxRuleConfig};
-    use crate::web_search::{WebSearchError, WEB_SEARCH_DEFAULT_RESULT_LIMIT};
 
     /// Stub backend that records the `limit` it was asked for and replays a
     /// canned response, so tests never touch the network.
@@ -471,6 +474,10 @@ mod tests {
     }
 
     impl WebSearchBackend for StubBackend {
+        fn network_target(&self) -> String {
+            "https://stub.example".to_string()
+        }
+
         fn search<'a>(
             &'a self,
             terms: &'a str,
@@ -737,6 +744,7 @@ mod tests {
                 rule: NamedSandboxRule::NetworkRequest,
                 verdict: ApprovalVerdictConfig::AutoApproved,
                 reason: None,
+                target: None,
             }]);
         let configured_tool = WebSearchTool::new(
             Arc::new(StubBackend::returning(Vec::new())),

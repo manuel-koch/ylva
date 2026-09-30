@@ -1,6 +1,6 @@
 [package]
 name = "ylva"
-version = "0.10.10"
+version = "0.10.11"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["Manuel Koch"]
@@ -51,6 +51,7 @@ tree-sitter = "0.25"
 tree-sitter-bash = "0.25"
 clap = { version = "4", features = ["derive"] }
 scraper = "0.27.0"
+htmd = "0.5"
 
 [build-dependencies]
 time = { version = "0.3", features = ["formatting", "macros"] }

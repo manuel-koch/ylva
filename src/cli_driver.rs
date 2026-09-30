@@ -272,6 +272,7 @@ impl App for ConsoleApp {
             sandbox,
             ToolRegistryConfig {
                 tool_sandbox_rules,
+                web_fetch: self.profile.web_fetch.clone(),
                 ..ToolRegistryConfig::default()
             },
         ));

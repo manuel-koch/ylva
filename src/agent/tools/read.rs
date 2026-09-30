@@ -65,18 +65,18 @@ use super::{
 };
 use crate::sandbox::{ApprovalCheck, SandboxContext};
 
-const MEDIA_TYPE_IMAGE_PNG: &str = "image/png";
+pub(crate) const MEDIA_TYPE_IMAGE_PNG: &str = "image/png";
 const MEDIA_TYPE_IMAGE_JPEG: &str = "image/jpeg";
 const MEDIA_TYPE_IMAGE_WEBP: &str = "image/webp";
 const MEDIA_TYPE_IMAGE_GIF: &str = "image/gif";
-const MEDIA_TYPE_APPLICATION_PDF: &str = "application/pdf";
-const SUPPORTED_IMAGE_MEDIA_TYPES: &[&str] = &[
+pub(crate) const MEDIA_TYPE_APPLICATION_PDF: &str = "application/pdf";
+pub(crate) const SUPPORTED_IMAGE_MEDIA_TYPES: &[&str] = &[
     MEDIA_TYPE_IMAGE_PNG,
     MEDIA_TYPE_IMAGE_JPEG,
     MEDIA_TYPE_IMAGE_WEBP,
     MEDIA_TYPE_IMAGE_GIF,
 ];
-const SUPPORTED_MEDIA_TYPES: &[&str] = &[
+pub(crate) const SUPPORTED_MEDIA_TYPES: &[&str] = &[
     MEDIA_TYPE_IMAGE_PNG,
     MEDIA_TYPE_IMAGE_JPEG,
     MEDIA_TYPE_IMAGE_WEBP,
@@ -1244,14 +1244,14 @@ fn base64_read_result(
     }
 }
 
-fn supported_media_type(bytes: &[u8]) -> Option<String> {
+pub(crate) fn supported_media_type(bytes: &[u8]) -> Option<String> {
     let mime_type = infer::get(bytes)?.mime_type();
     SUPPORTED_MEDIA_TYPES
         .contains(&mime_type)
         .then(|| mime_type.to_string())
 }
 
-fn safe_source_filename(path: &str, fallback_filename: &str) -> String {
+pub(crate) fn safe_source_filename(path: &str, fallback_filename: &str) -> String {
     let basename = std::path::Path::new(path)
         .file_name()
         .and_then(|name| name.to_str())
@@ -1322,6 +1322,7 @@ mod tests {
             rule: NamedSandboxRule::CrossFilesystem,
             verdict: ApprovalVerdictConfig::UserApprovalRequired,
             reason: None,
+            target: None,
         }]);
         let tool = ReadTool::new(context);
 

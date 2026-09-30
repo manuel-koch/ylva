@@ -26,12 +26,14 @@ pub mod layered;
 mod profile;
 mod provider;
 pub mod soul;
+mod web_fetch;
 mod web_search;
 
 pub use agent::AgentConfig;
 pub use agent_type_file::AgentTypeDefinition;
 pub use profile::{profile_config_source_path, ProfileConfig, ToolSandboxConfig};
 pub use provider::{ProviderConfig, ProviderConnectionConfig};
+pub use web_fetch::WebFetchConfig;
 pub use web_search::WebSearchConfig;
 
 /// File name of a profile's configuration inside its profile directory.
@@ -150,10 +152,40 @@ pub enum ConfigError {
         index: usize,
     },
     #[error(
+        "profile config at {} has a `target` parameter on [tools.{tool}].rules[{index}]: \
+         `target` is only valid on a `network_request` rule (it scopes that rule to request \
+         targets matching its `scheme://host[:port]` target pattern)",
+        path.display()
+    )]
+    MisplacedSandboxRuleTarget {
+        path: PathBuf,
+        tool: String,
+        index: usize,
+    },
+    #[error(
+        "profile config at {} has an invalid [tools.{tool}].rules[{index}].target: {detail}",
+        path.display()
+    )]
+    InvalidSandboxRuleTarget {
+        path: PathBuf,
+        tool: String,
+        index: usize,
+        detail: String,
+    },
+    #[error(
         "profile config at {} has an invalid [web_search] backend '{backend}'; expected one of: {expected}",
         path.display()
     )]
     InvalidWebSearchBackend {
+        path: PathBuf,
+        backend: String,
+        expected: String,
+    },
+    #[error(
+        "profile config at {} has an invalid [web_fetch] backend '{backend}'; expected one of: {expected}",
+        path.display()
+    )]
+    InvalidWebFetchBackend {
         path: PathBuf,
         backend: String,
         expected: String,
