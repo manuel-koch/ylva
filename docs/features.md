@@ -225,56 +225,63 @@ sandbox evaluation and never
 bypasses an approval check. See
 [implementation notes](./implementation-notes.md#path-like-argument-normalization).
 
-- **read**: Read file content from `path` using `mode`/`offset`/`limit` and the
-  per-call `encoding` argument. When `mode` is omitted, the read autodetects:
-  valid UTF-8 text is read by lines (so `offset`/`limit` keep their 0-based
-  line meaning), a whole binary file recognized as PNG/JPEG/WebP/GIF/PDF is
-  returned as Base64 with a typed attachment, and any other binary content —
-  or a ranged read of binary content — fails with a retry hint to use an
-  explicit `mode: "bytes"`. Set `mode` to `lines`/`chars`/`bytes` to force a
-  unit; explicit modes are honored as requested and fail when they cannot
-  apply. In `lines` mode, `offset` is a 0-based line index and `limit` is a
-  line count. Text-oriented `lines` and `chars` reads require valid UTF-8 and
-  fail with an error that suggests retrying with `mode: "bytes"` (and
-  `encoding: "base64"` for binary data) instead of inserting replacement
-  characters. `bytes` reads with the default `utf8` encoding retain the
-  existing lossy decoding behavior. `encoding` defaults to `utf8`; set
-  `encoding: "base64"` together with an explicit `mode: "bytes"` to return
-  the selected raw bytes exactly as standard padded Base64 with no line
-  breaks. Byte `offset`/`limit` slicing happens before Base64 encoding.
-  Base64 output remains available in the model-facing result text. Memory use
-  follows the selected window rather than the file size: `bytes` seeks to
-  `offset` and reads at most `limit` bytes, and the `lines`/`chars`/autodetect
-  paths stream fixed-size chunks while validating UTF-8 to EOF — whole-file
-  buffering remains only for results returned whole (a `bytes` selection
-  within the cap and the complete recognized media read that bypasses it).
-  When the selected decoded bytes are valid UTF-8, the user-facing tool bubble
-  uses the normal text metadata (`read_bytes` and `read_lines`) and a decoded
-  content preview; opaque or invalid UTF-8 bytes show only `read_bytes`
-  metadata and no content section. Output is capped at 262144 raw selected
-  bytes (256 KiB) (`truncated` field present in result metadata when capped):
-  content past the cap is discarded silently with no in-text marker and the
-  content section is labeled `Partial result`, the same vocabulary capped
-  `bash` and `search` output uses. The cap wins over a larger explicit
-  `limit`; complete recognized media reads (PNG/JPEG/WebP/GIF/PDF Base64
-  attachments) are exempt, because a truncated image or PDF is unusable and
-  `media_type` is only recognized for complete files. An exempt whole file is
-  still limited to 8388608 bytes (8 MiB): a larger complete media file fails
-  with an explicit size error instead of being truncated or loaded unbounded.
-  Continue a capped read with `offset`/`limit`. Reads auto-approve when the sandbox abstains; a path
-  outside the workspace or with a dot-prefixed component requires user
-  approval instead. Any explicit verdict from a configured `[tools.read]`
-  rule list — including the opt-in `cross_filesystem` rule (a path on a
-  different filesystem than the workspace root) — is honored as-is.
-- **write**: Write `content` to `path`, with the per-call `encoding` defaulting
-  to `utf8`. Set `encoding: "base64"` to decode standard padded Base64 and
-  write the resulting arbitrary bytes; invalid input fails before any parent
-  directory or target-file change. Requires user approval before execution
-  (approval-gated). UTF-8 writes retain their content previews. Base64 writes
-  whose decoded bytes are valid UTF-8 also show the decoded text preview;
-  opaque or invalid UTF-8 bytes show only the byte-count confirmation and
-  metadata. Content payloads are redacted from logs and argument spans. There
-  is no CLI/profile configuration setting or size limit added by this feature.
+### `read`
+
+Read file content from `path` using `mode`/`offset`/`limit` and the
+per-call `encoding` argument. When `mode` is omitted, the read autodetects:
+valid UTF-8 text is read by lines (so `offset`/`limit` keep their 0-based
+line meaning), a whole binary file recognized as PNG/JPEG/WebP/GIF/PDF is
+returned as Base64 with a typed attachment, and any other binary content —
+or a ranged read of binary content — fails with a retry hint to use an
+explicit `mode: "bytes"`. Set `mode` to `lines`/`chars`/`bytes` to force a
+unit; explicit modes are honored as requested and fail when they cannot
+apply. In `lines` mode, `offset` is a 0-based line index and `limit` is a
+line count. Text-oriented `lines` and `chars` reads require valid UTF-8 and
+fail with an error that suggests retrying with `mode: "bytes"` (and
+`encoding: "base64"` for binary data) instead of inserting replacement
+characters. `bytes` reads with the default `utf8` encoding retain the
+existing lossy decoding behavior. `encoding` defaults to `utf8`; set
+`encoding: "base64"` together with an explicit `mode: "bytes"` to return
+the selected raw bytes exactly as standard padded Base64 with no line
+breaks. Byte `offset`/`limit` slicing happens before Base64 encoding.
+Base64 output remains available in the model-facing result text. Memory use
+follows the selected window rather than the file size: `bytes` seeks to
+`offset` and reads at most `limit` bytes, and the `lines`/`chars`/autodetect
+paths stream fixed-size chunks while validating UTF-8 to EOF — whole-file
+buffering remains only for results returned whole (a `bytes` selection
+within the cap and the complete recognized media read that bypasses it).
+When the selected decoded bytes are valid UTF-8, the user-facing tool bubble
+uses the normal text metadata (`read_bytes` and `read_lines`) and a decoded
+content preview; opaque or invalid UTF-8 bytes show only `read_bytes`
+metadata and no content section. Output is capped at 262144 raw selected
+bytes (256 KiB) (`truncated` field present in result metadata when capped):
+content past the cap is discarded silently with no in-text marker and the
+content section is labeled `Partial result`, the same vocabulary capped
+`bash` and `search` output uses. The cap wins over a larger explicit
+`limit`; complete recognized media reads (PNG/JPEG/WebP/GIF/PDF Base64
+attachments) are exempt, because a truncated image or PDF is unusable and
+`media_type` is only recognized for complete files. An exempt whole file is
+still limited to 8388608 bytes (8 MiB): a larger complete media file fails
+with an explicit size error instead of being truncated or loaded unbounded.
+Continue a capped read with `offset`/`limit`. Reads auto-approve when the sandbox abstains; a path
+outside the workspace or with a dot-prefixed component requires user
+approval instead. Any explicit verdict from a configured `[tools.read]`
+rule list — including the opt-in `cross_filesystem` rule (a path on a
+different filesystem than the workspace root) — is honored as-is.
+
+### `write`
+
+Write `content` to `path`, with the per-call `encoding` defaulting
+to `utf8`. Set `encoding: "base64"` to decode standard padded Base64 and
+write the resulting arbitrary bytes; invalid input fails before any parent
+directory or target-file change. Requires user approval before execution
+(approval-gated). UTF-8 writes retain their content previews. Base64 writes
+whose decoded bytes are valid UTF-8 also show the decoded text preview;
+opaque or invalid UTF-8 bytes show only the byte-count confirmation and
+metadata. Content payloads are redacted from logs and argument spans. There
+is no CLI/profile configuration setting or size limit added by this feature.
+
+### Binary attachments for `read`
 
 Binary `read`/`write` support remains an exact transport and UI-safety layer,
 with provider-aware input for explicit Base64 `read` results added on top:
@@ -299,178 +306,207 @@ with provider-aware input for explicit Base64 `read` results added on top:
   tool message. Synthetic user messages are not persisted or rendered in the
   TUI/CLI. Request dumps redact Base64 and inline media payloads while retaining
   safe roles, IDs, media types, and filenames.
-- **edit**: Patch an existing file in-place. The file must already exist (use `write`
-  to create new files). Two modes:
-  - **SearchReplace** — supply `old_string` and `new_string`; replaces the **first**
-    occurrence by default. Set `replace_all: true` to replace every occurrence in one
-    call (useful when renaming a symbol throughout a file). Returns an error if
-    `old_string` is not found.
-  - **LineRange** — supply `start_line`, `end_line` (1-based, inclusive) and
-    `new_string`; replaces those lines. Returns an error if the range is out of
-    bounds or `start_line > end_line`.
-  A unified diff preview is shown before the user approves the call, with a
-  two-column line-number gutter (old file | new file) so each added, removed,
-  and context line is annotated with its position in the old and/or new file.
-  Requires user approval by default.
-- **glob**: Search for paths using a glob `pattern`, including wildcards like `*`, `?`, `**`, `[...]`.
-  Patterns are resolved relative to cwd unless absolute; to search beneath a sub-directory, include
-  that directory in the pattern (for example, `docs/**/*.md`). There is no separate `path`
-  argument. Bare `**` matches directories; use `**/*` to match files and directories recursively.
-  The search root is never a match and is always excluded from returned paths and all
-  counts, regardless of the pattern or option flags; only descendants are eligible. Hidden files
-  (dot-prefixed names) are **included by default**, matching `find . -type f` behaviour. Optional
-  `dot_ignore` (default `false`); set to `true` to exclude any path component that starts with `.`.
-  Optional `git_ignore` (default `true`) skips paths matched by `.gitignore` rules; it does not
-  exclude the `.git` directory or other dot-prefixed paths. Set `dot_ignore` to `true` to exclude
-  them. Set `git_ignore` to `false` to use plain glob matching without gitignore rules. Optional
-  `only_files` / `only_dirs` filters restrict results to files or directories only (mutually
-  exclusive; both `true` returns an error). Optional `limit` caps the result count; omit it for
-  no result-count limit rather than using an arbitrary large value.
-  Result metadata contains flat `files`, `directories`, and `total` counts, where `total` is the
-  sum of the other two fields, plus a boolean `truncated`. `truncated` is `false` when all
-  matching paths are returned and `true` when `limit` omits additional paths; it does not report
-  an omission count. Optional `only_count` returns no paths and exposes the same counts; the result
-  text retains the matching total.
-  CLI/TUI summaries use a tool-provided display projection: `glob` omits zero-valued `files` and
-  `directories` and `truncated=false`. It omits `total` when either type count is zero, because
-  the total is then inferable, except that an empty result displays `total=0`; the complete
-  metadata remains available to the LLM/API.
-  Paths inside the workspace are auto-approved; paths outside require user
-  approval. A configured `cross_filesystem` rule is evaluated against the
-  pattern's root directory, not against each match.
-- **bash**: Execute a shell command or multi-line script via `bash -c` from the
-  current working directory, which is the workspace root in normal runtime.
-  Use relative paths directly; do not prefix commands with a redundant `cd` to
-  the workspace root. Requires explicit human approval before execution. An
-  optional `label` (3–6 word purpose of the command) describes what the
-  command will do: the collapsed bubble title and the CLI status line show
-  it as a `label=…` prop — including while the call is pending approval —
-  and the expanded bubble body leads with a `Label` section followed by a
-  `Command` section in every state (then a `Result` section with the
-  command output once completed — or `Partial result` when the output cap
-  truncated the capture — and a `Partial result` section after them when
-  the call fails with partial output). When those
-  sections carry both arguments the expanded args line is hidden, while
-  the collapsed title keeps them. An absent or blank `label` is omitted
-  everywhere, and approval behavior does not depend on it. stdout
-  and stderr are merged in true arrival order. Output is capped at 1000 whole
-  output lines or 65536 bytes, whichever is hit first (`truncated` field
-  present in result metadata when capped). Excess lines are discarded; a line
-  that alone exceeds the remaining byte budget is kept as a UTF-8-safe prefix
-  up to the byte cap so oversized first lines still yield non-empty output.
-  Default timeout: 30 s. On timeout or cancellation the entire
-  process (including any child processes it spawned) is killed. See
-  [implementation notes](./implementation-notes.md#bash-tool-process-group-cleanup).
-  The tool description explicitly tells the model never to use it to sleep,
-  poll, or otherwise wait for a spawned subagent — the harness delivers each
-  subagent's completion automatically.
-- **search**: Search file contents using a regular-expression `pattern` within a
-  directory tree (defaults to cwd when `path` is omitted). Respects `.gitignore`.
-  Binary files are skipped. Results formatted in grep style: `filepath:lineno: content` for matches
-  and `filepath-lineno- content` for context lines. One structured result section per
-  matching file. Optional `glob` (e.g. `**/*.rs`, `*.txt`) restricts which files are searched,
-  matched against each file's path relative to the search root. Optional
-  `case_sensitive` (default `false`) and `context_lines` (default `0`). Optional
-  `files_with_matches: true` returns only matched file paths (no line content), like
-  `grep -l`. Optional `only_matches: true` returns only the matched substrings — one
-  entry per occurrence, ignoring context lines, like `grep -o`. `files_with_matches` and
-  `only_matches` are mutually exclusive. Result paths mirror the form of the input: a
-  relative `path` argument produces relative result paths; an absolute argument produces
-  absolute result paths. Output is capped at 1000 whole output lines (`truncated` field
-  present in result metadata when capped). Paths inside the
-  workspace are auto-approved; paths outside require user approval.
-- **web_search**: Search the web for `terms` and return ranked results from
-  the configured search backend (`docs/configuration.md`): `duckduckgo` (the
-  default — DuckDuckGo's HTML endpoint), `searxng`, which requires a
-  `[web_search.backends.searxng] base_url` naming the instance to query, or
-  `brave`, which requires a `[web_search.backends.brave] api_key` holding the
-  Brave Search API subscription token.
-  `text` lists each hit as a numbered title with its URL; the structured
-  result metadata carries one `{title, url, snippet}` entry per hit, with
-  snippets whitespace-normalized and truncated to 300 characters. Optional
-  `limit` caps the number of results (schema maximum 20; omit it for the
-  configured default — `[web_search] result_limit`, 15 unless overridden). A
-  search with no recognizable results returns an empty result list; a
-  backend block/challenge page or unparseable response fails with an error
-  instead of a silently-empty answer. Requires user approval before
-  execution unless a `[tools.web_search]` `network_request` rule (optionally
-  scoped to the backend endpoint's `scheme://host` with `target`, see
-  `docs/configuration.md`) or `--auto-approve-web-search` states a verdict.
-- **web_fetch**: Fetch the web content at `url` over HTTP `GET` and return it
-  as text. Only absolute `http://`/`https://` URLs are accepted; other schemes
-  fail before any request is made. HTML is converted to markdown as a no-JS
-  reading: `<script>`/`<style>` payloads (inline JavaScript, JSON config
-  blobs, CSS) are dropped and `<noscript>` fallback text is kept as visible
-  content. Text/JSON/XML bodies (`text/*`, `application/json`,
-  `application/xml`, and
-  `+json`/`+xml` suffixes) pass through verbatim; the magic-number-sniffed
-  media types PNG/JPEG/WebP/GIF/PDF are returned as a Base64 result with a
-  typed attachment exactly like a whole-file `read` — complete response only,
-  up to 8388608 bytes (8 MiB); a larger response fails with an explicit size
-  error, never a truncated attachment. Other binary or non-UTF-8 bodies fail
-  with a clear error naming the content type. Returned text (markdown or
-  verbatim) is capped at 65536 bytes (64 KiB): longer output is truncated
-  with `truncated: true` result metadata and a `Partial result` content
-  section, the same vocabulary capped `read`/`bash`/`search` output uses.
-  Result metadata carries `url`, `final_url` (after redirects), `status`,
-  `content_type`, and `media_type` for media results. The done tool bubble
-  renders these response facts as a wrapped `Response` content section
-  (`final_url` only when a redirect was followed) instead of truncating
-  them into the one-line summary, which keeps only the `truncated` flag.
-  Redirects are followed
-  normally, but host-scoped `network_request` `target` rules evaluate the
-  requested URL only (see `docs/configuration.md`). Requires user approval
-  before execution unless a `[tools.web_fetch]` `network_request` rule or
-  `--auto-approve-web-fetch` states a verdict.
-- **clarify**: Ask the user a question in the TUI and wait for their answer.
-  Optional `context` adds supporting detail. Optional `choices` supplies up to
-  5 numbered answers; clicking a choice copies it into the input box,
-  and `Enter` submits it as the tool result. The TUI renders the question in a
-  yellow banner above the footer. This tool is not registered in headless CLI
-  mode, so it never appears in the headless `tools` array.
-- **spawn_subagent**: Delegate a self-contained `task` (plus a required `label`
-  summarising the delegated task for display, and optional `briefing` and
-  `agent_type`) to a child agent that runs concurrently with the parent. `label`
-  is shown as the tool-call bubble's primary title text — including while
-  collapsed. An explicitly chosen `agent_type` qualifies the title instead of
-  appearing as a bracketed prop — `Spawn Subagent (local-discovery) …` in the
-  root conversation, `Subagent (local-discovery) …` in the drill-in header —
-  while the default type is omitted entirely. Only available to agents allowed
-  to spawn children (no nesting —
-  delegation is one level deep). Requires user approval unless
-  `--auto-approve-spawn` is set. The call resolves immediately with an
-  admission event containing the `run_id`, `tool_call_id`, `label`, and
-  outstanding-run count; this is not the child's outcome. A terminal
-  completion event later carries the same correlation fields plus
-  `status`, `result`/`error`, `sources`, `outstanding_count`, and `all_done`.
-  Completion order is not a reliable ordering signal. The current scheduler
-  runs at most one child at a time and queues further spawns, but that is an
-  implementation constraint rather than part of the model-facing contract. Its
-  description lists every configured agent type and its optional
-  model-facing `description`, so the parent can choose a suitable type instead
-  of guessing names.
-  See
-  [Child-agent delegation](#child-agent-delegation).
-- **agent_finish**: Only available to child agents (a root agent never sees
-  it). Reports `status` (`"success"` or `"failure"`), an optional `result` /
-  `error`, and optional `sources`, then ends the child's turn. `status` is
-  requested as mandatory but tolerated as missing: if a model omits it, it is
-  inferred as `"failure"` when `error` is set and `"success"` otherwise,
-  rather than the call being auto-denied for a schema violation. The parent
-  receives this through the `spawn_subagent` lifecycle event — it never sees
-  the child's own conversation, only the `result`/`error` string, so a child
-  should make its `result` self-contained rather than referencing
-  "earlier"/"above" content the parent cannot see, and must not fold in
-  meta-commentary or self-review narration about its own process (e.g.
-  "Self-Correction/Review:") — only the finished deliverable belongs there.
-  If a child goes idle
-  without calling `agent_finish`, the parent instead receives a synthesized
-  result built from the child's last assistant message; if the child hits
-  its max-tool-iterations cap first, the parent receives a clear failure
-  instead, so it isn't mistaken for the child's own conclusion. A child is
-  told its tool-use iteration budget up front so it can pace itself. Provider
-  and stream failures are also reported as clear failures rather than being
-  synthesized as empty or unstructured results.
+
+### `edit`
+
+Patch an existing file in-place. The file must already exist (use `write`
+to create new files). Two modes:
+
+- **SearchReplace** — supply `old_string` and `new_string`; replaces the **first**
+  occurrence by default. Set `replace_all: true` to replace every occurrence in one
+  call (useful when renaming a symbol throughout a file). Returns an error if
+  `old_string` is not found.
+- **LineRange** — supply `start_line`, `end_line` (1-based, inclusive) and
+  `new_string`; replaces those lines. Returns an error if the range is out of
+  bounds or `start_line > end_line`.
+
+A unified diff preview is shown before the user approves the call, with a
+two-column line-number gutter (old file | new file) so each added, removed, and
+context line is annotated with its position in the old and/or new file.
+Requires user approval by default.
+
+### `glob`
+
+Search for paths using a glob `pattern`, including wildcards like `*`, `?`, `**`, `[...]`.
+Patterns are resolved relative to cwd unless absolute; to search beneath a sub-directory, include
+that directory in the pattern (for example, `docs/**/*.md`). There is no separate `path`
+argument. Bare `**` matches directories; use `**/*` to match files and directories recursively.
+The search root is never a match and is always excluded from returned paths and all
+counts, regardless of the pattern or option flags; only descendants are eligible. Hidden files
+(dot-prefixed names) are **included by default**, matching `find . -type f` behaviour. Optional
+`dot_ignore` (default `false`); set to `true` to exclude any path component that starts with `.`.
+Optional `git_ignore` (default `true`) skips paths matched by `.gitignore` rules; it does not
+exclude the `.git` directory or other dot-prefixed paths. Set `dot_ignore` to `true` to exclude
+them. Set `git_ignore` to `false` to use plain glob matching without gitignore rules. Optional
+`only_files` / `only_dirs` filters restrict results to files or directories only (mutually
+exclusive; both `true` returns an error). Optional `limit` caps the result count; omit it for
+no result-count limit rather than using an arbitrary large value.
+Result metadata contains flat `files`, `directories`, and `total` counts, where `total` is the
+sum of the other two fields, plus a boolean `truncated`. `truncated` is `false` when all
+matching paths are returned and `true` when `limit` omits additional paths; it does not report
+an omission count. Optional `only_count` returns no paths and exposes the same counts; the result
+text retains the matching total.
+CLI/TUI summaries use a tool-provided display projection: `glob` omits zero-valued `files` and
+`directories` and `truncated=false`. It omits `total` when either type count is zero, because
+the total is then inferable, except that an empty result displays `total=0`; the complete
+metadata remains available to the LLM/API.
+Paths inside the workspace are auto-approved; paths outside require user
+approval. A configured `cross_filesystem` rule is evaluated against the
+pattern's root directory, not against each match.
+
+### `bash`
+
+Execute a shell command or multi-line script via `bash -c` from the
+current working directory, which is the workspace root in normal runtime.
+Use relative paths directly; do not prefix commands with a redundant `cd` to
+the workspace root. Requires explicit human approval before execution. An
+optional `label` (3–6 word purpose of the command) describes what the
+command will do: the collapsed bubble title and the CLI status line show
+it as a `label=…` prop — including while the call is pending approval —
+and the expanded bubble body leads with a `Label` section followed by a
+`Command` section in every state (then a `Result` section with the
+command output once completed — or `Partial result` when the output cap
+truncated the capture — and a `Partial result` section after them when
+the call fails with partial output). When those
+sections carry both arguments the expanded args line is hidden, while
+the collapsed title keeps them. An absent or blank `label` is omitted
+everywhere, and approval behavior does not depend on it. stdout
+and stderr are merged in true arrival order. Output is capped at 1000 whole
+output lines or 65536 bytes, whichever is hit first (`truncated` field
+present in result metadata when capped). Excess lines are discarded; a line
+that alone exceeds the remaining byte budget is kept as a UTF-8-safe prefix
+up to the byte cap so oversized first lines still yield non-empty output.
+Default timeout: 30 s. On timeout or cancellation the entire
+process (including any child processes it spawned) is killed. See
+[implementation notes](./implementation-notes.md#bash-tool-process-group-cleanup).
+The tool description explicitly tells the model never to use it to sleep,
+poll, or otherwise wait for a spawned subagent — the harness delivers each
+subagent's completion automatically.
+
+### `search`
+
+Search file contents using a regular-expression `pattern` within a
+directory tree (defaults to cwd when `path` is omitted). Respects `.gitignore`.
+Binary files are skipped. Results formatted in grep style: `filepath:lineno: content` for matches
+and `filepath-lineno- content` for context lines. One structured result section per
+matching file. Optional `glob` (e.g. `**/*.rs`, `*.txt`) restricts which files are searched,
+matched against each file's path relative to the search root. Optional
+`case_sensitive` (default `false`) and `context_lines` (default `0`). Optional
+`files_with_matches: true` returns only matched file paths (no line content), like
+`grep -l`. Optional `only_matches: true` returns only the matched substrings — one
+entry per occurrence, ignoring context lines, like `grep -o`. `files_with_matches` and
+`only_matches` are mutually exclusive. Result paths mirror the form of the input: a
+relative `path` argument produces relative result paths; an absolute argument produces
+absolute result paths. Output is capped at 1000 whole output lines (`truncated` field
+present in result metadata when capped). Paths inside the
+workspace are auto-approved; paths outside require user approval.
+
+### `web_search`
+
+Search the web for `terms` and return ranked results from
+the configured search backend (`docs/configuration.md`): `duckduckgo` (the
+default — DuckDuckGo's HTML endpoint), `searxng`, which requires a
+`[web_search.backends.searxng] base_url` naming the instance to query, or
+`brave`, which requires a `[web_search.backends.brave] api_key` holding the
+Brave Search API subscription token.
+`text` lists each hit as a numbered title with its URL; the structured
+result metadata carries one `{title, url, snippet}` entry per hit, with
+snippets whitespace-normalized and truncated to 300 characters. Optional
+`limit` caps the number of results (schema maximum 20; omit it for the
+configured default — `[web_search] result_limit`, 15 unless overridden). A
+search with no recognizable results returns an empty result list; a
+backend block/challenge page or unparseable response fails with an error
+instead of a silently-empty answer. Requires user approval before
+execution unless a `[tools.web_search]` `network_request` rule (optionally
+scoped to the backend endpoint's `scheme://host` with `target`, see
+`docs/configuration.md`) or `--auto-approve-web-search` states a verdict.
+
+### `web_fetch`
+
+Fetch the web content at `url` over HTTP `GET` and return it
+as text. Only absolute `http://`/`https://` URLs are accepted; other schemes
+fail before any request is made. HTML is converted to markdown as a no-JS
+reading: `<script>`/`<style>` payloads (inline JavaScript, JSON config
+blobs, CSS) are dropped and `<noscript>` fallback text is kept as visible
+content. Text/JSON/XML bodies (`text/*`, `application/json`,
+`application/xml`, and
+`+json`/`+xml` suffixes) pass through verbatim; the magic-number-sniffed
+media types PNG/JPEG/WebP/GIF/PDF are returned as a Base64 result with a
+typed attachment exactly like a whole-file `read` — complete response only,
+up to 8388608 bytes (8 MiB); a larger response fails with an explicit size
+error, never a truncated attachment. Other binary or non-UTF-8 bodies fail
+with a clear error naming the content type. Returned text (markdown or
+verbatim) is capped at 65536 bytes (64 KiB): longer output is truncated
+with `truncated: true` result metadata and a `Partial result` content
+section, the same vocabulary capped `read`/`bash`/`search` output uses.
+Result metadata carries `url`, `final_url` (after redirects), `status`,
+`content_type`, and `media_type` for media results. The done tool bubble
+renders these response facts as a wrapped `Response` content section
+(`final_url` only when a redirect was followed) instead of truncating
+them into the one-line summary, which keeps only the `truncated` flag.
+Redirects are followed
+normally, but host-scoped `network_request` `target` rules evaluate the
+requested URL only (see `docs/configuration.md`). Requires user approval
+before execution unless a `[tools.web_fetch]` `network_request` rule or
+`--auto-approve-web-fetch` states a verdict.
+
+### `clarify`
+
+Ask the user a question in the TUI and wait for their answer.
+Optional `context` adds supporting detail. Optional `choices` supplies up to
+5 numbered answers; clicking a choice copies it into the input box,
+and `Enter` submits it as the tool result. The TUI renders the question in a
+yellow banner above the footer. This tool is not registered in headless CLI
+mode, so it never appears in the headless `tools` array.
+
+### `spawn_subagent`
+
+Delegate a self-contained `task` (plus a required `label`
+summarising the delegated task for display, and optional `briefing` and
+`agent_type`) to a child agent that runs concurrently with the parent. `label`
+is shown as the tool-call bubble's primary title text — including while
+collapsed. An explicitly chosen `agent_type` qualifies the title instead of
+appearing as a bracketed prop — `Spawn Subagent (local-discovery) …` in the
+root conversation, `Subagent (local-discovery) …` in the drill-in header —
+while the default type is omitted entirely. Only available to agents allowed
+to spawn children (no nesting —
+delegation is one level deep). Requires user approval unless
+`--auto-approve-spawn` is set. The call resolves immediately with an
+admission event containing the `run_id`, `tool_call_id`, `label`, and
+outstanding-run count; this is not the child's outcome. A terminal
+completion event later carries the same correlation fields plus
+`status`, `result`/`error`, `sources`, `outstanding_count`, and `all_done`.
+Completion order is not a reliable ordering signal. The current scheduler
+runs at most one child at a time and queues further spawns, but that is an
+implementation constraint rather than part of the model-facing contract. Its
+description lists every configured agent type and its optional
+model-facing `description`, so the parent can choose a suitable type instead
+of guessing names.
+See
+[Child-agent delegation](#child-agent-delegation).
+
+### `agent_finish`
+
+Only available to child agents (a root agent never sees
+it). Reports `status` (`"success"` or `"failure"`), an optional `result` /
+`error`, and optional `sources`, then ends the child's turn. `status` is
+requested as mandatory but tolerated as missing: if a model omits it, it is
+inferred as `"failure"` when `error` is set and `"success"` otherwise,
+rather than the call being auto-denied for a schema violation. The parent
+receives this through the `spawn_subagent` lifecycle event — it never sees
+the child's own conversation, only the `result`/`error` string, so a child
+should make its `result` self-contained rather than referencing
+"earlier"/"above" content the parent cannot see, and must not fold in
+meta-commentary or self-review narration about its own process (e.g.
+"Self-Correction/Review:") — only the finished deliverable belongs there.
+If a child goes idle
+without calling `agent_finish`, the parent instead receives a synthesized
+result built from the child's last assistant message; if the child hits
+its max-tool-iterations cap first, the parent receives a clear failure
+instead, so it isn't mistaken for the child's own conclusion. A child is
+told its tool-use iteration budget up front so it can pace itself. Provider
+and stream failures are also reported as clear failures rather than being
+synthesized as empty or unstructured results.
 
 ## Child-agent delegation
 
