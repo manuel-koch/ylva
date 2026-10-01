@@ -11,13 +11,14 @@ Ylva is highly customizable to adapt to user needs.
 
 - [x] Global and workspace scoped configurations
 - [x] Customize behavior using `profiles` on global and and workspace scope
-- [x] Layered global/workspace configuration with `ylva init` scaffolding, a `SOUL.md`
-  persona, and trusted `AGENTS.md`/`CLAUDE.md` instruction files folded into the system prompt
+- [x] Layered global/workspace configuration with `ylva init` scaffolding
+- [x] A `SOUL.md` persona, and trusted `AGENTS.md` / `CLAUDE.md` instruction
+      files folded into the system prompt
 - [x] Multiple LLM providers built-in
   - [x] Ollama
   - [x] Openrouter
   - [ ] Copilot
-  - [ ] AnthropicQ
+  - [ ] Anthropic
 - [x] Configurable `engines` ( combination of provider + model + config )
 - [x] Ability to run main and subagent(s)
 - [x] Support LLM calling tools:
@@ -41,3 +42,4 @@ Ylva is highly customizable to adapt to user needs.
   - [x] `/clear` to clear/reset current session
 - [ ] Tracking token usage in current context
 - [ ] Session / context compaction
+- [ ] Support for skills
