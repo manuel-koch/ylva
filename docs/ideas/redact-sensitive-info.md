@@ -8,3 +8,10 @@ We could even try simple heuristics of injected whitespaces, base64 encoding
 or alike. Not sure how much security that would add, because there are
 arbitrary ways one could circumvent this behaviour by introducing custom encoding
 of a sensitive value ( knowing how ylva scans tool result output ).
+
+`.env` may contain normal and sensitive envvars.
+We should find a way to distinct normal from sensitive envvars and only redact
+the sensitive ones!
+
+Maybe we use a toplevel config property `redact_envvar_pattern` that could
+be a regular expression that identifies envvars that are sensitive ?
