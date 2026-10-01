@@ -66,15 +66,22 @@ pub enum WebFetchBackendKind {
 }
 
 impl WebFetchBackendKind {
+    /// Config/wire name of the native backend — the single place this name is
+    /// spelled out.
+    pub const NATIVE_NAME: &'static str = "native";
+
+    /// User-facing label of the native backend.
+    pub const NATIVE_DISPLAY_NAME: &'static str = "Native";
+
     /// Every backend name accepted as `[web_fetch] backend`, in display
     /// order. The error text for an unknown value is built from this list, so
     /// config validation cannot drift from what is actually implemented.
-    pub const SUPPORTED_NAMES: &'static [&'static str] = &["native"];
+    pub const SUPPORTED_NAMES: &'static [&'static str] = &[Self::NATIVE_NAME];
 
     /// The wire/config name of this backend.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Native => "native",
+            Self::Native => Self::NATIVE_NAME,
         }
     }
 
@@ -82,19 +89,16 @@ impl WebFetchBackendKind {
     /// `Web Fetch (…)` tool title).
     pub fn display_name(self) -> &'static str {
         match self {
-            Self::Native => "Native",
+            Self::Native => Self::NATIVE_DISPLAY_NAME,
         }
     }
 
     /// Look up a backend by its config name; `None` for an unsupported name.
     pub fn from_name(name: &str) -> Option<Self> {
-        Self::SUPPORTED_NAMES
-            .iter()
-            .find(|supported| **supported == name)
-            .map(|_| match name {
-                "native" => Self::Native,
-                _ => unreachable!("SUPPORTED_NAMES only lists known backends"),
-            })
+        match name {
+            Self::NATIVE_NAME => Some(Self::Native),
+            _ => None,
+        }
     }
 
     /// The human-readable list of supported names for error messages.
@@ -587,6 +591,19 @@ mod tests {
             WebFetchBackendKind::supported_names_display(),
             "native".to_string()
         );
+    }
+
+    #[test]
+    fn every_supported_name_is_selectable_and_roundtrips() {
+        for supported in WebFetchBackendKind::SUPPORTED_NAMES {
+            let kind = WebFetchBackendKind::from_name(supported)
+                .unwrap_or_else(|| panic!("SUPPORTED_NAMES entry '{supported}' must be usable"));
+            assert_eq!(kind.as_str(), *supported);
+            assert!(
+                !kind.display_name().is_empty(),
+                "'{supported}' must have a user-facing label"
+            );
+        }
     }
 
     #[test]

@@ -34,7 +34,7 @@ pub use agent_type_file::AgentTypeDefinition;
 pub use profile::{profile_config_source_path, ProfileConfig, ToolSandboxConfig};
 pub use provider::{ProviderConfig, ProviderConnectionConfig};
 pub use web_fetch::WebFetchConfig;
-pub use web_search::WebSearchConfig;
+pub use web_search::{SearXngBackendConfig, WebSearchBackendsConfig, WebSearchConfig};
 
 /// File name of a profile's configuration inside its profile directory.
 pub const PROFILE_CONFIG_FILE_NAME: &str = "config.toml";
@@ -180,6 +180,16 @@ pub enum ConfigError {
         path: PathBuf,
         backend: String,
         expected: String,
+    },
+    #[error(
+        "profile config at {} has an invalid {key} for [web_search] backend '{backend}': {reason}",
+        path.display()
+    )]
+    InvalidWebSearchBackendSetting {
+        path: PathBuf,
+        backend: String,
+        key: String,
+        reason: String,
     },
     #[error(
         "profile config at {} has an invalid [web_fetch] backend '{backend}'; expected one of: {expected}",

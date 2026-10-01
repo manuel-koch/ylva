@@ -22,8 +22,8 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::agent::tools::backends::web_search::{
-    backend_for, WebSearchBackend, WebSearchBackendKind, WEB_SEARCH_DEFAULT_RESULT_LIMIT,
-    WEB_SEARCH_MAX_RESULT_LIMIT,
+    backend_for, WebSearchBackend, WebSearchBackendError, WebSearchBackendKind,
+    WEB_SEARCH_DEFAULT_RESULT_LIMIT, WEB_SEARCH_MAX_RESULT_LIMIT,
 };
 
 use super::ConfigError;
@@ -31,6 +31,9 @@ use super::ConfigError;
 /// Internal HTTP timeout for one web-search request (seconds), used when
 /// `[web_search] timeout_secs` is absent.
 const DEFAULT_WEB_SEARCH_TIMEOUT_SECS: u64 = 30;
+
+/// Config key of the SearXNG instance root, named in validation errors.
+const SEARXNG_BASE_URL_KEY: &str = "[web_search.backends.searxng] base_url";
 
 fn default_backend() -> String {
     WebSearchBackendKind::DuckDuckGo.as_str().to_string()
@@ -48,8 +51,8 @@ fn default_result_limit() -> usize {
 ///
 /// Every field has an explicit default (`backend` = `"duckduckgo"`,
 /// `timeout_secs` = [`DEFAULT_WEB_SEARCH_TIMEOUT_SECS`], `result_limit` =
-/// [`WEB_SEARCH_DEFAULT_RESULT_LIMIT`]), so an absent section behaves
-/// exactly like the written-out form.
+/// [`WEB_SEARCH_DEFAULT_RESULT_LIMIT`], `backends` = no per-backend
+/// settings), so an absent section behaves exactly like the written-out form.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct WebSearchConfig {
     /// Search backend serving the `web_search` tool. Validated at config
@@ -67,6 +70,31 @@ pub struct WebSearchConfig {
     /// disagree with the tool schema.
     #[serde(default = "default_result_limit")]
     pub result_limit: usize,
+    /// Per-backend settings under `[web_search.backends.<name>]`. A table for
+    /// a backend that is *not* selected is still validated, but only the
+    /// selected backend's table is required to be present.
+    #[serde(default)]
+    pub backends: WebSearchBackendsConfig,
+}
+
+/// The `[web_search.backends]` table: nested per-backend settings, one
+/// sub-table per selectable [`WebSearchBackendKind`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct WebSearchBackendsConfig {
+    /// `[web_search.backends.searxng]`; present only when the profile
+    /// configures a SearXNG instance.
+    #[serde(default)]
+    pub searxng: Option<SearXngBackendConfig>,
+}
+
+/// The `[web_search.backends.searxng]` table.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SearXngBackendConfig {
+    /// Root URL of the SearXNG instance (e.g. `https://searx.example.org`).
+    /// Required — and non-empty — when `backend = "searxng"`; a value that is
+    /// present must always be a parsable `http(s)` URL.
+    #[serde(default)]
+    pub base_url: Option<String>,
 }
 
 impl Default for WebSearchConfig {
@@ -75,6 +103,7 @@ impl Default for WebSearchConfig {
             backend: default_backend(),
             timeout_secs: default_timeout_secs(),
             result_limit: default_result_limit(),
+            backends: WebSearchBackendsConfig::default(),
         }
     }
 }
@@ -91,7 +120,69 @@ impl WebSearchConfig {
                 expected: WebSearchBackendKind::supported_names_display(),
             });
         }
-        Ok(())
+        self.validate_searxng_backend(path)
+    }
+
+    /// Validate the `[web_search.backends.searxng]` table against the
+    /// selected backend.
+    ///
+    /// The *selected* backend must have a usable `base_url`; a table that is
+    /// present but unselected is only checked for a parsable value (an empty
+    /// string is tolerated there, because the setting is unused).
+    fn validate_searxng_backend(&self, path: &Path) -> Result<(), ConfigError> {
+        let selected_searxng = self.backend == WebSearchBackendKind::SearXng.as_str();
+        let Some(table) = self.backends.searxng.as_ref() else {
+            return if selected_searxng {
+                Err(ConfigError::InvalidWebSearchBackendSetting {
+                    path: path.to_path_buf(),
+                    backend: WebSearchBackendKind::SearXng.as_str().to_string(),
+                    key: "[web_search.backends.searxng]".to_string(),
+                    reason: "the table is required when backend = \"searxng\" selects it"
+                        .to_string(),
+                })
+            } else {
+                Ok(())
+            };
+        };
+        let Some(base_url) = table.base_url.as_deref() else {
+            return if selected_searxng {
+                Err(ConfigError::InvalidWebSearchBackendSetting {
+                    path: path.to_path_buf(),
+                    backend: WebSearchBackendKind::SearXng.as_str().to_string(),
+                    key: SEARXNG_BASE_URL_KEY.to_string(),
+                    reason: "must name the SearXNG instance".to_string(),
+                })
+            } else {
+                Ok(())
+            };
+        };
+        if base_url.trim().is_empty() {
+            return if selected_searxng {
+                Err(ConfigError::InvalidWebSearchBackendSetting {
+                    path: path.to_path_buf(),
+                    backend: WebSearchBackendKind::SearXng.as_str().to_string(),
+                    key: SEARXNG_BASE_URL_KEY.to_string(),
+                    reason: "must be a non-empty URL".to_string(),
+                })
+            } else {
+                Ok(())
+            };
+        }
+        match reqwest::Url::parse(base_url.trim()) {
+            Ok(url) if matches!(url.scheme(), "http" | "https") => Ok(()),
+            Ok(url) => Err(ConfigError::InvalidWebSearchBackendSetting {
+                path: path.to_path_buf(),
+                backend: WebSearchBackendKind::SearXng.as_str().to_string(),
+                key: SEARXNG_BASE_URL_KEY.to_string(),
+                reason: format!("must use the http or https scheme, got '{}'", url.scheme()),
+            }),
+            Err(error) => Err(ConfigError::InvalidWebSearchBackendSetting {
+                path: path.to_path_buf(),
+                backend: WebSearchBackendKind::SearXng.as_str().to_string(),
+                key: SEARXNG_BASE_URL_KEY.to_string(),
+                reason: format!("must be a parsable URL: {error}"),
+            }),
+        }
     }
 
     /// The internal HTTP timeout for one request. A configured `0` would make
@@ -101,8 +192,18 @@ impl WebSearchConfig {
     }
 
     /// Build the configured backend instance.
-    pub(crate) fn build_backend(&self) -> Arc<dyn WebSearchBackend> {
-        backend_for(&self.backend, self.http_timeout())
+    ///
+    /// An `Err` here is only reachable when `validate()` was skipped — profile
+    /// load always validates first, so `default_registry` turns the error into
+    /// an explicit invariant panic rather than falling back to another
+    /// backend.
+    pub(crate) fn build_backend(&self) -> Result<Arc<dyn WebSearchBackend>, WebSearchBackendError> {
+        let searxng_base_url = self
+            .backends
+            .searxng
+            .as_ref()
+            .and_then(|table| table.base_url.as_deref());
+        backend_for(&self.backend, searxng_base_url, self.http_timeout())
     }
 
     /// The default result count for calls omitting `limit`, capped at the
@@ -122,6 +223,7 @@ mod tests {
         assert_eq!(config.backend, "duckduckgo");
         assert_eq!(config.timeout_secs, 30);
         assert_eq!(config.result_limit, WEB_SEARCH_DEFAULT_RESULT_LIMIT);
+        assert_eq!(config.backends.searxng, None);
     }
 
     #[test]
@@ -141,6 +243,21 @@ mod tests {
     }
 
     #[test]
+    fn nested_searxng_table_deserializes() {
+        let config: WebSearchConfig = toml::from_str(
+            "backend = \"searxng\"\n\n[backends.searxng]\nbase_url = \"https://searx.example.org\"\n",
+        )
+        .expect("the nested table parses");
+        assert_eq!(config.backend, "searxng");
+        assert_eq!(
+            config.backends.searxng,
+            Some(SearXngBackendConfig {
+                base_url: Some("https://searx.example.org".to_string())
+            })
+        );
+    }
+
+    #[test]
     fn unknown_backend_is_rejected_naming_the_config_path() {
         let config = WebSearchConfig {
             backend: "startpage".to_string(),
@@ -153,8 +270,8 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("startpage"), "{message}");
         assert!(
-            message.contains("duckduckgo"),
-            "names the accepted values: {message}"
+            message.contains("duckduckgo") && message.contains("searxng"),
+            "names every accepted value: {message}"
         );
         assert!(
             message.contains("/home/user/.ylva/profiles/default/config.toml"),
@@ -167,6 +284,128 @@ mod tests {
         WebSearchConfig::default()
             .validate(Path::new("config.toml"))
             .expect("the default backend is supported");
+    }
+
+    #[test]
+    fn searxng_without_the_table_is_rejected_naming_path_and_key() {
+        let config = WebSearchConfig {
+            backend: "searxng".to_string(),
+            ..WebSearchConfig::default()
+        };
+        let path = Path::new("/home/user/.ylva/profiles/default/config.toml");
+        let error = config
+            .validate(path)
+            .expect_err("searxng needs its instance table");
+        let message = error.to_string();
+        assert!(
+            matches!(
+                &error,
+                ConfigError::InvalidWebSearchBackendSetting { backend, key, .. }
+                    if backend == "searxng" && key.contains("backends.searxng")
+            ),
+            "{message}"
+        );
+        assert!(
+            message.contains("/home/user/.ylva/profiles/default/config.toml"),
+            "names the config path: {message}"
+        );
+    }
+
+    #[test]
+    fn searxng_without_base_url_is_rejected_naming_path_and_key() {
+        let config: WebSearchConfig =
+            toml::from_str("backend = \"searxng\"\n\n[backends.searxng]\n")
+                .expect("the table parses");
+        let path = Path::new("config.toml");
+        let error = config
+            .validate(path)
+            .expect_err("searxng needs its instance URL");
+        let message = error.to_string();
+        assert!(
+            matches!(
+                &error,
+                ConfigError::InvalidWebSearchBackendSetting { key, .. }
+                    if key.contains("base_url")
+            ),
+            "{message}"
+        );
+        assert!(message.contains("config.toml"), "{message}");
+        assert!(message.contains("searxng"), "{message}");
+    }
+
+    #[test]
+    fn searxng_with_an_unusable_base_url_is_rejected_naming_the_reason() {
+        let cases = [
+            (
+                "[backends.searxng]\nbase_url = \"\"\n",
+                "non-empty",
+                "an empty URL names no instance",
+            ),
+            (
+                "[backends.searxng]\nbase_url = \"not a url\"\n",
+                "parsable URL",
+                "an unparsable URL is rejected",
+            ),
+            (
+                "[backends.searxng]\nbase_url = \"ftp://searx.example.org\"\n",
+                "http or https scheme",
+                "a non-http scheme is rejected",
+            ),
+        ];
+        for (table, reason_fragment, case) in cases {
+            let config: WebSearchConfig =
+                toml::from_str(&format!("backend = \"searxng\"\n\n{table}"))
+                    .expect("the table parses");
+            let error = match config.validate(Path::new("config.toml")) {
+                Ok(()) => panic!("{case} must be rejected"),
+                Err(error) => error,
+            };
+            let message = error.to_string();
+            assert!(
+                matches!(
+                    &error,
+                    ConfigError::InvalidWebSearchBackendSetting { key, .. }
+                        if key.contains("base_url")
+                ),
+                "{case}: {message}"
+            );
+            assert!(
+                message.contains(reason_fragment),
+                "{case}: the reason is named: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn unselected_searxng_table_is_still_validated() {
+        let config: WebSearchConfig =
+            toml::from_str("\n[backends.searxng]\nbase_url = \"not a url\"\n")
+                .expect("the table parses");
+        let error = config
+            .validate(Path::new("config.toml"))
+            .expect_err("a present but unselected table must still be parsable");
+        assert!(error.to_string().contains("parsable URL"), "{error}");
+    }
+
+    #[test]
+    fn unselected_searxng_table_with_a_valid_url_validates() {
+        let config: WebSearchConfig = toml::from_str(
+            "backend = \"duckduckgo\"\n\n[backends.searxng]\nbase_url = \"https://searx.example.org\"\n",
+        )
+        .expect("the table parses");
+        config
+            .validate(Path::new("config.toml"))
+            .expect("a valid unselected table is accepted");
+        assert_eq!(config.backend, "duckduckgo", "duckduckgo is untouched");
+    }
+
+    #[test]
+    fn duckduckgo_ignores_an_empty_unselected_searxng_base_url() {
+        let config: WebSearchConfig =
+            toml::from_str("\n[backends.searxng]\nbase_url = \"\"\n").expect("the table parses");
+        config
+            .validate(Path::new("config.toml"))
+            .expect("an unused empty value is tolerated");
     }
 
     #[test]
@@ -194,7 +433,57 @@ mod tests {
 
     #[test]
     fn build_backend_returns_the_configured_backend() {
-        let backend = WebSearchConfig::default().build_backend();
+        let backend = WebSearchConfig::default()
+            .build_backend()
+            .expect("the default config always builds");
         assert!(format!("{backend:?}").contains("DuckDuckGoBackend"));
+
+        let searxng: WebSearchConfig = toml::from_str(
+            "backend = \"searxng\"\n\n[backends.searxng]\nbase_url = \"https://searx.example.org/\"\n",
+        )
+        .expect("the table parses");
+        let backend = searxng.build_backend().expect("a valid config builds");
+        assert!(
+            format!("{backend:?}").contains("SearXngBackend"),
+            "the configured backend is built, not substituted: {backend:?}"
+        );
+    }
+
+    #[test]
+    fn build_backend_never_substitutes_a_backend_for_an_invalid_state() {
+        // Hand-built states that `validate()` would reject at profile load.
+        let missing_table = WebSearchConfig {
+            backend: "searxng".to_string(),
+            ..WebSearchConfig::default()
+        };
+        assert!(
+            missing_table
+                .build_backend()
+                .is_err_and(|error| error.to_string().contains("base_url")),
+            "searxng without base_url must not yield a different backend"
+        );
+
+        let missing_url = WebSearchConfig {
+            backend: "searxng".to_string(),
+            backends: WebSearchBackendsConfig {
+                searxng: Some(SearXngBackendConfig { base_url: None }),
+            },
+            ..WebSearchConfig::default()
+        };
+        assert!(
+            missing_url.build_backend().is_err(),
+            "an empty base_url must not yield a different backend"
+        );
+
+        let unsupported = WebSearchConfig {
+            backend: "startpage".to_string(),
+            ..WebSearchConfig::default()
+        };
+        assert!(
+            unsupported
+                .build_backend()
+                .is_err_and(|error| { error.to_string().contains("duckduckgo, searxng") }),
+            "an unknown backend must not yield a different backend"
+        );
     }
 }

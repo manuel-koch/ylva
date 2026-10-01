@@ -4,7 +4,7 @@ Allow configuring web-search backend implementations:
 
 - What external services could we use for that ?
   - DuckDuckGo (implemented)
-  - SearXNG
+  - SearXNG (implemented)
   - StartPage
   - alternatives ?
 

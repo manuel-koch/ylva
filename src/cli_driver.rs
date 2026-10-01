@@ -259,22 +259,33 @@ impl ConsoleApp {
     }
 }
 
+/// Registry configuration for the CLI's display/approval registry.
+///
+/// `run_cli_to_with_title` renders tool titles and approval decisions from
+/// this registry while the agent executes through the registry
+/// [`AgentFactory`] builds. Both must receive the profile's `[web_search]`
+/// and `[web_fetch]` sections, otherwise the rendered title names a
+/// different backend than the one the agent actually calls.
+fn display_registry_config(profile: &ProfileConfig) -> ToolRegistryConfig {
+    let tool_sandbox_rules = profile
+        .tools
+        .iter()
+        .map(|(tool_name, tool_config)| (tool_name.clone(), tool_config.rules.clone()))
+        .collect();
+    ToolRegistryConfig {
+        tool_sandbox_rules,
+        web_search: profile.web_search.clone(),
+        web_fetch: profile.web_fetch.clone(),
+        ..ToolRegistryConfig::default()
+    }
+}
+
 impl App for ConsoleApp {
     async fn run(mut self) -> anyhow::Result<u8> {
         let sandbox = std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new()));
-        let tool_sandbox_rules = self
-            .profile
-            .tools
-            .iter()
-            .map(|(tool_name, tool_config)| (tool_name.clone(), tool_config.rules.clone()))
-            .collect();
         let registry = Arc::new(default_registry(
             sandbox,
-            ToolRegistryConfig {
-                tool_sandbox_rules,
-                web_fetch: self.profile.web_fetch.clone(),
-                ..ToolRegistryConfig::default()
-            },
+            display_registry_config(&self.profile),
         ));
         let (agent, ui_rx) = self
             .factory
@@ -1121,6 +1132,35 @@ mod tests {
 
     fn read_tool() -> Arc<dyn Tool> {
         Arc::new(ReadTool::default())
+    }
+
+    #[test]
+    fn display_registry_titles_the_backend_the_profile_configures() {
+        let profile = ProfileConfig {
+            web_search: crate::config::WebSearchConfig {
+                backend: "searxng".to_string(),
+                backends: crate::config::WebSearchBackendsConfig {
+                    searxng: Some(crate::config::SearXngBackendConfig {
+                        base_url: Some("https://searx.example.org".to_string()),
+                    }),
+                },
+                ..crate::config::WebSearchConfig::default()
+            },
+            ..ProfileConfig::default()
+        };
+
+        let registry = default_registry(
+            std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new())),
+            display_registry_config(&profile),
+        );
+        let web_search = registry
+            .get(crate::agent::tools::web_search::WebSearchTool::NAME)
+            .expect("web_search is part of the CLI tool set");
+        assert_eq!(
+            web_search.title(),
+            "Web Search (SearXNG)",
+            "the rendered title must name the backend the profile selects"
+        );
     }
 
     #[test]

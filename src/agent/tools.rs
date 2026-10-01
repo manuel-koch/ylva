@@ -775,12 +775,21 @@ pub fn default_registry(
     // sandbox context: that context carries its `[tools.web_search]`
     // `network_request` rules and the `--auto-approve-web-search`
     // catch-all (see `SandboxContext::check_network_request`).
+    //
+    // Backend construction is fallible but never fails here: profile load
+    // validated `[web_search]` first, so a construction error would be an
+    // invariant violation. Panicking on it keeps a misconfigured backend
+    // loud instead of silently substituting another one.
     if allowed
         .iter()
         .any(|name| name == web_search::WebSearchTool::NAME)
     {
+        let web_search_backend = config
+            .web_search
+            .build_backend()
+            .expect("web search backend builds from a profile config validated at load");
         registry.register(Arc::new(web_search::WebSearchTool::new(
-            config.web_search.build_backend(),
+            web_search_backend,
             &config.web_search,
             sandbox_context_for(web_search::WebSearchTool::NAME, AutoApproveTool::WebSearch),
         )));

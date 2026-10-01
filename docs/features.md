@@ -375,17 +375,19 @@ with provider-aware input for explicit Base64 `read` results added on top:
   present in result metadata when capped). Paths inside the
   workspace are auto-approved; paths outside require user approval.
 - **web_search**: Search the web for `terms` and return ranked results from
-  the configured search backend (`docs/configuration.md`). `text` lists each
-  hit as a numbered title with its URL; the structured result metadata
-  carries one `{title, url, snippet}` entry per hit, with snippets
-  whitespace-normalized and truncated to 300 characters. Optional `limit`
-  caps the number of results (schema maximum 20; omit it for the configured
-  default — `[web_search] result_limit`, 15 unless overridden). A search
-  with no recognizable results returns an empty result list; a backend
-  block/challenge page or unparseable response fails with an error instead
-  of a silently-empty answer. Requires user approval before execution
-  unless a `[tools.web_search]` `network_request` rule (optionally scoped
-  to the backend endpoint's `scheme://host` with `target`, see
+  the configured search backend (`docs/configuration.md`): `duckduckgo` (the
+  default — DuckDuckGo's HTML endpoint) or `searxng`, which requires a
+  `[web_search.backends.searxng] base_url` naming the instance to query.
+  `text` lists each hit as a numbered title with its URL; the structured
+  result metadata carries one `{title, url, snippet}` entry per hit, with
+  snippets whitespace-normalized and truncated to 300 characters. Optional
+  `limit` caps the number of results (schema maximum 20; omit it for the
+  configured default — `[web_search] result_limit`, 15 unless overridden). A
+  search with no recognizable results returns an empty result list; a
+  backend block/challenge page or unparseable response fails with an error
+  instead of a silently-empty answer. Requires user approval before
+  execution unless a `[tools.web_search]` `network_request` rule (optionally
+  scoped to the backend endpoint's `scheme://host` with `target`, see
   `docs/configuration.md`) or `--auto-approve-web-search` states a verdict.
 - **web_fetch**: Fetch the web content at `url` over HTTP `GET` and return it
   as text. Only absolute `http://`/`https://` URLs are accepted; other schemes

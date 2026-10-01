@@ -2280,15 +2280,29 @@ rules = [
     #[test]
     fn the_e2e_custom_profile_keeps_loading_with_target_rules() {
         // tests/e2e/custom/profiles/default/config.toml is a live e2e fixture;
-        // its [tools.web_fetch] `target` rule must parse and validate.
+        // its [tools.web_fetch] `target` rule must parse and validate, and its
+        // `${…}`-interpolated [web_search] values must resolve to the defaults
+        // the e2e scripts ship in the profile's `.env`.
         let profiles_root =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/e2e/custom/profiles");
         let environment = HashMap::from([
             ("OLLAMA_CLOUD_API_KEY".to_string(), "test-key".to_string()),
             ("OPENROUTER_API_KEY".to_string(), "test-key".to_string()),
+            (
+                "YLVA_WEB_SEARCH_BACKEND".to_string(),
+                "duckduckgo".to_string(),
+            ),
+            (
+                "SEARXNG_BASE_URL".to_string(),
+                "http://localhost:20081".to_string(),
+            ),
         ]);
         let profile = ProfileConfig::load_with_environment(&profiles_root, "default", &environment)
             .expect("the e2e custom profile must keep loading");
+        assert_eq!(
+            profile.web_search.backend, "duckduckgo",
+            "the fixture defaults to the duckduckgo backend"
+        );
         let rules = &profile
             .tools
             .get("web_fetch")
@@ -2418,7 +2432,62 @@ result_limit = 4
             ConfigError::InvalidWebSearchBackend { backend, .. } if backend == "startpage"
         ));
         assert!(message.contains("startpage"), "{message}");
-        assert!(message.contains("duckduckgo"), "{message}");
+        assert!(
+            message.contains("duckduckgo, searxng"),
+            "names both accepted values: {message}"
+        );
+        assert!(
+            message.contains("config.toml"),
+            "the error must name the config path: {message}"
+        );
+    }
+
+    #[test]
+    fn searxng_web_search_section_loads_its_instance_url() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "searxng-web-search",
+            r#"
+[web_search]
+backend = "searxng"
+
+[web_search.backends.searxng]
+base_url = "https://searx.example.org"
+"#,
+        );
+
+        let profile =
+            ProfileConfig::load(temp.path(), "searxng-web-search").expect("the fixture loads");
+        assert_eq!(profile.web_search.backend, "searxng");
+        assert_eq!(
+            profile.web_search.backends.searxng,
+            Some(crate::config::SearXngBackendConfig {
+                base_url: Some("https://searx.example.org".to_string())
+            })
+        );
+    }
+
+    #[test]
+    fn searxng_web_search_backend_without_an_instance_url_is_rejected() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "searxng-without-instance",
+            "[web_search]\nbackend = \"searxng\"\n",
+        );
+
+        let error = ProfileConfig::load(temp.path(), "searxng-without-instance")
+            .expect_err("a missing instance table must fail profile loading");
+        let message = error.to_string();
+        assert!(matches!(
+            error,
+            ConfigError::InvalidWebSearchBackendSetting { backend, .. } if backend == "searxng"
+        ));
+        assert!(
+            message.contains("backends.searxng"),
+            "names the config key: {message}"
+        );
         assert!(
             message.contains("config.toml"),
             "the error must name the config path: {message}"

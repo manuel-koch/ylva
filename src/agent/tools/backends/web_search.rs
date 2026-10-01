@@ -19,7 +19,9 @@
 //! so tests pass a stub and no unit/integration test touches the network
 //! (see `docs/known-test-issues.md` — network side effects must be
 //! caller-injected). Each backend kind lives in its own implementation
-//! module ([`duckduckgo`] today); [`backend_for`] selects one by config name.
+//! module ([`duckduckgo`], [`searxng`]); [`backend_for`] builds the one named
+//! by the config, or returns an error — it never substitutes a different
+//! backend for the configured one.
 //!
 //! Every backend fails fast: a transport error, a non-success HTTP status
 //! (including bot-detection/captcha responses), or an unparseable body is a
@@ -34,8 +36,10 @@ use serde::{Deserialize, Serialize};
 
 /// Implementation modules, one per [`WebSearchBackend`] backend kind.
 pub mod duckduckgo;
+pub mod searxng;
 
 pub use duckduckgo::DuckDuckGoBackend;
+pub use searxng::SearXngBackend;
 
 /// Result count used when a `web_search` call omits `limit`.
 pub const WEB_SEARCH_DEFAULT_RESULT_LIMIT: usize = 15;
@@ -55,18 +59,33 @@ pub const WEB_SEARCH_SNIPPET_MAX_CHARS: usize = 300;
 pub enum WebSearchBackendKind {
     /// DuckDuckGo's HTML endpoint (`html.duckduckgo.com`).
     DuckDuckGo,
+    /// A SearXNG instance (`[web_search.backends.searxng] base_url`).
+    SearXng,
 }
 
 impl WebSearchBackendKind {
+    /// Config/wire name of the DuckDuckGo backend — the single place this
+    /// name is spelled out.
+    pub const DUCKDUCKGO_NAME: &'static str = "duckduckgo";
+    /// Config/wire name of the SearXNG backend.
+    pub const SEARXNG_NAME: &'static str = "searxng";
+
+    /// User-facing label of the DuckDuckGo backend.
+    pub const DUCKDUCKGO_DISPLAY_NAME: &'static str = "DuckDuckGo";
+    /// User-facing label of the SearXNG backend.
+    pub const SEARXNG_DISPLAY_NAME: &'static str = "SearXNG";
+
     /// Every backend name accepted as `[web_search] backend`, in display
     /// order. The error text for an unknown value is built from this list, so
     /// config validation cannot drift from what is actually implemented.
-    pub const SUPPORTED_NAMES: &'static [&'static str] = &["duckduckgo"];
+    pub const SUPPORTED_NAMES: &'static [&'static str] =
+        &[Self::DUCKDUCKGO_NAME, Self::SEARXNG_NAME];
 
     /// The wire/config name of this backend.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::DuckDuckGo => "duckduckgo",
+            Self::DuckDuckGo => Self::DUCKDUCKGO_NAME,
+            Self::SearXng => Self::SEARXNG_NAME,
         }
     }
 
@@ -74,19 +93,18 @@ impl WebSearchBackendKind {
     /// `Web Search (…)` tool title).
     pub fn display_name(self) -> &'static str {
         match self {
-            Self::DuckDuckGo => "DuckDuckGo",
+            Self::DuckDuckGo => Self::DUCKDUCKGO_DISPLAY_NAME,
+            Self::SearXng => Self::SEARXNG_DISPLAY_NAME,
         }
     }
 
     /// Look up a backend by its config name; `None` for an unsupported name.
     pub fn from_name(name: &str) -> Option<Self> {
-        Self::SUPPORTED_NAMES
-            .iter()
-            .find(|supported| **supported == name)
-            .map(|_| match name {
-                "duckduckgo" => Self::DuckDuckGo,
-                _ => unreachable!("SUPPORTED_NAMES only lists known backends"),
-            })
+        match name {
+            Self::DUCKDUCKGO_NAME => Some(Self::DuckDuckGo),
+            Self::SEARXNG_NAME => Some(Self::SearXng),
+            _ => None,
+        }
     }
 
     /// The human-readable list of supported names for error messages.
@@ -121,6 +139,11 @@ pub enum WebSearchError {
     /// captcha pages, `429` rate limits, `5xx` errors).
     #[error("web search backend responded with HTTP {status}")]
     Status { status: u16 },
+    /// The backend answered with a non-success HTTP status that carries a
+    /// diagnosis worth passing on — currently SearXNG's `403` for instances
+    /// that disabled JSON output.
+    #[error("web search backend responded with HTTP {status}: {hint}")]
+    StatusWithHint { status: u16, hint: String },
     /// The response body was not the expected search-results markup — e.g.
     /// DuckDuckGo's bot-detection challenge page, which answers with HTTP
     /// `202`.
@@ -146,22 +169,55 @@ pub trait WebSearchBackend: Send + Sync + std::fmt::Debug {
     fn network_target(&self) -> String;
 }
 
+/// Why [`backend_for`] could not build the configured backend.
+///
+/// Construction only ever yields the configured backend or one of these —
+/// there is no fallback to a different backend.
+#[derive(Debug, thiserror::Error)]
+pub enum WebSearchBackendError {
+    /// `[web_search] backend` names a backend this build does not implement.
+    /// Config validation rejects the value first; this is the defensive path.
+    #[error("unsupported web search backend '{backend_name}'; supported: {supported}")]
+    UnsupportedBackend {
+        backend_name: String,
+        supported: String,
+    },
+    /// `[web_search] backend = "searxng"` without the configuration key its
+    /// instance URL lives in.
+    #[error("web search backend 'searxng' requires {missing_key} to name the SearXNG instance")]
+    MissingBackendSetting { missing_key: String },
+}
+
 /// Build the backend named by `backend_name`.
 ///
-/// `[web_search] backend` is validated at config load, so an unknown name is
-/// a defensive-only path: registration must never fail over it. Returns an
-/// `Arc` so the caller can hand the instance straight to the tool.
-pub fn backend_for(backend_name: &str, http_timeout: Duration) -> Arc<dyn WebSearchBackend> {
+/// `[web_search] backend` is validated at config load, so an error here is a
+/// defensive-only path: registration must never fail over it to a different
+/// backend. Returns an `Arc` so the caller can hand the instance straight to
+/// the tool.
+pub fn backend_for(
+    backend_name: &str,
+    base_url: Option<&str>,
+    http_timeout: Duration,
+) -> Result<Arc<dyn WebSearchBackend>, WebSearchBackendError> {
     match WebSearchBackendKind::from_name(backend_name) {
-        Some(WebSearchBackendKind::DuckDuckGo) => Arc::new(DuckDuckGoBackend::new(http_timeout)),
-        None => {
-            tracing::error!(
-                backend = backend_name,
-                supported = WebSearchBackendKind::SUPPORTED_NAMES.join(", "),
-                "unsupported web search backend; falling back to duckduckgo"
-            );
-            Arc::new(DuckDuckGoBackend::new(http_timeout))
+        Some(WebSearchBackendKind::DuckDuckGo) => {
+            Ok(Arc::new(DuckDuckGoBackend::new(http_timeout)))
         }
+        Some(WebSearchBackendKind::SearXng) => {
+            let Some(base_url) = base_url.filter(|value| !value.trim().is_empty()) else {
+                return Err(WebSearchBackendError::MissingBackendSetting {
+                    missing_key: "[web_search.backends.searxng].base_url".to_string(),
+                });
+            };
+            Ok(Arc::new(SearXngBackend::with_base_url(
+                base_url.trim(),
+                http_timeout,
+            )))
+        }
+        None => Err(WebSearchBackendError::UnsupportedBackend {
+            backend_name: backend_name.to_string(),
+            supported: WebSearchBackendKind::supported_names_display(),
+        }),
     }
 }
 
@@ -241,24 +297,64 @@ mod tests {
             WebSearchBackendKind::from_name("duckduckgo"),
             Some(WebSearchBackendKind::DuckDuckGo)
         );
-        assert_eq!(WebSearchBackendKind::from_name("searxng"), None);
+        assert_eq!(
+            WebSearchBackendKind::from_name("searxng"),
+            Some(WebSearchBackendKind::SearXng)
+        );
+        assert_eq!(WebSearchBackendKind::from_name("startpage"), None);
         assert_eq!(WebSearchBackendKind::DuckDuckGo.as_str(), "duckduckgo");
+        assert_eq!(WebSearchBackendKind::SearXng.as_str(), "searxng");
         assert_eq!(
             WebSearchBackendKind::DuckDuckGo.display_name(),
             "DuckDuckGo"
         );
+        assert_eq!(WebSearchBackendKind::SearXng.display_name(), "SearXNG");
         assert_eq!(
             WebSearchBackendKind::supported_names_display(),
-            "duckduckgo"
+            "duckduckgo, searxng"
         );
     }
 
     #[test]
+    fn every_supported_name_is_selectable_and_roundtrips() {
+        for supported in WebSearchBackendKind::SUPPORTED_NAMES {
+            let kind = WebSearchBackendKind::from_name(supported)
+                .unwrap_or_else(|| panic!("SUPPORTED_NAMES entry '{supported}' must be usable"));
+            assert_eq!(kind.as_str(), *supported);
+            assert!(
+                !kind.display_name().is_empty(),
+                "'{supported}' must have a user-facing label"
+            );
+        }
+    }
+
+    #[test]
     fn backend_for_builds_the_configured_backend() {
-        let backend = backend_for("duckduckgo", Duration::from_secs(1));
-        assert!(format!("{backend:?}").contains("DuckDuckGoBackend"));
-        // Defensive fallback for an unsupported name (config load rejects it).
-        let fallback = backend_for("something-else", Duration::from_secs(1));
-        assert!(format!("{fallback:?}").contains("DuckDuckGoBackend"));
+        let duckduckgo = backend_for("duckduckgo", None, Duration::from_secs(1))
+            .expect("the default backend always builds");
+        assert!(format!("{duckduckgo:?}").contains("DuckDuckGoBackend"));
+
+        let searxng = backend_for(
+            "searxng",
+            Some("https://searx.example.org"),
+            Duration::from_secs(1),
+        )
+        .expect("searxng with an instance URL builds");
+        assert!(format!("{searxng:?}").contains("SearXngBackend"));
+
+        let unsupported = backend_for("something-else", None, Duration::from_secs(1))
+            .expect_err("an unsupported name must not build a substituted backend");
+        assert!(
+            unsupported.to_string().contains("something-else")
+                && unsupported.to_string().contains("duckduckgo, searxng"),
+            "{unsupported}"
+        );
+
+        let missing_url = backend_for("searxng", None, Duration::from_secs(1))
+            .expect_err("searxng without base_url must not build a substituted backend");
+        assert!(
+            missing_url.to_string().contains("base_url"),
+            "the error names the missing key: {missing_url}"
+        );
     }
 }

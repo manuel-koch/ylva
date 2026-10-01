@@ -395,9 +395,15 @@ The `[web_search]` table configures the `web_search` tool (see
 
 | Field | Type | Description |
 |---|---|---|
-| `backend` | string | Search backend serving `web_search`. Only `"duckduckgo"` (DuckDuckGo's HTML endpoint) is supported today; an unknown value is a hard config error naming the accepted values. |
+| `backend` | string | Search backend serving `web_search`: `"duckduckgo"` (default — DuckDuckGo's HTML endpoint) or `"searxng"` (the instance configured under `[web_search.backends.searxng]`). An unknown value is a hard config error naming the accepted values. |
 | `timeout_secs` | number | Internal HTTP timeout for one search request, in seconds (default `30`, floored at `1`). The tool's outer execution timeout is this value plus a small grace period, so the backend's own timeout fires first. |
 | `result_limit` | number | Result count a `web_search` call returns when it omits `limit` (default `15`). Clamped to `1..=20` so config can never disagree with the tool schema's maximum. |
+
+Per-backend settings live in nested tables under `[web_search.backends]`:
+
+| Field | Type | Description |
+|---|---|---|
+| `backends.searxng.base_url` | string | Root URL of the SearXNG instance (e.g. `https://searx.example.org`). Required — and non-empty — when `backend = "searxng"`; `${ENV_VAR}` interpolation applies as to every other string. |
 
 ```toml
 [web_search]
@@ -407,6 +413,53 @@ result_limit = 15
 ```
 
 An absent `[web_search]` table behaves exactly like the written-out default.
+
+Selecting SearXNG additionally requires its instance root:
+
+```toml
+[web_search]
+backend = "searxng"
+
+[web_search.backends.searxng]
+base_url = "https://searx.example.org"
+```
+
+Selecting `searxng` without the table, without `base_url`, or with a value
+that does not parse as an `http(s)` URL is a hard config error naming the
+config path, the backend, the key, and the reason. Ylva ships no default
+instance and never substitutes another backend for a misconfigured one. A
+`[web_search.backends.searxng]` table that is present while `duckduckgo` is
+selected is validated but otherwise unused.
+
+#### Running your own SearXNG instance
+
+SearXNG's JSON output is disabled in its shipped defaults, so an instance
+that does not enable it answers HTTP `403` — ylva reports that as an error
+stating that `format=json` is likely disabled. Enable it in the instance's
+`settings.yml`:
+
+```yaml
+search:
+  formats: [html, json]
+```
+
+A minimal `docker-compose.yml` for a local instance:
+
+```yaml
+services:
+  searxng:
+    image: searxng/searxng
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./settings.yml:/etc/searxng/settings.yml:ro
+    environment:
+      SEARXNG_BASE_URL: http://localhost:8080/
+```
+
+Instance-side limiter realities: the default budgets pace ylva's search
+traffic fine, and `pass_ip`/`trusted_proxies` in the instance's `limiter.toml`
+are the administrator's levers for callers that need more headroom.
 
 ### Web fetch configuration
 
@@ -705,7 +758,9 @@ rejected (omit `target` to match every call), and an invalid pattern is a
 hard startup error. `target` is only valid on a `network_request` rule; on
 any other rule kind it is a hard startup error. Which key a call is matched
 against: `web_fetch` uses the requested URL's key, `web_search` its
-configured backend endpoint's key (e.g. `https://html.duckduckgo.com`).
+configured backend endpoint's key — `https://html.duckduckgo.com` for the
+default backend, the configured instance authority (e.g.
+`https://searx.example.org`) for `searxng`.
 
 `verdict`/`reason` behave like every other named rule, rules are evaluated
 in list order with last-match-wins, and `--auto-approve-web-search`/

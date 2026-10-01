@@ -113,21 +113,21 @@ Key constraints:
 
 ## Implementation Plan
 
-1. [ ] Implement the backend module `src/agent/tools/backends/web_search/searxng.rs`
+1. [x] Implement the backend module `src/agent/tools/backends/web_search/searxng.rs`
    and declare it in the seam (`pub mod searxng;` + `pub use searxng::SearXngBackend;`
    next to the `duckduckgo` declarations in `backends/web_search.rs`):
-   - [ ] `SearXngBackend { client, base_url, dump_source }` mirroring
+   - [x] `SearXngBackend { client, base_url, dump_source }` mirroring
      `duckduckgo.rs`: constructors `with_base_url(base_url, http_timeout)`,
      `with_base_url_and_dump_path(…)`, private
      `with_base_url_and_dump_source(…)` building a `reqwest::Client` with
      `OUTBOUND_USER_AGENT` and the configured timeout; trailing slashes
      trimmed; **no** `DEFAULT_BASE_URL`.
-   - [ ] `search()`: short-circuit `Ok(Vec::new())` on `limit == 0`; `POST {base_url}/search`
+   - [x] `search()`: short-circuit `Ok(Vec::new())` on `limit == 0`; `POST {base_url}/search`
      with form fields `q` = terms and `format` = `json` (nothing in the query
      string); send `Accept: */*`, `Accept-Language: en-US,en;q=0.9`, and
      `Accept-Encoding: gzip` explicitly; dump request/response through
      `RequestDumpContext` exactly like `duckduckgo.rs` (no retry).
-   - [ ] Response handling: non-2xx → `Status`, `403` → new
+   - [x] Response handling: non-2xx → `Status`, `403` → new
      `WebSearchError` variant carrying a hint ("the instance likely has
      format=json disabled in its settings.yml"); parse JSON with private
      serde DTOs (`results[].url/title/content`, `unresponsive_engines` as
@@ -137,18 +137,19 @@ Key constraints:
      with empty `title`/`url`, mirror DDG's entry skipping), truncate to
      `limit`, normalize `snippet` whitespace but do not truncate it (the tool
      already caps snippets at `WEB_SEARCH_SNIPPET_MAX_CHARS`).
-   - [ ] `network_target()` = `crate::http::network_target(&self.base_url)`
+   - [x] `network_target()` = `crate::http::network_target(&self.base_url)`
      with raw-`base_url` fallback (same expression as `duckduckgo.rs:103-105`).
-   - [ ] Module docs state the fail-fast policy, the POST rationale (SearXNG's
+   - [x] Module docs state the fail-fast policy, the POST rationale (SearXNG's
      limiter counts only query-string `format`), and the required-header set.
 
-2. [ ] Wire selection and config (one atomic change — `backend_for`'s
+2. [x] Wire selection and config (one atomic change — `backend_for`'s
    signature moves):
-   - [ ] In `backends/web_search.rs`: add `WebSearchBackendKind::SearXng`;
+   - [x] In `backends/web_search.rs`: add `WebSearchBackendKind::SearXng`;
      extend `SUPPORTED_NAMES` to `&["duckduckgo", "searxng"]`, `as_str`
      (`"searxng"`), `display_name` (`"SearXNG"`), and the `from_name` match.
-   - [ ] Change `backend_for` to
-     `backend_for(backend_name: &str, base_url: Option<&str>, http_timeout: Duration) -> Result<Arc<dyn WebSearchBackend>, WebSearchBackendError>`:
+   - [x] Change `backend_for` to
+     `backend_for(backend_name: &str, base_url: Option<&str>, http_timeout: Duration)`
+     `-> Result<Arc<dyn WebSearchBackend>, WebSearchBackendError>`:
      `duckduckgo` → `DuckDuckGoBackend::new`; `searxng` + `Some(base_url)` →
      `SearXngBackend::with_base_url`; unknown name → `Err` variant naming the
      supported names; `searxng` without `base_url` → `Err` variant naming the
@@ -156,64 +157,64 @@ Key constraints:
      seam and **delete** the existing `tracing::error!` +
      DuckDuckGo-fallback arm — construction only ever yields the configured
      backend or an error (see step 3).
-   - [ ] In `src/config/web_search.rs`: add
+   - [x] In `src/config/web_search.rs`: add
      `backends: WebSearchBackendsConfig` (nested structs
      `WebSearchBackendsConfig { searxng: Option<SearXngBackendConfig> }`,
      `SearXngBackendConfig { base_url: Option<String> }`), all with
      `#[serde(default)]` and `Debug, Clone, PartialEq, Eq, Deserialize`;
      update `Default`, the struct docs, and the section docs.
-   - [ ] Extend `validate()`: backend name check first (existing); then
+   - [x] Extend `validate()`: backend name check first (existing); then
      selected-`searxng` requires the table and a present, non-empty
      `base_url` that parses via `reqwest::Url::parse` with scheme
      `http`/`https`; a `base_url` that *is* present (selected or not) must
      parse the same way (empty string while unselected is allowed); add a
      `ConfigError` variant beside `InvalidWebSearchBackend` in
      `src/config.rs` naming path, backend, key, and reason.
-   - [ ] `build_backend()` passes `self.backends.searxng.and_then(|table| table.base_url)`
+   - [x] `build_backend()` passes `self.backends.searxng.and_then(|table| table.base_url)`
      into `backend_for` and returns its `Result` unchanged; update its doc
      comment (an `Err` here is only reachable when `validate()` was skipped —
      profile load always validates first).
 
-3. [ ] Make construction failure loud at the registry — this step removes the
+3. [x] Make construction failure loud at the registry — this step removes the
    consistency issue noted for this plan (silent DuckDuckGo substitution):
-   - [ ] In `src/agent/tools.rs` (`default_registry`, the `build_backend()`
+   - [x] In `src/agent/tools.rs` (`default_registry`, the `build_backend()`
      call around line 783): handle the new `Result` with
      `.expect("web search backend builds from a profile config validated at load")`
      and state that invariant in the surrounding comment. `default_registry`
      keeps its infallible `-> ToolRegistry` signature (its ~21 test call
      sites stay untouched); `web_fetch::backend_for` keeps its native
      fallback — untouched, a separate concern outside this change.
-   - [ ] Update the seam module docs (`src/agent/tools/backends/web_search.rs`
+   - [x] Update the seam module docs (`src/agent/tools/backends/web_search.rs`
      header) so they no longer describe selection-by-name with a fallback:
      `backend_for` returns the configured backend or an error.
-   - [ ] Pin the fix behaviorally in `src/config/web_search.rs` tests: a
+   - [x] Pin the fix behaviorally in `src/config/web_search.rs` tests: a
      hand-built invalid state (e.g. `backend = "searxng"` with no
      `backends.searxng.base_url`) makes `build_backend()` return `Err` —
      never an `Ok` holding a different backend.
 
-4. [ ] Tests for selection and config:
-   - [ ] Seam tests in `backends/web_search.rs`:
+4. [x] Tests for selection and config:
+   - [x] Seam tests in `backends/web_search.rs`:
      `backend_kind_names_roundtrip` gains the `searxng` roundtrip, the
      `display_name` assertion, and `supported_names_display() ==
      "duckduckgo, searxng"` (replacing today's `from_name("searxng") == None`
-      assertion); `backend_for_builds_the_configured_backend` covers the new
-      `Result` signature: `duckduckgo` and `searxng` + `Some(url)` → `Ok`
-      (`Debug` contains `DuckDuckGoBackend` / `SearXngBackend`); unknown name
-      and `searxng` + `None` → `Err` — no `Ok` ever carries a substituted
-      backend.
-   - [ ] Config tests in `src/config/web_search.rs`: defaults unchanged
+     assertion); `backend_for_builds_the_configured_backend` covers the new
+     `Result` signature: `duckduckgo` and `searxng` + `Some(url)` → `Ok`
+     (`Debug` contains `DuckDuckGoBackend` / `SearXngBackend`); unknown name
+     and `searxng` + `None` → `Err` — no `Ok` ever carries a substituted
+     backend.
+   - [x] Config tests in `src/config/web_search.rs`: defaults unchanged
      (`backend == "duckduckgo"`, `backends.searxng == None`); absent section
      ≡ default; explicit nested table parses; `searxng` without table → error
      naming path + key; `searxng` with missing/empty/invalid/non-http
      `base_url` → error naming path + reason; unselected `searxng` table with
      invalid URL → error; unselected with valid URL → validates;
      `duckduckgo` untouched by table presence; unknown-backend message lists
-      both names; `build_backend()` `Ok` cases (default config; valid searxng
-      config → `Debug` contains `SearXngBackend`) — the `Err` pin for
-      invalid construction states lives in step 3.
+     both names; `build_backend()` `Ok` cases (default config; valid searxng
+     config → `Debug` contains `SearXngBackend`) — the `Err` pin for
+     invalid construction states lives in step 3.
 
-5. [ ] Unit tests in `searxng.rs`, following the `duckduckgo.rs` test module:
-   - [ ] Local raw `tokio::net::TcpListener` mock server asserting the wire
+5. [x] Unit tests in `searxng.rs`, following the `duckduckgo.rs` test module:
+   - [x] Local raw `tokio::net::TcpListener` mock server asserting the wire
      shape: request line `POST /search HTTP/1.1`, **empty query string**,
      form body exactly `format=json&q=<terms>` (or `q`-first — assert the
      actual encoding produced by `.form(&[…])`), headers `user-agent`
@@ -222,43 +223,45 @@ Key constraints:
      application/x-www-form-urlencoded`; plus request/response dump
      assertions (request dump `path == "/search"`, response dump `.json`
      extension).
-   - [ ] Fixture-JSON parse tests: hits mapping (title/url/snippet),
+   - [x] Fixture-JSON parse tests: hits mapping (title/url/snippet),
      missing/whitespace `content` → empty snippet, entries with empty
      title/url skipped, `limit` capping, valid empty `results` → `Ok(vec![])`.
-   - [ ] Failure tests: `403` → hint-carrying error mentioning `format=json`;
+   - [x] Failure tests: `403` → hint-carrying error mentioning `format=json`;
      `429` → `Status`; `200` with HTML body → `Parse`; JSON `{"error": …}` →
      `Parse` carrying the message; empty results + `unresponsive_engines` →
      `Parse` naming the engines.
-   - [ ] `network_target()` (custom base URL with path/trailing slash →
+   - [x] `network_target()` (custom base URL with path/trailing slash →
      authority) and the zero-limit short-circuit.
-   - [ ] **No** `#[ignore]`d live test (settled: e2e covers live checks).
+   - [x] **No** `#[ignore]`d live test (settled: e2e covers live checks).
 
-6. [ ] Profile-level config tests in `src/config/profile.rs` (the
+6. [x] Profile-level config tests in `src/config/profile.rs` (the
    `[web_search]` block around lines 2362-2421): a `searxng` section with
    `base_url` loads into the profile; `backend = "searxng"` without the
    table/`base_url` fails at `profile.web_search.validate(&path)` with the
    new error naming the config path; the existing absent-section →
    `duckduckgo` test keeps passing.
 
-7. [ ] Complete the e2e wiring (two files are already modified in the working
+7. [x] Complete the e2e wiring (two files are already modified in the working
    tree — finish and verify them, keep their env-var spelling):
-   - [ ] `tests/e2e/custom/profiles/default/config.toml` (WIP lines 44-48)
+   - [x] `tests/e2e/custom/profiles/default/config.toml` (WIP lines 44-48)
      uses `backend = "${YLVA_WEB_SEARCH_BACKEND}"` and
      `[web_search.backends.searxng] base_url = "${SEARXNG_BASE_URL}"`;
-     `tests/e2e/custom/profiles/default/.env` defines both keys (added).
-     Because `${…}` interpolation runs on every string at load, both keys
-     must always be defined or the whole profile fails — ensure the defaults
-     are `YLVA_WEB_SEARCH_BACKEND=duckduckgo` and a syntactically valid
-     placeholder URL (e.g. `http://localhost:20081`) that passes validation
-     while `duckduckgo` is selected.
-   - [ ] Verify `tests/e2e/web_search-tool.zsh` still runs with the defaults;
+     `tests/e2e/custom/profiles/default/.env` defines both keys with the same
+     spelling. Because `${…}` interpolation runs on every string at load, both
+     keys must always be defined or the whole profile fails. **As shipped by
+     the user (supersedes the original default):** the profile `.env` selects
+     `YLVA_WEB_SEARCH_BACKEND=searxng` with a real instance; the profile-load
+     fixture in `src/config/profile.rs` supplies the load-time fallback values
+     `YLVA_WEB_SEARCH_BACKEND=duckduckgo` and `SEARXNG_BASE_URL=http://localhost:20081`,
+     which pass validation while `duckduckgo` is selected.
+   - [x] Verify `tests/e2e/web_search-tool.zsh` still runs with the defaults;
      document (in the script header or `docs/` where the e2e scripts are
      described) how to run it against SearXNG:
      `YLVA_WEB_SEARCH_BACKEND=searxng SEARXNG_BASE_URL=<instance-url>`
      pointing at a user-provided instance.
 
-8. [ ] Update the docs affected by the change (same change set):
-   - [ ] `docs/configuration.md`: the `[web_search]` table — `backend` row
+8. [x] Update the docs affected by the change (same change set):
+   - [x] `docs/configuration.md`: the `[web_search]` table — `backend` row
      now lists both values; add the nested `[web_search.backends.searxng]`
      table (row or sub-section) with `base_url`: required for `searxng`,
      ignored by `duckduckgo`, `${ENV_VAR}` interpolation usable; TOML example
@@ -268,20 +271,44 @@ Key constraints:
      budgets pace ylva fine; `pass_ip`/`trusted_proxies` are the admin's
      levers); network-rule `target` example around line 708 gains the
      `https://searx.example.org`-style authority form.
-   - [ ] `docs/features.md` (`web_search` bullet, lines 377-389): name both
+   - [x] `docs/features.md` (`web_search` bullet, lines 377-389): name both
      backends and the `base_url` requirement.
-   - [ ] `docs/implementation-notes.md`: the HTTP-client paragraph at lines
+   - [x] `docs/implementation-notes.md`: the HTTP-client paragraph at lines
      164-184 (currently DuckDuckGo-specific) gains the SearXNG backend —
      form POST, required headers, serde JSON parsing, dump behavior; the
      `network_target` sentence at line ~543 notes that the SearXNG target
      derives from the configured instance URL.
-   - [ ] Do **not** edit `docs/ideas/web-search.md` (owned by the user).
+   - [x] Do **not** edit `docs/ideas/web-search.md` (owned by the user).
 
-9. [ ] Verification gate: `make format lint`, then the single mandatory test
+9. [x] Verification gate: `make format lint`, then the single mandatory test
    gate `make test-coverage` (full suite + coverage threshold 80). Markdown
    added/changed in step 8 must pass `rumdl` with `.rumdl.toml` (included in
    the format/lint targets; fix with `rumdl fmt <paths>`). Fix all failures;
    do not add a separate `make test` run.
+
+## Outcome notes (changes beyond the steps above)
+
+- **CLI tool title fix.** The acceptance criterion "`Web Search (SearXNG)`"
+  only held for the executing registry: `src/cli_driver.rs` built its
+  display/approval registry with `..ToolRegistryConfig::default()`, so
+  `web_search` fell back to the default (DuckDuckGo) config while the agent
+  executed through the `AgentFactory` registry with the profile config. The
+  profile's `[web_search]` section is now passed through a
+  `display_registry_config(&profile)` helper, pinned by
+  `cli_driver::tests::display_registry_titles_the_backend_the_profile_configures`,
+  and the invariant is documented in `docs/implementation-notes.md` (CLI
+  driver section).
+- **Docs example uses the placeholder.** The `[web_search.backends.searxng]`
+  TOML example in `docs/configuration.md` uses `base_url =
+  "https://searx.example.org"` rather than `${SEARXNG_BASE_URL}`, so it is
+  copy-pasteable; `${ENV_VAR}` interpolation is documented in the `base_url`
+  table row instead.
+- **Backend-name constants (both seams).** `WebSearchBackendKind` and
+  `WebFetchBackendKind` gained per-backend `*_NAME` / `*_DISPLAY_NAME`
+  constants; `SUPPORTED_NAMES`, `as_str`, `display_name`, and `from_name` now
+  reference them, and `from_name` dropped its `unreachable!()` arm in favour
+  of a `match` on the constants. The invariant is pinned by
+  `every_supported_name_is_selectable_and_roundtrips` in both seams.
 
 ## Proposed Improvements
 

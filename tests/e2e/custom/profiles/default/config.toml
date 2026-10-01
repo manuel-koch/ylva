@@ -41,6 +41,12 @@ description = "An agent that can perform read-only discovery tasks in workspace 
 engine = "local-discovery"
 allowed_tools = ["read", "glob", "search"]
 
+[web_search]
+backend = "${YLVA_WEB_SEARCH_BACKEND}"
+
+[web_search.backends.searxng]
+base_url = "${SEARXNG_BASE_URL}"
+
 [tools.web_search]
 rules = [
     { rule = "network_request", verdict = "auto_approved" },

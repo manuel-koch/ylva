@@ -165,17 +165,26 @@ The shared `reqwest::Client` is built once at its construction site inside
 `OpenAiCompatibleProvider` with a client-level default
 `User-Agent: ylva/<version>` (version from `CARGO_PKG_VERSION`). The
 non-streaming model/catalog requests use the shared `crate::http` helpers
-(`get_json` and `post_json`); chat uses `post_with_retry`; the DuckDuckGo
-backend owns a client for its HTML endpoint and submits a `ddgr`-shaped form
-`POST` with `DNT: 1` and gzip negotiation; the `reqwest` `gzip` feature decodes
-compressed responses before HTML parsing. The non-streaming helpers and
-DuckDuckGo create paired dump paths through `RequestDumpSource`, dump the
-request before sending, buffer the response once, and dump it before status or
-JSON/HTML parsing. `Environment` resolves `YLVA_REQUEST_DUMP_PATH` in
-production; an explicit `Template` source lets tests use a temporary path
-without mutating process-global environment state. A `RequestDumpContext`
-retains the timestamp and dump id while the response path is selected after
-headers arrive. After `reqwest` content decoding, buffered response bytes
+(`get_json` and `post_json`); chat uses `post_with_retry`; each web-search
+backend owns a client of its own — the DuckDuckGo backend for its HTML
+endpoint submits a `ddgr`-shaped form `POST` with `DNT: 1` and gzip
+negotiation, and the SearXNG backend for the configured instance submits a
+form `POST` to `/search` carrying `q` and `format=json` in the *body* (the
+instance's limiter only charges its per-hour JSON budget for `format` in the
+query string). The SearXNG backend additionally sends the header set that
+instance's bot detection requires — `Accept: */*`, a non-empty
+`Accept-Language`, and `Accept-Encoding: gzip` — because requests missing
+them are rejected. The `reqwest` `gzip` feature decodes compressed
+responses before HTML/JSON parsing; SearXNG bodies parse with serde DTOs
+into `{title, url, snippet}` hits. The non-streaming helpers and both
+web-search backends create paired dump paths through `RequestDumpSource`,
+dump the request before sending, buffer the response once, and dump it
+before status or JSON/HTML parsing. `Environment` resolves
+`YLVA_REQUEST_DUMP_PATH` in production; an explicit `Template` source lets
+tests use a temporary path without mutating process-global environment
+state. A `RequestDumpContext` retains the timestamp and dump id while the
+response path is selected after headers arrive. After `reqwest` content
+decoding, buffered response bytes
 remain unmodified; the extension maps the media type (`.json`, `.html`, `.txt`,
 `.xml`, common media extensions, or `.bin` fallback), while SSE retains its
 `.jsonl` event transcript. Transport failures leave a `[transport]` marker in
@@ -540,7 +549,9 @@ Approval runs through `SandboxContext::check_network_request(target)`,
 where `target` is the call's `scheme://host` match key (explicit port
 included when present): `web_fetch` derives it from the requested URL
 (`crate::http::network_target`, rejecting non-`http(s)` schemes before any
-request), `web_search` from its configured backend endpoint's base URL. A
+request), `web_search` from its configured backend endpoint's base URL —
+the fixed DuckDuckGo endpoint or, for `searxng`, the configured instance
+URL's `scheme://host`. A
 `network_request` rule without a `target` parameter matches every call; a
 `target` is compiled into a `NetworkTargetPattern`
 (`src/sandbox/network_target_pattern.rs`) and matched against the key with
@@ -696,6 +707,12 @@ scanning raw arguments:
 
 Implemented in `src/cli_driver.rs`; selected automatically by `main.rs` when
 stdout is not a terminal or forced via `--no-tui`.
+
+The driver builds its own `ToolRegistry` (`display_registry_config`) to render
+tool titles and approval decisions, while the agent executes through the
+registry `AgentFactory` builds. Both must receive the profile's `[web_search]`
+and `[web_fetch]` sections — otherwise a rendered `Web Search (…)` title names
+a different backend than the one the agent actually calls.
 
 When `--auto-approve-spawn` is set and the assistant calls `spawn_subagent`,
 the CLI keeps the process alive past the assistant's own final `StreamDone`
