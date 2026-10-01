@@ -39,3 +39,17 @@ seperator
 ylva << '__EOT__'
 Read `https://www.bundestag.de/` and report a summary of the page.
 __EOT__
+
+seperator
+
+ylva << '__EOT__'
+Fetch image using `web_fetch` and describe its content: `https://i.ytimg.com/vi/0iNrGpwZwog/sddefault.jpg`.
+__EOT__
+
+seperator
+
+ylva << '__EOT__'
+Do a search on Github using `web_fetch` and this URL template for url-encoded terms:
+`https://api.github.com/search/issues?per_page=3&page=1&q=<terms>+language:rust`.
+Search for "agent harness" and report repository URLs from the result.
+__EOT__
