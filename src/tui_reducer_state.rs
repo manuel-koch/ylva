@@ -1275,6 +1275,23 @@ impl SlashOverlay {
     }
 }
 
+/// The message-draft input state parked by `Effect::SaveInputStateAndClear`
+/// while a tool approval or clarify question pauses the input, and given
+/// back as one unit by `Effect::RestoreInputState`.
+///
+/// Bundling the textarea lines with the slash overlay makes the
+/// save/restore pairing atomic: a `/models` picker's fetched catalog (which
+/// the draft text alone cannot reproduce) always returns together with the
+/// draft it was opened from, and neither half can be overwritten without
+/// the other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputSnapshot {
+    /// The draft's textarea lines as they were; `None` when it was empty.
+    pub input_lines: Option<Vec<String>>,
+    /// The slash overlay as it was when the input was parked.
+    pub slash_overlay: SlashOverlay,
+}
+
 /// Indices into `choices` whose `provider_connection/model` identity
 /// contains every whitespace-separated word of `filter`, case-insensitively
 /// (in any order — e.g. `"deepseek v3"` matches `stub/deepseek-v3` and
@@ -1356,7 +1373,7 @@ pub(crate) fn slash_overlay_text_rows(overlay: &SlashOverlay) -> Vec<String> {
 /// The live model-picker filter typed after `/models` in `draft`. Falls
 /// back to the whole trimmed draft if it no longer starts with `/models`
 /// (e.g. the user backspaced into the command name itself).
-fn extract_models_filter(draft: &str) -> String {
+pub(crate) fn extract_models_filter(draft: &str) -> String {
     let trimmed = draft.trim_start();
     trimmed
         .strip_prefix("/models")
@@ -1376,11 +1393,15 @@ pub enum Effect {
     SubmitPrompt { steer: bool },
     /// Replace the textarea with an empty, freshly-configured default.
     ClearTextarea,
-    /// Snapshot the current textarea lines into
-    /// `AppState::pending_approval_input_snapshot` then clear the textarea.
-    SaveTextareaAndClear,
-    /// Restore the textarea from the snapshot saved by `SaveTextareaAndClear`.
-    RestoreTextarea,
+    /// Park the message-draft input state: snapshot the textarea lines and
+    /// the current slash overlay into `AppState::pending_input_snapshot` as
+    /// one [`InputSnapshot`], clear the textarea, and hide the overlay for
+    /// the duration of the pause (the approval footer / clarify banner owns
+    /// the rows above the input).
+    SaveInputStateAndClear,
+    /// Give back what `SaveInputStateAndClear` parked: restore the textarea
+    /// lines and the slash overlay from `AppState::pending_input_snapshot`.
+    RestoreInputState,
     /// Replace the textarea content with the given text.
     SetInputText(String),
     /// Feed a key event into the textarea.
@@ -1722,10 +1743,11 @@ pub struct AppState {
     pub conversation: ConversationListState,
 
     // ── tool-approval ───────────────────────────────────────────────────────
-    /// Textarea lines saved when a `ToolPending` approval sub-mode starts so
-    /// the unsubmitted draft can be restored once the approval is resolved.
-    /// `None` when no approval is in progress or the input was empty.
-    pub pending_approval_input_snapshot: Option<Vec<String>>,
+    /// The message-draft input state parked by `Effect::SaveInputStateAndClear`
+    /// when a tool approval or clarify question pauses the input, restored as
+    /// one unit by `Effect::RestoreInputState` (see [`InputSnapshot`]).
+    /// `None` when no pause is in progress or the input was empty.
+    pub pending_input_snapshot: Option<InputSnapshot>,
 
     // ── input history ───────────────────────────────────────────────────────
     /// All `UserMessage` texts, oldest → newest.
@@ -1871,7 +1893,7 @@ impl AppState {
 
             conversation: ConversationListState::default(),
 
-            pending_approval_input_snapshot: None,
+            pending_input_snapshot: None,
 
             input_history: Vec::new(),
             history_index: None,
@@ -2345,6 +2367,42 @@ impl AppState {
             .push(ChatEntry::Notice { text });
     }
 
+    /// The tool call currently awaiting a user verdict, as
+    /// `(tool_id, tool_name)`: the first bubble still in
+    /// [`ToolCallState::Pending`] in the root or any child transcript.
+    ///
+    /// This is the authoritative "an approval is outstanding" marker —
+    /// arming `Focus::ToolApproval` pushes such a bubble in the same event
+    /// and a verdict resolves both together — so it stays usable while the
+    /// help popup has temporarily replaced the focus.
+    pub fn pending_tool_approval(&self) -> Option<(Uuid, String)> {
+        fn find_in(messages: &[ChatEntry]) -> Option<(Uuid, String)> {
+            messages.iter().find_map(|entry| match entry {
+                ChatEntry::ToolBubble {
+                    id, name, state, ..
+                } if matches!(**state, ToolCallState::Pending { .. }) => Some((*id, name.clone())),
+                _ => None,
+            })
+        }
+        find_in(&self.chat_entries).or_else(|| {
+            self.child_conversations
+                .values()
+                .find_map(|conversation| find_in(&conversation.messages))
+        })
+    }
+
+    /// The focus to take when the help popup closes. An outstanding tool
+    /// approval outranks the normal input: returning to `Focus::MainInput`
+    /// there would hand the slash-command-capable main input to the user
+    /// while a tool still awaits its verdict (and hide the approval
+    /// controls), so the approval focus is resumed instead.
+    pub fn restore_focus_after_help(&mut self) {
+        self.focus = match self.pending_tool_approval() {
+            Some((tool_id, tool_name)) => Focus::ToolApproval { tool_id, tool_name },
+            None => Focus::MainInput,
+        };
+    }
+
     /// Recompute the suggestion overlay from the live draft.
     ///
     /// Called by the Driver after every textarea mutation. A visible model
@@ -2352,7 +2410,33 @@ impl AppState {
     /// command and is dismissed by Esc or a selection, not by typing — but
     /// further typing still live-narrows the picker's already-fetched
     /// catalog by re-deriving its filter from the draft.
+    ///
+    /// A pending tool approval outranks every overlay: the overlay is
+    /// parked and hidden by `Effect::SaveInputStateAndClear` when the
+    /// approval is armed (see `presenter::push_tool_pending_bubble`), and
+    /// this recompute must not bring it back while the approval owns the
+    /// rows above the input — e.g. while the user types a denial reason
+    /// containing `/`. The guard covers both the approval focus itself and
+    /// the help popup having temporarily replaced it (consulting the
+    /// outstanding-approval bubble via [`AppState::pending_tool_approval`]),
+    /// so no slash-command UI can surface while a verdict is outstanding.
+    /// `Effect::RestoreInputState` gives the parked overlay back when the
+    /// approval resolves; the next recompute then reconciles it with the
+    /// restored draft.
+    ///
+    /// For suggestions, the highlighted entry is kept while the recomputed
+    /// choice set is identical to the visible one (so `↑`/`↓` navigation
+    /// survives this per-action recompute) and reset to the first entry
+    /// when the draft changes the set.
     pub fn refresh_slash_overlay(&mut self, draft: &str) {
+        let approval_owns_input = matches!(self.focus, Focus::ToolApproval { .. })
+            || (matches!(self.focus, Focus::HelpPopup) && self.pending_tool_approval().is_some());
+        if approval_owns_input {
+            self.slash_overlay = SlashOverlay::Hidden;
+            self.slash_overlay_drag_start = None;
+            self.slash_overlay_drag_end = None;
+            return;
+        }
         if matches!(self.slash_overlay, SlashOverlay::Hidden) {
             self.slash_overlay_drag_start = None;
             self.slash_overlay_drag_end = None;
@@ -2372,13 +2456,25 @@ impl AppState {
             return;
         }
         let suggestions = slash_command_suggestions(draft);
-        self.slash_overlay = if suggestions.is_empty() {
-            SlashOverlay::Hidden
-        } else {
+        if suggestions.is_empty() {
+            self.slash_overlay = SlashOverlay::Hidden;
+            return;
+        }
+        // Keep the highlighted entry across the Driver's per-action recompute
+        // while the draft leaves the choice set untouched — otherwise `↑`/`↓`
+        // would be reset to the first entry after every key press. A draft
+        // that narrows or widens the set restarts the selection at the top,
+        // mirroring the model picker's filter-change behaviour.
+        let selected = match &self.slash_overlay {
             SlashOverlay::Suggestions {
-                choices: suggestions,
-                selected: 0,
-            }
+                choices,
+                selected: current,
+            } if *choices == suggestions => *current,
+            _ => 0,
+        };
+        self.slash_overlay = SlashOverlay::Suggestions {
+            choices: suggestions,
+            selected,
         };
     }
 
@@ -3448,6 +3544,142 @@ mod tests {
             vec![0, 1, 2],
             "an all-whitespace filter matches everything"
         );
+    }
+
+    #[test]
+    fn refresh_slash_overlay_stays_hidden_while_a_tool_approval_is_pending() {
+        let mut state = AppState::new();
+        state.refresh_slash_overlay("/mo");
+        assert!(
+            matches!(state.slash_overlay, SlashOverlay::Suggestions { .. }),
+            "expected the suggestion overlay to be open, got {:?}",
+            state.slash_overlay
+        );
+
+        state.focus = Focus::ToolApproval {
+            tool_id: Uuid::new_v4(),
+            tool_name: "write".to_string(),
+        };
+        // The per-action recompute must not reopen the overlay while the
+        // approval owns the rows above the input — e.g. while the user types
+        // a denial reason containing `/`.
+        state.refresh_slash_overlay("/mo");
+        assert_eq!(state.slash_overlay, SlashOverlay::Hidden);
+
+        // Once the approval resolves, the recompute derives the overlay from
+        // the restored draft again.
+        state.focus = Focus::MainInput;
+        state.refresh_slash_overlay("/mo");
+        assert!(
+            matches!(state.slash_overlay, SlashOverlay::Suggestions { .. }),
+            "the overlay must reopen from the restored draft, got {:?}",
+            state.slash_overlay
+        );
+    }
+
+    #[test]
+    fn refresh_slash_overlay_stays_hidden_while_help_is_open_during_an_outstanding_approval() {
+        let mut state = AppState::new();
+        // The help popup has taken the focus, but the verdict is still
+        // outstanding: the denial reason typed before opening help must not
+        // bring the overlay back behind the popup.
+        state.focus = Focus::HelpPopup;
+        state.chat_entries.push(ChatEntry::ToolBubble {
+            id: Uuid::new_v4(),
+            name: "write".to_string(),
+            state: Box::new(ToolCallState::Pending {
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+            }),
+            collapsed: true,
+        });
+        state.refresh_slash_overlay("/mo");
+        assert_eq!(
+            state.slash_overlay,
+            SlashOverlay::Hidden,
+            "an outstanding approval must suppress the overlay even from the help focus"
+        );
+
+        // Once the tool bubble leaves `Pending` the guard lifts with it,
+        // even if help is still open (the verdict ends the pause).
+        state.chat_entries.clear();
+        state.refresh_slash_overlay("/mo");
+        assert!(
+            matches!(state.slash_overlay, SlashOverlay::Suggestions { .. }),
+            "a resolved approval must not keep suppressing the overlay, got {:?}",
+            state.slash_overlay
+        );
+    }
+
+    #[test]
+    fn restore_focus_after_help_returns_to_an_outstanding_approval_first() {
+        let mut state = AppState::new();
+        state.focus = Focus::HelpPopup;
+        state.restore_focus_after_help();
+        assert_eq!(
+            state.focus,
+            Focus::MainInput,
+            "without an outstanding approval, closing help returns to the normal input"
+        );
+
+        let tool_id = Uuid::new_v4();
+        state.chat_entries.push(ChatEntry::ToolBubble {
+            id: tool_id,
+            name: "write".to_string(),
+            state: Box::new(ToolCallState::Pending {
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+            }),
+            collapsed: true,
+        });
+        state.focus = Focus::HelpPopup;
+        state.restore_focus_after_help();
+        assert_eq!(
+            state.focus,
+            Focus::ToolApproval {
+                tool_id,
+                tool_name: "write".to_string()
+            },
+            "closing help with a verdict outstanding must resume the approval focus"
+        );
+    }
+
+    #[test]
+    fn refresh_slash_overlay_keeps_the_selection_while_the_choices_are_unchanged() {
+        let mut state = AppState::new();
+        state.refresh_slash_overlay("/");
+        assert!(matches!(
+            state.slash_overlay,
+            SlashOverlay::Suggestions { .. }
+        ));
+
+        state.move_slash_selection(1);
+        assert_eq!(
+            state.selected_slash_command().map(|command| command.name),
+            Some("/models")
+        );
+
+        // Same draft → same choices: the per-action recompute must keep the
+        // highlight, otherwise ↑/↓ would reset it after every key press.
+        state.refresh_slash_overlay("/");
+        assert_eq!(
+            state.selected_slash_command().map(|command| command.name),
+            Some("/models")
+        );
+
+        // A draft that narrows the choice set restarts the selection at the
+        // top, mirroring the model picker's filter-change behaviour.
+        state.refresh_slash_overlay("/t");
+        assert_eq!(
+            state.selected_slash_command().map(|command| command.name),
+            Some("/tools")
+        );
+        let SlashOverlay::Suggestions { selected, .. } = &state.slash_overlay else {
+            panic!("expected suggestions, got {:?}", state.slash_overlay);
+        };
+        assert_eq!(*selected, 0);
     }
 
     #[test]

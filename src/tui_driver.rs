@@ -51,9 +51,9 @@ use crate::presenter::{self, TextareaContext, TuiEvent};
 use crate::render;
 use crate::session_title::{SessionTitleUpdate, TitleAttempt};
 use crate::tui_reducer_state::{
-    engine_choice_label, matching_model_indices, model_choice_label, AppState, ConfirmKey,
-    DomainEvent, Effect, Focus, HistoryDirection, InputEvent, ModelChoice, SlashOverlay,
-    TuiDisplayMetadata, TuiMode, UserMessageState, CONFIRM_TIMEOUT,
+    engine_choice_label, extract_models_filter, matching_model_indices, model_choice_label,
+    AppState, ConfirmKey, DomainEvent, Effect, Focus, HistoryDirection, InputEvent, InputSnapshot,
+    ModelChoice, SlashOverlay, TuiDisplayMetadata, TuiMode, UserMessageState, CONFIRM_TIMEOUT,
 };
 use crate::tui_render_state::TuiState;
 use crate::ToolRegistry;
@@ -322,20 +322,43 @@ async fn execute_effects(
                 configure_textarea(textarea);
                 *mouse_drag = MouseDrag::default();
             }
-            Effect::SaveTextareaAndClear => {
+            Effect::SaveInputStateAndClear => {
                 let lines = textarea.lines().to_vec();
-                let is_empty = lines == vec!["".to_string()];
-                state.pending_approval_input_snapshot = if is_empty { None } else { Some(lines) };
+                let input_lines = if lines == vec![String::new()] {
+                    None
+                } else {
+                    Some(lines)
+                };
                 *textarea = TextArea::default();
                 configure_textarea(textarea);
+                // Park textarea and overlay as one unit *before* the hide:
+                // the rows the overlay draws on are taken over by the
+                // approval footer / clarify banner for the pause's duration.
+                let slash_overlay = state.slash_overlay.clone();
+                state.pending_input_snapshot = Some(InputSnapshot {
+                    input_lines,
+                    slash_overlay,
+                });
+                state.slash_overlay = SlashOverlay::Hidden;
             }
-            Effect::RestoreTextarea => {
-                *textarea = if let Some(snapshot) = state.pending_approval_input_snapshot.take() {
-                    TextArea::from(snapshot)
+            Effect::RestoreInputState => {
+                let snapshot = state.pending_input_snapshot.take();
+                *textarea = if let Some(InputSnapshot {
+                    input_lines: Some(lines),
+                    ..
+                }) = &snapshot
+                {
+                    TextArea::from(lines.clone())
                 } else {
                     TextArea::default()
                 };
                 configure_textarea(textarea);
+                // Bring the parked overlay back; the driver's following
+                // `refresh_slash_overlay` reconciles it with the restored
+                // draft (the `/models` picker keeps its fetched catalog).
+                if let Some(snapshot) = snapshot {
+                    state.slash_overlay = snapshot.slash_overlay;
+                }
             }
             Effect::SetInputText(text) => {
                 let lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
@@ -546,6 +569,34 @@ fn abort_pending_model_list(pending_model_list: &mut Option<PendingModelList>) {
     if let Some(pending) = pending_model_list.take() {
         pending.task.abort();
     }
+}
+
+/// Resume a `/models` catalog request that a pause (tool approval, clarify)
+/// interrupted.
+///
+/// A result completing while the pause hid the overlay is discarded — the
+/// result branch only applies to a visible `SlashOverlay::LoadingModels` —
+/// so once `RestoreInputState` puts `LoadingModels` back, the request must
+/// be made again for the picker to ever populate. When the original request
+/// is still in flight, its pending handle remains and the existing result
+/// branch applies it on arrival, so this is a no-op then.
+fn resume_interrupted_model_list(
+    state: &AppState,
+    pending_model_list: &mut Option<PendingModelList>,
+    engine: &Arc<dyn Engine>,
+    draft: &str,
+) {
+    if !matches!(state.slash_overlay, SlashOverlay::LoadingModels) {
+        return;
+    }
+    if pending_model_list.is_some() {
+        return;
+    }
+    start_model_list(
+        pending_model_list,
+        Some(extract_models_filter(draft)),
+        engine,
+    );
 }
 
 /// Wait for the current catalog request, or remain disabled when no request is
@@ -915,7 +966,6 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
         steer_indicator: app.steer_indicator,
         pending_approval: None,
         pending_approval_is_subagent: false,
-        pending_approval_input_snapshot: app.pending_approval_input_snapshot,
         input_history: app.input_history,
         history_index: app.history_index,
         draft: app.draft,
@@ -1314,6 +1364,18 @@ where
                     {
                         break;
                     }
+                    // Mouse actions can change the draft too — the approval
+                    // approve/deny buttons restore the snapshot saved when the
+                    // pause started — so mirror the key-action path below:
+                    // resume a discarded catalog request, then re-derive the
+                    // suggestion overlay from the restored draft.
+                    resume_interrupted_model_list(
+                        &state,
+                        &mut pending_model_list,
+                        &engine,
+                        &textarea.lines().join("\n"),
+                    );
+                    state.refresh_slash_overlay(&textarea.lines().join("\n"));
                     continue;
                 }
 
@@ -1334,6 +1396,14 @@ where
                 {
                     break;
                 }
+                // A pause that just restored `SlashOverlay::LoadingModels`
+                // needs its discarded catalog request made again.
+                resume_interrupted_model_list(
+                    &state,
+                    &mut pending_model_list,
+                    &engine,
+                    &textarea.lines().join("\n"),
+                );
                 let (model_list_effects, immediate_slash_effects): (Vec<_>, Vec<_>) =
                     slash_effects.into_iter().partition(|effect| {
                         matches!(effect, Effect::ListModels { .. })
@@ -2660,8 +2730,11 @@ mod tests {
         )
         .await;
         assert_eq!(
-            state.pending_approval_input_snapshot,
-            Some(vec!["hello world".to_string()])
+            state.pending_input_snapshot,
+            Some(InputSnapshot {
+                input_lines: Some(vec!["hello world".to_string()]),
+                slash_overlay: SlashOverlay::Hidden,
+            })
         );
         assert_eq!(textarea.lines(), &[""]);
 
@@ -2670,14 +2743,467 @@ mod tests {
             &mut state,
             &mut textarea,
             &cmd_tx,
-            vec![Effect::RestoreTextarea],
+            vec![Effect::RestoreInputState],
             &mut MouseDrag::default(),
             &mut NoopClipboard,
             &mut PendingRunIds::default(),
         )
         .await;
         assert_eq!(textarea.lines(), &["hello world"]);
-        assert_eq!(state.pending_approval_input_snapshot, None);
+        assert_eq!(state.pending_input_snapshot, None);
+    }
+
+    #[tokio::test]
+    async fn approval_hides_the_suggestion_overlay_and_reopens_it_when_resolved() {
+        // Regression (backlog): typing a slash command and then receiving a
+        // tool approval. Arming the approval must hide the overlay,
+        // the per-action recompute must keep it hidden while the approval is
+        // pending, and resolving the approval must bring it back together
+        // with the restored draft.
+        let (mut state, _, cmd_tx, mut cmd_rx) = setup();
+        let mut mouse_drag = MouseDrag::default();
+        let mut clipboard = NoopClipboard;
+        let mut pending_run_ids = PendingRunIds::default();
+
+        let mut textarea = TextArea::from(vec!["/mo".to_string()]);
+        configure_textarea(&mut textarea);
+        state.refresh_slash_overlay(&textarea.lines().join("\n"));
+        assert!(matches!(
+            state.slash_overlay,
+            SlashOverlay::Suggestions { .. }
+        ));
+
+        let tool_id = Uuid::new_v4();
+        let effects = presenter::update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolPending {
+                id: tool_id,
+                name: "write".to_string(),
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                run_id: None,
+            }),
+            &textarea_ctx_from(&textarea),
+        );
+        execute_effects(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            effects,
+            &mut mouse_drag,
+            &mut clipboard,
+            &mut pending_run_ids,
+        )
+        .await;
+        assert_eq!(state.slash_overlay, SlashOverlay::Hidden);
+        assert_eq!(textarea.lines(), &[""]);
+
+        // Typing a denial reason containing `/` must not reopen the overlay
+        // while the approval is pending: the Driver recomputes it after every
+        // key action.
+        let effects = presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Char('/')))),
+            &textarea_ctx_from(&textarea),
+        );
+        execute_effects(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            effects,
+            &mut mouse_drag,
+            &mut clipboard,
+            &mut pending_run_ids,
+        )
+        .await;
+        state.refresh_slash_overlay(&textarea.lines().join("\n"));
+        assert_eq!(
+            state.slash_overlay,
+            SlashOverlay::Hidden,
+            "the recompute must not reopen the overlay during the approval"
+        );
+
+        let effects = presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::Escape),
+            &textarea_ctx_from(&textarea),
+        );
+        execute_effects(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            effects,
+            &mut mouse_drag,
+            &mut clipboard,
+            &mut pending_run_ids,
+        )
+        .await;
+        assert_eq!(
+            cmd_rx.try_recv(),
+            Ok(AgentCommand::DenyTool {
+                id: tool_id,
+                reason: String::new(),
+            })
+        );
+        assert_eq!(
+            textarea.lines(),
+            &["/mo"],
+            "the snapshotted draft must be restored after the approval"
+        );
+        state.refresh_slash_overlay(&textarea.lines().join("\n"));
+        assert!(
+            matches!(state.slash_overlay, SlashOverlay::Suggestions { .. }),
+            "the overlay must reopen from the restored draft, got {:?}",
+            state.slash_overlay
+        );
+    }
+
+    #[tokio::test]
+    async fn mouse_approve_restores_the_draft_and_reopens_the_suggestion_overlay() {
+        // The key-action path recomputes the overlay after its effects; the
+        // mouse path must do the same so approving with the button restores
+        // the slash-command draft *and* its suggestion overlay.
+        let (mut state, _, cmd_tx, mut cmd_rx) = setup();
+        let mut mouse_drag = MouseDrag::default();
+        let mut clipboard = NoopClipboard;
+        let mut pending_run_ids = PendingRunIds::default();
+
+        let mut textarea = TextArea::from(vec!["/mo".to_string()]);
+        configure_textarea(&mut textarea);
+        state.refresh_slash_overlay(&textarea.lines().join("\n"));
+        assert!(matches!(
+            state.slash_overlay,
+            SlashOverlay::Suggestions { .. }
+        ));
+
+        let tool_id = Uuid::new_v4();
+        let effects = presenter::update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolPending {
+                id: tool_id,
+                name: "write".to_string(),
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                run_id: None,
+            }),
+            &textarea_ctx_from(&textarea),
+        );
+        execute_effects(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            effects,
+            &mut mouse_drag,
+            &mut clipboard,
+            &mut pending_run_ids,
+        )
+        .await;
+        assert_eq!(state.slash_overlay, SlashOverlay::Hidden);
+
+        state.layout.approve_button = ratatui::layout::Rect::new(1, 1, 12, 1);
+        let effects = presenter::update(
+            &mut state,
+            TuiEvent::Mouse(crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: 2,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &textarea_ctx_from(&textarea),
+        );
+        assert_eq!(
+            effects,
+            vec![
+                Effect::ApproveTool { id: tool_id },
+                Effect::RestoreInputState
+            ]
+        );
+        execute_effects(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            effects,
+            &mut mouse_drag,
+            &mut clipboard,
+            &mut pending_run_ids,
+        )
+        .await;
+        assert_eq!(
+            cmd_rx.try_recv(),
+            Ok(AgentCommand::ApproveTool { id: tool_id })
+        );
+        // Mirrors the Driver's mouse branch.
+        state.refresh_slash_overlay(&textarea.lines().join("\n"));
+        assert_eq!(textarea.lines(), &["/mo"]);
+        assert!(
+            matches!(state.slash_overlay, SlashOverlay::Suggestions { .. }),
+            "the overlay must reopen from the restored draft, got {:?}",
+            state.slash_overlay
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_resolution_restores_the_models_picker_with_its_catalog() {
+        // Regression: accepting `/models` opened the picker, then a tool
+        // approval arrived. Hiding the overlay for the approval used to
+        // destroy the fetched catalog — the draft text alone cannot
+        // reproduce it — so resolving the approval fell back to a
+        // suggestion list instead of the picker.
+        let (mut state, _, cmd_tx, mut cmd_rx) = setup();
+        let mut mouse_drag = MouseDrag::default();
+        let mut clipboard = NoopClipboard;
+        let mut pending_run_ids = PendingRunIds::default();
+
+        let mut textarea = TextArea::from(vec!["/models deep".to_string()]);
+        configure_textarea(&mut textarea);
+        state.slash_overlay = SlashOverlay::ModelPicker {
+            choices: vec![ModelChoice {
+                label: "stub/deepseek-v3".to_string(),
+                selection: crate::llm::ProviderModelOption {
+                    provider_connection: "stub".to_string(),
+                    model: crate::llm::ModelInfo {
+                        id: "deepseek-v3".to_string(),
+                        context_length: None,
+                        reasoning_efforts: None,
+                        reasoning_default: None,
+                        input_modalities: None,
+                    },
+                    reasoning_effort: None,
+                },
+                is_active: true,
+                engine_name: None,
+            }],
+            filter: "deep".to_string(),
+            selected: 0,
+        };
+
+        let tool_id = Uuid::new_v4();
+        let effects = presenter::update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolPending {
+                id: tool_id,
+                name: "write".to_string(),
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                run_id: None,
+            }),
+            &textarea_ctx_from(&textarea),
+        );
+        execute_effects(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            effects,
+            &mut mouse_drag,
+            &mut clipboard,
+            &mut pending_run_ids,
+        )
+        .await;
+        assert_eq!(state.slash_overlay, SlashOverlay::Hidden);
+        let parked = state
+            .pending_input_snapshot
+            .clone()
+            .expect("input state must be parked while the approval is pending");
+        assert!(
+            matches!(parked.slash_overlay, SlashOverlay::ModelPicker { .. }),
+            "the picker must be parked, got {:?}",
+            parked.slash_overlay
+        );
+        assert_eq!(parked.input_lines, Some(vec!["/models deep".to_string()]));
+
+        let effects = presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::Escape),
+            &textarea_ctx_from(&textarea),
+        );
+        execute_effects(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            effects,
+            &mut mouse_drag,
+            &mut clipboard,
+            &mut pending_run_ids,
+        )
+        .await;
+        assert_eq!(
+            cmd_rx.try_recv(),
+            Ok(AgentCommand::DenyTool {
+                id: tool_id,
+                reason: String::new(),
+            })
+        );
+        assert_eq!(state.pending_input_snapshot, None);
+        assert_eq!(textarea.lines(), &["/models deep"]);
+        // The Driver's post-effect recompute reconciles the restored picker
+        // with the restored draft (same filter, kept catalog).
+        state.refresh_slash_overlay(&textarea.lines().join("\n"));
+        let SlashOverlay::ModelPicker {
+            choices, filter, ..
+        } = &state.slash_overlay
+        else {
+            panic!(
+                "the models picker must come back with the restored draft, got {:?}",
+                state.slash_overlay
+            );
+        };
+        assert_eq!(filter, "deep");
+        assert_eq!(choices.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn approval_input_never_interprets_slash_commands() {
+        // The approval popup's input is plain text: no suggestion overlay
+        // may open while typing a denial reason that starts with `/`, Tab
+        // must not complete a command, and Enter must deny with the typed
+        // reason instead of running the command.
+        let (mut state, _, cmd_tx, mut cmd_rx) = setup();
+        let mut mouse_drag = MouseDrag::default();
+        let mut clipboard = NoopClipboard;
+        let mut pending_run_ids = PendingRunIds::default();
+
+        let mut textarea = TextArea::from(vec!["hello".to_string()]);
+        configure_textarea(&mut textarea);
+
+        let tool_id = Uuid::new_v4();
+        let effects = presenter::update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolPending {
+                id: tool_id,
+                name: "write".to_string(),
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                run_id: None,
+            }),
+            &textarea_ctx_from(&textarea),
+        );
+        execute_effects(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            effects,
+            &mut mouse_drag,
+            &mut clipboard,
+            &mut pending_run_ids,
+        )
+        .await;
+        assert_eq!(state.slash_overlay, SlashOverlay::Hidden);
+
+        // Type "/clear" as the denial reason, mirroring the driver loop:
+        // key → effects → per-action recompute.
+        for character in "/clear".chars() {
+            let effects = presenter::update(
+                &mut state,
+                TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Char(character)))),
+                &textarea_ctx_from(&textarea),
+            );
+            execute_effects(
+                &mut state,
+                &mut textarea,
+                &cmd_tx,
+                effects,
+                &mut mouse_drag,
+                &mut clipboard,
+                &mut pending_run_ids,
+            )
+            .await;
+            state.refresh_slash_overlay(&textarea.lines().join("\n"));
+            assert_eq!(
+                state.slash_overlay,
+                SlashOverlay::Hidden,
+                "no suggestions while typing a denial reason containing `/`"
+            );
+        }
+        assert_eq!(textarea.lines(), &["/clear"]);
+
+        // Tab must not complete a slash command in the approval input.
+        let effects = presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Tab))),
+            &textarea_ctx_from(&textarea),
+        );
+        assert_eq!(effects, vec![Effect::TextareaKey(key_event(KeyCode::Tab))]);
+
+        // Enter must deny with the typed reason, not run `/clear`.
+        let effects = presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+            &textarea_ctx_from(&textarea),
+        );
+        assert!(
+            matches!(
+                effects.as_slice(),
+                [Effect::DenyTool { id, reason }, Effect::RestoreInputState]
+                    if *id == tool_id && reason == "/clear"
+            ),
+            "Enter must deny with the reason, got {effects:?}"
+        );
+        execute_effects(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            effects,
+            &mut mouse_drag,
+            &mut clipboard,
+            &mut pending_run_ids,
+        )
+        .await;
+        assert_eq!(
+            cmd_rx.try_recv(),
+            Ok(AgentCommand::DenyTool {
+                id: tool_id,
+                reason: "/clear".to_string(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn interrupted_model_list_discovery_resumes_after_the_pause() {
+        // A result completing while a pause hid the overlay is discarded, so
+        // once the pause restores `LoadingModels` the request must be made
+        // again for the picker to ever populate.
+        let (mut state, _, _cmd_tx, _cmd_rx) = setup();
+        let engine: Arc<dyn Engine> = StubEngine::with_models(&["small", "large"], "large");
+        let mut pending_model_list: Option<PendingModelList> = None;
+
+        state.slash_overlay = SlashOverlay::LoadingModels;
+        resume_interrupted_model_list(&state, &mut pending_model_list, &engine, "/models deep");
+        assert!(
+            pending_model_list.is_some(),
+            "the discarded catalog request must be restarted"
+        );
+
+        let (filter, result) = wait_for_model_list(&mut pending_model_list)
+            .await
+            .expect("the restarted request must produce a result");
+        pending_model_list = None;
+        apply_model_list_result(&mut state, filter, result, &engine);
+        let SlashOverlay::ModelPicker {
+            choices, filter, ..
+        } = &state.slash_overlay
+        else {
+            panic!("expected the models picker, got {:?}", state.slash_overlay);
+        };
+        assert_eq!(filter, "deep");
+        assert_eq!(choices.len(), 2);
+
+        // While the original request is still in flight, its result will be
+        // applied on arrival — the helper must not start a second one.
+        state.slash_overlay = SlashOverlay::LoadingModels;
+        start_model_list(&mut pending_model_list, None, &engine);
+        resume_interrupted_model_list(&state, &mut pending_model_list, &engine, "/models deep");
+        assert_eq!(
+            pending_model_list
+                .as_ref()
+                .map(|pending| pending.filter.clone()),
+            Some(None),
+            "an in-flight request must not be replaced"
+        );
+        abort_pending_model_list(&mut pending_model_list);
     }
 
     #[test]
@@ -3116,6 +3642,50 @@ mod tests {
             completion,
             vec![Effect::SetInputText("/models".to_string())]
         );
+    }
+
+    #[test]
+    fn suggestion_selection_survives_the_driver_per_action_recompute() {
+        // Regression: the Driver recomputes the overlay after every key
+        // action (see the key branch of the event loop). Rebuilding the
+        // suggestions with `selected: 0` on each recompute made ↑/↓ a no-op
+        // in the running app — the presenter moved the highlight and the
+        // recompute immediately put it back on the first entry. The unit
+        // test above misses this because it skips the recompute.
+        let mut state = AppState::new();
+        state.refresh_slash_overlay("/");
+        let textarea = TextareaContext {
+            is_empty: false,
+            text: "/".to_string(),
+            cursor_row: 0,
+            cursor_row_is_last: true,
+        };
+        let highlighted =
+            |state: &AppState| state.selected_slash_command().map(|command| command.name);
+
+        presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Down))),
+            &textarea,
+        );
+        state.refresh_slash_overlay(&textarea.text);
+        assert_eq!(highlighted(&state), Some("/models"));
+
+        presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Down))),
+            &textarea,
+        );
+        state.refresh_slash_overlay(&textarea.text);
+        assert_eq!(highlighted(&state), Some("/tools"));
+
+        presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Up))),
+            &textarea,
+        );
+        state.refresh_slash_overlay(&textarea.text);
+        assert_eq!(highlighted(&state), Some("/models"));
     }
 
     #[test]

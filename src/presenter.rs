@@ -86,7 +86,10 @@ fn route_keyboard(
 fn keyboard_help(state: &mut AppState, event: InputEvent) -> Vec<Effect> {
     match event {
         InputEvent::ShowHelp | InputEvent::Escape => {
-            state.focus = Focus::MainInput;
+            // Closing help resumes an outstanding tool approval rather than
+            // the main input — otherwise the slash-command-capable input
+            // would take over while a tool still awaits its verdict.
+            state.restore_focus_after_help();
             state.help_popup.help_scroll_offset = 0;
             state.help_popup.help_scroll_x = 0;
             state.clear_help_selection();
@@ -140,14 +143,17 @@ fn keyboard_approval(
                     id: tool_id,
                     reason: String::new(),
                 },
-                Effect::RestoreTextarea,
+                Effect::RestoreInputState,
             ]
         }
         InputEvent::SigInt => vec![Effect::StopAgent],
         InputEvent::KeyInput(key_event) if key_event.code == KeyCode::Enter => {
             state.focus = Focus::MainInput;
             if textarea.is_empty {
-                vec![Effect::ApproveTool { id: tool_id }, Effect::RestoreTextarea]
+                vec![
+                    Effect::ApproveTool { id: tool_id },
+                    Effect::RestoreInputState,
+                ]
             } else {
                 // User typed a denial reason — pass it to the agent so it can
                 // be forwarded to the model as an implicit user message.
@@ -157,7 +163,7 @@ fn keyboard_approval(
                         id: tool_id,
                         reason,
                     },
-                    Effect::RestoreTextarea,
+                    Effect::RestoreInputState,
                 ]
             }
         }
@@ -366,12 +372,12 @@ fn keyboard_clarify(
         InputEvent::SigInt => vec![Effect::StopAgent],
         InputEvent::CtrlC => {
             state.mode = TuiMode::Pending;
-            vec![Effect::AbortClarify, Effect::RestoreTextarea]
+            vec![Effect::AbortClarify, Effect::RestoreInputState]
         }
         InputEvent::Escape => {
             if textarea.is_empty {
                 state.mode = TuiMode::Pending;
-                vec![Effect::AbortClarify, Effect::RestoreTextarea]
+                vec![Effect::AbortClarify, Effect::RestoreInputState]
             } else {
                 vec![Effect::ClearTextarea]
             }
@@ -381,7 +387,7 @@ fn keyboard_clarify(
             state.mode = TuiMode::Pending;
             vec![
                 Effect::AnswerClarify(textarea.text.clone()),
-                Effect::RestoreTextarea,
+                Effect::RestoreInputState,
             ]
         }
         InputEvent::KeyInput(key_event) if key_event.code == KeyCode::Up => {
@@ -824,7 +830,7 @@ fn route_mouse(
             // Close modal on click outside.
             if matches!(state.focus, Focus::HelpPopup) {
                 if !state.layout.help_popup.hit(column, row) {
-                    state.focus = Focus::MainInput;
+                    state.restore_focus_after_help();
                     state.help_popup.help_scroll_offset = 0;
                     state.help_popup.help_scroll_x = 0;
                     state.clear_help_selection();
@@ -902,7 +908,10 @@ fn route_mouse(
                     && row < deny.y + deny.height;
                 if in_approve {
                     state.focus = Focus::MainInput;
-                    return vec![Effect::ApproveTool { id: tool_id }, Effect::RestoreTextarea];
+                    return vec![
+                        Effect::ApproveTool { id: tool_id },
+                        Effect::RestoreInputState,
+                    ];
                 }
                 if in_deny {
                     state.focus = Focus::MainInput;
@@ -911,7 +920,7 @@ fn route_mouse(
                             id: tool_id,
                             reason: String::new(),
                         },
-                        Effect::RestoreTextarea,
+                        Effect::RestoreInputState,
                     ];
                 }
             }
@@ -1354,8 +1363,15 @@ fn push_tool_pending_bubble(
         tool_id: id,
         tool_name: name,
     };
+    // The approval footer occupies the rows directly above the input, the
+    // same rows any slash overlay draws itself onto, and the approval also
+    // takes over keyboard routing — so the save effect below parks the open
+    // overlay (notably a `/models` picker's already-fetched catalog, which
+    // the draft alone cannot reproduce) into `pending_input_snapshot` and
+    // hides it until `RestoreInputState` brings draft and overlay back
+    // together when the approval resolves.
     state.note_child_interactive_pause(run_id);
-    vec![Effect::SaveTextareaAndClear]
+    vec![Effect::SaveInputStateAndClear]
 }
 
 /// Shared handling for `DomainEvent::ClarifyPending`, used identically by
@@ -1407,7 +1423,10 @@ fn push_clarify_pending_bubble(
     state.clarify_banner_state.clarify_scroll_offset = usize::MAX;
     state.focus = Focus::MainInput;
     state.note_child_interactive_pause(run_id);
-    vec![Effect::SaveTextareaAndClear]
+    // The banner sits on the same rows above the input as the approval
+    // footer, so this save parks draft *and* overlay together — see
+    // `InputSnapshot`.
+    vec![Effect::SaveInputStateAndClear]
 }
 
 fn domain_idle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
@@ -3116,7 +3135,7 @@ mod tests {
             id: tool_id,
             reason: String::new(),
         }));
-        assert!(effects.contains(&Effect::RestoreTextarea));
+        assert!(effects.contains(&Effect::RestoreInputState));
         assert_eq!(state.focus, Focus::MainInput);
     }
 
@@ -3151,7 +3170,7 @@ mod tests {
             id: tool_id,
             reason: String::new(),
         }));
-        assert!(effects.contains(&Effect::RestoreTextarea));
+        assert!(effects.contains(&Effect::RestoreInputState));
     }
 
     #[test]
@@ -3276,7 +3295,7 @@ mod tests {
             &empty_textarea(),
         );
         assert!(effects.contains(&Effect::ApproveTool { id: tool_id }));
-        assert!(effects.contains(&Effect::RestoreTextarea));
+        assert!(effects.contains(&Effect::RestoreInputState));
     }
 
     #[test]
@@ -3296,7 +3315,7 @@ mod tests {
             id: tool_id,
             reason: "deny reason".to_string(),
         }));
-        assert!(effects.contains(&Effect::RestoreTextarea));
+        assert!(effects.contains(&Effect::RestoreInputState));
     }
 
     #[test]
@@ -3314,7 +3333,7 @@ mod tests {
             }),
             &empty_textarea(),
         );
-        assert!(effects.contains(&Effect::SaveTextareaAndClear));
+        assert!(effects.contains(&Effect::SaveInputStateAndClear));
         assert!(matches!(
             state.mode,
             TuiMode::ClarifyPending { ref question, choices: None, .. } if question == "Test?"
@@ -3404,7 +3423,7 @@ mod tests {
             effects,
             vec![
                 Effect::AnswerClarify("free-form answer".to_string()),
-                Effect::RestoreTextarea,
+                Effect::RestoreInputState,
             ]
         );
     }
@@ -3425,7 +3444,7 @@ mod tests {
         );
         assert_eq!(state.mode, TuiMode::Pending);
         assert!(effects.contains(&Effect::AbortClarify));
-        assert!(effects.contains(&Effect::RestoreTextarea));
+        assert!(effects.contains(&Effect::RestoreInputState));
     }
 
     #[test]
@@ -5719,6 +5738,98 @@ mod tests {
                 tool_id,
                 tool_name: "test_tool".to_string()
             }
+        );
+    }
+
+    #[test]
+    fn tool_pending_parks_the_input_state_via_the_save_effect() {
+        // Regression: a half-typed slash command left the suggestion overlay
+        // open when a tool approval arrived, and the approval footer draws on
+        // the same rows above the input. Arming the approval must emit the
+        // save effect that parks draft + overlay together and hides the
+        // overlay (the snapshot/hide itself happens when the Driver executes
+        // the effect — covered by the `tui_driver` tests).
+        let mut state = AppState::new();
+        state.refresh_slash_overlay("/mo");
+        assert!(
+            matches!(state.slash_overlay, SlashOverlay::Suggestions { .. }),
+            "expected the suggestion overlay to be open, got {:?}",
+            state.slash_overlay
+        );
+
+        let effects = update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolPending {
+                id: Uuid::new_v4(),
+                name: "write".to_string(),
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                run_id: None,
+            }),
+            &textarea_with("/mo"),
+        );
+        assert!(matches!(state.focus, Focus::ToolApproval { .. }));
+        assert!(
+            effects.contains(&Effect::SaveInputStateAndClear),
+            "expected the input-state save effect, got {effects:?}"
+        );
+    }
+
+    #[test]
+    fn closing_help_during_an_outstanding_approval_returns_to_the_approval_focus() {
+        // Regression: closing the help popup used to drop focus to
+        // `Focus::MainInput` even while a tool still awaited its verdict —
+        // handing the slash-command-capable main input to the user and
+        // hiding the approval controls.
+        let mut state = AppState::new();
+        let tool_id = Uuid::new_v4();
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolPending {
+                id: tool_id,
+                name: "write".to_string(),
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                run_id: None,
+            }),
+            &empty_textarea(),
+        );
+        assert!(matches!(state.focus, Focus::ToolApproval { .. }));
+
+        let effects = update(
+            &mut state,
+            TuiEvent::Input(InputEvent::ShowHelp),
+            &empty_textarea(),
+        );
+        assert!(effects.is_empty());
+        assert!(matches!(state.focus, Focus::HelpPopup));
+
+        let effects = update(
+            &mut state,
+            TuiEvent::Input(InputEvent::Escape),
+            &empty_textarea(),
+        );
+        assert_eq!(
+            state.focus,
+            Focus::ToolApproval {
+                tool_id,
+                tool_name: "write".to_string()
+            },
+            "closing help must resume the approval focus while the verdict is outstanding"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::DenyTool { .. })),
+            "closing help must not resolve the approval"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::RestoreInputState)),
+            "closing help must not restore the input — the pause is still active"
         );
     }
 

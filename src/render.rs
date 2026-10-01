@@ -164,7 +164,6 @@ fn project_for_draw(state: &AppState) -> TuiState {
         steer_indicator: state.steer_indicator,
         pending_approval,
         pending_approval_is_subagent,
-        pending_approval_input_snapshot: state.pending_approval_input_snapshot.clone(),
         input_history: state.input_history.clone(),
         history_index: state.history_index,
         draft: state.draft.clone(),

@@ -1248,7 +1248,11 @@ the selected connection, model, and effort;
 `Esc` closes any open overlay and clears the draft (before the usual
 draft-clear/abort ladder), since leaving the draft in place would make the
 next per-action `refresh_slash_overlay` recompute reopen the very overlay
-just dismissed.
+just dismissed. That recompute keeps the highlighted suggestion as long as
+the draft leaves the choice set unchanged — otherwise it would undo `↑`/`↓`
+navigation after every key press — and restarts the selection at the first
+entry when the draft narrows or widens the set (the model picker behaves the
+same way for its filter).
 Model rows identify reasoning as unavailable, at the default (naming the
 provider-advertised default when one is known, e.g. `default (medium)`), or
 adjustable with a `⚙` marker, and append `[I]`/`[F]` input-modality markers
@@ -1262,6 +1266,30 @@ Left-dragging within any visible slash-command overlay row selects its
 rendered text, highlights the range while dragging, and copies the selected
 text to the clipboard on release without changing the command or model
 selection.
+
+A pending tool approval outranks every slash overlay: arming
+`Focus::ToolApproval` (`presenter::push_tool_pending_bubble`) emits
+`Effect::SaveInputStateAndClear`, which parks the textarea lines *and* the
+current overlay as one `InputSnapshot`
+(`AppState::pending_input_snapshot`) and hides the overlay, while
+`AppState::refresh_slash_overlay` refuses to recompute it for the duration
+— the approval footer draws on the same rows above the input, and a denial
+reason typed during the approval must not reopen the overlay over it.
+`Effect::RestoreInputState` gives both halves back together, so a
+`/models` picker returns with its fetched catalog (which the draft text
+alone cannot reproduce) instead of collapsing into re-derived suggestions;
+the Driver recomputes the overlay after its effects in the key-action
+*and* mouse branches to reconcile the restored overlay with the restored
+draft. The clarify banner parks the input the same way — it occupies the
+same rows above the input.
+The suppression is keyed to the outstanding-approval bubble
+(`AppState::pending_tool_approval`), not only to the focus: the help popup
+can temporarily take the focus during an approval, and closing it
+(`AppState::restore_focus_after_help`) resumes the approval focus while a
+verdict is still outstanding. That keeps the reason field under
+`keyboard_approval`'s plain-text routing — `Enter` denies with the reason,
+`Tab` is literal — instead of the slash-command handling in
+`keyboard_main`, so no slash command can run from an approval popup.
 
 The same selection pipeline is used by the startup wordmark and help popup:
 the View records the rendered lines and geometry, while the Presenter owns
@@ -1281,7 +1309,11 @@ The task's result is handled by a separate `select!` branch, so the main loop
 continues consuming agent updates, input, timeouts, and spinner ticks while
 discovery is pending. Dismissing the loading overlay cancels the pending
 request; completed results are ignored unless the loading overlay is still
-active.
+active. The same applies while a pause (tool approval, clarify) hides the
+overlay: a result completing during the pause is discarded, and
+`tui_driver::resume_interrupted_model_list` restarts the request when the
+pause restores `LoadingModels` — unless the original request is still in
+flight, whose result the existing branch then applies on arrival.
 
 Two rules keep this consistent with blueprint §4C:
 

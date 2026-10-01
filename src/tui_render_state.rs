@@ -225,10 +225,6 @@ pub struct TuiState {
     /// title so it's unambiguous which agent's tool call is being approved.
     /// Meaningless when `pending_approval` is `None`.
     pub pending_approval_is_subagent: bool,
-    /// Textarea lines saved when a `ToolPending` approval sub-mode starts so
-    /// the unsubmitted draft can be restored once the approval is resolved.
-    /// `None` when no approval is in progress or the input was empty.
-    pub pending_approval_input_snapshot: Option<Vec<String>>,
     /// All `UserMessage` texts, oldest → newest (including pending and
     /// cancelled steers, so the user can recover them via ↑).
     pub input_history: Vec<String>,
@@ -291,7 +287,6 @@ impl TuiState {
             steer_indicator: false,
             pending_approval: None,
             pending_approval_is_subagent: false,
-            pending_approval_input_snapshot: None,
             input_history: Vec::new(),
             history_index: None,
             draft: String::new(),
