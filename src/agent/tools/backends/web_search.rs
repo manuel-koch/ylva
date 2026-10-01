@@ -19,9 +19,9 @@
 //! so tests pass a stub and no unit/integration test touches the network
 //! (see `docs/known-test-issues.md` — network side effects must be
 //! caller-injected). Each backend kind lives in its own implementation
-//! module ([`duckduckgo`], [`searxng`]); [`backend_for`] builds the one named
-//! by the config, or returns an error — it never substitutes a different
-//! backend for the configured one.
+//! module ([`duckduckgo`], [`searxng`], [`brave`]); [`backend_for`] builds
+//! the one named by the config, or returns an error — it never substitutes a
+//! different backend for the configured one.
 //!
 //! Every backend fails fast: a transport error, a non-success HTTP status
 //! (including bot-detection/captcha responses), or an unparseable body is a
@@ -35,9 +35,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Implementation modules, one per [`WebSearchBackend`] backend kind.
+pub mod brave;
 pub mod duckduckgo;
 pub mod searxng;
 
+pub use brave::BraveBackend;
 pub use duckduckgo::DuckDuckGoBackend;
 pub use searxng::SearXngBackend;
 
@@ -61,6 +63,8 @@ pub enum WebSearchBackendKind {
     DuckDuckGo,
     /// A SearXNG instance (`[web_search.backends.searxng] base_url`).
     SearXng,
+    /// Brave Search's API (`[web_search.backends.brave] api_key`).
+    Brave,
 }
 
 impl WebSearchBackendKind {
@@ -69,23 +73,28 @@ impl WebSearchBackendKind {
     pub const DUCKDUCKGO_NAME: &'static str = "duckduckgo";
     /// Config/wire name of the SearXNG backend.
     pub const SEARXNG_NAME: &'static str = "searxng";
+    /// Config/wire name of the Brave Search backend.
+    pub const BRAVE_NAME: &'static str = "brave";
 
     /// User-facing label of the DuckDuckGo backend.
     pub const DUCKDUCKGO_DISPLAY_NAME: &'static str = "DuckDuckGo";
     /// User-facing label of the SearXNG backend.
     pub const SEARXNG_DISPLAY_NAME: &'static str = "SearXNG";
+    /// User-facing label of the Brave Search backend.
+    pub const BRAVE_DISPLAY_NAME: &'static str = "Brave";
 
     /// Every backend name accepted as `[web_search] backend`, in display
     /// order. The error text for an unknown value is built from this list, so
     /// config validation cannot drift from what is actually implemented.
     pub const SUPPORTED_NAMES: &'static [&'static str] =
-        &[Self::DUCKDUCKGO_NAME, Self::SEARXNG_NAME];
+        &[Self::DUCKDUCKGO_NAME, Self::SEARXNG_NAME, Self::BRAVE_NAME];
 
     /// The wire/config name of this backend.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::DuckDuckGo => Self::DUCKDUCKGO_NAME,
             Self::SearXng => Self::SEARXNG_NAME,
+            Self::Brave => Self::BRAVE_NAME,
         }
     }
 
@@ -95,6 +104,7 @@ impl WebSearchBackendKind {
         match self {
             Self::DuckDuckGo => Self::DUCKDUCKGO_DISPLAY_NAME,
             Self::SearXng => Self::SEARXNG_DISPLAY_NAME,
+            Self::Brave => Self::BRAVE_DISPLAY_NAME,
         }
     }
 
@@ -103,6 +113,7 @@ impl WebSearchBackendKind {
         match name {
             Self::DUCKDUCKGO_NAME => Some(Self::DuckDuckGo),
             Self::SEARXNG_NAME => Some(Self::SearXng),
+            Self::BRAVE_NAME => Some(Self::Brave),
             _ => None,
         }
     }
@@ -140,8 +151,9 @@ pub enum WebSearchError {
     #[error("web search backend responded with HTTP {status}")]
     Status { status: u16 },
     /// The backend answered with a non-success HTTP status that carries a
-    /// diagnosis worth passing on — currently SearXNG's `403` for instances
-    /// that disabled JSON output.
+    /// diagnosis worth passing on — e.g. SearXNG's `403` for instances that
+    /// disabled JSON output, or the `detail`/`code` of Brave Search's error
+    /// envelope.
     #[error("web search backend responded with HTTP {status}: {hint}")]
     StatusWithHint { status: u16, hint: String },
     /// The response body was not the expected search-results markup — e.g.
@@ -182,31 +194,50 @@ pub enum WebSearchBackendError {
         backend_name: String,
         supported: String,
     },
-    /// `[web_search] backend = "searxng"` without the configuration key its
-    /// instance URL lives in.
-    #[error("web search backend 'searxng' requires {missing_key} to name the SearXNG instance")]
-    MissingBackendSetting { missing_key: String },
+    /// The selected backend's required configuration key is missing or blank
+    /// (e.g. SearXNG's `base_url`, Brave's `api_key`).
+    #[error("web search backend '{backend_name}' requires {missing_key}")]
+    MissingBackendSetting {
+        backend_name: String,
+        missing_key: String,
+    },
 }
 
-/// Build the backend named by `backend_name`.
+/// The factory input of [`backend_for`]: each variant carries only its own
+/// backend's settings, so an unrelated optional setting can never reach a
+/// backend that does not use it.
+///
+/// Deliberately has no `Debug` implementation — the `Brave` variant holds the
+/// subscription token, which must never be formatted.
+pub enum WebSearchBackendSettings<'a> {
+    /// DuckDuckGo needs no backend-specific settings.
+    DuckDuckGo,
+    /// SearXNG's instance root, from `[web_search.backends.searxng] base_url`.
+    SearXng { base_url: Option<&'a str> },
+    /// Brave Search's subscription token, from
+    /// `[web_search.backends.brave] api_key`.
+    Brave { api_key: Option<&'a str> },
+    /// A backend name this build does not implement.
+    Unsupported { backend_name: &'a str },
+}
+
+/// Build the backend named by `settings`.
 ///
 /// `[web_search] backend` is validated at config load, so an error here is a
 /// defensive-only path: registration must never fail over it to a different
 /// backend. Returns an `Arc` so the caller can hand the instance straight to
 /// the tool.
 pub fn backend_for(
-    backend_name: &str,
-    base_url: Option<&str>,
+    settings: WebSearchBackendSettings<'_>,
     http_timeout: Duration,
 ) -> Result<Arc<dyn WebSearchBackend>, WebSearchBackendError> {
-    match WebSearchBackendKind::from_name(backend_name) {
-        Some(WebSearchBackendKind::DuckDuckGo) => {
-            Ok(Arc::new(DuckDuckGoBackend::new(http_timeout)))
-        }
-        Some(WebSearchBackendKind::SearXng) => {
+    match settings {
+        WebSearchBackendSettings::DuckDuckGo => Ok(Arc::new(DuckDuckGoBackend::new(http_timeout))),
+        WebSearchBackendSettings::SearXng { base_url } => {
             let Some(base_url) = base_url.filter(|value| !value.trim().is_empty()) else {
                 return Err(WebSearchBackendError::MissingBackendSetting {
-                    missing_key: "[web_search.backends.searxng].base_url".to_string(),
+                    backend_name: WebSearchBackendKind::SEARXNG_NAME.to_string(),
+                    missing_key: "[web_search.backends.searxng] base_url".to_string(),
                 });
             };
             Ok(Arc::new(SearXngBackend::with_base_url(
@@ -214,10 +245,24 @@ pub fn backend_for(
                 http_timeout,
             )))
         }
-        None => Err(WebSearchBackendError::UnsupportedBackend {
-            backend_name: backend_name.to_string(),
-            supported: WebSearchBackendKind::supported_names_display(),
-        }),
+        WebSearchBackendSettings::Brave { api_key } => {
+            let Some(api_key) = api_key.filter(|value| !value.trim().is_empty()) else {
+                return Err(WebSearchBackendError::MissingBackendSetting {
+                    backend_name: WebSearchBackendKind::BRAVE_NAME.to_string(),
+                    missing_key: "[web_search.backends.brave] api_key".to_string(),
+                });
+            };
+            Ok(Arc::new(BraveBackend::with_api_key(
+                api_key.trim(),
+                http_timeout,
+            )))
+        }
+        WebSearchBackendSettings::Unsupported { backend_name } => {
+            Err(WebSearchBackendError::UnsupportedBackend {
+                backend_name: backend_name.to_string(),
+                supported: WebSearchBackendKind::supported_names_display(),
+            })
+        }
     }
 }
 
@@ -301,17 +346,23 @@ mod tests {
             WebSearchBackendKind::from_name("searxng"),
             Some(WebSearchBackendKind::SearXng)
         );
+        assert_eq!(
+            WebSearchBackendKind::from_name("brave"),
+            Some(WebSearchBackendKind::Brave)
+        );
         assert_eq!(WebSearchBackendKind::from_name("startpage"), None);
         assert_eq!(WebSearchBackendKind::DuckDuckGo.as_str(), "duckduckgo");
         assert_eq!(WebSearchBackendKind::SearXng.as_str(), "searxng");
+        assert_eq!(WebSearchBackendKind::Brave.as_str(), "brave");
         assert_eq!(
             WebSearchBackendKind::DuckDuckGo.display_name(),
             "DuckDuckGo"
         );
         assert_eq!(WebSearchBackendKind::SearXng.display_name(), "SearXNG");
+        assert_eq!(WebSearchBackendKind::Brave.display_name(), "Brave");
         assert_eq!(
             WebSearchBackendKind::supported_names_display(),
-            "duckduckgo, searxng"
+            "duckduckgo, searxng, brave"
         );
     }
 
@@ -330,31 +381,84 @@ mod tests {
 
     #[test]
     fn backend_for_builds_the_configured_backend() {
-        let duckduckgo = backend_for("duckduckgo", None, Duration::from_secs(1))
+        let duckduckgo = backend_for(WebSearchBackendSettings::DuckDuckGo, Duration::from_secs(1))
             .expect("the default backend always builds");
         assert!(format!("{duckduckgo:?}").contains("DuckDuckGoBackend"));
 
         let searxng = backend_for(
-            "searxng",
-            Some("https://searx.example.org"),
+            WebSearchBackendSettings::SearXng {
+                base_url: Some("https://searx.example.org"),
+            },
             Duration::from_secs(1),
         )
         .expect("searxng with an instance URL builds");
         assert!(format!("{searxng:?}").contains("SearXngBackend"));
 
-        let unsupported = backend_for("something-else", None, Duration::from_secs(1))
-            .expect_err("an unsupported name must not build a substituted backend");
+        let brave = backend_for(
+            WebSearchBackendSettings::Brave {
+                api_key: Some("test-subscription-token"),
+            },
+            Duration::from_secs(1),
+        )
+        .expect("brave with a subscription token builds");
+        let rendered = format!("{brave:?}");
+        assert!(
+            rendered.contains("BraveBackend") && !rendered.contains("test-subscription-token"),
+            "{rendered}"
+        );
+
+        let unsupported = backend_for(
+            WebSearchBackendSettings::Unsupported {
+                backend_name: "something-else",
+            },
+            Duration::from_secs(1),
+        )
+        .expect_err("an unsupported name must not build a substituted backend");
         assert!(
             unsupported.to_string().contains("something-else")
-                && unsupported.to_string().contains("duckduckgo, searxng"),
+                && unsupported
+                    .to_string()
+                    .contains("duckduckgo, searxng, brave"),
             "{unsupported}"
         );
 
-        let missing_url = backend_for("searxng", None, Duration::from_secs(1))
-            .expect_err("searxng without base_url must not build a substituted backend");
+        let missing_url = backend_for(
+            WebSearchBackendSettings::SearXng { base_url: None },
+            Duration::from_secs(1),
+        )
+        .expect_err("searxng without base_url must not build a substituted backend");
         assert!(
-            missing_url.to_string().contains("base_url"),
+            missing_url.to_string().contains("base_url")
+                && missing_url.to_string().contains("searxng"),
             "the error names the missing key: {missing_url}"
+        );
+        let blank_url = backend_for(
+            WebSearchBackendSettings::SearXng {
+                base_url: Some("   "),
+            },
+            Duration::from_secs(1),
+        )
+        .expect_err("a blank base_url must not build a substituted backend");
+        assert!(blank_url.to_string().contains("base_url"), "{blank_url}");
+
+        let missing_api_key = backend_for(
+            WebSearchBackendSettings::Brave { api_key: None },
+            Duration::from_secs(1),
+        )
+        .expect_err("brave without api_key must not build a substituted backend");
+        assert!(
+            missing_api_key.to_string().contains("api_key")
+                && missing_api_key.to_string().contains("brave"),
+            "the error names the missing key: {missing_api_key}"
+        );
+        let blank_api_key = backend_for(
+            WebSearchBackendSettings::Brave { api_key: Some("") },
+            Duration::from_secs(1),
+        )
+        .expect_err("a blank api_key must not build a substituted backend");
+        assert!(
+            blank_api_key.to_string().contains("api_key"),
+            "{blank_api_key}"
         );
     }
 }

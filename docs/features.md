@@ -87,6 +87,11 @@ filesystem (device) than the workspace root — see
 Tool status lines render as `[tool] <title> …` (e.g. `[tool] Read docs/features.md [limit=32]`);
 bracketed props come from the tool's title arguments ranked by schema field
 order, so a labeled `bash` call renders `[tool] Bash echo hi [label=Greet the user]`.
+The first-ranked argument is the call's payload (`terms`, `command`, `path`)
+and is shown inline; both it and every bracketed prop are truncated with a
+trailing `…` once they pass their display budget (80 and 40 characters)
+instead of being replaced by a length placeholder, so a long query or command
+still shows its head and the status line never wraps.
 
 `--auto-approve-spawn` lets a spawned child agent (see
 [Child-agent delegation](#child-agent-delegation)) run to completion before
@@ -376,8 +381,10 @@ with provider-aware input for explicit Base64 `read` results added on top:
   workspace are auto-approved; paths outside require user approval.
 - **web_search**: Search the web for `terms` and return ranked results from
   the configured search backend (`docs/configuration.md`): `duckduckgo` (the
-  default — DuckDuckGo's HTML endpoint) or `searxng`, which requires a
-  `[web_search.backends.searxng] base_url` naming the instance to query.
+  default — DuckDuckGo's HTML endpoint), `searxng`, which requires a
+  `[web_search.backends.searxng] base_url` naming the instance to query, or
+  `brave`, which requires a `[web_search.backends.brave] api_key` holding the
+  Brave Search API subscription token.
   `text` lists each hit as a numbered title with its URL; the structured
   result metadata carries one `{title, url, snippet}` entry per hit, with
   snippets whitespace-normalized and truncated to 300 characters. Optional
@@ -425,7 +432,11 @@ with provider-aware input for explicit Base64 `read` results added on top:
   summarising the delegated task for display, and optional `briefing` and
   `agent_type`) to a child agent that runs concurrently with the parent. `label`
   is shown as the tool-call bubble's primary title text — including while
-  collapsed. Only available to agents allowed to spawn children (no nesting —
+  collapsed. An explicitly chosen `agent_type` qualifies the title instead of
+  appearing as a bracketed prop — `Spawn Subagent (local-discovery) …` in the
+  root conversation, `Subagent (local-discovery) …` in the drill-in header —
+  while the default type is omitted entirely. Only available to agents allowed
+  to spawn children (no nesting —
   delegation is one level deep). Requires user approval unless
   `--auto-approve-spawn` is set. The call resolves immediately with an
   admission event containing the `run_id`, `tool_call_id`, `label`, and
@@ -641,6 +652,15 @@ module structure (model/presenter/view/driver split).
 - **Multiline paste:** the TUI supports pasting multiline text via the
   terminal's bracketed-paste protocol. Pasted text is dedented before
   insertion.
+- **Tool bubble titles:** a bubble's title line is the tool's own display
+  label (`Tool::title()`) rather than a re-derivation from its name, so
+  `web_search` and `web_fetch` name the backend the profile selects — e.g.
+  `Web Search (Brave)` — exactly as the CLI status line prints it. A tool
+  the registry does not know falls back to its title-cased name. A subtype
+  the model picks per call (`Tool::subtype_argument()`, e.g.
+  `spawn_subagent`'s `agent_type`) is folded into that label as
+  `({value})` — `Spawn Subagent (local-discovery)` — and dropped from the
+  bracketed props, so the variant is rendered once.
 - **Tool bubble collapse/expand:** clicking a tool bubble's title line or its
   left-border bar toggles whether the bubble's arguments and result are shown
   (expanded, `▼`) or hidden (collapsed, `▶`). Collapsed bubbles display only

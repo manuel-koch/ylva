@@ -73,7 +73,11 @@ pub struct ChildViewState {
     /// real root `spawn_subagent` `ToolBubble`'s `(id, name, state,
     /// collapsed)` so `tui_widgets::draw` can re-render it verbatim as the header —
     /// same chrome, same collapsed/expanded state, same task/label/
-    /// agent_type content the user saw before drilling in. `None` while
+    /// agent_type content the user saw before drilling in. The one
+    /// deviation is the title: the header shortens it to `"Subagent"` (the
+    /// drill-in view already sits above that subagent's own transcript, so
+    /// the root-relative "Spawn" is noise) — see
+    /// `ToolBubbleArgs::display_title_override`. `None` while
     /// viewing `Root`.
     pub child_view_bubble: Option<(uuid::Uuid, String, ToolCallState, bool)>,
     /// Current vertical scroll offset inside the child-view header bubble
@@ -200,7 +204,7 @@ pub struct TuiState {
     /// reply. Flushed into a `ChatEntry::ThinkingMessage` on `StreamDone`.
     pub partial_thinking_text: String,
     /// Mirrors `AppState::thinking_started_at`; used to render the live
-    /// "Thinking... (Ns)" elapsed-time title while a thinking stream is
+    /// "Thinking… (Ns)" elapsed-time title while a thinking stream is
     /// in progress.
     pub thinking_started_at: Option<Instant>,
     /// Mirrors `AppState::partial_thinking_collapsed` so the in-flight

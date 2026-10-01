@@ -395,15 +395,22 @@ The `[web_search]` table configures the `web_search` tool (see
 
 | Field | Type | Description |
 |---|---|---|
-| `backend` | string | Search backend serving `web_search`: `"duckduckgo"` (default — DuckDuckGo's HTML endpoint) or `"searxng"` (the instance configured under `[web_search.backends.searxng]`). An unknown value is a hard config error naming the accepted values. |
+| `backend` | string | Search backend serving `web_search`: `duckduckgo`, `searxng` or `brave`. An unknown value is a hard config error naming the accepted values. |
 | `timeout_secs` | number | Internal HTTP timeout for one search request, in seconds (default `30`, floored at `1`). The tool's outer execution timeout is this value plus a small grace period, so the backend's own timeout fires first. |
 | `result_limit` | number | Result count a `web_search` call returns when it omits `limit` (default `15`). Clamped to `1..=20` so config can never disagree with the tool schema's maximum. |
+
+The available `web_search` backends:
+
+- `duckduckgo` (default): DuckDuckGo's HTML endpoint
+- `searxng`: SearXNG instance at `base_url`
+- `brave`: Brave API access with a given API-KEY
 
 Per-backend settings live in nested tables under `[web_search.backends]`:
 
 | Field | Type | Description |
 |---|---|---|
 | `backends.searxng.base_url` | string | Root URL of the SearXNG instance (e.g. `https://searx.example.org`). Required — and non-empty — when `backend = "searxng"`; `${ENV_VAR}` interpolation applies as to every other string. |
+| `backends.brave.api_key` | string | Brave Search API subscription token. Required — and non-empty — when `backend = "brave"` selects it; a secret, so `${ENV_VAR}` interpolation is the intended spelling. There is no automatic `BRAVE_API_KEY` environment fallback: the value only ever comes from the config (or the `${ENV_VAR}` it interpolates). |
 
 ```toml
 [web_search]
@@ -460,6 +467,24 @@ services:
 Instance-side limiter realities: the default budgets pace ylva's search
 traffic fine, and `pass_ip`/`trusted_proxies` in the instance's `limiter.toml`
 are the administrator's levers for callers that need more headroom.
+
+Selecting Brave Search additionally requires its subscription token:
+
+```toml
+[web_search]
+backend = "brave"
+
+[web_search.backends.brave]
+api_key = "${BRAVE_API_KEY}"
+```
+
+Selecting `brave` without the table, without `api_key`, or with a blank
+value is a hard config error naming the config path, the backend, the key,
+and the reason. A `[web_search.backends.brave]` table that is present while
+another backend is selected is validated but otherwise unused — an empty
+`api_key` is tolerated there. Ylva ships the fixed Brave endpoint
+(`https://api.search.brave.com`) in its API contract: there is no instance
+to run and no URL to configure.
 
 ### Web fetch configuration
 
@@ -760,7 +785,8 @@ any other rule kind it is a hard startup error. Which key a call is matched
 against: `web_fetch` uses the requested URL's key, `web_search` its
 configured backend endpoint's key — `https://html.duckduckgo.com` for the
 default backend, the configured instance authority (e.g.
-`https://searx.example.org`) for `searxng`.
+`https://searx.example.org`) for `searxng`, and the fixed
+`https://api.search.brave.com` for `brave`.
 
 `verdict`/`reason` behave like every other named rule, rules are evaluated
 in list order with last-match-wins, and `--auto-approve-web-search`/

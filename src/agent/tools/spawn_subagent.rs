@@ -155,6 +155,14 @@ impl Tool for SpawnSubagentTool {
         key == "agent_type" && value.as_str() == Some(DEFAULT_CHILD_AGENT_TYPE)
     }
 
+    /// The call's subtype: which configured agent type the child runs as.
+    /// Rendered as `Subagent (local-discovery)` instead of an
+    /// `agent_type=…` prop; the default type qualifies nothing because
+    /// [`is_default_argument`](Self::is_default_argument) already drops it.
+    fn subtype_argument(&self) -> Option<&'static str> {
+        Some("agent_type")
+    }
+
     fn non_default_redacted_arguments(&self, arguments: &Value) -> Vec<(String, Value)> {
         self.non_default_arguments(arguments)
             .into_iter()
@@ -312,6 +320,23 @@ mod tests {
         assert!(call.is_body_argument("briefing"));
         assert!(!call.is_body_argument("label"));
         assert!(!call.is_body_argument("agent_type"));
+    }
+
+    #[test]
+    fn agent_type_is_the_calls_subtype() {
+        let tool = SpawnSubagentTool::new(false);
+        assert_eq!(tool.subtype_argument(), Some("agent_type"));
+        assert!(
+            tool.is_default_argument(
+                "agent_type",
+                &Value::String(DEFAULT_CHILD_AGENT_TYPE.into())
+            ),
+            "the default type never reaches a renderer, so it qualifies nothing"
+        );
+        assert!(
+            !tool.is_default_argument("agent_type", &Value::String("local-discovery".into())),
+            "an explicitly chosen type does reach the renderer"
+        );
     }
 
     #[test]

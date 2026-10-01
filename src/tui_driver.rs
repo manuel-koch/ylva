@@ -1034,7 +1034,14 @@ where
     state.engine_display = agent.engine_display_info();
     let hint = confirm_hint(state);
     terminal.draw(|frame| {
-        render::render(frame, state, textarea, hint.as_deref(), mouse_pos);
+        render::render(
+            frame,
+            state,
+            textarea,
+            hint.as_deref(),
+            mouse_pos,
+            agent.registry().as_ref(),
+        );
     })?;
     Ok(())
 }

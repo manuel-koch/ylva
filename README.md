@@ -31,7 +31,7 @@ Ylva is highly customizable to adapt to user needs.
   - [x] `web_search` to search for terms in www, using backends
     - [x] DuckDuckGo
     - [x] SearXNG
-    - [ ] Brave
+    - [x] Brave
   - [x] `web_fetch` to fetch data from a given URL
 - [x] Human-in-the-loop safety via a path-based tool-approval sandbox
 - [x] Per-tool configurable sandbox approval rules

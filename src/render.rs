@@ -24,6 +24,7 @@
 use ratatui::Frame;
 use ratatui_textarea::TextArea;
 
+use crate::agent::tools::ToolRegistry;
 use crate::tui_reducer_state::{
     ActiveSubagentCounts, AppState, BannerDragSelection, ChatEntry, ConversationView, Focus,
 };
@@ -35,6 +36,10 @@ use crate::tui_widgets::{self, ButtonAreas};
 /// Projects `state` into a [`TuiState`] snapshot, delegates all rendering to
 /// [`crate::tui_widgets::draw`], then syncs the view-geometry fields written by
 /// `tui_widgets::draw` back into `state.layout` and the scroll/render-cache fields.
+/// The `registry` carries no rendering state of its own: tool bubbles look up
+/// their display label in it while drawing (`Tool::title()`, e.g.
+/// `Web Search (Brave)`) — the same on-demand lookup the CLI status line
+/// performs — so a title is never copied into the view-model.
 ///
 /// Called inside `terminal.draw(|frame| { render::render(frame, …); })`.
 pub fn render(
@@ -43,9 +48,17 @@ pub fn render(
     textarea: &mut TextArea<'_>,
     hint: Option<&str>,
     mouse_pos: Option<(u16, u16)>,
+    registry: &ToolRegistry,
 ) {
     let mut render_state = project_for_draw(state);
-    let button_areas = tui_widgets::draw(frame, &mut render_state, textarea, hint, mouse_pos);
+    let button_areas = tui_widgets::draw(
+        frame,
+        &mut render_state,
+        textarea,
+        hint,
+        mouse_pos,
+        registry,
+    );
     sync_from_draw(state, render_state, button_areas);
 }
 
@@ -545,7 +558,14 @@ mod tests {
             let mut textarea = TextArea::default();
             terminal
                 .draw(|frame| {
-                    crate::tui_widgets::draw(frame, &mut projected, &mut textarea, None, None);
+                    crate::tui_widgets::draw(
+                        frame,
+                        &mut projected,
+                        &mut textarea,
+                        None,
+                        None,
+                        &ToolRegistry::new(),
+                    );
                 })
                 .expect("draw");
             let buffer = terminal.backend().buffer().clone();
@@ -622,7 +642,14 @@ mod tests {
             let mut textarea = TextArea::default();
             terminal
                 .draw(|frame| {
-                    crate::tui_widgets::draw(frame, &mut projected, &mut textarea, None, None);
+                    crate::tui_widgets::draw(
+                        frame,
+                        &mut projected,
+                        &mut textarea,
+                        None,
+                        None,
+                        &ToolRegistry::new(),
+                    );
                 })
                 .expect("draw");
             let buffer = terminal.backend().buffer().clone();
@@ -873,7 +900,14 @@ mod tests {
         let mut textarea = TextArea::default();
         terminal
             .draw(|frame| {
-                crate::tui_widgets::draw(frame, &mut projected, &mut textarea, None, None);
+                crate::tui_widgets::draw(
+                    frame,
+                    &mut projected,
+                    &mut textarea,
+                    None,
+                    None,
+                    &ToolRegistry::new(),
+                );
             })
             .expect("draw");
 
@@ -931,5 +965,139 @@ mod tests {
         assert_eq!(state.conversation.scroll_offset, 7);
         assert!(!state.conversation.scroll_locked);
         assert!(state.pending_scroll_to_bubble.is_none());
+    }
+
+    /// Render one frame of `state` through `registry` into a `TestBackend`
+    /// buffer and return its plain text, so a test can assert what a bubble's
+    /// title line reads.
+    fn rendered_chat_text(state: &AppState, registry: &ToolRegistry) -> String {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        use ratatui_textarea::TextArea;
+
+        const COLUMNS: u16 = 100;
+        const ROWS: u16 = 24;
+
+        let mut projected = project_for_draw(state);
+        let mut terminal = Terminal::new(TestBackend::new(COLUMNS, ROWS)).expect("terminal");
+        let mut textarea = TextArea::default();
+        terminal
+            .draw(|frame| {
+                crate::tui_widgets::draw(
+                    frame,
+                    &mut projected,
+                    &mut textarea,
+                    None,
+                    None,
+                    registry,
+                );
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        let mut rendered = String::new();
+        for row in 0..ROWS {
+            for column in 0..COLUMNS {
+                rendered.push_str(buffer.cell((column, row)).expect("cell").symbol());
+            }
+            rendered.push('\n');
+        }
+        rendered
+    }
+
+    /// The registry `default_registry` builds from a brave-configured profile
+    /// — the same `[web_search]` section the CLI hands its display registry.
+    fn brave_web_search_registry() -> ToolRegistry {
+        crate::agent::tools::default_registry(
+            std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new())),
+            crate::agent::tools::ToolRegistryConfig {
+                web_search: crate::config::WebSearchConfig {
+                    backend: "brave".to_string(),
+                    backends: crate::config::WebSearchBackendsConfig {
+                        searxng: None,
+                        brave: Some(crate::config::BraveBackendConfig {
+                            api_key: Some("test-subscription-token".to_string()),
+                        }),
+                    },
+                    ..crate::config::WebSearchConfig::default()
+                },
+                ..crate::agent::tools::ToolRegistryConfig::default()
+            },
+        )
+    }
+
+    fn push_web_search_bubble(state: &mut AppState) {
+        state.chat_entries.push(ChatEntry::ToolBubble {
+            id: Uuid::new_v4(),
+            name: crate::agent::tools::web_search::WebSearchTool::NAME.to_string(),
+            state: Box::new(ToolCallState::Running {
+                arguments: serde_json::json!({ "terms": "agent-harnesses" }),
+                content_sections: vec![],
+                title_arguments: vec![("terms".to_string(), serde_json::json!("agent-harnesses"))],
+                progress_arguments: vec![],
+            }),
+            collapsed: false,
+        });
+    }
+
+    #[test]
+    fn tool_bubble_title_asks_the_tool_for_its_label_at_render_time() {
+        let mut state = AppState::new();
+        push_web_search_bubble(&mut state);
+
+        let with_backend = rendered_chat_text(&state, &brave_web_search_registry());
+        assert!(
+            with_backend.contains("Web Search (Brave)"),
+            "the bubble title must name the backend the registry's tool reports: {with_backend:?}"
+        );
+
+        // A registry without that tool (e.g. a directly-constructed one)
+        // falls back to the title-cased name instead of inventing a backend.
+        let without_backend = rendered_chat_text(&state, &ToolRegistry::new());
+        assert!(
+            without_backend.contains("Web Search"),
+            "the fallback still titles the bubble: {without_backend:?}"
+        );
+        assert!(
+            !without_backend.contains("Brave"),
+            "the fallback must not claim a backend: {without_backend:?}"
+        );
+    }
+
+    #[test]
+    fn drill_in_header_keeps_the_subagent_title_despite_the_registries_label() {
+        let mut state = AppState::new();
+        let bubble_id = Uuid::new_v4();
+        push_spawn_bubble(&mut state, bubble_id, "reviewer", "look into flaky test");
+        let run_id = Uuid::new_v4();
+        state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id,
+            agent_type: "reviewer".to_string(),
+            task: "look into flaky test".to_string(),
+            label: "Investigate flaky test".to_string(),
+        });
+        state.switch_to_child_view(run_id);
+        let mut registry = crate::agent::tools::default_registry(
+            std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new())),
+            crate::agent::tools::ToolRegistryConfig::default(),
+        );
+        registry.register(std::sync::Arc::new(
+            crate::agent::tools::spawn_subagent::SpawnSubagentTool::new(false),
+        ));
+
+        let rendered = rendered_chat_text(&state, &registry);
+
+        assert!(
+            rendered.contains("Subagent (reviewer)"),
+            "the header keeps its short title and still shows the subtype: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("agent_type"),
+            "the subtype is part of the title, not a prop: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("Spawn Subagent"),
+            "the header's shortened title must win over the tool's own label: {rendered:?}"
+        );
     }
 }

@@ -34,7 +34,9 @@ pub use agent_type_file::AgentTypeDefinition;
 pub use profile::{profile_config_source_path, ProfileConfig, ToolSandboxConfig};
 pub use provider::{ProviderConfig, ProviderConnectionConfig};
 pub use web_fetch::WebFetchConfig;
-pub use web_search::{SearXngBackendConfig, WebSearchBackendsConfig, WebSearchConfig};
+pub use web_search::{
+    BraveBackendConfig, SearXngBackendConfig, WebSearchBackendsConfig, WebSearchConfig,
+};
 
 /// File name of a profile's configuration inside its profile directory.
 pub const PROFILE_CONFIG_FILE_NAME: &str = "config.toml";

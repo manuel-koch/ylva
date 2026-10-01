@@ -116,7 +116,9 @@ The value is a path template: the directory and filename stem are extracted and
 the request is written as
 `<stem>_<timestamp>_<dump_id>_request.jsonl`. Its first line contains the
 request's `scheme`/`host`/`path`/`query`/`headers`; `Authorization`, `Cookie`,
-and API-key-style header values are redacted as `<REDACTED>`. Its second line is
+and API-key-style header values are redacted as `<REDACTED>`, and so is every
+header whose name ends in `-token` (matched case-insensitively — this covers
+Brave's `X-Subscription-Token`). Its second line is
 the compact JSON request body, or `null` for a request without a body. Base64
 tool-result payloads and inline image/file data are replaced with stable
 redaction markers while roles, IDs, media types, filenames, and other safe

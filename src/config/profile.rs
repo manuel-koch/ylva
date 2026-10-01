@@ -2296,6 +2296,7 @@ rules = [
                 "SEARXNG_BASE_URL".to_string(),
                 "http://localhost:20081".to_string(),
             ),
+            ("BRAVE_API_KEY".to_string(), "test-key".to_string()),
         ]);
         let profile = ProfileConfig::load_with_environment(&profiles_root, "default", &environment)
             .expect("the e2e custom profile must keep loading");
@@ -2433,8 +2434,8 @@ result_limit = 4
         ));
         assert!(message.contains("startpage"), "{message}");
         assert!(
-            message.contains("duckduckgo, searxng"),
-            "names both accepted values: {message}"
+            message.contains("duckduckgo, searxng, brave"),
+            "names every accepted value: {message}"
         );
         assert!(
             message.contains("config.toml"),
@@ -2486,6 +2487,63 @@ base_url = "https://searx.example.org"
         ));
         assert!(
             message.contains("backends.searxng"),
+            "names the config key: {message}"
+        );
+        assert!(
+            message.contains("config.toml"),
+            "the error must name the config path: {message}"
+        );
+    }
+
+    #[test]
+    fn brave_web_search_section_loads_its_api_key() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "brave-web-search",
+            r#"
+[web_search]
+backend = "brave"
+
+[web_search.backends.brave]
+api_key = "test-subscription-token"
+"#,
+        );
+
+        let profile =
+            ProfileConfig::load(temp.path(), "brave-web-search").expect("the fixture loads");
+        assert_eq!(profile.web_search.backend, "brave");
+        assert_eq!(
+            profile.web_search.backends.brave,
+            Some(crate::config::BraveBackendConfig {
+                api_key: Some("test-subscription-token".to_string())
+            })
+        );
+        let rendered = format!("{profile:?}");
+        assert!(
+            !rendered.contains("test-subscription-token"),
+            "the token must never reach a Debug output: {rendered}"
+        );
+    }
+
+    #[test]
+    fn brave_web_search_backend_without_the_table_is_rejected() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "brave-without-table",
+            "[web_search]\nbackend = \"brave\"\n",
+        );
+
+        let error = ProfileConfig::load(temp.path(), "brave-without-table")
+            .expect_err("a missing brave table must fail profile loading");
+        let message = error.to_string();
+        assert!(matches!(
+            error,
+            ConfigError::InvalidWebSearchBackendSetting { backend, .. } if backend == "brave"
+        ));
+        assert!(
+            message.contains("backends.brave"),
             "names the config key: {message}"
         );
         assert!(

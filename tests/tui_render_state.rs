@@ -780,7 +780,14 @@ fn steer_bubble_renders_below_streaming_not_above() {
 
     terminal
         .draw(|frame| {
-            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("draw");
 
@@ -835,7 +842,14 @@ fn steer_sent_before_first_chunk_does_not_jump_above_stream() {
 
     terminal
         .draw(|frame| {
-            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("draw");
 
@@ -866,7 +880,14 @@ fn steer_sent_before_first_chunk_does_not_jump_above_stream() {
     state.partial_assistant_text.push_str("world");
     terminal
         .draw(|frame| {
-            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("draw after chunk");
 
@@ -937,7 +958,14 @@ fn footer_says_subagent_working_while_child_is_only_streaming() {
 
     terminal
         .draw(|frame| {
-            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("draw");
 
@@ -970,7 +998,14 @@ fn footer_says_subagent_working_while_child_is_only_streaming() {
     });
     terminal
         .draw(|frame| {
-            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("draw with child running its own tool");
     let buf = terminal.backend().buffer().clone();
@@ -1005,7 +1040,14 @@ fn footer_shows_running_and_queued_subagent_counts() {
 
     terminal
         .draw(|frame| {
-            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("draw");
 
@@ -1043,7 +1085,14 @@ fn footer_shows_the_active_named_engine_and_model() {
 
     terminal
         .draw(|frame| {
-            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("draw");
 
@@ -1064,7 +1113,14 @@ fn footer_shows_the_active_named_engine_and_model() {
     state.engine_display.reasoning_effort = None;
     terminal
         .draw(|frame| {
-            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("draw without explicit reasoning effort");
 
@@ -1101,7 +1157,14 @@ fn footer_renders_bold_keys_with_normal_action_text_and_separators() {
 
     terminal
         .draw(|frame| {
-            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("draw");
 
@@ -1177,7 +1240,14 @@ fn help_popup_footer_shows_popup_controls_instead_of_input_controls() {
 
     terminal
         .draw(|frame| {
-            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("draw");
 
@@ -1227,7 +1297,14 @@ fn busy_help_popup_footer_shows_cancel_and_quit() {
 
     terminal
         .draw(|frame| {
-            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("draw");
 
@@ -1287,7 +1364,14 @@ fn model_picker_footer_shows_picker_controls_instead_of_send() {
 
     terminal
         .draw(|frame| {
-            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("draw");
 
@@ -1339,7 +1423,14 @@ fn model_picker_click_uses_rendered_row_geometry_without_switching() {
 
     terminal
         .draw(|frame| {
-            ylva::render::render(frame, &mut state, &mut textarea, None, None);
+            ylva::render::render(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("draw");
 
@@ -1395,7 +1486,14 @@ fn model_picker_click_uses_absolute_row_after_scrolling() {
 
     terminal
         .draw(|frame| {
-            ylva::render::render(frame, &mut state, &mut textarea, None, None);
+            ylva::render::render(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("initial draw");
     for _ in 0..10 {
@@ -1412,7 +1510,14 @@ fn model_picker_click_uses_absolute_row_after_scrolling() {
     }
     terminal
         .draw(|frame| {
-            ylva::render::render(frame, &mut state, &mut textarea, None, None);
+            ylva::render::render(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("scrolled draw");
 
@@ -1446,7 +1551,14 @@ fn model_picker_click_uses_absolute_row_after_scrolling() {
     let first_visible_row_before_click = first_visible_row;
     terminal
         .draw(|frame| {
-            ylva::render::render(frame, &mut state, &mut textarea, None, None);
+            ylva::render::render(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("redraw after click");
     assert_eq!(
@@ -1473,7 +1585,14 @@ fn model_picker_moves_selection_up_inside_scrolled_window() {
 
     terminal
         .draw(|frame| {
-            ylva::render::render(frame, &mut state, &mut textarea, None, None);
+            ylva::render::render(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("initial draw");
     for _ in 0..10 {
@@ -1489,7 +1608,14 @@ fn model_picker_moves_selection_up_inside_scrolled_window() {
         );
         terminal
             .draw(|frame| {
-                ylva::render::render(frame, &mut state, &mut textarea, None, None);
+                ylva::render::render(
+                    frame,
+                    &mut state,
+                    &mut textarea,
+                    None,
+                    None,
+                    &ylva::ToolRegistry::new(),
+                );
             })
             .expect("scroll draw");
     }
@@ -1507,7 +1633,14 @@ fn model_picker_moves_selection_up_inside_scrolled_window() {
         );
         terminal
             .draw(|frame| {
-                ylva::render::render(frame, &mut state, &mut textarea, None, None);
+                ylva::render::render(
+                    frame,
+                    &mut state,
+                    &mut textarea,
+                    None,
+                    None,
+                    &ylva::ToolRegistry::new(),
+                );
             })
             .expect("up-navigation draw");
         assert_eq!(
@@ -1533,7 +1666,14 @@ fn model_picker_moves_selection_up_inside_scrolled_window() {
         );
         terminal
             .draw(|frame| {
-                ylva::render::render(frame, &mut state, &mut textarea, None, None);
+                ylva::render::render(
+                    frame,
+                    &mut state,
+                    &mut textarea,
+                    None,
+                    None,
+                    &ylva::ToolRegistry::new(),
+                );
             })
             .expect("upper-bound navigation draw");
         assert_eq!(
@@ -1573,7 +1713,14 @@ fn model_picker_shows_scrollbar_when_entries_overflow() {
 
     terminal
         .draw(|frame| {
-            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("draw");
 
@@ -1634,7 +1781,14 @@ fn model_picker_shows_a_message_instead_of_vanishing_when_the_filter_matches_not
 
     terminal
         .draw(|frame| {
-            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("draw");
 
@@ -1693,7 +1847,14 @@ fn footer_says_subagent_thinking_while_child_streams_thinking_text() {
 
     terminal
         .draw(|frame| {
-            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("draw");
 
@@ -1745,7 +1906,14 @@ fn footer_says_subagent_streaming_while_child_streams_response_text() {
 
     terminal
         .draw(|frame| {
-            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("draw");
 
@@ -1803,7 +1971,14 @@ fn root_view_shows_live_thinking_progress_while_a_tool_bubble_is_running() {
 
     terminal
         .draw(|frame| {
-            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("draw");
 
@@ -1822,7 +1997,14 @@ fn root_view_shows_live_thinking_progress_while_a_tool_bubble_is_running() {
     state.partial_assistant_text = "here is my plan while waiting...".to_string();
     terminal
         .draw(|frame| {
-            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("draw with in-flight response text");
     let buf = terminal.backend().buffer().clone();
@@ -1874,7 +2056,14 @@ fn child_view_header_shortens_spawn_subagent_title() {
 
     terminal
         .draw(|frame| {
-            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("draw");
 
@@ -1928,7 +2117,14 @@ fn footer_indicates_subagent_done_while_parent_still_busy() {
 
     terminal
         .draw(|frame| {
-            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("draw");
 
@@ -1952,7 +2148,14 @@ fn footer_indicates_subagent_done_while_parent_still_busy() {
     state.agent_mode = AgentMode::Idle;
     terminal
         .draw(|frame| {
-            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("draw after parent idle");
     let buf = terminal.backend().buffer().clone();
@@ -1992,7 +2195,14 @@ fn steer_render_order_across_full_steer_cycle() {
         let mut textarea = TextArea::default();
         terminal
             .draw(|frame| {
-                tui_widgets::draw(frame, state, &mut textarea, None, None);
+                tui_widgets::draw(
+                    frame,
+                    state,
+                    &mut textarea,
+                    None,
+                    None,
+                    &ylva::ToolRegistry::new(),
+                );
             })
             .expect("draw");
         let buf = terminal.backend().buffer().clone();
@@ -2212,7 +2422,14 @@ fn pending_tool_bubble_renders_after_completed_entries() {
 
     terminal
         .draw(|frame| {
-            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("draw");
 
@@ -2307,7 +2524,14 @@ fn expanded_tool_bubble_with_multiline_title_argument_stays_single_line_and_gets
 
     terminal
         .draw(|frame| {
-            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("draw");
 
@@ -2347,6 +2571,17 @@ fn expanded_tool_bubble_with_multiline_title_argument_stays_single_line_and_gets
 
 /// Render one tool bubble and return the visible rows as strings.
 fn render_tool_bubble_rows(state: &mut ylva::TuiState, width: u16, height: u16) -> Vec<String> {
+    render_tool_bubble_rows_with_registry(state, width, height, &ylva::ToolRegistry::new())
+}
+
+/// Render one tool bubble against an explicit `registry` — a tool's display
+/// title and subtype qualifier resolve through it, exactly as in production.
+fn render_tool_bubble_rows_with_registry(
+    state: &mut ylva::TuiState,
+    width: u16,
+    height: u16,
+    registry: &ylva::ToolRegistry,
+) -> Vec<String> {
     use ratatui_textarea::TextArea;
     use ylva::tui_widgets;
 
@@ -2355,7 +2590,7 @@ fn render_tool_bubble_rows(state: &mut ylva::TuiState, width: u16, height: u16) 
     let mut textarea = TextArea::default();
     terminal
         .draw(|frame| {
-            tui_widgets::draw(frame, state, &mut textarea, None, None);
+            tui_widgets::draw(frame, state, &mut textarea, None, None, registry);
         })
         .expect("draw");
     let buf = terminal.backend().buffer().clone();
@@ -2594,7 +2829,14 @@ fn expanded_bash_command_section_renders_with_syntax_colors() {
     let mut textarea = TextArea::default();
     terminal
         .draw(|frame| {
-            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("draw");
     let buffer = terminal.backend().buffer().clone();
@@ -2732,6 +2974,162 @@ fn expanded_bubble_shows_args_when_sections_do_not_cover_title_keys() {
     assert!(
         rows.iter().any(|row| row.contains("src/main.rs")),
         "args line must still show the uncovered title key, rows: {rows:?}"
+    );
+}
+
+#[test]
+fn collapsed_bubble_caps_title_args_with_the_ellipsis_glyph() {
+    use ylva::tui_reducer_state::ResultSection;
+    use ylva::ToolCallState;
+
+    // Long enough that the collapsed title must cut it at any sane width.
+    let long_terms = "agent-harnesses that can be run on MacOS with a very long query ".repeat(4);
+    let mut state = ylva::TuiState {
+        chat_entries: vec![ChatEntry::ToolBubble {
+            id: uuid::Uuid::new_v4(),
+            name: "web_search".to_string(),
+            state: Box::new(ToolCallState::Done {
+                arguments: serde_json::json!({ "terms": long_terms }),
+                result_section: ResultSection::plain(""),
+                content_sections: vec![],
+                summary: vec![],
+                duration: std::time::Duration::from_millis(1234),
+                title_arguments: vec![("terms".to_string(), serde_json::json!(long_terms))],
+            }),
+            collapsed: true,
+        }],
+        ..ylva::TuiState::new()
+    };
+
+    let rows = render_tool_bubble_rows(&mut state, 60, 20);
+    let title_row = rows
+        .iter()
+        .find(|row| row.contains("Web Search"))
+        .expect("the collapsed title row renders");
+
+    assert!(
+        title_row.contains('…'),
+        "capped title args must end in the ellipsis glyph: {title_row:?}"
+    );
+    assert!(
+        !title_row.contains("..."),
+        "three plain dots must not be used as the cap marker: {title_row:?}"
+    );
+    assert!(
+        !title_row.contains(" …"),
+        "the cut must not leave a space before the marker: {title_row:?}"
+    );
+    assert!(
+        title_row.contains('→'),
+        "the duration summary stays visible after the marker: {title_row:?}"
+    );
+    assert!(
+        title_row.contains("… → 1.234s"),
+        "the marker is followed by the duration summary: {title_row:?}"
+    );
+}
+
+#[test]
+fn collapsed_bubble_title_cut_drops_a_space_before_the_marker() {
+    use ylva::tui_reducer_state::ResultSection;
+    use ylva::ToolCallState;
+
+    // Word followed by enough spaces that any realistic cut lands inside the
+    // run — without trimming, the marker would render as `word     …`.
+    let long_terms = format!("agent-harnesses{}", " ".repeat(400));
+    let mut state = ylva::TuiState {
+        chat_entries: vec![ChatEntry::ToolBubble {
+            id: uuid::Uuid::new_v4(),
+            name: "web_search".to_string(),
+            state: Box::new(ToolCallState::Done {
+                arguments: serde_json::json!({ "terms": long_terms }),
+                result_section: ResultSection::plain(""),
+                content_sections: vec![],
+                summary: vec![],
+                duration: std::time::Duration::from_millis(1234),
+                title_arguments: vec![("terms".to_string(), serde_json::json!(long_terms))],
+            }),
+            collapsed: true,
+        }],
+        ..ylva::TuiState::new()
+    };
+
+    let rows = render_tool_bubble_rows(&mut state, 120, 20);
+    let title_row = rows
+        .iter()
+        .find(|row| row.contains("agent-harnesses"))
+        .expect("the collapsed title row renders");
+
+    assert!(
+        title_row.contains("agent-harnesses…"),
+        "the marker must hug the last visible character: {title_row:?}"
+    );
+    assert!(
+        !title_row.contains(" …"),
+        "the cut must not leave whitespace before the marker: {title_row:?}"
+    );
+}
+
+#[test]
+fn subagent_bubble_title_carries_the_agent_type_as_a_subtype() {
+    use ylva::agent::tools::spawn_subagent::SpawnSubagentTool;
+    use ylva::tui_reducer_state::ResultSection;
+    use ylva::ToolCallState;
+
+    let mut registry = ylva::ToolRegistry::new();
+    registry.register(Arc::new(SpawnSubagentTool::new(false)));
+
+    let mut state = ylva::TuiState {
+        chat_entries: vec![ChatEntry::ToolBubble {
+            id: uuid::Uuid::new_v4(),
+            name: SpawnSubagentTool::NAME.to_string(),
+            state: Box::new(ToolCallState::Done {
+                arguments: serde_json::json!({
+                    "label": "Analyze read tool features",
+                    "task": "list the read tool's features",
+                    "agent_type": "local-discovery",
+                }),
+                result_section: ResultSection::plain(""),
+                content_sections: vec![],
+                summary: vec![("status".to_string(), "unstructured".to_string())],
+                duration: std::time::Duration::from_millis(48_392),
+                title_arguments: vec![
+                    (
+                        "label".to_string(),
+                        serde_json::json!("Analyze read tool features"),
+                    ),
+                    (
+                        "agent_type".to_string(),
+                        serde_json::json!("local-discovery"),
+                    ),
+                ],
+            }),
+            collapsed: true,
+        }],
+        ..ylva::TuiState::new()
+    };
+
+    let rows = render_tool_bubble_rows_with_registry(&mut state, 120, 20, &registry);
+    let title_row = rows
+        .iter()
+        .find(|row| row.contains("Spawn Subagent"))
+        .expect("the collapsed subagent title row renders");
+
+    assert!(
+        title_row.contains("Spawn Subagent (local-discovery)"),
+        "the subtype reads as part of the title: {title_row:?}"
+    );
+    assert!(
+        !title_row.contains("agent_type"),
+        "the subtype must not be rendered a second time as a prop: {title_row:?}"
+    );
+    assert!(
+        title_row.contains("Analyze read tool features"),
+        "the label stays the inline primary: {title_row:?}"
+    );
+    assert!(
+        title_row.contains("status=unstructured"),
+        "the summary is untouched by the subtype promotion: {title_row:?}"
     );
 }
 
@@ -2913,7 +3311,14 @@ fn dragging_across_logo_build_lines_copies_version_and_profile() {
 
     terminal
         .draw(|frame| {
-            render::render(frame, &mut state, &mut textarea, None, None);
+            render::render(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("draw");
 
@@ -3011,7 +3416,14 @@ fn startup_logo_shows_selected_runtime_profile() {
 
     terminal
         .draw(|frame| {
-            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("draw");
 
@@ -3050,7 +3462,14 @@ fn help_popup_shows_runtime_paths() {
 
     terminal
         .draw(|frame| {
-            tui_widgets::draw(frame, &mut state, &mut textarea, None, None);
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("draw");
 
@@ -3101,7 +3520,14 @@ fn dragging_scrolled_help_popup_line_copies_rendered_text() {
 
     terminal
         .draw(|frame| {
-            render::render(frame, &mut state, &mut textarea, None, None);
+            render::render(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("initial help popup draw");
 
@@ -3114,7 +3540,14 @@ fn dragging_scrolled_help_popup_line_copies_rendered_text() {
     state.help_popup.help_scroll_offset = target_line;
     terminal
         .draw(|frame| {
-            render::render(frame, &mut state, &mut textarea, None, None);
+            render::render(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
         })
         .expect("scrolled help popup draw");
 

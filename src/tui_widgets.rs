@@ -44,6 +44,7 @@ use crate::theme::{
     USER_MESSAGE_STEERED_BORDER_COLOR,
 };
 
+use crate::agent::tools::ToolRegistry;
 use crate::agent::AgentMode;
 use crate::build_info::BUILD_INFO;
 use crate::markdown::render_markdown;
@@ -190,6 +191,7 @@ pub fn draw(
     textarea: &mut TextArea<'_>,
     hint: Option<&str>,
     mouse_pos: Option<(u16, u16)>,
+    registry: &ToolRegistry,
 ) -> Option<ButtonAreas> {
     let full_area = frame.area();
     // Drill-in conversation model (Phase 6.10): while viewing a child
@@ -209,10 +211,18 @@ pub fn draw(
         let mut discarded_title_rows = Vec::new();
         // The header sits directly above the subagent's own transcript, so
         // "Spawn" (relevant only from the root conversation's point of view)
-        // is dropped in favor of the shorter "Subagent".
-        let display_title_override = (name
-            == crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME)
-            .then_some("Subagent");
+        // is dropped in favor of the shorter "Subagent". Every other tool
+        // bubble asks its own tool for the label, like the CLI status line.
+        let header_tool = registry.get(name);
+        let display_title_override =
+            if name == crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME {
+                Some("Subagent".to_string())
+            } else {
+                header_tool.as_ref().map(|tool| tool.title())
+            };
+        let subtype_argument = header_tool
+            .as_ref()
+            .and_then(|tool| tool.subtype_argument());
         append_tool_bubble_lines(
             &mut header_lines,
             ToolBubbleArgs {
@@ -221,7 +231,8 @@ pub fn draw(
                 state: bubble_state,
                 collapsed: *collapsed,
                 spinner_frame: state.spinner_frame,
-                display_title_override,
+                display_title_override: display_title_override.as_deref(),
+                subtype_argument,
             },
             &mut discarded_title_rows,
             header_row_width.saturating_sub(4).max(1),
@@ -437,7 +448,7 @@ pub fn draw(
         state.child_view.header_rendered_line_prefix_widths.clear();
     }
 
-    draw_chat(frame, chat_area, state);
+    draw_chat(frame, chat_area, state, registry);
 
     // Thin solid line separating the conversation area from the lower panel.
     // Tinted the same pinkish/magenta as the header separator while viewing a
@@ -667,7 +678,7 @@ fn help_popup_footer_hints(state: &TuiState) -> &'static [FooterHint] {
     }
 }
 
-fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
+fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState, registry: &ToolRegistry) {
     // Split horizontally first so all widths are derived from content_area —
     // this ensures trailing-pad spans reach the right edge of content_area
     // and leave no bare cells that cause rendering artifacts.
@@ -764,6 +775,11 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
                     ));
                     continue;
                 }
+                let bubble_tool = registry.get(name);
+                let display_title_override = bubble_tool.as_ref().map(|tool| tool.title());
+                let subtype_argument = bubble_tool
+                    .as_ref()
+                    .and_then(|tool| tool.subtype_argument());
                 append_tool_bubble_lines(
                     &mut lines,
                     ToolBubbleArgs {
@@ -772,7 +788,8 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
                         state: bubble_state.as_ref(),
                         collapsed: *collapsed,
                         spinner_frame: state.spinner_frame,
-                        display_title_override: None,
+                        display_title_override: display_title_override.as_deref(),
+                        subtype_argument,
                     },
                     &mut bubble_title_rows_out,
                     bubble_row_width.saturating_sub(4).max(1),
@@ -871,6 +888,11 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
     // Flush pending-approval tool bubbles last so they always sit at the
     // bottom of the conversation, directly above the approve/deny footer.
     for (bubble_id, name, bubble_state, collapsed) in &deferred_pending_tool_bubbles {
+        let pending_tool = registry.get(name);
+        let display_title_override = pending_tool.as_ref().map(|tool| tool.title());
+        let subtype_argument = pending_tool
+            .as_ref()
+            .and_then(|tool| tool.subtype_argument());
         append_tool_bubble_lines(
             &mut lines,
             ToolBubbleArgs {
@@ -879,7 +901,8 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState) {
                 state: bubble_state,
                 collapsed: *collapsed,
                 spinner_frame: state.spinner_frame,
-                display_title_override: None,
+                display_title_override: display_title_override.as_deref(),
+                subtype_argument,
             },
             &mut bubble_title_rows_out,
             bubble_row_width.saturating_sub(4).max(1),
@@ -1383,7 +1406,7 @@ fn append_thinking_lines(
 /// title routes through `thinking_title_rows`, keyed by the
 /// `STREAMING_THINKING_ENTRY_INDEX` sentinel since there is no real
 /// `chat_entries` index yet. The title shows the live elapsed time
-/// (`Thinking... ({elapsed})`) computed from `thinking_started_at`, updating
+/// (`Thinking… ({elapsed})`) computed from `thinking_started_at`, updating
 /// every redraw while the stream is active.
 fn append_streaming_thinking_lines(
     lines: &mut Vec<Line<'static>>,
@@ -1398,7 +1421,7 @@ fn append_streaming_thinking_lines(
     let elapsed = thinking_started_at
         .map(|started_at| started_at.elapsed())
         .unwrap_or_default();
-    let title_text = format!("Thinking... ({:.1}s)", elapsed.as_secs_f64());
+    let title_text = format!("Thinking… ({:.1}s)", elapsed.as_secs_f64());
 
     let bubble_start_row = lines.len();
 
@@ -1489,15 +1512,24 @@ struct ToolBubbleArgs<'a> {
     state: &'a ToolCallState,
     collapsed: bool,
     spinner_frame: u8,
-    /// Overrides the title-cased tool name (e.g. `spawn_subagent` → `Spawn
-    /// Subagent`) with a custom display title. Used only by the drill-in
-    /// header bubble, which re-renders the *same* `spawn_subagent` bubble
-    /// shown in the root conversation but shortens its title to `"Subagent"`
-    /// there — the header already sits directly above the subagent's own
-    /// transcript, so "Spawn" is redundant context that only applies to the
-    /// root conversation's view of the call. `None` everywhere else, which
-    /// falls back to the plain title-cased tool name.
+    /// The bubble's display title: the tool's own `Tool::title()` label for
+    /// `name`, looked up by the caller in the `ToolRegistry` at render time
+    /// (e.g. `Web Search (Brave)`, which names the configured backend).
+    /// `None` for a tool the registry does not know, which falls back to the
+    /// title-cased tool name.
+    ///
+    /// The one exception is the drill-in header bubble, which re-renders the
+    /// *same* `spawn_subagent` bubble shown in the root conversation but
+    /// shortens its title to `"Subagent"` there — the header already sits
+    /// directly above the subagent's own transcript, so "Spawn" (relevant
+    /// only from the root conversation's point of view) is redundant.
     display_title_override: Option<&'a str>,
+    /// The tool's `Tool::subtype_argument()` — the title argument naming
+    /// which variant of the tool this call is (e.g. `spawn_subagent`'s
+    /// `agent_type`), looked up by the caller in the `ToolRegistry`. It is
+    /// folded into the title as `({value})` and dropped from the props by
+    /// `display_title_with_subtype`; `None` for a tool without one.
+    subtype_argument: Option<&'a str>,
 }
 
 /// Returns the display title for a result section, derived from the tool name and section ID.
@@ -1592,6 +1624,7 @@ fn append_tool_bubble_lines(
         collapsed,
         spinner_frame,
         display_title_override,
+        subtype_argument,
     } = bubble;
     let style = BubbleStyle::new(TOOL_BUBBLE_BORDER_COLOR);
     let bar = style.bar.clone();
@@ -1641,6 +1674,20 @@ fn append_tool_bubble_lines(
         .into_iter()
         .filter(|(key, _)| !is_subagent || (key != "run_id" && key != "status"))
         .collect();
+    // The tool's own `Tool::title()` label when the registry knows it (e.g.
+    // `spawn_subagent` → `Spawn Subagent`, `web_search` → `Web Search
+    // (Brave)`), otherwise the title-cased tool name (see
+    // `ToolBubbleArgs::display_title_override`), then folded with the call's
+    // per-call subtype — `Spawn Subagent (local-discovery)` — which also
+    // leaves the props.
+    let base_title = display_title_override
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::agent::tools::title_case_tool_name(name));
+    let (display_title, title_arguments) = crate::agent::tools::display_title_with_subtype(
+        &base_title,
+        subtype_argument,
+        &title_arguments,
+    );
     let title_arguments = title_arguments.as_slice();
     // Only strings and numbers qualify as the bare (keyless) primary arg.
     // Booleans need their key name to be meaningful, so they stay in props.
@@ -1790,12 +1837,6 @@ fn append_tool_bubble_lines(
         " "
     };
 
-    // Title-case the tool name for display (e.g. `spawn_subagent` → `Spawn Subagent`),
-    // unless the caller supplied an override (see `ToolBubbleArgs::display_title_override`).
-    let display_title: String = display_title_override
-        .map(str::to_string)
-        .unwrap_or_else(|| crate::agent::tools::title_case_tool_name(name));
-
     let tool_ran = matches!(state, ToolCallState::Done { .. });
     let dim_white = Style::default()
         .fg(CONTENT_COLOR)
@@ -1868,7 +1909,7 @@ fn append_tool_bubble_lines(
     //
     //   Collapsed — single line: `{prefix} {primary_arg} {props} [→ {summary}]`
     //     If the full text exceeds `wrap_width`, the line is truncated and
-    //     terminated with "..." (dim white) so the bubble always fits in the
+    //     terminated with "…" (dim white) so the bubble always fits in the
     //     terminal width. Region styling still applies to the visible chars.
     //
     //   Expanded — two sections:
@@ -1945,9 +1986,10 @@ fn append_tool_bubble_lines(
     // Helper: emit one title row with per-region char styling.
     // `line_text` is the display string for the prefix+args portion of the row.
     // `prefix_end` and `primary_end` are char-index boundaries within `line_text`.
-    // `truncated` appends a dim "..." when the args were truncated.
-    // Summary segments are always rendered after the optional "..." so the
+    // `truncated` appends a dim TRUNCATION_MARKER when the args were truncated.
+    // Summary segments are always rendered after the optional marker so the
     // summary / duration stays visible even when args are truncated.
+    const TRUNCATION_MARKER: &str = "…";
     let emit_styled_line = |lines: &mut Vec<Line>,
                             line_text: &str,
                             prefix_end: usize,
@@ -1977,7 +2019,7 @@ fn append_tool_bubble_lines(
             ));
         }
         if truncated {
-            spans.push(Span::styled("...", dim_white));
+            spans.push(Span::styled(TRUNCATION_MARKER, dim_white));
         }
         if !summary_segments.is_empty() {
             spans.extend(summary_spans(&summary_segments));
@@ -2003,19 +2045,22 @@ fn append_tool_bubble_lines(
 
         // Reserve space for the summary suffix so it is always visible.
         // The available columns for the args portion are: total width minus
-        // the prefix and the summary. An extra 3 are needed when truncating
-        // to leave room for "...".
+        // the prefix and the summary. One extra column is needed when
+        // truncating to leave room for TRUNCATION_MARKER.
         let available_for_args = wrap_width
             .saturating_sub(prefix_char_len)
             .saturating_sub(summary_char_len);
         let args_fit = sanitized_args_chars.len() <= available_for_args;
         let truncated = !args_fit;
         let display_args_len = if truncated {
-            available_for_args.saturating_sub(3)
+            available_for_args.saturating_sub(TRUNCATION_MARKER.chars().count())
         } else {
             sanitized_args_chars.len()
         };
-        let display_args: String = sanitized_args_chars[..display_args_len].iter().collect();
+        let raw_display_args: String = sanitized_args_chars[..display_args_len].iter().collect();
+        // A cut that lands on a space would render `word …` — drop the
+        // trailing whitespace so the marker hugs the last visible character.
+        let display_args = raw_display_args.trim_end();
         let display_text = format!("{title_prefix}{display_args}");
 
         // Region boundaries (prefix → border colour, primary arg → bold, rest → dim).
@@ -3756,6 +3801,7 @@ mod tests {
                 collapsed: false,
                 spinner_frame: 0,
                 display_title_override: None,
+                subtype_argument: None,
             },
             &mut bubble_title_rows,
             80,
@@ -3816,6 +3862,7 @@ mod tests {
                 collapsed: false,
                 spinner_frame: 0,
                 display_title_override: None,
+                subtype_argument: None,
             },
             &mut bubble_title_rows,
             80,
@@ -3864,6 +3911,7 @@ mod tests {
                         collapsed,
                         spinner_frame: 0,
                         display_title_override,
+                        subtype_argument: None,
                     },
                     &mut bubble_title_rows,
                     80,
@@ -3947,6 +3995,7 @@ mod tests {
                 collapsed: false,
                 spinner_frame: 3,
                 display_title_override: None,
+                subtype_argument: None,
             },
             &mut bubble_title_rows,
             80,
@@ -3995,6 +4044,7 @@ mod tests {
                 collapsed: false,
                 spinner_frame: 0,
                 display_title_override: None,
+                subtype_argument: None,
             },
             &mut bubble_title_rows,
             80,
@@ -4041,6 +4091,7 @@ mod tests {
                 collapsed: true,
                 spinner_frame: 0,
                 display_title_override: None,
+                subtype_argument: None,
             },
             &mut bubble_title_rows,
             80,
@@ -4093,6 +4144,7 @@ mod tests {
                 collapsed: false,
                 spinner_frame: 0,
                 display_title_override: Some("Subagent"),
+                subtype_argument: None,
             },
             &mut bubble_title_rows,
             80,

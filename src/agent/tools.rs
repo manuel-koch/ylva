@@ -351,6 +351,59 @@ pub fn title_case_tool_name(name: &str) -> String {
         .join(" ")
 }
 
+/// Fold a tool's per-call subtype into its display title.
+///
+/// `subtype_argument` is [`Tool::subtype_argument`]: when that argument is
+/// present in `title_arguments`, its value is appended to `title` as
+/// `({value})` and the argument is dropped from the returned list, so a
+/// renderer shows the variant exactly once — in the title rather than as a
+/// bracketed `key=value` prop:
+/// `Spawn Subagent (local-discovery) "Refactor the parser"`.
+///
+/// The title comes back unchanged and the arguments untouched when the tool
+/// declares no subtype argument, the argument is absent (a default-valued
+/// subtype never reaches a renderer), or its value is not a string. The value
+/// is flattened to a single line so a subtype can never break the title row.
+///
+/// Shared by the CLI status line and the TUI tool bubble so the two cannot
+/// drift apart.
+pub fn display_title_with_subtype(
+    title: &str,
+    subtype_argument: Option<&str>,
+    title_arguments: &[(String, serde_json::Value)],
+) -> (String, Vec<(String, serde_json::Value)>) {
+    let Some(subtype_key) = subtype_argument else {
+        return (title.to_string(), title_arguments.to_vec());
+    };
+    let mut subtype_value: Option<String> = None;
+    let mut remaining: Vec<(String, serde_json::Value)> = Vec::with_capacity(title_arguments.len());
+    for (key, value) in title_arguments {
+        if subtype_value.is_none() && key == subtype_key {
+            if let Some(raw_value) = value.as_str() {
+                subtype_value = Some(single_line_text(raw_value));
+                continue;
+            }
+        }
+        remaining.push((key.clone(), value.clone()));
+    }
+    match subtype_value {
+        Some(value) => (format!("{title} ({value})"), remaining),
+        None => (title.to_string(), remaining),
+    }
+}
+
+/// Replace the control characters that would break a single-line title with
+/// visible placeholders — the same mapping the TUI applies to title props.
+fn single_line_text(text: &str) -> String {
+    text.chars()
+        .map(|character| match character {
+            '\n' | '\r' => '↵',
+            '\t' => ' ',
+            character => character,
+        })
+        .collect()
+}
+
 /// A named, schema-described tool the model may call.
 ///
 /// The trait exposes tool **data** and argument metadata. Actual execution is
@@ -367,8 +420,31 @@ pub trait Tool: Send + Sync {
     /// Derived automatically from [`name`](Self::name) via
     /// [`title_case_tool_name`]. Override only when the canonical name cannot
     /// produce the desired label.
+    ///
+    /// A subtype fixed by *config* rather than chosen per call is part of this
+    /// label, because the tool instance already knows its variant (e.g. the
+    /// parenthetical in `Web Search (Brave)`). A subtype the *model* picks per
+    /// call belongs in [`subtype_argument`](Self::subtype_argument) instead.
     fn title(&self) -> String {
         title_case_tool_name(self.name())
+    }
+
+    /// The title argument that names which subtype of this tool this call
+    /// performs — a specification/behavior/variant of the tool selected with
+    /// the call (e.g. `spawn_subagent`'s `agent_type`).
+    ///
+    /// Renderers show it as `{title} ({value})` and drop it from the
+    /// bracketed props, so the variant reads as part of the label:
+    /// `Spawn Subagent (local-discovery) "Refactor the parser"`. Arguments
+    /// equal to their default never reach a renderer (see
+    /// [`is_default_argument`](Self::is_default_argument)), so an unspecified
+    /// subtype qualifies nothing.
+    ///
+    /// `None` (the default) for tools without a per-call subtype — including
+    /// the ones whose subtype is config-derived and already carried by
+    /// [`title`](Self::title).
+    fn subtype_argument(&self) -> Option<&'static str> {
+        None
     }
 
     /// A human-readable description fed to the model alongside the schema.
@@ -1194,6 +1270,67 @@ mod tests {
     }
 
     #[test]
+    fn brave_target_scoped_rule_matches_the_brave_endpoint_only() {
+        // A brave-configured profile makes the tool's network match key the
+        // fixed Brave authority, so only a rule targeting that authority may
+        // auto-approve — the target-scoped contract of
+        // `WebSearchBackend::network_target`.
+        let brave_web_search = crate::config::WebSearchConfig {
+            backend: "brave".to_string(),
+            backends: crate::config::WebSearchBackendsConfig {
+                searxng: None,
+                brave: Some(crate::config::BraveBackendConfig {
+                    api_key: Some("test-subscription-token".to_string()),
+                }),
+            },
+            ..crate::config::WebSearchConfig::default()
+        };
+        let tool_sandbox_rules_for = |target: &str| {
+            let mut tool_sandbox_rules = HashMap::new();
+            tool_sandbox_rules.insert(
+                web_search::WebSearchTool::NAME.to_string(),
+                vec![crate::sandbox::SandboxRuleConfig::Named {
+                    rule: crate::sandbox::NamedSandboxRule::NetworkRequest,
+                    verdict: crate::sandbox::ApprovalVerdictConfig::AutoApproved,
+                    reason: None,
+                    target: Some(target.to_string()),
+                }],
+            );
+            tool_sandbox_rules
+        };
+        let registry_for = |target: &str| {
+            default_registry(
+                std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new())),
+                ToolRegistryConfig {
+                    tool_sandbox_rules: tool_sandbox_rules_for(target),
+                    web_search: brave_web_search.clone(),
+                    ..ToolRegistryConfig::default()
+                },
+            )
+        };
+
+        let registry = registry_for("https://api.search.brave.com");
+        let web_search_tool = registry
+            .get(web_search::WebSearchTool::NAME)
+            .expect("web_search tool");
+        assert_eq!(
+            web_search_tool.needs_approval(&serde_json::json!({ "terms": "query" })),
+            ApprovalCheck::AutoApproved,
+            "the brave network_target must match a rule targeting https://api.search.brave.com"
+        );
+
+        let other_registry = registry_for("https://html.duckduckgo.com");
+        let other_web_search_tool = other_registry
+            .get(web_search::WebSearchTool::NAME)
+            .expect("web_search tool");
+        assert_eq!(
+            other_web_search_tool.needs_approval(&serde_json::json!({ "terms": "query" })),
+            ApprovalCheck::UserApprovalRequired,
+            "a rule for another authority must not match the brave endpoint"
+        );
+    }
+
+    #[test]
     fn registered_tool_titles_omit_unknown_arguments() {
         let sandbox = std::sync::Arc::new(std::sync::RwLock::new(crate::sandbox::Sandbox::new()));
         let config = ToolRegistryConfig {
@@ -1769,6 +1906,81 @@ mod tests {
         // Regression: the tool-bubble title must render as "Spawn Subagent",
         // not "Spawn_subagent" (only the leading char capitalised).
         assert_eq!(title_case_tool_name("spawn_subagent"), "Spawn Subagent");
+    }
+
+    #[test]
+    fn subtype_argument_defaults_to_none() {
+        assert_eq!(TestTool.subtype_argument(), None);
+        assert_eq!(
+            crate::agent::tools::read::ReadTool::default().subtype_argument(),
+            None
+        );
+    }
+
+    #[test]
+    fn display_title_with_subtype_qualifies_the_title_and_drops_the_argument() {
+        let arguments = vec![
+            (
+                "label".to_string(),
+                serde_json::json!("Refactor the parser"),
+            ),
+            (
+                "agent_type".to_string(),
+                serde_json::json!("local-discovery"),
+            ),
+            ("task".to_string(), serde_json::json!("do it")),
+        ];
+
+        let (title, remaining) =
+            display_title_with_subtype("Spawn Subagent", Some("agent_type"), &arguments);
+
+        assert_eq!(title, "Spawn Subagent (local-discovery)");
+        assert_eq!(
+            remaining,
+            vec![
+                (
+                    "label".to_string(),
+                    serde_json::json!("Refactor the parser")
+                ),
+                ("task".to_string(), serde_json::json!("do it")),
+            ],
+            "the subtype argument must not be rendered a second time as a prop"
+        );
+    }
+
+    #[test]
+    fn display_title_with_subtype_is_unchanged_when_the_argument_is_absent() {
+        let arguments = vec![("label".to_string(), serde_json::json!("Refactor"))];
+
+        let (title, remaining) =
+            display_title_with_subtype("Spawn Subagent", Some("agent_type"), &arguments);
+
+        assert_eq!(title, "Spawn Subagent");
+        assert_eq!(remaining, arguments);
+    }
+
+    #[test]
+    fn display_title_without_a_subtype_argument_touches_nothing() {
+        let arguments = vec![(
+            "agent_type".to_string(),
+            serde_json::json!("local-discovery"),
+        )];
+
+        let (title, remaining) = display_title_with_subtype("Web Search", None, &arguments);
+
+        assert_eq!(title, "Web Search");
+        assert_eq!(remaining, arguments);
+    }
+
+    #[test]
+    fn display_title_flattens_a_multiline_subtype_value() {
+        let arguments = vec![("agent_type".to_string(), serde_json::json!("one\ntwo"))];
+
+        let (title, remaining) =
+            display_title_with_subtype("Subagent", Some("agent_type"), &arguments);
+
+        assert_eq!(title, "Subagent (one↵two)");
+        assert!(remaining.is_empty());
     }
 
     #[test]

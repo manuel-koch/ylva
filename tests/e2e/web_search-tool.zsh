@@ -1,4 +1,15 @@
 #!/bin/zsh
+#
+# Manual e2e check for the `web_search` tool — run by hand, never by a Make
+# gate. The profile picks its backend through YLVA_WEB_SEARCH_BACKEND in the
+# gitignored tests/e2e/custom/profiles/default/.env:
+#
+#   YLVA_WEB_SEARCH_BACKEND=searxng   # default: the local SearXNG instance
+#   YLVA_WEB_SEARCH_BACKEND=brave     # Brave Search; the same .env must also
+#                                     # define BRAVE_API_KEY (the token is
+#                                     # read through ${BRAVE_API_KEY}
+#                                     # interpolation only, never from the
+#                                     # process environment implicitly)
 YLVA=${CARGO_TARGET_DIR:-./target}/debug/ylva
 ROOT_DIR=$(git rev-parse --show-toplevel)
 LOG_DIR=${ROOT_DIR}/logs

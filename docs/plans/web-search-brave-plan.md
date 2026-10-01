@@ -129,7 +129,7 @@ Key constraints:
 
 ## Implementation Plan
 
-1. [ ] Restore the green baseline before touching anything else. The working
+1. [x] Restore the green baseline before touching anything else. The working
    tree already contains `[web_search.backends.brave] api_key = "${BRAVE_API_KEY}"`
    in `tests/e2e/custom/profiles/default/config.toml`; `${…}` interpolation
    runs over every TOML string at profile load, and
@@ -138,22 +138,22 @@ Key constraints:
    key — the test currently fails with
    `MissingEnvironmentVariable { name: "BRAVE_API_KEY" }` (verified by
    running it).
-   - [ ] Add `("BRAVE_API_KEY".to_string(), "test-key".to_string())` to the
+   - [x] Add `("BRAVE_API_KEY".to_string(), "test-key".to_string())` to the
      map at `src/config/profile.rs:2288-2299`, mirroring the
      `OLLAMA_CLOUD_API_KEY` entry.
    - Tests: `cargo test --lib the_e2e_custom_profile_keeps_loading_with_target_rules`
      passes; the suite is green again before step 2.
 
-2. [ ] Generalize sensitive-header redaction and cover the Brave token
+2. [x] Generalize sensitive-header redaction and cover the Brave token
    (`src/http.rs`). The existing explicit list does not include
    `x-subscription-token`, and the current matcher has no generic token
    suffix rule; without this change a Brave search writes its credential
    into a `YLVA_REQUEST_DUMP_PATH` artifact, contradicting the invariant
    stated above `SENSITIVE_HEADER_NAMES` (`src/http.rs:405-412`).
-   - [ ] Keep the existing explicit sensitive-header names and extend
+   - [x] Keep the existing explicit sensitive-header names and extend
      `is_sensitive_header_name` (`src/http.rs:429`) to also recognize any
      header name ending in `-token`, case-insensitively.
-   - [ ] Extend `dump_request_redacts_sensitive_header_values`
+   - [x] Extend `dump_request_redacts_sensitive_header_values`
      (`src/http.rs:1087`) to assert `x-subscription-token` and an unrelated
      token-suffixed name such as `x-custom-token` are redacted, including
      mixed-case input to `is_sensitive_header_name`; verify a non-suffix
@@ -161,21 +161,24 @@ Key constraints:
      the raw token values appear nowhere in the dump file.
    - Tests: `cargo test --lib dump_request_redacts_sensitive_header_values`.
 
-3. [ ] Implement the backend module
+3. [x] Implement the backend module
    `src/agent/tools/backends/web_search/brave.rs` and declare it in the seam
    (`pub mod brave;` + `pub use brave::BraveBackend;` next to the existing
    declarations at `backends/web_search.rs:38-42`), mirroring
    `searxng.rs` (the closest analogue: JSON API):
-   - [ ] `BraveBackend { client, api_key, dump_source }` with constructors
-     `with_api_key(api_key, http_timeout)`,
-     `with_api_key_and_dump_path(api_key, http_timeout, dump_path)` (test
-     hook), and private `with_api_key_and_dump_source(…)` building a
+   - [x] `BraveBackend { client, api_key, base_url, dump_source }` with
+     constructors `with_api_key(api_key, http_timeout)` (production, against
+     `DEFAULT_BASE_URL`),
+     `with_api_key_and_base_url_and_dump_path(api_key, base_url, http_timeout, dump_path)`
+     (test hook — it also carries the base URL so the mock-server tests can
+     point at `127.0.0.1`, mirroring `duckduckgo.rs`'s `with_base_url`), and
+     private `with_api_key_and_base_url_and_dump_source(…)` building a
      `reqwest::Client` with `OUTBOUND_USER_AGENT` and the configured
      timeout; implement `Debug` manually so it keeps the `BraveBackend`
      type name but never formats the API key (e.g. show `<REDACTED>`); a
      `DEFAULT_BASE_URL` const `https://api.search.brave.com` (endpoint
-     `{base}/res/v1/web/search`) — no configurable URL.
-   - [ ] `search()`: short-circuit `Ok(Vec::new())` on `limit == 0`; `GET`
+     `{base}/res/v1/web/search`) — no configurable URL in production.
+   - [x] `search()`: short-circuit `Ok(Vec::new())` on `limit == 0`; `GET`
      `{DEFAULT_BASE_URL}/res/v1/web/search` with query pairs `q` = terms,
      `count` = `limit.min(WEB_SEARCH_MAX_RESULT_LIMIT)`,
      `result_filter` = `web`, `text_decorations` = `false`; explicit headers
@@ -186,11 +189,11 @@ Key constraints:
      `null` body; no retry). Do not locally reject, truncate, or otherwise
      rewrite `terms`; Brave's 4xx error envelope carries diagnostics for an
      empty or over-limit query.
-   - [ ] Response handling: non-2xx → try to parse the Brave error envelope
+   - [x] Response handling: non-2xx → try to parse the Brave error envelope
      (`{error: {detail, code}}`); a non-empty `detail` (falling back to
      `code`) becomes `WebSearchError::StatusWithHint`, otherwise plain
      `Status`; HTTP 200 → `parse_brave_results`.
-   - [ ] Parsing with private serde DTOs: `BraveSearchResponse { web:
+   - [x] Parsing with private serde DTOs: `BraveSearchResponse { web:
      Option<BraveWebResults> }`, `BraveWebResults { results }`,
      `BraveWebResult { title, url, description: Option<String> }`; skip
      entries with empty `title`/`url` (mirror the other backends), take at
@@ -198,14 +201,14 @@ Key constraints:
      truncate snippets (the tool caps them at
      `WEB_SEARCH_SNIPPET_MAX_CHARS`); absent `web` or empty `results` →
      `Ok(vec![])`; anything that is not the expected JSON shape → `Parse`.
-   - [ ] `network_target()` = `crate::http::network_target(DEFAULT_BASE_URL)`
+   - [x] `network_target()` = `crate::http::network_target(DEFAULT_BASE_URL)`
      with a raw-const fallback (same expression shape as
      `duckduckgo.rs:103-105`).
-   - [ ] Broaden the doc comment of `WebSearchError::StatusWithHint`
+   - [x] Broaden the doc comment of `WebSearchError::StatusWithHint`
      (`backends/web_search.rs:142-146`), which currently names only
      SearXNG's `403`, to cover Brave's error envelopes; extend the seam
      module docs (`:15-28`) with the new module.
-   - [ ] Tests inside `brave.rs`, following the `duckduckgo.rs`/`searxng.rs`
+   - [x] Tests inside `brave.rs`, following the `duckduckgo.rs`/`searxng.rs`
      test modules (raw `tokio::net::TcpListener` one-shot mock + JSON
      fixtures, never the live API):
      - wire-shape test: request line `GET /res/v1/web/search?…` carrying
@@ -232,22 +235,22 @@ Key constraints:
       - no `#[ignore]`d live test (settled: e2e covers live checks).
    - Tests: `cargo test --lib backends::web_search::brave`.
 
-4. [ ] Wire selection and construction — one atomic, compiling change (the
+4. [x] Wire selection and construction — one atomic, compiling change (the
    factory input changes and `WebSearchBackendsConfig` gains a
    field, so seam + config + every struct literal move together):
-   - [ ] In `backends/web_search.rs`: add `WebSearchBackendKind::Brave`;
+   - [x] In `backends/web_search.rs`: add `WebSearchBackendKind::Brave`;
      add `BRAVE_NAME = "brave"` / `BRAVE_DISPLAY_NAME = "Brave"` constants;
      append `Self::BRAVE_NAME` to `SUPPORTED_NAMES` (order:
      `duckduckgo, searxng, brave` — default first); extend the `as_str`,
      `display_name`, and `from_name` matches.
-   - [ ] Add a backend-specific `WebSearchBackendSettings<'a>` enum in
+   - [x] Add a backend-specific `WebSearchBackendSettings<'a>` enum in
      `backends/web_search.rs` with variants `DuckDuckGo`,
      `SearXng { base_url: Option<&'a str> }`,
      `Brave { api_key: Option<&'a str> }`, and
      `Unsupported { backend_name: &'a str }`. Each supported variant carries
      only its own backend's setting; do not derive `Debug` for this enum,
      because the Brave variant contains a secret.
-   - [ ] Change `backend_for` to accept
+   - [x] Change `backend_for` to accept
      `backend_for(settings: WebSearchBackendSettings<'_>, http_timeout: Duration)`
      and return `Result<Arc<dyn WebSearchBackend>, WebSearchBackendError>`:
      `DuckDuckGo` → `DuckDuckGoBackend::new`; `SearXng` with a non-blank
@@ -258,14 +261,14 @@ Key constraints:
      `WebSearchConfig::build_backend()` maps `WebSearchBackendKind` plus its
      typed per-backend config tables to this enum (unknown names map to
      `Unsupported`) before calling the factory.
-   - [ ] Generalize `WebSearchBackendError::MissingBackendSetting`
+   - [x] Generalize `WebSearchBackendError::MissingBackendSetting`
      (`backends/web_search.rs:185-188`): its `thiserror` message hardcodes
      `'searxng' … to name the SearXNG instance` and cannot carry Brave's
      missing key as written. Give it a `backend_name` field and a generic
      message (`web search backend '{backend_name}' requires {missing_key}`),
      and update its doc comment. The existing test only asserts the error
      contains `base_url`, so it survives.
-   - [ ] In `src/config/web_search.rs`: add
+   - [x] In `src/config/web_search.rs`: add
      `BraveBackendConfig { api_key: Option<String> }` and
      `brave: Option<BraveBackendConfig>` on `WebSearchBackendsConfig`, both
      with `#[serde(default)]`; derive `Clone, PartialEq, Eq, Deserialize`
@@ -275,16 +278,16 @@ Key constraints:
      backend-specific config into the matching
      `WebSearchBackendSettings` variant instead of passing unrelated
      optional settings to the factory.
-   - [ ] Re-export `BraveBackendConfig` next to `SearXngBackendConfig` in
+   - [x] Re-export `BraveBackendConfig` next to `SearXngBackendConfig` in
      `src/config.rs:37`.
-   - [ ] Fix the struct literals that gain the new field and the assertions
+   - [x] Fix the struct literals that gain the new field and the assertions
      that pin the supported-name list:
      `src/cli_driver.rs:1142` (`WebSearchBackendsConfig { … }`),
      `src/config/web_search.rs:468` (same), and the four
      `"duckduckgo, searxng"` occurrences at
      `backends/web_search.rs:314`, `backends/web_search.rs:349`,
      `src/config/web_search.rs:485`, `src/config/profile.rs:2436`.
-   - [ ] Tests: extend `backend_kind_names_roundtrip` (brave roundtrip,
+   - [x] Tests: extend `backend_kind_names_roundtrip` (brave roundtrip,
      `display_name() == "Brave"`, `supported_names_display() ==
      "duckduckgo, searxng, brave"`) and
      `backend_for_builds_the_configured_backend` (all backend-specific
@@ -299,12 +302,12 @@ Key constraints:
      `nested_searxng_table_deserializes` (`src/config/web_search.rs:245`).
    - Tests: `cargo test --lib backends::web_search` and `cargo test --lib config::web_search`.
 
-5. [ ] Validate the brave table at config load
+5. [x] Validate the brave table at config load
    (`WebSearchConfig::validate` in `src/config/web_search.rs:115-124`
    currently delegates only to `validate_searxng_backend`):
-   - [ ] Add `const BRAVE_API_KEY_KEY: &str = "[web_search.backends.brave] api_key";`
+   - [x] Add `const BRAVE_API_KEY_KEY: &str = "[web_search.backends.brave] api_key";`
      beside `SEARXNG_BASE_URL_KEY` (`:36`).
-   - [ ] Add `validate_brave_backend(path)` modeled on
+   - [x] Add `validate_brave_backend(path)` modeled on
      `validate_searxng_backend` (`:132-186`) but without URL parsing:
      selected + no table → `ConfigError::InvalidWebSearchBackendSetting`
      with key `[web_search.backends.brave]` and reason "the table is
@@ -315,8 +318,8 @@ Key constraints:
      key) that is present but **unselected** validates nothing beyond
      presence — an empty string is tolerated there (mirror the searxng
      semantics documented on `WebSearchConfig::backends`).
-   - [ ] Chain it from `validate()` after the existing searxng check.
-   - [ ] Tests (matrix beside the searxng ones at `:289-400`): `brave`
+   - [x] Chain it from `validate()` after the existing searxng check.
+   - [x] Tests (matrix beside the searxng ones at `:289-400`): `brave`
      without table → error naming path + backend + key; without `api_key`;
      with empty and whitespace-only values; unselected brave table with
      empty `api_key` → validates; `duckduckgo` defaults untouched by a
@@ -325,27 +328,27 @@ Key constraints:
      `known_backend_validates` (`:287`) gains a brave case.
    - Tests: `cargo test --lib config::web_search`.
 
-6. [ ] Profile-level config tests in `src/config/profile.rs` (the
+6. [x] Profile-level config tests in `src/config/profile.rs` (the
    `[web_search]` block, `:2376-2496`), beside the searxng pair at
    `:2445-2489`:
-   - [ ] A fixture with `backend = "brave"` and
+   - [x] A fixture with `backend = "brave"` and
      `[web_search.backends.brave] api_key = "…"` loads and asserts
      `profile.web_search.backends.brave.api_key`.
-   - [ ] `backend = "brave"` without the table (and without `api_key`) fails
+   - [x] `backend = "brave"` without the table (and without `api_key`) fails
      at `profile.web_search.validate(&path)` with
      `InvalidWebSearchBackendSetting` naming the config path.
-   - [ ] The existing absent-section → `duckduckgo` test and the
+   - [x] The existing absent-section → `duckduckgo` test and the
      `the_e2e_custom_profile_keeps_loading_with_target_rules` test (step 1)
      keep passing with the brave table present but unselected.
    - Tests: `cargo test --lib config::profile`.
 
-7. [ ] Pin the user-facing wiring: title and sandbox target.
-   - [ ] Extend (or sibling-add beside)
+7. [x] Pin the user-facing wiring: title and sandbox target.
+   - [x] Extend (or sibling-add beside)
      `display_registry_titles_the_backend_the_profile_configures`
      (`src/cli_driver.rs:1137-1164`) with a brave profile —
      `backend = "brave"` plus `brave: Some(BraveBackendConfig { api_key: Some(…) })`
      — asserting `web_search.title() == "Web Search (Brave)"`.
-   - [ ] Add a registry test beside
+   - [x] Add a registry test beside
      `configured_web_search_rule_applies_through_default_registry`
      (`src/agent/tools.rs:1170`) whose `[tools.web_search]` rule carries
      `target = "https://api.search.brave.com"` and a brave-configured
@@ -354,12 +357,12 @@ Key constraints:
      observable).
    - Tests: `cargo test --lib cli_driver` and `cargo test --lib agent::tools`.
 
-8. [ ] Verify the e2e wiring end to end (files already in place; no secret
+8. [x] Verify the e2e wiring end to end (files already in place; no secret
    values are printed or copied):
-   - [ ] Confirm `tests/e2e/custom/profiles/default/config.toml` keeps the
+   - [x] Confirm `tests/e2e/custom/profiles/default/config.toml` keeps the
      brave table it already carries and that `profiles/default/.env`
      (gitignored) defines `BRAVE_API_KEY` with the same spelling.
-   - [ ] Document in the header comment of `tests/e2e/web_search-tool.zsh`
+   - [x] Document in the header comment of `tests/e2e/web_search-tool.zsh`
      how to run the script against Brave:
      `YLVA_WEB_SEARCH_BACKEND=brave` (with `BRAVE_API_KEY` present in the
      profile `.env`), beside the existing SearXNG invocation note. This
@@ -367,10 +370,10 @@ Key constraints:
    - Tests: `cargo test --lib config::profile` (the fixture-load test
      covers the profile side); the zsh script itself is a manual check.
 
-9. [ ] Documentation step — update **every** doc affected by this change, in
+9. [x] Documentation step — update **every** doc affected by this change, in
    the same change set (each sub-item is part of this step):
-   - [ ] `README.md:34`: flip `- [ ] Brave` to `- [x] Brave`.
-   - [ ] `docs/configuration.md`:
+   - [x] `README.md:34`: flip `- [x] Brave` to `- [x] Brave`.
+   - [x] `docs/configuration.md`:
      - the `backend` row (`:396-400`) lists `"brave"` as a third value;
      - the per-backend table (`:402-406`) gains a `backends.brave.api_key`
        row: required — and non-empty — when `backend = "brave"` selects it,
@@ -383,31 +386,31 @@ Key constraints:
        that ylva ships a fixed Brave endpoint (no instance to run);
      - the network-rule match-key sentence (`:759-763`) gains
        `https://api.search.brave.com` for `brave`.
-   - [ ] `docs/features.md:377-391`: the `web_search` bullet names `brave`
+   - [x] `docs/features.md:377-391`: the `web_search` bullet names `brave`
      (requiring `[web_search.backends.brave] api_key`) beside `duckduckgo`
      and `searxng`.
-   - [ ] `docs/implementation-notes.md`:
+   - [x] `docs/implementation-notes.md`:
      - the HTTP-client paragraph (`:164-193`) gains the Brave backend —
        one `GET` against `api.search.brave.com`, the
        `X-Subscription-Token` header, serde JSON parsing, dump behavior,
        and the redaction of that header;
      - the approval/`network_target` sentence (`:548-563`) notes that the
        brave target is the fixed `https://api.search.brave.com` authority.
-   - [ ] Markdown added/changed here must pass `rumdl` with `.rumdl.toml`
+   - [x] Markdown added/changed here must pass `rumdl` with `.rumdl.toml`
      (run `rumdl fmt <paths>` to fix).
-   - [ ] Update `docs/cli-options.md:115-124` to say that request-dump
+   - [x] Update `docs/cli-options.md:115-124` to say that request-dump
      headers ending in `-token` are redacted case-insensitively, in addition
      to the existing authorization, cookie, and API-key-style redaction.
      No CLI option or special environment-variable handling is added;
      `BRAVE_API_KEY` is supplied through ordinary profile interpolation.
-   - [ ] Explicitly **no** changes: `docs/ideas/web-search.md` (the user's
+   - [x] Explicitly **no** changes: `docs/ideas/web-search.md` (the user's
      brainstorm file — do not edit), `CONTEXT.md` (no glossary term exists
      for search backends and none is introduced), and
      `docs/architecture-design-records/` (directory is empty; the change
      follows the established seam pattern, so no new ADR is needed).
    - Tests: `rumdl check` on the touched markdown files.
 
-10. [ ] Verification gate: `make format lint`, then the single mandatory
+10. [x] Verification gate: `make format lint`, then the single mandatory
     test gate `make test-coverage` (full suite + coverage threshold 80).
     Fix all failures; do not add a separate `make test` run.
 

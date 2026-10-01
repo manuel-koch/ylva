@@ -23,7 +23,7 @@ use serde::Deserialize;
 
 use crate::agent::tools::backends::web_search::{
     backend_for, WebSearchBackend, WebSearchBackendError, WebSearchBackendKind,
-    WEB_SEARCH_DEFAULT_RESULT_LIMIT, WEB_SEARCH_MAX_RESULT_LIMIT,
+    WebSearchBackendSettings, WEB_SEARCH_DEFAULT_RESULT_LIMIT, WEB_SEARCH_MAX_RESULT_LIMIT,
 };
 
 use super::ConfigError;
@@ -34,6 +34,10 @@ const DEFAULT_WEB_SEARCH_TIMEOUT_SECS: u64 = 30;
 
 /// Config key of the SearXNG instance root, named in validation errors.
 const SEARXNG_BASE_URL_KEY: &str = "[web_search.backends.searxng] base_url";
+
+/// Config key of the Brave Search subscription token, named in validation
+/// errors.
+const BRAVE_API_KEY_KEY: &str = "[web_search.backends.brave] api_key";
 
 fn default_backend() -> String {
     WebSearchBackendKind::DuckDuckGo.as_str().to_string()
@@ -85,6 +89,10 @@ pub struct WebSearchBackendsConfig {
     /// configures a SearXNG instance.
     #[serde(default)]
     pub searxng: Option<SearXngBackendConfig>,
+    /// `[web_search.backends.brave]`; present only when the profile
+    /// configures a Brave Search subscription token.
+    #[serde(default)]
+    pub brave: Option<BraveBackendConfig>,
 }
 
 /// The `[web_search.backends.searxng]` table.
@@ -95,6 +103,34 @@ pub struct SearXngBackendConfig {
     /// present must always be a parsable `http(s)` URL.
     #[serde(default)]
     pub base_url: Option<String>,
+}
+
+/// The `[web_search.backends.brave]` table.
+///
+/// Holds the Brave Search API subscription token — a secret, so the intended
+/// spelling is a `${ENV_VAR}` interpolation and [`Debug`] masks the value.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+pub struct BraveBackendConfig {
+    /// Brave Search API subscription token. Required — and non-empty — when
+    /// `backend = "brave"`; never read from the process environment
+    /// implicitly.
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+impl std::fmt::Debug for BraveBackendConfig {
+    /// Report whether a key is configured without ever formatting it — a
+    /// `Debug` output (e.g. a log line or an error message) must not leak the
+    /// subscription token.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BraveBackendConfig")
+            .field(
+                "api_key",
+                &self.api_key.as_ref().map(|_| "<REDACTED>".to_string()),
+            )
+            .finish()
+    }
 }
 
 impl Default for WebSearchConfig {
@@ -120,7 +156,8 @@ impl WebSearchConfig {
                 expected: WebSearchBackendKind::supported_names_display(),
             });
         }
-        self.validate_searxng_backend(path)
+        self.validate_searxng_backend(path)?;
+        self.validate_brave_backend(path)
     }
 
     /// Validate the `[web_search.backends.searxng]` table against the
@@ -185,6 +222,54 @@ impl WebSearchConfig {
         }
     }
 
+    /// Validate the `[web_search.backends.brave]` table against the
+    /// selected backend.
+    ///
+    /// The *selected* backend must have a usable `api_key`; a table that is
+    /// present but unselected is not inspected at all — an empty string is
+    /// tolerated there, because the setting is unused. Unlike SearXNG there
+    /// is no URL to parse: Brave's endpoint is fixed.
+    fn validate_brave_backend(&self, path: &Path) -> Result<(), ConfigError> {
+        let selected_brave = self.backend == WebSearchBackendKind::Brave.as_str();
+        let Some(table) = self.backends.brave.as_ref() else {
+            return if selected_brave {
+                Err(ConfigError::InvalidWebSearchBackendSetting {
+                    path: path.to_path_buf(),
+                    backend: WebSearchBackendKind::Brave.as_str().to_string(),
+                    key: "[web_search.backends.brave]".to_string(),
+                    reason: "the table is required when backend = \"brave\" selects it".to_string(),
+                })
+            } else {
+                Ok(())
+            };
+        };
+        let Some(api_key) = table.api_key.as_deref() else {
+            return if selected_brave {
+                Err(ConfigError::InvalidWebSearchBackendSetting {
+                    path: path.to_path_buf(),
+                    backend: WebSearchBackendKind::Brave.as_str().to_string(),
+                    key: BRAVE_API_KEY_KEY.to_string(),
+                    reason: "must hold the Brave Search API subscription token".to_string(),
+                })
+            } else {
+                Ok(())
+            };
+        };
+        if api_key.trim().is_empty() {
+            return if selected_brave {
+                Err(ConfigError::InvalidWebSearchBackendSetting {
+                    path: path.to_path_buf(),
+                    backend: WebSearchBackendKind::Brave.as_str().to_string(),
+                    key: BRAVE_API_KEY_KEY.to_string(),
+                    reason: "must be a non-empty API key".to_string(),
+                })
+            } else {
+                Ok(())
+            };
+        }
+        Ok(())
+    }
+
     /// The internal HTTP timeout for one request. A configured `0` would make
     /// every request time out instantly, so it floors at one second.
     pub(crate) fn http_timeout(&self) -> Duration {
@@ -193,17 +278,34 @@ impl WebSearchConfig {
 
     /// Build the configured backend instance.
     ///
-    /// An `Err` here is only reachable when `validate()` was skipped — profile
-    /// load always validates first, so `default_registry` turns the error into
-    /// an explicit invariant panic rather than falling back to another
-    /// backend.
+    /// The backend-specific config tables are mapped onto their own
+    /// [`WebSearchBackendSettings`] variant, so the factory never receives a
+    /// setting belonging to a different backend. An `Err` here is only
+    /// reachable when `validate()` was skipped — profile load always
+    /// validates first, so `default_registry` turns the error into an
+    /// explicit invariant panic rather than falling back to another backend.
     pub(crate) fn build_backend(&self) -> Result<Arc<dyn WebSearchBackend>, WebSearchBackendError> {
-        let searxng_base_url = self
-            .backends
-            .searxng
-            .as_ref()
-            .and_then(|table| table.base_url.as_deref());
-        backend_for(&self.backend, searxng_base_url, self.http_timeout())
+        let settings = match WebSearchBackendKind::from_name(&self.backend) {
+            Some(WebSearchBackendKind::DuckDuckGo) => WebSearchBackendSettings::DuckDuckGo,
+            Some(WebSearchBackendKind::SearXng) => WebSearchBackendSettings::SearXng {
+                base_url: self
+                    .backends
+                    .searxng
+                    .as_ref()
+                    .and_then(|table| table.base_url.as_deref()),
+            },
+            Some(WebSearchBackendKind::Brave) => WebSearchBackendSettings::Brave {
+                api_key: self
+                    .backends
+                    .brave
+                    .as_ref()
+                    .and_then(|table| table.api_key.as_deref()),
+            },
+            None => WebSearchBackendSettings::Unsupported {
+                backend_name: &self.backend,
+            },
+        };
+        backend_for(settings, self.http_timeout())
     }
 
     /// The default result count for calls omitting `limit`, capped at the
@@ -224,6 +326,7 @@ mod tests {
         assert_eq!(config.timeout_secs, 30);
         assert_eq!(config.result_limit, WEB_SEARCH_DEFAULT_RESULT_LIMIT);
         assert_eq!(config.backends.searxng, None);
+        assert_eq!(config.backends.brave, None);
     }
 
     #[test]
@@ -258,6 +361,30 @@ mod tests {
     }
 
     #[test]
+    fn nested_brave_table_deserializes() {
+        let config: WebSearchConfig = toml::from_str(
+            "backend = \"brave\"\n\n[backends.brave]\napi_key = \"sentinel-brave-token\"\n",
+        )
+        .expect("the nested table parses");
+        assert_eq!(config.backend, "brave");
+        assert_eq!(
+            config.backends.brave,
+            Some(BraveBackendConfig {
+                api_key: Some("sentinel-brave-token".to_string())
+            })
+        );
+        let rendered = format!("{config:?}");
+        assert!(
+            !rendered.contains("sentinel-brave-token"),
+            "the token must never reach a Debug output: {rendered}"
+        );
+        assert!(
+            rendered.contains("<REDACTED>"),
+            "the masked key stays visible as redacted: {rendered}"
+        );
+    }
+
+    #[test]
     fn unknown_backend_is_rejected_naming_the_config_path() {
         let config = WebSearchConfig {
             backend: "startpage".to_string(),
@@ -270,7 +397,9 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("startpage"), "{message}");
         assert!(
-            message.contains("duckduckgo") && message.contains("searxng"),
+            message.contains("duckduckgo")
+                && message.contains("searxng")
+                && message.contains("brave"),
             "names every accepted value: {message}"
         );
         assert!(
@@ -284,6 +413,19 @@ mod tests {
         WebSearchConfig::default()
             .validate(Path::new("config.toml"))
             .expect("the default backend is supported");
+        let brave = WebSearchConfig {
+            backend: "brave".to_string(),
+            backends: WebSearchBackendsConfig {
+                searxng: None,
+                brave: Some(BraveBackendConfig {
+                    api_key: Some("test-subscription-token".to_string()),
+                }),
+            },
+            ..WebSearchConfig::default()
+        };
+        brave
+            .validate(Path::new("config.toml"))
+            .expect("a brave config with its token is supported");
     }
 
     #[test]
@@ -409,6 +551,110 @@ mod tests {
     }
 
     #[test]
+    fn brave_without_the_table_is_rejected_naming_path_backend_and_key() {
+        let config = WebSearchConfig {
+            backend: "brave".to_string(),
+            ..WebSearchConfig::default()
+        };
+        let path = Path::new("/home/user/.ylva/profiles/default/config.toml");
+        let error = config
+            .validate(path)
+            .expect_err("brave needs its api_key table");
+        let message = error.to_string();
+        assert!(
+            matches!(
+                &error,
+                ConfigError::InvalidWebSearchBackendSetting { backend, key, .. }
+                    if backend == "brave" && key == "[web_search.backends.brave]"
+            ),
+            "{message}"
+        );
+        assert!(
+            message.contains("/home/user/.ylva/profiles/default/config.toml"),
+            "names the config path: {message}"
+        );
+        assert!(message.contains("brave"), "names the backend: {message}");
+        assert!(message.contains("table is required"), "{message}");
+    }
+
+    #[test]
+    fn brave_without_api_key_is_rejected_naming_path_backend_and_key() {
+        let config: WebSearchConfig =
+            toml::from_str("backend = \"brave\"\n\n[backends.brave]\n").expect("the table parses");
+        let path = Path::new("/home/user/.ylva/profiles/default/config.toml");
+        let error = config
+            .validate(path)
+            .expect_err("brave needs its subscription token");
+        let message = error.to_string();
+        assert!(
+            matches!(
+                &error,
+                ConfigError::InvalidWebSearchBackendSetting { backend, key, .. }
+                    if backend == "brave" && key.contains("backends.brave") && key.contains("api_key")
+            ),
+            "{message}"
+        );
+        assert!(message.contains("subscription token"), "{message}");
+        assert!(
+            message.contains("/home/user/.ylva/profiles/default/config.toml"),
+            "names the config path: {message}"
+        );
+    }
+
+    #[test]
+    fn brave_with_a_blank_api_key_is_rejected_naming_the_reason() {
+        let cases = [
+            ("[backends.brave]\napi_key = \"\"\n", "an empty key"),
+            (
+                "[backends.brave]\napi_key = \"   \"\n",
+                "a whitespace-only key",
+            ),
+        ];
+        for (table, case) in cases {
+            let config: WebSearchConfig =
+                toml::from_str(&format!("backend = \"brave\"\n\n{table}"))
+                    .expect("the table parses");
+            let error = config
+                .validate(Path::new("config.toml"))
+                .expect_err("a blank key must fail");
+            let message = error.to_string();
+            assert!(
+                matches!(
+                    &error,
+                    ConfigError::InvalidWebSearchBackendSetting { key, reason, .. }
+                        if key.contains("api_key") && reason == "must be a non-empty API key"
+                ),
+                "{case}: {message}"
+            );
+            assert!(message.contains("config.toml"), "{case}: {message}");
+        }
+    }
+
+    #[test]
+    fn unselected_brave_table_with_an_empty_api_key_validates() {
+        let config: WebSearchConfig =
+            toml::from_str("\n[backends.brave]\napi_key = \"\"\n").expect("the table parses");
+        config
+            .validate(Path::new("config.toml"))
+            .expect("an unused empty value is tolerated");
+        assert_eq!(config.backend, "duckduckgo", "the default stays selected");
+    }
+
+    #[test]
+    fn duckduckgo_defaults_are_untouched_by_a_present_brave_table() {
+        let config: WebSearchConfig = toml::from_str(
+            "backend = \"duckduckgo\"\n\n[backends.brave]\napi_key = \"test-subscription-token\"\n",
+        )
+        .expect("the table parses");
+        config
+            .validate(Path::new("config.toml"))
+            .expect("an unselected brave table never breaks the default");
+        assert_eq!(config.backend, "duckduckgo");
+        let backend = config.build_backend().expect("the default still builds");
+        assert!(format!("{backend:?}").contains("DuckDuckGoBackend"));
+    }
+
+    #[test]
     fn zero_timeout_floors_to_one_second() {
         let config = WebSearchConfig {
             timeout_secs: 0,
@@ -447,6 +693,27 @@ mod tests {
             format!("{backend:?}").contains("SearXngBackend"),
             "the configured backend is built, not substituted: {backend:?}"
         );
+
+        let sentinel_token = "sentinel-brave-token";
+        let brave: WebSearchConfig = toml::from_str(&format!(
+            "backend = \"brave\"\n\n[backends.brave]\napi_key = \"{sentinel_token}\"\n"
+        ))
+        .expect("the table parses");
+        let backend = brave.build_backend().expect("a valid config builds");
+        let rendered_backend = format!("{backend:?}");
+        assert!(
+            rendered_backend.contains("BraveBackend"),
+            "the configured backend is built, not substituted: {rendered_backend}"
+        );
+        assert!(
+            !rendered_backend.contains(sentinel_token),
+            "the API key must never reach a Debug output: {rendered_backend}"
+        );
+        let rendered_config = format!("{brave:?}");
+        assert!(
+            !rendered_config.contains(sentinel_token),
+            "the containing config must not leak the token either: {rendered_config}"
+        );
     }
 
     #[test]
@@ -467,6 +734,7 @@ mod tests {
             backend: "searxng".to_string(),
             backends: WebSearchBackendsConfig {
                 searxng: Some(SearXngBackendConfig { base_url: None }),
+                brave: None,
             },
             ..WebSearchConfig::default()
         };
@@ -482,8 +750,21 @@ mod tests {
         assert!(
             unsupported
                 .build_backend()
-                .is_err_and(|error| { error.to_string().contains("duckduckgo, searxng") }),
+                .is_err_and(|error| { error.to_string().contains("duckduckgo, searxng, brave") }),
             "an unknown backend must not yield a different backend"
+        );
+
+        let brave_without_key = WebSearchConfig {
+            backend: "brave".to_string(),
+            ..WebSearchConfig::default()
+        };
+        assert!(
+            brave_without_key.build_backend().is_err_and(|error| error
+                .to_string()
+                .contains("api_key")
+                && error.to_string().contains("brave")
+                && !error.to_string().contains("DuckDuckGo")),
+            "brave without api_key must not yield a different backend"
         );
     }
 }

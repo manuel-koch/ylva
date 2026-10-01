@@ -57,24 +57,60 @@ fn route_command(run_id: Option<uuid::Uuid>, command: AgentCommand) -> AgentComm
     }
 }
 
+/// The display title for `tool_name` together with the title arguments that
+/// still need rendering: the tool's
+/// [`subtype_argument`](Tool::subtype_argument) is folded into the title as
+/// `({value})` and dropped from the props (via
+/// [`crate::agent::tools::display_title_with_subtype`]), so the call's
+/// variant reads as part of the label — `Spawn Subagent (local-discovery) …`
+/// — instead of as an `agent_type=…` prop. Falls back to the title-cased
+/// tool name for a tool the registry does not know.
+fn display_title_for(
+    registry: &ToolRegistry,
+    tool_name: &str,
+    title_arguments: &[(String, serde_json::Value)],
+) -> (String, Vec<(String, serde_json::Value)>) {
+    match registry.get(tool_name) {
+        Some(tool) => crate::agent::tools::display_title_with_subtype(
+            &tool.title(),
+            tool.subtype_argument(),
+            title_arguments,
+        ),
+        None => (capitalize_first(tool_name), title_arguments.to_vec()),
+    }
+}
+
 fn render_invocation_from_title_arguments(
     title: &str,
     title_arguments: &[(String, serde_json::Value)],
 ) -> String {
-    render_invocation_with_string_limit(title, title_arguments, STRING_ELIDE_LIMIT)
+    render_invocation_with_display_limits(
+        title,
+        title_arguments,
+        PRIMARY_ARG_DISPLAY_LIMIT,
+        STRING_ELIDE_LIMIT,
+    )
 }
 
-fn render_invocation_with_string_limit(
+/// Render one tool status line.
+///
+/// The first-ranked scalar argument is the call's *primary* — its payload
+/// (`terms`, `command`, `path`) — and is shown inline, truncated at
+/// `primary_display_limit`. Every remaining argument becomes a bracketed
+/// `key=value` prop truncated at `prop_display_limit`. Both are truncated
+/// with a trailing `…`, never replaced by a length placeholder: the line
+/// stays a single line without losing the head of what actually ran.
+fn render_invocation_with_display_limits(
     title: &str,
     title_arguments: &[(String, serde_json::Value)],
-    string_limit: usize,
+    primary_display_limit: usize,
+    prop_display_limit: usize,
 ) -> String {
     let mut line = title.to_string();
-    let is_short = |s: &str| s.len() <= string_limit;
     let scalar_primary = |v: &serde_json::Value| -> Option<String> {
         match v {
-            serde_json::Value::String(s) if is_short(s) => Some(s.as_str().to_string()),
-            serde_json::Value::Number(n) => Some(n.to_string()),
+            serde_json::Value::String(text) => Some(text.clone()),
+            serde_json::Value::Number(number) => Some(number.to_string()),
             _ => None,
         }
     };
@@ -84,6 +120,7 @@ fn render_invocation_with_string_limit(
         .next_if(|(_, v)| scalar_primary(v).is_some())
         .and_then(|(_, v)| scalar_primary(v))
     {
+        let primary = truncate_with_ellipsis(&primary, primary_display_limit);
         line.push(' ');
         // A literal identifier (path, glob pattern, regex, ...) reads fine
         // bare even after a multi-word title, since it visually contrasts
@@ -100,7 +137,7 @@ fn render_invocation_with_string_limit(
         }
     }
     let rest: Vec<String> = iter
-        .map(|(k, v)| format!("{k}={}", render_arg_value_with_limit(v, string_limit)))
+        .map(|(k, v)| format!("{k}={}", render_arg_value_with_limit(v, prop_display_limit)))
         .collect();
     if !rest.is_empty() {
         line.push_str(&format!(" [{}]", rest.join(", ")));
@@ -108,29 +145,20 @@ fn render_invocation_with_string_limit(
     line
 }
 
-/// Render a tool invocation for a denial line: string arguments longer than
-/// [`DENIED_ARG_DISPLAY_LIMIT`] are truncated with a trailing `…` instead of
-/// being dropped, so the denied command is always visible.
+/// Render a tool invocation for a denial line: every string argument —
+/// primary and prop alike — is truncated at [`DENIED_ARG_DISPLAY_LIMIT`] with
+/// a trailing `…` instead of being dropped, so the denied command is always
+/// visible.
 fn render_denied_invocation(
     title: &str,
     title_arguments: &[(String, serde_json::Value)],
 ) -> String {
-    let truncated_arguments: Vec<(String, serde_json::Value)> = title_arguments
-        .iter()
-        .map(|(key, value)| {
-            let display_value = match value {
-                serde_json::Value::String(text) if text.len() > DENIED_ARG_DISPLAY_LIMIT => {
-                    serde_json::Value::String(truncate_with_ellipsis(
-                        text,
-                        DENIED_ARG_DISPLAY_LIMIT,
-                    ))
-                }
-                other => other.clone(),
-            };
-            (key.clone(), display_value)
-        })
-        .collect();
-    render_invocation_with_string_limit(title, &truncated_arguments, DENIED_ARG_DISPLAY_LIMIT)
+    render_invocation_with_display_limits(
+        title,
+        title_arguments,
+        DENIED_ARG_DISPLAY_LIMIT,
+        DENIED_ARG_DISPLAY_LIMIT,
+    )
 }
 
 fn render_content_sections(
@@ -193,9 +221,18 @@ fn render_content_sections(
     Ok(())
 }
 
-/// Length beyond which a string value is treated as "long" and elided when
-/// rendering a tool invocation.
+/// Byte budget for a bracketed `key=value` prop on a normal tool status
+/// line: past it the value is truncated with a trailing `…` (never replaced
+/// by a length placeholder), so the line stays one line but still shows what
+/// the argument starts with.
 const STRING_ELIDE_LIMIT: usize = 40;
+
+/// Byte budget for the inline *primary* (first-ranked) argument of a normal
+/// tool status line — the call's payload (`terms`, `command`, `path`).
+/// Deliberately as generous as [`DENIED_ARG_DISPLAY_LIMIT`]: a payload the
+/// user is about to approve deserves at least the visibility of one already
+/// denied. Past it the value is truncated with a trailing `…`.
+const PRIMARY_ARG_DISPLAY_LIMIT: usize = 80;
 
 /// Byte length beyond which a string argument on a CLI denial line is
 /// truncated with a trailing `…`. The denied command must always stay
@@ -217,6 +254,10 @@ fn truncate_with_ellipsis(text: &str, max_bytes: usize) -> String {
         }
         truncated.push(character);
     }
+    // A cut that lands on a space would render `word …` — drop the trailing
+    // whitespace so the marker hugs the last visible character.
+    let trimmed_len = truncated.trim_end().len();
+    truncated.truncate(trimmed_len);
     truncated.push_str(ELLIPSIS);
     truncated
 }
@@ -676,10 +717,8 @@ async fn run_cli_to_with_title(
                 )?;
                 writeln!(out)?;
                 current_section = StreamSection::None;
-                let title = registry
-                    .get(&name)
-                    .map(|tool| tool.title().to_string())
-                    .unwrap_or_else(|| capitalize_first(&name));
+                let (title, title_arguments) =
+                    display_title_for(&registry, &name, &title_arguments);
                 let invocation = render_invocation_from_title_arguments(&title, &title_arguments);
                 pending_invocations.insert(id, invocation.clone());
                 let approval_check = registry
@@ -795,10 +834,8 @@ async fn run_cli_to_with_title(
                 )?;
                 writeln!(out)?;
                 current_section = StreamSection::None;
-                let title = registry
-                    .get(&name)
-                    .map(|tool| tool.title().to_string())
-                    .unwrap_or_else(|| capitalize_first(&name));
+                let (title, title_arguments) =
+                    display_title_for(&registry, &name, &title_arguments);
                 let invocation = render_invocation_from_title_arguments(&title, &title_arguments);
                 pending_invocations.insert(id, invocation.clone());
                 write_cli_styled_line(
@@ -1080,46 +1117,40 @@ async fn run_cli_to_with_title(
 /// This is **host-side presentation policy** (CLI-only in Phase 3): the App
 /// decides how a tool is shown, using the tool's [`title`](Tool::title) as the
 /// label, the tool's own `argument_order` to pick the primary (inline)
-/// argument, and its `non_default_arguments` for the bracketed rest. Host
-/// details (brackets, eliding long values) stay here.
+/// argument, and its `non_default_arguments` for the bracketed rest. The line
+/// shape itself (inline primary, bracketed props, `…` truncation) lives in
+/// [`render_invocation_with_display_limits`], shared with the production path
+/// that renders `title_arguments`; this helper differs only in how it
+/// collects arguments — it includes body arguments, which the production
+/// path shows as content sections instead. Both paths also fold the tool's
+/// [`subtype_argument`](Tool::subtype_argument) into the label through
+/// [`crate::agent::tools::display_title_with_subtype`].
 #[cfg(test)]
 fn render_tool_invocation(tool: &dyn Tool, arguments: &serde_json::Value) -> String {
-    let mut line = tool.title().to_string();
-    let mut non_default = tool.non_default_arguments(arguments);
+    let mut non_default: Vec<(String, serde_json::Value)> = tool
+        .non_default_arguments(arguments)
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.clone()))
+        .collect();
     non_default.sort_by(|(key_a, _), (key_b, _)| {
         (tool.argument_order(key_a), key_a).cmp(&(tool.argument_order(key_b), key_b))
     });
-    let mut rest: Vec<String> = Vec::new();
-    for (index, (key, value)) in non_default.into_iter().enumerate() {
-        if index == 0 {
-            // A short-string primary is shown inline; a long one is dropped to
-            // keep the status line short (its content stays in the JSONL
-            // history).
-            if let Some(text) = value.as_str() {
-                if text.len() <= STRING_ELIDE_LIMIT {
-                    line.push(' ');
-                    line.push_str(text);
-                }
-            }
-            continue;
-        }
-        rest.push(format!(
-            "{key}={}",
-            render_arg_value_with_limit(value, STRING_ELIDE_LIMIT)
-        ));
-    }
-    if !rest.is_empty() {
-        line.push_str(&format!(" [{}]", rest.join(", ")));
-    }
-    line
+    let (title, non_default) = crate::agent::tools::display_title_with_subtype(
+        &tool.title(),
+        tool.subtype_argument(),
+        &non_default,
+    );
+    render_invocation_with_display_limits(
+        &title,
+        &non_default,
+        PRIMARY_ARG_DISPLAY_LIMIT,
+        STRING_ELIDE_LIMIT,
+    )
 }
 
 fn render_arg_value_with_limit(value: &serde_json::Value, string_limit: usize) -> String {
     match value {
-        serde_json::Value::String(text) if text.len() > string_limit => {
-            format!("<{}-char string elided>", text.chars().count())
-        }
-        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::String(text) => truncate_with_ellipsis(text, string_limit),
         serde_json::Value::Null => "null".to_string(),
         other => serde_json::to_string(other).unwrap_or_else(|_| "?".to_string()),
     }
@@ -1143,6 +1174,7 @@ mod tests {
                     searxng: Some(crate::config::SearXngBackendConfig {
                         base_url: Some("https://searx.example.org".to_string()),
                     }),
+                    brave: None,
                 },
                 ..crate::config::WebSearchConfig::default()
             },
@@ -1159,6 +1191,36 @@ mod tests {
         assert_eq!(
             web_search.title(),
             "Web Search (SearXNG)",
+            "the rendered title must name the backend the profile selects"
+        );
+    }
+
+    #[test]
+    fn display_registry_titles_brave_when_the_profile_configures_it() {
+        let profile = ProfileConfig {
+            web_search: crate::config::WebSearchConfig {
+                backend: "brave".to_string(),
+                backends: crate::config::WebSearchBackendsConfig {
+                    searxng: None,
+                    brave: Some(crate::config::BraveBackendConfig {
+                        api_key: Some("test-subscription-token".to_string()),
+                    }),
+                },
+                ..crate::config::WebSearchConfig::default()
+            },
+            ..ProfileConfig::default()
+        };
+
+        let registry = default_registry(
+            std::sync::Arc::new(std::sync::RwLock::new(Sandbox::new())),
+            display_registry_config(&profile),
+        );
+        let web_search = registry
+            .get(crate::agent::tools::web_search::WebSearchTool::NAME)
+            .expect("web_search is part of the CLI tool set");
+        assert_eq!(
+            web_search.title(),
+            "Web Search (Brave)",
             "the rendered title must name the backend the profile selects"
         );
     }
@@ -1220,7 +1282,7 @@ mod tests {
     }
 
     #[test]
-    fn render_elides_long_string_values() {
+    fn render_truncates_long_bracketed_props_with_an_ellipsis() {
         let tool: Arc<dyn Tool> = Arc::new(crate::agent::tools::write::WriteTool::default());
         let rendered = render_tool_invocation(
             tool.as_ref(),
@@ -1231,12 +1293,126 @@ mod tests {
         );
         assert!(rendered.starts_with("Write /tmp/out.txt ["));
         assert!(
-            rendered.contains("char string elided>]"),
-            "long content should be elided: {rendered}"
+            rendered.contains("Lorem ipsum dolor sit amet"),
+            "the head of an over-budget prop must stay visible: {rendered}"
         );
         assert!(
-            !rendered.contains("Lorem ipsum"),
-            "content must not appear: {rendered}"
+            rendered.contains('…'),
+            "an over-budget prop is truncated, not replaced: {rendered}"
+        );
+        assert!(
+            !rendered.contains("eiusmod tempor incididunt"),
+            "the tail is cut to keep the line short: {rendered}"
+        );
+        assert!(!rendered.contains("elided"), "{rendered}");
+        let prop_value = rendered
+            .split_once("content=")
+            .expect("content prop is rendered")
+            .1
+            .trim_end_matches(']');
+        assert!(
+            prop_value.len() <= STRING_ELIDE_LIMIT,
+            "a prop respects its budget: {prop_value}"
+        );
+    }
+
+    #[test]
+    fn render_inlines_the_whole_primary_when_it_fits_the_primary_budget() {
+        // A search query is the call's payload: 55 bytes clears the old
+        // 40-byte prop budget (which used to bracket and elide it into a
+        // length placeholder) and fits the primary budget, so it must appear
+        // in full, inline.
+        let terms = "agent-harnesses that can be run on MacOS with good UX";
+        assert!(terms.len() > STRING_ELIDE_LIMIT);
+        assert!(terms.len() <= PRIMARY_ARG_DISPLAY_LIMIT);
+
+        let rendered = render_invocation_from_title_arguments(
+            "Web Search",
+            &[("terms".to_string(), serde_json::json!(terms))],
+        );
+
+        assert!(
+            rendered.contains(terms),
+            "the query must be fully visible: {rendered}"
+        );
+        assert!(
+            !rendered.contains('['),
+            "the payload is the inline primary, not a bracketed prop: {rendered}"
+        );
+        assert!(!rendered.contains("elided"), "{rendered}");
+    }
+
+    #[test]
+    fn render_truncates_an_over_budget_primary_with_an_ellipsis() {
+        let command = "echo \"=== Top-level listing ===\"; ls -la; echo; echo \"=== pwd ===\"; \
+                       pwd; find . -type f | wc -l";
+        assert!(command.len() > PRIMARY_ARG_DISPLAY_LIMIT);
+
+        let rendered = render_invocation_from_title_arguments(
+            "Bash",
+            &[("command".to_string(), serde_json::json!(command))],
+        );
+
+        assert!(
+            rendered.starts_with("Bash echo"),
+            "the head of the command must stay visible: {rendered}"
+        );
+        assert!(
+            rendered.contains('…'),
+            "an over-budget primary is truncated: {rendered}"
+        );
+        assert!(
+            !rendered.contains('['),
+            "the payload is inline, not bracketed: {rendered}"
+        );
+        assert!(!rendered.contains("elided"), "{rendered}");
+        assert!(
+            rendered.len() <= "Bash ".len() + PRIMARY_ARG_DISPLAY_LIMIT,
+            "the line respects the primary budget: {rendered}"
+        );
+    }
+
+    #[test]
+    fn render_qualifies_the_title_with_the_subtype_argument() {
+        let tool: Arc<dyn Tool> = Arc::new(
+            crate::agent::tools::spawn_subagent::SpawnSubagentTool::new(false),
+        );
+
+        let with_subtype = render_tool_invocation(
+            tool.as_ref(),
+            &serde_json::json!({
+                "label": "Analyze read tool features",
+                "task": "list the read tool's features",
+                "agent_type": "local-discovery",
+            }),
+        );
+        assert!(
+            with_subtype.starts_with("Spawn Subagent (local-discovery) "),
+            "the subtype reads as part of the title: {with_subtype}"
+        );
+        assert!(
+            !with_subtype.contains("agent_type"),
+            "the subtype must not be rendered a second time as a prop: {with_subtype}"
+        );
+        assert!(
+            with_subtype.contains("\"Analyze read tool features\""),
+            "the label stays the inline primary: {with_subtype}"
+        );
+
+        let without_subtype = render_tool_invocation(
+            tool.as_ref(),
+            &serde_json::json!({
+                "label": "Analyze read tool features",
+                "task": "list the read tool's features",
+            }),
+        );
+        assert!(
+            without_subtype.starts_with("Spawn Subagent "),
+            "an unspecified subtype qualifies nothing: {without_subtype}"
+        );
+        assert!(
+            !without_subtype.contains('('),
+            "no parenthetical without an explicit subtype: {without_subtype}"
         );
     }
 
@@ -1287,10 +1463,10 @@ mod tests {
     }
 
     #[test]
-    fn render_denied_invocation_shows_command_between_elide_and_display_limits() {
-        // 73-byte command: longer than STRING_ELIDE_LIMIT (40), so the old
-        // filter dropped it entirely; within DENIED_ARG_DISPLAY_LIMIT (80),
-        // so it must appear in full.
+    fn render_denied_invocation_shows_a_long_command_in_full() {
+        // 73-byte command: over the 40-byte prop budget that bounds a normal
+        // status line, but within DENIED_ARG_DISPLAY_LIMIT (80), so a denial
+        // line must still show it in full.
         let command = "echo \"=== Top-level listing ===\"; ls -la; echo; echo \"=== pwd ===\"; pwd";
         assert!(command.len() > STRING_ELIDE_LIMIT);
         assert!(command.len() <= DENIED_ARG_DISPLAY_LIMIT);
@@ -1345,6 +1521,16 @@ mod tests {
             truncate_with_ellipsis("find . | wc -l", 80),
             "find . | wc -l"
         );
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_strips_trailing_whitespace_before_the_marker() {
+        // The 12th byte of the budget falls on the space after "world";
+        // rendering `word …` would read as a broken word.
+        let truncated = truncate_with_ellipsis("hello world example", 15);
+        assert_eq!(truncated, "hello world…");
+        assert!(!truncated.contains(" …"), "{truncated}");
+        assert!(truncated.ends_with('…'), "{truncated}");
     }
 
     #[test]

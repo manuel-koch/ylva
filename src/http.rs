@@ -423,12 +423,20 @@ const SENSITIVE_HEADER_NAMES: &[&str] = &[
 /// value in a request dump.
 const REDACTED_HEADER_VALUE: &str = "<REDACTED>";
 
+/// Suffix recognized as credential-carrying by [`is_sensitive_header_name`],
+/// matched case-insensitively (e.g. `x-subscription-token`).
+const SENSITIVE_HEADER_SUFFIX: &str = "-token";
+
 /// `true` when `name` is a known credential-carrying header (see
-/// [`SENSITIVE_HEADER_NAMES`]).
+/// [`SENSITIVE_HEADER_NAMES`]) or ends in [`SENSITIVE_HEADER_SUFFIX`] — the
+/// generic rule that keeps backend subscription tokens (Brave's
+/// `x-subscription-token`) out of request dumps. Both matches are
+/// case-insensitive.
 fn is_sensitive_header_name(name: &str) -> bool {
     SENSITIVE_HEADER_NAMES
         .iter()
         .any(|sensitive| name.eq_ignore_ascii_case(sensitive))
+        || name.to_ascii_lowercase().ends_with(SENSITIVE_HEADER_SUFFIX)
 }
 
 /// Derive the `scheme://host` network-sandbox match key of a URL — the
@@ -1094,6 +1102,18 @@ mod tests {
             "Bearer super-secret-key".parse().expect("header value"),
         );
         headers.insert("x-api-key", "another-secret".parse().expect("header value"));
+        headers.insert(
+            "x-subscription-token",
+            "brave-subscription-secret".parse().expect("header value"),
+        );
+        headers.insert(
+            "x-custom-token",
+            "custom-token-secret".parse().expect("header value"),
+        );
+        headers.insert(
+            "x-token-id",
+            "not-a-credential".parse().expect("header value"),
+        );
         headers.insert("x-custom", "not-secret".parse().expect("header value"));
         let redacted_headers = redacted_headers_json(&headers);
 
@@ -1109,9 +1129,26 @@ mod tests {
             serde_json::from_str(contents.lines().next().expect("meta line")).expect("valid json");
         assert_eq!(meta["headers"]["authorization"], REDACTED_HEADER_VALUE);
         assert_eq!(meta["headers"]["x-api-key"], REDACTED_HEADER_VALUE);
+        assert_eq!(
+            meta["headers"]["x-subscription-token"],
+            REDACTED_HEADER_VALUE
+        );
+        assert_eq!(meta["headers"]["x-custom-token"], REDACTED_HEADER_VALUE);
+        assert_eq!(meta["headers"]["x-token-id"], "not-a-credential");
         assert_eq!(meta["headers"]["x-custom"], "not-secret");
         assert!(
-            !contents.contains("super-secret-key") && !contents.contains("another-secret"),
+            is_sensitive_header_name("X-Subscription-Token"),
+            "the -token suffix rule must match mixed-case header names"
+        );
+        assert!(
+            !is_sensitive_header_name("X-Token-Id"),
+            "a name that merely contains the suffix must stay unaffected"
+        );
+        assert!(
+            !contents.contains("super-secret-key")
+                && !contents.contains("another-secret")
+                && !contents.contains("brave-subscription-secret")
+                && !contents.contains("custom-token-secret"),
             "no secret value may appear anywhere in the dump: {contents:?}"
         );
     }

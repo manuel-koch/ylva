@@ -168,15 +168,21 @@ non-streaming model/catalog requests use the shared `crate::http` helpers
 (`get_json` and `post_json`); chat uses `post_with_retry`; each web-search
 backend owns a client of its own — the DuckDuckGo backend for its HTML
 endpoint submits a `ddgr`-shaped form `POST` with `DNT: 1` and gzip
-negotiation, and the SearXNG backend for the configured instance submits a
+negotiation, the SearXNG backend for the configured instance submits a
 form `POST` to `/search` carrying `q` and `format=json` in the *body* (the
 instance's limiter only charges its per-hour JSON budget for `format` in the
-query string). The SearXNG backend additionally sends the header set that
+query string), and the Brave backend issues a single `GET` against
+`https://api.search.brave.com/res/v1/web/search` authenticated with the
+`X-Subscription-Token` header — never an `api_key` query parameter, since
+query strings are written verbatim into dumps and `*-token` header names are
+redacted from the dumped header projection alongside the explicit
+credential headers. The SearXNG backend additionally sends the header set that
 instance's bot detection requires — `Accept: */*`, a non-empty
 `Accept-Language`, and `Accept-Encoding: gzip` — because requests missing
 them are rejected. The `reqwest` `gzip` feature decodes compressed
-responses before HTML/JSON parsing; SearXNG bodies parse with serde DTOs
-into `{title, url, snippet}` hits. The non-streaming helpers and both
+responses before HTML/JSON parsing; SearXNG and Brave bodies parse with
+serde DTOs into `{title, url, snippet}` hits. The non-streaming helpers and
+all three
 web-search backends create paired dump paths through `RequestDumpSource`,
 dump the request before sending, buffer the response once, and dump it
 before status or JSON/HTML parsing. `Environment` resolves
@@ -550,8 +556,9 @@ where `target` is the call's `scheme://host` match key (explicit port
 included when present): `web_fetch` derives it from the requested URL
 (`crate::http::network_target`, rejecting non-`http(s)` schemes before any
 request), `web_search` from its configured backend endpoint's base URL —
-the fixed DuckDuckGo endpoint or, for `searxng`, the configured instance
-URL's `scheme://host`. A
+the fixed DuckDuckGo endpoint, the fixed
+`https://api.search.brave.com` authority for `brave`, or, for `searxng`,
+the configured instance URL's `scheme://host`. A
 `network_request` rule without a `target` parameter matches every call; a
 `target` is compiled into a `NetworkTargetPattern`
 (`src/sandbox/network_target_pattern.rs`) and matched against the key with
@@ -1040,10 +1047,7 @@ user-facing on-disk contract; this section is the contributor view.
   rather than a separately-maintained header string — the bubble is found
   via `ChildRunInfo::bubble_id`, an exact, permanent correlation captured at
   `ChildAgentStarted` time (the spawn_subagent tool call's own id), not by
-  guessing "the most recently started spawn bubble". The header's title is
-  shortened to `"Subagent"` instead of the plain title-cased `"Spawn
-  Subagent"` shown for the same bubble in the root conversation (via
-  `ToolBubbleArgs::display_title_override` in `tui_widgets.rs`). A child's
+  guessing "the most recently started spawn bubble". A child's
   transcript is **not** seeded with a synthetic task message — the header
   bubble already shows the task. If the child is paused for its own
   approval/clarify, the input box behaves normally (`Enter` routes to the
@@ -1208,16 +1212,29 @@ log lines, without risking sensitive payloads in the log file.
 
 ### View
 
-`src/render.rs` + `src/tui_widgets.rs` — `render(frame, state)` entry point.
-Writes computed geometry back to `state.layout`; delegates widget rendering
-to helpers in `tui_widgets.rs`. `AppState::display_metadata` carries the
-selected runtime profile, its resolved config path, Ylva home, and workspace
-root into the startup logo and help popup. Runtime paths beneath the
-operating-system home directory are rendered with a `~` prefix; paths outside
-that directory remain absolute. The view stores the plain rendered lines and
-content geometry for both surfaces, allowing the Presenter to map mouse drags
-through centered or scrolled content and emit clipboard effects without
-coupling it to ratatui.
+`src/render.rs` + `src/tui_widgets.rs` — `render(frame, state, …, registry)`
+entry point. Writes computed geometry back to `state.layout`; delegates
+widget rendering to helpers in `tui_widgets.rs`. `AppState::display_metadata`
+carries the selected runtime profile, its resolved config path, Ylva home,
+and workspace root into the startup logo and help popup. Runtime paths
+beneath the operating-system home directory are rendered with a `~` prefix;
+paths outside that directory remain absolute. The view stores the plain
+rendered lines and content geometry for both surfaces, allowing the Presenter
+to map mouse drags through centered or scrolled content and emit clipboard
+effects without coupling it to ratatui.
+
+A tool bubble's title is not re-derived from the tool name, and no title is
+ever cached in state: `draw_frame` hands the agent's live `ToolRegistry` to
+`render::render` → `tui_widgets::draw` → `draw_chat`, and each bubble looks
+its own tool up while drawing (`registry.get(name).map(|tool| tool.title())`,
+falling back to `title_case_tool_name` for a name the registry does not know)
+— the same on-demand lookup `cli_driver` performs for its `[tool]` line. That
+lookup also supplies `Tool::subtype_argument()`, the per-call variant whose
+value `display_title_with_subtype` (shared by both renderers) folds into the
+label as `({value})` while removing it from the props. That
+is what makes a label carrying more than the title-cased name —
+`Web Search (Brave)`, `Web Fetch (Native)` — render in the TUI exactly as the
+CLI prints it.
 
 ### Driver
 

@@ -2394,7 +2394,14 @@ mod tests {
         let mut textarea = TextArea::default();
         terminal
             .draw(|frame| {
-                crate::render::render(frame, state, &mut textarea, None, None);
+                crate::render::render(
+                    frame,
+                    state,
+                    &mut textarea,
+                    None,
+                    None,
+                    &crate::ToolRegistry::new(),
+                );
             })
             .expect("render test frame");
         terminal.backend().buffer().clone()

@@ -47,6 +47,9 @@ backend = "${YLVA_WEB_SEARCH_BACKEND}"
 [web_search.backends.searxng]
 base_url = "${SEARXNG_BASE_URL}"
 
+[web_search.backends.brave]
+api_key = "${BRAVE_API_KEY}"
+
 [tools.web_search]
 rules = [
     { rule = "network_request", verdict = "auto_approved" },
