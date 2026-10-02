@@ -1,5 +1,9 @@
 # Provider Model Favorites
 
+The `/models` picker is implemented and lists models from configured provider
+connections. It does not yet group or rank favorites. This remains a separate,
+deferred picker enhancement.
+
 We could scan thru recent sessions on startup and find out
 what provider/models where used in the past
 and put them in a new "favorite" section in the `/models` slash-command

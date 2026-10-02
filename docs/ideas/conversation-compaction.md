@@ -1,12 +1,8 @@
 # Conversation compaction
 
-Not implemented. Blueprint §4C and Phase 12 already fix the in-memory shape
-(tiered messages, cached token counts, hysteresis trigger); this idea covers
-what the blueprint leaves open: where the compacted conversation lives, how it
-relates to the ongoing session, whether compaction blocks the conversation,
-and where the sweep point sits. It is also the "total request size" half that
-`tool-result-size-guard.md` deliberately defers (its *Options considered*,
-option 4).
+Planned in [the blueprint finalization plan](../plans/blueprint-finalization-plan.md).
+The design choices below are settled. Implementation must preserve the full
+session transcript while giving the model a compacted view.
 
 ## Problem
 
@@ -33,6 +29,65 @@ What exists today:
 - The only way to shed context today is `/clear`, which discards everything
   and starts a fresh session with no link back.
 
+## Selected design
+
+### Token estimates and thresholds
+
+- Cache an approximate token count per message when it enters the context.
+  Use `tiktoken-rs` for OpenAI-compatible models and a four-characters-per-token
+  estimate for Ollama. These counts are for budgeting, not billing.
+- Start background summarization after a completed turn when usage reaches
+  about 70% of the active engine's context window.
+- Apply a completed summary at the next safe turn boundary. At 90%, do not wait
+  for the background task. Drop old complete turns or oversized old tool
+  results synchronously until usage is at or below the target.
+- The default target is 50% of the active engine's context length. Expose
+  `compact_target_ratio` per engine. Keep the 90% hard trigger fixed.
+- Re-evaluate the budget when `/models` switches to a model with a different
+  context length.
+
+The profile already resolves `context_length` from the engine configuration,
+the provider catalog, or the 128,000-token default. `compact_engine` already
+selects the engine for summary requests.
+
+### Summary and live context
+
+The summarizer receives a snapshot of an old context prefix. It must preserve
+decisions, outstanding work, file paths, identifiers, user constraints, and
+where the verbatim tail begins. It has no tools and never mutates `Context`.
+The outer agent loop applies the result at a natural boundary. If summarization
+fails or times out, the loop logs the failure and uses the synchronous drop
+fallback.
+
+Only root conversations compact in this implementation. Child runs are
+short-lived and one-shot. There is no manual `/compact` command yet.
+
+### Persistence and replay
+
+Append a compaction event to the existing JSONL session. Do not start a new
+session or rewrite earlier messages. Each event records a monotonically
+advancing message boundary and the summary for the prefix through that
+boundary. A later event supersedes the previous model-context snapshot; replay
+uses the latest event and keeps messages after its boundary as the verbatim
+tail.
+
+The TUI and persisted session retain every original message. The TUI shows a
+compaction marker at the boundary. The model receives a provider-safe marked
+summary followed by the recent tail. Do not insert a mid-conversation
+`system` message, since some provider chat templates reject it.
+
+### Tool protocol constraints
+
+- Never compact between an assistant tool call and its matching result. A
+  boundary must include the complete call/result group.
+- Compact only when the agent has reached a safe turn boundary and the serial
+  tool queue is empty.
+- A steer does not cancel or descope pending tool calls. Every issued
+  `tool_call_id` must receive exactly one tool result before later user content
+  enters the model context.
+- Preserve the raw transcript even when an old result is dropped from the
+  model-facing view.
+
 ## Invariants compaction must keep
 
 - **Sole writer.** Only the outer agent loop mutates `Context` (blueprint §4C
@@ -52,9 +107,7 @@ What exists today:
 - **Recent tail verbatim.** The model needs the latest turns as they
   happened; only the old prefix is a summarization candidate.
 
-## Where the compacted conversation lives
-
-The "spawn a new session with a back reference?" question.
+## Persistence options considered
 
 ### Option 1 — session rollover with back reference
 
@@ -75,7 +128,7 @@ summary, and link the two files.
   history unless it follows the link too. TUI input history already spans
   sessions, so it is unaffected.
 
-### Option 2 — compaction event inside the session (tentative lean)
+### Option 2 — compaction event inside the session (selected)
 
 Keep one session, one id. Append a new `StoreEvent::Compaction { boundary,
 summary, … }` line; on hydrate, messages `[0..boundary)` are replaced by the
@@ -99,14 +152,11 @@ summary would have to be recomputed on every resume (a model call at startup)
 or lost. The summary is conversation state and must persist somewhere, which
 collapses into option 2.
 
-**Open:** option 1 vs option 2. Option 2 leans ahead because it satisfies
-every invariant without touching the resume contract; option 1 wins only if
-per-file disk bounding and "one session = one compaction era" semantics are
-judged more important than id stability.
+**Selected:** option 2. The session id remains stable, old messages remain in
+the append-only record, and replay reconstructs the latest model-context
+snapshot.
 
-## When compaction runs
-
-The hard-boundary and async-swap questions.
+## Scheduling options considered
 
 ### Option A — hard boundary
 
@@ -121,10 +171,10 @@ summarizer stalls worse.
    `[0..boundary)` to the summarizer (`compact_engine`) while the
    conversation keeps running on the full context.
 2. When the result returns, the loop applies it **at the next natural point**
-   (the same injection discipline as steers): `messages = [system…, summary,
-   messages[boundary..]]` — a prefix replacement, never a `ClearContext`-style
-   whole-context swap, so messages committed after the snapshot survive
-   untouched.
+   (the same injection discipline as steers): the model view becomes the
+   leading system messages, a provider-safe marked summary, and
+   `messages[boundary..]`. This replaces only the model-facing prefix; the
+   transcript stays intact and messages committed after the snapshot survive.
 3. In-flight streams are safe by construction: a stream holds a
    `Vec<Message>` clone taken at request start and only returns its own
    output, which appends fine after the swap.
@@ -135,16 +185,16 @@ hard limit while the summarizer is still out, something must give — gate then
 (`find_oldest_droppable`, the blueprint's original Phase 12 algorithm) and
 let the summary replace those drops later.
 
-### Option C — proactive idle sweep with a hard backstop
+### Option C — proactive summary with a hard backstop (selected)
 
 Start compaction when a turn completes and usage crosses a *soft* threshold,
-so it usually finishes in the background before the *hard* threshold; at the
-hard threshold fall back to option A or to synchronous dropping. Combines B's
-unblocked UX with A's guarantee, at the cost of two thresholds and a little
-more state.
+so it usually finishes in the background before the *hard* threshold. At the
+hard threshold, drop old complete turns or oversized old results synchronously.
+This combines the unblocked UX with a hard limit.
 
-**Open:** A vs B vs C. C leans ahead: B without a backstop can overrun the
-window, A alone stalls on every compaction.
+**Selected:** option C. Start the summary after a completed turn at the soft
+threshold. Apply it at a safe point. The synchronous drop path is the hard
+backstop at 90%.
 
 ## Sweep spot
 
@@ -157,28 +207,13 @@ counts):
 - Counts are cached per message at insertion (`tiktoken-rs`, byte heuristic
   for Ollama), so evaluating the trigger after each `Context::commit` is O(1).
 
-Remaining choices:
+The soft threshold is 70%. The hard threshold is 90%. The target ratio is
+configurable per engine and defaults to 0.5. Keep the thresholds fixed for now.
 
-- **Soft trigger** (for option C): an earlier ratio — around 0.7 — at which a
-  background sweep starts after a turn completes. The exact number is a
-  calibration detail for the plan, not a decision now.
-- **Config surface:** `context_length` is already the override lever (profile,
-  then catalog, then 128 000). Whether trigger/target ratios also need profile
-  config (blueprint says per-`EngineConfig`), plus a disable switch and a
-  manual `/compact` slash command, are open — decide in the plan.
-- **Estimation error:** tiktoken is model-family dependent and the Ollama byte
-  heuristic is rough; the 0.9 margin absorbs it. If compaction misbehaves,
-  lower the trigger or override `context_length` instead of adding
-  guardrails (the blueprint's YAGNI note on `max_drop_ratio` still applies).
-- **Model switch:** `/models` to a smaller window changes the effective
-  `context_length` immediately — re-evaluate the trigger on the switch, not
-  only on the next commit; the new window may already be over the hard
-  threshold.
-- **The summarizer's own window:** the prefix sent to `compact_engine` can
-  itself exceed that engine's window on very long sessions. Hierarchical
-  (bucket-then-merge) summarization is the escape hatch; defer until measured.
-- **Subagents:** child contexts are short-lived and one-shot; compaction is a
-  root-session concern only (open to confirmation).
+Token estimates remain approximate because encodings vary by model family and
+the Ollama fallback is a heuristic. If the summarizer's own context window
+proves too small, add hierarchical summarization only after measuring that
+failure. No `max_drop_ratio` guard or disable switch is planned now.
 
 ## What the summary must preserve
 
@@ -210,25 +245,13 @@ plus `.meta.json` sidecar) — unrelated to this idea. Keep the terms apart:
 - `docs/configuration.md` (`compact_engine`, `context_length`)
 - `docs/persistence.md` (append-only contract, resume, `parent_session`)
 
-## Open questions
+## Deferred
 
-1. Where does the compacted conversation live: session rollover with a back
-   reference, or a compaction event inside the current session?
-2. Blocking model: hard boundary, async prefix swap, or proactive sweep with
-   a hard backstop?
-3. Trigger ratios: hard 0.9 / target 0.5 per blueprint — is a soft sweep
-   threshold, and profile-level config knobs for it, warranted?
-4. Does the TUI keep rendering the full transcript while the model sees the
-   compacted view, and how is that divergence shown to the user?
-5. If option 1: does `--conversation-id` follow a rollover chain, or is a
-   superseded session a hard error with a hint?
-6. Is a manual `/compact` slash command in scope?
+- A manual `/compact` command.
+- Compaction for child-agent contexts.
+- Hierarchical summarization if the compact engine cannot accept the selected
+  prefix.
+- Per-result wire-size protection and the default `glob` ceiling. See
+  [`tool-result-size-guard.md`](./tool-result-size-guard.md).
 
-## Next step
-
-Resolve the open questions, then turn the outcome into a plan
-(`plan-software-change` skill, `docs/plans/`) that updates
-`docs/blueprint.md` Phase 12, `docs/features.md`, `docs/configuration.md`,
-`docs/persistence.md`, `docs/implementation-notes.md` and `CONTEXT.md` in the
-same commit. The persistence-shape choice (open question 1) likely warrants
-an architecture decision record.
+No new architecture decision record is planned for the initial implementation.

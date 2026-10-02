@@ -1,0 +1,27 @@
+# JSON output for the CLI
+
+Deferred from blueprint finalization. The headless CLI currently streams
+assistant text to stdout and has no `--format` flag.
+
+## Goal
+
+Add `--format json` for scripts that need a structured result instead of
+parsing terminal-oriented text. The blueprint proposes emitting one final JSON
+object after the run completes.
+
+## Open questions
+
+- Define the stable object schema, including the session ID, assistant output,
+  tool outcomes, and errors.
+- Decide what a failed or interrupted run emits. Avoid emitting malformed
+  partial JSON.
+- Keep diagnostics and progress off stdout. Coordinate this with
+  [`cli-output-streams.md`](./cli-output-streams.md) and
+  [`cli-output-buffering.md`](./cli-output-buffering.md).
+- Decide whether JSON includes the full transcript or only the final response.
+
+## Related
+
+- [`cli-exit-codes.md`](./cli-exit-codes.md)
+- [`cli-quiet-mode.md`](./cli-quiet-mode.md)
+- [`docs/cli-options.md`](../cli-options.md)

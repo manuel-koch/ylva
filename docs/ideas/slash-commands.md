@@ -1,5 +1,11 @@
 # Slash commands in TUI
 
+The `/models`, `/tools`, and `/clear` commands are implemented. A child
+conversation can already be opened by double-clicking its `spawn_subagent`
+bubble; the proposed `/agent` command would add an aggregate run list, not the
+basic drill-in. Session resume still uses explicit `--conversation-id`; there
+is no `/session` picker. These additions remain deferred.
+
 ## /agent
 
 Using `/agent` to show overlay of all (sub) agents that are avail in current

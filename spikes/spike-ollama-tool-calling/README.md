@@ -106,9 +106,9 @@ toward the `ollama_native` provider.
 ## Outcome
 
 **Criterion A: PASS** on live Ollama for `gemma4:e4b-mlx` and `gpt-oss:20b`.
-**Criterion B: structural PASS** — the Ollama shape matches the documented OpenRouter
-reference (`tool_calls[i].{id,index,type,function}.function.{name,arguments}`).
-The live byte-for-byte OpenRouter diff has not been run yet (requires
-`OPENROUTER_API_KEY`); treat Criterion B's live "identical to a real
-OpenRouter stream" claim as unverified until then. See the outcome note under
-`docs/blueprint.md` §0 Spike 3 for details and raw captures in `out/`.
+**Criterion B: live PASS** — the Ollama shapes were compared with live
+OpenRouter captures for `deepseek/deepseek-v4-flash-0731` and
+`moonshotai/kimi-k2.6`; both diffs were empty. The recorded model outputs and
+comparison result are in `docs/blueprint.md` §0 Spike 3. Raw capture files are
+not retained in this repository. No rerun is required for blueprint
+finalization.

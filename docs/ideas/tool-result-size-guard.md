@@ -1,8 +1,8 @@
 # Wire-level tool-result size guard, and a bounded `glob`
 
-Not implemented. A backstop for tool results that outgrow the context window,
-plus the one tool that still returns unbounded output. Shape, threshold and
-scope are settled (see *Decisions*), so this is ready to turn into a plan.
+Deferred for later implementation. This is a per-result wire guard plus a
+bounded `glob`; aggregate context compaction is covered separately by
+[`conversation-compaction.md`](./conversation-compaction.md).
 
 ## Problem
 
@@ -107,3 +107,13 @@ Give `glob` the treatment `search` and `bash` already have:
   ceiling; `truncated: true` reports the cut.
 - **Request total is out of scope** — that is conversation compaction, to be
   written up as a separate idea.
+
+## Relationship to the blueprint's insertion cap
+
+The blueprint also proposed truncating every tool result to roughly 8–16 KiB
+when inserting it into history. That behavior is not selected for this idea:
+it would change the persisted result as well as the model-facing result. The
+later implementation should keep the 512 KiB serialization-time failure guard
+and bound `glob` output, while context compaction handles the aggregate model
+view without rewriting the transcript. The exact `glob` ceiling remains to be
+chosen when this deferred work is planned.

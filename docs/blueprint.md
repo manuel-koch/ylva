@@ -7,7 +7,7 @@ and allows real-time steering/interruption.
 
 ## 0. Proof-of-Concept Spikes
 
-Before building the full architecture, validate the two riskiest assumptions through isolated spikes.
+Before building the full architecture, validate the riskiest assumptions through isolated spikes.
 
 ### Spike 1: TUI Responsiveness Under Load
 
@@ -23,8 +23,8 @@ Create a minimal `ratatui` + `tokio` application that simulates an LLM stream.
   (~20 tokens) at 1000+ msg/s**,
   i.e. the consumer never falls behind — not as the producer never waiting on a full channel.
   A bounded channel (`send().await` throttles the generator under overload) keeps memory flat regardless.
-- Test rapid steering: send a mid-stream `AgentCommand::Prompt` — verify the stream is **not**
-  cancelled (the steer is queued and injected at the next natural point) and the UI stays glitch-free.
+- Demonstrate the spike generator's prompt-triggered cancel/restart path. This is a spike control,
+  not a test of production cooperative steering; `tests/steering.rs` verifies that behavior.
 - Test interruption: send a mid-stream `AgentCommand::Stop` — verify the stream cancels cleanly
   and a subsequent prompt restarts without UI glitches.
 
@@ -34,7 +34,9 @@ Create a minimal `ratatui` + `tokio` application that simulates an LLM stream.
 - Keyboard input (Enter, Ctrl+C, typing) responds instantly regardless of stream volume.
 - Steady-state channel queue depth ≤ ~20 tokens at 1000+ msg/s
   (no consumer starvation / no effective backpressure).
-- No memory growth (flat peak buffered memory) after 10 minutes of continuous token injection.
+
+The ten-minute memory soak is not an acceptance criterion. Peak buffered memory remains an
+informational metric, and the ring buffer is capacity-bounded.
 
 #### Spike 1 Outcome
 
@@ -50,13 +52,11 @@ Measured on the default 60 s short run at 1000 msg/s:
   17 ms, histogram entirely in the `<8 ms` bucket → "≤ 17 ms" criterion **met**.
 - **Queue depth:** peak ≤ 1 token (target ~20) → no consumer starvation, the
   "no effective backpressure" criterion **met** at 1000 msg/s.
-- **Memory:** scrolling ring is capacity-bounded and peak buffered bytes stay
-  flat on the short run → criterion is consistent with the design; the
-  mandated 10-minute (`--duration 600`) soak with a flat peak is still to be
-  confirmed manually/CI.
-- **Steering:** an auto `Prompt` fires ~3 s into the run and cancels/restarts
-  the generator cleanly (verified via the exit summary); live visuals for
-  "no UI glitches" require an interactive terminal.
+- **Memory:** the scrolling ring is capacity-bounded and peak buffered bytes
+  stayed flat on the short run. The ten-minute soak is not required.
+- **Prompt demo:** an auto `Prompt` fires ~3 s into the run and cancels/restarts
+  the generator cleanly. This does not test Ylva's non-cancelling steer
+  behavior; production steering is covered by `tests/steering.rs`.
 - **Implementation notes:** an initial bug (the generator's `send().await`
   was not cancel-aware) could deadlock shutdown/steering when the bounded
   channel was full; fixed by `select!`-ing the send against the
@@ -138,9 +138,9 @@ prompting) and the "unified provider" claim must be revised.
 
 **Spike 3 outcome:** **PASS** — the unified-provider assumption is validated; keep the
 single provider serving both backends for Ollama and OpenRouter via the OpenAI
-`/v1/chat/completions` spec. Recorded from
-[`spikes/spike-ollama-tool-calling/`](../spikes/spike-ollama-tool-calling/) (SSE logs in
-`out/`).
+`/v1/chat/completions` spec. The comparison was recorded in
+[`spikes/spike-ollama-tool-calling/`](../spikes/spike-ollama-tool-calling/);
+raw SSE captures are not retained in the repository.
 
 - **Criterion A (accepts `tools`, streams `delta.tool_calls`) — PASS.** HTTP 200 with at
   least one chunk carrying `choices[0].delta.tool_calls` with `function.name` and
@@ -177,7 +177,7 @@ single provider serving both backends for Ollama and OpenRouter via the OpenAI
   the stream ends; unload via `ollama stop <model>` between model switches.
 - **Models actually used:** `gemma4:e4b-mlx` (primary) and `gpt-oss:20b` (confirmation);
   the models named in §Spike 3 text (`llama3.1:8b`, `qwen2.5`, `mistral-nemo`) were not
-  pulled and were not used. Raw capture: `spikes/spike-ollama-tool-calling/out/sse_*.log`.
+  pulled and were not used. Raw capture files were not retained in the repository.
 
 ---
 
@@ -197,8 +197,9 @@ at any time without waiting for the stream to finish.
 
 - **Steer** (user sends a new message while the agent is busy): never aborts a live
   generation. The message is drawn as a pending bubble and queued; it is injected at
-  the next natural point — a model hand-off pause (`clarify` / tool-approval), a
-  completed tool-call boundary, or the end of the current assistant response. Queued
+  the next safe point — after the live response ends or after every issued tool call
+  has its matching result. A normal steer cannot replace a pending approval or
+  `clarify` result. Queued
   steers are appended in order (after flushing any partial assistant text to history)
   and then the agent starts a fresh request. Verified: no OpenAI-compatible SSE provider
   supports true mid-stream message injection, so a steer can only *wait for a natural
@@ -219,10 +220,9 @@ works even if crossterm's event queue is momentarily stuck.
 ```text
 ┌──────────────────────────────────────────────────────────────┐
 │  TUI Thread (ratatui) — ALWAYS RESPONSIVE                    │
-│  ┌────────────┐  ┌──────────────────────────────────────┐    │
-│  │ Sidebar    │  │ Chat / Code / Diff / Partial Stream  │    │
-│  │ (Files)    │  │ (Scrollable)                         │    │
-│  └────────────┘  └──────────────────────────────────────┘    │
+│  ┌───────────────────────────────────────────────────────┐   │
+│  │ Chat / Code / Diff / Partial Stream (Scrollable)      │   │
+│  └───────────────────────────────────────────────────────┘   │
 │  ┌────────────────────────────────────────────────────────┐  │
 │  │ Input Box  [Always active — type + Enter anytime]      │  │
 │  └────────────────────────────────────────────────────────┘  │
@@ -277,8 +277,8 @@ works even if crossterm's event queue is momentarily stuck.
 3. **Interruption is cooperative.** `Ctrl+C` / `Esc` fires the `CancellationToken` to abort the HTTP
    stream and any running tool, preserve whatever partial response was received, and return to idle.
 4. **Steering never aborts.** A new user message sent while the agent is busy is queued and injected
-   at the next natural point (model hand-off, completed tool call, or response end) — never by
-   cancelling a live generation.
+   after the live response ends or after every issued tool call has its matching result — never by
+   cancelling a live generation or replacing a pending tool response.
 
 ## 2. Crate Ecosystem
 
@@ -315,10 +315,8 @@ works even if crossterm's event queue is momentarily stuck.
 | ---------------------- | ------------------------------------------------------------------- |
 | `thiserror` / `anyhow` | Error handling across tools and LLM calls                           |
 | `tokio::sync::mpsc`    | Send tokens & tool results from agent task to UI                    |
-| `which`                | Validate that `bash`, `git`, `rg` exist before offering shell tools |
-| `ignore`               | Respect `.gitignore` when building file tree or searching           |
+| `ignore`               | Respect `.gitignore` when searching                                |
 | `tempfile`             | Safe scratchpads for agent drafts before disk writes                |
-| `walkdir`              | Recursive directory traversal for the file explorer                 |
 
 ### Persistence & Config
 
@@ -354,12 +352,11 @@ src/
 │   └── tools/
 │       ├── fs.rs        # read, write, glob, edit
 │       ├── shell.rs     # execute_command (with user confirmation!)
-│       └── search.rs    # grep/ripgrep via std::process
+│       └── search.rs    # Built-in ignore + regex content search
 ├── widgets.rs           # module root (re-exports, shared widget state)
 └── widgets/
     ├── chat_bubble.rs   # Custom ratatui widget for assistant messages
     ├── code_block.rs    # Syntect-highlighted block
-    └── file_tree.rs     # Left sidebar explorer
 ```
 
 ## 4. Core Implementation Patterns
@@ -433,9 +430,9 @@ trait Provider: Send + Sync {
 }
 
 /// Backend-reported model descriptor. All fields except `id` are optional because
-/// backends return inconsistent metadata. `context_length` here is **advisory,
-/// display-only** (e.g. a future `/models` slash command shows it); the
-/// `EngineConfig.context_length` from TOML is the SSOT for engine construction.
+/// backends return inconsistent metadata. The catalog's `context_length` is
+/// shown in `/models` and supplies the engine's context limit when the profile
+/// does not set `EngineConfig.context_length` explicitly.
 struct ModelInfo {
     id: String,
     context_length: Option<usize>,
@@ -950,7 +947,7 @@ loop {
             terminal.draw(|f| ui.draw(f, &self)).ok();
         }
 
-        // 2. Live updates from child-agent sidebar
+        // 2. Live updates from child-agent conversations
         Some(sub_update) = subagent_ui_rx.recv() => {
             self.apply_child_ui_update(sub_update);
             terminal.draw(|f| ui.draw(f, &self)).ok();
@@ -1050,7 +1047,7 @@ or recent turns when the conversation grows long.
 ```rust
 enum MessageTier {
     System,         // Tier 0: Core identity prompt — NEVER dropped or summarized
-    InitialContext, // Tier 1: Project root, file tree, workspace notes — NEVER dropped in initial implementation
+    InitialContext, // Tier 1: Stable workspace instructions — NEVER dropped initially
     Recent,         // Tier 2: Last N user/assistant turns — dropped LAST
     Compacted,      // Tier 3: Previously summarized buckets — dropped before Recent
 }
@@ -1075,7 +1072,7 @@ impl Context {
     fn messages(&self) -> &[Message] {
         &self.messages
     }
-    // Phase 3 adds: push_tool_result, push_tool_error, descope_pending_tools
+    // Phase 3 adds: push_tool_result and push_tool_error
     // Phase 12 adds: push_system, push_initial_context, maybe_compact, token counting
 }
 ```
@@ -1094,48 +1091,43 @@ impl Context {
 - `push_assistant(content, status, tool_calls)` →
   `Message::Assistant { content, status, tool_calls }`
 
-**Phase 12 (future):** Replace `Vec<Message>` with `Vec<TieredMessage>`, add
-`push_system`, `push_initial_context`, `push_compacted`, `maybe_compact`,
-`find_oldest_droppable`, and `find_oversized_result`.
+**Phase 12:** Keep the complete transcript separate from the model-facing
+context view. Add tiered messages, cached token estimates, and an append-only
+compaction snapshot. The transcript remains intact when the model view drops or
+summarizes old messages.
 
 **Context ownership rule (HARD):** The outer agent loop is the **sole writer** to `Context`.
 
-**Compaction (Phase 12 future):**
+**Compaction thresholds and target:** Start a background summary after a
+completed turn at 70% of the active context length. Apply it at the next safe
+turn boundary. At 90%, use a synchronous drop fallback if the summary has not
+been applied. The default target is `context_length × 0.5`; configure
+`compact_target_ratio` per engine, and keep the 90% trigger fixed.
 
-Phase 1 does not implement compaction or token counting. The full algorithm
-(`maybe_compact`, `find_oldest_droppable`, `find_oversized_result`) is deferred
-until Phase 12 when `TieredMessage` and `tiktoken-rs` are introduced.
+Use cached, approximate token counts: `tiktoken-rs` for OpenAI-compatible
+models and a four-characters-per-token estimate for Ollama. Re-evaluate after
+`/models` changes the active context length.
 
-**Compaction trigger and target:** `maybe_compact` uses a **hysteresis** model
-with a single control, `compact_target_ratio` (fraction of `context_length`):
+**Summary generation:** Use the configured `compact_engine` without tools. It
+summarizes an immutable prefix snapshot; the outer agent loop applies the
+result. If summary generation fails or times out, log the failure and drop
+old complete turns or oversized old results to reach the target. Do not cut a
+tool-call/result pair or compact while the serial tool queue is non-empty.
 
-- **Trigger (high-water mark):** when `total_tokens > context_length × 0.9`.
-- **Target (low-water mark):** compact down to **≤ `context_length × compact_target_ratio`**.
-  Default `compact_target_ratio = 0.5` → ~0.4L headroom after compaction,
-  preventing thrash on the next turn.
-- The target is an **upper bound**: the result may end up smaller (e.g. one
-  oversized tool result dropped can overshoot), but the algorithm performs
-  **minimal intervention** — drops/summarizes the least amount needed to reach
-  the target. It never aims smaller than the target.
-- The ratio (not an absolute token count) auto-scales across engines: an 8 KB
-  Ollama model and a 200 KB OpenRouter model use the same parameter.
-- Both `context_length` and `compact_target_ratio` come from `EngineConfig`
-  (per-engine), since a small-window model may want a tighter ratio.
-- A "minimum drop ratio" guardrail is **not** added now (YAGNI); if compaction
-  in practice over-discards, add `max_drop_ratio` ("never drop more than X% of
-  current in one pass") then.
+**Persistence and replay:** Append a compaction event to the current session
+JSONL file. Each event stores a monotonic message boundary and the summary for
+the prefix through that boundary. A later event supersedes the previous model
+snapshot. Replay uses the latest event, retains the original transcript, and
+keeps messages after the boundary as the verbatim tail. The TUI displays the
+complete transcript with a compaction marker; the model receives a marked,
+provider-safe summary followed by the tail. Do not insert a mid-conversation
+`system` message.
 
-**Tool-result truncation (Phase 12 future):** Tool results are **truncated at
-insertion** to a configurable cap (default ~8–16 KB / engine-tunable), with a
-clear marker such as `… [truncated M of K chars]`. Combined with
-`maybe_compact` preferring oversized results, a large result neither swallows
-the window nor forces many older turns to be dropped. If the model needs more
-of a file, it re-calls `read`/`edit` with `offset`/`limit` — the
-existing tool contract.
-
-**Phase 12 (future):** Replace `find_oldest_droppable` + `remove` with a
-summarization pass: collect K oldest `Recent` messages, spawn a background
-summarizer model, and replace them with one `Compacted` system message.
+**Scope:** Compaction is automatic and applies to root conversations only.
+Child contexts are short-lived; a manual `/compact` command is deferred. The
+per-result 512 KiB wire guard and bounded `glob` are also deferred to
+`docs/ideas/tool-result-size-guard.md`. The earlier 8–16 KiB insertion-time
+truncation proposal is not selected.
 
 **Context ownership rule (HARD):** The outer agent loop is the **sole writer** to `Context`.
 The inner streaming task never holds a mutable reference, `Arc`, or lock to `Context`.
@@ -1160,8 +1152,8 @@ When the user types "No, use `Arc` instead of `Rc`" while the model is still gen
 
 1. The message is drawn as a **pending bubble** and queued as a steer — the live stream
    is **not** cancelled.
-2. At the next natural point — the current response ends (`StreamDone`), a tool call
-   completes, or a hand-off pause is reached — the outer loop calls
+2. At the next safe point — the current response ends (`StreamDone`), or every
+   tool call in the current response has its matching result — the outer loop calls
    `push_assistant(partial, Complete, tool_calls)` to make the partial response a
    committed message in `Context`.
 3. The queued steer(s) are appended as user messages via `push_user`.
@@ -1175,17 +1167,17 @@ The model sees (the assistant turn is complete rather than mid-word cut off):
 [User]: No, use `Arc` instead of `Rc`
 ```
 
-If the agent is stuck at a hand-off (tool approval or `clarify`) the steer supersedes it:
-pending tools are descoped, and the message is delivered as the redirect (or the `clarify`
-answer). This works remarkably well with modern instruction-tuned models. Aborting a
-generation is reserved for the explicit interrupt (`Ctrl+C` / `Esc`).
+If the agent is paused for tool approval or is processing a multi-tool response, a new user
+message remains queued until every issued tool call has its matching result. It cannot descope
+pending calls or be inserted into the middle of that tool-call sequence because some providers
+require exactly one result for each `tool_call_id` before they accept later conversation content.
+The user can interrupt the current conversation with `Esc`/`Ctrl+C`; steering does not cancel the
+pending tool sequence.
 
-**Token counting:** Use `tiktoken-rs` for OpenAI-compatible models and a byte-length
-heuristic (4 chars ≈ 1 token) for Ollama as a cheap fallback. Maintain a rolling
-window that trims the oldest user/assistant pairs (never the system prompt) when
-the total exceeds the model limit. For a more advanced solution (Phase 12), summarise
-dropped messages via a cheap summariser model call and prepend a system message
-with the summary.
+The earlier rolling-window sketch is superseded by the Phase 12 design above:
+cached estimates, background summarization through `compact_engine`, a hard
+drop fallback, and an append-only compaction event. The summary is projected
+with a provider-safe marked message, not a mid-conversation `system` role.
 
 ### D. Tool Registry + Dynamic Schemas
 
@@ -1294,12 +1286,9 @@ the notion of "in/out of workspace" arrive with the sandbox in Phase 6 (Q7).
 open-ended question when it is uncertain. The agent loop pauses, the TUI
 renders the question prominently, and the user types an answer in the input box.
 
-The `clarify` tool is **free-text only**. The model poses an open-ended question
-and the user answers via the normal input box. No multiple-choice options are
-supported; if the model wants the user to pick between alternatives, it can
-express them in the question text (e.g. "Should I use A or B?"). This keeps
-the TUI rendering simple — a single question banner — and avoids modal
-navigation logic for option selection.
+The `clarify` tool can ask an open-ended question or provide up to five
+numbered choices. Selecting a choice copies it into the input box; the user
+submits it with `Enter`. Headless mode does not register `clarify`.
 
 ```rust
 #[derive(JsonSchema, Deserialize)]
@@ -1339,10 +1328,9 @@ cannot call it. No prompt-engineering required.
 tool_schemas = registry.filter(|name| active_tool_names.contains(name));
 ```
 
-**Tool binary checks:** Re-check tool availability **lazily** at invocation time,
-not just at startup. If `ripgrep` is missing when `search` is invoked, catch the
-error and show a helpful TUI message. Gracefully degrade: if `rg` is missing,
-fall back to a slower `walkdir` + `regex` search.
+**Search implementation:** The `search` tool uses the built-in `ignore` walker
+and `regex` crate. It respects `.gitignore` and does not require an external
+`rg` executable.
 
 **Tool execution strategy:** Every tool invocation runs in a dedicated `tokio::spawn` task with its
 own `CancellationToken` (`current_tool_cancel`). The agent loop remains responsive to `Stop`
@@ -1429,19 +1417,21 @@ Named rules:
 4. User sends approval or answer via `cmd_tx`
 5. Agent resumes: executes tool, appends result, re-prompts LLM
 
-**Important:** The input box remains active during tool approval. The user can
-even steer ("change the commit message to...") by typing and hitting Enter, which
-queues a steer and injects it at the next natural point rather than cancelling
-anything.
+**Important:** A pending tool approval cannot be replaced by a normal steer.
+The tool call must receive its approval/denial result; a pending `clarify` call
+must receive its answer or cancellation result. A user message queued while the
+agent is busy is injected only after all outstanding tool calls have matching
+results. `Esc`/`Ctrl+C` remains the interrupt path.
 
 **Headless mode safety:** Mutating tools (`write`, `edit`, `bash`) require
 explicit `--auto-approve-write`, `--auto-approve-edit`, or `--auto-approve-bash`
 flags (implemented; see `docs/cli-options.md`/`docs/configuration.md`'s
 "`bash` command rules" — the `--auto-approve-shell` name below is this
 blueprint's original placeholder for what shipped as `--auto-approve-bash`).
-If invoked without the corresponding flag, the agent emits exit code `4` and
-a descriptive error to stderr. A script that forgets the flag fails loudly,
-never silently executes `rm -rf /`.
+If invoked without the corresponding flag, the headless driver denies the tool
+and returns a descriptive tool error. The blueprint's proposed exit code `4`
+for this case is deferred to `docs/ideas/cli-exit-codes.md`; the current CLI
+does not implement that exit-code contract.
 
 ### F. Rich Chat Rendering
 
@@ -1480,7 +1470,8 @@ tracked separately as a future idea, not part of this phase.
 
 Ylva models a **single pool of typed agents**. An agent type (e.g. `research`,
 `code_edit`, `default`) is a named bundle of behavior — persona, tool whitelist,
-engine override, timeout — declared once in config and usable in **any role**.
+engine override, timeout, and `max_tool_iterations` — declared once in config
+and usable in **any role**.
 There is no separate "main agent" vs "sub-agent" category: a `research` agent
 can run as the root conversation (the user types `ylva --agent research`) or as
 a child spawned by a coding root. The same config entry, the same factory call.
@@ -1491,9 +1482,9 @@ hold (live channels, a parent's `CancellationToken`, a curated briefing):
 
 | Concern | Decided by | Why |
 |---|---|---|
-| persona, tool whitelist, engine, timeout | **agent type** | static, TOML-deserialized |
+| persona, tool whitelist, engine, timeout, iteration limit | **agent type** | static, profile/file configured |
 | `parent_cancel: CancellationToken` | **role** | only a child has a parent |
-| output channels (App UI vs. sidebar + parent) | **role** | depends on caller |
+| output channels (root UI vs. child view + parent) | **role** | depends on caller |
 | initial `Context` (user prompt vs. curated briefing) | **role** | briefing comes from parent |
 | `spawn_subagent` tool available? | **role ∩ type** | see "No nesting" below |
 
@@ -1560,7 +1551,7 @@ The child is a fully independent ReAct agent with:
   stripped because role = `Child`)
 - Its own `Provider` (from the engine assigned to the type in the profile)
 - Its own `CancellationToken` (linked to the parent's tool cancel)
-- Its own `subagent_ui_tx` channel for live updates to the TUI sidebar
+- Its own `subagent_ui_tx` channel for live updates to the child conversation view
 
 When the child finishes (via `agent_finish` tool, timeout, or user cancellation),
 it sends a terminal completion event to the root agent loop. The event carries
@@ -1688,7 +1679,7 @@ supported:
 
 ```toml
 # agents/research.toml
-max_iterations = 10
+max_tool_iterations = 10
 timeout_secs = 120
 allowed_tools = ["read", "search", "glob"]
 can_spawn = false
@@ -1700,7 +1691,7 @@ Be thorough. Cite file paths when referencing code."""
 
 ```markdown
 +++
-max_iterations = 10
+max_tool_iterations = 10
 timeout_secs = 120
 allowed_tools = ["read", "search", "glob"]
 can_spawn = false
@@ -1898,13 +1889,14 @@ child agents as well.
    - The configured `Provider` (from the engine assigned to the type in the
      profile)
    - A new `CancellationToken`
-   - Its own `subagent_ui_tx` for live sidebar updates
+   - Its own `subagent_ui_tx` for live child-conversation updates
    - Its own `agent_tx` for sending the final result back to the parent
      The child runs its own ReAct loop in a `tokio::spawn` task.
 3. **Parallel execution:** the root agent loop does NOT wait. It continues to
    process `Prompt` (steering) and `Stop` commands from the user. The child
    and root run concurrently. If the root LLM produces new tokens while the
-   child is working, both appear in the TUI (main chat + sidebar panel).
+   child is working, the root and child conversations continue independently
+   in the TUI.
 4. **Finish:** the child must call a special `agent_finish` tool to return its
    result. The `agent_finish` schema is:
 
@@ -1934,9 +1926,9 @@ child agents as well.
    heads-up system message stating its tool-use iteration budget, so a
    capable model can pace its tool calls and call `agent_finish` before it
    runs out.
-5. **Re-integration:** the `result` field of the structured output is injected
-   into the root conversation as a `Message::System` (or a dedicated
-   `Message::ChildResult`) so the root LLM can use it on its next turn.
+ 1. **Re-integration:** the structured child result is added to the root
+    conversation as a marked harness notice so the root LLM can use it on its
+    next turn. It is not inserted as a mid-conversation `system` message.
 
 #### Steering While a Child Agent Runs
 
@@ -1947,8 +1939,8 @@ at the next natural point (a completed tool-call boundary / hand-off), and the
 root LLM starts a fresh request with the updated context then.
 
 The child continues to completion in the background. Its live events flow
-through `subagent_ui_rx` to the sidebar panel. Its final result is appended to
-the root history when it arrives via `agent_rx`.
+through `subagent_ui_rx` to the child conversation view. Its final result is
+appended to the root history when it arrives via `agent_rx`.
 
 **The root LLM then sees both the user's steering message and the child
 result on its next turn**, and decides how to reconcile them. This is emergent
@@ -1981,12 +1973,10 @@ store (see §4H). Two JSONL record shapes are written per parent session file:
 
 #### UI & Headless
 
-- **TUI:** a dedicated collapsible sidebar panel shows **live** child-agent
-  activity: streaming tokens, tool calls, and status. It receives events via
-  `subagent_ui_rx`, not by polling disk. The status bar shows
-  `🔍 Child agent 'research' running... (14s / 120s)`. When finished, the panel
-  shows the result summary and a link to view the full thread (loaded from the
-  sub-session file for audit).
+- **TUI:** a full-screen drill-in view shows the child's own transcript while
+  the parent continues in the background. Live updates arrive through
+  `subagent_ui_rx`; completed child transcripts remain browsable. The previous
+  collapsible-sidebar design was superseded.
 - **Headless:** child agents are **disabled by default** — without
   `--auto-approve-spawn`, `spawn_subagent` is denied outright. With the flag,
   the one-shot process stays alive until every spawned child has reported a
@@ -2072,9 +2062,10 @@ stored.
    header**:
 
    ```json
-   {"type":"meta","v":1,"schema_version":3,"app_version":"0.6.2","created_at":"…","cwd_hash":"…","engine":"…"}
-   {"type": "user", "v": 1, "text": "…"}
-   {"type": "assistant", "v": 2, "text": "…"}
+    {"type":"meta","version":1,"schema_version":1,"app_version":"0.7.0","created_at":"…","project_key":"…","provider_connection":"openrouter","model":"gpt-4o","session_id":"…","title":"…","agent_type":"default"}
+    {"type":"model_changed","version":1,"changed_at":"…","provider_connection":"openrouter","model":"gpt-4o"}
+    {"type":"message","version":1,"timestamp":"…","message":{"role":"user","content":"…","kind":"explicit"}}
+    {"type":"agent_type_changed","version":1,"changed_at":"…","agent_type":"research"}
    ```
 
    - **Reader tolerance (A):** `#[serde(tag = "type")]`, *never*
@@ -2103,9 +2094,26 @@ stored.
      grep-based today; a future `/sessions`-style feature can layer on
      without layout change since the `meta` header already carries
      `created_at`.
-   - **Consequence:** "remembers conversation history across restarts" is
-     scoped to explicit resume. A user who wants continuity passes
-     `--conversation-id`; otherwise each launch is a new session.
+    - **Consequence:** "remembers conversation history across restarts" is
+      scoped to explicit resume. A user who wants continuity passes
+      `--conversation-id`; otherwise each launch is a new session.
+    - **Root agent type:** store the selected `agent_type` in the session
+      header. On resume, use the latest `agent_type` selection unless the user
+      supplies `--agent`; append an `agent_type_changed` event for an explicit
+      override so later resumes keep it. Older sessions without this metadata
+      use `default`. If the effective type is no longer available, fail startup
+      unless an explicit `--agent` selects an available type.
+    - **Cloned sessions:** add `cloned_from` to the new session's `meta`
+      header. Omit it for sessions that were not cloned.
+    - **Clone without changing the source:** `--conversation-id <id> --clone`
+      copies a top-level session's full logical event stream into a new session with a new UUID,
+      new creation time, copied title/provider/model/initial-agent metadata,
+      and `cloned_from` source ID. The clone copies messages, compaction
+      snapshots, model/agent selection events, and child-run lifecycle records.
+      Child transcript files remain shared read-only references. All new
+      messages append to the clone; the source file is never modified. Cloning
+      fails if another Ylva holds the source session's write lock. Child-session
+      IDs are not valid clone sources.
 
    > **Future tracing note (log correlation per session):** once the TUI can
    > clear/reset/continue a session in-process (not just restart with an explicit
@@ -2213,8 +2221,9 @@ stored.
       attempts the lock non-blockingly, and only compresses sessions it can
       exclusively lock. This guarantees no live writer ever has its file
       gzipped under it.
-    - **Manual override:** the user can `ylva compress` / `ylva decompress
-      --all | --before <date> | <session-id>`. Decompress restores a
+    - **Manual override:** the user can `ylva session compress` /
+      `ylva session decompress --all | --before <date> | <session-id>`.
+      Decompress restores a
       `.jsonl.gz` to raw `.jsonl` (dropping the now-redundant sidecar or
       demoting it back to the in-file meta line).
     - The archive write order (decision 8) is followed: write sidecar first,
@@ -2225,8 +2234,8 @@ stored.
 
 12. **Deletion — explicit CLI only, with dry-run:**
     - History is never auto-deleted. Deleting a session is an explicit,
-      user-triggered act: `ylva delete <session-id>…` (or
-      `ylva delete --before <date>` / `--all`), supported by a **`--dry-run`
+      user-triggered act: `ylva session delete <session-id>…` (or
+      `ylva session delete --before <date>` / `--all`), supported by a **`--dry-run`
       flag** that lists exactly which `<uuid>.jsonl[.gz]` (+ `.meta.json`)
       files *would* be removed without touching anything.
     - Deletion respects the lock (decision 7): a session held by an active
@@ -2242,24 +2251,19 @@ stored.
 | **Setup**            | `OPENROUTER_API_KEY` env var        | Ollama server running locally                  |
 | **Models**           | 100+ (Claude, GPT-4, Mistral, etc.) | Downloaded GGUFs                               |
 | **Function Calling** | Native OpenAI `tools` spec          | Native since v0.3+ (needs tool-trained models) |
-| **Streaming**        | SSE with `delta.tool_calls` chunks  | SSE via `/api/chat`                            |
+| **Streaming**        | SSE with `delta.tool_calls` chunks  | SSE via `/v1/chat/completions`                 |
 | **Abort / Cancel**   | Drop HTTP request body              | Drop HTTP request body                         |
 | **Cost**             | Pay-per-token                       | Free (your hardware)                           |
 
 **Strategy:** Start with OpenRouter + `mistralai/mistral-small` or `anthropic/claude-3.5-haiku`
 for cheap, reliable tool use while debugging the TUI. Once solid, test locally with Ollama + `llama3.1:8b`.
 
-> **Assumption check — Spike 3 (§0):** The unified-provider architecture assumes
-> Ollama's `/v1/chat/completions` endpoint supports the OpenAI `tools` spec
-> identically to OpenRouter. This is **unverified**. Run Spike 3 before Phase 2
-> begins; if it fails, the plan must add a second `ollama_native` provider
-> targeting `/api/chat` and the "single provider serves both backends" claim
-> in §4A must be revised.
-
-**Ollama implementation note:** If you need full control over the request body and streaming response
-parsing, you can also implement the Ollama provider using raw `reqwest` + `serde_json` to POST to
-`/api/chat`. This avoids any abstraction mismatch with tool calling, though `ollama-rs` remains a
-convenient choice for model listing and discovery.
+**Spike 3 validation:** The live Ollama/OpenRouter shape comparison passed for
+`gemma4:e4b-mlx`, `gpt-oss:20b`, `deepseek/deepseek-v4-flash-0731`, and
+`moonshotai/kimi-k2.6`. Both OpenRouter shape diffs were empty. Keep one shared
+OpenAI-compatible chat stream at `/v1/chat/completions`; Ollama's model
+discovery still uses native `/api` endpoints. No `ollama_native` chat provider
+is required. See the Spike 3 outcome in §0 and its README.
 
 ## 6. Headless / CLI Mode
 
@@ -2268,6 +2272,11 @@ and scripting. It reuses the same `Provider` trait, `ToolRegistry`,
 and `AgentState` machine as the TUI, but drives them through a minimal
 "fake TUI" wrapper that prints to stdout/stderr instead of rendering a
 terminal UI.
+
+The shipped headless contract is documented in `docs/features.md` and
+`docs/cli-options.md`. The JSON output, quiet mode, output-stream separation,
+buffering, and exit-code redesign described below are deferred to the
+individual notes listed in Phase 13.
 
 **Mode dispatch:** `main.rs` selects an `App` implementation (see
 [class-diagram.mmd](./class-diagram.mmd)). The `App` trait is a single seam:
@@ -2306,11 +2315,11 @@ exchanges to it.
 ┌────────────────────────────────────────────┐
 │  CLI Entry (main.rs)                       │
 │  ┌──────────────────────────────────────┐  │
-│  │ FakeTuiWrapper                       │  │
+│  │ ConsoleApp                           │  │
 │  │ • Receives UiUpdate events           │  │
-│  │ • Buffers tokens to stdout           │  │
-│  │ • Prints status to stderr            │  │
-│  │ • Emits JSON at end (--format json)  │  │
+│  │ • Streams assistant text to stdout   │  │
+│  │ • Prints session hint to stderr      │  │
+│  │ • JSON output is deferred            │  │
 │  └──────────────────────────────────────┘  │
 │  ┌──────────────────────────────────────┐  │
 │  │ Shared Agent Task (tokio)            │  │
@@ -2334,6 +2343,9 @@ ylva --prompt "audit security" --profile work
 
 # Resume existing conversation (UUID session id, §4H)
 ylva --prompt "what about error handling?" --conversation-id 3f2a9c81-9b1e-4a7d-8c44-9b9c63d7f2b1
+
+# Clone an existing conversation and continue without appending to its source
+ylva --prompt "try a different approach" --conversation-id 3f2a9c81-9b1e-4a7d-8c44-9b9c63d7f2b1 --clone
 
 # JSON output (buffered, emitted at end)
 ylva --prompt "generate tests" --format json
@@ -2388,8 +2400,9 @@ explicit flags:
 The `clarify` tool is **not registered** in headless mode. The model never sees it;
 if a decision is needed, the model must make a best-effort guess or error out.
 
-If a mutating tool is invoked without the corresponding flag, the agent emits
-exit code `4` and a descriptive error to stderr.
+If a mutating tool is invoked without the corresponding flag, the headless
+driver denies the tool and returns a descriptive tool error. The proposed
+exit code `4` is deferred to `docs/ideas/cli-exit-codes.md`.
 
 **Model selection:** Use `--profile <name>` to load a predefined engine configuration. Override explicitly
 with `--provider` + `--model` flags (e.g., `--provider openrouter --model anthropic/claude-3.5-haiku`)
@@ -2422,8 +2435,9 @@ This guarantees well-formed output for downstream tools and avoids partial outpu
 
 ### Phase 0: Proof-of-Concept Spikes
 
-See §0 for the three pre-build spikes (TUI responsiveness and HTTP stream cancellation).
-These are standalone experiments, not part of the production code path.
+See §0 for the three pre-build spikes: TUI responsiveness, HTTP stream
+cancellation, and Ollama tool calling. They are standalone experiments, not
+part of the production code path.
 
 ### Phase 1: Minimal Headless Build (The Agent Kernel)
 
@@ -2595,7 +2609,9 @@ top of a proven agent loop.
 - [x] Extract `AgentLoop` as a reusable struct (provider + registry + context)
       so Phase 6 child agents can instantiate it with a restricted tool whitelist
 
-- [x] Prevent infinite loops: max iterations = 15 (configurable per engine)
+- [x] Prevent infinite loops with the fixed 50-request guard in `src/agent.rs`.
+      Per-agent `max_tool_iterations` configuration with the same default is a
+      remaining agent-controls task in Phase 13.
 
 - [x] No TUI yet. Approval flow is **hardcoded, not interactive** (CLI-only): every
       tool call pauses for `ApproveTool`/`DenyTool`/`Stop`; the driver auto-approves
@@ -2807,12 +2823,14 @@ See reducer-state-handling-plan.md.
 
 - [x] Confirmation modal for `bash` and `write` (human-in-the-loop)
 
-- [x] `search` tool wrapping `ripgrep` via `std::process` with lazy binary check and graceful fallback
+- [x] Built-in `search` tool using `ignore` + `regex`; it respects `.gitignore`
+      and does not depend on external `rg`.
 
 - [x] `clarify` tool for interactive open-ended questions; render question banner in TUI, user answers
       via input box; not available in headless mode
 
-- [-] File tree sidebar using `ignore` + `walkdir`
+- [-] File-tree sidebar using `ignore` + `walkdir` — **dropped**. The TUI has
+  no sidebar; file discovery uses `search` and `glob`.
 
 - [x] **Diff view:** When `write` is proposed, render a side-by-side or unified diff in chat
       before approval
@@ -2826,15 +2844,17 @@ See reducer-state-handling-plan.md.
 - [x] `agent_finish` tool available only inside child-agent runs; fallback to unstructured
       text if never called
 
-- [-] Child-agent persistence records (`child_start` / `child_result`) with parent session linkage (§4H)
+- [x] Child-agent persistence records (`child_start` / `child_result`) with
+      parent session linkage (§4H)
 
 - [x] Child agent inherits parent safety settings (`--auto-approve-*` in headless)
 
-- [x] TUI sidebar panel for active/past child-agent runs (collapsible, shows runtime & status)
+- [x] Full-screen child-conversation drill-in view, which supersedes the
+      originally planned child-agent sidebar panel.
 
 - [x] Headless: `--auto-approve-spawn` flag (child agents denied without it) + stderr status lines
 
-**Key crates:** `which`, `ignore`, `tempfile`
+**Key crates:** `ignore`, `regex`, `tempfile`
 
 ### Phase 7: Polish & Persistence
 
@@ -3066,7 +3086,7 @@ hard usage errors: stderr, exit 2).
 
 - [x] Cover the existing flag surface: `init [--workspace] [--force]`,
       `--no-tui`, `--color=<auto|no|yes>`, `--prompt`, `--profile`,
-      `--log-file`, `--log-level`, `--log-format`, `--conversation-id`, seven
+      `--log-file`, `--log-level`, `--log-format`, `--conversation-id`, nine
       `--auto-approve-*` booleans; add clap's `--help`
 
 - [x] Deliberate strictness: unknown flags rejected; missing values hard-error
@@ -3083,61 +3103,125 @@ hard usage errors: stderr, exit 2).
 
 ### Phase 12: Context Compaction & Token Budgeting
 
-- [ ] **Goal:** Keep the context window bounded for long-running conversations
-      without losing the most valuable context (§4C).
+- [ ] **Goal:** Bound the model-facing context in long-running root
+      conversations while preserving the full session transcript.
 
-- [ ] Tiered context management: replace `Context`'s `Vec<Message>` with
-      `Vec<TieredMessage>` tagged `System` (never drop), `InitialContext` (never
-      drop initially), `Recent` (drop oldest first), `Compacted` (drop before
-      `Recent`)
+- [ ] Separate the complete transcript from the model-facing context view.
+      Keep the outer `AgentLoop` as the sole writer; background work receives
+      immutable snapshots only.
 
-- [ ] Token counting with cached counts per `TieredMessage` (re-count on
-      insertion, not every request); `tiktoken-rs` for OpenAI-compatible
-      engines, a byte-length heuristic (4 chars ≈ 1 token) for Ollama
+- [ ] Add tiered context entries and cached token estimates. Never compact the
+      leading system prompt; keep recent messages verbatim. Use `tiktoken-rs`
+      for OpenAI-compatible models and a byte-length estimate (4 characters ≈
+      1 token) for Ollama. Counts are approximate and used for budgeting, not
+      billing.
 
-- [ ] Context window compaction: when total > `context_length × 0.9`, compact to
-      ≤ `context_length × compact_target_ratio` (default 0.5, per `EngineConfig`);
-      minimal intervention, drops/summarizes oldest `Recent`/`Compacted` messages
-      (`maybe_compact`), preferring an oversized tool result
-      (`find_oversized_result`) over dropping whole turns
+- [ ] Configure `compact_target_ratio` per engine, default `0.5`. Start a
+      background summary after a completed turn at 70% of the active
+      `context_length`. Apply the summary at the next safe turn boundary. Keep
+      the 90% hard trigger fixed; if it is reached before the summary applies,
+      synchronously drop old complete turns or oversized old results until the
+      target is met.
 
-- [ ] Tool-result truncation at insertion (default ~8–16 KB, engine-tunable),
-      with a `"… [truncated M of K chars]"` marker
+- [ ] Summarize the old prefix with the configured `compact_engine`. The
+      summary must preserve decisions, open work, file paths, identifiers, user
+      constraints, and the boundary before the verbatim tail. On summarizer
+      failure or timeout, use the synchronous drop fallback and log the
+      failure.
 
-- [ ] Phase 12 extension: replace "drop" with on-the-fly summarization via a
-      cheap local model (engine = `compact_engine`, §4G/§4G config, wired in
-      Phase 10)
+- [ ] Persist a versioned compaction event in the existing session JSONL file.
+      Store a monotonic message boundary and the prefix summary. A later event
+      supersedes the previous model-context snapshot. Do not rewrite or delete
+      original messages. Replay uses the latest event to rebuild the model view
+      and keeps the raw transcript intact.
+
+- [ ] Keep tool-call/result groups indivisible during compaction. A boundary
+      must never separate a `tool_call_id` from its one matching result, and
+      compaction runs only when the serial tool queue is empty.
+
+- [ ] Keep the full transcript visible in the TUI and show a compaction marker
+      at each boundary. The model receives a provider-safe marked summary
+      followed by the verbatim tail. Do not insert a mid-conversation `system`
+      message.
+
+- [ ] Re-evaluate the active budget when `/models` switches to a model with a
+      different context length. Compaction applies to root sessions only; child
+      contexts are short-lived. No manual `/compact` command is included.
+
+- [ ] Keep per-result wire-size protection and a default `glob` ceiling out of
+      this phase. They are deferred to
+      `docs/ideas/tool-result-size-guard.md`. The blueprint's earlier 8–16 KiB
+      insertion-time truncation proposal is not selected.
+
+- [ ] Add unit and integration coverage for cached estimates, threshold
+      behavior, summary application, fallback, tool-call/result pairing,
+      append-only persistence, resume replay, model switching, and the visible
+      TUI marker. Update `README.md`, `CONTEXT.md`, and the named runtime docs
+      in the finalization plan.
 
 **Key crates:** `tiktoken-rs`
 
 ### Phase 13: CLI Surface
 
-**Decision:** Headless mode already works from Phase 1 and clap-backed
-argument parsing landed in Phase 11. This phase adds the scripting surface:
-structured output, quiet mode, exit codes, and store-management subcommands.
+**Decision:** Headless mode already works and clap-backed argument parsing
+landed in Phase 11. This phase tracks the remaining agent/session CLI
+controls selected for implementation. Structured output, quiet mode, stream
+policy, buffering, exit-code changes, one-off provider/model overrides, and
+session-maintenance commands are deferred to their idea notes.
 
-- [ ] **Goal:** Automation and scripting support.
+- [ ] **Goal:** Finish the selected CLI and agent controls. JSON/quiet output,
+      output stream policy, buffering, exit-code changes, one-off provider/model
+      overrides, and session maintenance are deferred to individual notes in
+      `docs/ideas/` and `docs/ideas/session.md`.
 
-- [ ] Implement `FakeTuiWrapper` that receives `UiUpdate` events and prints to stdout/stderr
+- [x] Implement `ConsoleApp`, the headless driver that receives `UiUpdate`
+      events and writes CLI output.
 
 - [ ] Buffer stdout output; emit final JSON object on `--format json`
+      (deferred to `docs/ideas/cli-output-buffering.md` and
+      `docs/ideas/cli-json-output.md`)
 
 - [x] Implement granular `--auto-approve-read`/`--auto-approve-write`/
       `--auto-approve-glob`/`--auto-approve-bash`/`--auto-approve-search`/
-      `--auto-approve-edit`/`--auto-approve-spawn` flags (all seven implemented
+      `--auto-approve-edit`/`--auto-approve-web-search`/
+      `--auto-approve-web-fetch`/`--auto-approve-spawn` flags (all nine implemented
       ahead of this phase — see `docs/cli-options.md`)
 
 - [ ] Define exit codes: `0` success, `1` error, `2` interrupt, `3` tool failure, `4` approval denied
+      (deferred to `docs/ideas/cli-exit-codes.md`)
 
 - [x] Support `--conversation-id <id>` to resume and append to existing threads
       (implemented ahead of this phase — see `docs/cli-options.md`)
 
-- [ ] Store-management subcommands: `ylva compress` / `ylva decompress [--all|--before <date>|<session-id>]`,
-      `ylva delete [<session-id>…|--before <date>|--all] --dry-run` (§4H decisions 11–12)
+- [ ] Store-management subcommands for compression, decompression, and deletion
+      (deferred to `docs/ideas/session.md`)
 
 - [ ] Print minimal status to stderr by default; `--quiet` to suppress
+      (deferred to `docs/ideas/cli-quiet-mode.md` and
+      `docs/ideas/cli-output-streams.md`)
 
-- [ ] Always persist to a JSONL session file (no `--no-persist` flag)
+- [x] Always persist to a JSONL session file (no `--no-persist` flag)
+
+- [ ] Add `--agent <type>` for selecting the root agent in both TUI and
+      headless modes. Store the selected type in new-session metadata and
+      restore the latest selection on resume. Persist an explicit resume
+      override as an `agent_type_changed` event. Legacy sessions without this
+      metadata use `default`. A stored or explicitly requested type that is no
+      longer available is a startup error unless the user explicitly selects
+      an available type.
+
+- [ ] Add per-agent `max_tool_iterations`, default `50`, for root and child
+      loops. Reject zero. This replaces the original per-engine limit of 15.
+
+- [ ] Add `--clone` with `--conversation-id <id>` in both TUI and headless
+      modes. Clone a top-level session's full logical event stream into a new
+      UUID with a `cloned_from` source link and copied title. Refuse to clone a
+      child transcript or a session held by another Ylva process; all new
+      messages append only to the clone.
+
+- [ ] Keep `--provider` and `--model` one-off overrides deferred to
+      `docs/ideas/cli-provider-override.md` and
+      `docs/ideas/cli-model-override.md`.
 
 ## 8. Critical Pitfalls to Avoid
 
@@ -3168,8 +3252,9 @@ structured output, quiet mode, exit codes, and store-management subcommands.
    the streaming task.
 10. **Headless mode must never auto-approve dangerous tools by default.** If `--auto-approve-bash`
     (implemented; superseded the `--auto-approve-shell` placeholder name) is not passed, `bash`
-    must exit with code `4` and a clear error. A script that forgets the flag should fail loudly,
-    not silently execute `rm -rf /`.
+    is denied and returns a clear tool error. The proposed exit code `4` is deferred to
+    `docs/ideas/cli-exit-codes.md`. A script that forgets the flag must fail loudly, not
+    silently execute `rm -rf /`.
 11. **Context ownership confusion.** The inner streaming task must never hold a mutable reference to
     `Context`. Send completion events back to the outer agent loop via channel so the outer loop
     remains the sole writer.
@@ -3224,9 +3309,7 @@ config = "0.14"
 toml = "0.8"
 sha2 = "0.10"
 chrono = "0.4"
-walkdir = "2"
 ignore = "0.4"
-which = "7"
 tempfile = "3"
 uuid = { version = "1", features = ["v4"] }
 nix = { version = "0.29", features = ["process", "signal"] }
@@ -3244,41 +3327,53 @@ Study these for patterns:
 
 ## 11. Success Criteria
 
-- [ ] Runs in any terminal with zero GUI dependencies
+- [x] Runs in any terminal with zero GUI dependencies
 
-- [ ] Supports OpenRouter and Ollama with a single config change
+- [x] Supports OpenRouter and Ollama with a single config change
 
-- [ ] Streams tokens in real-time without UI freezes
+- [x] Streams tokens in real-time without UI freezes
 
-- [ ] **Can interrupt model generation at any time with** `Ctrl+C`
+- [x] **Can interrupt model generation at any time with** `Ctrl+C`
 
-- [ ] **Can type and send new messages while the model is still streaming**
+- [x] **Can type and send new messages while the model is still streaming**
   (queued and injected at the next natural point)
 
-- [ ] Interrupted partial messages are preserved in conversation history;
+- [x] Interrupted partial messages are preserved in conversation history;
   queued steers are shown as pending until injected
 
-- [ ] Reads and proposes file edits with diff preview
+- [x] Reads and proposes file edits with diff preview
 
-- [ ] Executes shell commands only after explicit user confirmation
+- [x] Executes shell commands only after explicit user confirmation
 
-- [ ] **Can ask the user clarifying questions via the `clarify` tool when uncertain**
+- [x] **Can ask the user clarifying questions via the `clarify` tool when uncertain**
 
-- [ ] **Can delegate focused tasks to child agents with curated briefing and config-driven types**
+- [x] **Can delegate focused tasks to child agents with curated briefing and config-driven types**
 
-- [ ] **Child-agent runs are persisted and auditable via the unified JSONL store (§4H)**
+- [x] **Child-agent runs are persisted and auditable via the unified JSONL store (§4H)**
 
-- [ ] Conversation history is retained across restarts; resuming an old session works via explicit `--conversation-id`
+- [x] Conversation history is retained across restarts; resuming an old session works via explicit `--conversation-id`
 
-- [ ] Respects `.gitignore` when showing file trees and searching
+- [x] Search respects `.gitignore`. The file-tree sidebar was dropped.
 
-- [ ] **Headless mode runs non-interactively with structured exit codes**
+- [ ] **Headless mode uses the proposed structured exit-code contract** (deferred to `docs/ideas/cli-exit-codes.md`)
 
-- [ ] **Headless mode supports `--format json` for programmatic output**
+- [ ] **Headless mode supports `--format json` for programmatic output** (deferred to `docs/ideas/cli-json-output.md`)
 
-- [ ] **Headless mode supports `--conversation-id` to resume existing threads**
+- [x] **Headless mode supports `--conversation-id` to resume existing threads**
 
-- [ ] **Headless mode requires explicit `--auto-approve-*` flags for mutating tools**
+- [x] **Headless mode requires explicit `--auto-approve-*` flags for mutating tools**
+
+- [ ] Long conversations compact the model-facing context while preserving the
+      full transcript (Phase 12).
+
+- [ ] Root agent types are selectable with `--agent` and restored on resume
+      unless explicitly overridden.
+
+- [ ] A top-level session can be cloned with
+      `--conversation-id <id> --clone`; new messages append to the clone and
+      the source remains unchanged.
+
+- [ ] Root and child agents support per-agent `max_tool_iterations` settings.
 
 ## 12. Design Decisions
 
@@ -3292,15 +3387,15 @@ where they are documented in the body of this document.
 | **Agent loop architecture**    | Outer `tokio::select!` on `cmd_rx` + `agent_rx`; inner streaming task sends `AgentEvent` back to loop for state transitions                                                                    | §4B ReAct Loop                               |
 | **Context ownership**          | Outer agent loop owns `Context`; inner task sends events via channel                                                                                                                           | §1 Vision, §4B ReAct Loop, §4C Context       |
 | **Multi-line input**           | `Enter` sends; `Shift+Enter` inserts newline                                                                                                                                                   | §4B ReAct Loop                               |
-| **Markdown parsing**           | Render raw text while streaming; parse markdown only after `Done`                                                                                                                              | §4F Rich Chat Rendering                      |
+| **Markdown parsing**           | Render Markdown while streaming; syntax highlighting uses a content-addressed cache                                                                                                            | §4F Rich Chat Rendering                      |
 | **Tool call streaming**        | Provider emits raw `Delta`s; the agent's streaming task owns a `ToolCallAccumulator` per index, assembles calls, emits batch on `Done`                                                         | §4A Unified Provider Trait, §4B ReAct Loop   |
 | **HTTP cancellation**          | Drop the **request future** to abort the TCP connection                                                                                                                                        | §4A Unified Provider Trait                   |
 | **HTTP retry**                 | Pre-stream failures only (`429`/`5xx`/connect) with bounded exponential backoff honoring `Retry-After`; never retry mid-stream                                                                 | §4A Unified Provider Trait                   |
-| **Steering semantics**        | Cooperative: a steer never aborts a live generation; queued steers inject at the next natural point (hand-off, completed tool call, end of response). Interrupt (`Stop`) is the only abort path. `current_cancel.take()` ignores stale `StreamCancelled` | §1 Vision, §4B ReAct Loop, §8 Pitfalls |
+| **Steering semantics**        | A steer never aborts a live generation. During a tool-call sequence, wait for every issued call's matching result before injecting it. `Stop` is the interrupt path. | §1 Vision, §4B ReAct Loop, §8 Pitfalls |
 | **State overlap**              | Explicit `AgentMode` enum (`Idle`, `Streaming`, `ToolPending`)                                                                                                                                 | §4B ReAct Loop                               |
 | **Multi tool call execution**  | One message's calls accumulate by `tool_call_index`, queued, drained **serially** (approval inline at each call); deferred single re-prompt on empty queue; never parallel                     | §4A, §4B ReAct Loop                          |
 | **Tool process cleanup**       | `process_group(0)` + kill the process group (`killpg`) for shell tools; `kill()` alone leaks grandchildren                                                                                     | §4D Tool Registry                            |
-| **Tool result size**           | Truncate at insertion (tunable cap + marker); `maybe_compact` prefers oversized results                                                                                                        | §4C Context, §4D Tool Registry               |
+| **Tool result size**           | Aggregate context compaction is Phase 12; the per-result 512 KiB wire guard and bounded `glob` are deferred to `docs/ideas/tool-result-size-guard.md`                                          | §4C Context, Phase 12                        |
 | **TUI event loop**             | `spawn_blocking` for crossterm + `select!` on `ui_rx` + `subagent_ui_rx` + `event_rx`                                                                                                          | §4B ReAct Loop                               |
 | **TUI async context**          | `main.rs` uses `rt.block_on` for the TUI loop                                                                                                                                                  | §4B ReAct Loop                               |
 | **Token counting**             | `tiktoken-rs` for OpenAI; byte heuristic for Ollama; cached per `TieredMessage`. Counts are **approximate/advisory** (encoding is model-family dependent); rely on `context_length × 0.9` margin | §4C Context State Machine                    |
@@ -3310,22 +3405,23 @@ where they are documented in the body of this document.
 | **Tool binary checks**         | Lazy check at invocation with graceful fallback                                                                                                                                                | §4D Tool Registry                            |
 | **Tool timeouts**              | `tokio::time::timeout` around `Command::output` with user-visible defaults                                                                                                                     | §4D Tool Registry                            |
 | **Tool errors**                | `ToolError` variant in `UiUpdate` for visible failure reporting                                                                                                                                | §4B ReAct Loop, §4D Tool Registry            |
-| **Headless mode**              | Full CLI with `--prompt`, `--format`, `--conversation-id`, granular `--auto-approve-*`, exit codes `0–4`                                                                                       | §7 CLI Surface                               |
-| **Output streams**             | Split stdout (content) / stderr (status); `--quiet` flag; buffer and emit at end                                                                                                               | §7 CLI Surface                               |
-| **Headless safety**            | Mutating tools require `--auto-approve-*`; exit code `4` if denied                                                                                                                             | §4E Safety, §7 CLI Surface                   |
+| **Headless mode**              | Shipped CLI supports prompts, resume, and granular `--auto-approve-*`; root `--agent` and `--clone` are planned in Phase 13; JSON output and exit-code changes are deferred                    | §7 CLI Surface                               |
+| **Output streams**             | Separate stdout/stderr policy, `--quiet`, and buffering are deferred to `docs/ideas/cli-output-streams.md`, `cli-quiet-mode.md`, and `cli-output-buffering.md`                               | §7 CLI Surface                               |
+| **Headless safety**            | Mutating tools require `--auto-approve-*`; proposed exit code `4` is deferred                                                                                                                 | §4E Safety, §7 CLI Surface                   |
+| **Session cloning**            | `--conversation-id <id> --clone` forks a top-level session into a new UUID with copied events and `cloned_from`; the source is read-only                                                         | §4H Persistence, §7 CLI Surface               |
 | **Conversation titles**        | Utility-engine conversation generates a concise title from the first user message and first assistant reply, then atomically persists a single-line value in the `meta` header (§4H decision 8) | §7 Phase 9, §4H decision 8                   |
 | **Model switching**            | Supported mid-conversation via `/models`, which queries each configured provider connection once and switches the selected connection/model through `EngineRouter`; the `SwitchModel` command placeholder was dropped | §4B ReAct Loop, §6 Commands |
 | **App state**                  | Dumb view model; agent loop owns state machine                                                                                                                                                 | §4B ReAct Loop                               |
-| **Config format**              | TOML for all config files; YAML explicitly rejected                                                                                                                                            | §2 Crate Ecosystem, §4G Agent Types & Delegation |
+| **Config format**              | Profiles and `.toml` agent files use TOML; `.md` agent files accept `+++` TOML or `---` YAML frontmatter                                                                                         | §4G Agent-Type File Formats                  |
 | **Engine vs Provider mapping** | `Engine` = named model/runtime configuration; `provider_connection` = named endpoint/credential connection; `provider` = implementation kind; `Provider` = runtime trait object built from a connection at startup | §4A Provider Trait, §4G Engine Definitions |
 | **Syntect themes**             | 2 built-in and selectable: dark, light; "monokai" is not bundled with `syntect` and stays an idea (`docs/ideas/monokai-theme.md`)                                                                | §4F Rich Chat Rendering                      |
 | **edit tool**             | Both search-and-replace and line-range modes                                                                                                                                                   | §4D Tool Registry                            |
 | **Slash commands**             | Only recognised at start of line                                                                                                                                                               | §7 CLI Surface                               |
-| **Headless buffering**         | Buffer everything; emit at end                                                                                                                                                                 | §7 CLI Surface                               |
-| **Clarify tool**               | Free-text only; no multiple-choice options                                                                                                                                                     | §4D Tool Registry                            |
+| **Headless buffering**         | Buffering policy is deferred to `docs/ideas/cli-output-buffering.md`                                                                                                                           | §7 CLI Surface                               |
+| **Clarify tool**               | Supports free-text answers and up to five selectable choices                                                                                                                                  | §4D Tool Registry                            |
 | **Child-agent delegation**      | Tool-based `spawn_subagent` using reusable `AgentLoop`                                                                                                                                         | §4G Agent Types & Delegation                  |
 | **Child-agent parallelism**     | Child agent runs in parallel with root agent; root loop never blocks                                                                                                                          | §4G Child-Agent Lifecycle                    |
-| **Child-agent channels**        | Dedicated `subagent_ui_tx`/`subagent_ui_rx` for live sidebar updates; store only for audit                                                                                                    | §4G UI & Headless                            |
+| **Child-agent channels**        | Dedicated `subagent_ui_tx`/`subagent_ui_rx` for live child-conversation updates; store for audit                                                                                              | §4G UI & Headless                            |
 | **Agent types**                 | Single pool; profile-driven with global behavior + local engine assignment                                                                                                                     | §4G Agent Types & Delegation                  |
 | **Child-agent briefing**        | Hybrid system + user message; curated by root agent                                                                                                                                           | §4G Agent Types & Delegation                  |
 | **Child-agent nesting**         | Forbidden; one level only (structural: `Child` role strips `spawn_subagent`)                                                                                                                   | §4G Agent Types & Delegation                  |
@@ -3336,7 +3432,7 @@ where they are documented in the body of this document.
 | **Agent-type config format**    | `.toml` flat or `.md` with `+++` TOML or `---` YAML frontmatter (body = system_prompt)                                                                                                          | §4G Agent-Type File Formats                   |
 | **Child-agent safety**          | Inherits parent safety settings                                                                                                                                                                | §4G Safety Inheritance                        |
 | **Child-agent persistence**     | `child_start` / `child_result` JSONL records in the parent session + dedicated sub-session file (§4H)                                                                                          | §4G Agent Types & Delegation, §4H            |
-| **Child-agent UI**              | Collapsible sidebar panel + status bar line                                                                                                                                                    | §4G Agent Types & Delegation                  |
+| **Child-agent UI**              | Full-screen child-conversation drill-in; no child sidebar                                                                                                                                      | §4G Agent Types & Delegation                  |
 | **Child-agent headless**        | `--auto-approve-spawn` opt-in; `spawn_subagent` denied headless without it                                                                                                                      | §4G Agent Types & Delegation                  |
 | **Build order**                | Headless first (Phase 1–3), TUI added as rendering layer in Phase 4                                                                                                                            | §7 Phased Build Plan                         |
 | **Minimal build**              | No CLI surface, no config parsing, no TOML in Phase 1                                                                                                                                          | §7 Phase 1                                   |
@@ -3346,13 +3442,13 @@ where they are documented in the body of this document.
 | **Context ownership**          | Single-writer rule enforced immediately; read-only clone passed to inner task                                                                                                                  | §7 Phase 1, §4C Context                      |
 | **Persistence store**          | Plain append-only JSONL (no SQLite): global `~/.ylva/chats/<hash-of-cwd>/<uuid>.jsonl`; raw-rich, archive-compressible                                                                          | §4H decisions 1–3                            |
 | **Schema evolution**           | Tolerant typed events + `meta` header `schema_version` + idempotent atomic upgraders; unknown fields/`type` ignored                                                                             | §4H decision 4                               |
-| **Resume/session model**       | Explicit `--conversation-id` (UUID) only; no auto-resume, no startup picker                                                                                                                    | §4H decision 5                               |
+| **Resume/session model**       | Explicit `--conversation-id` resumes in place; `--conversation-id --clone` forks a top-level session to a new UUID without changing the source                                                   | §4H decision 5                               |
 | **Corruption recovery**        | Repair-on-open (truncate invalid tail before resume+append); reads never mutate                                                                                                                 | §4H decision 6                               |
 | **Concurrent writers**         | `flock` every session open; fail-fast on conflict; listings never disturb active writer                                                                                                        | §4H decision 7                               |
 | **Session findability**        | Sidecar = session abstract, greppable: in-file `meta` line when raw, `.meta.json` when compressed; `rg '"type":"meta"'`                                                                       | §4H decision 8                               |
-| **Compression**                | Raw when new; auto-compress old unlocked sessions; `ylva compress`/`decompress` manual override                                                                                                 | §4H decision 11                              |
+| **Compression**                | Raw when new; auto-compress old unlocked sessions; `ylva session compress`/`decompress` manual override                                                                                        | §4H decision 11                              |
 | **Durability**                 | `flush` per line, no per-line `fsync`; dedicated writer channel so loops never block on disk                                                                                                    | §4H decision 10                              |
-| **Retention/deletion**         | History kept forever (no auto-delete); explicit `ylva delete … --dry-run`; auto-compression bounds disk                                                                                        | §4H decisions 11–12                          |
+| **Retention/deletion**         | History kept forever (no auto-delete); explicit `ylva session delete … --dry-run`; auto-compression bounds disk                                                                               | §4H decisions 11–12                          |
 | **Message enum**               | `System`, `User`, `Assistant { content, status, tool_calls }`, `ToolResult`, `ToolError` (Q1)                                                                                               | §4B ReAct Loop                               |
 | **Context Phase 1**            | Simple `Vec<Message>`; no `buffer`, no `TieredMessage` (Q2, Q13)                                                                                                                              | §4C Context                                  |
 | **Persona / system message**   | `Context::new()` uses the code-owned global SOUL value; project `.ylva/SOUL.md` and home `~/.ylva/SOUL.md` replace it through the three-layer fallback                                                                                      | §4C Context, §4G Config, §7 Phase 1/6        |
