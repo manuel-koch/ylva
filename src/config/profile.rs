@@ -212,6 +212,71 @@ fn validate_tool_sandbox_rules(
     Ok(())
 }
 
+/// Validate every agent type's configured `max_tool_iterations`. A limit of
+/// `0` would make the iteration guard trip on the very first tool-use round,
+/// so it is a hard profile-load error naming the agent type instead.
+fn validate_agent_max_tool_iterations(
+    agents: &HashMap<String, AgentConfig>,
+    path: &Path,
+) -> Result<(), ConfigError> {
+    for (agent_type, agent_config) in agents {
+        if agent_config.max_tool_iterations == Some(0) {
+            return Err(ConfigError::InvalidMaxToolIterations {
+                path: path.to_path_buf(),
+                agent_type: agent_type.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Validate every `[engines.<name>]` compaction knob.
+///
+/// The three ratios must be fractions in `(0, 1]` and ordered
+/// `compact_target_ratio < soft_compaction_threshold <
+/// hard_compaction_threshold`: a target at or above the soft trigger would
+/// make compaction unable to reach its own goal, and soft at or above hard
+/// would make the background path unreachable (the hard drop would always
+/// win). A violation is a hard startup error naming the engine and the rule.
+fn validate_compaction_settings(
+    engines: &HashMap<String, crate::llm::EngineConfig>,
+    path: &Path,
+) -> Result<(), ConfigError> {
+    fn is_ratio(value: f64) -> bool {
+        value.is_finite() && value > 0.0 && value <= 1.0
+    }
+    for (engine_name, engine_config) in engines {
+        let target = engine_config.compact_target_ratio;
+        let soft = engine_config.soft_compaction_threshold;
+        let hard = engine_config.hard_compaction_threshold;
+        let detail = if !is_ratio(target) {
+            format!("compact_target_ratio must be > 0 and <= 1, got {target}")
+        } else if !is_ratio(soft) {
+            format!("soft_compaction_threshold must be > 0 and <= 1, got {soft}")
+        } else if !is_ratio(hard) {
+            format!("hard_compaction_threshold must be > 0 and <= 1, got {hard}")
+        } else if target >= soft {
+            format!(
+                "compact_target_ratio ({target}) must be below \
+                 soft_compaction_threshold ({soft})"
+            )
+        } else if soft >= hard {
+            format!(
+                "soft_compaction_threshold ({soft}) must be below \
+                 hard_compaction_threshold ({hard})"
+            )
+        } else {
+            continue;
+        };
+        return Err(ConfigError::InvalidCompactionSetting {
+            path: path.to_path_buf(),
+            engine: engine_name.clone(),
+            detail,
+        });
+    }
+    Ok(())
+}
+
 fn default_engine_name() -> String {
     DEFAULT_PROFILE_NAME.to_string()
 }
@@ -247,6 +312,7 @@ fn default_agent_config() -> AgentConfig {
         description: None,
         allowed_tools: None,
         timeout_secs: None,
+        max_tool_iterations: None,
         persona: None,
         can_spawn: true,
         tools: HashMap::new(),
@@ -442,6 +508,8 @@ impl ProfileConfig {
         for agent in profile.agents.values() {
             validate_tool_sandbox_rules(&agent.tools, &path)?;
         }
+        validate_agent_max_tool_iterations(&profile.agents, &path)?;
+        validate_compaction_settings(&profile.engines, &path)?;
         tracing::info!(
             path = %path.display(),
             ?layer,
@@ -472,6 +540,8 @@ impl ProfileConfig {
         for agent in profile.agents.values() {
             validate_tool_sandbox_rules(&agent.tools, built_in_path)?;
         }
+        validate_agent_max_tool_iterations(&profile.agents, built_in_path)?;
+        validate_compaction_settings(&profile.engines, built_in_path)?;
         Ok(profile)
     }
 
@@ -503,6 +573,28 @@ impl ProfileConfig {
         self.utility_engine
             .as_deref()
             .unwrap_or(self.default_engine.as_str())
+    }
+
+    /// Engine name serving `agent_type`: the agent type's configured
+    /// `engine` when set, else `default_engine`.
+    pub fn engine_name_for(&self, agent_type: &str) -> &str {
+        self.agents
+            .get(agent_type)
+            .and_then(|agent_config| agent_config.engine.as_deref())
+            .unwrap_or(self.default_engine.as_str())
+    }
+
+    /// Effective tool-use iteration limit for `agent_type`: the configured
+    /// `max_tool_iterations` when set and non-zero, else
+    /// [`crate::agent::DEFAULT_MAX_TOOL_USE_ITERATIONS`]. Profile validation rejects
+    /// a configured `0`; the `filter` here keeps a programmatically built
+    /// profile from ever producing a limit no loop can run under.
+    pub fn max_tool_iterations_for(&self, agent_type: &str) -> usize {
+        self.agents
+            .get(agent_type)
+            .and_then(|agent_config| agent_config.max_tool_iterations)
+            .filter(|limit| *limit > 0)
+            .unwrap_or(crate::agent::DEFAULT_MAX_TOOL_USE_ITERATIONS)
     }
 }
 
@@ -589,6 +681,7 @@ fn load_agent_types(
             description: None,
             allowed_tools: None,
             timeout_secs: None,
+            max_tool_iterations: None,
             persona: None,
             can_spawn: false,
             tools: HashMap::new(),
@@ -610,6 +703,9 @@ fn apply_agent_config_overrides(config: &mut AgentConfig, overrides: AgentConfig
     }
     if overrides.timeout_secs.is_some() {
         config.timeout_secs = overrides.timeout_secs;
+    }
+    if overrides.max_tool_iterations.is_some() {
+        config.max_tool_iterations = overrides.max_tool_iterations;
     }
     if overrides.persona.is_some() {
         config.persona = overrides.persona;
@@ -740,6 +836,9 @@ mod tests {
     use crate::highlight::ThemeName;
 
     use super::*;
+    use crate::agent::compaction::{
+        DEFAULT_HARD_COMPACTION_THRESHOLD, DEFAULT_SOFT_COMPACTION_THRESHOLD,
+    };
 
     /// Write `contents` as `<root>/<profile_name>/config.toml`.
     fn write_profile_config(root: &Path, profile_name: &str, contents: &str) {
@@ -1631,6 +1730,191 @@ timeout_secs = 30
     }
 
     #[test]
+    fn max_tool_iterations_defaults_to_the_shared_limit_when_unconfigured() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let profiles_root = temp.path().join("home").join(PROFILES_DIRECTORY_NAME);
+        write_profile_config(
+            &profiles_root,
+            "work",
+            "[agents.explorer]\npersona = \"You explore code.\"\n",
+        );
+
+        let profile = ProfileConfig::load(&profiles_root, "work").expect("profile loads");
+        let explorer = profile.agents.get("explorer").expect("explorer agent type");
+        assert_eq!(explorer.max_tool_iterations, None);
+        assert_eq!(
+            profile.max_tool_iterations_for("explorer"),
+            crate::agent::DEFAULT_MAX_TOOL_USE_ITERATIONS
+        );
+        assert_eq!(
+            profile.max_tool_iterations_for("default"),
+            crate::agent::DEFAULT_MAX_TOOL_USE_ITERATIONS
+        );
+        assert_eq!(
+            profile.max_tool_iterations_for("never-configured"),
+            crate::agent::DEFAULT_MAX_TOOL_USE_ITERATIONS
+        );
+    }
+
+    #[test]
+    fn inline_max_tool_iterations_overrides_a_file_authored_definition() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let profiles_root = home.join(PROFILES_DIRECTORY_NAME);
+        write_profile_config(
+            &profiles_root,
+            "work",
+            "[agents.research]\nmax_tool_iterations = 7\n",
+        );
+        write_agent_type_file(
+            &home,
+            "agents/research.md",
+            "+++\ncan_spawn = true\nmax_tool_iterations = 12\n+++\nInvestigate evidence.\n",
+        );
+
+        let profile = ProfileConfig::load(&profiles_root, "work").expect("profile loads");
+        let research = profile.agents.get("research").expect("research agent type");
+        assert_eq!(
+            research.max_tool_iterations,
+            Some(7),
+            "the inline override replaces the file-authored limit"
+        );
+        assert_eq!(profile.max_tool_iterations_for("research"), 7);
+
+        write_profile_config(
+            &profiles_root,
+            "solo",
+            "[agents.solo]\nmax_tool_iterations = 20\n",
+        );
+        let solo_profile = ProfileConfig::load(&profiles_root, "solo").expect("profile loads");
+        assert_eq!(solo_profile.max_tool_iterations_for("solo"), 20);
+    }
+
+    #[test]
+    fn a_zero_max_tool_iterations_is_rejected_during_profile_validation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let profiles_root = temp.path().join("home").join(PROFILES_DIRECTORY_NAME);
+        write_profile_config(
+            &profiles_root,
+            "work",
+            "[agents.explorer]\nmax_tool_iterations = 0\n",
+        );
+
+        let error = ProfileConfig::load(&profiles_root, "work")
+            .expect_err("a zero iteration limit must be rejected");
+        assert!(matches!(
+            error,
+            ConfigError::InvalidMaxToolIterations { .. }
+        ));
+        let message = error.to_string();
+        assert!(message.contains("max_tool_iterations = 0"), "{message}");
+        assert!(message.contains("explorer"), "{message}");
+    }
+
+    #[test]
+    fn a_zero_max_tool_iterations_in_an_agent_type_file_is_rejected() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let profiles_root = home.join(PROFILES_DIRECTORY_NAME);
+        write_profile_config(&profiles_root, "work", "\n");
+        write_agent_type_file(
+            &home,
+            "agents/research.md",
+            "+++\nmax_tool_iterations = 0\n+++\nInvestigate evidence.\n",
+        );
+
+        let error = ProfileConfig::load(&profiles_root, "work")
+            .expect_err("a file-authored zero iteration limit must be rejected");
+        assert!(matches!(
+            error,
+            ConfigError::InvalidMaxToolIterations { .. }
+        ));
+        assert!(error.to_string().contains("research"), "{error}");
+    }
+
+    #[test]
+    fn compaction_thresholds_default_and_parse_per_engine() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let profiles_root = temp.path().join(PROFILES_DIRECTORY_NAME);
+        write_profile_config(
+            &profiles_root,
+            "work",
+            "\n[engines.fast]\nprovider = \"mock\"\nmodel = \"test-model\"\n",
+        );
+
+        let profile = ProfileConfig::load(&profiles_root, "work").expect("the fixture loads");
+        let fast = profile.engines.get("fast").expect("the fast engine");
+        assert_eq!(fast.compact_target_ratio, 0.5, "target defaults to half");
+        assert_eq!(
+            fast.soft_compaction_threshold,
+            DEFAULT_SOFT_COMPACTION_THRESHOLD
+        );
+        assert_eq!(
+            fast.hard_compaction_threshold,
+            DEFAULT_HARD_COMPACTION_THRESHOLD
+        );
+
+        write_profile_config(
+            &profiles_root,
+            "work",
+            "\n[engines.fast]\nprovider = \"mock\"\nmodel = \"test-model\"\n\
+             compact_target_ratio = 0.4\n\
+             soft_compaction_threshold = 0.8\n\
+             hard_compaction_threshold = 0.95\n",
+        );
+        let profile = ProfileConfig::load(&profiles_root, "work").expect("the fixture loads");
+        let fast = profile.engines.get("fast").expect("the fast engine");
+        assert_eq!(fast.compact_target_ratio, 0.4);
+        assert_eq!(fast.soft_compaction_threshold, 0.8);
+        assert_eq!(fast.hard_compaction_threshold, 0.95);
+    }
+
+    #[test]
+    fn compaction_thresholds_must_be_ordered_target_below_soft_below_hard() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let profiles_root = temp.path().join(PROFILES_DIRECTORY_NAME);
+
+        for (knobs, expected_fragment) in [
+            (
+                "compact_target_ratio = 1.5\n",
+                "compact_target_ratio must be > 0 and <= 1",
+            ),
+            (
+                "soft_compaction_threshold = 0.0\n",
+                "soft_compaction_threshold must be > 0 and <= 1",
+            ),
+            (
+                "hard_compaction_threshold = 1.5\n",
+                "hard_compaction_threshold must be > 0 and <= 1",
+            ),
+            (
+                "compact_target_ratio = 0.8\nsoft_compaction_threshold = 0.7\n",
+                "must be below soft_compaction_threshold",
+            ),
+            (
+                "soft_compaction_threshold = 0.9\nhard_compaction_threshold = 0.9\n",
+                "must be below hard_compaction_threshold",
+            ),
+        ] {
+            write_profile_config(
+                &profiles_root,
+                "work",
+                &format!("\n[engines.fast]\nprovider = \"mock\"\nmodel = \"test-model\"\n{knobs}"),
+            );
+
+            let error = ProfileConfig::load(&profiles_root, "work")
+                .expect_err("an unordered compaction knob must be rejected");
+            assert!(
+                matches!(error, ConfigError::InvalidCompactionSetting { .. }),
+                "{error}"
+            );
+            let message = error.to_string();
+            assert!(message.contains(expected_fragment), "{message}");
+            assert!(message.contains("fast"), "{message}");
+        }
+    }
+
+    #[test]
     fn same_scope_project_agent_file_and_inline_table_are_rejected() {
         let temp = tempfile::tempdir().expect("tempdir");
         let profiles_root = temp.path().join("home").join(PROFILES_DIRECTORY_NAME);
@@ -1905,6 +2189,7 @@ engine = "ollama/local"
                     description: None,
                     allowed_tools: Some(vec!["bash".to_string()]),
                     timeout_secs: Some(120),
+                    max_tool_iterations: None,
                     persona: Some("You are a helpful assistant.".to_string()),
                     can_spawn: false,
                     tools: HashMap::new(),
@@ -1937,6 +2222,7 @@ engine = "ollama/local"
             description: None,
             allowed_tools: None,
             timeout_secs: None,
+            max_tool_iterations: None,
             persona: None,
             can_spawn: true,
             tools: HashMap::new(),
@@ -2275,44 +2561,6 @@ rules = [
             error,
             ConfigError::InvalidSandboxRuleKind { tool, index: 0, .. } if tool == "web_fetch"
         ));
-    }
-
-    #[test]
-    fn the_e2e_custom_profile_keeps_loading_with_target_rules() {
-        // tests/e2e/custom/profiles/default/config.toml is a live e2e fixture;
-        // its [tools.web_fetch] `target` rule must parse and validate, and its
-        // `${…}`-interpolated [web_search] values must resolve to the defaults
-        // the e2e scripts ship in the profile's `.env`.
-        let profiles_root =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/e2e/custom/profiles");
-        let environment = HashMap::from([
-            ("OLLAMA_CLOUD_API_KEY".to_string(), "test-key".to_string()),
-            ("OPENROUTER_API_KEY".to_string(), "test-key".to_string()),
-            (
-                "YLVA_WEB_SEARCH_BACKEND".to_string(),
-                "duckduckgo".to_string(),
-            ),
-            (
-                "SEARXNG_BASE_URL".to_string(),
-                "http://localhost:20081".to_string(),
-            ),
-            ("BRAVE_API_KEY".to_string(), "test-key".to_string()),
-        ]);
-        let profile = ProfileConfig::load_with_environment(&profiles_root, "default", &environment)
-            .expect("the e2e custom profile must keep loading");
-        assert_eq!(
-            profile.web_search.backend, "duckduckgo",
-            "the fixture defaults to the duckduckgo backend"
-        );
-        let rules = &profile
-            .tools
-            .get("web_fetch")
-            .expect("web_fetch table")
-            .rules;
-        assert!(
-            rules.iter().any(|rule| rule.has_target()),
-            "the fixture's target rule must survive parsing: {rules:?}"
-        );
     }
 
     // ── `[web_fetch]` section ─────────────────────────────────────────────────

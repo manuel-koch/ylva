@@ -218,6 +218,10 @@ pub struct TuiState {
     pub queued_steer_texts: Vec<String>,
     /// true while ≥1 steer is queued.
     pub steer_indicator: bool,
+    /// Pre-formatted footer readout of the model view against the active
+    /// window (`64.2K (45%)`), projected from `AppState::context_usage`.
+    /// `None` until the first report arrives.
+    pub context_usage_text: Option<String>,
     /// Set by `UiUpdate::ToolPending`; cleared by `ToolStart`/`ToolKilled`/
     /// `StreamCancelled`. While `Some`, the TUI is in approval sub-mode.
     pub pending_approval: Option<(uuid::Uuid, String, serde_json::Value)>, // (tool_id, tool_name, arguments)
@@ -289,6 +293,7 @@ impl TuiState {
             partial_thinking_collapsed: false,
             queued_steer_texts: Vec::new(),
             steer_indicator: false,
+            context_usage_text: None,
             pending_approval: None,
             pending_approval_is_subagent: false,
             input_history: Vec::new(),

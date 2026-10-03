@@ -50,7 +50,8 @@ impl OllamaProvider {
                 Self::customize_request_body,
                 ContentPartFormat::OllamaCompatibility,
                 super::openai_compatible_provider::redact_chat_completion_request_body,
-            ),
+            )
+            .with_provider_kind("ollama"),
             native_base_url,
         }
     }
@@ -151,6 +152,17 @@ impl Provider for OllamaProvider {
         cancel: CancellationToken,
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
         self.inner.chat(messages, tools, cancel)
+    }
+
+    fn chat_with_session_id<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        session_id: Option<uuid::Uuid>,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        self.inner
+            .chat_with_session_id(messages, tools, cancel, session_id)
     }
 }
 

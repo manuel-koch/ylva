@@ -252,6 +252,8 @@ pub(crate) struct AgentConfigOverrides {
     pub allowed_tools: Option<Vec<String>>,
     #[serde(default, deserialize_with = "deserialize_optional_u64_or_string")]
     pub timeout_secs: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_optional_usize_or_string")]
+    pub max_tool_iterations: Option<usize>,
     #[serde(default)]
     pub persona: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_bool_or_string")]
@@ -276,6 +278,28 @@ where
         Some(TimeoutValue::Text(value)) => value.trim().parse::<u64>().map(Some).map_err(|error| {
             serde::de::Error::custom(format!("invalid timeout_secs '{value}': {error}"))
         }),
+        None => Ok(None),
+    }
+}
+
+fn deserialize_optional_usize_or_string<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum IterationLimitValue {
+        Number(usize),
+        Text(String),
+    }
+
+    match Option::<IterationLimitValue>::deserialize(deserializer)? {
+        Some(IterationLimitValue::Number(value)) => Ok(Some(value)),
+        Some(IterationLimitValue::Text(value)) => {
+            value.trim().parse::<usize>().map(Some).map_err(|error| {
+                serde::de::Error::custom(format!("invalid max_tool_iterations '{value}': {error}"))
+            })
+        }
         None => Ok(None),
     }
 }
@@ -368,6 +392,32 @@ persona = "Investigate the evidence."
             definition.config.persona.as_deref(),
             Some("Investigate the evidence.")
         );
+    }
+
+    #[test]
+    fn agent_type_files_parse_max_tool_iterations_in_every_format() {
+        let pure_toml =
+            parse_agent_type_contents(Path::new("research.toml"), "max_tool_iterations = 7\n")
+                .expect("pure TOML parses");
+        assert_eq!(pure_toml.config.max_tool_iterations, Some(7));
+
+        let toml_frontmatter = parse_agent_type_contents(
+            Path::new("research.md"),
+            "+++\nmax_tool_iterations = \"8\"\n+++\nInvestigate the evidence.\n",
+        )
+        .expect("TOML frontmatter parses");
+        assert_eq!(toml_frontmatter.config.max_tool_iterations, Some(8));
+
+        let yaml_frontmatter = parse_agent_type_contents(
+            Path::new("research.md"),
+            "---\nmax_tool_iterations: 9\n---\n\nInvestigate the evidence.\n\n",
+        )
+        .expect("YAML frontmatter parses");
+        assert_eq!(yaml_frontmatter.config.max_tool_iterations, Some(9));
+
+        let absent = parse_agent_type_contents(Path::new("research.toml"), "can_spawn = true\n")
+            .expect("pure TOML parses");
+        assert_eq!(absent.config.max_tool_iterations, None);
     }
 
     #[test]

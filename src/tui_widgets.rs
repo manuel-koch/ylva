@@ -808,6 +808,20 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState, registry: &Too
                     lines.push(Line::styled(display, Style::default().fg(ERROR_COLOR)));
                 }
             }
+            ChatEntry::CompactionMarker {
+                summarized_messages,
+            } => {
+                let label = format!(
+                    "  ── compaction · {summarized_messages} {} summarized ──",
+                    plural_noun(*summarized_messages, "message", "messages")
+                );
+                lines.push(Line::styled(
+                    label,
+                    Style::default()
+                        .fg(MUTED_TEXT_COLOR)
+                        .add_modifier(Modifier::DIM),
+                ));
+            }
             ChatEntry::Notice { text } => {
                 for (index, source_line) in text.lines().enumerate() {
                     let wrapped_lines =
@@ -2729,7 +2743,12 @@ fn draw_normal_footer(
         row_1_text
     };
     draw_footer_row(frame, row_1, &row_1_text, FOOTER_STATUS_COLOR, state);
-    draw_footer_hints(frame, row_2, footer_hints);
+    draw_footer_hints(
+        frame,
+        row_2,
+        footer_hints,
+        state.context_usage_text.as_deref(),
+    );
 }
 
 fn active_subagent_footer_label(counts: ActiveSubagentCounts) -> Option<String> {
@@ -2752,7 +2771,28 @@ fn plural_noun<'a>(count: usize, singular_noun: &'a str, plural_noun: &'a str) -
     }
 }
 
-fn draw_footer_hints(frame: &mut Frame, area: Rect, hints: &[FooterHint]) {
+/// Draw the keybinding hints on the footer's second row, with the model-view
+/// readout (`64.2K (45%)`) pinned to the right end of the same row when one
+/// has been reported. On a row too narrow to hold both without colliding,
+/// the readout is dropped rather than allowed to overwrite the hints.
+fn draw_footer_hints(
+    frame: &mut Frame,
+    area: Rect,
+    hints: &[FooterHint],
+    context_usage_text: Option<&str>,
+) {
+    let usage_width = context_usage_text
+        .map(|usage| usage.chars().count() as u16 + 1)
+        .unwrap_or(0);
+    let has_room_for_both = usage_width > 0 && area.width > usage_width + 8;
+    let (hints_area, usage_area) = if has_room_for_both {
+        let [hints_area, usage_area] =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(usage_width)]).areas(area);
+        (hints_area, Some(usage_area))
+    } else {
+        (area, None)
+    };
+
     let normal_style = Style::default().fg(MUTED_TEXT_COLOR);
     let key_style = normal_style.add_modifier(Modifier::BOLD);
     let mut spans = Vec::with_capacity(hints.len() * 4 + 1);
@@ -2771,7 +2811,15 @@ fn draw_footer_hints(frame: &mut Frame, area: Rect, hints: &[FooterHint]) {
         spans.push(Span::styled(hint.description, normal_style));
     }
 
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    frame.render_widget(Paragraph::new(Line::from(spans)), hints_area);
+
+    if let (Some(usage_area), Some(usage)) = (usage_area, context_usage_text) {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(format!(" {usage}"), normal_style)))
+                .alignment(Alignment::Right),
+            usage_area,
+        );
+    }
 }
 
 /// Draw the slash-command overlay as a floating panel whose bottom edge sits

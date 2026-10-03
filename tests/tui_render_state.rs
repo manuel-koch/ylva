@@ -1140,6 +1140,157 @@ fn footer_shows_the_active_named_engine_and_model() {
 }
 
 #[test]
+fn compaction_marker_renders_between_the_summarized_and_the_verbatim_turns() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_widgets;
+    use ylva::{ChatEntry, TuiState, UserMessageState};
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+    let mut state = TuiState {
+        chat_entries: vec![
+            ChatEntry::UserMessage {
+                text: "the old question".to_string(),
+                state: UserMessageState::Sent,
+            },
+            ChatEntry::AssistantMessage {
+                text: "the old answer".to_string(),
+                interrupted: false,
+            },
+            ChatEntry::CompactionMarker {
+                summarized_messages: 2,
+            },
+            ChatEntry::UserMessage {
+                text: "the tail question".to_string(),
+                state: UserMessageState::Sent,
+            },
+        ],
+        ..TuiState::new()
+    };
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
+        })
+        .expect("draw");
+
+    let buffer = terminal.backend().buffer().clone();
+    let rows: Vec<String> = (0..24u16)
+        .map(|row| {
+            (0..80u16)
+                .map(|column| buffer.cell((column, row)).unwrap().symbol().to_string())
+                .collect()
+        })
+        .collect();
+    let rendered = rows.join("\n");
+    assert!(
+        rendered.contains("compaction · 2 messages summarized"),
+        "the marker is rendered: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("the old question") && rendered.contains("the old answer"),
+        "the summarized prefix stays browsable: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("the tail question"),
+        "the verbatim tail stays browsable: {rendered:?}"
+    );
+    let marker_row = rows
+        .iter()
+        .position(|row| row.contains("compaction · 2 messages summarized"))
+        .expect("marker row");
+    let tail_row = rows
+        .iter()
+        .position(|row| row.contains("the tail question"))
+        .expect("tail row");
+    assert!(
+        marker_row < tail_row,
+        "the marker precedes the tail it opens: marker={marker_row} tail={tail_row}"
+    );
+}
+
+#[test]
+fn footer_shows_the_model_view_readout_right_aligned_on_the_hint_row() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_widgets;
+    use ylva::TuiState;
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
+    let mut state = TuiState {
+        context_usage_text: Some("64.2K (45%)".to_string()),
+        ..TuiState::new()
+    };
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
+        })
+        .expect("draw");
+
+    let buffer = terminal.backend().buffer().clone();
+    let hint_row = (0..20u16)
+        .find(|row| {
+            let line: String = (0..80u16)
+                .map(|column| buffer.cell((column, *row)).unwrap().symbol().to_string())
+                .collect();
+            line.contains("F1 help")
+        })
+        .expect("keybinding footer row");
+    let line: String = (0..80u16)
+        .map(|column| {
+            buffer
+                .cell((column, hint_row))
+                .unwrap()
+                .symbol()
+                .to_string()
+        })
+        .collect();
+
+    assert!(
+        line.contains("64.2K (45%)"),
+        "the hint row carries the model-view readout: {line:?}"
+    );
+    assert!(
+        line.starts_with(' ') && line.contains("enter send"),
+        "the keybinding hints stay left-aligned: {line:?}"
+    );
+    let readout_end = line
+        .char_indices()
+        .rev()
+        .find(|(_, character)| !character.is_whitespace())
+        .map(|(index, _)| index)
+        .expect("non-blank readout");
+    assert_eq!(
+        readout_end,
+        line.trim_end().len() - 1,
+        "the readout sits at the right end of the row: {line:?}"
+    );
+    assert!(
+        !line.contains("enter send   64.2K"),
+        "hints and readout must not run together: {line:?}"
+    );
+}
+
+#[test]
 fn footer_renders_bold_keys_with_normal_action_text_and_separators() {
     use ratatui::backend::TestBackend;
     use ratatui::style::Modifier;

@@ -87,9 +87,25 @@ pub struct Cli {
     )]
     pub log_format: LogFormat,
 
-    /// Resume an existing session by its uuid
+    /// Resume an existing session by its uuid (with `--clone`: the session
+    /// to copy from)
     #[arg(long, value_name = "uuid", value_parser = parse_conversation_id)]
     pub conversation_id: Option<Uuid>,
+
+    /// Clone the session named by `--conversation-id` into a brand-new
+    /// session instead of resuming it: every logical event of the source is
+    /// copied, the source file is left untouched, and all new writes go to
+    /// the clone. Requires `--conversation-id <uuid>`, and the source must be
+    /// a top-level session that no other Ylva process holds open.
+    #[arg(long, requires = "conversation_id")]
+    pub clone: bool,
+
+    /// Root agent type to run as; must exist in the selected profile. On a
+    /// fresh session it defaults to `default`, on a resume to the type the
+    /// session last stored — this flag always wins and becomes the latest
+    /// selection.
+    #[arg(long, value_name = "type")]
+    pub agent: Option<String>,
 
     /// Auto-approve read tool calls
     #[arg(long)]
@@ -373,6 +389,29 @@ mod tests {
         let cli =
             parse(["--conversation-id", &session_id.to_string()]).expect("a valid uuid parses");
         assert_eq!(cli.conversation_id, Some(session_id));
+    }
+
+    #[test]
+    fn clone_is_absent_without_the_flag() {
+        let cli = parse(["--no-tui"]).expect("parses");
+        assert!(!cli.clone);
+    }
+
+    #[test]
+    fn clone_with_a_conversation_id_parses() {
+        let session_id = uuid::Uuid::new_v4();
+        let cli = parse(["--conversation-id", &session_id.to_string(), "--clone"])
+            .expect("--clone with its source id parses");
+        assert!(cli.clone);
+        assert_eq!(cli.conversation_id, Some(session_id));
+    }
+
+    #[test]
+    fn clone_without_a_conversation_id_is_an_error() {
+        let error = parse(["--clone"]).expect_err("--clone needs a source session");
+        let message = error.to_string();
+        assert!(message.contains("--clone"), "{message}");
+        assert!(message.contains("--conversation-id"), "{message}");
     }
 
     #[test]

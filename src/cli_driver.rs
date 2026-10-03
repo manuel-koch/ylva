@@ -366,6 +366,10 @@ pub async fn run_cli(
         api_base_url: None,
         api_key: None,
         reasoning: None,
+
+        compact_target_ratio: 0.5,
+        soft_compaction_threshold: 0.7,
+        hard_compaction_threshold: 0.9,
     };
     let engine = Arc::new(EngineImpl::new(provider, engine_config));
     let (agent, ui_rx) = AgentLoop::new(engine, Arc::clone(&registry));
@@ -945,6 +949,11 @@ async fn run_cli_to_with_title(
                 }
             }
             Some(UiUpdate::SteerQueued { .. }) | Some(UiUpdate::SteerApplied { .. }) => {}
+            // Headless output has no footer for the model-view readout.
+            Some(UiUpdate::ContextUsage { .. } | UiUpdate::ChildContextUsage { .. }) => {}
+            // Headless output renders messages inline as they stream, so a
+            // transcript marker has nothing to be inserted into.
+            Some(UiUpdate::CompactionApplied { .. }) => {}
             // No-op in headless mode: there's no live bubble to patch a
             // status update onto (see `UiUpdate::ToolProgress`'s doc comment
             // for its TUI-only purpose). The eventual `ToolDone` still

@@ -18,7 +18,9 @@ surface.
 | `--log-file <path>` | path | any writable file path | *none* | Write logs to this file. The file is opened in truncate/overwrite mode on each start, so logs never accumulate across runs. |
 | `--log-level <level>` | enum | `trace`, `debug`, `info`, `warn`, `error` | `info` | Minimum severity written. Selecting a level includes it and all higher-severity levels (`trace < debug < info < warn < error`). |
 | `--log-format <format>` | enum | `text`, `json` | `text` | Output format. `text` is human-readable; `json` produces JSONL (one JSON object per line). |
-| `--conversation-id <uuid>` | uuid | any persisted session id | *none* | Resume the named session: its `.jsonl` file is re-attached for append instead of a fresh session being started. An unknown id is a hard error (exit code `2`) — never a silent fresh session. See `docs/persistence.md`. |
+| `--agent <type>` | string | any agent type available in the selected profile | see below | Root agent type to run as. On a fresh session it defaults to `default`; on a resume it defaults to the type the session last stored. An explicit value always wins and becomes the latest stored selection, so later resumes without the flag continue under it. A type that is absent from the selected profile is a startup error (exit code `2`), unless the flag explicitly names an available type that resolves a stale stored name. See [Resuming a session](#resuming-a-session). |
+| `--conversation-id <uuid>` | uuid | any persisted session id | *none* | Resume the named session: its `.jsonl` file is re-attached for append instead of a fresh session being started. An unknown id is a hard error (exit code `2`) — never a silent fresh session. With `--clone` it names the session to copy instead. See `docs/persistence.md`. |
+| `--clone` | none | — | — | Copy the session named by `--conversation-id` into a **brand-new** session instead of resuming it: the source's full logical event stream is replayed into the new file, the source file stays byte-for-byte unchanged, and all new writes go to the clone. Requires `--conversation-id <uuid>` (exit code `2` without it), and the source must be a top-level session that no other Ylva process holds open — a child transcript or a locked source is a hard error (exit code `2`) that creates nothing. See [Clone contract](persistence.md#clone-contract). |
 | `--auto-approve-read` | none | — | — | Skip the human-approval prompt for `read` tool calls. |
 | `--auto-approve-write` | none | — | — | Skip the human-approval prompt for `write` tool calls. |
 | `--auto-approve-glob` | none | — | — | Skip the human-approval prompt for `glob` tool calls. |
@@ -31,10 +33,11 @@ surface.
 
 An invalid `--color`, `--log-level`, `--log-format`, or `--conversation-id`
 value, an unknown flag, a flag missing its required value (for any
-value-taking flag, including `--profile`), or a `--log-file` that cannot be
-opened (for example, its containing directory does not exist) prints a usage
-error to stderr and exits with code `2` — the error names the attempted path
-or flag. Repeating `--color` or `--prompt` uses the last occurrence; other
+value-taking flag, including `--profile`), `--clone` without
+`--conversation-id`, or a `--log-file` that cannot be opened (for example, its
+containing directory does not exist) prints a usage error to stderr and exits
+with code `2` — the error names the attempted path or flag. Repeating
+`--color` or `--prompt` uses the last occurrence; other
 value-taking flags may not be repeated. The `init` subcommand may follow
 global flags (`ylva --no-tui init --workspace`). The `init` subcommand also
 exits with code `2` when its target root cannot be resolved or a seeded file
@@ -58,11 +61,16 @@ Session: dbe9a693-d709-4670-89cd-6162e6ae3e11
 Resume with: ylva --conversation-id dbe9a693-d709-4670-89cd-6162e6ae3e11
 ```
 
+A resume also restores the root agent type the session last stored; an
+explicit `--agent <type>` on the resume wins instead and is persisted as the
+session's latest selection, while sessions written before agent-type metadata
+existed continue as `default`.
+
 When the run used an explicit `--profile <name>`, the hint includes it too
 (`--profile <name>` is otherwise omitted, since the implicit default profile
 needs no flag to resume with the same configuration). See
 `docs/persistence.md` for how `--conversation-id` re-attaches the session
-file.
+file, and `--clone` starts a copy of it instead.
 
 ## Prompt resolution
 
@@ -111,6 +119,17 @@ environment values are never written to logs.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `YLVA_REQUEST_DUMP_PATH` | — | When set, every outbound HTTP request is dumped, including model catalogs, Ollama metadata, chat/SSE, and web search. Request and response files share a timestamp and per-request id. A relative directory is resolved against the process working directory. Used by `make build-debug-and-run-with-logs`. |
+| `YLVA_TOKEN_USAGE_DUMP_PATH` | — | When set, append one metadata-only JSONL record per model request to this file. Records pair the pre-send `cl100k_base` estimate of the serialized Chat Completions body with provider-reported input usage for that request when present. Each record includes its UTC request timestamp and session ID when associated with a persisted session (`null` for standalone utility requests). A relative path is resolved against the process working directory. No conversation content, credentials, or request payload is written. This is diagnostic data, not billed usage, and is independent of `YLVA_REQUEST_DUMP_PATH` and session persistence. |
+
+The token usage dump is a single append-only JSONL file. Each record contains a
+request correlation ID, UTC timestamp, nullable session ID, provider
+implementation and connection, model, local estimated input-token count and estimate source, and nullable
+`reported_input_tokens`/`reported_source` fields. OpenAI-compatible streams request
+usage and recognize `usage.prompt_tokens` or `usage.input_tokens`; provider
+support varies, so a missing or interrupted observation is `null`, never zero.
+The local estimate tokenizes the exact serialized request JSON with
+`cl100k_base`; it is a consistent comparison baseline, not a prediction of the
+provider's model-native token count.
 
 The value is a path template: the directory and filename stem are extracted and
 the request is written as

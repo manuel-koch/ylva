@@ -282,6 +282,10 @@ async fn ollama_chat_request_carries_the_runtime_reasoning_effort() {
             api_base_url: Some(server.base_url()),
             api_key: None,
             reasoning: Some("medium".to_string()),
+
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
         },
     );
 
@@ -353,6 +357,10 @@ async fn openrouter_request_projects_selected_image_capability_once() {
             api_base_url: Some(server.base_url()),
             api_key: Some("test-key".to_string()),
             reasoning: None,
+
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
         },
     );
     let models = engine.list_models().await.expect("model catalog");
@@ -419,6 +427,10 @@ async fn ollama_vision_request_uses_compatibility_image_shape_and_pdf_fallback()
             api_base_url: Some(server.base_url()),
             api_key: None,
             reasoning: None,
+
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
         },
     );
     let models = engine.list_models().await.expect("model catalog");
@@ -555,6 +567,10 @@ async fn generic_openai_compatible_catalog_can_opt_into_image_projection() {
             api_base_url: Some(server.base_url()),
             api_key: None,
             reasoning: None,
+
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
         },
     );
     let models = engine.list_models().await.expect("model catalog");
@@ -614,6 +630,10 @@ async fn named_ollama_connection_uses_native_model_discovery() {
         api_base_url: None,
         api_key: None,
         reasoning: None,
+
+        compact_target_ratio: 0.5,
+        soft_compaction_threshold: 0.7,
+        hard_compaction_threshold: 0.9,
     };
     let provider = ProviderRegistry::provider_from_provider_config(
         "ollama-local",
@@ -726,6 +746,10 @@ async fn switching_model_during_stream_keeps_in_flight_request_on_original_model
             api_base_url: Some(server.base_url()),
             api_key: None,
             reasoning: None,
+
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
         },
     );
 

@@ -179,6 +179,12 @@ fn project_for_draw(state: &AppState) -> TuiState {
         pending_approval_is_subagent,
         input_history: state.input_history.clone(),
         history_index: state.history_index,
+        context_usage_text: state.active_context_usage().map(|usage| {
+            crate::tui_reducer_state::format_context_usage(
+                usage.estimated_tokens,
+                usage.context_length,
+            )
+        }),
         draft: state.draft.clone(),
         input_area: state.layout.input_area.rect,
         toast: state.toast.clone(),

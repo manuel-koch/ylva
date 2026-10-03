@@ -12,14 +12,17 @@ Resume with: ylva --conversation-id <session_id>
 
 ## Clone and continue a session
 
-Selected for the blueprint finalization plan. Add `--clone` to
-`--conversation-id <uuid>` in both TUI and headless modes. Clone only a
-top-level session. The clone receives a new session ID, keeps the source title,
-and records the source ID as `cloned_from`. Copy the logical session events,
-including messages, compaction snapshots, model/agent changes, and child-run
-lifecycle records. Child transcript files remain shared read-only references.
-A clone fails if the source is locked by another Ylva process. All new
-conversation writes go to the clone; the original session remains unchanged.
+Implemented by [the blueprint finalization plan](../plans/blueprint-finalization-plan.md):
+`--clone` with `--conversation-id <uuid>` in both TUI and headless modes
+clones only a top-level session. The clone receives a new session ID, keeps
+the source title, and records the source ID as `cloned_from`. The logical
+session events are copied — messages, compaction snapshots, model/agent
+changes, and child-run lifecycle records (the latter rebased onto the clone's
+id) — while child transcript files remain shared read-only references. A
+clone fails if the source is locked by another Ylva process or is a child
+transcript; all new conversation writes go to the clone and the original
+session remains byte-for-byte unchanged. See the
+[clone contract](../persistence.md#clone-contract).
 
 ## List sessions
 

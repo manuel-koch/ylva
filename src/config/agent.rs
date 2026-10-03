@@ -47,6 +47,12 @@ pub struct AgentConfig {
     /// `None` means no timeout is enforced.
     #[serde(default, deserialize_with = "deserialize_optional_u64_or_string")]
     pub timeout_secs: Option<u64>,
+    /// Maximum tool-use rounds the agent's loop may start within a single
+    /// user turn before the iteration guard stops re-prompting. When `None`
+    /// the effective limit is [`crate::agent::DEFAULT_MAX_TOOL_USE_ITERATIONS`].
+    /// A value of `0` is rejected by profile validation.
+    #[serde(default, deserialize_with = "deserialize_optional_usize_or_string")]
+    pub max_tool_iterations: Option<usize>,
     /// The agent type's own persona: the one model-facing text this type
     /// contributes. It is composed as a single section after the global
     /// baseline (global SOUL plus trusted instruction sections) and before
@@ -80,6 +86,28 @@ where
         Some(TimeoutValue::Text(value)) => value.trim().parse::<u64>().map(Some).map_err(|error| {
             serde::de::Error::custom(format!("invalid timeout_secs '{value}': {error}"))
         }),
+        None => Ok(None),
+    }
+}
+
+fn deserialize_optional_usize_or_string<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum IterationLimitValue {
+        Number(usize),
+        Text(String),
+    }
+
+    match Option::<IterationLimitValue>::deserialize(deserializer)? {
+        Some(IterationLimitValue::Number(value)) => Ok(Some(value)),
+        Some(IterationLimitValue::Text(value)) => {
+            value.trim().parse::<usize>().map(Some).map_err(|error| {
+                serde::de::Error::custom(format!("invalid max_tool_iterations '{value}': {error}"))
+            })
+        }
         None => Ok(None),
     }
 }

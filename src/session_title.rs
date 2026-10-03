@@ -148,7 +148,7 @@ impl TitleAttempt {
                     prompt_chars,
                     "session title utility request started"
                 );
-                match generate_title(engine, prompt).await {
+                match generate_title(engine, prompt, Some(session_id)).await {
                     Ok(title) => {
                         let title_chars = title.chars().count();
                         tracing::info!(
@@ -196,15 +196,20 @@ impl TitleAttempt {
     }
 }
 
-async fn generate_title(engine: Arc<dyn Engine>, prompt: String) -> anyhow::Result<String> {
+async fn generate_title(
+    engine: Arc<dyn Engine>,
+    prompt: String,
+    session_id: Option<uuid::Uuid>,
+) -> anyhow::Result<String> {
     let mut stream = match engine
-        .chat(
+        .chat_with_session_id(
             vec![Message::User {
                 content: prompt,
                 kind: UserMessageKind::Explicit,
             }],
             Vec::new(),
             CancellationToken::new(),
+            session_id,
         )
         .await
     {
@@ -354,6 +359,10 @@ mod tests {
                 api_base_url: None,
                 api_key: None,
                 reasoning: None,
+
+                compact_target_ratio: 0.5,
+                soft_compaction_threshold: 0.7,
+                hard_compaction_threshold: 0.9,
             }
         }
 
@@ -406,7 +415,7 @@ mod tests {
         let prompt = "<user_message>\nquestion\n</user_message>".to_string();
 
         assert_eq!(
-            generate_title(engine, prompt.clone())
+            generate_title(engine, prompt.clone(), None)
                 .await
                 .expect("title generated"),
             "A title"
@@ -433,7 +442,9 @@ mod tests {
             response: "\n ".to_string(),
         });
 
-        assert!(generate_title(engine, "prompt".to_string()).await.is_err());
+        assert!(generate_title(engine, "prompt".to_string(), None)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -446,6 +457,7 @@ mod tests {
             uuid::Uuid::new_v4(),
             "mock",
             "title-model",
+            None,
         )
         .expect("store created");
         store.record_message(&Message::User {
@@ -472,6 +484,10 @@ mod tests {
                 api_base_url: None,
                 api_key: None,
                 reasoning: None,
+
+                compact_target_ratio: 0.5,
+                soft_compaction_threshold: 0.7,
+                hard_compaction_threshold: 0.9,
             },
         ));
         let attempt = TitleAttempt::default();

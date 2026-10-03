@@ -27,20 +27,22 @@ use crate::llm::{ToolEnvelope, ToolSchema};
 use crate::store::Store;
 
 pub mod child_agent_manager;
+pub mod compaction;
 pub mod tools;
 
 use tools::{ToolCall, ToolRegistry};
 
-/// Maximum number of LLM requests the tool-use loop starts within a single user
-/// turn before the guard stops re-prompting. Applies identically to the root
-/// loop and to every child `AgentLoop` spawned via `spawn_subagent` — each
-/// loop tracks its own `iterations` counter independently, so a child
-/// tripping this guard neither counts against nor is masked by the root's own
-/// counter. See `UiUpdate::Error::run_id` for how the resulting error is
-/// attributed back to whichever loop (root or child) actually exceeded it.
-/// Per-engine configurability is a later (Phase 5) concern; this
-/// module-level default is the Phase 3 SSOT.
-pub const MAX_TOOL_USE_ITERATIONS: usize = 50;
+/// Default number of LLM requests the tool-use loop starts within a single
+/// user turn before the guard stops re-prompting. Each loop tracks its own
+/// `iterations` counter independently, so a child tripping this guard neither
+/// counts against nor is masked by the root's own counter. See
+/// `UiUpdate::Error::run_id` for how the resulting error is attributed back
+/// to whichever loop (root or child) actually exceeded it.
+///
+/// This is the *default* only: an agent type's `max_tool_iterations`
+/// (`ProfileConfig::max_tool_iterations_for`) overrides it per loop, root and
+/// child alike, through `AgentLoop::with_max_tool_iterations`.
+pub const DEFAULT_MAX_TOOL_USE_ITERATIONS: usize = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentMode {
@@ -417,6 +419,121 @@ pub enum UiUpdate {
         status: String,
         result: Option<String>,
     },
+    /// The model view's estimated size against the active context window,
+    /// reported once hydration finishes and again whenever a turn settles so
+    /// the footer can show e.g. `64.2K (45%)`. The estimate is the same
+    /// advisory token count compaction budgets with — not billed usage.
+    ContextUsage {
+        estimated_tokens: usize,
+        context_length: usize,
+    },
+    /// The model view's estimated size against the active context window for
+    /// one child run. The parent loop forwards this update unchanged; the TUI
+    /// keeps it keyed by `run_id` so background children cannot replace the
+    /// root footer value.
+    ChildContextUsage {
+        run_id: Uuid,
+        estimated_tokens: usize,
+        context_length: usize,
+    },
+    /// A compaction snapshot was applied to the model view this run: the
+    /// transcript keeps every message, and the TUI marks where the verbatim
+    /// tail begins. `entry_index` counts the chat entries built from the
+    /// messages before the cut; `summarized_messages` is how many transcript
+    /// messages the snapshot summarizes (rebuilt system prompts excluded).
+    CompactionApplied {
+        entry_index: usize,
+        summarized_messages: usize,
+    },
+}
+
+/// Tell the UI where a freshly applied compaction sits in the transcript it
+/// replays, so the marker lands at the same entry the next resume would put
+/// it at.
+async fn send_compaction_applied(
+    ui_tx: &mpsc::Sender<UiUpdate>,
+    context: &Context,
+    boundary: usize,
+) {
+    let entry_index =
+        crate::tui_reducer_state::project_messages(&context.messages()[..boundary]).len();
+    let summarized_messages = boundary.saturating_sub(context.leading_system_len());
+    let _ = ui_tx
+        .send(UiUpdate::CompactionApplied {
+            entry_index,
+            summarized_messages,
+        })
+        .await;
+}
+
+/// Run one compaction sweep at a safe boundary and report the outcome: the
+/// model-view usage readout, plus a transcript marker when that sweep applied
+/// a snapshot the transcript has not shown yet.
+///
+/// The replayed marker comes from the persisted snapshot instead (the TUI
+/// reads it before the loop ever runs), so only a compaction applied *here*
+/// emits this update — `boundary_before`/`boundary_after` make the sweep's
+/// decision visible to the caller.
+async fn sweep_compaction_and_report(
+    compaction: &mut compaction::CompactionRuntime,
+    context: &mut Context,
+    engine: &dyn Engine,
+    generation: u64,
+    run_id: Option<Uuid>,
+    ui_tx: &mpsc::Sender<UiUpdate>,
+) {
+    let boundary_before = context.compaction().map(|snapshot| snapshot.boundary);
+    compaction.sweep(context, engine, generation);
+    if compaction.enabled() || run_id.is_some() {
+        send_context_usage(ui_tx, context, engine, run_id).await;
+    }
+    if !compaction.enabled() {
+        return;
+    }
+    if let Some(boundary_after) = context.compaction().map(|snapshot| snapshot.boundary) {
+        if boundary_before != Some(boundary_after) {
+            send_compaction_applied(ui_tx, context, boundary_after).await;
+        }
+    }
+}
+
+/// Report the model view's size against the active window to the UI.
+///
+/// Sent by root loops only (`CompactionRuntime::enabled`), so a child's
+/// context can never overwrite the root's footer readout.
+async fn send_context_usage(
+    ui_tx: &mpsc::Sender<UiUpdate>,
+    context: &Context,
+    engine: &dyn Engine,
+    run_id: Option<Uuid>,
+) {
+    let (estimated_tokens, context_length) = (
+        context.model_view_token_count(),
+        engine.effective_context_length(),
+    );
+    tracing::debug!(
+        run_id = ?run_id,
+        estimated_tokens,
+        context_length,
+        usage_ratio = if context_length == 0 {
+            0.0
+        } else {
+            estimated_tokens as f64 / context_length as f64
+        },
+        "model-view context usage reported"
+    );
+    let update = match run_id {
+        Some(run_id) => UiUpdate::ChildContextUsage {
+            run_id,
+            estimated_tokens,
+            context_length,
+        },
+        None => UiUpdate::ContextUsage {
+            estimated_tokens,
+            context_length,
+        },
+    };
+    let _ = ui_tx.send(update).await;
 }
 
 /// A raw tool-call fragment emitted by a provider, to be assembled by the
@@ -618,9 +735,108 @@ pub static TOOL_PROTOCOL_SYSTEM_PROMPT: LazyLock<String> = LazyLock::new(|| {
     format!("{lead}\n{shape}")
 });
 
+/// Priority tier of a message in the model-facing view (blueprint §4C).
+///
+/// Tiers describe how the *model view* treats a message when the context
+/// window fills. The transcript itself is tier-agnostic: it keeps every
+/// message regardless of what the model view later drops or summarizes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageTier {
+    /// Tier 0: the core identity prompt — never dropped or summarized.
+    System,
+    /// Tier 1: stable instructions (tool protocol, persona, briefing) —
+    /// never dropped initially.
+    InitialContext,
+    /// Tier 2: ordinary conversation turns — dropped last.
+    Recent,
+    /// Tier 3: previously summarized buckets — dropped before `Recent`.
+    Compacted,
+}
+
+/// Bookkeeping cached for one transcript message when it enters the context:
+/// its tier in the model-facing view and its approximate token count.
+///
+/// Held index-parallel to [`Context::messages`] (the blueprint's
+/// `TieredMessage` bookkeeping) so the transcript itself stays a plain
+/// `Vec<Message>` for replay, persistence and cloning, and so no message text
+/// is stored twice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContextEntry {
+    tier: MessageTier,
+    token_count: usize,
+}
+
+/// The tier a message occupies at `index`: the leading identity prompt is
+/// the `System` tier, every other system message (tool protocol, persona,
+/// briefing, child budget) is stable `InitialContext` instructions, and
+/// everything else is conversation `Recent`. [`MessageTier::Compacted`] is
+/// only ever assigned to the synthetic summary entry compaction projects
+/// into the model view, never to a transcript message.
+fn tier_for(index: usize, message: &Message) -> MessageTier {
+    match message {
+        Message::System { .. } if index == 0 => MessageTier::System,
+        Message::System { .. } => MessageTier::InitialContext,
+        _ => MessageTier::Recent,
+    }
+}
+
+/// Approximate token count of one message's model-visible text.
+///
+/// Counts the payload text only (content, tool-call arguments, tool result
+/// and error text); role framing and message separators are ignored, which
+/// is well inside the approximation's tolerance (blueprint §4C: counts are
+/// advisory, the `context_length × 0.9` margin absorbs the error).
+fn estimate_message_tokens(estimator: crate::llm::TokenEstimator, message: &Message) -> usize {
+    match message {
+        Message::System { content } => estimator.estimate_tokens(content),
+        Message::User { content, .. } => estimator.estimate_tokens(content),
+        Message::Assistant {
+            content,
+            tool_calls,
+            ..
+        } => {
+            let mut tokens = estimator.estimate_tokens(content);
+            for tool_call in tool_calls {
+                tokens += estimator.estimate_tokens(&tool_call.name);
+                tokens += estimator.estimate_tokens(&tool_call.arguments.to_string());
+            }
+            tokens
+        }
+        Message::ToolResult { value } => {
+            estimator.estimate_tokens(&value.name) + estimator.estimate_tokens(&value.result)
+        }
+        Message::ToolError { name, error, .. } => {
+            estimator.estimate_tokens(name) + estimator.estimate_tokens(error)
+        }
+    }
+}
+
+/// The conversation as the agent loop records it: every committed message, in
+/// order, exactly as replayed by the TUI and persisted to the session file.
+///
+/// The model-facing view is built separately (see [`Context::model_messages`])
+/// so compaction can replace an old prefix without touching this record.
 #[derive(Debug, Default)]
 pub struct Context {
     messages: Vec<Message>,
+    /// Bookkeeping for `messages`, index-aligned and maintained exclusively
+    /// by [`Context::push_entry`] (i.e. by `commit` and `hydrate`): tier plus
+    /// the token count cached when the message entered the context.
+    entries: Vec<ContextEntry>,
+    /// Token estimator used to (re)build `entries`' counts. Chosen from the
+    /// active engine's provider connection and refreshed when the model
+    /// switches.
+    estimator: crate::llm::TokenEstimator,
+    /// The latest applied compaction: `messages[..boundary]` is represented
+    /// in the model view by its marked summary. The transcript keeps every
+    /// summarized message untouched (blueprint §4C *record vs view*).
+    compaction: Option<crate::agent::compaction::CompactionSnapshot>,
+    /// First transcript index included in the model view after the leading
+    /// system block. `0` means "nothing dropped"; [`Context::drop_model_view_to`]
+    /// and [`Context::set_compaction`] advance it, never rewind it. Like
+    /// `compaction`, this shapes the model view only — the transcript is
+    /// never rewritten.
+    view_start: usize,
     /// Session store this context appends its committed messages to, when
     /// persistence is enabled (blueprint §4H). `None` for child agents and
     /// for runs started without a store.
@@ -634,17 +850,39 @@ impl Context {
 
     /// Construct a context with a caller-supplied initial system message.
     pub fn with_system_prompt(system_prompt: impl Into<String>) -> Self {
-        Context {
+        let mut context = Context {
             store: None,
-            messages: vec![
-                Message::System {
-                    content: system_prompt.into(),
-                },
-                Message::System {
-                    content: TOOL_PROTOCOL_SYSTEM_PROMPT.to_string(),
-                },
-            ],
-        }
+            entries: Vec::new(),
+            estimator: crate::llm::TokenEstimator::default(),
+            compaction: None,
+            view_start: 0,
+            messages: Vec::new(),
+        };
+        context.push_entry(Message::System {
+            content: system_prompt.into(),
+        });
+        context.push_entry(Message::System {
+            content: TOOL_PROTOCOL_SYSTEM_PROMPT.to_string(),
+        });
+        context
+    }
+
+    /// Append a message and its bookkeeping together, without forwarding to
+    /// the session store — hydration replays messages the store already
+    /// holds, while [`Context::commit`] persists first and then lands here.
+    fn push_entry(&mut self, message: Message) {
+        let index = self.messages.len();
+        let entry = ContextEntry {
+            tier: tier_for(index, &message),
+            token_count: estimate_message_tokens(self.estimator, &message),
+        };
+        self.messages.push(message);
+        self.entries.push(entry);
+        debug_assert_eq!(
+            self.messages.len(),
+            self.entries.len(),
+            "transcript and bookkeeping stay index-aligned"
+        );
     }
 
     /// Attach a session store, so every message committed from here on is
@@ -655,8 +893,17 @@ impl Context {
     /// are rebuilt from the running binary on every resume, so storing them
     /// would pin a stale copy into the transcript.
     pub fn set_store(&mut self, store: Store) {
-        match Store::read_messages(store.path()) {
-            Ok(messages) => self.hydrate(messages),
+        match Store::read_session_state(store.path()) {
+            Ok(state) => {
+                self.hydrate(state.messages);
+                // Rebuild the model view from the latest snapshot plus the
+                // verbatim tail; the transcript above already carries every
+                // original message, and re-applying is a read — it never
+                // writes the event back.
+                if let Some(snapshot) = state.compaction {
+                    self.set_compaction(snapshot);
+                }
+            }
             Err(error) => tracing::warn!(
                 %error,
                 path = %store.path().display(),
@@ -671,7 +918,9 @@ impl Context {
     /// appended in store order. Malformed store lines are handled by the store's
     /// tolerant read path.
     pub fn hydrate(&mut self, messages: Vec<Message>) {
-        self.messages.extend(messages);
+        for message in messages {
+            self.push_entry(message);
+        }
 
         let mut completed_tool_calls = std::collections::HashSet::new();
         let mut tool_calls = Vec::new();
@@ -695,7 +944,7 @@ impl Context {
             if !completed_tool_calls.contains(&id)
                 && name != tools::spawn_subagent::SpawnSubagentTool::NAME
             {
-                self.messages.push(Message::ToolError {
+                self.push_entry(Message::ToolError {
                     id,
                     name,
                     error: "Tool call did not complete before the session ended.".to_string(),
@@ -724,7 +973,7 @@ impl Context {
         if let Some(store) = &self.store {
             store.record_message(&message);
         }
-        self.messages.push(message);
+        self.push_entry(message);
     }
 
     pub fn push_user(&mut self, text: String) {
@@ -814,6 +1063,233 @@ impl Context {
 
     pub fn messages(&self) -> &[Message] {
         &self.messages
+    }
+
+    /// Number of leading contiguous system messages: the rebuilt identity
+    /// prompt and tool-protocol prompt (plus any instructions injected ahead
+    /// of the first user turn). Compaction neither summarizes nor drops them
+    /// (blueprint §4C *system tiers*).
+    pub fn leading_system_len(&self) -> usize {
+        self.messages
+            .iter()
+            .take_while(|message| matches!(message, Message::System { .. }))
+            .count()
+    }
+
+    /// First transcript index included in the model view after the leading
+    /// system block.
+    fn model_view_start(&self) -> usize {
+        self.view_start.max(self.leading_system_len())
+    }
+
+    /// Tokens of the model view that are *not* part of the verbatim tail:
+    /// the leading system block plus, when compacted, the projected summary.
+    fn model_view_head_tokens(&self) -> usize {
+        let leading_system_len = self.leading_system_len();
+        let mut tokens: usize = self.entries[..leading_system_len]
+            .iter()
+            .map(|entry| entry.token_count)
+            .sum();
+        if let Some(snapshot) = &self.compaction {
+            tokens += estimate_message_tokens(self.estimator, &snapshot.summary_message());
+        }
+        tokens
+    }
+
+    /// The model-facing view of the conversation for the next request.
+    ///
+    /// The transcript stays intact no matter what the model sees: the
+    /// leading system instructions, then the marked summary of the compacted
+    /// prefix (when one is applied), then the verbatim tail after the
+    /// boundary (blueprint §4C). Without a compaction snapshot — and before
+    /// the hard fallback drops anything — this is simply the whole transcript
+    /// in order.
+    pub fn model_messages(&self) -> Vec<Message> {
+        let leading_system_len = self.leading_system_len();
+        let view_start = self.model_view_start();
+        let mut messages: Vec<Message> = self.messages[..leading_system_len].to_vec();
+        if let Some(snapshot) = &self.compaction {
+            messages.push(snapshot.summary_message());
+        }
+        messages.extend_from_slice(&self.messages[view_start..]);
+        messages
+    }
+
+    /// Tier of the message at `index` in the model-facing view.
+    pub fn tier(&self, index: usize) -> Option<MessageTier> {
+        self.entries.get(index).map(|entry| entry.tier)
+    }
+
+    /// The token count cached when the message at `index` entered the
+    /// context, in the estimator active at that time.
+    pub fn token_count(&self, index: usize) -> Option<usize> {
+        self.entries.get(index).map(|entry| entry.token_count)
+    }
+
+    /// Sum of every cached token count: the approximate size of the whole
+    /// transcript, in tokens. The model view can be smaller — see
+    /// [`Context::model_view_token_count`].
+    pub fn approximate_token_count(&self) -> usize {
+        self.entries.iter().map(|entry| entry.token_count).sum()
+    }
+
+    /// Approximate size of the *model view* — what the next request actually
+    /// sends — in tokens. This is the number compaction thresholds measure.
+    pub fn model_view_token_count(&self) -> usize {
+        let view_start = self.model_view_start();
+        let tail_tokens: usize = self.entries[view_start..]
+            .iter()
+            .map(|entry| entry.token_count)
+            .sum();
+        self.model_view_head_tokens() + tail_tokens
+    }
+
+    /// Number of messages projected into the current model view, including
+    /// the leading system block and the synthetic summary message, if any.
+    pub(crate) fn model_view_message_count(&self) -> usize {
+        self.leading_system_len()
+            + usize::from(self.compaction.is_some())
+            + self.messages.len().saturating_sub(self.model_view_start())
+    }
+
+    /// Approximate share (`0.0`–`1.0+`) of the supplied context window the
+    /// model view occupies. `context_length` is the active engine's effective
+    /// window ([`crate::llm::Engine::effective_context_length`]), so a
+    /// `/models` switch re-evaluates every threshold derived from this.
+    pub fn estimated_usage_ratio(&self, context_length: usize) -> f64 {
+        if context_length == 0 {
+            return 0.0;
+        }
+        self.model_view_token_count() as f64 / context_length as f64
+    }
+
+    /// The latest applied compaction snapshot, if any.
+    pub fn compaction(&self) -> Option<&crate::agent::compaction::CompactionSnapshot> {
+        self.compaction.as_ref()
+    }
+
+    /// Install a prefix summary as the model view's compaction snapshot:
+    /// `messages[..boundary]` is replaced by its marked summary, the tail
+    /// after `boundary` stays verbatim, and the transcript keeps everything.
+    ///
+    /// Returns `false` when the snapshot does not advance past the boundary
+    /// already applied — boundaries only ever move forward, so an older (or
+    /// replayed) result can never resurrect an already summarized prefix.
+    pub fn set_compaction(
+        &mut self,
+        snapshot: crate::agent::compaction::CompactionSnapshot,
+    ) -> bool {
+        let leading_system_len = self.leading_system_len();
+        let clamped_boundary = snapshot
+            .boundary
+            .clamp(leading_system_len, self.messages.len());
+        // Snap forward to a complete-turn cut: a persisted boundary must
+        // never re-split a tool call from its one result after a resume
+        // (blueprint §4C *tool protocol constraints*).
+        let boundary =
+            crate::agent::compaction::first_safe_boundary_from(&self.messages, clamped_boundary)
+                .unwrap_or(self.messages.len())
+                .max(leading_system_len);
+        if let Some(current) = &self.compaction {
+            if boundary <= current.boundary {
+                return false;
+            }
+        }
+        tracing::debug!(
+            boundary,
+            summary_chars = snapshot.summary.chars().count(),
+            "applying compaction snapshot to the model view"
+        );
+        self.view_start = self.view_start.max(boundary);
+        self.compaction = Some(crate::agent::compaction::CompactionSnapshot {
+            boundary,
+            summary: snapshot.summary,
+        });
+        true
+    }
+
+    /// Oldest-first token budget the prefix a new summary must cover so the
+    /// model view lands at `target_tokens`: the smallest prefix (counted from
+    /// the first message after the leading system block) whose removal
+    /// reaches the target, snapped forward to a cut that keeps every
+    /// tool-call/result group intact.
+    ///
+    /// `None` when no summarization is useful: the view already fits the
+    /// target, or there is no non-system prefix to summarize at all. The
+    /// summary's own size is unknown when this runs, so reaching the target
+    /// is best-effort — a later sweep trims the remainder.
+    pub fn summary_boundary_for_target(&self, target_tokens: usize) -> Option<usize> {
+        let leading_system_len = self.leading_system_len();
+        let tokens_to_remove = self.model_view_token_count().saturating_sub(target_tokens);
+        if tokens_to_remove == 0 {
+            return None;
+        }
+        let mut accumulated = 0usize;
+        let end_of_prefix = self.entries.len();
+        for index in leading_system_len..end_of_prefix {
+            accumulated += self.entries[index].token_count;
+            if accumulated >= tokens_to_remove {
+                return crate::agent::compaction::first_safe_boundary_from(
+                    &self.messages,
+                    (index + 1).max(leading_system_len + 1),
+                )
+                .filter(|boundary| *boundary > leading_system_len);
+            }
+        }
+        // The whole non-system prefix is smaller than what must go: summarize
+        // all of it when that is a non-empty, cuttable prefix.
+        (end_of_prefix > leading_system_len)
+            .then(|| {
+                crate::agent::compaction::first_safe_boundary_from(
+                    &self.messages,
+                    leading_system_len + 1,
+                )
+            })
+            .flatten()
+            .filter(|boundary| *boundary > leading_system_len)
+    }
+
+    /// Synchronously drop model-view messages — oldest first — until the view
+    /// fits `target_tokens` (blueprint §4C hard fallback).
+    ///
+    /// Only complete turns are cut: every candidate position keeps each
+    /// `tool_call_id` together with its one result, the leading system
+    /// instructions and any applied summary stay, and the transcript itself
+    /// is untouched. Returns `true` when the target is met; `false` when even
+    /// the empty tail would not fit (nothing is dropped then).
+    pub fn drop_model_view_to(&mut self, target_tokens: usize) -> bool {
+        let from = self.model_view_start();
+        let head_tokens = self.model_view_head_tokens();
+        for cut in crate::agent::compaction::safe_boundaries_from(&self.messages, from) {
+            let tail_tokens: usize = self.entries[cut..]
+                .iter()
+                .map(|entry| entry.token_count)
+                .sum();
+            if head_tokens + tail_tokens <= target_tokens {
+                self.view_start = self.view_start.max(cut);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The estimator used to cache token counts.
+    pub fn token_estimator(&self) -> crate::llm::TokenEstimator {
+        self.estimator
+    }
+
+    /// Switch to another estimator (a different provider connection) and
+    /// refresh every cached count in one pass. A no-op for the estimator
+    /// already in use, so repeated model switches on the same connection
+    /// never pay for a recount.
+    pub fn set_token_estimator(&mut self, estimator: crate::llm::TokenEstimator) {
+        if self.estimator == estimator {
+            return;
+        }
+        self.estimator = estimator;
+        for (entry, message) in self.entries.iter_mut().zip(self.messages.iter()) {
+            entry.token_count = estimate_message_tokens(estimator, message);
+        }
     }
 }
 
@@ -1027,14 +1503,16 @@ pub struct ChildRoleConfig {
     pub run_id: Uuid,
     /// The parent's `spawn_subagent` tool-call id this run is tied to.
     pub call_id: Uuid,
+    /// Persisted parent conversation associated with this child's requests.
+    pub session_id: Option<Uuid>,
     /// Optional context/background injected as an additional system message
     /// ahead of the child's task.
     pub briefing: Option<String>,
     /// Cancelled by the parent's `ChildAgentManager::cancel_all` (e.g. on
     /// `AgentCommand::Stop`); cascades into this child's own cancellation.
     pub parent_cancel: CancellationToken,
-    /// Forwards this child's `UiUpdate`s up to the parent, for live-token
-    /// display (blueprint §4G; rendering itself is Phase 6.10).
+    /// Forwards this child's `UiUpdate`s up to the parent, for live-token and
+    /// context-usage display in the child drill-in view.
     pub subagent_ui_tx: mpsc::Sender<UiUpdate>,
     /// Sent to by this child's `agent_finish` tool when called.
     pub finish_tx: mpsc::Sender<crate::child_agent_manager::FinishResult>,
@@ -1077,9 +1555,30 @@ pub struct AgentLoop {
     child_agent_manager: Option<crate::child_agent_manager::ChildAgentManager>,
     finish_rx: Option<mpsc::Receiver<crate::child_agent_manager::FinishResult>>,
     subagent_ui_rx: Option<mpsc::Receiver<UiUpdate>>,
+    /// Set via [`AgentLoop::with_max_tool_iterations`]: the effective
+    /// tool-use iteration limit for this loop, applied by the shared
+    /// iteration guard. Defaults to [`DEFAULT_MAX_TOOL_USE_ITERATIONS`].
+    max_tool_iterations: usize,
+    /// Set via [`AgentLoop::with_compaction_engine`] from the profile's
+    /// `compact_engine`: the engine background prefix summaries run on.
+    /// `None` (child loops, or no compact engine configured) disables
+    /// compaction for this loop.
+    compaction_engine: Option<Arc<dyn Engine>>,
+    /// Framing instruction for background summary requests: the resolved
+    /// `COMPACTION.md` layered like `SOUL.md`, or its built-in default.
+    compaction_summary_prompt: String,
+    /// Set via [`AgentLoop::with_agent_type`]: the root agent type this loop
+    /// was created for. Stamped into the `meta` header of the replacement
+    /// session `/clear` starts, so a cleared conversation keeps advertising
+    /// the type it runs under. `None` for loops built outside the factory
+    /// (tests, the legacy `run_cli` path).
+    agent_type: Option<String>,
     /// Set via [`AgentLoop::with_store`] when persistence is enabled: the
     /// session file this loop's committed messages are appended to.
     store: Option<Store>,
+    /// Session identity attached to model requests, including child requests
+    /// that are attributed to their persisted parent conversation.
+    session_id: Option<Uuid>,
     /// Shared with the running loop so drivers observe the successor store
     /// after `AgentCommand::ClearContext` rolls the session over.
     current_store: Arc<Mutex<Option<Store>>>,
@@ -1140,7 +1639,13 @@ impl AgentLoop {
             child_agent_manager: None,
             finish_rx: None,
             subagent_ui_rx: None,
+            max_tool_iterations: DEFAULT_MAX_TOOL_USE_ITERATIONS,
+            compaction_engine: None,
+            compaction_summary_prompt: crate::config::compaction_prompt::DEFAULT_COMPACTION_PROMPT
+                .to_string(),
+            agent_type: None,
             store: None,
+            session_id: None,
             current_store,
         };
         (agent, ui_rx)
@@ -1165,12 +1670,49 @@ impl AgentLoop {
         self.parent_cancel = Some(config.parent_cancel);
         self.briefing = config.briefing;
         self.own_run_id = Some(config.run_id);
+        self.session_id = config.session_id;
         self
     }
 
     /// Set the root agent's initial system message.
     pub fn with_system_prompt(mut self, system_prompt: impl Into<String>) -> Self {
         self.system_prompt = Some(system_prompt.into());
+        self
+    }
+
+    /// Set the engine background prefix summaries run on (the profile's
+    /// `compact_engine`). Only applied to root loops — child contexts are
+    /// short-lived and never compact (blueprint §4C *scope*).
+    pub fn with_compaction_engine(mut self, engine: Arc<dyn Engine>) -> Self {
+        self.compaction_engine = Some(engine);
+        self
+    }
+
+    /// Set the framing instruction background summary requests carry (the
+    /// loaded `COMPACTION.md`). Defaults to the built-in prompt, so loops
+    /// built outside the factory still summarize with a sane instruction.
+    pub fn with_compaction_summary_prompt(mut self, summary_prompt: impl Into<String>) -> Self {
+        self.compaction_summary_prompt = summary_prompt.into();
+        self
+    }
+
+    /// Record the root agent type this loop was created for; see the
+    /// `agent_type` field.
+    pub fn with_agent_type(mut self, agent_type: impl Into<String>) -> Self {
+        self.agent_type = Some(agent_type.into());
+        self
+    }
+
+    /// Set this loop's effective tool-use iteration limit (the per-agent
+    /// `max_tool_iterations` resolved from the profile). A limit of `0` is
+    /// rejected by profile validation; here it falls back to the default so
+    /// a programmatically built loop can never start with a dead budget.
+    pub fn with_max_tool_iterations(mut self, max_tool_iterations: usize) -> Self {
+        self.max_tool_iterations = if max_tool_iterations == 0 {
+            DEFAULT_MAX_TOOL_USE_ITERATIONS
+        } else {
+            max_tool_iterations
+        };
         self
     }
 
@@ -1224,6 +1766,7 @@ impl AgentLoop {
             .current_store
             .lock()
             .expect("current store mutex is not poisoned") = Some(store.clone());
+        self.session_id = Some(store.session_id());
         self.store = Some(store);
         self
     }
@@ -1267,7 +1810,12 @@ impl AgentLoop {
         let mut child_agent_manager = self.child_agent_manager.take();
         let mut finish_rx = self.finish_rx.take();
         let mut subagent_ui_rx = self.subagent_ui_rx.take();
+        let max_tool_iterations = self.max_tool_iterations;
+        let compaction_engine = self.compaction_engine.take();
+        let compaction_summary_prompt = std::mem::take(&mut self.compaction_summary_prompt);
+        let agent_type = self.agent_type.clone();
         let store = self.store.clone();
+        let mut session_id = self.session_id;
         let current_store = Arc::clone(&self.current_store);
         // Retained past `Context::set_store` so `AgentCommand::ClearContext`
         // can roll the session over to a fresh file on the same store root.
@@ -1291,9 +1839,14 @@ impl AgentLoop {
                 Some(system_prompt) => Context::with_system_prompt(system_prompt),
                 None => Context::new(),
             };
+            // Pick the common local estimate before hydration, so counts
+            // cached while replaying use the same baseline.
+            context.set_token_estimator(crate::llm::TokenEstimator::Tiktoken);
             if let Some(store) = store {
                 context.set_store(store);
             }
+            let (mut compaction, mut compaction_rx) =
+                compaction::CompactionRuntime::new(compaction_engine, compaction_summary_prompt);
             if let Some(briefing) = briefing {
                 context.push_system(briefing);
             }
@@ -1305,7 +1858,7 @@ impl AgentLoop {
                 // and wrapping up (calling `agent_finish`) well before it
                 // hits.
                 context.push_system(format!(
-                    "You have a budget of at most {MAX_TOOL_USE_ITERATIONS} tool-use \
+                    "You have a budget of at most {max_tool_iterations} tool-use \
                      round(s) to complete this task. Work efficiently — batch related \
                      tool calls where possible — and call `agent_finish` with your \
                      result as soon as you have an answer, well before you run out of \
@@ -1313,6 +1866,13 @@ impl AgentLoop {
                      your work will be reported as failed and none of your findings will \
                      reach the caller."
                 ));
+            }
+            // Report a child after its child-only system messages are
+            // installed, so its first readout measures the same initial model
+            // view sent to the model. Root resumes report only when compaction
+            // is configured, preserving the existing footer behavior.
+            if compaction.enabled() || own_run_id.is_some() {
+                send_context_usage(&ui_tx, &context, engine.as_ref(), own_run_id).await;
             }
             let mut mode = AgentMode::Idle;
             let mut current_cancel: Option<CancellationToken> = None;
@@ -1406,6 +1966,7 @@ impl AgentLoop {
                                         agent_tx.clone(),
                                         generation,
                                         own_run_id,
+                                        session_id,
                                     ));
                                 } else if pending_child_finish_reprompt {
                                     pending_child_finish_reprompt = false;
@@ -1421,6 +1982,7 @@ impl AgentLoop {
                                     // comment.
                                     if !bump_and_check_iteration_cap(
                                         &mut iterations,
+                                        max_tool_iterations,
                                         &mut context,
                                         &mut mode,
                                         &ui_tx,
@@ -1438,10 +2000,21 @@ impl AgentLoop {
                                             agent_tx.clone(),
                                             generation,
                                             own_run_id,
+                                            session_id,
                                         ));
                                     }
                                 } else {
                                     mode = AgentMode::Idle;
+                                }
+                                if mode == AgentMode::Idle && pending_tools.is_empty() {
+                                    sweep_compaction_and_report(
+                                        &mut compaction,
+                                        &mut context,
+                                        engine.as_ref(),
+                                        generation,
+                                        own_run_id,
+                                        &ui_tx,
+                                    )                                    .await;
                                 }
                             }
                             AgentEvent::StreamCancelled { partial } => {
@@ -1520,6 +2093,7 @@ impl AgentLoop {
                                     &mut current_cancel,
                                     &mut current_tool_cancel,
                                     &mut iterations,
+                                    max_tool_iterations,
                                     false,
                                     engine.clone(),
                                     Arc::clone(&registry),
@@ -1533,6 +2107,7 @@ impl AgentLoop {
                                     own_run_id,
                                     &mut pending_child_finish_reprompt,
                                     &mut iteration_cap_exceeded,
+                                    session_id,
                                 )
                                 .await;
                             }
@@ -1595,6 +2170,7 @@ impl AgentLoop {
                                     &mut current_cancel,
                                     &mut current_tool_cancel,
                                     &mut iterations,
+                                    max_tool_iterations,
                                     true,
                                     engine.clone(),
                                     Arc::clone(&registry),
@@ -1608,6 +2184,7 @@ impl AgentLoop {
                                     own_run_id,
                                     &mut pending_child_finish_reprompt,
                                     &mut iteration_cap_exceeded,
+                                    session_id,
                                 )
                                 .await;
                             }
@@ -1641,6 +2218,7 @@ impl AgentLoop {
                                     &mut current_cancel,
                                     &mut current_tool_cancel,
                                     &mut iterations,
+                                    max_tool_iterations,
                                     true,
                                     engine.clone(),
                                     Arc::clone(&registry),
@@ -1654,6 +2232,7 @@ impl AgentLoop {
                                     own_run_id,
                                     &mut pending_child_finish_reprompt,
                                     &mut iteration_cap_exceeded,
+                                    session_id,
                                 )
                                 .await;
                             }
@@ -1806,6 +2385,7 @@ impl AgentLoop {
                             // doc comment).
                             if bump_and_check_iteration_cap(
                                 &mut iterations,
+                                max_tool_iterations,
                                 &mut context,
                                 &mut mode,
                                 &ui_tx,
@@ -1829,6 +2409,7 @@ impl AgentLoop {
                                     agent_tx.clone(),
                                     generation,
                                     own_run_id,
+                                    session_id,
                                 ));
                             }
                         } else if all_done {
@@ -1896,6 +2477,12 @@ impl AgentLoop {
                             | UiUpdate::AgentIdle => {
                                 // Intentionally swallowed — see comment above.
                             }
+                            update @ UiUpdate::ChildContextUsage { .. } => {
+                                // Child readouts are already scoped to their
+                                // run; forward them so the TUI can retain each
+                                // child independently of the parent view.
+                                let _ = ui_tx.send(update).await;
+                            }
                             other => {
                                 let _ = ui_tx.send(other).await;
                             }
@@ -1917,6 +2504,26 @@ impl AgentLoop {
                         pending_steers.clear();
                         return Ok(context);
                     }
+                    outcome = compaction_rx.recv() => {
+                        // A background summary finished (or failed). The
+                        // loop itself applies it — never the summarizer —
+                        // and only at a safe boundary: idle with an empty
+                        // serial tool queue. Otherwise it stays pending
+                        // until the next completed turn.
+                        if let Some(outcome) = outcome {
+                            compaction.on_outcome(outcome, generation);
+                            if mode == AgentMode::Idle && pending_tools.is_empty() {
+                                sweep_compaction_and_report(
+                                    &mut compaction,
+                                    &mut context,
+                                    engine.as_ref(),
+                                    generation,
+                                    own_run_id,
+                                    &ui_tx,
+                                )                                .await;
+                            }
+                        }
+                    }
                     cmd = cmd_rx.recv() => {
                         let Some(cmd) = cmd else {
                             // AgentLoop dropped → cmd_tx closed → clean shutdown:
@@ -1935,6 +2542,18 @@ impl AgentLoop {
                                     continue;
                                 }
                                 if mode == AgentMode::Idle {
+                                    // A fresh turn is a safe boundary too:
+                                    // applying (or forcing) compaction here
+                                    // keeps the request that follows inside
+                                    // the active context window.
+                                    sweep_compaction_and_report(
+                                        &mut compaction,
+                                        &mut context,
+                                        engine.as_ref(),
+                                        generation,
+                                        own_run_id,
+                                        &ui_tx,
+                                    )                                    .await;
                                     iterations = 1;
                                     context.push_user(text);
                                     mode = AgentMode::Streaming;
@@ -1946,6 +2565,7 @@ impl AgentLoop {
                                         agent_tx.clone(),
                                         generation,
                                         own_run_id,
+                                        session_id,
                                     ));
                                 } else {
                                     // Cooperative steering: never cancel the live
@@ -1986,6 +2606,7 @@ impl AgentLoop {
                                             &mut current_cancel,
                                             &mut current_tool_cancel,
                                             &mut iterations,
+                                            max_tool_iterations,
                                             true,
                                             engine.clone(),
                                             Arc::clone(&registry),
@@ -1999,6 +2620,7 @@ impl AgentLoop {
                                             own_run_id,
                                             &mut pending_child_finish_reprompt,
                                             &mut iteration_cap_exceeded,
+                                            session_id,
                                         )
                                         .await;
                                     } else {
@@ -2082,6 +2704,7 @@ impl AgentLoop {
                                         &mut current_cancel,
                                         &mut current_tool_cancel,
                                         &mut iterations,
+                                        max_tool_iterations,
                                         true,
                                         engine.clone(),
                                         Arc::clone(&registry),
@@ -2095,6 +2718,7 @@ impl AgentLoop {
                                         own_run_id,
                                         &mut pending_child_finish_reprompt,
                                         &mut iteration_cap_exceeded,
+                                        session_id,
                                     )
                                     .await;
                                 }
@@ -2154,6 +2778,7 @@ impl AgentLoop {
                                         &mut current_cancel,
                                         &mut current_tool_cancel,
                                         &mut iterations,
+                                        max_tool_iterations,
                                         true,
                                         engine.clone(),
                                         Arc::clone(&registry),
@@ -2167,6 +2792,7 @@ impl AgentLoop {
                                         own_run_id,
                                         &mut pending_child_finish_reprompt,
                                         &mut iteration_cap_exceeded,
+                                        session_id,
                                     )
                                     .await;
                                 }
@@ -2207,6 +2833,7 @@ impl AgentLoop {
                                         &mut current_cancel,
                                         &mut current_tool_cancel,
                                         &mut iterations,
+                                        max_tool_iterations,
                                         true,
                                         engine.clone(),
                                         Arc::clone(&registry),
@@ -2220,6 +2847,7 @@ impl AgentLoop {
                                         own_run_id,
                                         &mut pending_child_finish_reprompt,
                                         &mut iteration_cap_exceeded,
+                                        session_id,
                                     )
                                     .await;
                                 }
@@ -2411,6 +3039,13 @@ impl AgentLoop {
                                 // the `generation` bump below for the part
                                 // cancellation alone can't cover).
                                 generation = generation.wrapping_add(1);
+                                // A summary (pending or in flight) belongs to
+                                // the conversation being cleared; its result
+                                // must never shape the replacement's model
+                                // view. The background task keeps running —
+                                // its outcome is dropped by the generation
+                                // check above.
+                                compaction.reset();
                                 pending_steers.clear();
                                 pending_tools.clear();
                                 if let Some(cancel_token) = current_cancel.take() {
@@ -2443,6 +3078,7 @@ impl AgentLoop {
                                         &config.provider_connection,
                                         &config.model,
                                         None,
+                                        agent_type.as_deref(),
                                     ) {
                                         Ok(new_store) => fresh_context.set_store(new_store),
                                         Err(error) => tracing::warn!(
@@ -2452,6 +3088,7 @@ impl AgentLoop {
                                     }
                                 }
                                 context = fresh_context;
+                                session_id = context.store().map(|store| store.session_id());
                                 *current_store
                                     .lock()
                                     .expect("current store mutex is not poisoned") =
@@ -2461,6 +3098,8 @@ impl AgentLoop {
                                 provider_connection,
                                 model,
                             } => {
+                                // The common local baseline does not change
+                                // across provider/model switches.
                                 if let Some(store) = context.store() {
                                     store.record_model_changed(&provider_connection, &model);
                                 }
@@ -2684,7 +3323,8 @@ async fn resolve_spawn_subagent(
 /// `StreamDone` must not force a redundant extra re-prompt for it.
 ///
 /// `iteration_cap_exceeded` is set (to the guard's explanation message) when
-/// `MAX_TOOL_USE_ITERATIONS` is exceeded — but only for a child loop
+/// the loop's effective `max_tool_iterations` is exceeded — but only for a
+/// child loop
 /// (`own_run_id.is_some()`); a root loop's own hit is reported to the human
 /// directly (an `Interrupted` assistant bubble) and never sets this. The
 /// caller (`AgentLoop::run`'s `is_child && mode == AgentMode::Idle` tail)
@@ -2693,7 +3333,8 @@ async fn resolve_spawn_subagent(
 /// folding this into the generic "unstructured" fallback used when a child
 /// simply goes idle without ever calling `agent_finish`. See docs/features.md
 /// → *spawn_subagent*/*agent_finish* for the distinction.
-/// Increments `*iterations` and, if that now exceeds `MAX_TOOL_USE_ITERATIONS`,
+/// Increments `*iterations` and, if that now exceeds `max_tool_iterations`
+/// (the loop's effective limit; see [`AgentLoop::with_max_tool_iterations`]),
 /// reports the guard tripping and forces `*mode = AgentMode::Idle`: for the
 /// root (`own_run_id: None`) a human reads the transcript directly, so a real
 /// `Interrupted` assistant bubble is pushed; for a child, the explanation is
@@ -2719,6 +3360,7 @@ async fn resolve_spawn_subagent(
 /// other tool-use round.
 async fn bump_and_check_iteration_cap(
     iterations: &mut usize,
+    max_tool_iterations: usize,
     context: &mut Context,
     mode: &mut AgentMode,
     ui_tx: &mpsc::Sender<UiUpdate>,
@@ -2727,18 +3369,16 @@ async fn bump_and_check_iteration_cap(
 ) -> bool {
     *iterations += 1;
     tracing::debug!(iterations = *iterations, "advancing tool queue");
-    if *iterations <= MAX_TOOL_USE_ITERATIONS {
+    if *iterations <= max_tool_iterations {
         return false;
     }
     tracing::warn!(
         iterations = *iterations,
+        max_tool_iterations,
         run_id = ?own_run_id,
         "max tool-use iterations exceeded"
     );
-    let message = format!(
-        "Max tool-use iterations ({}) exceeded.",
-        MAX_TOOL_USE_ITERATIONS
-    );
+    let message = format!("Max tool-use iterations ({max_tool_iterations}) exceeded.");
     match own_run_id {
         None => {
             context.push_assistant(message.clone(), AssistantStatus::Interrupted);
@@ -2765,6 +3405,7 @@ async fn advance_tool_queue(
     current_cancel: &mut Option<CancellationToken>,
     current_tool_cancel: &mut Option<CancellationToken>,
     iterations: &mut usize,
+    max_tool_iterations: usize,
     increment_iterations: bool,
     engine: Arc<dyn Engine>,
     registry: Arc<ToolRegistry>,
@@ -2778,6 +3419,7 @@ async fn advance_tool_queue(
     own_run_id: Option<Uuid>,
     pending_child_finish_reprompt: &mut bool,
     iteration_cap_exceeded: &mut Option<String>,
+    session_id: Option<Uuid>,
 ) {
     // `spawn_subagent` and auto-denied tools resolve synchronously within
     // this same loop (unlike a normally-executing auto-approved tool, which
@@ -2788,7 +3430,7 @@ async fn advance_tool_queue(
     // `increment_iterations` this call was originally invoked with (`false`,
     // since the `ToolCall` handler always calls this function that way) —
     // silently completing a full tool-use round without ever counting
-    // against `MAX_TOOL_USE_ITERATIONS`. Shadow the parameter as mutable so
+    // against the loop's `max_tool_iterations`. Shadow the parameter as mutable so
     // resolving any such tool below can flip it to `true` for the rest of
     // this call.
     let mut increment_iterations = increment_iterations;
@@ -2799,6 +3441,7 @@ async fn advance_tool_queue(
                 if increment_iterations
                     && bump_and_check_iteration_cap(
                         iterations,
+                        max_tool_iterations,
                         context,
                         mode,
                         &ui_tx,
@@ -2833,6 +3476,7 @@ async fn advance_tool_queue(
                     agent_tx,
                     generation,
                     own_run_id,
+                    session_id,
                 ));
                 return;
             }
@@ -2995,6 +3639,7 @@ async fn advance_tool_queue(
 /// [`StreamEvent::Delta`] fragments into a batch of [`AssembledToolCall`]s
 /// (blueprint §4A refinement); the outer loop stays the sole writer of
 /// `Context`, and this task never writes it.
+#[expect(clippy::too_many_arguments)]
 fn start_request(
     context: &Context,
     engine: Arc<dyn Engine>,
@@ -3003,9 +3648,10 @@ fn start_request(
     agent_tx: mpsc::Sender<(u64, AgentEvent)>,
     generation: u64,
     own_run_id: Option<Uuid>,
+    session_id: Option<Uuid>,
 ) -> CancellationToken {
     let cancel = CancellationToken::new();
-    let messages = context.messages().to_vec();
+    let messages = context.model_messages();
     let inner_cancel = cancel.clone();
     // `run_id` is `None` for the root loop and `Some(...)` for a child loop
     // (see `AgentLoop::own_run_id`); attaching it to this span lets every
@@ -3016,7 +3662,10 @@ fn start_request(
     let span = tracing::info_span!("agent_stream", run_id = ?own_run_id);
     tokio::spawn(
         async move {
-            let mut stream = match engine.chat(messages, tools, inner_cancel.clone()).await {
+            let mut stream = match engine
+                .chat_with_session_id(messages, tools, inner_cancel.clone(), session_id)
+                .await
+            {
                 Ok(stream) => stream,
                 Err(error) => {
                     // If the cancel token was already fired (e.g. user aborted
@@ -3246,8 +3895,39 @@ mod tests {
                 api_base_url: None,
                 api_key: None,
                 reasoning: None,
+
+                compact_target_ratio: 0.5,
+                soft_compaction_threshold: 0.7,
+                hard_compaction_threshold: 0.9,
             },
         ))
+    }
+
+    #[test]
+    fn context_usage_log_reports_estimate_window_and_ratio() {
+        let log = capture_logs(async {
+            let mut context = Context::new();
+            context.set_token_estimator(crate::llm::TokenEstimator::FourCharactersPerToken);
+            context.push_user("a request with measurable content".to_string());
+            let expected_tokens = context.model_view_token_count();
+            let (ui_tx, mut ui_rx) = mpsc::channel(1);
+
+            send_context_usage(&ui_tx, &context, test_engine().as_ref(), None).await;
+
+            assert!(matches!(
+                ui_rx.recv().await,
+                Some(UiUpdate::ContextUsage {
+                    estimated_tokens,
+                    context_length: crate::llm::DEFAULT_CONTEXT_LENGTH,
+                }) if estimated_tokens == expected_tokens
+            ));
+        });
+
+        assert!(log.contains("model-view context usage reported"));
+        assert!(log.contains("estimated_tokens="));
+        assert!(log.contains("context_length=128000"));
+        assert!(log.contains("usage_ratio="));
+        assert!(log.contains("run_id=None"));
     }
 
     /// Engine double that reports one pending notice, for asserting the
@@ -3306,7 +3986,11 @@ mod tests {
                         api_base_url: None,
                         api_key: None,
                         reasoning: None,
-                    },
+
+                        compact_target_ratio: 0.5,
+                        soft_compaction_threshold: 0.7,
+                        hard_compaction_threshold: 0.9,
+},
                 ),
                 pending: std::sync::Mutex::new(vec![
                     "Model mock/test-model does not advertise reasoning effort \"max\"; using the provider default.".to_string(),
@@ -3357,6 +4041,10 @@ mod tests {
                     api_base_url: None,
                     api_key: None,
                     reasoning: None,
+
+                    compact_target_ratio: 0.5,
+                    soft_compaction_threshold: 0.7,
+                    hard_compaction_threshold: 0.9,
                 },
             ));
             let (mut agent, mut ui_rx) = AgentLoop::new(engine, Arc::new(ToolRegistry::new()));
@@ -3408,6 +4096,10 @@ mod tests {
                     api_base_url: None,
                     api_key: None,
                     reasoning: None,
+
+                    compact_target_ratio: 0.5,
+                    soft_compaction_threshold: 0.7,
+                    hard_compaction_threshold: 0.9,
                 },
             ));
             let (mut agent, mut ui_rx) = AgentLoop::new(engine, Arc::new(ToolRegistry::new()));
@@ -3929,6 +4621,7 @@ mod tests {
             Uuid::new_v4(),
             "mock",
             "test-model",
+            None,
         )
         .expect("store created");
         store.record_message(&Message::User {
@@ -4050,6 +4743,1071 @@ mod tests {
                 content: "hello".into(),
                 kind: UserMessageKind::Explicit,
             }
+        );
+    }
+
+    #[test]
+    fn token_counts_are_cached_when_messages_enter_the_context() {
+        let estimator = crate::llm::TokenEstimator::FourCharactersPerToken;
+        let mut context = Context::new();
+        context.set_token_estimator(estimator);
+        context.push_user("hello world".to_string());
+        context.push_assistant("hi".to_string(), AssistantStatus::Complete);
+        context.push_tool_result(ToolResult {
+            id: Uuid::new_v4(),
+            name: "read".to_string(),
+            result: "abcdefgh".to_string(),
+            attachments: vec![],
+            result_section_id: None,
+            result_metadata: None,
+            result_metadata_schema: None,
+            summary: vec![],
+            content_sections: vec![],
+            duration: Duration::ZERO,
+        });
+
+        for index in 0..context.messages().len() {
+            let expected = estimate_message_tokens(estimator, &context.messages()[index]);
+            assert_eq!(
+                context.token_count(index),
+                Some(expected),
+                "the count is cached at insertion for message {index}"
+            );
+        }
+        let sum: usize = (0..context.messages().len())
+            .map(|index| context.token_count(index).expect("entry exists"))
+            .sum();
+        assert_eq!(context.approximate_token_count(), sum);
+        assert!(
+            context.approximate_token_count() > 0,
+            "a non-empty context occupies some tokens"
+        );
+        assert!(context.tier(0).is_some());
+        assert_eq!(context.token_count(context.messages().len()), None);
+    }
+
+    #[test]
+    fn switching_the_token_estimator_refreshes_every_cached_count() {
+        let tiktoken = crate::llm::TokenEstimator::Tiktoken;
+        let heuristic = crate::llm::TokenEstimator::FourCharactersPerToken;
+        let mut context = Context::new();
+        assert_eq!(context.token_estimator(), tiktoken);
+        context.push_user("plenty of words to estimate in this turn".to_string());
+        for index in 0..context.messages().len() {
+            assert_eq!(
+                context.token_count(index),
+                Some(estimate_message_tokens(
+                    tiktoken,
+                    &context.messages()[index]
+                )),
+                "counts start out under the default estimator"
+            );
+        }
+
+        context.set_token_estimator(heuristic);
+        for index in 0..context.messages().len() {
+            assert_eq!(
+                context.token_count(index),
+                Some(estimate_message_tokens(
+                    heuristic,
+                    &context.messages()[index]
+                )),
+                "every cached count is recounted under the new estimator"
+            );
+        }
+
+        let after_switch = context.approximate_token_count();
+        context.set_token_estimator(heuristic);
+        assert_eq!(
+            context.approximate_token_count(),
+            after_switch,
+            "re-selecting the active estimator is a no-op"
+        );
+    }
+
+    #[test]
+    fn context_tiers_order_identity_instructions_and_conversation() {
+        let mut context = Context::new();
+        assert_eq!(context.tier(0), Some(MessageTier::System));
+        assert_eq!(context.tier(1), Some(MessageTier::InitialContext));
+
+        context.push_user("first question".to_string());
+        assert_eq!(context.tier(2), Some(MessageTier::Recent));
+
+        // Instructions injected later (a child briefing, the iteration
+        // budget) stay stable `InitialContext` wherever they land.
+        context.push_system("work within the sandbox".to_string());
+        assert_eq!(context.tier(3), Some(MessageTier::InitialContext));
+        assert_eq!(context.tier(4), None);
+
+        assert_eq!(
+            context.model_messages(),
+            context.messages(),
+            "without a compaction snapshot the model view is the whole transcript"
+        );
+    }
+
+    #[test]
+    fn hydration_populates_tiers_and_counts_for_replayed_messages() {
+        let mut context = Context::new();
+        context.hydrate(vec![
+            Message::User {
+                content: "a stored turn".to_string(),
+                kind: UserMessageKind::Explicit,
+            },
+            Message::System {
+                content: "stored instructions".to_string(),
+            },
+        ]);
+
+        assert_eq!(context.tier(2), Some(MessageTier::Recent));
+        assert_eq!(context.tier(3), Some(MessageTier::InitialContext));
+        for index in 0..context.messages().len() {
+            let expected =
+                estimate_message_tokens(context.token_estimator(), &context.messages()[index]);
+            assert_eq!(
+                context.token_count(index),
+                Some(expected),
+                "replayed messages are counted too, for message {index}"
+            );
+        }
+        assert!(context.approximate_token_count() > 0);
+    }
+
+    #[test]
+    fn estimated_usage_ratio_uses_the_active_engines_effective_context_length() {
+        let mut context = Context::new();
+        context.set_token_estimator(crate::llm::TokenEstimator::FourCharactersPerToken);
+        context.push_user("0123456789abcdef".to_string());
+
+        let configured = EngineConfig {
+            provider_connection: "ollama".to_string(),
+            model: "test-model".to_string(),
+            temperature: None,
+            context_length: Some(64),
+            api_base_url: None,
+            api_key: None,
+            reasoning: None,
+
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
+        };
+        assert_eq!(configured.effective_context_length(None), 64);
+        let unconfigured = EngineConfig {
+            context_length: None,
+
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
+            ..configured.clone()
+        };
+        assert_eq!(
+            unconfigured.effective_context_length(Some(1024)),
+            1024,
+            "the provider catalog supplies the length when config does not"
+        );
+        assert_eq!(
+            unconfigured.effective_context_length(None),
+            crate::llm::DEFAULT_CONTEXT_LENGTH,
+            "the built-in default is the last resort"
+        );
+
+        let tokens = context.approximate_token_count();
+        let ratio = context.estimated_usage_ratio(configured.effective_context_length(None));
+        assert!(
+            (ratio - tokens as f64 / 64.0).abs() < f64::EPSILON,
+            "usage is measured against the effective window: {ratio}"
+        );
+        assert_eq!(context.estimated_usage_ratio(0), 0.0);
+    }
+
+    /// Compact-engine stand-in that records every request it receives and
+    /// either answers with a canned summary or fails the stream.
+    struct ScriptedSummaryProvider {
+        recorded: Arc<Mutex<Vec<Vec<Message>>>>,
+        fail: bool,
+    }
+
+    impl crate::llm::Provider for ScriptedSummaryProvider {
+        fn name(&self) -> &str {
+            "scripted-summary"
+        }
+
+        fn list_models(
+            &self,
+        ) -> futures::future::BoxFuture<'_, anyhow::Result<Vec<crate::llm::ModelInfo>>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+
+        fn chat<'a>(
+            &'a self,
+            messages: Vec<Message>,
+            _tools: Vec<crate::llm::ToolSchema>,
+            _cancel: CancellationToken,
+        ) -> futures::future::BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+            self.recorded
+                .lock()
+                .expect("summary recording mutex is not poisoned")
+                .push(messages);
+            let fail = self.fail;
+            Box::pin(async move {
+                let (tx, rx) = mpsc::channel(4);
+                tokio::spawn(async move {
+                    if fail {
+                        let _ = tx
+                            .send(StreamEvent::Error(anyhow::anyhow!(
+                                "compact engine unavailable"
+                            )))
+                            .await;
+                    } else {
+                        let _ = tx
+                            .send(StreamEvent::Text(
+                                "Decided to keep the transcript in the store.".to_string(),
+                            ))
+                            .await;
+                        let _ = tx.send(StreamEvent::Done).await;
+                    }
+                });
+                Ok(rx)
+            })
+        }
+    }
+
+    /// Drain `ui_rx` until `predicate` matches, then return everything read.
+    ///
+    /// Draining is mandatory (see `docs/known-test-issues.md`): the loop parks
+    /// on `send().await` once the bounded update channel fills, which would
+    /// stall both the turn and the compaction it is meant to trigger.
+    async fn collect_updates_until<F>(
+        ui_rx: &mut mpsc::Receiver<UiUpdate>,
+        mut predicate: F,
+    ) -> Vec<UiUpdate>
+    where
+        F: FnMut(&UiUpdate) -> bool,
+    {
+        let mut collected: Vec<UiUpdate> = Vec::new();
+        for _ in 0..400 {
+            while let Ok(update) = ui_rx.try_recv() {
+                let matched = predicate(&update);
+                collected.push(update);
+                if matched {
+                    return collected;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("condition not reached; collected {collected:?}");
+    }
+
+    /// Let already-spawned background tasks (the summary request and the
+    /// loop's handling of its outcome) run to completion under paused time.
+    async fn settle_background_tasks() {
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// Build the first turn of a conversation and pick a context window in
+    /// which it sits inside the soft-threshold band (`≈80%`), with the
+    /// rebuilt system prompts alone well under the compaction target so the
+    /// drop fallback has somewhere to go.
+    fn first_turn_window(prompt: &str, target_usage: f64) -> usize {
+        let mut probe = Context::new();
+        probe.set_token_estimator(crate::llm::TokenEstimator::Tiktoken);
+        let system_tokens = probe.model_view_token_count();
+        probe.push_user(prompt.to_string());
+        let total_tokens = probe.model_view_token_count();
+        assert!(
+            total_tokens * 10 >= system_tokens * 19,
+            "the prompt must carry enough tokens that the system prompts \
+             alone fit the compaction target: system={system_tokens} \
+             total={total_tokens}"
+        );
+        let context_length = (total_tokens as f64 / target_usage) as usize;
+        assert!(
+            (system_tokens as f64) <= 0.5 * context_length as f64,
+            "the system prompts alone must fit the compaction target"
+        );
+        context_length
+    }
+
+    /// Grow a prompt until it carries enough tokens for
+    /// [`first_turn_window`]'s budget assertions.
+    fn sized_prompt() -> String {
+        let mut prompt = "note ".repeat(64);
+        loop {
+            let mut probe = Context::new();
+            probe.set_token_estimator(crate::llm::TokenEstimator::Tiktoken);
+            let system_tokens = probe.model_view_token_count();
+            probe.push_user(prompt.clone());
+            if probe.model_view_token_count() * 10 >= system_tokens * 19 {
+                return prompt;
+            }
+            prompt = prompt.repeat(2);
+            assert!(prompt.len() < 4_000_000, "prompt sizing must converge");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_completed_turn_above_the_soft_threshold_compacts_the_model_view() {
+        let prompt = sized_prompt();
+        let context_length = first_turn_window(&prompt, 0.8);
+        let active_config = EngineConfig {
+            provider_connection: "mock".to_string(),
+            model: "test-model".to_string(),
+            temperature: None,
+            context_length: Some(context_length),
+            api_base_url: None,
+            api_key: None,
+            reasoning: None,
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
+        };
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let active: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+            Arc::new(MockProvider::new(vec!["ok".to_string()], Duration::ZERO)),
+            active_config.clone(),
+        ));
+        let compact_engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+            Arc::new(ScriptedSummaryProvider {
+                recorded: Arc::clone(&recorded),
+                fail: false,
+            }),
+            active_config,
+        ));
+        let temporary_directory = tempfile::tempdir().expect("temporary directory");
+        let store = crate::store::Store::create(
+            &temporary_directory.path().join("chats"),
+            temporary_directory.path(),
+            Uuid::new_v4(),
+            "mock",
+            "test-model",
+            None,
+        )
+        .expect("store created");
+
+        let (agent_loop, mut ui_rx) = AgentLoop::new(
+            active,
+            Arc::new(tools::default_registry(
+                test_sandbox(),
+                tools::ToolRegistryConfig::default(),
+            )),
+        );
+        let mut agent_loop = agent_loop
+            .with_compaction_engine(compact_engine)
+            .with_store(store.clone());
+        let handle = agent_loop.run();
+        agent_loop
+            .send_command(AgentCommand::Prompt(prompt.clone()))
+            .await;
+        let updates =
+            collect_updates_until(&mut ui_rx, |update| matches!(update, UiUpdate::StreamDone))
+                .await;
+        let reported_usage = updates
+            .iter()
+            .find_map(|update| match update {
+                UiUpdate::ContextUsage {
+                    estimated_tokens,
+                    context_length,
+                } => Some((*estimated_tokens, *context_length)),
+                _ => None,
+            })
+            .expect("the loop reports the model-view size at least once");
+        assert_eq!(
+            reported_usage.1, context_length,
+            "the readout carries the active window"
+        );
+        assert!(
+            reported_usage.0 > 0,
+            "the readout carries a non-zero estimate"
+        );
+        settle_background_tasks().await;
+
+        let requests = recorded
+            .lock()
+            .expect("summary recording mutex is not poisoned")
+            .clone();
+        assert_eq!(
+            requests.len(),
+            1,
+            "the completed turn above the soft threshold starts exactly one background summary"
+        );
+        let request = &requests[0];
+        assert!(
+            matches!(
+                request.first(),
+                Some(Message::System { content }) if content == compaction::COMPACTION_SUMMARY_PROMPT
+            ),
+            "the summarizer gets its framing instruction first: {request:?}"
+        );
+        assert!(
+            request.iter().any(|message| matches!(
+                message,
+                Message::User { content, .. } if content.as_str() == prompt.as_str()
+            )),
+            "the summarized prefix contains the original turn: {request:?}"
+        );
+
+        drop(agent_loop);
+        let context = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("loop returns")
+            .expect("loop task ok")
+            .expect("loop returns a context");
+
+        assert!(
+            context.compaction().is_some(),
+            "the background summary was applied at a safe boundary"
+        );
+        let snapshot = context.compaction().expect("compaction applied");
+        assert_eq!(
+            snapshot.summary,
+            "Decided to keep the transcript in the store."
+        );
+        let model_messages = context.model_messages();
+        let leading_system_len = context.leading_system_len();
+        assert!(
+            snapshot.boundary > leading_system_len && snapshot.boundary <= context.messages().len(),
+            "the boundary sits inside the transcript: {}",
+            snapshot.boundary
+        );
+        assert!(
+            !model_messages.iter().any(|message| matches!(
+                message,
+                Message::User { content, .. } if content.as_str() == prompt.as_str()
+            )),
+            "the summarized prefix is gone from the model view: {model_messages:?}"
+        );
+        assert_eq!(
+            &model_messages[..leading_system_len],
+            &context.messages()[..leading_system_len],
+            "the leading system instructions stay verbatim"
+        );
+        assert!(
+            matches!(
+                &model_messages[leading_system_len],
+                Message::User { content, .. }
+                    if content.starts_with(compaction::COMPACTION_SUMMARY_MARKER)
+            ),
+            "the summary is projected as a marked user message: {model_messages:?}"
+        );
+        assert_eq!(
+            &model_messages[leading_system_len + 1..],
+            &context.messages()[snapshot.boundary..],
+            "the tail after the boundary stays verbatim"
+        );
+        assert!(
+            context.messages().iter().any(|message| matches!(
+                message,
+                Message::User { content, .. } if content.as_str() == prompt.as_str()
+            )),
+            "the transcript keeps every original message"
+        );
+
+        store.flush().await;
+        let events = crate::store::Store::read_events(store.path()).expect("events readable");
+        let compactions: Vec<(usize, String)> = events
+            .iter()
+            .filter_map(|event| match event {
+                crate::store::StoreEvent::Compaction {
+                    boundary, summary, ..
+                } => Some((*boundary, summary.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            compactions,
+            vec![(
+                snapshot.boundary,
+                "Decided to keep the transcript in the store.".to_string()
+            )],
+            "the applied snapshot is appended to the session file"
+        );
+        assert_eq!(
+            crate::store::Store::read_messages(store.path())
+                .expect("messages readable")
+                .iter()
+                .filter(|message| matches!(message, Message::User { .. }))
+                .count(),
+            1,
+            "restoring or applying the snapshot never writes the user turn twice"
+        );
+
+        let mut announced_boundary: Option<(usize, usize)> = None;
+        while let Ok(update) = ui_rx.try_recv() {
+            if let UiUpdate::CompactionApplied {
+                entry_index,
+                summarized_messages,
+            } = update
+            {
+                announced_boundary = Some((entry_index, summarized_messages));
+            }
+        }
+        let (entry_index, summarized_messages) = announced_boundary
+            .expect("applying a snapshot announces the marker position to the TUI");
+        assert_eq!(
+            summarized_messages,
+            snapshot.boundary - leading_system_len,
+            "the marker counts transcript messages, not the rebuilt system prompts"
+        );
+        let store_messages =
+            crate::store::Store::read_messages(store.path()).expect("messages readable");
+        assert_eq!(
+            entry_index,
+            crate::tui_reducer_state::project_messages(&store_messages[..summarized_messages])
+                .len(),
+            "the emitted index matches what a resume-time replay computes"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_background_summary_falls_back_to_dropping_at_the_next_boundary() {
+        let prompt = sized_prompt();
+        let context_length = first_turn_window(&prompt, 0.8);
+        let active_config = EngineConfig {
+            provider_connection: "mock".to_string(),
+            model: "test-model".to_string(),
+            temperature: None,
+            context_length: Some(context_length),
+            api_base_url: None,
+            api_key: None,
+            reasoning: None,
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
+        };
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let active: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+            Arc::new(MockProvider::new(vec!["ok".to_string()], Duration::ZERO)),
+            active_config.clone(),
+        ));
+        let compact_engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+            Arc::new(ScriptedSummaryProvider {
+                recorded: Arc::clone(&recorded),
+                fail: true,
+            }),
+            active_config,
+        ));
+
+        let (agent_loop, mut ui_rx) = AgentLoop::new(
+            active,
+            Arc::new(tools::default_registry(
+                test_sandbox(),
+                tools::ToolRegistryConfig::default(),
+            )),
+        );
+        let mut agent_loop = agent_loop.with_compaction_engine(compact_engine);
+        let handle = agent_loop.run();
+        agent_loop
+            .send_command(AgentCommand::Prompt(prompt.clone()))
+            .await;
+        collect_updates_until(&mut ui_rx, |update| matches!(update, UiUpdate::StreamDone)).await;
+        settle_background_tasks().await;
+
+        assert_eq!(
+            recorded
+                .lock()
+                .expect("summary recording mutex is not poisoned")
+                .len(),
+            1,
+            "the summary attempt is made before the fallback runs"
+        );
+
+        drop(agent_loop);
+        let context = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("loop returns")
+            .expect("loop task ok")
+            .expect("loop returns a context");
+
+        assert!(
+            context.compaction().is_none(),
+            "a failed summary never becomes a snapshot"
+        );
+        assert!(
+            context.model_messages().len() < context.messages().len(),
+            "the fallback drops the prefix from the model view while the \
+             transcript keeps it: view={} transcript={}",
+            context.model_messages().len(),
+            context.messages().len()
+        );
+        assert!(
+            matches!(
+                context.model_messages().first(),
+                Some(Message::System { .. })
+            ),
+            "the leading system instructions are never dropped"
+        );
+        assert!(
+            context.messages().iter().any(|message| matches!(
+                message,
+                Message::User { content, .. } if content.as_str() == prompt.as_str()
+            )),
+            "the transcript keeps every original message"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_turn_above_the_hard_threshold_drops_without_starting_a_summary() {
+        let prompt = sized_prompt();
+        let context_length = first_turn_window(&prompt, 0.95);
+        let active_config = EngineConfig {
+            provider_connection: "mock".to_string(),
+            model: "test-model".to_string(),
+            temperature: None,
+            context_length: Some(context_length),
+            api_base_url: None,
+            api_key: None,
+            reasoning: None,
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
+        };
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let active: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+            Arc::new(MockProvider::new(vec!["ok".to_string()], Duration::ZERO)),
+            active_config.clone(),
+        ));
+        let compact_engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+            Arc::new(ScriptedSummaryProvider {
+                recorded: Arc::clone(&recorded),
+                fail: false,
+            }),
+            active_config,
+        ));
+
+        let (agent_loop, mut ui_rx) = AgentLoop::new(
+            active,
+            Arc::new(tools::default_registry(
+                test_sandbox(),
+                tools::ToolRegistryConfig::default(),
+            )),
+        );
+        let mut agent_loop = agent_loop.with_compaction_engine(compact_engine);
+        let handle = agent_loop.run();
+        agent_loop
+            .send_command(AgentCommand::Prompt(prompt.clone()))
+            .await;
+        collect_updates_until(&mut ui_rx, |update| matches!(update, UiUpdate::StreamDone)).await;
+        settle_background_tasks().await;
+
+        assert!(
+            recorded
+                .lock()
+                .expect("summary recording mutex is not poisoned")
+                .is_empty(),
+            "above the hard threshold the loop drops synchronously instead of waiting \
+             for a background summary"
+        );
+
+        drop(agent_loop);
+        let context = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("loop returns")
+            .expect("loop task ok")
+            .expect("loop returns a context");
+
+        assert!(context.compaction().is_none(), "no summary was produced");
+        assert!(
+            context.model_messages().len() < context.messages().len(),
+            "the model view was trimmed: view={} transcript={}",
+            context.model_messages().len(),
+            context.messages().len()
+        );
+        assert!(
+            (context.estimated_usage_ratio(context_length) - 0.5).abs() < 0.4,
+            "the trimmed view is near the compaction target: {}",
+            context.estimated_usage_ratio(context_length)
+        );
+        assert!(
+            context.messages().iter().any(|message| matches!(
+                message,
+                Message::User { content, .. } if content.as_str() == prompt.as_str()
+            )),
+            "the transcript keeps every original message"
+        );
+    }
+
+    #[test]
+    fn set_compaction_replaces_the_prefix_and_only_moves_forward() {
+        let mut context = Context::new();
+        context.push_user("first turn".to_string());
+        context.push_assistant("first answer".to_string(), AssistantStatus::Complete);
+        context.push_user("second turn".to_string());
+        let transcript_len = context.messages().len();
+
+        assert!(
+            context.set_compaction(compaction::CompactionSnapshot {
+                boundary: 3,
+                summary: "the first turn, summarized".to_string(),
+            }),
+            "the first snapshot applies"
+        );
+
+        let model_messages = context.model_messages();
+        let leading_system_len = context.leading_system_len();
+        assert_eq!(
+            model_messages.len(),
+            leading_system_len + 1 + (transcript_len - 3),
+            "system block + the summary + the verbatim tail after the boundary"
+        );
+        assert!(
+            matches!(
+                &model_messages[leading_system_len],
+                Message::User { content, .. }
+                    if content.starts_with(compaction::COMPACTION_SUMMARY_MARKER)
+            ),
+            "the summary is marked, not a system message: {model_messages:?}"
+        );
+        assert_eq!(
+            &model_messages[leading_system_len + 1..],
+            &context.messages()[3..],
+            "the tail after the boundary is verbatim"
+        );
+        assert_eq!(
+            context.messages().len(),
+            transcript_len,
+            "compaction never rewrites the transcript"
+        );
+
+        assert!(
+            !context.set_compaction(compaction::CompactionSnapshot {
+                boundary: 3,
+                summary: "the same boundary again".to_string(),
+            }),
+            "an identical boundary must not supersede the applied snapshot"
+        );
+        assert!(
+            !context.set_compaction(compaction::CompactionSnapshot {
+                boundary: 2,
+                summary: "an older boundary".to_string(),
+            }),
+            "boundaries only ever move forward"
+        );
+        assert_eq!(
+            context.compaction().expect("snapshot kept").summary,
+            "the first turn, summarized"
+        );
+
+        assert!(
+            context.set_compaction(compaction::CompactionSnapshot {
+                boundary: transcript_len,
+                summary: "everything, summarized".to_string(),
+            }),
+            "a newer, larger boundary supersedes the applied one"
+        );
+        assert_eq!(
+            context.model_messages().len(),
+            leading_system_len + 1,
+            "the whole prefix is now represented by the summary alone"
+        );
+    }
+
+    #[test]
+    fn drop_model_view_to_cuts_only_at_complete_turn_boundaries() {
+        let mut context = Context::new();
+        context.set_token_estimator(crate::llm::TokenEstimator::FourCharactersPerToken);
+        let call_id = Uuid::new_v4();
+        context.push_user("do the work".to_string());
+        context.push_assistant_tool_call(
+            String::new(),
+            AssistantStatus::Complete,
+            vec![ToolCallRequest {
+                id: call_id,
+                name: "read".to_string(),
+                arguments: Value::Null,
+                persisted_title_arguments: Vec::new(),
+            }],
+        );
+        context.push_tool_result(ToolResult {
+            id: call_id,
+            name: "read".to_string(),
+            result: "x".repeat(8_000),
+            attachments: vec![],
+            result_section_id: None,
+            result_metadata: None,
+            result_metadata_schema: None,
+            summary: vec![],
+            content_sections: vec![],
+            duration: Duration::ZERO,
+        });
+        context.push_user("and now this".to_string());
+
+        let leading_system_len = context.leading_system_len();
+        let system_tokens: usize = context.entries[..leading_system_len]
+            .iter()
+            .map(|entry| entry.token_count)
+            .sum();
+        let final_turn_tokens = context.entries[context.messages().len() - 1].token_count;
+        // Room for the system prompts plus the final turn, but nowhere near
+        // enough for the 8 000-character tool result that precedes it: the
+        // only cut that fits must leave the result behind, never split it
+        // from its call.
+        let target_tokens = system_tokens + final_turn_tokens + 10;
+
+        assert!(
+            context.drop_model_view_to(target_tokens),
+            "the target is reachable without the oversized result"
+        );
+        let model_messages = context.model_messages();
+        assert_eq!(
+            model_messages.len(),
+            leading_system_len + 1,
+            "the view keeps the system block and the final turn: {model_messages:?}"
+        );
+        assert_eq!(
+            model_messages.last(),
+            context.messages().last(),
+            "the final turn stays verbatim"
+        );
+        assert_eq!(
+            context.messages().len(),
+            6,
+            "the transcript keeps the dropped messages"
+        );
+        assert_eq!(
+            context.model_view_token_count(),
+            system_tokens + final_turn_tokens
+        );
+
+        assert!(
+            !context.drop_model_view_to(1),
+            "a target below the system prompts alone cannot be met"
+        );
+    }
+
+    #[test]
+    fn summary_boundary_for_target_never_cuts_a_tool_call_result_group() {
+        let mut context = Context::new();
+        context.set_token_estimator(crate::llm::TokenEstimator::FourCharactersPerToken);
+        let call_id = Uuid::new_v4();
+        context.push_user("do the work".to_string());
+        context.push_assistant_tool_call(
+            String::new(),
+            AssistantStatus::Complete,
+            vec![ToolCallRequest {
+                id: call_id,
+                name: "read".to_string(),
+                arguments: Value::Null,
+                persisted_title_arguments: Vec::new(),
+            }],
+        );
+        context.push_tool_result(ToolResult {
+            id: call_id,
+            name: "read".to_string(),
+            result: "y".repeat(8_000),
+            attachments: vec![],
+            result_section_id: None,
+            result_metadata: None,
+            result_metadata_schema: None,
+            summary: vec![],
+            content_sections: vec![],
+            duration: Duration::ZERO,
+        });
+        context.push_user("follow-up".to_string());
+
+        // A target that the raw accumulation would reach in the middle of the
+        // tool-call/result pair (right after the assistant message).
+        let target_tokens = context
+            .model_view_token_count()
+            .saturating_sub(context.token_count(2).expect("result entry") + 100);
+
+        let boundary = context
+            .summary_boundary_for_target(target_tokens)
+            .expect("a prefix exists to summarize");
+        assert!(
+            compaction::first_safe_boundary_from(context.messages(), boundary) == Some(boundary),
+            "the chosen boundary {boundary} must be a complete-turn cut"
+        );
+        assert!(
+            boundary >= 4,
+            "the cut has to include the whole tool round, not just its call: {boundary}"
+        );
+    }
+
+    /// Tool-call ids in `messages` whose result or error is not present —
+    /// the pairing invariant every model view must satisfy.
+    fn orphaned_tool_call_ids(messages: &[Message]) -> Vec<Uuid> {
+        let mut open: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+        for message in messages {
+            match message {
+                Message::Assistant { tool_calls, .. } => {
+                    open.extend(tool_calls.iter().map(|tool_call| tool_call.id));
+                }
+                Message::ToolResult { value } => {
+                    open.remove(&value.id);
+                }
+                Message::ToolError { id, .. } => {
+                    open.remove(id);
+                }
+                _ => {}
+            }
+        }
+        open.into_iter().collect()
+    }
+
+    #[tokio::test]
+    async fn resuming_restores_the_latest_compaction_without_rewriting_the_session() {
+        let temporary_directory = tempfile::tempdir().expect("temporary directory");
+        let chats_root = temporary_directory.path().join("chats");
+        let session_id = Uuid::new_v4();
+        let store = crate::store::Store::create(
+            &chats_root,
+            temporary_directory.path(),
+            session_id,
+            "ollama",
+            "llama3",
+            None,
+        )
+        .expect("store created");
+        store.record_message(&Message::User {
+            content: "first turn".to_string(),
+            kind: UserMessageKind::Explicit,
+        });
+        store.record_message(&Message::Assistant {
+            content: "first answer".to_string(),
+            status: AssistantStatus::Complete,
+            tool_calls: Vec::new(),
+        });
+        store.record_message(&Message::User {
+            content: "second turn".to_string(),
+            kind: UserMessageKind::Explicit,
+        });
+        // Absolute transcript index: the two rebuilt system prompts occupy
+        // `[..2]` in the live context and again after a resume.
+        store.record_compaction(4, 0, "first turn, summarized");
+        store.flush().await;
+        let path = store.path().to_path_buf();
+        let before = std::fs::read(&path).expect("session file readable");
+
+        let mut context = Context::new();
+        context.set_store(store.clone());
+        store.flush().await;
+        let after = std::fs::read(&path).expect("session file readable");
+        assert_eq!(
+            before, after,
+            "hydration plus snapshot restore must not append a second event"
+        );
+
+        assert_eq!(context.messages().len(), 5, "2 system + 3 stored messages");
+        let snapshot = context.compaction().expect("snapshot restored");
+        assert_eq!(snapshot.boundary, 4);
+        assert_eq!(snapshot.summary, "first turn, summarized");
+
+        let model_messages = context.model_messages();
+        let leading_system_len = context.leading_system_len();
+        assert_eq!(
+            model_messages.len(),
+            leading_system_len + 2,
+            "system block + the restored summary + the verbatim tail"
+        );
+        assert!(
+            matches!(
+                &model_messages[leading_system_len],
+                Message::User { content, .. }
+                    if content.starts_with(compaction::COMPACTION_SUMMARY_MARKER)
+            ),
+            "the restored summary keeps the provider-safe projection: {model_messages:?}"
+        );
+        assert_eq!(
+            &model_messages[leading_system_len + 1..],
+            &context.messages()[4..],
+            "the tail after the restored boundary is verbatim"
+        );
+        assert!(
+            !model_messages.iter().any(|message| matches!(
+                message,
+                Message::User { content, .. } if content == "first turn"
+            )),
+            "the summarized prefix stays out of the model view"
+        );
+        assert!(
+            context.messages().iter().any(|message| matches!(
+                message,
+                Message::User { content, .. } if content == "first turn"
+            )),
+            "the transcript keeps every original message"
+        );
+    }
+
+    #[tokio::test]
+    async fn resuming_a_snapshot_never_splits_a_tool_call_from_its_result() {
+        let temporary_directory = tempfile::tempdir().expect("temporary directory");
+        let chats_root = temporary_directory.path().join("chats");
+        let session_id = Uuid::new_v4();
+        let store = crate::store::Store::create(
+            &chats_root,
+            temporary_directory.path(),
+            session_id,
+            "ollama",
+            "llama3",
+            None,
+        )
+        .expect("store created");
+        let call_id = Uuid::new_v4();
+        store.record_message(&Message::User {
+            content: "do the work".to_string(),
+            kind: UserMessageKind::Explicit,
+        });
+        store.record_message(&Message::Assistant {
+            content: String::new(),
+            status: AssistantStatus::Complete,
+            tool_calls: vec![ToolCallRequest {
+                id: call_id,
+                name: "read".to_string(),
+                arguments: Value::Null,
+                persisted_title_arguments: Vec::new(),
+            }],
+        });
+        store.record_message(&Message::ToolResult {
+            value: ToolResult {
+                id: call_id,
+                name: "read".to_string(),
+                result: "file contents".to_string(),
+                attachments: vec![],
+                result_section_id: None,
+                result_metadata: None,
+                result_metadata_schema: None,
+                summary: vec![],
+                content_sections: vec![],
+                duration: Duration::ZERO,
+            },
+        });
+        store.record_message(&Message::User {
+            content: "second turn".to_string(),
+            kind: UserMessageKind::Explicit,
+        });
+        // Deliberately splits the round: the assistant tool call lands in the
+        // summarized prefix while its result stays in the tail.
+        store.record_compaction(4, 0, "the tool round, summarized");
+        store.flush().await;
+
+        let mut context = Context::new();
+        context.set_store(store.clone());
+        store.flush().await;
+
+        let snapshot = context.compaction().expect("snapshot restored");
+        assert_eq!(
+            snapshot.boundary, 5,
+            "the restored boundary snaps forward past the tool call's result"
+        );
+        let model_messages = context.model_messages();
+        assert_eq!(
+            orphaned_tool_call_ids(&model_messages),
+            Vec::<Uuid>::new(),
+            "the model view never carries a call without its result: {model_messages:?}"
+        );
+        assert_eq!(
+            orphaned_tool_call_ids(context.messages()),
+            Vec::<Uuid>::new(),
+            "nor does the transcript"
+        );
+        assert_eq!(
+            model_messages.last(),
+            context.messages().last(),
+            "the verbatim tail keeps the final turn"
         );
     }
 
@@ -4302,6 +6060,7 @@ mod tests {
         let mut current_cancel = None;
         let mut current_tool_cancel = None;
         let mut iterations = 1usize;
+        let max_tool_iterations = DEFAULT_MAX_TOOL_USE_ITERATIONS;
         let mut clarify_started_at = None;
         let mut pending_steers = VecDeque::new();
 
@@ -4312,6 +6071,7 @@ mod tests {
             &mut current_cancel,
             &mut current_tool_cancel,
             &mut iterations,
+            max_tool_iterations,
             false,
             test_engine(),
             registry,
@@ -4325,6 +6085,7 @@ mod tests {
             None,
             &mut false,
             &mut None,
+            None,
         )
         .await;
 
@@ -4367,6 +6128,7 @@ mod tests {
         let mut current_cancel = None;
         let mut current_tool_cancel = None;
         let mut iterations = 1usize;
+        let max_tool_iterations = DEFAULT_MAX_TOOL_USE_ITERATIONS;
         let mut clarify_started_at = None;
         let mut pending_steers = VecDeque::new();
 
@@ -4377,6 +6139,7 @@ mod tests {
             &mut current_cancel,
             &mut current_tool_cancel,
             &mut iterations,
+            max_tool_iterations,
             false,
             test_engine(),
             registry,
@@ -4390,6 +6153,7 @@ mod tests {
             None,
             &mut false,
             &mut None,
+            None,
         )
         .await;
 
@@ -4427,6 +6191,7 @@ mod tests {
         let mut current_cancel = None;
         let mut current_tool_cancel = None;
         let mut iterations = 1usize;
+        let max_tool_iterations = DEFAULT_MAX_TOOL_USE_ITERATIONS;
         let mut clarify_started_at = None;
         let mut pending_steers = VecDeque::from(["steered while tool ran".to_string()]);
 
@@ -4437,6 +6202,7 @@ mod tests {
             &mut current_cancel,
             &mut current_tool_cancel,
             &mut iterations,
+            max_tool_iterations,
             true,
             test_engine(),
             registry,
@@ -4450,6 +6216,7 @@ mod tests {
             None,
             &mut false,
             &mut None,
+            None,
         )
         .await;
 
@@ -4499,6 +6266,10 @@ mod tests {
                     api_base_url: None,
                     api_key: None,
                     reasoning: None,
+
+                    compact_target_ratio: 0.5,
+                    soft_compaction_threshold: 0.7,
+                    hard_compaction_threshold: 0.9,
                 },
             ));
 
@@ -4611,6 +6382,10 @@ mod tests {
                     api_base_url: None,
                     api_key: None,
                     reasoning: None,
+
+                    compact_target_ratio: 0.5,
+                    soft_compaction_threshold: 0.7,
+                    hard_compaction_threshold: 0.9,
                 },
             ));
 
@@ -4657,6 +6432,97 @@ mod tests {
     }
 
     #[test]
+    fn clear_context_records_the_root_agent_type_in_the_replacement_session() {
+        crate::test_support::run_locked(async {
+            // `/clear` starts a brand-new session file; its `meta` header must
+            // carry the root agent type this loop runs under, so a cleared
+            // conversation keeps advertising the type instead of degrading to
+            // a header with no type at all.
+            let temporary_directory = tempfile::tempdir().expect("temporary directory");
+            let chats_root = temporary_directory.path().join("chats");
+            let original_session_id = Uuid::new_v4();
+            let store = crate::store::Store::create(
+                &chats_root,
+                temporary_directory.path(),
+                original_session_id,
+                "mock",
+                "test-model",
+                None,
+            )
+            .expect("store created");
+
+            let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+                Arc::new(MockProvider::with_script(
+                    vec![MockEvent::Text("ok".to_string())],
+                    Duration::from_millis(10),
+                )),
+                EngineConfig {
+                    provider_connection: "mock".to_string(),
+                    model: "test-model".to_string(),
+                    temperature: None,
+                    context_length: None,
+                    api_base_url: None,
+                    api_key: None,
+                    reasoning: None,
+
+                    compact_target_ratio: 0.5,
+                    soft_compaction_threshold: 0.7,
+                    hard_compaction_threshold: 0.9,
+                },
+            ));
+            let (agent_loop, mut ui_rx) = AgentLoop::new(
+                engine,
+                Arc::new(tools::default_registry(
+                    test_sandbox(),
+                    tools::ToolRegistryConfig::default(),
+                )),
+            );
+            let mut agent_loop = agent_loop.with_agent_type("researcher").with_store(store);
+
+            let handle = agent_loop.run();
+            agent_loop.send_command(AgentCommand::ClearContext).await;
+
+            let replacement = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let sessions = crate::store::Store::list_sessions(
+                        &chats_root,
+                        &crate::store::project_key(temporary_directory.path()),
+                    )
+                    .expect("sessions are listable");
+                    if let Some(session) = sessions
+                        .into_iter()
+                        .find(|session| session.session_id != original_session_id)
+                    {
+                        break session;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the replacement session appears on disk");
+
+            let events =
+                crate::store::Store::read_events(&replacement.path).expect("events readable");
+            let crate::store::StoreEvent::Meta(meta) = &events[0] else {
+                panic!("first line must be the meta header, got {:?}", events[0]);
+            };
+            assert_eq!(
+                meta.agent_type.as_deref(),
+                Some("researcher"),
+                "the replacement session records the loop's root agent type"
+            );
+            assert_eq!(
+                meta.parent_session, None,
+                "a /clear rollover is not a child run"
+            );
+
+            drop(agent_loop);
+            let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+            while ui_rx.try_recv().is_ok() {}
+        });
+    }
+
+    #[test]
     fn child_role_run_returns_immediately_after_finish_tool_is_called() {
         crate::test_support::run_locked(async {
             // Regression/integration test for Phase 6.9: a `Role::Child` agent
@@ -4685,6 +6551,10 @@ mod tests {
                     api_base_url: None,
                     api_key: None,
                     reasoning: None,
+
+                    compact_target_ratio: 0.5,
+                    soft_compaction_threshold: 0.7,
+                    hard_compaction_threshold: 0.9,
                 },
             ));
 
@@ -4710,6 +6580,7 @@ mod tests {
             agent_loop = agent_loop.with_child_role(ChildRoleConfig {
                 run_id,
                 call_id,
+                session_id: None,
                 briefing: Some("do the task".to_string()),
                 parent_cancel: CancellationToken::new(),
                 subagent_ui_tx,
@@ -4739,7 +6610,7 @@ mod tests {
             assert!(
             context.messages().iter().any(|message| matches!(
                 message,
-                Message::System { content } if content.contains("tool-use") && content.contains(&MAX_TOOL_USE_ITERATIONS.to_string())
+                Message::System { content } if content.contains("tool-use") && content.contains(&DEFAULT_MAX_TOOL_USE_ITERATIONS.to_string())
             )),
             "a child must receive a heads-up system message stating its \
              tool-use iteration budget, so it can wrap up before hitting it"
@@ -4757,6 +6628,7 @@ mod tests {
             // Drain the ui updates emitted along the way; we only assert that a
             // ToolDone for "agent_finish" was sent among them.
             let mut saw_finish_tool_done = false;
+            let mut saw_child_context_usage = false;
             while let Ok(Some(update)) =
                 tokio::time::timeout(Duration::from_millis(50), ui_rx.recv()).await
             {
@@ -4764,10 +6636,26 @@ mod tests {
                 {
                     saw_finish_tool_done = true;
                 }
+                if matches!(
+                    update,
+                    UiUpdate::ChildContextUsage {
+                        run_id: reported_run_id,
+                        estimated_tokens,
+                        context_length,
+                    } if reported_run_id == run_id
+                        && estimated_tokens > 0
+                        && context_length == 128_000
+                ) {
+                    saw_child_context_usage = true;
+                }
             }
             assert!(
                 saw_finish_tool_done,
                 "expected a ToolDone update for finish"
+            );
+            assert!(
+                saw_child_context_usage,
+                "the child reports its own context estimate tagged with its run id"
             );
         });
     }
@@ -4796,6 +6684,10 @@ mod tests {
                     api_base_url: None,
                     api_key: None,
                     reasoning: None,
+
+                    compact_target_ratio: 0.5,
+                    soft_compaction_threshold: 0.7,
+                    hard_compaction_threshold: 0.9,
                 },
             ));
 
@@ -4856,6 +6748,10 @@ mod tests {
                     api_base_url: None,
                     api_key: None,
                     reasoning: None,
+
+                    compact_target_ratio: 0.5,
+                    soft_compaction_threshold: 0.7,
+                    hard_compaction_threshold: 0.9,
                 },
             ));
 
@@ -4873,6 +6769,7 @@ mod tests {
             agent_loop = agent_loop.with_child_role(ChildRoleConfig {
                 run_id,
                 call_id,
+                session_id: None,
                 briefing: Some("do the task".to_string()),
                 parent_cancel: CancellationToken::new(),
                 subagent_ui_tx,
@@ -4887,7 +6784,7 @@ mod tests {
             // Drain `ui_rx` *while* `run()` is in flight, exactly like the
             // TUI/CLI drivers do. The channel is bounded (capacity 100) and
             // every tool round emits several `UiUpdate`s, so an undrained
-            // receiver fills it long before `MAX_TOOL_USE_ITERATIONS` rounds
+            // receiver fills it long before `DEFAULT_MAX_TOOL_USE_ITERATIONS` rounds
             // elapse — `ui_tx.send().await` then parks the whole loop, the
             // iteration cap never trips, and `run()` never returns.
             let mut handle = handle;

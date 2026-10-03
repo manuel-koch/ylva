@@ -31,8 +31,8 @@ use crate::markdown::render_markdown;
 use crate::slash_command::{parse_slash_command_invocation, SlashCommand, SlashCommandInvocation};
 use crate::tui_reducer_state::{
     model_picker_row_entries, slash_overlay_text_rows, AppState, ChatEntry, ChatSelection,
-    ChildRunInfo, ConfirmKey, ConversationView, DomainEvent, Effect, Focus, HistoryDirection,
-    InputEvent, SlashOverlay, ToolCallState, TuiMode, UserMessageState,
+    ChildRunInfo, ConfirmKey, ContextUsage, ConversationView, DomainEvent, Effect, Focus,
+    HistoryDirection, InputEvent, SlashOverlay, ToolCallState, TuiMode, UserMessageState,
     HELP_HORIZONTAL_SCROLL_COLUMNS,
 };
 
@@ -1284,6 +1284,19 @@ fn domain_child_lifecycle(state: &mut AppState, event: DomainEvent) -> Vec<Effec
             }
             vec![]
         }
+        DomainEvent::ChildContextUsage {
+            run_id,
+            estimated_tokens,
+            context_length,
+        } => {
+            if let Some(conversation) = state.child_conversations.get_mut(&run_id) {
+                conversation.context_usage = Some(ContextUsage {
+                    estimated_tokens,
+                    context_length,
+                });
+            }
+            vec![]
+        }
         DomainEvent::ChildAgentDone { run_id, .. } => {
             state.flush_child_partial_text(run_id);
             // Only auto-return if the user is currently viewing *this*
@@ -1315,6 +1328,46 @@ fn domain_child_lifecycle(state: &mut AppState, event: DomainEvent) -> Vec<Effec
             if let Some((bubble_id, _)) = state.last_bubble_click.take() {
                 state.toggle_tool_bubble_collapsed(bubble_id);
             }
+            vec![]
+        }
+        DomainEvent::CompactionApplied {
+            entry_index,
+            summarized_messages,
+        } => {
+            // Mode-independent like the other transcript bookkeeping events:
+            // a sweep applies compaction at a settled boundary, whatever the
+            // view state happens to be. Duplicate emissions are dropped by
+            // the boundary itself — it only ever grows.
+            let already_marked = state.chat_entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    ChatEntry::CompactionMarker {
+                        summarized_messages: existing
+                    } if *existing == summarized_messages
+                )
+            });
+            if !already_marked {
+                let insert_at = entry_index.min(state.chat_entries.len());
+                state.chat_entries.insert(
+                    insert_at,
+                    ChatEntry::CompactionMarker {
+                        summarized_messages,
+                    },
+                );
+            }
+            vec![]
+        }
+        DomainEvent::ContextUsage {
+            estimated_tokens,
+            context_length,
+        } => {
+            // Mode-independent like the child-lifecycle events: a settled
+            // turn reports the readout while the loop is idle, and a summary
+            // outcome can do so without touching the mode.
+            state.context_usage = Some(ContextUsage {
+                estimated_tokens,
+                context_length,
+            });
             vec![]
         }
         other => match state.mode.clone() {
@@ -2482,7 +2535,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let mut replayed_state = AppState::new();
-        replayed_state.replay_messages(&replayed_messages, child_runs);
+        replayed_state.replay_messages(&replayed_messages, child_runs, None);
         let replayed_entries = replayed_state.chat_entries.clone();
 
         // Keep the surrounding frame identical so this compares the actual
@@ -2555,7 +2608,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let mut replayed_state = AppState::new();
-        replayed_state.replay_messages(&replayed_messages, &[]);
+        replayed_state.replay_messages(&replayed_messages, &[], None);
         let replayed_entries = replayed_state.chat_entries.clone();
 
         live_state.mode = TuiMode::Idle;
@@ -4852,6 +4905,104 @@ mod tests {
     }
 
     #[test]
+    fn child_context_usage_is_kept_per_run_and_selected_only_for_drilled_view() {
+        let mut state = AppState::new();
+        let first_run_id = Uuid::new_v4();
+        let second_run_id = Uuid::new_v4();
+        for (run_id, label) in [(first_run_id, "First"), (second_run_id, "Second")] {
+            state.start_child_run(ChildRunInfo {
+                run_id,
+                bubble_id: Uuid::new_v4(),
+                agent_type: "reviewer".to_string(),
+                task: format!("Review {label}"),
+                label: label.to_string(),
+            });
+        }
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ChildContextUsage {
+                run_id: first_run_id,
+                estimated_tokens: 2_000,
+                context_length: 16_000,
+            }),
+            &empty_textarea(),
+        );
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ChildContextUsage {
+                run_id: second_run_id,
+                estimated_tokens: 6_000,
+                context_length: 32_000,
+            }),
+            &empty_textarea(),
+        );
+
+        assert_eq!(
+            state.context_usage, None,
+            "a background child's report must not overwrite root usage"
+        );
+        assert_eq!(
+            state.active_context_usage(),
+            None,
+            "root view selects root usage"
+        );
+
+        state.switch_to_child_view(first_run_id);
+        assert_eq!(
+            state.active_context_usage(),
+            Some(ContextUsage {
+                estimated_tokens: 2_000,
+                context_length: 16_000,
+            })
+        );
+        state.switch_to_child_view(second_run_id);
+        assert_eq!(
+            state.active_context_usage(),
+            Some(ContextUsage {
+                estimated_tokens: 6_000,
+                context_length: 32_000,
+            })
+        );
+
+        state.switch_to_root_view();
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ContextUsage {
+                estimated_tokens: 8_000,
+                context_length: 64_000,
+            }),
+            &empty_textarea(),
+        );
+        assert_eq!(
+            state.active_context_usage(),
+            Some(ContextUsage {
+                estimated_tokens: 8_000,
+                context_length: 64_000,
+            }),
+            "root view returns to root usage"
+        );
+
+        state.switch_to_child_view(first_run_id);
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ChildAgentDone {
+                run_id: first_run_id,
+                status: "success".to_string(),
+                result: Some("done".to_string()),
+            }),
+            &empty_textarea(),
+        );
+        assert_eq!(
+            state.active_context_usage(),
+            Some(ContextUsage {
+                estimated_tokens: 2_000,
+                context_length: 16_000,
+            }),
+            "finished child readout remains available while its transcript is drilled in"
+        );
+    }
+
+    #[test]
     fn domain_stream_started_clears_partial_thinking_text() {
         let mut state = AppState::new();
         state.mode = TuiMode::Pending;
@@ -5274,7 +5425,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let mut replayed_state = AppState::new();
-        replayed_state.replay_messages(&replayed_messages, &[]);
+        replayed_state.replay_messages(&replayed_messages, &[], None);
         let replayed_entries = replayed_state.chat_entries.clone();
 
         live_state.mode = TuiMode::Idle;

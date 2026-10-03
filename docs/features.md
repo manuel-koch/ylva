@@ -115,6 +115,12 @@ intact.
   directory, so the same checkout always lands in the same folder.
 - Every start begins a **fresh** session: Ylva never auto-resumes and shows no
   startup picker.
+- `--conversation-id <uuid> --clone` starts a **new** session that replays
+  an existing one: the source file is left byte-for-byte unchanged, the clone
+  gets its own session id with a `cloned_from` link in its header, and all new
+  writes go to the clone. Only top-level sessions can be cloned, and a source
+  another Ylva process holds open fails cleanly without creating anything.
+  See the [clone contract](persistence.md#clone-contract).
 - `--conversation-id <uuid>` re-attaches an existing session, replays its
   prior transcript into the next headless request and the TUI chat view, and
   appends the new turn; an unknown id is an error rather than a silent fresh
@@ -135,9 +141,68 @@ intact.
 - On exit, Ylva prints the session id and a ready-to-paste
   `ylva --conversation-id <uuid>` command to stderr, so resuming never
   requires hunting through the chats directory.
+- The root agent type is part of the session's metadata: a resume continues
+  with the type the session last stored unless `--agent <type>` says
+  otherwise, and an explicit override is persisted as the session's latest
+  selection so the next resume keeps it.
 
 See [persistence](./persistence.md) for the on-disk format and the full resume
 contract.
+
+## Context management and compaction
+
+A long conversation must keep fitting the active model's context window
+without losing anything the user can still read.
+
+- **Transcript vs. model view.** The transcript is the durable, ordered
+  record of every message and never loses one. The *model view* is what a
+  request actually carries: the leading system block, an optional compaction
+  summary, and the verbatim tail after the compaction boundary. The outer
+  agent loop is the only writer of both; background summarization only ever
+  receives an immutable snapshot of the prefix it summarizes.
+- **Token estimates.** Each message caches an approximate token count when it
+  enters the context using `tiktoken-rs` `cl100k_base` for every model. The
+  estimate is advisory: it does not claim to match the serving model's
+  tokenizer, serialized prompt processing, or billed usage. When
+  `YLVA_TOKEN_USAGE_DUMP_PATH` is set, Ylva also estimates each exact serialized
+  Chat Completions request before sending it and appends a metadata-only JSONL
+  record with a UTC request timestamp, its session ID when available, and any
+  provider-reported prompt/input count received for that same request.
+  Providers may omit usage, and interrupted streams retain an unavailable value
+  rather than reporting zero. See [CLI options — Debug](./cli-options.md#debug).
+  A `/models` switch re-evaluates the context budget against the new model's
+  window on the next settled turn.
+- **Automatic compaction.** After a completed turn at or above the engine's
+  `soft_compaction_threshold` (default `0.7` of the effective context
+  window), a background summary of the oldest prefix is started; it is
+  applied at the next safe boundary — a turn boundary with an empty serial
+  tool queue. Above `hard_compaction_threshold` (default `0.9`), or after a
+  failed or timed-out summary, the model view is instead dropped
+  synchronously — oldest complete turns or oversized old tool results first —
+  until it fits `context_length × compact_target_ratio` (default `0.5`).
+  Tool calls and their one matching result are never split. Compaction logs
+  report each sweep's estimated model-view tokens, active window, usage ratio,
+  thresholds, and chosen action, plus estimated tokens before and after a
+  summary or synchronous drop, signed estimated token savings (which can be
+  negative if a summary is larger), percentage change, and projected message
+  counts before and after. Context-usage update logs also include the numeric
+  estimate, active window, and ratio. These are local estimates, not
+  provider-reported usage or billed tokens.
+- **Summary generation.** The configured `compact_engine` (resolved to
+  `default_engine`) answers a tool-free request framed by the loaded
+  [`COMPACTION.md`](./configuration.md#compaction-summary-prompt-compactionmd)
+  instruction: it must preserve decisions, open work, file paths, identifiers,
+  user constraints, and where the verbatim tail begins.
+- **Scope.** Only root conversations compact; subagent contexts are
+  short-lived. There is no manual `/compact` command.
+- **Persistence and resume.** Each applied snapshot appends a `compaction`
+  event (never a rewrite); the newest one wins, so resume rebuilds the same
+  model view while the transcript stays complete. See the
+  [persistence format](./persistence.md#compaction).
+- **In the TUI.** The transcript keeps every message and shows a
+  `── compaction · N messages summarized ──` divider at the boundary (both
+  on replay and when a summary is applied live), and the footer's
+  key-hints row right-aligns the model-view readout (`64.2K (45%)`).
 
 ## TUI Runtime
 
@@ -601,6 +666,26 @@ module structure (model/presenter/view/driver split).
   <queued> queued` label; finished subagents are excluded, zero-valued
   categories are omitted, and the counts are hidden while viewing a child
   transcript. No sidebar.
+- **Compaction marker:** when a conversation compacts, the transcript keeps
+  every message and a non-message divider (`── compaction · N messages
+  summarized ──`) marks where the verbatim tail begins. It is inserted from
+  the persisted snapshot on replay — so it survives resume in the same
+  position — and added live when a summary is applied mid-session. It is a
+  view-only entry: it is never sent to the model and never seeds input
+  history. See the [resume contract](persistence.md#resume-contract) for how
+  the model view and the transcript stay separate.
+- **Context-usage readout:** the key-hints row right-aligns the estimated size
+  of the model view against the active context window — e.g. `64.2K (45%)`.
+  It is reported once hydration finishes (so a resumed session shows it
+  immediately) and again after every settled turn. While drilled into a child
+  transcript, it shows that child's latest estimate and context window; child
+  updates remain isolated from the root and other child readouts. A finished
+  child's last readout remains available while its transcript is browsed. The
+  estimate is the same approximate token count compaction budgets with, not
+  billed usage; the percentage is its fill of the window rounded to a whole
+  percent and clamped at `100%`. On a row too narrow to hold the readout next to
+  the hints, the readout is dropped rather than overwriting them. Headless
+  output has no footer and ignores the update.
 - **Input always active:** the input box is never disabled. `Enter` sends
   unconditionally — while the model is streaming, the message is queued as a
   pending steer (shown dimmed, then committed once the model has seen it),

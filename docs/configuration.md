@@ -97,7 +97,7 @@ engine = "ollama/local"
 | Key | Type | Description |
 |---|---|---|
 | `default_engine` | string | Name of the `[engines.*]` entry used when an agent type names none. Defaults to `default`. |
-| `compact_engine` | string (optional) | Engine used for summarisation tasks; resolves to `default_engine` when absent. Phase 10 wires this at runtime. |
+| `compact_engine` | string (optional) | Engine used for summarisation tasks — the compaction summary of an old conversation prefix and the session-title generation flow; resolves to `default_engine` when absent. |
 | `utility_engine` | string (optional) | Isolated engine used to generate session titles from the first user message and completed assistant reply; resolves to `default_engine` when absent. |
 | `default_model` | string (optional) | Model filled into every `[engines.*]` entry that names none of its own. |
 | `theme` | `dark` \| `light` | Syntax-highlighting theme. Defaults to `dark`. See [features — rendering](./features.md#tui-architecture). |
@@ -257,6 +257,28 @@ setup.
   in prompt text. There is no configuration knob for any of the rules above —
   the allowlist and the limits are code-owned constants.
 
+### Compaction summary prompt (`COMPACTION.md`)
+
+When a conversation compacts, the compact engine receives an immutable prefix
+snapshot plus a framing instruction that tells it what the summary must
+preserve. That instruction comes from `COMPACTION.md`, resolved with the same
+whole-file replacement order as `SOUL.md`:
+
+```text
+<workspace-root>/.ylva/COMPACTION.md
+    -> ~/.ylva/COMPACTION.md
+    -> code-owned built-in prompt
+```
+
+The resolved text is trimmed only at the end and is loaded when the root loop
+is built, so a workspace file changes how that workspace's conversations
+compact without touching the profile. The built-in prompt preserves decisions,
+open/blocked task state, file paths, URLs, citations, identifiers, user
+constraints, and the boundary where the verbatim tail begins, and it instructs
+the model to return only the summary text. Only the framing instruction is
+configurable: the summarizer stays tool-free and never sees the verbatim tail
+it is cut against.
+
 ### Agent-type files
 
 Agent-type files are user-authored external configuration. Ylva loads them
@@ -336,10 +358,19 @@ the provider.
 | `provider_connection` | string | Name of the connection under `[provider_connections.*]`. The connection's `provider` field must be `"mock"`, `"ollama"`, or `"openrouter"`. Ollama uses the server origin as `api_base_url` and derives both `/v1` chat and `/api` catalog endpoints; OpenRouter uses its origin as `api_base_url` and derives `/api/v1` for chat and model discovery. |
 | `model` | string | Model identifier passed to the provider. May be omitted, in which case the profile's `default_model` fills it in. |
 | `temperature` | number (optional) | Sampling temperature. Omit to use the model's own default. |
-| `context_length` | number (optional) | Maximum token context window. Omitted means the profile doesn't limit it explicitly. Accepts either a plain integer or a string with a `kb`/`mb` suffix (e.g. `"265kb"` = `265 * 1024`, `"2mb"` = `2 * 1024 * 1024`) — the same 1024-based units `/models` uses to display context lengths. The value actually used is resolved in priority order: this configured value, then the provider's advertised context length for the active model (from its `/models` catalog), then the built-in default of `128 000`. Phase 12 reads the resolved value to drive compaction budgeting. |
+| `context_length` | number (optional) | Maximum token context window. Omitted means the profile doesn't limit it explicitly. Accepts either a plain integer or a string with a `kb`/`mb` suffix (e.g. `"265kb"` = `265 * 1024`, `"2mb"` = `2 * 1024 * 1024`) — the same 1024-based units `/models` uses to display context lengths. The value actually used is resolved in priority order: this configured value, then the provider's advertised context length for the active model (from its `/models` catalog), then the built-in default of `128 000`. Compaction budgeting uses this resolved value as the window it measures the model view against. |
 | `api_base_url` | string (optional) | Optional engine-level override for the connection's base URL. |
 | `api_key` | string (optional) | Optional engine-level override for the connection's API key. |
 | `reasoning` | string (optional) | Initial explicit reasoning effort applied when the engine is constructed. Omitted uses the provider's own default. Validated once, lazily before the first chat, against the model catalog: an advertised value is kept; a value the model does not advertise (including models that expose no selectable alternatives at all) is dropped to the provider default with a warning naming the model and effort; when the model is absent from the catalog or the catalog fetch fails, the value is kept unvalidated. Later changes go through `/models`, which validates the effort against the model's advertised options before switching. |
+| `compact_target_ratio` | number (optional) | Fraction of the effective context window that a compaction shrinks the model view to (default `0.5`). Must be `> 0` and `≤ 1`, and strictly below `soft_compaction_threshold`. |
+| `soft_compaction_threshold` | number (optional) | Fraction of the effective context window at or above which a completed turn starts a background compaction summary (default `0.7`). Must be `> 0` and `≤ 1`, and strictly below `hard_compaction_threshold`. |
+| `hard_compaction_threshold` | number (optional) | Fraction of the effective context window above which the model-view prefix is dropped synchronously instead of waiting for a summary (default `0.9`). Must be `> 0` and `≤ 1`. |
+
+The three compaction ratios are validated when the profile loads: a ratio
+outside `(0, 1]` or a pair that is out of order (`compact_target_ratio` at or
+above `soft_compaction_threshold`, or `soft_compaction_threshold` at or above
+`hard_compaction_threshold`) is a startup error naming the engine and the
+violated rule.
 
 ## Profile configuration
 
@@ -348,7 +379,7 @@ A profile groups engine selection and per-agent settings for a runtime session.
 | Field | Type | Description |
 |---|---|---|
 | `default_engine` | string | Name of the engine used when no agent-level override is present (required). |
-| `compact_engine` | string (optional) | Engine used for summarisation tasks. Resolves to `default_engine` when absent. Phase 10 wires this at runtime. |
+| `compact_engine` | string (optional) | Engine used for summarisation tasks — the compaction summary of an old conversation prefix and the session-title generation flow. Resolves to `default_engine` when absent. |
 | `utility_engine` | string (optional) | Isolated engine used for utility tasks such as session-title generation. Resolves to `default_engine` when absent and does not follow `/models` runtime switching. |
 | `provider_connections` | table | Named provider connections, keyed by connection name. |
 | `engines` | table | Named model/runtime configurations, keyed by engine name. |
@@ -362,6 +393,7 @@ A profile groups engine selection and per-agent settings for a runtime session.
 | `description` | string (optional) | Model-facing summary of the tasks this agent type is suited for. The root agent receives it in the `spawn_subagent` tool description. |
 | `allowed_tools` | list of strings (optional) | Restrict which tool names this agent may invoke. When absent, the caller's flat default tool list applies (the CLI's or TUI's standard tool set, whichever is unset). When set, a distinct agent type — including one used only for spawned children — can be restricted to a genuinely different tool set than the root or any other agent type. |
 | `timeout_secs` | number (optional) | Maximum wall-clock seconds before the agent is cancelled. Omitted means no timeout. |
+| `max_tool_iterations` | number (optional) | Cap on consecutive tool-use rounds one turn may spend, for this agent type's root and child loops alike. Defaults to `50` when omitted; `0` is rejected at profile load because it would trip the guard on the very first tool-use round. |
 | `persona` | string (optional) | The agent type's own persona: the single model-facing text this type contributes, composed after the global baseline (global SOUL plus trusted instruction sections) and before the tool protocol — it extends that baseline, never replaces it. Write it as `persona = "…"` in a `.toml` agent-type file, as the body of a `.md` agent-type file (the body *is* the persona), or as `persona = "…"` in an inline table, where it replaces a file-sourced persona. Applies when the type runs as root or child. |
 | `can_spawn` | boolean | When `true` (for a root agent), registers the `spawn_subagent` tool so this agent may delegate self-contained tasks to a concurrently-running child agent (one level deep; children cannot spawn further children). Use `--auto-approve-spawn` to skip the human-approval prompt for `spawn_subagent` calls. See "Child-agent delegation" in `docs/features.md`. |
 | `tools` | table | Per-tool sandbox rule lists scoped to this agent type only, keyed by tool name (`[agents.<type>.tools.<name>]` inline tables, or a file-authored agent-type's own top-level `[tools.<name>]`/`tools: { <name>: ... }` table). Same shape as the profile-level `[tools.<name>]` table (see "Sandbox" below), resolved with higher precedence than it for this agent type. |

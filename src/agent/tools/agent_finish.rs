@@ -20,7 +20,7 @@
 //! immediately (not deferred to a later `ToolDone`/re-prompt cycle); the
 //! surrounding `AgentLoop::run` loop recognises this tool by name and exits
 //! the child's ReAct loop unconditionally afterwards — the only tool call
-//! exempt from `MAX_TOOL_USE_ITERATIONS`.
+//! exempt from `DEFAULT_MAX_TOOL_USE_ITERATIONS`.
 
 use futures::FutureExt;
 use schemars::{schema_for, JsonSchema};

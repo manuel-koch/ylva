@@ -21,6 +21,7 @@ use crate::ylva_home::{ylva_home, YLVA_DIR_NAME};
 
 mod agent;
 pub mod agent_type_file;
+pub mod compaction_prompt;
 pub mod instructions;
 pub mod layered;
 mod profile;
@@ -201,6 +202,21 @@ pub enum ConfigError {
         path: PathBuf,
         backend: String,
         expected: String,
+    },
+    #[error(
+        "profile config at {} has max_tool_iterations = 0 for agent type '{agent_type}'; \
+         expected at least 1",
+        path.display()
+    )]
+    InvalidMaxToolIterations { path: PathBuf, agent_type: String },
+    #[error(
+        "profile config at {} has an invalid compaction setting for engine '{engine}': {detail}",
+        path.display()
+    )]
+    InvalidCompactionSetting {
+        path: PathBuf,
+        engine: String,
+        detail: String,
     },
     #[error("cannot resolve the home directory for ~/.ylva")]
     HomeDirectoryNotFound,

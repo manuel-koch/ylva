@@ -84,6 +84,17 @@ pub enum StoreError {
     },
     #[error("session '{session_id}' writer is no longer available")]
     WriterClosed { session_id: Uuid },
+    #[error(
+        "session '{session_id}' is a child transcript at {}; only top-level sessions can be \
+         cloned",
+        path.display()
+    )]
+    SessionIsChild { session_id: Uuid, path: PathBuf },
+    #[error(
+        "session '{session_id}' at {} has no readable metadata header; it cannot be cloned",
+        path.display()
+    )]
+    MissingSessionMeta { session_id: Uuid, path: PathBuf },
 }
 
 /// One persisted JSONL line.
@@ -158,6 +169,44 @@ pub enum StoreEvent {
         provider_connection: String,
         model: String,
     },
+    /// The root agent type serving this session changed — written when an
+    /// explicit `--agent <type>` override on a resumed session differs from
+    /// the type the session was already using. `meta.agent_type` only
+    /// captures the type resolved at creation, so — exactly like
+    /// [`StoreEvent::ModelChanged`] for the model — this event is the
+    /// authoritative, replayable history of every later selection, and the
+    /// last one wins when a later run resolves the session's type.
+    AgentTypeChanged {
+        #[serde(default, alias = "v")]
+        version: u32,
+        changed_at: String,
+        agent_type: String,
+    },
+    /// The model-facing context was compacted through `boundary`: transcript
+    /// messages `[..boundary]` are represented from here on by `summary`,
+    /// while every one of them stays in this append-only file (blueprint §4C
+    /// *record vs view*).
+    ///
+    /// Appended, never rewritten: a later event with a larger boundary
+    /// supersedes an earlier one, so replay keeps the latest snapshot and the
+    /// verbatim tail after its boundary.
+    Compaction {
+        #[serde(default, alias = "v")]
+        version: u32,
+        compacted_at: String,
+        /// First transcript index kept verbatim as the tail, counted in the
+        /// live model context (the rebuilt leading system prompts included).
+        boundary: usize,
+        /// The same cut expressed in the **persisted transcript**: the leading
+        /// system prompts, which are rebuilt on every run and never written to
+        /// this file, are excluded. The TUI positions its compaction marker
+        /// with this value because it replays the file without building a
+        /// model context. `None` for events written before the marker
+        /// existed — the TUI then shows no marker for that snapshot.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transcript_boundary: Option<usize>,
+        summary: String,
+    },
 }
 
 /// The `meta` header record written as the first line of every session file.
@@ -195,6 +244,21 @@ pub struct SessionMeta {
     /// sessions' header shape is unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session: Option<Uuid>,
+    /// The root agent type resolved for this session at creation time (or
+    /// when `/clear` started its replacement session). `None` for sessions
+    /// written before this field existed — those read back as the `default`
+    /// agent type. Later selections are tracked only by
+    /// [`StoreEvent::AgentTypeChanged`]; this field is never rewritten after
+    /// creation, and it is omitted from the JSON line while unset so existing
+    /// headers keep their shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
+    /// The session this one was created from by `--clone`. `None` for every
+    /// session that was not cloned — omitted from the JSON line rather than
+    /// serialized as `null`, so existing headers keep their shape. The
+    /// source file is never rewritten, so this link is one-way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloned_from: Option<Uuid>,
 }
 
 /// Read-only summary of one persisted session, built from its `meta` header
@@ -211,6 +275,26 @@ pub struct SessionSummary {
     pub parent_session: Option<Uuid>,
     /// Absolute path of the session's `.jsonl` file.
     pub path: PathBuf,
+}
+
+/// One session's full persisted state, as [`Store::read_session_state`]
+/// returns it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionState {
+    /// Every event in append order — the record the TUI replays and the
+    /// clone path copies, including messages, selection changes, child-run
+    /// lifecycle records and compaction snapshots.
+    pub events: Vec<StoreEvent>,
+    /// Every committed message, in order — the durable transcript.
+    pub messages: Vec<Message>,
+    /// The latest compaction snapshot, if the session ever compacted.
+    /// `None` for sessions written before the event existed.
+    pub compaction: Option<crate::agent::compaction::CompactionSnapshot>,
+    /// That snapshot's boundary in persisted-transcript coordinates (system
+    /// prompts excluded) — what the TUI uses to place its compaction marker.
+    /// `None` when the session never compacted, or when the snapshot predates
+    /// the field.
+    pub compaction_transcript_boundary: Option<usize>,
 }
 
 /// `~/.ylva/chats`, the production root of all persisted sessions.
@@ -382,6 +466,7 @@ impl Store {
         session_id: Uuid,
         provider_connection: &str,
         model: &str,
+        agent_type: Option<&str>,
     ) -> Result<Store, StoreError> {
         let project_key = project_key(cwd);
         let path = session_path(chats_root, &project_key, session_id);
@@ -398,6 +483,8 @@ impl Store {
                 session_id,
                 title: String::new(),
                 parent_session: None,
+                agent_type: agent_type.map(str::to_string),
+                cloned_from: None,
             };
             let meta_line_len = write_meta_line(&mut file, &path, &meta)?;
             Some((meta, meta_line_len))
@@ -461,6 +548,159 @@ impl Store {
         ))
     }
 
+    /// Create a brand-new top-level session that replays `source_id`'s
+    /// logical event stream — the `--clone` path.
+    ///
+    /// The source is read under a nonblocking exclusive lock held only for
+    /// the read: another Ylva process holding the source (or a source that is
+    /// a child transcript) fails before anything is created. The source file
+    /// itself is never repaired, rewritten, or appended to. The clone gets a
+    /// fresh session id, its own `meta` header naming the source in
+    /// `cloned_from` with `parent_session` unset, and every copied event
+    /// except the old header — with `child_start`/`child_result` records
+    /// rebased onto the new id. Child transcript files stay where they are
+    /// and are reused as read-only history.
+    ///
+    /// `agent_type` is the effective root type for the clone (an explicit
+    /// `--agent`, else the source's stored type, else `None` for a source
+    /// written before either field existed).
+    pub fn clone_session(
+        chats_root: &Path,
+        cwd: &Path,
+        source_id: Uuid,
+        agent_type: Option<&str>,
+    ) -> Result<Store, StoreError> {
+        let project_key = project_key(cwd);
+        let source_path = session_path(chats_root, &project_key, source_id);
+        if !source_path.is_file() {
+            return Err(StoreError::SessionNotFound {
+                session_id: source_id,
+                path: source_path,
+            });
+        }
+
+        let (source_meta, events) = {
+            // Exclusive nonblock: a live resume of the source — or a
+            // concurrent clone of it — makes this fail without touching it.
+            let _source_lock = open_locked_session_file(&source_path, source_id, true)?;
+            let events = Store::read_events(&source_path)?;
+            let source_meta = events.iter().find_map(|event| match event {
+                StoreEvent::Meta(meta) => Some(meta.clone()),
+                _ => None,
+            });
+            let source_meta = source_meta.ok_or_else(|| StoreError::MissingSessionMeta {
+                session_id: source_id,
+                path: source_path.clone(),
+            })?;
+            if source_meta.parent_session.is_some() {
+                return Err(StoreError::SessionIsChild {
+                    session_id: source_id,
+                    path: source_path,
+                });
+            }
+            (source_meta, events)
+        };
+
+        let clone_id = Uuid::new_v4();
+        let clone_path = session_path(chats_root, &project_key, clone_id);
+        let mut file = open_locked_session_file(&clone_path, clone_id, false)?;
+        let clone_meta = SessionMeta {
+            version: EVENT_VERSION,
+            created_at: now_timestamp(),
+            schema_version: SCHEMA_VERSION,
+            app_version: crate::build_info::BUILD_INFO.version.to_string(),
+            project_key: project_key.clone(),
+            provider_connection: source_meta.provider_connection.clone(),
+            model: source_meta.model.clone(),
+            session_id: clone_id,
+            title: source_meta.title.clone(),
+            parent_session: None,
+            agent_type: agent_type
+                .map(str::to_string)
+                .or_else(|| source_meta.agent_type.clone()),
+            cloned_from: Some(source_id),
+        };
+        let meta_line_len = write_meta_line(&mut file, &clone_path, &clone_meta)?;
+
+        let messages: Vec<Message> = events
+            .iter()
+            .filter_map(|event| match event {
+                StoreEvent::Message { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .collect();
+        for event in events {
+            let event = match event {
+                // The source's header is replaced by `clone_meta` above.
+                StoreEvent::Meta(_) => continue,
+                // Parent lifecycle records now name the clone, so a later
+                // resume of the clone resolves its child runs from its own
+                // session id. The child transcript files themselves are
+                // untouched and stay shared read-only history.
+                StoreEvent::ChildStart {
+                    version,
+                    created_at,
+                    id,
+                    parent_session,
+                    call_id,
+                    agent_type,
+                    task,
+                    label,
+                } if parent_session == source_id => StoreEvent::ChildStart {
+                    version,
+                    created_at,
+                    id,
+                    parent_session: clone_id,
+                    call_id,
+                    agent_type,
+                    task,
+                    label,
+                },
+                StoreEvent::ChildResult {
+                    version,
+                    completed_at,
+                    id,
+                    parent_session,
+                    call_id,
+                    status,
+                    result,
+                    sources,
+                    origin,
+                } if parent_session == source_id => StoreEvent::ChildResult {
+                    version,
+                    completed_at,
+                    id,
+                    parent_session: clone_id,
+                    call_id,
+                    status,
+                    result,
+                    sources,
+                    origin,
+                },
+                other => other,
+            };
+            append_event_line(&mut file, &clone_path, &event)?;
+        }
+
+        let title_state = if clone_meta.title.is_empty() {
+            Some((clone_meta.clone(), meta_line_len))
+        } else {
+            None
+        };
+        let title_snapshot = title_snapshot(&clone_meta, &messages);
+        Ok(Store::spawn_writer(
+            clone_id,
+            project_key,
+            chats_root.to_path_buf(),
+            clone_path,
+            file,
+            TitleState {
+                meta_awaiting_title: title_state,
+            },
+            title_snapshot,
+        ))
+    }
+
     /// Start a brand-new session in the same project directory: used both by
     /// the `/clear` slash command (resets the conversation mid-run, no
     /// parent) and by [`Store::write_child_transcript`] (a child-agent run,
@@ -470,8 +710,15 @@ impl Store {
         provider_connection: &str,
         model: &str,
         parent_session: Option<Uuid>,
+        agent_type: Option<&str>,
     ) -> Result<Store, StoreError> {
-        self.start_new_session_with_id(Uuid::new_v4(), provider_connection, model, parent_session)
+        self.start_new_session_with_id(
+            Uuid::new_v4(),
+            provider_connection,
+            model,
+            parent_session,
+            agent_type,
+        )
     }
 
     fn start_new_session_with_id(
@@ -480,6 +727,7 @@ impl Store {
         provider_connection: &str,
         model: &str,
         parent_session: Option<Uuid>,
+        agent_type: Option<&str>,
     ) -> Result<Store, StoreError> {
         let directory = project_directory(&self.inner.chats_root, &self.inner.project_key);
         let path = directory.join(format!("{session_id}.jsonl"));
@@ -495,6 +743,8 @@ impl Store {
             session_id,
             title: String::new(),
             parent_session,
+            agent_type: agent_type.map(str::to_string),
+            cloned_from: None,
         };
         let meta_line_len = write_meta_line(&mut file, &path, &meta)?;
         Ok(Store::spawn_writer(
@@ -720,6 +970,35 @@ impl Store {
         });
     }
 
+    /// Enqueue an `agent_type_changed` record: written when an explicit
+    /// `--agent <type>` override on a resumed session changes the active
+    /// root agent type. See [`StoreEvent::AgentTypeChanged`] for why this —
+    /// not `meta.agent_type` — is the authoritative history.
+    pub fn record_agent_type_changed(&self, agent_type: &str) {
+        self.record_event(StoreEvent::AgentTypeChanged {
+            version: EVENT_VERSION,
+            changed_at: now_timestamp(),
+            agent_type: agent_type.to_string(),
+        });
+    }
+
+    /// Enqueue a `compaction` record: written by the outer loop when a
+    /// background summary is applied to the model view. See
+    /// [`StoreEvent::Compaction`] for the append-only supersession rules.
+    /// `boundary` indexes the live model context, where the rebuilt leading
+    /// system prompts occupy the first slots; `leading_system_len` is how many
+    /// of those there are, so the event can also carry the cut in
+    /// persisted-transcript coordinates for replay-only readers (the TUI).
+    pub fn record_compaction(&self, boundary: usize, leading_system_len: usize, summary: &str) {
+        self.record_event(StoreEvent::Compaction {
+            version: EVENT_VERSION,
+            compacted_at: now_timestamp(),
+            boundary,
+            transcript_boundary: Some(boundary.saturating_sub(leading_system_len)),
+            summary: summary.to_string(),
+        });
+    }
+
     /// Enqueue the `child_start` record written to the **parent** session
     /// before a child run begins (§4G *Persistence*).
     pub fn record_child_start(
@@ -798,8 +1077,12 @@ impl Store {
         messages: &[Message],
     ) -> Result<Store, StoreError> {
         let (provider_connection, model) = provider_connection_and_model.unwrap_or(("", ""));
-        let child_store =
-            self.start_new_session(provider_connection, model, Some(self.inner.session_id))?;
+        let child_store = self.start_new_session(
+            provider_connection,
+            model,
+            Some(self.inner.session_id),
+            None,
+        )?;
         if provider_connection_and_model.is_some() {
             child_store.record_model_changed(provider_connection, model);
         }
@@ -838,6 +1121,7 @@ impl Store {
             provider_connection,
             model,
             Some(self.inner.session_id),
+            None,
         )?;
         if provider_connection_and_model.is_some() {
             child_store.record_model_changed(provider_connection, model);
@@ -929,6 +1213,98 @@ impl Store {
                 _ => None,
             })
             .collect())
+    }
+
+    /// Every persisted event of a session, in append order — the full
+    /// logical record (meta header, messages, child-run lifecycle records,
+    /// model/agent selection changes). A pure read: unparseable lines are
+    /// skipped in memory, never repaired on disk, matching
+    /// [`Store::read_messages`]. This is the read path for callers that need
+    /// more than the transcript (session cloning, resume-time selection
+    /// restoration), never a substitute for it in the message path.
+    pub fn read_events(path: &Path) -> Result<Vec<StoreEvent>, StoreError> {
+        let content = std::fs::read_to_string(path).map_err(|source| StoreError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Ok(content
+            .lines()
+            .filter_map(|line| serde_json::from_str::<StoreEvent>(line).ok())
+            .collect())
+    }
+
+    /// The `meta` header of a persisted session, if the file exists and its
+    /// first line parses. A pure read: no lock is taken and nothing is
+    /// modified, so it is safe to call before [`Store::resume`] decides
+    /// anything about the run.
+    pub fn read_session_meta(path: &Path) -> Result<Option<SessionMeta>, StoreError> {
+        if !path.is_file() {
+            return Ok(None);
+        }
+        Ok(read_meta_line_with_length(path)?.map(|(meta, _line_length)| meta))
+    }
+
+    /// The root agent type a resumed session should continue with: the last
+    /// [`StoreEvent::AgentTypeChanged`] wins, else the `meta` header's
+    /// `agent_type`, else `None` (a session written before either existed —
+    /// callers treat that as the `default` agent type).
+    pub fn read_latest_agent_type(path: &Path) -> Result<Option<String>, StoreError> {
+        let events = Self::read_events(path)?;
+        let mut latest = None;
+        for event in &events {
+            match event {
+                StoreEvent::Meta(meta) => latest = meta.agent_type.clone(),
+                StoreEvent::AgentTypeChanged { agent_type, .. } => {
+                    latest = Some(agent_type.clone())
+                }
+                _ => {}
+            }
+        }
+        Ok(latest)
+    }
+
+    /// Everything needed to rebuild one session: the full event stream (TUI
+    /// replay, cloning), the committed messages (transcript hydration), and
+    /// the latest compaction snapshot that shapes the model view.
+    ///
+    /// A pure read like every other `Store::read_*` path: unparseable lines
+    /// are skipped in memory and nothing on disk is touched.
+    pub fn read_session_state(path: &Path) -> Result<SessionState, StoreError> {
+        let events = Self::read_events(path)?;
+        let mut messages = Vec::new();
+        let mut compaction: Option<crate::agent::compaction::CompactionSnapshot> = None;
+        let mut compaction_transcript_boundary: Option<usize> = None;
+        for event in &events {
+            match event {
+                StoreEvent::Message { message, .. } => messages.push(message.clone()),
+                StoreEvent::Compaction {
+                    boundary,
+                    transcript_boundary,
+                    summary,
+                    ..
+                } => {
+                    // Append-only supersession: the newest snapshot wins, and
+                    // a boundary never rewinds.
+                    let is_newer = compaction
+                        .as_ref()
+                        .is_none_or(|current| *boundary >= current.boundary);
+                    if is_newer {
+                        compaction = Some(crate::agent::compaction::CompactionSnapshot {
+                            boundary: *boundary,
+                            summary: summary.clone(),
+                        });
+                        compaction_transcript_boundary = *transcript_boundary;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(SessionState {
+            events,
+            messages,
+            compaction,
+            compaction_transcript_boundary,
+        })
     }
 
     /// Read explicit user messages from prior top-level sessions in this
@@ -1177,6 +1553,25 @@ fn lock_session_file(
     _session_id: Uuid,
 ) -> Result<LockedSessionFile, StoreError> {
     Ok(file)
+}
+
+/// Append one already-built event line to an open session file and flush it.
+///
+/// The counterpart of [`write_meta_line`] used by [`Store::clone_session`],
+/// which writes the whole replay before handing the file to the writer task.
+fn append_event_line(
+    file: &mut LockedSessionFile,
+    path: &Path,
+    event: &StoreEvent,
+) -> Result<(), StoreError> {
+    let line = serde_json::to_string(event).expect("event always serializes");
+    file.write_all(line.as_bytes())
+        .and_then(|()| file.write_all(b"\n"))
+        .and_then(|()| file.flush())
+        .map_err(|source| StoreError::Io {
+            path: path.to_path_buf(),
+            source,
+        })
 }
 
 /// Truncate a corrupt trailing JSON line (a write cut short by a power loss)
@@ -1445,8 +1840,15 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let chats_root = temp.path().join("chats");
         let session_id = Uuid::new_v4();
-        let store = Store::create(&chats_root, temp.path(), session_id, "openrouter", "gpt-4o")
-            .expect("store created");
+        let store = Store::create(
+            &chats_root,
+            temp.path(),
+            session_id,
+            "openrouter",
+            "gpt-4o",
+            None,
+        )
+        .expect("store created");
 
         store.record_message(&user_message("hello store"));
         store.record_message(&Message::Assistant {
@@ -1490,6 +1892,7 @@ mod tests {
             Uuid::new_v4(),
             "openrouter",
             "gpt-4o",
+            None,
         )
         .expect("store created");
 
@@ -1523,6 +1926,7 @@ mod tests {
             Uuid::new_v4(),
             "openrouter",
             "gpt-4o",
+            None,
         )
         .expect("store created");
 
@@ -1550,6 +1954,7 @@ mod tests {
             Uuid::new_v4(),
             "openrouter",
             "gpt-4o",
+            None,
         )
         .expect("store created");
 
@@ -1594,8 +1999,15 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let chats_root = temp.path().join("chats");
         let session_id = Uuid::new_v4();
-        let first_run = Store::create(&chats_root, temp.path(), session_id, "openrouter", "gpt-4o")
-            .expect("store created");
+        let first_run = Store::create(
+            &chats_root,
+            temp.path(),
+            session_id,
+            "openrouter",
+            "gpt-4o",
+            None,
+        )
+        .expect("store created");
         first_run.record_message(&user_message("orphaned question"));
         first_run.flush().await;
         drop(first_run);
@@ -1629,6 +2041,7 @@ mod tests {
             Uuid::new_v4(),
             "openrouter",
             "gpt-4o",
+            None,
         )
         .expect("store created");
 
@@ -1673,6 +2086,7 @@ mod tests {
             Uuid::new_v4(),
             "openrouter",
             "gpt-4o",
+            None,
         )
         .expect("store created");
 
@@ -1718,8 +2132,15 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let chats_root = temp.path().join("chats");
         let session_id = Uuid::new_v4();
-        let first = Store::create(&chats_root, temp.path(), session_id, "openrouter", "gpt-4o")
-            .expect("first open succeeds");
+        let first = Store::create(
+            &chats_root,
+            temp.path(),
+            session_id,
+            "openrouter",
+            "gpt-4o",
+            None,
+        )
+        .expect("first open succeeds");
         first.record_message(&user_message("first"));
         first.flush().await;
 
@@ -1751,8 +2172,15 @@ mod tests {
         let chats_root = temp.path().join("chats");
         let session_id = Uuid::new_v4();
         {
-            let store = Store::create(&chats_root, temp.path(), session_id, "openrouter", "gpt-4o")
-                .expect("store created");
+            let store = Store::create(
+                &chats_root,
+                temp.path(),
+                session_id,
+                "openrouter",
+                "gpt-4o",
+                None,
+            )
+            .expect("store created");
             store.record_message(&user_message("first turn"));
             store.flush().await;
         }
@@ -1784,8 +2212,15 @@ mod tests {
         let chats_root = temp.path().join("chats");
         let session_id = Uuid::new_v4();
         {
-            let store = Store::create(&chats_root, temp.path(), session_id, "openrouter", "gpt-4o")
-                .expect("store created");
+            let store = Store::create(
+                &chats_root,
+                temp.path(),
+                session_id,
+                "openrouter",
+                "gpt-4o",
+                None,
+            )
+            .expect("store created");
             store.record_message(&user_message("first turn"));
             store.flush().await;
         }
@@ -1814,8 +2249,15 @@ mod tests {
         let chats_root = temp.path().join("chats");
         let session_id = Uuid::new_v4();
         {
-            let store = Store::create(&chats_root, temp.path(), session_id, "openrouter", "gpt-4o")
-                .expect("store created");
+            let store = Store::create(
+                &chats_root,
+                temp.path(),
+                session_id,
+                "openrouter",
+                "gpt-4o",
+                None,
+            )
+            .expect("store created");
             store.record_message(&user_message("only turn"));
             store.flush().await;
         }
@@ -1889,13 +2331,21 @@ mod tests {
             Uuid::new_v4(),
             "openrouter",
             "gpt-4o",
+            None,
         )
         .expect("older session");
         older.record_message(&user_message("older question"));
         older.record_message(&assistant_message("older reply"));
         older.flush().await;
-        let newer = Store::create(&chats_root, temp.path(), Uuid::new_v4(), "ollama", "llama3")
-            .expect("newer session");
+        let newer = Store::create(
+            &chats_root,
+            temp.path(),
+            Uuid::new_v4(),
+            "ollama",
+            "llama3",
+            None,
+        )
+        .expect("newer session");
         newer.record_message(&user_message("newer question"));
         newer.record_message(&assistant_message("newer reply"));
         newer.flush().await;
@@ -1930,6 +2380,7 @@ mod tests {
             Uuid::new_v4(),
             "openrouter",
             "gpt-4o",
+            None,
         )
         .expect("older session");
         older.record_message(&user_message("older prompt"));
@@ -1947,6 +2398,7 @@ mod tests {
             Uuid::new_v4(),
             "openrouter",
             "gpt-4o",
+            None,
         )
         .expect("newer session");
         newer.record_message(&user_message("newer head"));
@@ -1970,6 +2422,7 @@ mod tests {
             Uuid::new_v4(),
             "openrouter",
             "gpt-4o",
+            None,
         )
         .expect("current session");
         current.record_message(&user_message("current prompt"));
@@ -2012,8 +2465,15 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let chats_root = temp.path().join("chats");
         let parent_id = Uuid::new_v4();
-        let store = Store::create(&chats_root, temp.path(), parent_id, "openrouter", "gpt-4o")
-            .expect("store created");
+        let store = Store::create(
+            &chats_root,
+            temp.path(),
+            parent_id,
+            "openrouter",
+            "gpt-4o",
+            None,
+        )
+        .expect("store created");
         let run_id = Uuid::new_v4();
 
         store.record_message(&user_message("delegate this"));
@@ -2086,6 +2546,7 @@ mod tests {
             Uuid::new_v4(),
             "openrouter",
             "gpt-4o",
+            None,
         )
         .expect("parent store created");
         let finished_run_id = Uuid::new_v4();
@@ -2154,6 +2615,7 @@ mod tests {
             Uuid::new_v4(),
             "openrouter",
             "gpt-4o",
+            None,
         )
         .expect("store created");
         let context_messages = vec![
@@ -2222,6 +2684,7 @@ mod tests {
             Uuid::new_v4(),
             "openrouter",
             "gpt-4o",
+            None,
         )
         .expect("store created");
         let run_id = Uuid::new_v4();
@@ -2270,6 +2733,7 @@ mod tests {
             Uuid::new_v4(),
             "openrouter",
             "gpt-4o",
+            None,
         )
         .expect("store created");
         store.record_message(&user_message("hi"));
@@ -2299,8 +2763,15 @@ mod tests {
         let chats_root = temp.path().join("chats");
         // Deliberately a different initial provider/model than the ones
         // switched to below, so the assertion can't pass by accident.
-        let store = Store::create(&chats_root, temp.path(), Uuid::new_v4(), "ollama", "llama3")
-            .expect("store created");
+        let store = Store::create(
+            &chats_root,
+            temp.path(),
+            Uuid::new_v4(),
+            "ollama",
+            "llama3",
+            None,
+        )
+        .expect("store created");
 
         store.record_model_changed("openrouter", "gpt-4o");
         store.record_model_changed("openrouter", "gpt-4o-mini");
@@ -2337,6 +2808,307 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn meta_records_the_root_agent_type_and_omits_it_when_unset() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let chats_root = temp.path().join("chats");
+
+        let selected = Store::create(
+            &chats_root,
+            temp.path(),
+            Uuid::new_v4(),
+            "ollama",
+            "llama3",
+            Some("researcher"),
+        )
+        .expect("store created");
+        selected.flush().await;
+        let StoreEvent::Meta(selected_meta) = &read_events(selected.path())[0] else {
+            panic!("first line must be the meta header")
+        };
+        assert_eq!(
+            selected_meta.agent_type.as_deref(),
+            Some("researcher"),
+            "the resolved root agent type is part of the creation header"
+        );
+
+        // A session written before the field existed: no `agent_type` key at
+        // all, so readers fall back to `default` instead of failing.
+        let legacy = Store::create(
+            &chats_root,
+            temp.path(),
+            Uuid::new_v4(),
+            "ollama",
+            "llama3",
+            None,
+        )
+        .expect("store created");
+        legacy.flush().await;
+        let raw_first_line = std::fs::read_to_string(legacy.path())
+            .expect("session file readable")
+            .lines()
+            .next()
+            .expect("at least one line")
+            .to_string();
+        assert!(
+            !raw_first_line.contains("agent_type"),
+            "an unset agent type must not serialize at all: {raw_first_line}"
+        );
+        assert_eq!(
+            Store::read_latest_agent_type(legacy.path()).expect("legacy file is readable"),
+            None,
+            "a header without the field reads back as unset"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_latest_agent_type_follows_the_last_agent_type_changed_record() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let chats_root = temp.path().join("chats");
+        let store = Store::create(
+            &chats_root,
+            temp.path(),
+            Uuid::new_v4(),
+            "ollama",
+            "llama3",
+            Some("default"),
+        )
+        .expect("store created");
+
+        assert_eq!(
+            Store::read_latest_agent_type(store.path()).expect("readable"),
+            Some("default".to_string()),
+            "before any override the header's type is the active one"
+        );
+
+        store.record_agent_type_changed("researcher");
+        store.flush().await;
+        assert_eq!(
+            Store::read_latest_agent_type(store.path()).expect("readable"),
+            Some("researcher".to_string()),
+            "an override supersedes the header without rewriting it"
+        );
+
+        store.record_agent_type_changed("default");
+        store.flush().await;
+        let events = read_events(store.path());
+        let StoreEvent::Meta(meta) = &events[0] else {
+            panic!("first line must be the meta header")
+        };
+        assert_eq!(
+            meta.agent_type.as_deref(),
+            Some("default"),
+            "the header still names the type resolved at creation"
+        );
+        assert_eq!(
+            Store::read_latest_agent_type(store.path()).expect("readable"),
+            Some("default".to_string()),
+            "the last override wins over every earlier one"
+        );
+    }
+
+    #[tokio::test]
+    async fn compaction_events_carry_the_transcript_relative_boundary_for_replay() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let chats_root = temp.path().join("chats");
+        let store = Store::create(
+            &chats_root,
+            temp.path(),
+            Uuid::new_v4(),
+            "ollama",
+            "llama3",
+            None,
+        )
+        .expect("store created");
+        store.record_message(&user_message("first turn"));
+        // The live boundary counts the two rebuilt system prompts; the
+        // persisted transcript does not contain them.
+        store.record_compaction(5, 2, "summarized prefix");
+        store.flush().await;
+
+        let events = read_events(store.path());
+        let compaction = events
+            .iter()
+            .find_map(|event| match event {
+                StoreEvent::Compaction {
+                    boundary,
+                    transcript_boundary,
+                    ..
+                } => Some((*boundary, *transcript_boundary)),
+                _ => None,
+            })
+            .expect("the compaction event");
+        assert_eq!(compaction, (5, Some(3)));
+
+        let state = Store::read_session_state(store.path()).expect("state readable");
+        assert_eq!(
+            state.compaction.map(|snapshot| snapshot.boundary),
+            Some(5),
+            "the model-view boundary is unchanged for the context restore"
+        );
+        assert_eq!(
+            state.compaction_transcript_boundary,
+            Some(3),
+            "replay-only readers get the cut without the system prompts"
+        );
+    }
+
+    #[test]
+    fn a_compaction_event_written_before_the_field_still_reads() {
+        // An event from before the marker existed: no `transcript_boundary`
+        // key at all. The reader tolerates it and reports no marker position.
+        let legacy = r#"{"type":"compaction","version":1,"compacted_at":"2026-01-01T00:00:00.000Z","boundary":4,"summary":"old summary"}"#;
+        let event: StoreEvent = serde_json::from_str(legacy).expect("the legacy line parses");
+        let StoreEvent::Compaction {
+            boundary,
+            transcript_boundary,
+            ..
+        } = event
+        else {
+            panic!("a compaction line");
+        };
+        assert_eq!(boundary, 4);
+        assert_eq!(transcript_boundary, None);
+    }
+
+    #[tokio::test]
+    async fn compaction_events_round_trip_and_the_latest_snapshot_wins() {
+        use crate::agent::compaction::CompactionSnapshot;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let chats_root = temp.path().join("chats");
+        let store = Store::create(
+            &chats_root,
+            temp.path(),
+            Uuid::new_v4(),
+            "ollama",
+            "llama3",
+            None,
+        )
+        .expect("store created");
+        store.record_message(&user_message("first turn"));
+        store.record_compaction(3, 0, "first summary");
+        store.record_compaction(7, 0, "second summary");
+        store.flush().await;
+
+        let events = read_events(store.path());
+        let compactions: Vec<(u32, usize, String)> = events
+            .iter()
+            .filter_map(|event| match event {
+                StoreEvent::Compaction {
+                    version,
+                    boundary,
+                    summary,
+                    ..
+                } => Some((*version, *boundary, summary.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            compactions,
+            vec![
+                (EVENT_VERSION, 3, "first summary".to_string()),
+                (EVENT_VERSION, 7, "second summary".to_string()),
+            ],
+            "each snapshot is appended, in order, with the event version stamped on it"
+        );
+
+        let state = Store::read_session_state(store.path()).expect("state readable");
+        assert_eq!(
+            state.events.len(),
+            events.len(),
+            "the full event stream comes back for replay and cloning"
+        );
+        assert_eq!(state.messages, vec![user_message("first turn")]);
+        assert_eq!(
+            state.compaction,
+            Some(CompactionSnapshot {
+                boundary: 7,
+                summary: "second summary".to_string(),
+            }),
+            "the newest snapshot supersedes the older one"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_written_before_compaction_existed_reads_back_without_a_snapshot() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let chats_root = temp.path().join("chats");
+        let store = Store::create(
+            &chats_root,
+            temp.path(),
+            Uuid::new_v4(),
+            "ollama",
+            "llama3",
+            None,
+        )
+        .expect("store created");
+        store.record_message(&user_message("legacy turn"));
+        store.flush().await;
+
+        let state = Store::read_session_state(store.path()).expect("state readable");
+        assert_eq!(state.messages, vec![user_message("legacy turn")]);
+        assert!(
+            state.compaction.is_none(),
+            "a legacy session has no snapshot to restore: {state:?}"
+        );
+        assert!(!state
+            .events
+            .iter()
+            .any(|event| matches!(event, StoreEvent::Compaction { .. })));
+    }
+
+    #[tokio::test]
+    async fn reading_a_session_state_never_touches_the_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let chats_root = temp.path().join("chats");
+        let store = Store::create(
+            &chats_root,
+            temp.path(),
+            Uuid::new_v4(),
+            "ollama",
+            "llama3",
+            None,
+        )
+        .expect("store created");
+        store.record_message(&user_message("turn"));
+        store.record_compaction(1, 0, "summarized");
+        store.flush().await;
+        let path = store.path().to_path_buf();
+        let session_id = store.session_id();
+        let before = std::fs::read(&path).expect("session file readable");
+        // Release the writer lock so the resume below is the process that
+        // opens the file, exactly as a later `--conversation-id` run would.
+        drop(store);
+
+        // The dropped handle's writer task releases the advisory lock
+        // asynchronously, so retry briefly — exactly what a later process
+        // would do after the previous one exited.
+        let resumed = {
+            let mut attempts = 0;
+            loop {
+                match Store::resume(&chats_root, temp.path(), session_id) {
+                    Ok(resumed) => break resumed,
+                    Err(StoreError::SessionLocked { .. }) if attempts < 100 => {
+                        attempts += 1;
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    }
+                    Err(error) => panic!("resume succeeds: {error}"),
+                }
+            }
+        };
+        resumed.flush().await;
+        let state = Store::read_session_state(&path).expect("state readable");
+        assert_eq!(state.compaction.map(|snapshot| snapshot.boundary), Some(1));
+        drop(resumed);
+
+        let after = std::fs::read(&path).expect("session file readable");
+        assert_eq!(
+            before, after,
+            "a resume plus a state read must not append, rewrite or repair anything"
+        );
+    }
+
+    #[tokio::test]
     async fn a_clear_rollovers_meta_header_has_no_parent_session_either() {
         let temp = tempfile::tempdir().expect("tempdir");
         let chats_root = temp.path().join("chats");
@@ -2346,6 +3118,7 @@ mod tests {
             Uuid::new_v4(),
             "openrouter",
             "gpt-4o",
+            None,
         )
         .expect("store created");
         store.record_message(&user_message("hi"));
@@ -2353,7 +3126,7 @@ mod tests {
 
         // `/clear` rolls over to a fresh session but is not a child run.
         let rolled_over = store
-            .start_new_session("openrouter", "gpt-4o", None)
+            .start_new_session("openrouter", "gpt-4o", None, None)
             .expect("rollover session created");
         rolled_over.record_message(&user_message("hi again"));
         rolled_over.flush().await;
@@ -2389,6 +3162,7 @@ mod tests {
             Uuid::new_v4(),
             "openrouter",
             "gpt-4o",
+            None,
         )
         .expect("store created");
         store.record_message(&user_message("preserve this user message"));
@@ -2432,6 +3206,7 @@ mod tests {
             Uuid::new_v4(),
             "openrouter",
             "gpt-4o",
+            None,
         )
         .expect("store created");
         let path = store.path().to_path_buf();
@@ -2440,6 +3215,240 @@ mod tests {
 
         let events = read_events(&path);
         assert!(matches!(events.as_slice(), [StoreEvent::Meta(_)]));
+    }
+
+    #[tokio::test]
+    async fn cloning_replays_the_source_into_a_new_session_and_leaves_the_source_untouched() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let chats_root = temp.path().join("chats");
+        let source_id = Uuid::new_v4();
+        let source = Store::create(
+            &chats_root,
+            temp.path(),
+            source_id,
+            "openrouter",
+            "gpt-4o",
+            Some("explorer"),
+        )
+        .expect("source created");
+        source.record_message(&user_message("first turn"));
+        source.record_message(&assistant_message("first reply"));
+        source.record_model_changed("ollama", "llama3.2");
+        let run_id = Uuid::new_v4();
+        let call_id = Uuid::new_v4();
+        source.record_child_start(run_id, call_id, "research", "investigate", "Investigate");
+        source.record_child_result(
+            run_id,
+            call_id,
+            "success",
+            Some("found it".to_string()),
+            vec!["src/store.rs".to_string()],
+            FinishResultOrigin::Agent,
+        );
+        source
+            .set_title("Copied title".to_string())
+            .await
+            .expect("title set");
+        source.flush().await;
+        let source_path = source.path().to_path_buf();
+        let source_bytes_before = std::fs::read(&source_path).expect("source readable");
+        drop(source);
+        // Dropping the store only closes the writer task asynchronously; the
+        // clone's exclusive nonblock lock must wait for that file handle.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let clone = Store::clone_session(&chats_root, temp.path(), source_id, Some("default"))
+            .expect("clone created");
+        clone.flush().await;
+        let clone_id = clone.session_id();
+        let clone_path = clone.path().to_path_buf();
+
+        assert_ne!(clone_id, source_id, "the clone gets a fresh session id");
+        assert_eq!(
+            std::fs::read(&source_path).expect("source readable"),
+            source_bytes_before,
+            "the source file stays byte-for-byte unchanged"
+        );
+
+        let clone_meta = Store::read_session_meta(&clone_path)
+            .expect("clone meta readable")
+            .expect("clone meta present");
+        assert_eq!(clone_meta.session_id, clone_id);
+        assert_eq!(
+            clone_meta.cloned_from,
+            Some(source_id),
+            "the clone names its source"
+        );
+        assert_eq!(
+            clone_meta.parent_session, None,
+            "a clone is a top-level session, not a child of the source"
+        );
+        assert_eq!(clone_meta.provider_connection, "openrouter");
+        assert_eq!(clone_meta.model, "gpt-4o");
+        assert_eq!(
+            clone_meta.title, "Copied title",
+            "the source title is carried over"
+        );
+        assert_eq!(
+            clone_meta.agent_type.as_deref(),
+            Some("default"),
+            "an explicit --agent applies to the clone"
+        );
+
+        let state = Store::read_session_state(&clone_path).expect("clone state readable");
+        assert_eq!(
+            state.messages,
+            vec![user_message("first turn"), assistant_message("first reply")],
+            "the clone replays the full transcript"
+        );
+
+        let clone_events = read_events(&clone_path);
+        assert!(
+            !clone_events.iter().any(
+                |event| matches!(event, StoreEvent::Meta(meta) if meta.session_id == source_id)
+            ),
+            "the source header is not copied: {clone_events:?}"
+        );
+        let child_start = clone_events
+            .iter()
+            .find_map(|event| match event {
+                StoreEvent::ChildStart {
+                    id,
+                    parent_session,
+                    call_id: copied_call_id,
+                    ..
+                } => Some((*id, *parent_session, *copied_call_id)),
+                _ => None,
+            })
+            .expect("child_start copied");
+        assert_eq!(child_start.0, run_id, "the child run id is preserved");
+        assert_eq!(
+            child_start.1, clone_id,
+            "the lifecycle record is rebased onto the clone"
+        );
+        assert_eq!(child_start.2, call_id, "the spawn call id is preserved");
+        let child_result_parent = clone_events
+            .iter()
+            .find_map(|event| match event {
+                StoreEvent::ChildResult {
+                    id, parent_session, ..
+                } => Some((*id, *parent_session)),
+                _ => None,
+            })
+            .expect("child_result copied");
+        assert_eq!(child_result_parent, (run_id, clone_id));
+
+        // New writes land only on the clone.
+        clone.record_message(&user_message("second turn"));
+        clone.flush().await;
+        assert_eq!(
+            Store::read_messages(&clone_path)
+                .expect("clone messages")
+                .len(),
+            3
+        );
+        assert_eq!(
+            Store::read_messages(&source_path)
+                .expect("source messages")
+                .len(),
+            2,
+            "the source transcript gains nothing from the clone run"
+        );
+    }
+
+    #[tokio::test]
+    async fn cloning_a_child_transcript_is_rejected_without_creating_a_session() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let chats_root = temp.path().join("chats");
+        let source_id = Uuid::new_v4();
+        let source = Store::create(
+            &chats_root,
+            temp.path(),
+            source_id,
+            "openrouter",
+            "gpt-4o",
+            None,
+        )
+        .expect("source created");
+        let child_id = source
+            .write_child_transcript(None, &[user_message("child work")])
+            .await
+            .expect("child transcript written");
+        drop(source);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let result = Store::clone_session(&chats_root, temp.path(), child_id, None);
+
+        assert!(
+            matches!(
+                result,
+                Err(StoreError::SessionIsChild { session_id, .. }) if session_id == child_id
+            ),
+            "a child transcript must not be cloned, got {result:?}"
+        );
+        let project_directory = project_directory(&chats_root, &project_key(temp.path()));
+        let session_files = std::fs::read_dir(&project_directory)
+            .expect("project directory readable")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
+            .count();
+        assert_eq!(
+            session_files, 2,
+            "the source and its child transcript are the only session files"
+        );
+    }
+
+    #[tokio::test]
+    async fn cloning_a_locked_source_fails_without_creating_a_session() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let chats_root = temp.path().join("chats");
+        let source_id = Uuid::new_v4();
+        let source = Store::create(
+            &chats_root,
+            temp.path(),
+            source_id,
+            "openrouter",
+            "gpt-4o",
+            None,
+        )
+        .expect("source created");
+        source.record_message(&user_message("live session"));
+        source.flush().await;
+
+        let result = Store::clone_session(&chats_root, temp.path(), source_id, None);
+
+        assert!(
+            matches!(
+                result,
+                Err(StoreError::SessionLocked { session_id }) if session_id == source_id
+            ),
+            "a source held open by another handle must fail the clone, got {result:?}"
+        );
+        let project_directory = project_directory(&chats_root, &project_key(temp.path()));
+        let session_files = std::fs::read_dir(&project_directory)
+            .expect("project directory readable")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
+            .count();
+        assert_eq!(session_files, 1, "no clone file was created");
+    }
+
+    #[tokio::test]
+    async fn cloning_an_unknown_source_is_a_hard_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let chats_root = temp.path().join("chats");
+        let missing = Uuid::new_v4();
+
+        let result = Store::clone_session(&chats_root, temp.path(), missing, None);
+
+        assert!(
+            matches!(
+                result,
+                Err(StoreError::SessionNotFound { session_id, .. }) if session_id == missing
+            ),
+            "cloning an unknown id must not start a fresh session, got {result:?}"
+        );
+        assert!(!session_path(&chats_root, &project_key(temp.path()), missing).exists());
     }
 
     /// Rewrite the `created_at` of a session file's `meta` line so ordering

@@ -351,7 +351,10 @@ impl AgentFactory {
             },
         ));
         let (agent_loop, ui_rx) = AgentLoop::new(Arc::clone(&engine), registry);
-        let mut agent_loop = agent_loop.with_configured_engine_name(engine_name);
+        let mut agent_loop = agent_loop
+            .with_configured_engine_name(engine_name)
+            .with_agent_type(agent_type)
+            .with_max_tool_iterations(profile.max_tool_iterations_for(agent_type));
         if let Some(system_prompt) =
             compose_agent_system_prompt(system_prompt.as_deref(), profile.agents.get(agent_type))
         {
@@ -379,6 +382,21 @@ impl AgentFactory {
                 manager.finish_rx,
                 manager.subagent_ui_rx,
             );
+        }
+
+        // Root conversations compact through the profile's `compact_engine`
+        // (resolved to `default_engine` when unset). Child contexts are
+        // short-lived and never compact, so no compaction engine is wired
+        // for them (blueprint §4C *scope*).
+        if !is_child {
+            if let Some(compaction_engine) = engines.get(profile.compact_engine_name()).cloned() {
+                let summary_prompt = crate::config::compaction_prompt::load_compaction_prompt(
+                    crate::config::layered::current_workspace_root().as_deref(),
+                )?;
+                agent_loop = agent_loop
+                    .with_compaction_engine(compaction_engine)
+                    .with_compaction_summary_prompt(summary_prompt);
+            }
         }
 
         // Only the root agent streams into the session file; a child's
@@ -435,12 +453,14 @@ impl AgentFactory {
                     resolve_engine_name(&profile, &request.agent_type).to_string();
                 let run_id = request.run_id;
                 let call_id = request.call_id;
+                let session_id = parent_store.as_ref().map(Store::session_id);
                 let inherited_engine =
                     (child_engine_name == parent_engine_name).then_some(parent_engine);
 
                 let child_role_config = ChildRoleConfig {
                     run_id,
                     call_id,
+                    session_id,
                     briefing: request.briefing.clone(),
                     parent_cancel: cancel.clone(),
                     subagent_ui_tx: forward_ui_tx.clone(),
@@ -677,6 +697,10 @@ fn implicit_engine_config(
         api_base_url: None,
         api_key: None,
         reasoning: None,
+
+        compact_target_ratio: 0.5,
+        soft_compaction_threshold: 0.7,
+        hard_compaction_threshold: 0.9,
     }
 }
 
@@ -737,11 +761,7 @@ fn resolve_engine_name<'profile>(
     profile: &'profile ProfileConfig,
     agent_type: &str,
 ) -> &'profile str {
-    profile
-        .agents
-        .get(agent_type)
-        .and_then(|agent_config| agent_config.engine.as_deref())
-        .unwrap_or(profile.default_engine.as_str())
+    profile.engine_name_for(agent_type)
 }
 
 /// Return the deterministic catalog shown to a root model when it can spawn
@@ -948,6 +968,10 @@ mod tests {
             api_base_url: None,
             api_key: None,
             reasoning: None,
+
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
         }
     }
 
@@ -965,6 +989,7 @@ mod tests {
                     description: None,
                     allowed_tools: None,
                     timeout_secs: None,
+                    max_tool_iterations: None,
                     persona: None,
                     can_spawn: true,
                     tools: HashMap::new(),
@@ -1000,6 +1025,7 @@ mod tests {
                 ),
                 allowed_tools: None,
                 timeout_secs: None,
+                max_tool_iterations: None,
                 persona: None,
                 can_spawn: false,
                 tools: HashMap::new(),
@@ -1034,6 +1060,10 @@ mod tests {
             api_base_url: None,
             api_key: None,
             reasoning: None,
+
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
         };
         ProfileConfig {
             default_engine: "main".to_string(),
@@ -1049,6 +1079,7 @@ mod tests {
                         description: None,
                         allowed_tools: None,
                         timeout_secs: None,
+                        max_tool_iterations: None,
                         persona: None,
                         can_spawn: false,
                         tools: HashMap::new(),
@@ -1061,6 +1092,7 @@ mod tests {
                         description: None,
                         allowed_tools: None,
                         timeout_secs: None,
+                        max_tool_iterations: None,
                         persona: None,
                         can_spawn: false,
                         tools: HashMap::new(),
@@ -1120,6 +1152,10 @@ mod tests {
                         api_base_url: None,
                         api_key: None,
                         reasoning: None,
+
+                        compact_target_ratio: 0.5,
+                        soft_compaction_threshold: 0.7,
+                        hard_compaction_threshold: 0.9,
                     },
                 ),
                 (
@@ -1132,6 +1168,10 @@ mod tests {
                         api_base_url: None,
                         api_key: None,
                         reasoning: None,
+
+                        compact_target_ratio: 0.5,
+                        soft_compaction_threshold: 0.7,
+                        hard_compaction_threshold: 0.9,
                     },
                 ),
             ]),
@@ -1189,6 +1229,10 @@ mod tests {
                     api_base_url: None,
                     api_key: None,
                     reasoning: None,
+
+                    compact_target_ratio: 0.5,
+                    soft_compaction_threshold: 0.7,
+                    hard_compaction_threshold: 0.9,
                 },
             )]),
             ..ProfileConfig::default()
@@ -1244,6 +1288,7 @@ mod tests {
                 description: None,
                 allowed_tools: None,
                 timeout_secs: None,
+                max_tool_iterations: None,
                 persona: None,
                 can_spawn: false,
                 tools: HashMap::from([(
@@ -1268,6 +1313,7 @@ mod tests {
         let child_role_config = ChildRoleConfig {
             run_id: uuid::Uuid::new_v4(),
             call_id: uuid::Uuid::new_v4(),
+            session_id: None,
             briefing: Some("briefing text".to_string()),
             parent_cancel: CancellationToken::new(),
             subagent_ui_tx,
@@ -1301,6 +1347,7 @@ mod tests {
                         description: None,
                         allowed_tools: None,
                         timeout_secs: None,
+                        max_tool_iterations: None,
                         persona: Some("specialist persona".to_string()),
                         can_spawn: false,
                         tools: HashMap::new(),
@@ -1350,6 +1397,7 @@ mod tests {
                     Role::Child(ChildRoleConfig {
                         run_id: Uuid::new_v4(),
                         call_id: Uuid::new_v4(),
+                        session_id: None,
                         briefing: Some("child briefing".to_string()),
                         parent_cancel: CancellationToken::new(),
                         subagent_ui_tx,
@@ -1407,6 +1455,7 @@ mod tests {
                     description: None,
                     allowed_tools: None,
                     timeout_secs: None,
+                    max_tool_iterations: None,
                     persona: None,
                     can_spawn: false,
                     tools: HashMap::new(),
@@ -1449,6 +1498,7 @@ mod tests {
                 description: None,
                 allowed_tools: Some(vec!["read".to_string()]),
                 timeout_secs: None,
+                max_tool_iterations: None,
                 persona: None,
                 can_spawn: false,
                 tools: HashMap::new(),
@@ -1506,6 +1556,7 @@ mod tests {
                 description: None,
                 allowed_tools: None,
                 timeout_secs: None,
+                max_tool_iterations: None,
                 persona: None,
                 can_spawn: false,
                 tools: HashMap::from([(
@@ -1620,6 +1671,7 @@ mod tests {
             Uuid::new_v4(),
             "openrouter",
             "gpt-4o",
+            None,
         )
         .expect("parent store created");
         let mut child_context = Context::new();
@@ -1715,6 +1767,7 @@ mod tests {
                     description: None,
                     allowed_tools: None,
                     timeout_secs: None,
+                    max_tool_iterations: None,
                     persona: None,
                     can_spawn: false,
                     tools: HashMap::new(),
@@ -1740,6 +1793,7 @@ mod tests {
         let child_role_config = ChildRoleConfig {
             run_id,
             call_id,
+            session_id: None,
             briefing: request.briefing.clone(),
             parent_cancel: cancel.clone(),
             subagent_ui_tx: forward_ui_tx.clone(),
@@ -1806,6 +1860,7 @@ mod tests {
                     description: None,
                     allowed_tools: None,
                     timeout_secs: None,
+                    max_tool_iterations: None,
                     persona: None,
                     can_spawn: false,
                     tools: HashMap::new(),
@@ -1822,6 +1877,7 @@ mod tests {
         let child_role_config = ChildRoleConfig {
             run_id,
             call_id,
+            session_id: None,
             briefing: None,
             parent_cancel: cancel.clone(),
             subagent_ui_tx: forward_ui_tx.clone(),

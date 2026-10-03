@@ -53,8 +53,8 @@ pub use agent::tools::{
 pub use agent::{
     AgentCommand, AgentEvent, AgentLoop, AgentMode, AssembledToolCall, AssistantStatus,
     ChildRoleConfig, Context, DeltaChunk, Message, PendingTool, Role, StreamEvent, ToolAttachment,
-    ToolCallRequest, ToolResult, UiUpdate, UserMessageKind, DEFAULT_TOOL_TIMEOUT_SECS,
-    MAX_TOOL_USE_ITERATIONS, TOOL_PROTOCOL_SYSTEM_PROMPT,
+    ToolCallRequest, ToolResult, UiUpdate, UserMessageKind, DEFAULT_MAX_TOOL_USE_ITERATIONS,
+    DEFAULT_TOOL_TIMEOUT_SECS, TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
 pub use agent_factory::AgentFactory;
 pub use app::App;
@@ -62,6 +62,7 @@ pub use build_info::{BuildInfo, BUILD_INFO};
 pub use child_agent_manager::{ChildAgentManager, FinishResult, SpawnRequest, SpawnStatus};
 pub use cli::{Cli, CliColorMode, CliCommand};
 pub use cli_driver::{run_cli, run_cli_to, run_cli_to_with_options, CliOutputOptions, ConsoleApp};
+pub use config::compaction_prompt::{load_compaction_prompt, DEFAULT_COMPACTION_PROMPT};
 pub use config::instructions::{
     compose_root_system_prompt, load_trusted_instructions, InstructionFile,
     INSTRUCTION_SAFETY_PREAMBLE, MAX_INSTRUCTION_FILE_BYTES, TRUSTED_INSTRUCTION_FILE_NAMES,
@@ -95,14 +96,14 @@ pub use slash_command::{
     SlashCommandInfo, SlashCommandInvocation, SLASH_COMMANDS,
 };
 pub use store::{
-    default_chats_root, project_key, session_path, SessionMeta, SessionSummary, Store, StoreError,
-    StoreEvent,
+    default_chats_root, project_key, session_path, SessionMeta, SessionState, SessionSummary,
+    Store, StoreError, StoreEvent,
 };
 pub use tui_driver::TuiApp;
 pub use tui_reducer_state::{
-    ActiveSubagentCounts, AppLayout, AppState, ChatArea, ChatEntry, ChatSelection, DomainEvent,
-    Effect, Focus, HelpPopupLayout, InputAreaLayout, InputEvent, SlashOverlayLayout, ToolCallState,
-    TuiDisplayMetadata, TuiMode, UserMessageState,
+    ActiveSubagentCounts, AppLayout, AppState, ChatArea, ChatEntry, ChatSelection, ContextUsage,
+    DomainEvent, Effect, Focus, HelpPopupLayout, InputAreaLayout, InputEvent, SlashOverlayLayout,
+    ToolCallState, TuiDisplayMetadata, TuiMode, UserMessageState,
 };
 pub use tui_render_state::TuiState;
 pub use ylva_home::{ylva_home, YLVA_DIR_NAME, YLVA_HOME_ENVIRONMENT_VARIABLE};

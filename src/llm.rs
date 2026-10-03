@@ -28,6 +28,8 @@ pub(crate) mod openai_compatible_messages;
 pub mod openai_compatible_provider;
 pub mod openrouter_provider;
 pub mod provider_registry;
+pub mod token_estimate;
+pub(crate) mod token_usage;
 
 pub use engine::{
     Engine, EngineConfig, EngineDisplayInfo, EngineImpl, EngineRouter, EngineRuntimeConfig,
@@ -38,6 +40,7 @@ pub use ollama_provider::OllamaProvider;
 pub use openai_compatible_provider::OpenAiCompatibleProvider;
 pub use openrouter_provider::OpenRouterProvider;
 pub use provider_registry::{ProviderEnv, ProviderRegistry, ProviderSelection};
+pub use token_estimate::TokenEstimator;
 
 /// A single tool definition in the OpenAI chat-completions wire shape.
 ///
@@ -173,6 +176,19 @@ pub trait Provider: Send + Sync {
         tools: Vec<ToolSchema>,
         cancel: CancellationToken,
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>>;
+
+    /// Start a chat request associated with a persisted session when one is
+    /// available. Providers that do not record session metadata can use the
+    /// default implementation.
+    fn chat_with_session_id<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        _session_id: Option<uuid::Uuid>,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        self.chat(messages, tools, cancel)
+    }
 
     /// Return the short name identifying this provider connection or the
     /// built-in implementation (e.g. `"ollama-cloud"`, `"openrouter"`,

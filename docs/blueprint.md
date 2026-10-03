@@ -1102,11 +1102,15 @@ summarizes old messages.
 completed turn at 70% of the active context length. Apply it at the next safe
 turn boundary. At 90%, use a synchronous drop fallback if the summary has not
 been applied. The default target is `context_length × 0.5`; configure
-`compact_target_ratio` per engine, and keep the 90% trigger fixed.
+`compact_target_ratio` per engine, and make the soft (70%) and hard (90%)
+triggers configurable per engine with those defaults.
 
-Use cached, approximate token counts: `tiktoken-rs` for OpenAI-compatible
-models and a four-characters-per-token estimate for Ollama. Re-evaluate after
-`/models` changes the active context length.
+Use cached, approximate `cl100k_base` token counts for all models and
+re-evaluate after `/models` changes the active context length. The estimate is
+advisory. When `YLVA_TOKEN_USAGE_DUMP_PATH` is set, record a metadata-only
+comparison between the estimate of each exact serialized request and provider-
+reported input usage for that request, when available; never treat either as
+billed usage. See [CLI options — Debug](./cli-options.md#debug).
 
 **Summary generation:** Use the configured `compact_engine` without tools. It
 summarizes an immutable prefix snapshot; the outer agent loop applies the
@@ -3103,57 +3107,58 @@ hard usage errors: stderr, exit 2).
 
 ### Phase 12: Context Compaction & Token Budgeting
 
-- [ ] **Goal:** Bound the model-facing context in long-running root
+- [x] **Goal:** Bound the model-facing context in long-running root
       conversations while preserving the full session transcript.
 
-- [ ] Separate the complete transcript from the model-facing context view.
+- [x] Separate the complete transcript from the model-facing context view.
       Keep the outer `AgentLoop` as the sole writer; background work receives
       immutable snapshots only.
 
-- [ ] Add tiered context entries and cached token estimates. Never compact the
+- [x] Add tiered context entries and cached token estimates. Never compact the
       leading system prompt; keep recent messages verbatim. Use `tiktoken-rs`
       for OpenAI-compatible models and a byte-length estimate (4 characters ≈
       1 token) for Ollama. Counts are approximate and used for budgeting, not
       billing.
 
-- [ ] Configure `compact_target_ratio` per engine, default `0.5`. Start a
-      background summary after a completed turn at 70% of the active
-      `context_length`. Apply the summary at the next safe turn boundary. Keep
-      the 90% hard trigger fixed; if it is reached before the summary applies,
-      synchronously drop old complete turns or oversized old results until the
-      target is met.
+- [x] Configure `compact_target_ratio` per engine, default `0.5`, plus the
+      `soft_compaction_threshold` (default `0.7`) and `hard_compaction_threshold`
+      (default `0.9`) triggers per engine. Start a background summary after a
+      completed turn at the soft threshold of the active `context_length`. Apply
+      the summary at the next safe turn boundary. If the hard threshold is
+      reached before the summary applies, synchronously drop old complete turns
+      or oversized old results until the target is met.
 
-- [ ] Summarize the old prefix with the configured `compact_engine`. The
+- [x] Summarize the old prefix with the configured `compact_engine`. The
       summary must preserve decisions, open work, file paths, identifiers, user
       constraints, and the boundary before the verbatim tail. On summarizer
       failure or timeout, use the synchronous drop fallback and log the
       failure.
 
-- [ ] Persist a versioned compaction event in the existing session JSONL file.
+- [x] Persist a versioned compaction event in the existing session JSONL file.
       Store a monotonic message boundary and the prefix summary. A later event
       supersedes the previous model-context snapshot. Do not rewrite or delete
       original messages. Replay uses the latest event to rebuild the model view
       and keeps the raw transcript intact.
 
-- [ ] Keep tool-call/result groups indivisible during compaction. A boundary
+- [x] Keep tool-call/result groups indivisible during compaction. A boundary
       must never separate a `tool_call_id` from its one matching result, and
       compaction runs only when the serial tool queue is empty.
 
-- [ ] Keep the full transcript visible in the TUI and show a compaction marker
+- [x] Keep the full transcript visible in the TUI and show a compaction marker
       at each boundary. The model receives a provider-safe marked summary
       followed by the verbatim tail. Do not insert a mid-conversation `system`
       message.
 
-- [ ] Re-evaluate the active budget when `/models` switches to a model with a
+- [x] Re-evaluate the active budget when `/models` switches to a model with a
       different context length. Compaction applies to root sessions only; child
       contexts are short-lived. No manual `/compact` command is included.
 
-- [ ] Keep per-result wire-size protection and a default `glob` ceiling out of
+- [x] Keep per-result wire-size protection and a default `glob` ceiling out of
       this phase. They are deferred to
       `docs/ideas/tool-result-size-guard.md`. The blueprint's earlier 8–16 KiB
       insertion-time truncation proposal is not selected.
 
-- [ ] Add unit and integration coverage for cached estimates, threshold
+- [x] Add unit and integration coverage for cached estimates, threshold
       behavior, summary application, fallback, tool-call/result pairing,
       append-only persistence, resume replay, model switching, and the visible
       TUI marker. Update `README.md`, `CONTEXT.md`, and the named runtime docs
@@ -3169,7 +3174,7 @@ controls selected for implementation. Structured output, quiet mode, stream
 policy, buffering, exit-code changes, one-off provider/model overrides, and
 session-maintenance commands are deferred to their idea notes.
 
-- [ ] **Goal:** Finish the selected CLI and agent controls. JSON/quiet output,
+- [x] **Goal:** Finish the selected CLI and agent controls. JSON/quiet output,
       output stream policy, buffering, exit-code changes, one-off provider/model
       overrides, and session maintenance are deferred to individual notes in
       `docs/ideas/` and `docs/ideas/session.md`.
@@ -3202,7 +3207,7 @@ session-maintenance commands are deferred to their idea notes.
 
 - [x] Always persist to a JSONL session file (no `--no-persist` flag)
 
-- [ ] Add `--agent <type>` for selecting the root agent in both TUI and
+- [x] Add `--agent <type>` for selecting the root agent in both TUI and
       headless modes. Store the selected type in new-session metadata and
       restore the latest selection on resume. Persist an explicit resume
       override as an `agent_type_changed` event. Legacy sessions without this
@@ -3210,16 +3215,16 @@ session-maintenance commands are deferred to their idea notes.
       longer available is a startup error unless the user explicitly selects
       an available type.
 
-- [ ] Add per-agent `max_tool_iterations`, default `50`, for root and child
+- [x] Add per-agent `max_tool_iterations`, default `50`, for root and child
       loops. Reject zero. This replaces the original per-engine limit of 15.
 
-- [ ] Add `--clone` with `--conversation-id <id>` in both TUI and headless
+- [x] Add `--clone` with `--conversation-id <id>` in both TUI and headless
       modes. Clone a top-level session's full logical event stream into a new
       UUID with a `cloned_from` source link and copied title. Refuse to clone a
       child transcript or a session held by another Ylva process; all new
       messages append only to the clone.
 
-- [ ] Keep `--provider` and `--model` one-off overrides deferred to
+- [x] Keep `--provider` and `--model` one-off overrides deferred to
       `docs/ideas/cli-provider-override.md` and
       `docs/ideas/cli-model-override.md`.
 
@@ -3363,17 +3368,17 @@ Study these for patterns:
 
 - [x] **Headless mode requires explicit `--auto-approve-*` flags for mutating tools**
 
-- [ ] Long conversations compact the model-facing context while preserving the
+- [x] Long conversations compact the model-facing context while preserving the
       full transcript (Phase 12).
 
-- [ ] Root agent types are selectable with `--agent` and restored on resume
+- [x] Root agent types are selectable with `--agent` and restored on resume
       unless explicitly overridden.
 
-- [ ] A top-level session can be cloned with
+- [x] A top-level session can be cloned with
       `--conversation-id <id> --clone`; new messages append to the clone and
       the source remains unchanged.
 
-- [ ] Root and child agents support per-agent `max_tool_iterations` settings.
+- [x] Root and child agents support per-agent `max_tool_iterations` settings.
 
 ## 12. Design Decisions
 

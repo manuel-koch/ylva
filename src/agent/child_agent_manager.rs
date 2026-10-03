@@ -568,6 +568,7 @@ mod tests {
             parent_session_id,
             "openrouter",
             "gpt-4o",
+            None,
         )
         .expect("parent store created");
         let (mut manager, _calls) = test_manager();

@@ -175,6 +175,29 @@ fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
         UiUpdate::StreamDone => Some(DomainEvent::StreamDone),
         UiUpdate::StreamCancelled => Some(DomainEvent::StreamCancelled),
         UiUpdate::AgentIdle => Some(DomainEvent::AgentIdle),
+        UiUpdate::ContextUsage {
+            estimated_tokens,
+            context_length,
+        } => Some(DomainEvent::ContextUsage {
+            estimated_tokens: *estimated_tokens,
+            context_length: *context_length,
+        }),
+        UiUpdate::ChildContextUsage {
+            run_id,
+            estimated_tokens,
+            context_length,
+        } => Some(DomainEvent::ChildContextUsage {
+            run_id: *run_id,
+            estimated_tokens: *estimated_tokens,
+            context_length: *context_length,
+        }),
+        UiUpdate::CompactionApplied {
+            entry_index,
+            summarized_messages,
+        } => Some(DomainEvent::CompactionApplied {
+            entry_index: *entry_index,
+            summarized_messages: *summarized_messages,
+        }),
         UiUpdate::SteerQueued { run_id } => Some(DomainEvent::SteerQueued { run_id: *run_id }),
         UiUpdate::SteerApplied { run_id } => Some(DomainEvent::SteerApplied { run_id: *run_id }),
         UiUpdate::ToolPending {
@@ -951,6 +974,9 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
     let chat_area_rect = app.layout.chat_area.rect;
     let slash_overlay_drag = app.slash_overlay_drag_selection();
     let active_subagent_counts = app.active_subagent_counts();
+    let context_usage_text = app.active_context_usage().map(|usage| {
+        crate::tui_reducer_state::format_context_usage(usage.estimated_tokens, usage.context_length)
+    });
     TuiState {
         display_metadata: app.display_metadata,
         parent_agent_mode: agent_mode,
@@ -964,6 +990,7 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
         engine_display: app.engine_display,
         queued_steer_texts: app.queued_steer_texts,
         steer_indicator: app.steer_indicator,
+        context_usage_text,
         pending_approval: None,
         pending_approval_is_subagent: false,
         input_history: app.input_history,
@@ -1207,8 +1234,14 @@ where
     configure_textarea(&mut textarea);
     let replay_store = agent.store();
     if let Some(store) = replay_store.as_ref() {
-        let messages = match crate::store::Store::read_messages(store.path()) {
-            Ok(messages) => messages,
+        // One read rebuilds both the transcript and the compaction marker's
+        // position; a snapshot written before the transcript-relative
+        // boundary existed simply replays without a marker.
+        let messages = match crate::store::Store::read_session_state(store.path()) {
+            Ok(session_state) => {
+                state.replay_compaction_boundary = session_state.compaction_transcript_boundary;
+                session_state.messages
+            }
             Err(error) => {
                 tracing::warn!(
                     %error,
@@ -1229,7 +1262,7 @@ where
                 Vec::new()
             }
         };
-        state.replay_messages(&messages, &child_runs);
+        state.replay_messages(&messages, &child_runs, state.replay_compaction_boundary);
         match store.read_past_explicit_user_messages(input_history_limit) {
             Ok(prior_messages) => state.prepend_input_history(prior_messages),
             Err(error) => {
@@ -1804,6 +1837,10 @@ pub async fn run_tui_on_stdout(
         api_base_url: None,
         api_key: None,
         reasoning: None,
+
+        compact_target_ratio: 0.5,
+        soft_compaction_threshold: 0.7,
+        hard_compaction_threshold: 0.9,
     };
     let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(provider, engine_config));
     let factory = Arc::new(
@@ -1913,6 +1950,7 @@ mod tests {
             Uuid::new_v4(),
             "mock",
             "conversation",
+            None,
         )
         .expect("store created");
         let provider = Arc::new(crate::llm::MockProvider::new(
@@ -1929,6 +1967,10 @@ mod tests {
                 api_base_url: None,
                 api_key: None,
                 reasoning: None,
+
+                compact_target_ratio: 0.5,
+                soft_compaction_threshold: 0.7,
+                hard_compaction_threshold: 0.9,
             },
         ));
         let factory = Arc::new(
@@ -2017,6 +2059,7 @@ mod tests {
             Uuid::new_v4(),
             "mock",
             "conversation",
+            None,
         )
         .expect("previous store created");
         previous_store.record_message(&crate::agent::Message::User {
@@ -2035,6 +2078,7 @@ mod tests {
             Uuid::new_v4(),
             "mock",
             "conversation",
+            None,
         )
         .expect("current store created");
         current_store.record_message(&crate::agent::Message::User {
@@ -2054,6 +2098,10 @@ mod tests {
                 api_base_url: None,
                 api_key: None,
                 reasoning: None,
+
+                compact_target_ratio: 0.5,
+                soft_compaction_threshold: 0.7,
+                hard_compaction_threshold: 0.9,
             },
         ));
         let factory = AgentFactory::new(HashMap::from([("default".to_string(), engine)]))
@@ -2103,6 +2151,192 @@ mod tests {
         let mut textarea = TextArea::default();
         configure_textarea(&mut textarea);
         (AppState::new(), textarea, cmd_tx, cmd_rx)
+    }
+
+    #[tokio::test]
+    async fn compaction_applied_update_inserts_the_transcript_marker() {
+        let (mut state, mut textarea, cmd_tx, _cmd_rx) = setup();
+        state.chat_entries.push(ChatEntry::UserMessage {
+            text: "old turn".to_string(),
+            state: UserMessageState::Sent,
+        });
+        state.chat_entries.push(ChatEntry::AssistantMessage {
+            text: "old reply".to_string(),
+            interrupted: false,
+        });
+        state.chat_entries.push(ChatEntry::UserMessage {
+            text: "new turn".to_string(),
+            state: UserMessageState::Sent,
+        });
+
+        let textarea_context = textarea_ctx_from(&textarea);
+        let outcome = process_one_update(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            &textarea_context,
+            &UiUpdate::CompactionApplied {
+                entry_index: 2,
+                summarized_messages: 2,
+            },
+            &mut MouseDrag::default(),
+            &mut NoopClipboard,
+            &mut PendingRunIds::default(),
+        )
+        .await;
+
+        assert_eq!(outcome, ActionOutcome::Continue);
+        assert_eq!(
+            state.chat_entries[2],
+            crate::tui_reducer_state::ChatEntry::CompactionMarker {
+                summarized_messages: 2
+            },
+            "the marker lands where the tail begins: {:?}",
+            state.chat_entries
+        );
+        assert!(matches!(
+            &state.chat_entries[3],
+            ChatEntry::UserMessage { text, .. } if text == "new turn"
+        ));
+
+        // A repeated emission of the same boundary must not stack markers.
+        let repeat_context = textarea_ctx_from(&textarea);
+        process_one_update(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            &repeat_context,
+            &UiUpdate::CompactionApplied {
+                entry_index: 2,
+                summarized_messages: 2,
+            },
+            &mut MouseDrag::default(),
+            &mut NoopClipboard,
+            &mut PendingRunIds::default(),
+        )
+        .await;
+        assert_eq!(
+            state
+                .chat_entries
+                .iter()
+                .filter(|entry| matches!(entry, ChatEntry::CompactionMarker { .. }))
+                .count(),
+            1,
+            "the same boundary is marked once"
+        );
+    }
+
+    #[tokio::test]
+    async fn context_usage_update_stores_the_footer_readout() {
+        let (mut state, mut textarea, cmd_tx, _cmd_rx) = setup();
+        assert_eq!(state.context_usage, None, "no report before the first turn");
+
+        let textarea_context = textarea_ctx_from(&textarea);
+        let outcome = process_one_update(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            &textarea_context,
+            &UiUpdate::ContextUsage {
+                estimated_tokens: 64_200,
+                context_length: 128_000,
+            },
+            &mut MouseDrag::default(),
+            &mut NoopClipboard,
+            &mut PendingRunIds::default(),
+        )
+        .await;
+
+        assert_eq!(outcome, ActionOutcome::Continue);
+        assert_eq!(
+            state.context_usage,
+            Some(crate::tui_reducer_state::ContextUsage {
+                estimated_tokens: 64_200,
+                context_length: 128_000,
+            }),
+            "the readout is stored as reported, not pre-formatted"
+        );
+        assert_eq!(
+            crate::tui_reducer_state::format_context_usage(64_200, 128_000),
+            "64.2K (50%)"
+        );
+
+        // A later report replaces the earlier one, in any mode.
+        state.mode = TuiMode::Streaming;
+        let streaming_context = textarea_ctx_from(&textarea);
+        process_one_update(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            &streaming_context,
+            &UiUpdate::ContextUsage {
+                estimated_tokens: 1_000,
+                context_length: 128_000,
+            },
+            &mut MouseDrag::default(),
+            &mut NoopClipboard,
+            &mut PendingRunIds::default(),
+        )
+        .await;
+        assert_eq!(
+            state.context_usage,
+            Some(crate::tui_reducer_state::ContextUsage {
+                estimated_tokens: 1_000,
+                context_length: 128_000,
+            })
+        );
+        assert_eq!(state.mode, TuiMode::Streaming, "the mode is untouched");
+    }
+
+    #[test]
+    fn child_context_usage_update_projects_for_active_child_without_replacing_root() {
+        let (mut state, _textarea, _cmd_tx, _cmd_rx) = setup();
+        let run_id = uuid::Uuid::new_v4();
+        state.start_child_run(crate::tui_reducer_state::ChildRunInfo {
+            run_id,
+            bubble_id: uuid::Uuid::new_v4(),
+            agent_type: "reviewer".to_string(),
+            task: "Review the change".to_string(),
+            label: "Review change".to_string(),
+        });
+        state.context_usage = Some(crate::tui_reducer_state::ContextUsage {
+            estimated_tokens: 12_000,
+            context_length: 128_000,
+        });
+        state.switch_to_child_view(run_id);
+
+        let event = ui_update_to_domain_event(&UiUpdate::ChildContextUsage {
+            run_id,
+            estimated_tokens: 4_000,
+            context_length: 32_000,
+        })
+        .expect("child usage update maps to a domain event");
+        presenter::update(
+            &mut state,
+            TuiEvent::Domain(event),
+            &textarea_ctx_from(&TextArea::default()),
+        );
+
+        assert_eq!(
+            state.context_usage,
+            Some(crate::tui_reducer_state::ContextUsage {
+                estimated_tokens: 12_000,
+                context_length: 128_000,
+            }),
+            "child usage must not replace the root readout"
+        );
+        assert_eq!(
+            state.active_context_usage(),
+            Some(crate::tui_reducer_state::ContextUsage {
+                estimated_tokens: 4_000,
+                context_length: 32_000,
+            }),
+            "the active child view selects its own readout"
+        );
+        assert_eq!(
+            crate::tui_reducer_state::format_context_usage(4_000, 32_000),
+            "4.0K (13%)"
+        );
     }
 
     #[tokio::test]
@@ -3274,6 +3508,10 @@ mod tests {
                     api_base_url: None,
                     api_key: None,
                     reasoning: None,
+
+                    compact_target_ratio: 0.5,
+                    soft_compaction_threshold: 0.7,
+                    hard_compaction_threshold: 0.9,
                 }),
                 named_engines: Vec::new(),
             })
@@ -3330,6 +3568,10 @@ mod tests {
                     api_base_url: None,
                     api_key: None,
                     reasoning: None,
+
+                    compact_target_ratio: 0.5,
+                    soft_compaction_threshold: 0.7,
+                    hard_compaction_threshold: 0.9,
                 }),
                 named_engines: vec![(
                     engine_name.to_string(),
@@ -3341,6 +3583,10 @@ mod tests {
                         api_base_url: None,
                         api_key: None,
                         reasoning: engine_reasoning.map(str::to_string),
+
+                        compact_target_ratio: 0.5,
+                        soft_compaction_threshold: 0.7,
+                        hard_compaction_threshold: 0.9,
                     },
                 )],
             })

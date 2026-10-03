@@ -32,7 +32,7 @@ use ylva::{
     default_registry, AgentCommand, AgentLoop, ApprovalCheck, AssistantStatus, AutoApproveTool,
     DeltaChunk, EngineImpl, Message, MockEvent, MockProvider, Provider, Sandbox, StreamEvent, Tool,
     ToolAttachment, ToolCall, ToolCallResult, ToolError, ToolRegistry, ToolRegistryConfig,
-    ToolSchema, UiUpdate, UserMessageKind, MAX_TOOL_USE_ITERATIONS,
+    ToolSchema, UiUpdate, UserMessageKind, DEFAULT_MAX_TOOL_USE_ITERATIONS,
 };
 
 /// Build a `MockEvent::Delta` carrying a complete tool call for `index`.
@@ -1067,7 +1067,7 @@ async fn iteration_guard_stops_after_max_reprompts() {
         .iter()
         .filter(|u| matches!(u, UiUpdate::StreamStarted))
         .count();
-    assert_eq!(starts, MAX_TOOL_USE_ITERATIONS);
+    assert_eq!(starts, DEFAULT_MAX_TOOL_USE_ITERATIONS);
 
     drop(agent);
     let context = handle.await.expect("loop ok").expect("context");
@@ -1075,6 +1075,146 @@ async fn iteration_guard_stops_after_max_reprompts() {
         .messages()
         .iter()
         .any(|m| matches!(m, Message::ToolError { name, .. } if name == "write")));
+}
+
+#[tokio::test(start_paused = true)]
+async fn iteration_guard_honors_a_custom_root_limit() {
+    let registry = Arc::new(default_registry(
+        make_sandbox(),
+        ToolRegistryConfig::default(),
+    ));
+    let interval = Duration::from_millis(5);
+    let provider = MockProvider::with_script(
+        vec![call(
+            "write",
+            0,
+            serde_json::json!({ "path": "x", "content": "y" }),
+        )],
+        interval,
+    );
+    let (agent, mut ui_rx) = AgentLoop::new(
+        Arc::new(EngineImpl::new(
+            Arc::new(provider),
+            common::test_engine_config(),
+        )),
+        Arc::clone(&registry),
+    );
+    let mut agent = agent.with_max_tool_iterations(3);
+
+    agent
+        .send_command(AgentCommand::Prompt("loop".into()))
+        .await;
+    let handle = agent.run();
+
+    let done = drive_until(&agent, &mut ui_rx, registry.as_ref(), interval, |u| {
+        matches!(u, UiUpdate::Error { .. })
+    })
+    .await;
+
+    assert!(
+        done.iter()
+            .any(|u| matches!(u, UiUpdate::Error { message, run_id: None } if message.contains("Max tool-use iterations (3)"))),
+        "the guard must report the configured limit, got: {done:?}"
+    );
+    let starts = done
+        .iter()
+        .filter(|u| matches!(u, UiUpdate::StreamStarted))
+        .count();
+    assert_eq!(
+        starts, 3,
+        "a custom root limit replaces the default {DEFAULT_MAX_TOOL_USE_ITERATIONS}"
+    );
+
+    drop(agent);
+    let context = handle.await.expect("loop ok").expect("context");
+    assert!(matches!(
+        context.messages().last(),
+        Some(Message::Assistant {
+            status: AssistantStatus::Interrupted,
+            ..
+        })
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn iteration_guard_honors_a_custom_child_limit() {
+    let registry = Arc::new(default_registry(
+        make_sandbox(),
+        ToolRegistryConfig::default(),
+    ));
+    let interval = Duration::from_millis(0);
+    let provider = MockProvider::with_script(
+        vec![call("read", 0, serde_json::json!({ "path": "Cargo.toml" }))],
+        interval,
+    );
+    let (finish_tx, _finish_rx) = mpsc::channel(1);
+    let (subagent_ui_tx, _subagent_ui_rx) = mpsc::channel(16);
+    let run_id = uuid::Uuid::new_v4();
+    let call_id = uuid::Uuid::new_v4();
+
+    let (agent, mut ui_rx) = AgentLoop::new(
+        Arc::new(EngineImpl::new(
+            Arc::new(provider),
+            common::test_engine_config(),
+        )),
+        Arc::clone(&registry),
+    );
+    let mut agent = agent
+        .with_child_role(ylva::ChildRoleConfig {
+            run_id,
+            call_id,
+            session_id: None,
+            briefing: None,
+            parent_cancel: CancellationToken::new(),
+            subagent_ui_tx,
+            finish_tx,
+        })
+        .with_max_tool_iterations(2);
+
+    agent
+        .send_command(AgentCommand::Prompt("child loop".into()))
+        .await;
+    let mut handle = agent.run();
+
+    // Drain `ui_rx` while `run()` is in flight, exactly like the drivers do:
+    // the bounded channel fills long before the cap trips otherwise and the
+    // loop parks on `send().await` (see docs/known-test-issues.md).
+    let mut collected_updates: Vec<UiUpdate> = Vec::new();
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            tokio::select! {
+                biased;
+                joined = &mut handle => break joined,
+                update = ui_rx.recv() => match update {
+                    Some(update) => collected_updates.push(update),
+                    None => std::future::pending::<()>().await,
+                },
+            }
+        }
+    })
+    .await
+    .expect("the child returns once the custom iteration cap trips")
+    .expect("run() task should not panic");
+
+    // Collect anything `run()` posted just before returning that the select
+    // loop above had not polled yet (both branches were ready, and `biased`
+    // preferred `handle`).
+    while let Ok(update) = ui_rx.try_recv() {
+        collected_updates.push(update);
+    }
+
+    let error = result.expect_err("a child hitting its cap must return Err");
+    assert!(
+        error.to_string().contains("Max tool-use iterations (2)"),
+        "the child error must report the configured limit; got: {error}"
+    );
+    assert!(
+        collected_updates.iter().any(
+            |u| matches!(u, UiUpdate::Error { message, run_id: Some(error_run_id) }
+                if error_run_id == &run_id && message.contains("Max tool-use iterations (2)"))
+        ),
+        "the guard error must be attributed to this child run"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -1302,7 +1442,7 @@ async fn iteration_guard_also_stops_a_runaway_spawn_subagent_finish_reprompt_loo
     // — so a model that just keeps calling `spawn_subagent` again on every
     // finish notice (rather than ever answering) could reprompt forever,
     // one HTTP request per "finish", completely bypassing
-    // `MAX_TOOL_USE_ITERATIONS`. The guard must trip here exactly like it
+    // `DEFAULT_MAX_TOOL_USE_ITERATIONS`. The guard must trip here exactly like it
     // does for the plain `write`-in-a-loop case above.
     use tokio_util::sync::CancellationToken;
     use ylva::child_agent_manager::{ChildAgentManager, FinishResult, SpawnFn};

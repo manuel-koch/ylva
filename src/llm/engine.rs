@@ -28,6 +28,10 @@ use crate::llm::{InputModality, ModelInfo, Provider, ToolSchema};
 /// Default context-length used when no explicit value is configured.
 pub const DEFAULT_CONTEXT_LENGTH: usize = 128_000;
 
+/// Default [`EngineConfig::compact_target_ratio`]: compaction shrinks the
+/// model view back to 50% of the engine's context window.
+pub const DEFAULT_COMPACT_TARGET_RATIO: f64 = 0.5;
+
 /// Configuration for an Engine.
 ///
 /// Phase 7 wires the provider-connection name, `model`, `temperature`, `context_length`,
@@ -45,8 +49,9 @@ pub const DEFAULT_CONTEXT_LENGTH: usize = 128_000;
 ///   project/home/built-in fallback chain and will add persona/`agents/*.md`
 ///   sourcing, which populate this same struct through additional layers.
 /// - **Phase 12 (Context Compaction & Token Budgeting)** reads
-///   `context_length` to drive `maybe_compact`'s budget; it adds no fields
-///   here.
+///   `context_length` and `compact_target_ratio` to bound the model view
+///   (see `crate::agent::compaction`); the compaction thresholds themselves
+///   stay fixed and are not configurable here.
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct EngineConfig {
     /// Named provider connection. Legacy flat profiles may use `provider`,
@@ -87,6 +92,34 @@ pub struct EngineConfig {
     /// advertised options before switching.
     #[serde(default)]
     pub reasoning: Option<String>,
+    /// Target fraction of the context window a compaction shrinks the model
+    /// view back to (blueprint §4C). Configured per `[engines.*]` table and
+    /// defaults to [`DEFAULT_COMPACT_TARGET_RATIO`].
+    #[serde(default = "default_compact_target_ratio")]
+    pub compact_target_ratio: f64,
+    /// Soft compaction trigger: the usage fraction at or above which a
+    /// completed turn starts a background summary. Defaults to
+    /// [`crate::agent::compaction::DEFAULT_SOFT_COMPACTION_THRESHOLD`];
+    /// profile validation requires `0 < target < soft < hard <= 1`.
+    #[serde(default = "default_soft_compaction_threshold")]
+    pub soft_compaction_threshold: f64,
+    /// Hard compaction trigger: the usage fraction above which the loop stops
+    /// waiting for a background summary and drops synchronously. Defaults to
+    /// [`crate::agent::compaction::DEFAULT_HARD_COMPACTION_THRESHOLD`].
+    #[serde(default = "default_hard_compaction_threshold")]
+    pub hard_compaction_threshold: f64,
+}
+
+fn default_compact_target_ratio() -> f64 {
+    DEFAULT_COMPACT_TARGET_RATIO
+}
+
+fn default_soft_compaction_threshold() -> f64 {
+    crate::agent::compaction::DEFAULT_SOFT_COMPACTION_THRESHOLD
+}
+
+fn default_hard_compaction_threshold() -> f64 {
+    crate::agent::compaction::DEFAULT_HARD_COMPACTION_THRESHOLD
 }
 
 impl EngineConfig {
@@ -285,6 +318,19 @@ pub trait Engine: Send + Sync {
         cancel: CancellationToken,
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>>;
 
+    /// Start a chat request associated with a persisted session when one is
+    /// available. Engines that do not propagate request metadata can use the
+    /// default implementation.
+    fn chat_with_session_id<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        _session_id: Option<uuid::Uuid>,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        self.chat(messages, tools, cancel)
+    }
+
     /// A snapshot of the engine's configuration.
     ///
     /// Returned by value rather than by reference because `/models` mutates
@@ -369,6 +415,25 @@ pub trait Engine: Send + Sync {
     /// Update the active model's provider-advertised input modalities.
     fn set_input_modalities(&self, _input_modalities: Option<Vec<InputModality>>) {}
 
+    /// The context window the active model serves, in tokens.
+    ///
+    /// [`EngineConfig::effective_context_length`] resolved for the *current*
+    /// model: the profile's `context_length` when set, otherwise the
+    /// provider-catalog length adopted by the last `/models` selection,
+    /// otherwise [`DEFAULT_CONTEXT_LENGTH`]. Compaction re-reads this on
+    /// every sweep, so switching to a model with a different window
+    /// re-evaluates the budget (blueprint §4C).
+    fn effective_context_length(&self) -> usize {
+        self.config().effective_context_length(None)
+    }
+
+    /// Adopt the provider-catalog context length of a newly selected model.
+    ///
+    /// Engines whose profile leaves `context_length` unset follow the
+    /// catalog; an explicit profile value always wins. The default is a
+    /// no-op for engines with no runtime context length to update.
+    fn adopt_catalog_context_length(&self, _catalog_context_length: Option<usize>) {}
+
     /// Discover the active model's provider-advertised catalog metadata —
     /// input modalities and a reasoning-effort validation pass — from the
     /// provider catalog, at most once per engine.
@@ -418,6 +483,7 @@ pub trait Engine: Send + Sync {
         self.set_reasoning_effort(option.reasoning_effort.as_deref())?;
         self.switch_model(&option.model.id)?;
         self.set_input_modalities(option.model.input_modalities.clone());
+        self.adopt_catalog_context_length(option.model.context_length);
         Ok(())
     }
 }
@@ -549,8 +615,47 @@ impl Engine for EngineRouter {
         })
     }
 
+    fn chat_with_session_id<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        session_id: Option<uuid::Uuid>,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        Box::pin(async move {
+            let (engine_name, engine) = self.active_engine_entry();
+            engine.hydrate_catalog_metadata().await;
+            let config = engine.config();
+            tracing::debug!(
+                engine = %engine_name,
+                provider_connection = %config.provider_connection,
+                model = %config.model,
+                reasoning_effort = %crate::llm::format_reasoning_effort_for_log(
+                    engine.reasoning_effort().as_deref()
+                ),
+                input_modalities = %crate::llm::format_input_modalities_for_log(
+                    engine.input_modalities().as_deref()
+                ),
+                "named engine selected for chat request"
+            );
+            let span = tracing::debug_span!(
+                "engine_request",
+                engine = %engine_name,
+                provider_connection = %config.provider_connection,
+            );
+            engine
+                .chat_with_session_id(messages, tools, cancel, session_id)
+                .instrument(span)
+                .await
+        })
+    }
+
     fn config(&self) -> EngineConfig {
         self.active_engine().config()
+    }
+
+    fn effective_context_length(&self) -> usize {
+        self.active_engine().effective_context_length()
     }
 
     fn active_engine_name(&self) -> Option<String> {
@@ -779,6 +884,21 @@ impl Engine for EngineImpl {
         })
     }
 
+    fn chat_with_session_id<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        session_id: Option<uuid::Uuid>,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        Box::pin(async move {
+            self.hydrate_catalog_metadata().await;
+            self.provider
+                .chat_with_session_id(messages, tools, cancel, session_id)
+                .await
+        })
+    }
+
     fn config(&self) -> EngineConfig {
         let runtime_config = self
             .runtime_config
@@ -833,6 +953,43 @@ impl Engine for EngineImpl {
             .write()
             .expect("the engine runtime configuration lock is poisoned")
             .input_modalities = input_modalities;
+    }
+
+    fn effective_context_length(&self) -> usize {
+        // The profile's own value always wins; otherwise the runtime value
+        // (seeded from the built-in default, replaced by the catalog length
+        // a `/models` selection adopts).
+        let runtime_context_length = self
+            .runtime_config
+            .read()
+            .expect("the engine runtime configuration lock is poisoned")
+            .context_length;
+        self.config.context_length.unwrap_or(runtime_context_length)
+    }
+
+    fn adopt_catalog_context_length(&self, catalog_context_length: Option<usize>) {
+        if self.config.context_length.is_some() {
+            // An explicit profile `context_length` outranks the catalog.
+            return;
+        }
+        let Some(catalog_context_length) = catalog_context_length else {
+            return;
+        };
+        let mut runtime_config = self
+            .runtime_config
+            .write()
+            .expect("the engine runtime configuration lock is poisoned");
+        if runtime_config.context_length == catalog_context_length {
+            return;
+        }
+        tracing::info!(
+            provider_connection = %self.config.provider_connection,
+            model = %runtime_config.model,
+            previous_context_length = runtime_config.context_length,
+            context_length = catalog_context_length,
+            "adopted catalog context length for the selected model"
+        );
+        runtime_config.context_length = catalog_context_length;
     }
 
     fn hydrate_catalog_metadata(&self) -> BoxFuture<'_, ()> {
@@ -913,6 +1070,10 @@ mod tests {
             api_base_url: None,
             api_key: None,
             reasoning: None,
+
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
         }
     }
 
@@ -933,6 +1094,10 @@ mod tests {
                     api_base_url: Some(format!("https://{provider}.test/v1")),
                     api_key: None,
                     reasoning: None,
+
+                    compact_target_ratio: 0.5,
+                    soft_compaction_threshold: 0.7,
+                    hard_compaction_threshold: 0.9,
                 }),
                 models: models
                     .iter()
@@ -1081,6 +1246,10 @@ mod tests {
     fn engine_with_profile_reasoning(provider: Arc<dyn Provider>, reasoning: &str) -> EngineImpl {
         let config = EngineConfig {
             reasoning: Some(reasoning.to_string()),
+
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
             ..make_engine_config()
         };
         EngineImpl::new(provider, config)
@@ -1203,6 +1372,10 @@ model = "local"
     fn effective_context_length_prefers_the_configured_toml_value() {
         let config = EngineConfig {
             context_length: Some(32_000),
+
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
             ..make_engine_config()
         };
         assert_eq!(config.effective_context_length(Some(999_999)), 32_000);
@@ -1212,6 +1385,10 @@ model = "local"
     fn effective_context_length_falls_back_to_the_catalogs_context_length() {
         let config = EngineConfig {
             context_length: None,
+
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
             ..make_engine_config()
         };
         assert_eq!(config.effective_context_length(Some(64_000)), 64_000);
@@ -1221,11 +1398,121 @@ model = "local"
     fn effective_context_length_falls_back_to_the_built_in_default() {
         let config = EngineConfig {
             context_length: None,
+
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
             ..make_engine_config()
         };
         assert_eq!(
             config.effective_context_length(None),
             DEFAULT_CONTEXT_LENGTH
+        );
+    }
+
+    #[test]
+    fn compact_target_ratio_defaults_to_half_the_window_and_is_configurable_per_engine() {
+        let default_config: EngineConfig =
+            toml::from_str("provider = \"mock\"\nmodel = \"test-model\"\n")
+                .expect("a config without compact_target_ratio parses");
+        assert_eq!(
+            default_config.compact_target_ratio,
+            DEFAULT_COMPACT_TARGET_RATIO
+        );
+        assert_eq!(default_config.compact_target_ratio, 0.5);
+
+        let configured: EngineConfig = toml::from_str(
+            "provider = \"mock\"\nmodel = \"test-model\"\ncompact_target_ratio = 0.25\n",
+        )
+        .expect("an explicit compact_target_ratio parses");
+        assert_eq!(configured.compact_target_ratio, 0.25);
+    }
+
+    #[test]
+    fn the_compaction_budget_is_read_off_the_active_engine() {
+        let engine = CatalogEngine::new("mock", "test-model", &[]);
+
+        let budget = crate::agent::compaction::CompactionBudget::from_engine(&engine)
+            .expect("a non-zero window always yields a budget");
+        assert_eq!(
+            budget.context_length, DEFAULT_CONTEXT_LENGTH,
+            "no profile context_length and no catalog selection fall back to \
+             the built-in window"
+        );
+        assert_eq!(budget.target_ratio, 0.5);
+        assert_eq!(
+            budget.soft_threshold,
+            crate::agent::compaction::DEFAULT_SOFT_COMPACTION_THRESHOLD
+        );
+        assert_eq!(
+            budget.hard_threshold,
+            crate::agent::compaction::DEFAULT_HARD_COMPACTION_THRESHOLD
+        );
+        assert_eq!(budget.target_tokens(), DEFAULT_CONTEXT_LENGTH / 2);
+    }
+
+    #[test]
+    fn a_models_switch_adopts_the_catalog_context_length_only_when_unconfigured() {
+        let catalog_model = ModelInfo {
+            id: "catalog-model".to_string(),
+            context_length: Some(8_192),
+            reasoning_efforts: None,
+            reasoning_default: None,
+            input_modalities: None,
+        };
+        let mut selection = ProviderModelOption {
+            provider_connection: "mock".to_string(),
+            model: catalog_model,
+            reasoning_effort: None,
+        };
+
+        let mut unconfigured = make_engine_config();
+        unconfigured.context_length = None;
+        let provider_connection = unconfigured.provider_connection.clone();
+        let engine = EngineImpl::new(
+            Arc::new(OpenAiCompatibleProvider::new(
+                "test".to_string(),
+                "http://localhost:1234/v1".to_string(),
+                "provider-model".to_string(),
+                None,
+            )),
+            unconfigured,
+        );
+        assert_eq!(
+            engine.effective_context_length(),
+            DEFAULT_CONTEXT_LENGTH,
+            "no profile value and no catalog value yet"
+        );
+
+        selection.provider_connection = provider_connection.clone();
+        engine
+            .switch_model_option(&selection)
+            .expect("model selection succeeds");
+        assert_eq!(
+            engine.effective_context_length(),
+            8_192,
+            "the catalog length adopted by the switch is what budgets measure"
+        );
+
+        let mut pinned = make_engine_config();
+        pinned.context_length = Some(4_096);
+        selection.provider_connection = pinned.provider_connection.clone();
+        let engine = EngineImpl::new(
+            Arc::new(OpenAiCompatibleProvider::new(
+                "test".to_string(),
+                "http://localhost:1234/v1".to_string(),
+                "provider-model".to_string(),
+                None,
+            )),
+            pinned,
+        );
+        engine
+            .switch_model_option(&selection)
+            .expect("model selection succeeds");
+        assert_eq!(
+            engine.effective_context_length(),
+            4_096,
+            "an explicit profile context_length outranks the catalog"
         );
     }
 
@@ -1245,6 +1532,10 @@ model = "local"
             api_base_url: Some("http://localhost:1234/v1".to_string()),
             api_key: None,
             reasoning: None,
+
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
         };
         let engine = EngineImpl::new(Arc::clone(&provider) as Arc<dyn Provider>, config);
 

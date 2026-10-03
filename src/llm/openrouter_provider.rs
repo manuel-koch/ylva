@@ -46,7 +46,8 @@ impl OpenRouterProvider {
                 api_key,
                 Self::customize_request_body,
                 super::openai_compatible_provider::redact_chat_completion_request_body,
-            ),
+            )
+            .with_provider_kind("openrouter"),
         }
     }
 
@@ -90,6 +91,17 @@ impl Provider for OpenRouterProvider {
         cancel: CancellationToken,
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
         self.inner.chat(messages, tools, cancel)
+    }
+
+    fn chat_with_session_id<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        session_id: Option<uuid::Uuid>,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        self.inner
+            .chat_with_session_id(messages, tools, cancel, session_id)
     }
 }
 

@@ -369,6 +369,17 @@ pub enum ChatEntry {
     Notice {
         text: String,
     },
+    /// Non-message divider marking where compaction cut the transcript: the
+    /// `summarized_messages` messages before it are represented in the model
+    /// view by the compaction summary, while the full transcript stays
+    /// browsable here. Never sent to the model and never part of the
+    /// transcript — it exists only in this view-model, built from the
+    /// persisted snapshot's boundary.
+    CompactionMarker {
+        /// How many transcript messages the summary replaces — the boundary's
+        /// index in persisted-transcript coordinates.
+        summarized_messages: usize,
+    },
 }
 
 /// A single in-flight turn's accumulated stream text, shared by the root
@@ -513,6 +524,10 @@ pub struct ChildConversation {
     pub info: ChildRunInfo,
     pub messages: Vec<ChatEntry>,
     pub turn_buffer: TurnBuffer,
+    /// Latest context estimate reported by this child run. Kept with the
+    /// conversation so the footer can show the correct window while drilled
+    /// into this child, even after it finishes.
+    pub context_usage: Option<ContextUsage>,
     pub needs_lazy_load: bool,
 }
 
@@ -522,6 +537,7 @@ impl ChildConversation {
             info,
             messages: Vec::new(),
             turn_buffer: TurnBuffer::default(),
+            context_usage: None,
             needs_lazy_load: false,
         }
     }
@@ -531,6 +547,7 @@ impl ChildConversation {
             info,
             messages: Vec::new(),
             turn_buffer: TurnBuffer::default(),
+            context_usage: None,
             needs_lazy_load: true,
         }
     }
@@ -539,12 +556,16 @@ impl ChildConversation {
 /// Project persisted domain messages into the same terminal-free chat model
 /// used by live presenter updates.
 pub fn project_messages(messages: &[Message]) -> Vec<ChatEntry> {
-    project_messages_with_child_runs(messages, &[])
+    project_messages_with_child_runs(messages, &[], None)
 }
 
+/// Project persisted messages into chat entries, inserting the compaction
+/// marker at `compaction_boundary` — the transcript index where the verbatim
+/// tail begins. `None` keeps the plain transcript view.
 fn project_messages_with_child_runs(
     messages: &[Message],
     child_runs: &[ChildRunRecord],
+    compaction_boundary: Option<usize>,
 ) -> Vec<ChatEntry> {
     let tool_calls = messages
         .iter()
@@ -566,7 +587,12 @@ fn project_messages_with_child_runs(
         .collect::<HashMap<_, _>>();
     let mut entries = Vec::new();
 
-    for message in messages {
+    for (message_index, message) in messages.iter().enumerate() {
+        if Some(message_index) == compaction_boundary {
+            entries.push(ChatEntry::CompactionMarker {
+                summarized_messages: message_index,
+            });
+        }
         match message {
             Message::User {
                 content,
@@ -677,6 +703,13 @@ fn project_messages_with_child_runs(
                 let _ = arguments;
             }
         }
+    }
+    // A boundary at the very end of the transcript still gets its marker:
+    // everything was summarized and the tail is empty.
+    if Some(messages.len()) == compaction_boundary {
+        entries.push(ChatEntry::CompactionMarker {
+            summarized_messages: messages.len(),
+        });
     }
 
     for child_run in child_runs {
@@ -1042,6 +1075,13 @@ pub enum DomainEvent {
         text: String,
         is_thinking: bool,
     },
+    /// The child run's model-view estimate against its own active context
+    /// window. See `UiUpdate::ChildContextUsage`.
+    ChildContextUsage {
+        run_id: Uuid,
+        estimated_tokens: usize,
+        context_length: usize,
+    },
     /// The child agent run identified by `run_id` has finished.
     /// See `UiUpdate::ChildAgentDone`.
     ChildAgentDone {
@@ -1055,6 +1095,18 @@ pub enum DomainEvent {
     /// (see `AppState::last_bubble_click`). A no-op if a second click (or a
     /// click on a different bubble) already resolved/cleared it first.
     BubbleClickWindowExpired,
+    /// The model view's estimated size against the active context window;
+    /// see [`ContextUsage`] and `UiUpdate::ContextUsage`.
+    ContextUsage {
+        estimated_tokens: usize,
+        context_length: usize,
+    },
+    /// A compaction snapshot was applied this run; see
+    /// `UiUpdate::CompactionApplied` and [`ChatEntry::CompactionMarker`].
+    CompactionApplied {
+        entry_index: usize,
+        summarized_messages: usize,
+    },
 }
 
 impl DomainEvent {
@@ -1083,8 +1135,11 @@ impl DomainEvent {
             DomainEvent::ChildAgentStarted { .. } => "ChildAgentStarted",
             DomainEvent::ChildAgentEngineConfigured { .. } => "ChildAgentEngineConfigured",
             DomainEvent::ChildAgentToken { .. } => "ChildAgentToken",
+            DomainEvent::ChildContextUsage { .. } => "ChildContextUsage",
             DomainEvent::ChildAgentDone { .. } => "ChildAgentDone",
             DomainEvent::BubbleClickWindowExpired => "BubbleClickWindowExpired",
+            DomainEvent::ContextUsage { .. } => "ContextUsage",
+            DomainEvent::CompactionApplied { .. } => "CompactionApplied",
         }
     }
 
@@ -1226,6 +1281,50 @@ fn format_input_modality_markers(input_modalities: Option<&[InputModality]>) -> 
         None
     } else {
         Some(format!("[{markers}]"))
+    }
+}
+
+/// The model view's estimated size against the active context window, as
+/// reported by `UiUpdate::ContextUsage`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextUsage {
+    /// Estimated tokens of the model view (the same advisory estimate
+    /// compaction budgets with).
+    pub estimated_tokens: usize,
+    /// The active window the estimate is measured against.
+    pub context_length: usize,
+}
+
+/// Render a context-usage readout for the footer, e.g. `64.2K (45%)`.
+///
+/// The percentage is the estimate's fill of the active window, rounded to a
+/// whole percent and clamped to `100%` (an estimate can overshoot briefly
+/// before compaction runs).
+pub fn format_context_usage(estimated_tokens: usize, context_length: usize) -> String {
+    let percentage = if context_length == 0 {
+        0.0
+    } else {
+        (estimated_tokens as f64 / context_length as f64) * 100.0
+    }
+    .round()
+    .clamp(0.0, 100.0) as u64;
+    format!(
+        "{} ({percentage}%)",
+        format_token_estimate(estimated_tokens)
+    )
+}
+
+/// Abbreviate a token estimate: `950`, `64.2K`, `1.2M`.
+fn format_token_estimate(estimated_tokens: usize) -> String {
+    const THOUSAND: f64 = 1_000.0;
+    const MILLION: f64 = 1_000_000.0;
+    let tokens = estimated_tokens as f64;
+    if tokens >= MILLION {
+        format!("{:.1}M", tokens / MILLION)
+    } else if tokens >= THOUSAND {
+        format!("{:.1}K", tokens / THOUSAND)
+    } else {
+        estimated_tokens.to_string()
     }
 }
 
@@ -1761,6 +1860,17 @@ pub struct AppState {
     /// `true` while ≥1 steer is queued.
     pub steer_indicator: bool,
 
+    // ── context readout ─────────────────────────────────────────────────────
+    /// Latest root model-view estimate reported by `UiUpdate::ContextUsage`;
+    /// rendered in the footer only while `active_view` is `Root`. Child values
+    /// are stored on their respective `ChildConversation`s.
+    pub context_usage: Option<ContextUsage>,
+    /// The persisted compaction snapshot's transcript-relative boundary,
+    /// read once at startup and handed to [`Self::replay_messages`] so the
+    /// marker lands where the model view was cut. `None` when the session
+    /// never compacted or its snapshot predates the field.
+    pub replay_compaction_boundary: Option<usize>,
+
     // ── transient UI ────────────────────────────────────────────────────────
     /// Floating notification, auto-dismissed after [`TOAST_DURATION`].
     pub toast: Option<(String, Instant)>,
@@ -1886,6 +1996,8 @@ impl AppState {
             layout: AppLayout::default(),
             display_metadata: TuiDisplayMetadata::default(),
             engine_display: EngineDisplayInfo::default(),
+            context_usage: None,
+            replay_compaction_boundary: None,
 
             chat_entries: Vec::new(),
             turn_buffer: TurnBuffer::default(),
@@ -1937,8 +2049,19 @@ impl AppState {
     /// Replace the root view-model with a projection of a hydrated session.
     /// Persisted user messages also seed input history, while implicit
     /// harness notes remain model-only and are omitted by the projection.
-    pub fn replay_messages(&mut self, messages: &[Message], child_runs: &[ChildRunRecord]) {
-        self.chat_entries = project_messages_with_child_runs(messages, child_runs);
+    ///
+    /// `compaction_boundary` is the persisted snapshot's
+    /// transcript-relative cut (`SessionState::compaction_transcript_boundary`):
+    /// it inserts [`ChatEntry::CompactionMarker`] at the position the model
+    /// view was compacted at. `None` replays the plain transcript.
+    pub fn replay_messages(
+        &mut self,
+        messages: &[Message],
+        child_runs: &[ChildRunRecord],
+        compaction_boundary: Option<usize>,
+    ) {
+        self.chat_entries =
+            project_messages_with_child_runs(messages, child_runs, compaction_boundary);
         self.input_history = messages
             .iter()
             .filter_map(|message| match message {
@@ -1993,6 +2116,18 @@ impl AppState {
         self.child_conversations
             .get(&run_id)
             .is_some_and(|conversation| conversation.needs_lazy_load)
+    }
+
+    /// Latest context usage for the conversation currently shown in the main
+    /// chat area. Root usage remains independent from all child updates.
+    pub fn active_context_usage(&self) -> Option<ContextUsage> {
+        match &self.active_view {
+            ConversationView::Root => self.context_usage,
+            ConversationView::Child { run_id, .. } => self
+                .child_conversations
+                .get(run_id)
+                .and_then(|conversation| conversation.context_usage),
+        }
     }
 
     /// Returns `true` if a toast is active and has not yet expired.
@@ -3200,6 +3335,104 @@ mod tests {
     use crate::agent::ToolCallRequest;
 
     #[test]
+    fn replay_places_the_compaction_marker_at_the_boundary_and_keeps_the_transcript() {
+        let messages = vec![
+            crate::agent::Message::User {
+                content: "first question".to_string(),
+                kind: UserMessageKind::Explicit,
+            },
+            crate::agent::Message::Assistant {
+                content: "first answer".to_string(),
+                status: crate::agent::AssistantStatus::Complete,
+                tool_calls: Vec::new(),
+            },
+            crate::agent::Message::User {
+                content: "second question".to_string(),
+                kind: UserMessageKind::Explicit,
+            },
+            crate::agent::Message::Assistant {
+                content: "second answer".to_string(),
+                status: crate::agent::AssistantStatus::Complete,
+                tool_calls: Vec::new(),
+            },
+        ];
+
+        let mut state = AppState::new();
+        state.replay_messages(&messages, &[], Some(2));
+
+        assert_eq!(
+            state.chat_entries.len(),
+            5,
+            "four messages plus the marker: {:?}",
+            state.chat_entries
+        );
+        assert!(
+            matches!(
+                &state.chat_entries[0],
+                ChatEntry::UserMessage { text, .. } if text == "first question"
+            ),
+            "the summarized prefix stays browsable: {:?}",
+            state.chat_entries[0]
+        );
+        assert!(matches!(
+            &state.chat_entries[1],
+            ChatEntry::AssistantMessage { text, .. } if text == "first answer"
+        ));
+        assert_eq!(
+            state.chat_entries[2],
+            ChatEntry::CompactionMarker {
+                summarized_messages: 2
+            },
+            "the marker sits exactly where the verbatim tail begins"
+        );
+        assert!(
+            matches!(
+                &state.chat_entries[3],
+                ChatEntry::UserMessage { text, .. } if text == "second question"
+            ),
+            "the tail after the boundary keeps rendering in order: {:?}",
+            state.chat_entries[3]
+        );
+        assert!(matches!(
+            &state.chat_entries[4],
+            ChatEntry::AssistantMessage { text, .. } if text == "second answer"
+        ));
+        assert_eq!(
+            state.input_history,
+            vec!["first question".to_string(), "second question".to_string()],
+            "the marker is not a message and never seeds input history"
+        );
+
+        // A session without a snapshot replays exactly as before.
+        let mut plain = AppState::new();
+        plain.replay_messages(&messages, &[], None);
+        assert_eq!(plain.chat_entries.len(), 4);
+    }
+
+    #[test]
+    fn context_usage_formats_as_tokens_and_fill_percentage() {
+        assert_eq!(format_context_usage(64_200, 128_000), "64.2K (50%)");
+        assert_eq!(format_context_usage(950, 128_000), "950 (1%)");
+        assert_eq!(format_context_usage(1_260_000, 2_000_000), "1.3M (63%)");
+        assert_eq!(format_context_usage(0, 128_000), "0 (0%)");
+        assert_eq!(
+            format_context_usage(128_000, 128_000),
+            "128.0K (100%)",
+            "a full window reads 100%"
+        );
+        assert_eq!(
+            format_context_usage(200_000, 128_000),
+            "200.0K (100%)",
+            "an estimate overshooting the window clamps the percentage"
+        );
+        assert_eq!(
+            format_context_usage(1_000, 0),
+            "1.0K (0%)",
+            "a degenerate window reports 0% instead of dividing by zero"
+        );
+    }
+
+    #[test]
     fn replay_projection_restores_full_fidelity_tool_bubble() {
         let tool_id = Uuid::new_v4();
         let content_section =
@@ -3369,7 +3602,7 @@ mod tests {
             },
         ];
 
-        let entries = project_messages_with_child_runs(&messages, &child_runs);
+        let entries = project_messages_with_child_runs(&messages, &child_runs, None);
         let finished_entry = entries
             .iter()
             .find(|entry| {
@@ -3455,7 +3688,7 @@ mod tests {
         ];
 
         let mut state = AppState::new();
-        state.replay_messages(&root_messages, &child_runs);
+        state.replay_messages(&root_messages, &child_runs, None);
         assert!(state.child_needs_lazy_load(run_id));
         assert!(state
             .child_conversations

@@ -37,6 +37,24 @@ agents.
 A named specialization describing an agent's persona, tools, delegation
 ability, and runtime settings.
 
+**Root agent type selection**:
+The agent type a root conversation runs as: an explicit `--agent` wins, a
+resume otherwise continues with the type the session last stored, and a fresh
+session starts as `default`.
+_Avoid_: active agent, chosen persona
+
+**Tool-use iteration limit**:
+The per-agent-type cap (`max_tool_iterations`) on consecutive tool-use rounds
+a single turn may spend; it defaults to 50 for root and subagent loops and a
+value of zero is rejected.
+_Avoid_: tool loop cap, max iterations
+
+**Compaction prompt**:
+The instruction framing a compaction summary request, resolved from
+`COMPACTION.md` like the global SOUL (workspace, Ylva home, built-in) and
+supplied to the compact engine.
+_Avoid_: summary system prompt
+
 ## Agent identity and execution
 
 **Global SOUL**:
@@ -74,6 +92,18 @@ including the global SOUL with its trusted instruction content and any
 applicable agent-type guidance.
 _Avoid_: root agent's initial system message
 
+**Transcript**:
+The durable, ordered record of a conversation's messages as persisted and
+replayed in the UI. Compaction never prunes it: every original message stays
+browsable before and after a resume.
+_Avoid_: history, chat log
+
+**Model view**:
+The ordered message list actually sent to a model for a request: the leading
+system block, an optional compaction summary, and the verbatim tail after the
+compaction boundary.
+_Avoid_: prompt payload, request messages
+
 **Tool**:
 A named capability that an agent can invoke, such as reading files, editing
 files, searching, running commands, spawning agents, or asking the user for clarification.
@@ -81,6 +111,43 @@ files, searching, running commands, spawning agents, or asking the user for clar
 **Sandbox**:
 The filesystem boundary that governs which paths tools may access and when user
 approval is required.
+
+**Token estimate**:
+An approximate token count of a message, model view, or exact serialized model
+request, produced locally with `tiktoken-rs` `cl100k_base`. For an opt-in
+per-request diagnostic dump, the estimate is recorded beside any provider-
+reported prompt/input token count observed on that same request. It budgets
+compaction and the footer readout; it is advisory and never billed usage or a
+claim about the active model's tokenizer.
+_Avoid_: token count, usage
+
+**Reported input-token count**:
+A provider-reported prompt/input token count for one completed model request,
+when the provider returns it. It is distinct from the local token estimate and
+may be unavailable when usage is omitted or a stream is interrupted.
+_Avoid_: billed usage, exact token estimate
+
+**Context window**:
+The active model's effective token capacity, resolved per engine from the
+profile's `context_length`, then the provider catalog, then the built-in
+default.
+_Avoid_: max context, token limit
+
+**Compaction**:
+Replacing the oldest summarized part of the model view with a durable summary
+so a long conversation keeps fitting its context window, while the transcript
+stays intact and browsable.
+_Avoid_: truncation, history compression
+
+**Compaction boundary**:
+The transcript index where the summarized prefix ends and the verbatim tail
+begins. It never separates a tool call from its one matching result.
+_Avoid_: cut point, split index
+
+**Compaction thresholds**:
+The per-engine usage fractions of the context window that decide when to act:
+the soft threshold starts a background summary after a completed turn, the
+hard threshold forces a synchronous drop instead of waiting for one.
 
 ## Models and providers
 
@@ -111,3 +178,10 @@ delegation events.
 
 **Conversation ID**:
 The identifier used to reopen a persisted session for continuation.
+
+**Session clone**:
+A new session that replays another session's logical events under its own
+session ID, linked back by `cloned_from`. The source file is only read — it
+is never repaired, appended to, or rewritten — and all new writes go to the
+clone. Only top-level sessions can be cloned.
+_Avoid_: copy, fork, duplicate

@@ -308,6 +308,276 @@ async fn conversation_id_appends_to_the_existing_session_instead_of_overwriting_
     server.abort();
 }
 
+/// Give the implicit default profile a second root agent type, so `--agent`
+/// has something other than `default` to select.
+fn write_agent_type_profile(ylva_home: &TempDir) {
+    let profile_directory = ylva_home
+        .path()
+        .join(ylva::PROFILES_DIRECTORY_NAME)
+        .join(ylva::DEFAULT_PROFILE_NAME);
+    std::fs::create_dir_all(&profile_directory).expect("create profile directory");
+    std::fs::write(
+        profile_directory.join("config.toml"),
+        "[agents.researcher]\ndescription = \"Research things.\"\n",
+    )
+    .expect("write profile config");
+}
+
+/// The log line the binary writes when it resolves the root agent type, e.g.
+/// `agent_type=researcher explicit=true resumed=false`.
+fn logged_agent_type(log_path: &Path) -> Option<String> {
+    let log = std::fs::read_to_string(log_path).expect("read log");
+    log.lines()
+        .find(|line| line.contains("root agent type resolved"))
+        .and_then(|line| {
+            line.split_whitespace()
+                .find_map(|token| token.strip_prefix("agent_type="))
+                .map(str::to_string)
+        })
+}
+
+/// The `agent_type_changed` records of a session, in write order.
+fn agent_type_changes(events: &[StoreEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            StoreEvent::AgentTypeChanged { agent_type, .. } => Some(agent_type.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Remove the `agent_type` key from a session's `meta` header, producing the
+/// header shape written before the field existed.
+fn strip_agent_type_from_header(path: &Path) {
+    let contents = std::fs::read_to_string(path).expect("read session file");
+    let mut lines: Vec<String> = contents.lines().map(str::to_string).collect();
+    let mut header: serde_json::Value = serde_json::from_str(&lines[0]).expect("meta line is JSON");
+    assert!(
+        header.get("agent_type").is_some(),
+        "the header must carry one"
+    );
+    header
+        .as_object_mut()
+        .expect("meta is a JSON object")
+        .remove("agent_type");
+    lines[0] = serde_json::to_string(&header).expect("serialize meta line");
+    std::fs::write(path, format!("{}\n", lines.join("\n"))).expect("write session file");
+}
+
+/// The selected root agent type lands in the session metadata, is restored
+/// when a resume omits `--agent`, and an explicit override is appended as the
+/// latest selection without rewriting the creation header.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn root_agent_type_is_persisted_restored_and_overridable() {
+    let (server, provider_env) = start_mock_llm_server().await;
+
+    let ylva_home = TempDir::new().expect("tempdir");
+    write_agent_type_profile(&ylva_home);
+    let first_log_path = ylva_home.path().join("first.log");
+    let first_log = first_log_path
+        .to_str()
+        .expect("log path is UTF-8")
+        .to_string();
+
+    let first = tokio::task::spawn_blocking({
+        let provider_env = provider_env.clone();
+        move || {
+            spawn_ylva(
+                ylva_home,
+                &provider_env,
+                &["--agent", "researcher", "--log-file", &first_log],
+            )
+        }
+    })
+    .await
+    .expect("the first run completes");
+    assert!(
+        first.output.status.success(),
+        "the first run must succeed; stderr:\n{}",
+        first.stderr()
+    );
+    let session_id = first.sessions()[0].session_id;
+    let events = read_events(&first.sessions()[0].path);
+    let StoreEvent::Meta(meta) = &events[0] else {
+        panic!("first line must be the meta header, got {:?}", events[0])
+    };
+    assert_eq!(
+        meta.agent_type.as_deref(),
+        Some("researcher"),
+        "the selected type is persisted in the session metadata: {events:?}"
+    );
+    assert_eq!(
+        agent_type_changes(&events),
+        Vec::<String>::new(),
+        "a fresh session records its type only in `meta`"
+    );
+    assert_eq!(
+        logged_agent_type(&first_log_path).as_deref(),
+        Some("researcher"),
+        "the run's own log names the resolved type"
+    );
+
+    // Resume without the flag: the stored type is restored.
+    let restore_log_path = first.ylva_home.path().join("restore.log");
+    let restore_log = restore_log_path
+        .to_str()
+        .expect("log path is UTF-8")
+        .to_string();
+    let restored = tokio::task::spawn_blocking({
+        let provider_env = provider_env.clone();
+        move || {
+            spawn_ylva(
+                first.ylva_home,
+                &provider_env,
+                &[
+                    "--conversation-id",
+                    session_id.to_string().as_str(),
+                    "--log-file",
+                    &restore_log,
+                ],
+            )
+        }
+    })
+    .await
+    .expect("the resumed run completes");
+    assert!(
+        restored.output.status.success(),
+        "the resuming run must succeed; stderr:\n{}",
+        restored.stderr()
+    );
+    assert_eq!(
+        logged_agent_type(&restore_log_path).as_deref(),
+        Some("researcher"),
+        "a resume without --agent restores the stored type"
+    );
+    let events = read_events(&restored.sessions()[0].path);
+    assert_eq!(
+        agent_type_changes(&events),
+        Vec::<String>::new(),
+        "restoring never appends a change record: {events:?}"
+    );
+
+    // Resume with an explicit override: appended as the latest selection.
+    let override_log_path = restored.ylva_home.path().join("override.log");
+    let override_log = override_log_path
+        .to_str()
+        .expect("log path is UTF-8")
+        .to_string();
+    let overridden = tokio::task::spawn_blocking({
+        let provider_env = provider_env.clone();
+        move || {
+            spawn_ylva(
+                restored.ylva_home,
+                &provider_env,
+                &[
+                    "--conversation-id",
+                    session_id.to_string().as_str(),
+                    "--agent",
+                    "default",
+                    "--log-file",
+                    &override_log,
+                ],
+            )
+        }
+    })
+    .await
+    .expect("the overriding run completes");
+    assert!(
+        overridden.output.status.success(),
+        "the overriding run must succeed; stderr:\n{}",
+        overridden.stderr()
+    );
+    assert_eq!(
+        logged_agent_type(&override_log_path).as_deref(),
+        Some("default"),
+        "the override is the type this run executed as"
+    );
+    let events = read_events(&overridden.sessions()[0].path);
+    assert_eq!(
+        agent_type_changes(&events),
+        vec!["default".to_string()],
+        "the override is persisted as the latest selection: {events:?}"
+    );
+    let StoreEvent::Meta(meta) = &events[0] else {
+        panic!("first line must be the meta header, got {:?}", events[0])
+    };
+    assert_eq!(
+        meta.agent_type.as_deref(),
+        Some("researcher"),
+        "the creation header keeps the type resolved when the session started"
+    );
+    server.abort();
+}
+
+/// A session file written before `agent_type` existed resumes successfully
+/// as the `default` type instead of failing to parse or falling back
+/// silently to some other type.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_legacy_session_without_agent_type_metadata_defaults_on_resume() {
+    let (server, provider_env) = start_mock_llm_server().await;
+
+    let ylva_home = TempDir::new().expect("tempdir");
+    write_agent_type_profile(&ylva_home);
+    let first = tokio::task::spawn_blocking({
+        let provider_env = provider_env.clone();
+        move || spawn_ylva(ylva_home, &provider_env, &[])
+    })
+    .await
+    .expect("the first run completes");
+    assert!(
+        first.output.status.success(),
+        "the first run must succeed; stderr:\n{}",
+        first.stderr()
+    );
+    let session_id = first.sessions()[0].session_id;
+    let session_path = first.sessions()[0].path.clone();
+
+    strip_agent_type_from_header(&session_path);
+    assert_eq!(
+        Store::read_latest_agent_type(&session_path).expect("legacy file is readable"),
+        None,
+        "a header without the field reads back as unset"
+    );
+
+    let log_path = first.ylva_home.path().join("legacy.log");
+    let log = log_path.to_str().expect("log path is UTF-8").to_string();
+    let resumed = tokio::task::spawn_blocking({
+        let provider_env = provider_env.clone();
+        move || {
+            spawn_ylva(
+                first.ylva_home,
+                &provider_env,
+                &[
+                    "--conversation-id",
+                    session_id.to_string().as_str(),
+                    "--log-file",
+                    &log,
+                ],
+            )
+        }
+    })
+    .await
+    .expect("the resumed run completes");
+    assert!(
+        resumed.output.status.success(),
+        "a legacy session must resume successfully; stderr:\n{}",
+        resumed.stderr()
+    );
+    assert_eq!(
+        logged_agent_type(&log_path).as_deref(),
+        Some("default"),
+        "a session without a stored type resumes as `default`"
+    );
+    let events = read_events(&session_path);
+    assert_eq!(
+        agent_type_changes(&events),
+        Vec::<String>::new(),
+        "defaulting a legacy session must not append a change record: {events:?}"
+    );
+    server.abort();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resumed_headless_request_replays_the_prior_transcript_once() {
     let server = MockLlmServer::start_with_connection_frames(
@@ -607,6 +877,121 @@ async fn an_unknown_conversation_id_fails_instead_of_starting_a_new_session() {
     assert!(
         run.sessions().is_empty(),
         "no session file is created when the requested one does not exist"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn clone_flag_copies_a_session_into_a_new_one_and_leaves_the_source_untouched() {
+    let (server, provider_env) = start_mock_llm_server().await;
+    let first = tokio::task::spawn_blocking({
+        let provider_env = provider_env.clone();
+        move || run_persistence_e2e(&provider_env)
+    })
+    .await
+    .expect("the first run completes");
+    assert_session_holds_one_completed_turn(&first);
+
+    let source_summary = first
+        .sessions()
+        .into_iter()
+        .next()
+        .expect("the first run persisted a session");
+    let source_id = source_summary.session_id;
+    let source_path = source_summary.path.clone();
+    let source_bytes = std::fs::read(&source_path).expect("source readable");
+
+    let cloned = tokio::task::spawn_blocking({
+        let provider_env = provider_env.clone();
+        move || {
+            spawn_ylva_with_prompt(
+                first.ylva_home,
+                &provider_env,
+                &["--conversation-id", &source_id.to_string(), "--clone"],
+                "a fresh turn for the clone",
+            )
+        }
+    })
+    .await
+    .expect("the clone run completes");
+    assert!(
+        cloned.output.status.success(),
+        "cloning must succeed; stderr:\n{}",
+        cloned.stderr()
+    );
+
+    assert_eq!(
+        std::fs::read(&source_path).expect("source readable"),
+        source_bytes,
+        "the source file is byte-for-byte unchanged by the clone run"
+    );
+
+    let sessions = cloned.sessions();
+    assert_eq!(
+        sessions.len(),
+        2,
+        "the clone is a second session next to the source: {sessions:?}"
+    );
+    assert!(
+        sessions
+            .iter()
+            .any(|session| session.session_id == source_id),
+        "the source session still exists: {sessions:?}"
+    );
+    let clone_summary = sessions
+        .iter()
+        .find(|session| session.session_id != source_id)
+        .expect("a distinct clone session");
+    assert_ne!(clone_summary.session_id, source_id);
+
+    let clone_events = read_events(&clone_summary.path);
+    let StoreEvent::Meta(clone_meta) = &clone_events[0] else {
+        panic!(
+            "the clone starts with its own meta header: {:?}",
+            clone_events[0]
+        );
+    };
+    assert_eq!(clone_meta.session_id, clone_summary.session_id);
+    assert_eq!(
+        clone_meta.cloned_from,
+        Some(source_id),
+        "the clone names its source: {clone_meta:?}"
+    );
+    assert_eq!(
+        clone_meta.parent_session, None,
+        "a clone is a top-level session: {clone_meta:?}"
+    );
+    assert!(
+        clone_events.iter().any(|event| matches!(
+            event,
+            StoreEvent::Message {
+                message: ylva::Message::User { content, .. },
+                ..
+            } if content.contains(TEST_PROMPT)
+        )),
+        "the clone replays the source's turns: {clone_events:?}"
+    );
+    assert!(
+        clone_events.iter().any(|event| matches!(
+            event,
+            StoreEvent::Message {
+                message: ylva::Message::User { content, .. },
+                ..
+            } if content.contains("a fresh turn for the clone")
+        )),
+        "the new turn is persisted on the clone: {clone_events:?}"
+    );
+
+    let source_events = read_events(&source_path);
+    assert!(
+        !source_events.iter().any(|event| matches!(
+            event,
+            StoreEvent::Message {
+                message: ylva::Message::User { content, .. },
+                ..
+            } if content.contains("a fresh turn for the clone")
+        )),
+        "the source transcript gains nothing from the clone run: {source_events:?}"
     );
     server.abort();
 }

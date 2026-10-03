@@ -79,6 +79,32 @@ let _lock = crate::test_support::SUBSCRIBER_LOCK
 let cwd = std::env::current_dir().expect("cwd");
 ```
 
+## Session writer releases its file lock asynchronously
+
+### Issue
+
+`Store` spawns a writer task that owns the session file and its nonblocking
+exclusive `flock`. Dropping the `Store` only closes the command channel: the
+task notices the closure on its next poll and only then drops the file
+handle. A test that drops a store and immediately opens the same session file
+again — `Store::resume`, `Store::create`, or `Store::clone_session` — can
+observe `StoreError::SessionLocked` for the file it just released, which is
+flaky rather than deterministic.
+
+### Workaround
+
+After dropping the store, let the runtime turn over before re-opening:
+
+```rust
+drop(store);
+tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+// now resume or clone that session
+```
+
+The store tests follow this pattern (see
+`resume_appends_to_the_existing_file_without_overwriting_it` and the
+`cloning_*` tests in `src/store.rs`).
+
 ## `cfg(test)` does not reach library code from integration tests
 
 ### Issue
