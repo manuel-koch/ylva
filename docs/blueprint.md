@@ -1932,7 +1932,8 @@ child agents as well.
    child's own conclusion. Ahead of its briefing, a child also receives a
    heads-up system message stating its tool-use iteration budget, so a
    capable model can pace its tool calls and call `agent_finish` before it
-   runs out.
+   runs out. The child should make its handoff self-contained, concise, and
+   non-redundant, proportional to the task, without process narration.
  1. **Re-integration:** the structured child result is added to the root
     conversation as a marked harness notice so the root LLM can use it on its
     next turn. It is not inserted as a mid-conversation `system` message.

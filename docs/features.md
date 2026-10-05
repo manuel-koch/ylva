@@ -607,8 +607,9 @@ rather than the call being auto-denied for a schema violation. The parent
 receives this through the `spawn_subagent` lifecycle event — it never sees
 the child's own conversation, only the `result`/`error` string, so a child
 should make its `result` self-contained rather than referencing
-"earlier"/"above" content the parent cannot see, and must not fold in
-meta-commentary or self-review narration about its own process (e.g.
+"earlier"/"above" content the parent cannot see. The handoff should be
+concise and non-redundant, proportional to the task. It must not include
+meta-commentary or self-review narration about the child's process (e.g.
 "Self-Correction/Review:") — only the finished deliverable belongs there.
 If a child goes idle
 without calling `agent_finish`, the parent instead receives a synthesized
