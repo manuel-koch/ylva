@@ -1696,6 +1696,7 @@ async fn stop_while_spawn_subagent_is_running_resolves_it_to_cancelled_tool_done
     // lands — the mock provider script is deterministic and would keep
     // re-issuing the same call forever. Force termination here rather than
     // asserting quiescence.
+    drop(ui_rx);
     drop(agent);
     let context = handle.await.expect("loop ok").expect("context");
     let saw_cancelled_notice = context.messages().iter().any(|message| {

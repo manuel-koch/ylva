@@ -160,41 +160,67 @@ without losing anything the user can still read.
   summary, and the verbatim tail after the compaction boundary. The outer
   agent loop is the only writer of both; background summarization only ever
   receives an immutable snapshot of the prefix it summarizes.
-- **Token estimates.** Each message caches an approximate token count when it
-  enters the context using `tiktoken-rs` `cl100k_base` for every model. The
-  estimate is advisory: it does not claim to match the serving model's
-  tokenizer, serialized prompt processing, or billed usage. When
-  `YLVA_TOKEN_USAGE_DUMP_PATH` is set, Ylva also estimates each exact serialized
-  Chat Completions request before sending it and appends a metadata-only JSONL
-  record with a UTC request timestamp, its session ID when available, and any
-  provider-reported prompt/input count received for that same request.
+- **Token estimates.** The compaction budget estimates the model view and
+  active tool definitions using `tiktoken-rs` `cl100k_base`. The footer instead
+  applies `cl100k_base` to the serialized JSON Chat Completions request body
+  sent by OpenAI-compatible providers, including its roles, JSON structure,
+  tools, and provider-specific fields. It counts the JSON body as text. It does
+  not reproduce provider-side request processing or the selected model's
+  tokenizer, so it is not the serving model's actual input-token count. It
+  updates when each request starts and remains the last request's estimate
+  until another request is sent. With `YLVA_TOKEN_USAGE_DUMP_PATH` set, Ylva
+  appends a metadata-only JSONL record with the same local estimate, a UTC
+  timestamp, its session ID when available, and any provider-reported
+  prompt/input count received for that request. The provider count reflects
+  serving-side accounting when available. Neither estimate is billed usage.
+  The compaction estimate and serialized-body estimate can differ because they
+  count different representations.
   Providers may omit usage, and interrupted streams retain an unavailable value
   rather than reporting zero. See [CLI options — Debug](./cli-options.md#debug).
-  A `/models` switch re-evaluates the context budget against the new model's
-  window on the next settled turn.
+  A `/models` switch changes the window used for the next request.
 - **Automatic compaction.** After a completed turn at or above the engine's
   `soft_compaction_threshold` (default `0.7` of the effective context
   window), a background summary of the oldest prefix is started; it is
   applied at the next safe boundary — a turn boundary with an empty serial
-  tool queue. Above `hard_compaction_threshold` (default `0.9`), or after a
+  tool queue. After a tool-use round finishes, Ylva also checks the updated
+  context and compacts before sending its follow-up request. Above
+  `hard_compaction_threshold` (default `0.9`), or after a
   failed or timed-out summary, the model view is instead dropped
   synchronously — oldest complete turns or oversized old tool results first —
   until it fits `context_length × compact_target_ratio` (default `0.5`).
-  Tool calls and their one matching result are never split. Compaction logs
+  Tool calls and their one matching result are never split. Failed and timed-
+  out background summaries report their failure in the transcript; a timeout
+  also appends a `[failure]` line with the reason to the matching response dump
+  when request dumping is enabled. A successful summary reports completion,
+  and applied or dropped context clears the footer's stale serialized-request
+  estimate until the next model request starts. The TUI also adds a transcript
+  notice when background compaction starts and when synchronous compaction
+  drops context. Compaction logs
   report each sweep's estimated model-view tokens, active window, usage ratio,
   thresholds, and chosen action, plus estimated tokens before and after a
   summary or synchronous drop, signed estimated token savings (which can be
   negative if a summary is larger), percentage change, and projected message
-  counts before and after. Context-usage update logs also include the numeric
-  estimate, active window, and ratio. These are local estimates, not
+  counts before and after. Serialized-request estimate logs include the
+  request estimate, active window, and ratio; compaction sweep logs include
+  their separate model-view estimate. These are local estimates, not
   provider-reported usage or billed tokens.
-- **Summary generation.** The configured `compact_engine` (resolved to
+- **Summary generation.** The configured `[compaction].engine` (resolved to
   `default_engine`) answers a tool-free request framed by the loaded
   [`COMPACTION.md`](./configuration.md#compaction-summary-prompt-compactionmd)
   instruction: it must preserve decisions, open work, file paths, identifiers,
-  user constraints, and where the verbatim tail begins.
-- **Scope.** Only root conversations compact; subagent contexts are
-  short-lived. There is no manual `/compact` command.
+  user constraints, and where the verbatim tail begins. The built-in framing
+  instruction marks subsequent messages as source conversation, not additional
+  instructions, and excludes the final `Write the summary now.` request from
+  the material being summarized. The summary's wall-clock timeout comes from
+  `[compaction].timeout_sec` (default `60` seconds), independent of the engine
+  serving the conversation being compacted. See
+  [engine configuration](./configuration.md#engine-configuration) for the
+  setting and example. Agent types can override engine and timeout separately
+  under `[agents.<type>.compaction]`.
+- **Scope.** Root and child agent contexts compact independently using the
+  settings resolved for their agent type. Children wait for pending summaries
+  before reporting completion and resume work after compaction changes their
+  model view. There is no manual `/compact` command ( for now ).
 - **Persistence and resume.** Each applied snapshot appends a `compaction`
   event (never a rewrite); the newest one wins, so resume rebuilds the same
   model view while the transcript stays complete. See the
@@ -202,7 +228,9 @@ without losing anything the user can still read.
 - **In the TUI.** The transcript keeps every message and shows a
   `── compaction · N messages summarized ──` divider at the boundary (both
   on replay and when a summary is applied live), and the footer's
-  key-hints row right-aligns the model-view readout (`64.2K (45%)`).
+  key-hints row right-aligns the latest serialized-request readout
+  (`64.2K (45%)`). It is cleared after a compaction changes the model view
+  until the next request estimate arrives.
 
 ## TUI Runtime
 
@@ -266,6 +294,15 @@ marker in headless output — alongside a `tracing` warning in the log (see
 - Every outbound HTTP request (model listing, chat/SSE, and Ollama metadata
   calls) carries a dedicated `User-Agent: ylva/<version>` header so remote
   servers can identify the client.
+- Outbound requests are capped at
+  `MAX_CONCURRENT_PROVIDER_REQUESTS` concurrent requests per provider
+  connection, shared across model discovery, metadata lookups, and chat. JSON
+  catalog/detail GET and POST requests retry HTTP `429` and `5xx` responses
+  with bounded exponential backoff and honor `Retry-After` delta-seconds or
+  HTTP-date values when provided.
+  Chat requests use the same retry policy before streaming begins; a provider
+  error frame or a stream that closes without `[DONE]` is surfaced as a
+  conversation error instead of a successful empty reply.
 
 ## Tools to be used by models
 
@@ -276,6 +313,15 @@ Each tool call succeeds or fails with a structured result (`ok`/`result`/
 descriptions sent to the model include their argument schema. See
 [implementation notes](./implementation-notes.md#tool-result-wire-protocol)
 for the wire format.
+
+The initial tool protocol prompt and every model-facing tool description state
+that Ylva accepts at most `MAX_TOOL_CALLS_PER_RESPONSE` distinct tool calls
+across all tools in one assistant response. If a response exceeds that limit,
+Ylva discards the whole batch before any call executes, adds a concise hidden
+harness notice to the next model request, and counts the rejection against the
+per-turn `max_tool_iterations` budget. This bounds stream-side accumulation and
+the UI work caused by a pathological tool-call batch. The iteration budget is
+separate: it limits tool-use rounds over a turn, not calls within one response.
 
 Path arguments given as absolute paths inside the current working directory
 are displayed/executed in cwd-relative form for consistency; this does not
@@ -674,18 +720,19 @@ module structure (model/presenter/view/driver split).
   view-only entry: it is never sent to the model and never seeds input
   history. See the [resume contract](persistence.md#resume-contract) for how
   the model view and the transcript stay separate.
-- **Context-usage readout:** the key-hints row right-aligns the estimated size
-  of the model view against the active context window — e.g. `64.2K (45%)`.
-  It is reported once hydration finishes (so a resumed session shows it
-  immediately) and again after every settled turn. While drilled into a child
-  transcript, it shows that child's latest estimate and context window; child
-  updates remain isolated from the root and other child readouts. A finished
-  child's last readout remains available while its transcript is browsed. The
-  estimate is the same approximate token count compaction budgets with, not
-  billed usage; the percentage is its fill of the window rounded to a whole
-  percent and clamped at `100%`. On a row too narrow to hold the readout next to
-  the hints, the readout is dropped rather than overwriting them. Headless
-  output has no footer and ignores the update.
+- **Context-usage readout:** the key-hints row right-aligns the local estimate
+  of the latest serialized model request against the active context window —
+  e.g. `64.2K (45%)`. It updates as each request starts, before the provider
+  responds. A resumed session has no latest request estimate until it sends
+  one. While drilled into a child transcript, it shows that child's latest
+  request estimate and context window; child updates remain isolated from the
+  root and other child readouts. A finished child's last readout remains
+  available while its transcript is browsed. The estimate is not billed usage
+  and can differ from the compaction budget's model-view estimate; the
+  percentage is its fill of the window rounded to a whole percent and clamped
+  at `100%`. On a row too narrow to hold the readout next to the hints, the
+  readout is dropped rather than overwriting them. Headless output has no
+  footer and ignores the update.
 - **Input always active:** the input box is never disabled. `Enter` sends
   unconditionally — while the model is streaming, the message is queued as a
   pending steer (shown dimmed, then committed once the model has seen it),

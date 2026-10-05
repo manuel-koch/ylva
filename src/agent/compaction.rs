@@ -22,7 +22,7 @@
 //!
 //! Scheduling follows the selected option C: a completed turn above
 //! [`DEFAULT_SOFT_COMPACTION_THRESHOLD`] starts a background summary through the
-//! configured `compact_engine`, which the outer loop applies at the next safe
+//! configured `[compaction].engine`, which the outer loop applies at the next safe
 //! boundary. Above [`DEFAULT_HARD_COMPACTION_THRESHOLD`] — or when the summary fails
 //! or times out — the loop drops old messages synchronously instead.
 
@@ -35,6 +35,9 @@ use uuid::Uuid;
 use crate::agent::{Context, Message, StreamEvent, UserMessageKind};
 use crate::llm::engine::Engine;
 use tokio::sync::mpsc;
+
+/// Default wall-clock budget for one background compaction summary request.
+pub const DEFAULT_COMPACTION_TIMEOUT_SECS: u64 = 60;
 
 /// Default usage fraction of the active context window at or above which a
 /// completed turn starts a background summary (blueprint §4C).
@@ -57,10 +60,6 @@ pub const DEFAULT_HARD_COMPACTION_THRESHOLD: f64 = 0.90;
 /// the same way [`crate::agent::HARNESS_NOTICE_MARKER`] does for harness
 /// notices.
 pub const COMPACTION_SUMMARY_MARKER: &str = "[compacted conversation summary — not from the user]";
-
-/// Wall-clock budget for one background summary request. Exceeding it is
-/// treated like a failure: the loop logs it and falls back to dropping.
-pub const COMPACTION_SUMMARY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// System instruction framing the prefix snapshot handed to the compact
 /// engine. The text ships as [`DEFAULT_COMPACTION_PROMPT`] and a workspace or
@@ -103,11 +102,19 @@ pub enum CompactionAction {
     /// nothing.
     None,
     /// At or above the soft threshold with nothing in flight: start a
-    /// background summary of the old prefix.
+    /// background summary of the old prefix. If a safe prefix cannot be
+    /// selected, the runtime takes no action.
     StartSummary,
     /// Above the hard threshold (or a forced retry after a failed summary):
     /// drop old messages synchronously, without waiting.
     DropFallback,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct CompactionSweepResult {
+    pub summary_started: bool,
+    pub prefix_dropped: bool,
+    pub summary_applied: bool,
 }
 
 /// Map one usage evaluation onto the action it calls for, given the active
@@ -219,8 +226,12 @@ impl CompactionBudget {
     }
 
     /// Current usage of the model view against this window.
-    pub fn usage_ratio(self, context: &Context) -> f64 {
-        context.estimated_usage_ratio(self.context_length)
+    pub fn usage_ratio(self, estimated_model_tokens: usize) -> f64 {
+        if self.context_length == 0 {
+            0.0
+        } else {
+            estimated_model_tokens as f64 / self.context_length as f64
+        }
     }
 }
 
@@ -296,17 +307,26 @@ pub enum CompactionOutcome {
     },
     /// The summary failed, timed out, or came back empty: the loop falls
     /// back to synchronous dropping at its next safe boundary.
-    SummaryFailed { generation: u64 },
+    SummaryFailed { generation: u64, reason: String },
 }
 
 /// Drive one tool-free summary request to completion and return its text.
-pub async fn generate_summary(
+async fn generate_summary(
     engine: Arc<dyn Engine>,
     request: Vec<Message>,
     session_id: Option<uuid::Uuid>,
+    cancellation_token: CancellationToken,
+    request_dump_failure_handler: crate::http::RequestDumpFailureHandler,
 ) -> anyhow::Result<String> {
     let mut stream = engine
-        .chat_with_session_id(request, Vec::new(), CancellationToken::new(), session_id)
+        .chat_with_session_id_and_diagnostics(
+            request,
+            Vec::new(),
+            cancellation_token,
+            session_id,
+            Box::new(|_, _| Box::pin(async {})),
+            Some(request_dump_failure_handler),
+        )
         .await?;
     let mut summary = String::new();
     loop {
@@ -329,6 +349,56 @@ pub async fn generate_summary(
     Ok(summary)
 }
 
+pub(crate) async fn generate_summary_attempt(
+    engine: Arc<dyn Engine>,
+    request: Vec<Message>,
+    session_id: Option<uuid::Uuid>,
+    generation: u64,
+    boundary: usize,
+    timeout: Duration,
+    request_dump_failure_handler: crate::http::RequestDumpFailureHandler,
+) -> CompactionOutcome {
+    let cancellation_token = CancellationToken::new();
+    match tokio::time::timeout(
+        timeout,
+        generate_summary(
+            engine,
+            request,
+            session_id,
+            cancellation_token.clone(),
+            request_dump_failure_handler.clone(),
+        ),
+    )
+    .await
+    {
+        Ok(Ok(summary)) => CompactionOutcome::SummaryReady {
+            generation,
+            boundary,
+            summary,
+        },
+        Ok(Err(error)) => {
+            tracing::warn!(%error, boundary, "compaction summary failed");
+            let reason = error.to_string();
+            request_dump_failure_handler.report(&reason);
+            CompactionOutcome::SummaryFailed { generation, reason }
+        }
+        Err(_elapsed) => {
+            cancellation_token.cancel();
+            let reason = format!(
+                "compaction summary timed out after {} seconds",
+                timeout.as_secs()
+            );
+            request_dump_failure_handler.report(&reason);
+            tracing::warn!(
+                boundary,
+                timeout_secs = timeout.as_secs(),
+                "compaction summary timed out"
+            );
+            CompactionOutcome::SummaryFailed { generation, reason }
+        }
+    }
+}
+
 /// Runtime bookkeeping for background compaction inside the outer loop.
 ///
 /// Owns the summary outcome channel plus the in-flight/pending state. The
@@ -338,6 +408,7 @@ pub async fn generate_summary(
 /// the background task itself only ever sees an immutable prefix clone.
 pub(crate) struct CompactionRuntime {
     engine: Option<Arc<dyn Engine>>,
+    summary_timeout: Duration,
     /// Framing instruction for every summary request: the resolved
     /// `COMPACTION.md`, or its built-in default.
     summary_prompt: String,
@@ -349,17 +420,19 @@ pub(crate) struct CompactionRuntime {
 
 impl CompactionRuntime {
     /// Create the runtime and the receiver the loop polls for summary
-    /// outcomes. `engine` is the profile's `compact_engine`; `None` (child
+    /// outcomes. `engine` is the profile's `[compaction].engine`; `None` (child
     /// loops, or a profile without one) disables compaction entirely.
     /// `summary_prompt` is the framing instruction the compact engine gets.
     pub(crate) fn new(
         engine: Option<Arc<dyn Engine>>,
         summary_prompt: String,
+        summary_timeout: Duration,
     ) -> (Self, mpsc::Receiver<CompactionOutcome>) {
         let (outcome_tx, outcome_rx) = mpsc::channel(4);
         (
             Self {
                 engine,
+                summary_timeout,
                 summary_prompt,
                 outcome_tx,
                 summary_in_flight: false,
@@ -370,10 +443,14 @@ impl CompactionRuntime {
         )
     }
 
-    /// Whether this loop compacts at all: only root conversations with a
-    /// configured compact engine do (blueprint §4C *scope*).
+    /// Whether this loop has a configured compaction engine.
     pub(crate) fn enabled(&self) -> bool {
         self.engine.is_some()
+    }
+
+    /// Whether this runtime still has a summary running or waiting to apply.
+    pub(crate) fn summary_pending(&self) -> bool {
+        self.summary_in_flight || self.pending.is_some()
     }
 
     /// Record one summary attempt's outcome. Results stamped with another
@@ -402,6 +479,7 @@ impl CompactionRuntime {
             }
             CompactionOutcome::SummaryFailed {
                 generation: outcome_generation,
+                reason: _,
             } => {
                 if outcome_generation != generation {
                     return;
@@ -425,23 +503,54 @@ impl CompactionRuntime {
     ///
     /// Called only at safe boundaries: a completed turn or a freshly arrived
     /// user message while idle, always with an empty serial tool queue.
-    pub(crate) fn sweep(&mut self, context: &mut Context, engine: &dyn Engine, generation: u64) {
+    pub(crate) fn sweep(
+        &mut self,
+        context: &mut Context,
+        engine: &dyn Engine,
+        tools: &[crate::llm::ToolSchema],
+        generation: u64,
+    ) -> CompactionSweepResult {
+        self.sweep_by(
+            context,
+            engine,
+            generation,
+            |context| context.estimated_model_tokens(tools, engine),
+            |context, target_tokens| {
+                context.drop_model_view_to_model_target(target_tokens, tools, engine)
+            },
+            |context, target_tokens| {
+                context.summary_boundary_for_model_target(target_tokens, tools, engine)
+            },
+        )
+    }
+
+    fn sweep_by(
+        &mut self,
+        context: &mut Context,
+        engine: &dyn Engine,
+        generation: u64,
+        estimate_tokens: impl Fn(&Context) -> usize,
+        drop_to_target: impl Fn(&mut Context, usize) -> bool,
+        summary_boundary: impl Fn(&Context, usize) -> Option<usize>,
+    ) -> CompactionSweepResult {
+        let mut result = CompactionSweepResult::default();
         if !self.enabled() {
-            return;
+            return result;
         }
         let Some(budget) = CompactionBudget::from_engine(engine) else {
-            return;
+            return result;
         };
         let context_length = budget.context_length;
         if let Some(snapshot) = self.pending.take() {
             let boundary = snapshot.boundary;
             let summary = snapshot.summary.clone();
-            let tokens_before = context.model_view_token_count();
+            let tokens_before = estimate_tokens(context);
             let messages_before = context.model_view_message_count();
             if context.set_compaction(snapshot) {
+                result.summary_applied = true;
                 let effectiveness = CompactionEffectiveness::measure(
                     tokens_before,
-                    context.model_view_token_count(),
+                    estimate_tokens(context),
                     messages_before,
                     context.model_view_message_count(),
                 );
@@ -470,12 +579,13 @@ impl CompactionRuntime {
         let target_tokens = budget.target_tokens();
         if self.fallback_due {
             self.fallback_due = false;
-            let tokens_before = context.model_view_token_count();
+            let tokens_before = estimate_tokens(context);
             let messages_before = context.model_view_message_count();
-            let dropped = context.drop_model_view_to(target_tokens);
+            let dropped = drop_to_target(context, target_tokens);
+            result.prefix_dropped |= dropped;
             let effectiveness = CompactionEffectiveness::measure(
                 tokens_before,
-                context.model_view_token_count(),
+                estimate_tokens(context),
                 messages_before,
                 context.model_view_message_count(),
             );
@@ -493,7 +603,8 @@ impl CompactionRuntime {
                 "compaction summary failed; dropped the model view prefix synchronously"
             );
         }
-        let usage_ratio = budget.usage_ratio(context);
+        let estimated_tokens = estimate_tokens(context);
+        let usage_ratio = budget.usage_ratio(estimated_tokens);
         let action = plan_compaction(
             usage_ratio,
             self.summary_in_flight,
@@ -502,7 +613,7 @@ impl CompactionRuntime {
         );
         tracing::debug!(
             context_length,
-            estimated_tokens = context.model_view_token_count(),
+            estimated_tokens,
             model_view_messages = context.model_view_message_count(),
             usage_ratio,
             target_tokens,
@@ -515,15 +626,23 @@ impl CompactionRuntime {
         match action {
             CompactionAction::None => {}
             CompactionAction::StartSummary => {
-                self.start_summary(context, context_length, target_tokens, generation);
+                self.start_summary(
+                    context,
+                    context_length,
+                    target_tokens,
+                    generation,
+                    summary_boundary,
+                );
+                result.summary_started = self.summary_in_flight;
             }
             CompactionAction::DropFallback => {
-                let tokens_before = context.model_view_token_count();
+                let tokens_before = estimate_tokens(context);
                 let messages_before = context.model_view_message_count();
-                let dropped = context.drop_model_view_to(target_tokens);
+                let dropped = drop_to_target(context, target_tokens);
+                result.prefix_dropped |= dropped;
                 let effectiveness = CompactionEffectiveness::measure(
                     tokens_before,
-                    context.model_view_token_count(),
+                    estimate_tokens(context),
                     messages_before,
                     context.model_view_message_count(),
                 );
@@ -544,6 +663,7 @@ impl CompactionRuntime {
                 );
             }
         }
+        result
     }
 
     /// Snapshot the oldest prefix worth summarizing, then drive the compact
@@ -555,6 +675,7 @@ impl CompactionRuntime {
         context_length: usize,
         target_tokens: usize,
         generation: u64,
+        summary_boundary: impl Fn(&Context, usize) -> Option<usize>,
     ) {
         if self.summary_in_flight {
             return;
@@ -562,13 +683,15 @@ impl CompactionRuntime {
         let Some(engine) = self.engine.clone() else {
             return;
         };
-        let Some(boundary) = context.summary_boundary_for_target(target_tokens) else {
+        let Some(boundary) = summary_boundary(context, target_tokens) else {
             return;
         };
         let leading_system_len = context.leading_system_len();
         let prefix = context.messages()[leading_system_len..boundary].to_vec();
         let request = build_summary_request(&prefix, &self.summary_prompt);
         let session_id = context.store().map(|store| store.session_id());
+        let timeout = self.summary_timeout;
+        let request_dump_failure_handler = crate::http::RequestDumpFailureHandler::default();
         self.summary_in_flight = true;
         let outcome_tx = self.outcome_tx.clone();
         tracing::info!(
@@ -578,30 +701,16 @@ impl CompactionRuntime {
             "background compaction summary started"
         );
         tokio::spawn(async move {
-            let outcome = match tokio::time::timeout(
-                COMPACTION_SUMMARY_TIMEOUT,
-                generate_summary(engine, request, session_id),
+            let outcome = generate_summary_attempt(
+                engine,
+                request,
+                session_id,
+                generation,
+                boundary,
+                timeout,
+                request_dump_failure_handler,
             )
-            .await
-            {
-                Ok(Ok(summary)) => CompactionOutcome::SummaryReady {
-                    generation,
-                    boundary,
-                    summary,
-                },
-                Ok(Err(error)) => {
-                    tracing::warn!(%error, boundary, "compaction summary failed");
-                    CompactionOutcome::SummaryFailed { generation }
-                }
-                Err(_elapsed) => {
-                    tracing::warn!(
-                        boundary,
-                        timeout_secs = COMPACTION_SUMMARY_TIMEOUT.as_secs(),
-                        "compaction summary timed out"
-                    );
-                    CompactionOutcome::SummaryFailed { generation }
-                }
-            };
+            .await;
             let _ = outcome_tx.send(outcome).await;
         });
     }
@@ -683,6 +792,33 @@ mod tests {
     }
 
     #[test]
+    fn summary_timeout_comes_from_the_engine_generating_the_summary() {
+        let timeout = Duration::from_secs(240);
+        let compact_engine = Some(Arc::new(crate::llm::EngineImpl::new(
+            Arc::new(crate::llm::MockProvider::new(vec![], Duration::ZERO)),
+            crate::llm::EngineConfig {
+                provider_connection: "mock".to_string(),
+                model: "compact-model".to_string(),
+                temperature: None,
+                context_length: None,
+                api_base_url: None,
+                api_key: None,
+                reasoning: None,
+                compact_target_ratio: 0.5,
+                soft_compaction_threshold: 0.7,
+                hard_compaction_threshold: 0.9,
+            },
+        )) as Arc<dyn Engine>);
+        let (runtime, _outcome_rx) = CompactionRuntime::new(
+            compact_engine,
+            COMPACTION_SUMMARY_PROMPT.to_string(),
+            timeout,
+        );
+
+        assert_eq!(runtime.summary_timeout, Duration::from_secs(240));
+    }
+
+    #[test]
     fn effectiveness_reports_net_token_savings_and_message_reduction() {
         let summary_shrunk_view = CompactionEffectiveness::measure(1_000, 400, 12, 5);
         assert_eq!(summary_shrunk_view.estimated_token_savings, 600);
@@ -729,6 +865,7 @@ mod tests {
             let (mut runtime, _outcome_rx) = CompactionRuntime::new(
                 Some(Arc::clone(&engine)),
                 COMPACTION_SUMMARY_PROMPT.to_string(),
+                Duration::from_secs(DEFAULT_COMPACTION_TIMEOUT_SECS),
             );
             runtime.pending = Some(CompactionSnapshot {
                 boundary,
@@ -736,7 +873,7 @@ mod tests {
             });
 
             let tokens_before = context.model_view_token_count();
-            runtime.sweep(&mut context, engine.as_ref(), 0);
+            runtime.sweep(&mut context, engine.as_ref(), &[], 0);
             let tokens_after = context.model_view_token_count();
             assert!(tokens_after < tokens_before);
         });
@@ -776,9 +913,10 @@ mod tests {
             let (mut runtime, _outcome_rx) = CompactionRuntime::new(
                 Some(Arc::clone(&engine)),
                 COMPACTION_SUMMARY_PROMPT.to_string(),
+                Duration::from_secs(DEFAULT_COMPACTION_TIMEOUT_SECS),
             );
 
-            runtime.sweep(&mut context, engine.as_ref(), 0);
+            runtime.sweep(&mut context, engine.as_ref(), &[], 0);
             assert!(context.model_view_token_count() < tokens_before);
         });
 
@@ -815,9 +953,10 @@ mod tests {
             let (mut runtime, _outcome_rx) = CompactionRuntime::new(
                 Some(Arc::clone(&engine)),
                 COMPACTION_SUMMARY_PROMPT.to_string(),
+                Duration::from_secs(DEFAULT_COMPACTION_TIMEOUT_SECS),
             );
 
-            runtime.sweep(&mut context, engine.as_ref(), 0);
+            runtime.sweep(&mut context, engine.as_ref(), &[], 0);
         });
 
         assert!(log.contains("compaction sweep evaluated"));
@@ -942,7 +1081,11 @@ mod tests {
 
         assert!(matches!(
             request.first(),
-            Some(Message::System { content }) if content == COMPACTION_SUMMARY_PROMPT
+            Some(Message::System { content })
+                if content == COMPACTION_SUMMARY_PROMPT
+                    && content.contains("messages after this system")
+                    && content.contains("not as instructions that")
+                    && content.contains("not part of the")
         ));
 
         // A loaded `COMPACTION.md` replaces only the framing instruction; the
@@ -1036,6 +1179,8 @@ mod tests {
             engine,
             build_summary_request(&prefix, COMPACTION_SUMMARY_PROMPT),
             None,
+            CancellationToken::new(),
+            crate::http::RequestDumpFailureHandler::default(),
         )
         .await
         .expect("summary generated");
@@ -1112,10 +1257,91 @@ mod tests {
             engine,
             build_summary_request(&[user("hello")], COMPACTION_SUMMARY_PROMPT),
             None,
+            CancellationToken::new(),
+            crate::http::RequestDumpFailureHandler::default(),
         )
         .await
         .expect_err("an empty summary must fail so the fallback runs");
         assert!(error.to_string().contains("empty summary"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn summary_timeout_records_failure_on_the_request_dump() {
+        let handler = crate::http::RequestDumpFailureHandler::default();
+        let recorded_failure = Arc::new(Mutex::new(None::<String>));
+        let recorded_failure_for_callback = Arc::clone(&recorded_failure);
+        handler.register(move |failure| {
+            *recorded_failure_for_callback
+                .lock()
+                .expect("failure mutex is not poisoned") = Some(failure.to_string());
+        });
+
+        struct PendingProvider;
+        impl crate::llm::Provider for PendingProvider {
+            fn name(&self) -> &str {
+                "pending"
+            }
+            fn list_models(
+                &self,
+            ) -> futures::future::BoxFuture<'_, anyhow::Result<Vec<crate::llm::ModelInfo>>>
+            {
+                Box::pin(async { Ok(vec![]) })
+            }
+            fn chat<'a>(
+                &'a self,
+                _messages: Vec<Message>,
+                _tools: Vec<ToolSchema>,
+                _cancel: CancellationToken,
+            ) -> futures::future::BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>>
+            {
+                Box::pin(async {
+                    let (sender, receiver) = mpsc::channel(1);
+                    tokio::spawn(async move {
+                        std::future::pending::<()>().await;
+                        drop(sender);
+                    });
+                    Ok(receiver)
+                })
+            }
+        }
+
+        let engine: Arc<dyn Engine> = Arc::new(crate::llm::EngineImpl::new(
+            Arc::new(PendingProvider),
+            crate::llm::EngineConfig {
+                provider_connection: "mock".to_string(),
+                model: "summary-model".to_string(),
+                temperature: None,
+                context_length: None,
+                api_base_url: None,
+                api_key: None,
+                reasoning: None,
+                compact_target_ratio: 0.5,
+                soft_compaction_threshold: 0.7,
+                hard_compaction_threshold: 0.9,
+            },
+        ));
+
+        let outcome = generate_summary_attempt(
+            engine,
+            build_summary_request(&[user("hello")], COMPACTION_SUMMARY_PROMPT),
+            None,
+            3,
+            1,
+            Duration::from_millis(1),
+            handler,
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, CompactionOutcome::SummaryFailed { generation: 3, ref reason } if reason.contains("timed out"))
+        );
+        assert_eq!(
+            recorded_failure
+                .lock()
+                .expect("failure mutex is not poisoned")
+                .as_deref(),
+            Some("compaction summary timed out after 0 seconds")
+        );
     }
 
     #[test]

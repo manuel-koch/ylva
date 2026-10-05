@@ -448,6 +448,7 @@ async fn child_spawn_after_root_model_switch_uses_the_root_active_engine() {
             "default".to_string(),
             AgentConfig {
                 engine: None,
+                compaction: None,
                 description: None,
                 allowed_tools: None,
                 timeout_secs: None,
@@ -543,6 +544,7 @@ async fn running_child_uses_a_shared_engine_switch_on_its_next_request() {
             "default".to_string(),
             AgentConfig {
                 engine: None,
+                compaction: None,
                 description: None,
                 allowed_tools: None,
                 timeout_secs: None,
@@ -653,6 +655,7 @@ async fn child_with_explicit_engine_override_keeps_its_named_engine() {
                 "default".to_string(),
                 AgentConfig {
                     engine: None,
+                    compaction: None,
                     description: None,
                     allowed_tools: None,
                     timeout_secs: None,
@@ -666,6 +669,7 @@ async fn child_with_explicit_engine_override_keeps_its_named_engine() {
                 "research".to_string(),
                 AgentConfig {
                     engine: Some("specialized".to_string()),
+                    compaction: None,
                     description: Some("Handles specialized tasks.".to_string()),
                     allowed_tools: None,
                     timeout_secs: None,
@@ -1123,11 +1127,12 @@ async fn console_app_reacts_to_child_finish_through_real_agent_factory_and_run_c
 
     let profile = ylva::ProfileConfig {
         default_engine: "default".to_string(),
-        compact_engine: None,
+        compaction: ylva::CompactionConfig::default(),
         agents: std::collections::HashMap::from([(
             "default".to_string(),
             ylva::AgentConfig {
                 engine: None,
+                compaction: None,
                 description: None,
                 allowed_tools: None,
                 timeout_secs: None,
@@ -1291,11 +1296,12 @@ async fn spawned_child_bash_approval_is_routed_to_the_child_not_the_root() {
 
     let profile = ylva::ProfileConfig {
         default_engine: "default".to_string(),
-        compact_engine: None,
+        compaction: ylva::CompactionConfig::default(),
         agents: std::collections::HashMap::from([(
             "default".to_string(),
             ylva::AgentConfig {
                 engine: None,
+                compaction: None,
                 description: None,
                 allowed_tools: None,
                 timeout_secs: None,

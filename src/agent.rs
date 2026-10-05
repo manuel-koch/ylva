@@ -44,6 +44,10 @@ use tools::{ToolCall, ToolRegistry};
 /// child alike, through `AgentLoop::with_max_tool_iterations`.
 pub const DEFAULT_MAX_TOOL_USE_ITERATIONS: usize = 50;
 
+/// Maximum distinct tool calls accepted from one assistant response. A model
+/// response that exceeds this limit is rejected before any of its tools run.
+pub const MAX_TOOL_CALLS_PER_RESPONSE: usize = 128;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentMode {
     Idle,
@@ -217,6 +221,9 @@ pub enum AgentEvent {
         partial: String,
     },
     StreamError(String),
+    ToolCallLimitExceeded {
+        limit: usize,
+    },
     ToolCall {
         calls: Vec<AssembledToolCall>,
     },
@@ -427,6 +434,10 @@ pub enum UiUpdate {
         estimated_tokens: usize,
         context_length: usize,
     },
+    /// Clear the request estimate because the model view changed after the
+    /// latest request was sent and no current serialized-request estimate is
+    /// available yet.
+    ContextUsageCleared,
     /// The model view's estimated size against the active context window for
     /// one child run. The parent loop forwards this update unchanged; the TUI
     /// keeps it keyed by `run_id` so background children cannot replace the
@@ -467,8 +478,8 @@ async fn send_compaction_applied(
 }
 
 /// Run one compaction sweep at a safe boundary and report the outcome: the
-/// model-view usage readout, plus a transcript marker when that sweep applied
-/// a snapshot the transcript has not shown yet.
+/// compaction lifecycle notices and a transcript marker when that sweep
+/// applied a snapshot the transcript has not shown yet.
 ///
 /// The replayed marker comes from the persisted snapshot instead (the TUI
 /// reads it before the loop ever runs), so only a compaction applied *here*
@@ -478,39 +489,57 @@ async fn sweep_compaction_and_report(
     compaction: &mut compaction::CompactionRuntime,
     context: &mut Context,
     engine: &dyn Engine,
+    tools: &[ToolSchema],
     generation: u64,
     run_id: Option<Uuid>,
     ui_tx: &mpsc::Sender<UiUpdate>,
-) {
+) -> bool {
     let boundary_before = context.compaction().map(|snapshot| snapshot.boundary);
-    compaction.sweep(context, engine, generation);
-    if compaction.enabled() || run_id.is_some() {
-        send_context_usage(ui_tx, context, engine, run_id).await;
+    let result = compaction.sweep(context, engine, tools, generation);
+    if result.summary_started {
+        let _ = ui_tx
+            .send(UiUpdate::Notice {
+                text: "Started background context compaction.".to_string(),
+                run_id,
+            })
+            .await;
+    }
+    if result.prefix_dropped {
+        let _ = ui_tx
+            .send(UiUpdate::Notice {
+                text: "Compacted context synchronously to fit the context window.".to_string(),
+                run_id,
+            })
+            .await;
+    }
+    if result.summary_applied {
+        let _ = ui_tx
+            .send(UiUpdate::Notice {
+                text: "Background context compaction completed.".to_string(),
+                run_id,
+            })
+            .await;
+    }
+    if result.prefix_dropped || result.summary_applied {
+        let _ = ui_tx.send(UiUpdate::ContextUsageCleared).await;
     }
     if !compaction.enabled() {
-        return;
+        return result.prefix_dropped;
     }
     if let Some(boundary_after) = context.compaction().map(|snapshot| snapshot.boundary) {
         if boundary_before != Some(boundary_after) {
             send_compaction_applied(ui_tx, context, boundary_after).await;
         }
     }
+    result.prefix_dropped || result.summary_applied
 }
 
-/// Report the model view's size against the active window to the UI.
-///
-/// Sent by root loops only (`CompactionRuntime::enabled`), so a child's
-/// context can never overwrite the root's footer readout.
-async fn send_context_usage(
+async fn send_context_usage_estimate(
     ui_tx: &mpsc::Sender<UiUpdate>,
-    context: &Context,
-    engine: &dyn Engine,
+    estimated_tokens: usize,
+    context_length: usize,
     run_id: Option<Uuid>,
 ) {
-    let (estimated_tokens, context_length) = (
-        context.model_view_token_count(),
-        engine.effective_context_length(),
-    );
     tracing::debug!(
         run_id = ?run_id,
         estimated_tokens,
@@ -520,7 +549,7 @@ async fn send_context_usage(
         } else {
             estimated_tokens as f64 / context_length as f64
         },
-        "model-view context usage reported"
+        "serialized request token estimate reported"
     );
     let update = match run_id {
         Some(run_id) => UiUpdate::ChildContextUsage {
@@ -534,6 +563,45 @@ async fn send_context_usage(
         },
     };
     let _ = ui_tx.send(update).await;
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resume_child_after_compaction(
+    context: &mut Context,
+    mode: &mut AgentMode,
+    current_cancel: &mut Option<CancellationToken>,
+    engine: &Arc<dyn Engine>,
+    registry: &Arc<ToolRegistry>,
+    ui_tx: &mpsc::Sender<UiUpdate>,
+    agent_tx: &mpsc::Sender<(u64, AgentEvent)>,
+    generation: u64,
+    own_run_id: Option<Uuid>,
+    session_id: Option<Uuid>,
+) {
+    *mode = AgentMode::Streaming;
+    *current_cancel = Some(start_request(
+        context,
+        engine.clone(),
+        registry.schemas(),
+        ui_tx.clone(),
+        agent_tx.clone(),
+        generation,
+        own_run_id,
+        session_id,
+    ));
+}
+
+async fn report_compaction_failure(
+    ui_tx: &mpsc::Sender<UiUpdate>,
+    run_id: Option<Uuid>,
+    reason: &str,
+) {
+    let _ = ui_tx
+        .send(UiUpdate::Notice {
+            text: format!("Background context compaction failed: {reason}."),
+            run_id,
+        })
+        .await;
 }
 
 /// A raw tool-call fragment emitted by a provider, to be assembled by the
@@ -712,7 +780,7 @@ pub const HARNESS_NOTICE_MARKER: &str = "[harness notice — not from the user]"
 
 /// System-prompt snippet, injected immediately after the persona/initial
 /// system prompt, that documents the uniform tool-response envelope a model
-/// must parse. The described JSON matches the schema derived from
+/// must parse and the per-response tool-call limit. The described JSON matches the schema derived from
 /// [`crate::llm::ToolEnvelope`] — the very struct used to serialize every
 /// `role:"tool"` message — so the instruction can never drift from the wire
 /// shape (blueprint §4D: schema from typed data, never hand-written). It is a
@@ -732,7 +800,9 @@ pub static TOOL_PROTOCOL_SYSTEM_PROMPT: LazyLock<String> = LazyLock::new(|| {
         object.remove("description");
     }
     let shape = serde_json::to_string_pretty(&schema_json).unwrap_or_default();
-    format!("{lead}\n{shape}")
+    format!(
+        "{lead}\n{shape}\n\nA single assistant response may contain at most {MAX_TOOL_CALLS_PER_RESPONSE} distinct tool calls. Keep each batch within this limit; if more work is needed, continue in a later response."
+    )
 });
 
 /// Priority tier of a message in the model-facing view (blueprint §4C).
@@ -809,6 +879,18 @@ fn estimate_message_tokens(estimator: crate::llm::TokenEstimator, message: &Mess
             estimator.estimate_tokens(name) + estimator.estimate_tokens(error)
         }
     }
+}
+
+fn tool_schema_token_count(tools: &[ToolSchema]) -> usize {
+    let estimator = crate::llm::TokenEstimator::Tiktoken;
+    tools
+        .iter()
+        .map(|tool| {
+            estimator.estimate_tokens(&tool.name)
+                + estimator.estimate_tokens(&tool.description)
+                + estimator.estimate_tokens(&tool.parameters.to_string())
+        })
+        .sum()
 }
 
 /// The conversation as the agent loop records it: every committed message, in
@@ -1105,13 +1187,16 @@ impl Context {
     /// the hard fallback drops anything — this is simply the whole transcript
     /// in order.
     pub fn model_messages(&self) -> Vec<Message> {
+        self.model_messages_from(self.model_view_start())
+    }
+
+    fn model_messages_from(&self, view_start: usize) -> Vec<Message> {
         let leading_system_len = self.leading_system_len();
-        let view_start = self.model_view_start();
         let mut messages: Vec<Message> = self.messages[..leading_system_len].to_vec();
         if let Some(snapshot) = &self.compaction {
             messages.push(snapshot.summary_message());
         }
-        messages.extend_from_slice(&self.messages[view_start..]);
+        messages.extend_from_slice(&self.messages[view_start.max(leading_system_len)..]);
         messages
     }
 
@@ -1133,10 +1218,19 @@ impl Context {
         self.entries.iter().map(|entry| entry.token_count).sum()
     }
 
-    /// Approximate size of the *model view* — what the next request actually
-    /// sends — in tokens. This is the number compaction thresholds measure.
+    /// Approximate model-view size including the active tool definitions, but
+    /// excluding API/JSON transport framing.
+    pub fn estimated_model_tokens(&self, tools: &[ToolSchema], _engine: &dyn Engine) -> usize {
+        self.model_view_token_count() + tool_schema_token_count(tools)
+    }
+
+    /// Approximate payload-only size of the model view. Retained for callers
+    /// that need transcript message accounting.
     pub fn model_view_token_count(&self) -> usize {
-        let view_start = self.model_view_start();
+        self.model_view_token_count_from(self.model_view_start())
+    }
+
+    fn model_view_token_count_from(&self, view_start: usize) -> usize {
         let tail_tokens: usize = self.entries[view_start..]
             .iter()
             .map(|entry| entry.token_count)
@@ -1225,8 +1319,7 @@ impl Context {
             return None;
         }
         let mut accumulated = 0usize;
-        let end_of_prefix = self.entries.len();
-        for index in leading_system_len..end_of_prefix {
+        for index in leading_system_len..self.entries.len() {
             accumulated += self.entries[index].token_count;
             if accumulated >= tokens_to_remove {
                 return crate::agent::compaction::first_safe_boundary_from(
@@ -1236,9 +1329,7 @@ impl Context {
                 .filter(|boundary| *boundary > leading_system_len);
             }
         }
-        // The whole non-system prefix is smaller than what must go: summarize
-        // all of it when that is a non-empty, cuttable prefix.
-        (end_of_prefix > leading_system_len)
+        (self.entries.len() > leading_system_len)
             .then(|| {
                 crate::agent::compaction::first_safe_boundary_from(
                     &self.messages,
@@ -1247,6 +1338,21 @@ impl Context {
             })
             .flatten()
             .filter(|boundary| *boundary > leading_system_len)
+    }
+
+    /// Find the oldest safe prefix whose removal brings model-visible content
+    /// at or below `target_tokens`. The generated summary is not available yet,
+    /// so it is excluded from this projection.
+    pub(crate) fn summary_boundary_for_model_target(
+        &self,
+        target_tokens: usize,
+        tools: &[ToolSchema],
+        _engine: &dyn Engine,
+    ) -> Option<usize> {
+        let _ = _engine;
+        self.summary_boundary_for_target(
+            target_tokens.saturating_sub(tool_schema_token_count(tools)),
+        )
     }
 
     /// Synchronously drop model-view messages — oldest first — until the view
@@ -1271,6 +1377,18 @@ impl Context {
             }
         }
         false
+    }
+
+    /// Synchronously drop oldest complete turns until model-visible content
+    /// fits the target token estimate.
+    pub(crate) fn drop_model_view_to_model_target(
+        &mut self,
+        target_tokens: usize,
+        tools: &[ToolSchema],
+        _engine: &dyn Engine,
+    ) -> bool {
+        let _ = _engine;
+        self.drop_model_view_to(target_tokens.saturating_sub(tool_schema_token_count(tools)))
     }
 
     /// The estimator used to cache token counts.
@@ -1560,10 +1678,12 @@ pub struct AgentLoop {
     /// iteration guard. Defaults to [`DEFAULT_MAX_TOOL_USE_ITERATIONS`].
     max_tool_iterations: usize,
     /// Set via [`AgentLoop::with_compaction_engine`] from the profile's
-    /// `compact_engine`: the engine background prefix summaries run on.
-    /// `None` (child loops, or no compact engine configured) disables
-    /// compaction for this loop.
+    /// `[compaction].engine`: the engine background prefix summaries run on.
+    /// `None` (no compact engine configured) disables compaction for this loop.
     compaction_engine: Option<Arc<dyn Engine>>,
+    /// Wall-clock budget configured by `[compaction].timeout_sec` for
+    /// requests made by `compaction_engine`.
+    compaction_timeout: Duration,
     /// Framing instruction for background summary requests: the resolved
     /// `COMPACTION.md` layered like `SOUL.md`, or its built-in default.
     compaction_summary_prompt: String,
@@ -1641,6 +1761,7 @@ impl AgentLoop {
             subagent_ui_rx: None,
             max_tool_iterations: DEFAULT_MAX_TOOL_USE_ITERATIONS,
             compaction_engine: None,
+            compaction_timeout: Duration::from_secs(compaction::DEFAULT_COMPACTION_TIMEOUT_SECS),
             compaction_summary_prompt: crate::config::compaction_prompt::DEFAULT_COMPACTION_PROMPT
                 .to_string(),
             agent_type: None,
@@ -1681,10 +1802,16 @@ impl AgentLoop {
     }
 
     /// Set the engine background prefix summaries run on (the profile's
-    /// `compact_engine`). Only applied to root loops — child contexts are
-    /// short-lived and never compact (blueprint §4C *scope*).
+    /// `[compaction].engine`). Applied to root and child loops.
     pub fn with_compaction_engine(mut self, engine: Arc<dyn Engine>) -> Self {
         self.compaction_engine = Some(engine);
+        self
+    }
+
+    /// Set the wall-clock budget for summary requests made by the configured
+    /// compaction engine.
+    pub fn with_compaction_timeout_secs(mut self, timeout_secs: u64) -> Self {
+        self.compaction_timeout = Duration::from_secs(timeout_secs);
         self
     }
 
@@ -1745,6 +1872,18 @@ impl AgentLoop {
     /// queries (the model list) without reaching through the factory.
     pub fn engine(&self) -> Arc<dyn Engine> {
         self.engine.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn compaction_engine_config(&self) -> Option<crate::llm::EngineConfig> {
+        self.compaction_engine
+            .as_ref()
+            .map(|engine| engine.config())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn compaction_timeout(&self) -> Duration {
+        self.compaction_timeout
     }
 
     /// Snapshot the engine identity currently used by this agent.
@@ -1812,6 +1951,7 @@ impl AgentLoop {
         let mut subagent_ui_rx = self.subagent_ui_rx.take();
         let max_tool_iterations = self.max_tool_iterations;
         let compaction_engine = self.compaction_engine.take();
+        let compaction_timeout = self.compaction_timeout;
         let compaction_summary_prompt = std::mem::take(&mut self.compaction_summary_prompt);
         let agent_type = self.agent_type.clone();
         let store = self.store.clone();
@@ -1845,8 +1985,11 @@ impl AgentLoop {
             if let Some(store) = store {
                 context.set_store(store);
             }
-            let (mut compaction, mut compaction_rx) =
-                compaction::CompactionRuntime::new(compaction_engine, compaction_summary_prompt);
+            let (mut compaction, mut compaction_rx) = compaction::CompactionRuntime::new(
+                compaction_engine,
+                compaction_summary_prompt,
+                compaction_timeout,
+            );
             if let Some(briefing) = briefing {
                 context.push_system(briefing);
             }
@@ -1866,13 +2009,6 @@ impl AgentLoop {
                      your work will be reported as failed and none of your findings will \
                      reach the caller."
                 ));
-            }
-            // Report a child after its child-only system messages are
-            // installed, so its first readout measures the same initial model
-            // view sent to the model. Root resumes report only when compaction
-            // is configured, preserving the existing footer behavior.
-            if compaction.enabled() || own_run_id.is_some() {
-                send_context_usage(&ui_tx, &context, engine.as_ref(), own_run_id).await;
             }
             let mut mode = AgentMode::Idle;
             let mut current_cancel: Option<CancellationToken> = None;
@@ -1928,58 +2064,143 @@ impl AgentLoop {
 
             loop {
                 tokio::select! {
-                    biased;
-                    Some((event_generation, event)) = agent_rx.recv() => {
-                        if event_generation != generation {
-                            tracing::debug!(
-                                event_generation,
-                                generation,
-                                ?event,
-                                "dropping stale agent event from a superseded generation \
-                                 (likely produced before an AgentCommand::ClearContext)"
-                            );
-                            continue;
-                        }
-                        match event {
-                            AgentEvent::StreamDone { partial } => {
-                                context.push_assistant(partial, AssistantStatus::Complete);
-                                // Signal the driver only after the completed
-                                // assistant message has entered Context and
-                                // the session store. This ordering lets
-                                // out-of-band consumers safely inspect the
-                                // committed turn.
-                                let _ = ui_tx.send(UiUpdate::StreamDone).await;
-                                let steers_injected = inject_pending_steers(&mut pending_steers, &mut context);
-                                if steers_injected {
-                                    pending_child_finish_reprompt = false;
+                        biased;
+                        Some((event_generation, event)) = agent_rx.recv() => {
+                            if event_generation != generation {
+                                tracing::debug!(
+                                    event_generation,
+                                    generation,
+                                    ?event,
+                                    "dropping stale agent event from a superseded generation \
+                                     (likely produced before an AgentCommand::ClearContext)"
+                                );
+                                continue;
+                            }
+                            match event {
+                                AgentEvent::StreamDone { partial } => {
+                                    context.push_assistant(partial, AssistantStatus::Complete);
+                                    // Signal the driver only after the completed
+                                    // assistant message has entered Context and
+                                    // the session store. This ordering lets
+                                    // out-of-band consumers safely inspect the
+                                    // committed turn.
+                                    let _ = ui_tx.send(UiUpdate::StreamDone).await;
+                                    let steers_injected = inject_pending_steers(&mut pending_steers, &mut context);
+                                    if steers_injected {
+                                        pending_child_finish_reprompt = false;
+                                        let _ = ui_tx
+                                            .send(UiUpdate::SteerApplied {
+                                                run_id: own_run_id,
+                                            })
+                                            .await;
+                                        mode = AgentMode::Streaming;
+                                        current_cancel = Some(start_request(
+                                            &context,
+                                            engine.clone(),
+                                            registry.schemas(),
+                                            ui_tx.clone(),
+                                            agent_tx.clone(),
+                                            generation,
+                                            own_run_id,
+                                            session_id,
+                                        ));
+                                    } else if pending_child_finish_reprompt {
+                                        pending_child_finish_reprompt = false;
+                                        // Same iteration budget as any other
+                                        // re-prompt — without this guard a model
+                                        // whose replies never contain a tool call
+                                        // (so this branch, not `advance_tool_queue`'s
+                                        // queue-empty branch, is the one that
+                                        // clears a finish notice deferred while it
+                                        // was still streaming) could reprompt
+                                        // forever, bypassing the cap entirely; see
+                                        // `bump_and_check_iteration_cap`'s doc
+                                        // comment.
+                                        if !bump_and_check_iteration_cap(
+                                            &mut iterations,
+                                            max_tool_iterations,
+                                            &mut context,
+                                            &mut mode,
+                                            &ui_tx,
+                                            own_run_id,
+                                            &mut iteration_cap_exceeded,
+                                        )
+                                        .await
+                                        {
+                                            mode = AgentMode::Streaming;
+                                            current_cancel = Some(start_request(
+                                                &context,
+                                                engine.clone(),
+                                                registry.schemas(),
+                                                ui_tx.clone(),
+                                                agent_tx.clone(),
+                                                generation,
+                                                own_run_id,
+                                                session_id,
+                                            ));
+                                        }
+                                    } else {
+                                        mode = AgentMode::Idle;
+                                    }
+                                    if mode == AgentMode::Idle && pending_tools.is_empty() {
+                                        let prefix_dropped = sweep_compaction_and_report(
+                                            &mut compaction,
+                                            &mut context,
+                                            engine.as_ref(),
+                                            &registry.schemas(),
+                                            generation,
+                                            own_run_id,
+                                            &ui_tx,
+                                        )
+                                        .await;
+                                        if is_child && prefix_dropped {
+                                            resume_child_after_compaction(
+                                                &mut context,
+                                                &mut mode,
+                                                &mut current_cancel,
+                                                &engine,
+                                                &registry,
+                                                &ui_tx,
+                                                &agent_tx,
+                                                generation,
+                                                own_run_id,
+                                                session_id,
+                                            );
+                                        }
+                                    }
+                                }
+                                AgentEvent::StreamCancelled { partial } => {
+                                    // Only commit the partial when this was a genuine
+                                    // interrupt; ignore stale cancellation from a replaced
+                                    // stream (current_cancel already Some again).
+                                    if current_cancel.is_none() {
+                                        context.push_assistant(partial, AssistantStatus::Interrupted);
+                                        mode = AgentMode::Idle;
+                                    }
+                                }
+                                AgentEvent::StreamError(error) => {
+                                    pending_steers.clear();
+                                    current_cancel = None;
+                                    mode = AgentMode::Idle;
+                                    if is_child {
+                                        stream_error = Some(error.clone());
+                                    }
+                                    tracing::error!(message = %error, "agent stream error");
                                     let _ = ui_tx
-                                        .send(UiUpdate::SteerApplied {
+                                        .send(UiUpdate::Error {
+                                            message: error,
                                             run_id: own_run_id,
                                         })
                                         .await;
-                                    mode = AgentMode::Streaming;
-                                    current_cancel = Some(start_request(
-                                        &context,
-                                        engine.clone(),
-                                        registry.schemas(),
-                                        ui_tx.clone(),
-                                        agent_tx.clone(),
-                                        generation,
-                                        own_run_id,
-                                        session_id,
-                                    ));
-                                } else if pending_child_finish_reprompt {
-                                    pending_child_finish_reprompt = false;
-                                    // Same iteration budget as any other
-                                    // re-prompt — without this guard a model
-                                    // whose replies never contain a tool call
-                                    // (so this branch, not `advance_tool_queue`'s
-                                    // queue-empty branch, is the one that
-                                    // clears a finish notice deferred while it
-                                    // was still streaming) could reprompt
-                                    // forever, bypassing the cap entirely; see
-                                    // `bump_and_check_iteration_cap`'s doc
-                                    // comment.
+                                }
+                                AgentEvent::ToolCallLimitExceeded { limit } => {
+                                    current_cancel = None;
+                                    pending_steers.clear();
+                                    let notice = format!(
+                                        "The previous assistant response exceeded the limit of {limit} tool calls. None of those calls were executed. Continue the task using no more than {limit} tool calls in one response."
+                                    );
+                                    tracing::warn!(limit, "assistant response exceeded tool-call limit");
+                                    context.push_async_harness_notice(notice);
                                     if !bump_and_check_iteration_cap(
                                         &mut iterations,
                                         max_tool_iterations,
@@ -2003,559 +2224,370 @@ impl AgentLoop {
                                             session_id,
                                         ));
                                     }
-                                } else {
-                                    mode = AgentMode::Idle;
                                 }
-                                if mode == AgentMode::Idle && pending_tools.is_empty() {
-                                    sweep_compaction_and_report(
-                                        &mut compaction,
-                                        &mut context,
-                                        engine.as_ref(),
-                                        generation,
-                                        own_run_id,
-                                        &ui_tx,
-                                    )                                    .await;
-                                }
-                            }
-                            AgentEvent::StreamCancelled { partial } => {
-                                // Only commit the partial when this was a genuine
-                                // interrupt; ignore stale cancellation from a replaced
-                                // stream (current_cancel already Some again).
-                                if current_cancel.is_none() {
-                                    context.push_assistant(partial, AssistantStatus::Interrupted);
-                                    mode = AgentMode::Idle;
-                                }
-                            }
-                            AgentEvent::StreamError(error) => {
-                                pending_steers.clear();
-                                mode = AgentMode::Idle;
-                                if is_child {
-                                    stream_error = Some(error.clone());
-                                }
-                                tracing::error!(message = %error, "agent stream error");
-                                let _ = ui_tx
-                                    .send(UiUpdate::Error {
-                                        message: error,
-                                        run_id: own_run_id,
-                                    })
-                                    .await;
-                            }
-                            AgentEvent::ToolCall { calls } => {
-                                let mut requests = Vec::with_capacity(calls.len());
-                                for assembled in calls {
-                                    let pending_call = registry.create_call(
-                                        &assembled.name,
-                                        assembled.id,
-                                        assembled.arguments.clone(),
-                                    );
-                                    let persisted_title_arguments = pending_call
-                                        .as_ref()
-                                        .map_or_else(Vec::new, |call| call.title_arguments());
-                                    requests.push(ToolCallRequest {
-                                        id: assembled.id,
-                                        name: assembled.name.clone(),
-                                        arguments: assembled.arguments.clone(),
-                                        persisted_title_arguments,
-                                    });
-                                    match pending_call {
-                                        Some(call) => {
-                                            pending_tools.push_back(PendingTool { call });
-                                        }
-                                        None => {
-                                            let error =
-                                                format!("Unknown tool '{}'", assembled.name);
-                                            let _ = agent_tx
-                                                .send((
-                                                    generation,
-                                                    AgentEvent::ToolError {
-                                                        id: assembled.id,
-                                                        name: assembled.name.clone(),
-                                                        error,
-                                                        partial_output: None,
-                                                        duration: std::time::Duration::ZERO,
-                                                        content_sections: vec![],
-                                                    },
-                                                ))
-                                                .await;
+                                AgentEvent::ToolCall { calls } => {
+                                    let mut requests = Vec::with_capacity(calls.len());
+                                    for assembled in calls {
+                                        let pending_call = registry.create_call(
+                                            &assembled.name,
+                                            assembled.id,
+                                            assembled.arguments.clone(),
+                                        );
+                                        let persisted_title_arguments = pending_call
+                                            .as_ref()
+                                            .map_or_else(Vec::new, |call| call.title_arguments());
+                                        requests.push(ToolCallRequest {
+                                            id: assembled.id,
+                                            name: assembled.name.clone(),
+                                            arguments: assembled.arguments.clone(),
+                                            persisted_title_arguments,
+                                        });
+                                        match pending_call {
+                                            Some(call) => {
+                                                pending_tools.push_back(PendingTool { call });
+                                            }
+                                            None => {
+                                                let error =
+                                                    format!("Unknown tool '{}'", assembled.name);
+                                                let _ = agent_tx
+                                                    .send((
+                                                        generation,
+                                                        AgentEvent::ToolError {
+                                                            id: assembled.id,
+                                                            name: assembled.name.clone(),
+                                                            error,
+                                                            partial_output: None,
+                                                            duration: std::time::Duration::ZERO,
+                                                            content_sections: vec![],
+                                                        },
+                                                    ))
+                                                    .await;
+                                            }
                                         }
                                     }
-                                }
-                                context.push_assistant_tool_call(
-                                    String::new(),
-                                    AssistantStatus::Complete,
-                                    requests,
-                                );
-                                mode = AgentMode::ToolPending;
-                                advance_tool_queue(
-                                    &mut pending_tools,
-                                    &mut context,
-                                    &mut mode,
-                                    &mut current_cancel,
-                                    &mut current_tool_cancel,
-                                    &mut iterations,
-                                    max_tool_iterations,
-                                    false,
-                                    engine.clone(),
-                                    Arc::clone(&registry),
-                                    ui_tx.clone(),
-                                    agent_tx.clone(),
-                                    generation,
-                                    &mut clarify_started_at,
-                                    &mut pending_steers,
-                                    &mut child_agent_manager,
-                                    &mut spawn_content_sections,
-                                    own_run_id,
-                                    &mut pending_child_finish_reprompt,
-                                    &mut iteration_cap_exceeded,
-                                    session_id,
-                                )
-                                .await;
-                            }
-                            AgentEvent::ToolDone { id, name, result, display_result, result_metadata, result_metadata_schema, summary, duration, content_sections, attachments } => {
-                                current_tool_cancel = None;
-                                // `agent_finish` is only ever registered on a `Role::Child`
-                                // registry; once it completes the child's ReAct loop
-                                // exits unconditionally (exempt from the iteration
-                                // cap) — the tool itself already reported the
-                                // outcome to the parent via `finish_tx`.
-                                let is_finish = name == tools::agent_finish::AgentFinishTool::NAME;
-                                let result_section_id = if display_result.is_some() {
-                                    None
-                                } else {
-                                    Some(
-                                        crate::tui_reducer_state::result_section_ids::HIDDEN
-                                            .to_string(),
+                                    context.push_assistant_tool_call(
+                                        String::new(),
+                                        AssistantStatus::Complete,
+                                        requests,
+                                    );
+                                    mode = AgentMode::ToolPending;
+                                    advance_tool_queue(
+                                        &mut pending_tools,
+                                        &mut context,
+                                        &mut mode,
+                                        &mut current_cancel,
+                                        &mut current_tool_cancel,
+                                        &mut iterations,
+                                        max_tool_iterations,
+                                        false,
+                                        engine.clone(),
+                                        Arc::clone(&registry),
+                                        ui_tx.clone(),
+                                        agent_tx.clone(),
+                                        generation,
+                                        &mut clarify_started_at,
+                                        &mut pending_steers,
+                                        &mut child_agent_manager,
+                                        &mut spawn_content_sections,
+                own_run_id,
+                                        &mut pending_child_finish_reprompt,
+                                        &mut iteration_cap_exceeded,
+                                        session_id,
+                                        Some(&mut compaction),
                                     )
-                                };
-                                context.push_tool_result(
-                                    ToolResult {
-                                        id,
-                                        name: name.clone(),
-                                        result: result.clone(),
-                                        attachments,
-                                        result_section_id: result_section_id.clone(),
-                                        result_metadata,
-                                        result_metadata_schema,
-                                        summary: summary.clone(),
-                                        content_sections: content_sections.clone(),
-                                        duration,
-                                    },
-                                );
-                                let _ = ui_tx
-                                    .send(UiUpdate::ToolDone {
+                                    .await;
+                                }
+                                AgentEvent::ToolDone { id, name, result, display_result, result_metadata, result_metadata_schema, summary, duration, content_sections, attachments } => {
+                                    current_tool_cancel = None;
+                                    // `agent_finish` is only ever registered on a `Role::Child`
+                                    // registry; once it completes the child's ReAct loop
+                                    // exits unconditionally (exempt from the iteration
+                                    // cap) — the tool itself already reported the
+                                    // outcome to the parent via `finish_tx`.
+                                    let is_finish = name == tools::agent_finish::AgentFinishTool::NAME;
+                                    let result_section_id = if display_result.is_some() {
+                                        None
+                                    } else {
+                                        Some(
+                                            crate::tui_reducer_state::result_section_ids::HIDDEN
+                                                .to_string(),
+                                        )
+                                    };
+                                    context.push_tool_result(
+                                        ToolResult {
+                                            id,
+                                            name: name.clone(),
+                                            result: result.clone(),
+                                            attachments,
+                                            result_section_id: result_section_id.clone(),
+                                            result_metadata,
+                                            result_metadata_schema,
+                                            summary: summary.clone(),
+                                            content_sections: content_sections.clone(),
+                                            duration,
+                                        },
+                                    );
+                                    let _ = ui_tx
+                                        .send(UiUpdate::ToolDone {
+                                            id,
+                                            name,
+                                            result_section: crate::tui_reducer_state::ResultSection {
+                                                id: result_section_id
+                                                    .as_deref()
+                                                    .unwrap_or(
+                                                        crate::tui_reducer_state::result_section_ids::RESULT,
+                                                    )
+                                                    .to_string(),
+                                                content: display_result.unwrap_or_default(),
+                                            },
+                                            summary,
+                                            duration,
+                                            content_sections,
+                                            run_id: own_run_id,
+                                        })
+                                        .await;
+                                    if is_finish {
+                                        return Ok(context);
+                                    }
+                                    advance_tool_queue(
+                                        &mut pending_tools,
+                                        &mut context,
+                                        &mut mode,
+                                        &mut current_cancel,
+                                        &mut current_tool_cancel,
+                                        &mut iterations,
+                                        max_tool_iterations,
+                                        true,
+                                        engine.clone(),
+                                        Arc::clone(&registry),
+                                        ui_tx.clone(),
+                                        agent_tx.clone(),
+                                        generation,
+                                        &mut clarify_started_at,
+                                        &mut pending_steers,
+                                        &mut child_agent_manager,
+                                        &mut spawn_content_sections,
+                                        own_run_id,
+                                        &mut pending_child_finish_reprompt,
+                                        &mut iteration_cap_exceeded,
+                                        session_id,
+                                        Some(&mut compaction),
+                                    )
+                                    .await;
+                                }
+                                AgentEvent::ToolError { id, name, error, partial_output, duration, content_sections } => {
+                                    current_tool_cancel = None;
+                                    tracing::error!(
+                                        tool = %name,
+                                        tool_call_id = %id,
+                                        error = %error,
+                                        "tool failed"
+                                    );
+                                    context.push_tool_error(
                                         id,
                                         name,
-                                        result_section: crate::tui_reducer_state::ResultSection {
-                                            id: result_section_id
-                                                .as_deref()
-                                                .unwrap_or(
-                                                    crate::tui_reducer_state::result_section_ids::RESULT,
-                                                )
-                                                .to_string(),
-                                            content: display_result.unwrap_or_default(),
-                                        },
-                                        summary,
+                                        error.clone(),
+                                        partial_output.as_deref(),
+                                        duration,
+                                        content_sections.clone(),
+                                    );
+                                    let _ = ui_tx.send(UiUpdate::ToolError {
+                                        id,
+                                        error,
                                         duration,
                                         content_sections,
                                         run_id: own_run_id,
-                                    })
+                                    }).await;
+                                    advance_tool_queue(
+                                        &mut pending_tools,
+                                        &mut context,
+                                        &mut mode,
+                                        &mut current_cancel,
+                                        &mut current_tool_cancel,
+                                        &mut iterations,
+                                        max_tool_iterations,
+                                        true,
+                                        engine.clone(),
+                                        Arc::clone(&registry),
+                                        ui_tx.clone(),
+                                        agent_tx.clone(),
+                                        generation,
+                                        &mut clarify_started_at,
+                                        &mut pending_steers,
+                                        &mut child_agent_manager,
+                                        &mut spawn_content_sections,
+                                        own_run_id,
+                                        &mut pending_child_finish_reprompt,
+                                        &mut iteration_cap_exceeded,
+                                        session_id,
+                                        Some(&mut compaction),
+                                    )
                                     .await;
-                                if is_finish {
-                                    return Ok(context);
                                 }
-                                advance_tool_queue(
-                                    &mut pending_tools,
-                                    &mut context,
-                                    &mut mode,
-                                    &mut current_cancel,
-                                    &mut current_tool_cancel,
-                                    &mut iterations,
-                                    max_tool_iterations,
-                                    true,
-                                    engine.clone(),
-                                    Arc::clone(&registry),
-                                    ui_tx.clone(),
-                                    agent_tx.clone(),
-                                    generation,
-                                    &mut clarify_started_at,
-                                    &mut pending_steers,
-                                    &mut child_agent_manager,
-                                    &mut spawn_content_sections,
-                                    own_run_id,
-                                    &mut pending_child_finish_reprompt,
-                                    &mut iteration_cap_exceeded,
-                                    session_id,
-                                )
-                                .await;
+                                AgentEvent::ToolKilled { id, name: _ } => {
+                                    tracing::info!(%id, "tool killed; agent returning to idle");
+                                    current_tool_cancel = None;
+                                    pending_tools.clear();
+                                    let _ = ui_tx
+                                        .send(UiUpdate::ToolKilled {
+                                            id,
+                                            run_id: own_run_id,
+                                        })
+                                        .await;
+                                    mode = AgentMode::Idle;
+                                }
                             }
-                            AgentEvent::ToolError { id, name, error, partial_output, duration, content_sections } => {
-                                current_tool_cancel = None;
-                                tracing::error!(
-                                    tool = %name,
-                                    tool_call_id = %id,
-                                    error = %error,
-                                    "tool failed"
+                        }
+                        Some(finish_result) = recv_finish(&mut finish_rx) => {
+                            // The tool-calling wire protocol allows exactly one
+                            // `role:"tool"` response per `tool_call_id`; that slot
+                            // was already spent on `spawn_subagent`'s immediate
+                            // `{"status":"running"/"queued"}` result (see
+                            // `resolve_spawn_subagent`). So the child's *real*
+                            // outcome, arriving asynchronously and possibly after
+                            // further assistant turns, is appended as a brand-new
+                            // hidden harness notice instead of rewriting/duplicating
+                            // that earlier tool result — this keeps history
+                            // append-only (an honest record of what was known
+                            // when) and avoids the duplicate-`tool_call_id`
+                            // protocol violation entirely, rather than papering
+                            // over it by mutating a past message in place. A
+                            // completion is appended to context immediately, but
+                            // the root is re-prompted only after all currently
+                            // outstanding child runs are terminal. This avoids
+                            // acknowledgement turns for intermediate results
+                            // while preserving a single continuation point for
+                            // the aggregate answer.
+                            let run_id = finish_result.run_id;
+                            if cancelled_run_ids.remove(&run_id) {
+                                // This child was cancelled by a `Stop`/`ClearContext`
+                                // that already resolved (or discarded) its
+                                // tool bubble/context entry synchronously; the
+                                // manager only *requested* cancellation (a
+                                // `CancellationToken` is cooperative, not
+                                // immediate), so the child's task can still race
+                                // in a real `FinishResult` afterwards. Applying it
+                                // now would duplicate an already-settled entry or
+                                // — after `ClearContext` — push content into an
+                                // unrelated, brand-new `Context`. Drop it.
+                                tracing::debug!(
+                                    %run_id,
+                                    tool_call_id = %finish_result.call_id,
+                                    "dropping stale child finish result for a cancelled run"
                                 );
-                                context.push_tool_error(
-                                    id,
-                                    name,
-                                    error.clone(),
-                                    partial_output.as_deref(),
-                                    duration,
-                                    content_sections.clone(),
-                                );
-                                let _ = ui_tx.send(UiUpdate::ToolError {
-                                    id,
-                                    error,
+                                continue;
+                            }
+                            let call_id = finish_result.call_id;
+                            let status = finish_result.status.clone();
+                            let label = child_agent_manager
+                                .as_ref()
+                                .and_then(|manager| manager.label_for(run_id))
+                                .unwrap_or_default()
+                                .to_string();
+                            let outstanding_count = child_agent_manager
+                                .as_ref()
+                                .map(|manager| manager.outstanding_count_after_completion(run_id))
+                                .unwrap_or(0);
+                            let all_done = outstanding_count == 0;
+                            // The LLM-facing notice stays structured JSON (the
+                            // model reads correlation/lifecycle fields as well as
+                            // `status`/`result`/`error`/`sources`); only the TUI
+                            // bubble renders result content as Markdown sections.
+                            let result_text =
+                                serde_json::to_string(&finish_result.to_completion_json(
+                                    &label,
+                                    outstanding_count,
+                                ))
+                                .unwrap_or_default();
+                            let mut content_sections = spawn_content_sections
+                                .remove(&call_id)
+                                .unwrap_or_default();
+                            content_sections.extend(finish_result.content_sections());
+                            tracing::info!(%run_id, tool_call_id = %call_id, %status, "child agent finished");
+                            let next_step_note = if !all_done {
+                                format!(
+                                    "{outstanding_count} other subagent run(s) remain outstanding. \
+                                     This is an intermediate completion; do not produce an \
+                                     acknowledgement or a user-facing progress update solely for \
+                                     this event. The harness will provide one continuation after \
+                                     all outstanding child results are available."
+                                )
+                            } else {
+                                "All spawned subagent runs are now terminal. Combine this result with \
+                                 earlier completion events in the conversation and produce the \
+                                 answer for the user."
+                                    .to_string()
+                            };
+                            context.push_async_harness_notice(format!(
+                                "Subagent completion event; the structured JSON is harness metadata, \
+                                 not a user-facing message. The child result is already shown to the \
+                                 user in the tool bubble's Result/Error/Sources sections; do not \
+                                 repeat or quote it. Do not quote the JSON verbatim:\n{result_text}\n\
+                                 {next_step_note}",
+                            ));
+                            // Computed before `on_child_finished` clears the running slot.
+                            let duration = child_agent_manager
+                                .as_ref()
+                                .and_then(|manager| manager.running_duration(run_id))
+                                .unwrap_or_default();
+                            // Emitted before the `spawn_subagent` bubble's own
+                            // `ToolDone` so the driver can auto-return from the
+                            // child conversation view (if it auto-switched into
+                            // it) ahead of the parent bubble settling.
+                            let _ = ui_tx
+                                .send(UiUpdate::ChildAgentDone {
+                                    run_id,
+                                    status: status.clone(),
+                                    result: finish_result.result.clone(),
+                                })
+                                .await;
+                            let _ = ui_tx
+                                .send(UiUpdate::ToolDone {
+                                    id: call_id,
+                                    name: tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
+                                    result_section: crate::tui_reducer_state::ResultSection::plain(String::new()),
+                                    summary: vec![("status".to_string(), status)],
                                     duration,
                                     content_sections,
-                                    run_id: own_run_id,
-                                }).await;
-                                advance_tool_queue(
-                                    &mut pending_tools,
-                                    &mut context,
-                                    &mut mode,
-                                    &mut current_cancel,
-                                    &mut current_tool_cancel,
+                                    run_id: None,
+                                })
+                                .await;
+                            if let Some(manager) = child_agent_manager.as_mut() {
+                                manager.record_child_result(&finish_result);
+                                manager.on_child_finished(run_id);
+                            }
+                            tracing::debug!(
+                                tool_call_id = %call_id,
+                                mode = ?mode,
+                                "finish_rx: deciding whether to reprompt root after child result"
+                            );
+                            if all_done && mode == AgentMode::Idle {
+                                // Same iteration budget as any other re-prompt
+                                // (`advance_tool_queue`'s queue-empty branch) —
+                                // without this guard a model that just keeps
+                                // calling `spawn_subagent` again on every finish
+                                // notice, instead of ever answering, loops here
+                                // forever: this branch used to call
+                                // `start_request` unconditionally, bypassing the
+                                // cap entirely (see `bump_and_check_iteration_cap`'s
+                                // doc comment).
+                                if bump_and_check_iteration_cap(
                                     &mut iterations,
                                     max_tool_iterations,
-                                    true,
-                                    engine.clone(),
-                                    Arc::clone(&registry),
-                                    ui_tx.clone(),
-                                    agent_tx.clone(),
-                                    generation,
-                                    &mut clarify_started_at,
-                                    &mut pending_steers,
-                                    &mut child_agent_manager,
-                                    &mut spawn_content_sections,
-                                    own_run_id,
-                                    &mut pending_child_finish_reprompt,
-                                    &mut iteration_cap_exceeded,
-                                    session_id,
-                                )
-                                .await;
-                            }
-                            AgentEvent::ToolKilled { id, name: _ } => {
-                                tracing::info!(%id, "tool killed; agent returning to idle");
-                                current_tool_cancel = None;
-                                pending_tools.clear();
-                                let _ = ui_tx
-                                    .send(UiUpdate::ToolKilled {
-                                        id,
-                                        run_id: own_run_id,
-                                    })
-                                    .await;
-                                mode = AgentMode::Idle;
-                            }
-                        }
-                    }
-                    Some(finish_result) = recv_finish(&mut finish_rx) => {
-                        // The tool-calling wire protocol allows exactly one
-                        // `role:"tool"` response per `tool_call_id`; that slot
-                        // was already spent on `spawn_subagent`'s immediate
-                        // `{"status":"running"/"queued"}` result (see
-                        // `resolve_spawn_subagent`). So the child's *real*
-                        // outcome, arriving asynchronously and possibly after
-                        // further assistant turns, is appended as a brand-new
-                        // hidden harness notice instead of rewriting/duplicating
-                        // that earlier tool result — this keeps history
-                        // append-only (an honest record of what was known
-                        // when) and avoids the duplicate-`tool_call_id`
-                        // protocol violation entirely, rather than papering
-                        // over it by mutating a past message in place. A
-                        // completion is appended to context immediately, but
-                        // the root is re-prompted only after all currently
-                        // outstanding child runs are terminal. This avoids
-                        // acknowledgement turns for intermediate results
-                        // while preserving a single continuation point for
-                        // the aggregate answer.
-                        let run_id = finish_result.run_id;
-                        if cancelled_run_ids.remove(&run_id) {
-                            // This child was cancelled by a `Stop`/`ClearContext`
-                            // that already resolved (or discarded) its
-                            // tool bubble/context entry synchronously; the
-                            // manager only *requested* cancellation (a
-                            // `CancellationToken` is cooperative, not
-                            // immediate), so the child's task can still race
-                            // in a real `FinishResult` afterwards. Applying it
-                            // now would duplicate an already-settled entry or
-                            // — after `ClearContext` — push content into an
-                            // unrelated, brand-new `Context`. Drop it.
-                            tracing::debug!(
-                                %run_id,
-                                tool_call_id = %finish_result.call_id,
-                                "dropping stale child finish result for a cancelled run"
-                            );
-                            continue;
-                        }
-                        let call_id = finish_result.call_id;
-                        let status = finish_result.status.clone();
-                        let label = child_agent_manager
-                            .as_ref()
-                            .and_then(|manager| manager.label_for(run_id))
-                            .unwrap_or_default()
-                            .to_string();
-                        let outstanding_count = child_agent_manager
-                            .as_ref()
-                            .map(|manager| manager.outstanding_count_after_completion(run_id))
-                            .unwrap_or(0);
-                        let all_done = outstanding_count == 0;
-                        // The LLM-facing notice stays structured JSON (the
-                        // model reads correlation/lifecycle fields as well as
-                        // `status`/`result`/`error`/`sources`); only the TUI
-                        // bubble renders result content as Markdown sections.
-                        let result_text =
-                            serde_json::to_string(&finish_result.to_completion_json(
-                                &label,
-                                outstanding_count,
-                            ))
-                            .unwrap_or_default();
-                        let mut content_sections = spawn_content_sections
-                            .remove(&call_id)
-                            .unwrap_or_default();
-                        content_sections.extend(finish_result.content_sections());
-                        tracing::info!(%run_id, tool_call_id = %call_id, %status, "child agent finished");
-                        let next_step_note = if !all_done {
-                            format!(
-                                "{outstanding_count} other subagent run(s) remain outstanding. \
-                                 This is an intermediate completion; do not produce an \
-                                 acknowledgement or a user-facing progress update solely for \
-                                 this event. The harness will provide one continuation after \
-                                 all outstanding child results are available."
-                            )
-                        } else {
-                            "All spawned subagent runs are now terminal. Combine this result with \
-                             earlier completion events in the conversation and produce the \
-                             answer for the user."
-                                .to_string()
-                        };
-                        context.push_async_harness_notice(format!(
-                            "Subagent completion event; the structured JSON is harness metadata, \
-                             not a user-facing message. The child result is already shown to the \
-                             user in the tool bubble's Result/Error/Sources sections; do not \
-                             repeat or quote it. Do not quote the JSON verbatim:\n{result_text}\n\
-                             {next_step_note}",
-                        ));
-                        // Computed before `on_child_finished` clears the running slot.
-                        let duration = child_agent_manager
-                            .as_ref()
-                            .and_then(|manager| manager.running_duration(run_id))
-                            .unwrap_or_default();
-                        // Emitted before the `spawn_subagent` bubble's own
-                        // `ToolDone` so the driver can auto-return from the
-                        // child conversation view (if it auto-switched into
-                        // it) ahead of the parent bubble settling.
-                        let _ = ui_tx
-                            .send(UiUpdate::ChildAgentDone {
-                                run_id,
-                                status: status.clone(),
-                                result: finish_result.result.clone(),
-                            })
-                            .await;
-                        let _ = ui_tx
-                            .send(UiUpdate::ToolDone {
-                                id: call_id,
-                                name: tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
-                                result_section: crate::tui_reducer_state::ResultSection::plain(String::new()),
-                                summary: vec![("status".to_string(), status)],
-                                duration,
-                                content_sections,
-                                run_id: None,
-                            })
-                            .await;
-                        if let Some(manager) = child_agent_manager.as_mut() {
-                            manager.record_child_result(&finish_result);
-                            manager.on_child_finished(run_id);
-                        }
-                        tracing::debug!(
-                            tool_call_id = %call_id,
-                            mode = ?mode,
-                            "finish_rx: deciding whether to reprompt root after child result"
-                        );
-                        if all_done && mode == AgentMode::Idle {
-                            // Same iteration budget as any other re-prompt
-                            // (`advance_tool_queue`'s queue-empty branch) —
-                            // without this guard a model that just keeps
-                            // calling `spawn_subagent` again on every finish
-                            // notice, instead of ever answering, loops here
-                            // forever: this branch used to call
-                            // `start_request` unconditionally, bypassing the
-                            // cap entirely (see `bump_and_check_iteration_cap`'s
-                            // doc comment).
-                            if bump_and_check_iteration_cap(
-                                &mut iterations,
-                                max_tool_iterations,
-                                &mut context,
-                                &mut mode,
-                                &ui_tx,
-                                own_run_id,
-                                &mut iteration_cap_exceeded,
-                            )
-                            .await
-                            {
-                                tracing::info!(
-                                    tool_call_id = %call_id,
-                                    "finish_rx: root was idle but iteration cap already exceeded; not reprompting"
-                                );
-                            } else {
-                                tracing::info!(tool_call_id = %call_id, "finish_rx: root was idle, forcing reprompt");
-                                mode = AgentMode::Streaming;
-                                current_cancel = Some(start_request(
-                                    &context,
-                                    engine.clone(),
-                                    registry.schemas(),
-                                    ui_tx.clone(),
-                                    agent_tx.clone(),
-                                    generation,
-                                    own_run_id,
-                                    session_id,
-                                ));
-                            }
-                        } else if all_done {
-                            pending_child_finish_reprompt = true;
-                            tracing::debug!(
-                                tool_call_id = %call_id,
-                                mode = ?mode,
-                                "finish_rx: root not idle, deferring to its own queue-drain re-prompt"
-                            );
-                        } else {
-                            tracing::debug!(
-                                tool_call_id = %call_id,
-                                outstanding_count,
-                                mode = ?mode,
-                                "finish_rx: intermediate child result recorded without reprompt"
-                            );
-                        }
-                    }
-                    Some(update) = recv_subagent_ui(&mut subagent_ui_rx) => {
-                        // Phase 6.10 drill-in conversation model: the
-                        // child's own text/thinking tokens must never leak
-                        // into the parent's own `partial_assistant_text`
-                        // (they render in the dedicated child transcript
-                        // instead), and the child's own stream lifecycle
-                        // (`StreamStarted`/`StreamDone`/`StreamCancelled`)
-                        // must never flip the parent's own `TuiMode` —
-                        // only `ChildAgentStarted`/`ChildAgentDone` (see
-                        // `ChildAgentManager::start` and this loop's
-                        // `finish_rx` arm) mark the child conversation's
-                        // lifecycle boundaries for the UI. Everything else
-                        // (tool approvals/progress/errors, already stamped
-                        // with the child's own `run_id`) is forwarded as-is.
-                        match update {
-                            UiUpdate::AppendText(text) => {
-                                if let Some(run_id) = child_agent_manager
-                                    .as_ref()
-                                    .and_then(|manager| manager.running_run_id())
-                                {
-                                    let _ = ui_tx
-                                        .send(UiUpdate::ChildAgentToken {
-                                            run_id,
-                                            text,
-                                            is_thinking: false,
-                                        })
-                                        .await;
-                                }
-                            }
-                            UiUpdate::AppendThinking(text) => {
-                                if let Some(run_id) = child_agent_manager
-                                    .as_ref()
-                                    .and_then(|manager| manager.running_run_id())
-                                {
-                                    let _ = ui_tx
-                                        .send(UiUpdate::ChildAgentToken {
-                                            run_id,
-                                            text,
-                                            is_thinking: true,
-                                        })
-                                        .await;
-                                }
-                            }
-                            UiUpdate::StreamStarted
-                            | UiUpdate::StreamDone
-                            | UiUpdate::StreamCancelled
-                            | UiUpdate::AgentIdle => {
-                                // Intentionally swallowed — see comment above.
-                            }
-                            update @ UiUpdate::ChildContextUsage { .. } => {
-                                // Child readouts are already scoped to their
-                                // run; forward them so the TUI can retain each
-                                // child independently of the parent view.
-                                let _ = ui_tx.send(update).await;
-                            }
-                            other => {
-                                let _ = ui_tx.send(other).await;
-                            }
-                        }
-                    }
-                    _ = cancelled_or_pending(&parent_cancel) => {
-                        // The parent cancelled this child (e.g. it stopped
-                        // or was torn down). Abort whatever is in flight and
-                        // return immediately — nobody will drive this loop
-                        // with further commands.
-                        tracing::info!("child agent cancelled by parent");
-                        if let Some(cancel_token) = current_cancel.take() {
-                            cancel_token.cancel();
-                        }
-                        if let Some(tool_cancel) = current_tool_cancel.take() {
-                            tool_cancel.cancel();
-                        }
-                        pending_tools.clear();
-                        pending_steers.clear();
-                        return Ok(context);
-                    }
-                    outcome = compaction_rx.recv() => {
-                        // A background summary finished (or failed). The
-                        // loop itself applies it — never the summarizer —
-                        // and only at a safe boundary: idle with an empty
-                        // serial tool queue. Otherwise it stays pending
-                        // until the next completed turn.
-                        if let Some(outcome) = outcome {
-                            compaction.on_outcome(outcome, generation);
-                            if mode == AgentMode::Idle && pending_tools.is_empty() {
-                                sweep_compaction_and_report(
-                                    &mut compaction,
                                     &mut context,
-                                    engine.as_ref(),
-                                    generation,
-                                    own_run_id,
+                                    &mut mode,
                                     &ui_tx,
-                                )                                .await;
-                            }
-                        }
-                    }
-                    cmd = cmd_rx.recv() => {
-                        let Some(cmd) = cmd else {
-                            // AgentLoop dropped → cmd_tx closed → clean shutdown:
-                            // return the final committed Context (read-only history).
-                            return Ok(context);
-                        };
-                        log_agent_command(
-                            &cmd,
-                            mode,
-                            current_cancel.is_some(),
-                            current_tool_cancel.is_some(),
-                        );
-                        match cmd {
-                            AgentCommand::Prompt(text) => {
-                                if text.is_empty() {
-                                    continue;
-                                }
-                                if mode == AgentMode::Idle {
-                                    // A fresh turn is a safe boundary too:
-                                    // applying (or forcing) compaction here
-                                    // keeps the request that follows inside
-                                    // the active context window.
-                                    sweep_compaction_and_report(
-                                        &mut compaction,
-                                        &mut context,
-                                        engine.as_ref(),
-                                        generation,
-                                        own_run_id,
-                                        &ui_tx,
-                                    )                                    .await;
-                                    iterations = 1;
-                                    context.push_user(text);
+                                    own_run_id,
+                                    &mut iteration_cap_exceeded,
+                                )
+                                .await
+                                {
+                                    tracing::info!(
+                                        tool_call_id = %call_id,
+                                        "finish_rx: root was idle but iteration cap already exceeded; not reprompting"
+                                    );
+                                } else {
+                                    tracing::info!(tool_call_id = %call_id, "finish_rx: root was idle, forcing reprompt");
                                     mode = AgentMode::Streaming;
                                     current_cancel = Some(start_request(
                                         &context,
@@ -2567,38 +2599,320 @@ impl AgentLoop {
                                         own_run_id,
                                         session_id,
                                     ));
-                                } else {
-                                    // Cooperative steering: never cancel the live
-                                    // stream. Queued from ToolPending too; injection
-                                    // is deferred (Phase 4 adds descope_pending_tools).
-                                    pending_steers.push_back(text);
-                                    let _ = ui_tx
-                                        .send(UiUpdate::SteerQueued {
-                                            run_id: own_run_id,
-                                        })
-                                        .await;
+                                }
+                            } else if all_done {
+                                pending_child_finish_reprompt = true;
+                                tracing::debug!(
+                                    tool_call_id = %call_id,
+                                    mode = ?mode,
+                                    "finish_rx: root not idle, deferring to its own queue-drain re-prompt"
+                                );
+                            } else {
+                                tracing::debug!(
+                                    tool_call_id = %call_id,
+                                    outstanding_count,
+                                    mode = ?mode,
+                                    "finish_rx: intermediate child result recorded without reprompt"
+                                );
+                            }
+                        }
+                        Some(update) = recv_subagent_ui(&mut subagent_ui_rx) => {
+                            // Phase 6.10 drill-in conversation model: the
+                            // child's own text/thinking tokens must never leak
+                            // into the parent's own `partial_assistant_text`
+                            // (they render in the dedicated child transcript
+                            // instead), and the child's own stream lifecycle
+                            // (`StreamStarted`/`StreamDone`/`StreamCancelled`)
+                            // must never flip the parent's own `TuiMode` —
+                            // only `ChildAgentStarted`/`ChildAgentDone` (see
+                            // `ChildAgentManager::start` and this loop's
+                            // `finish_rx` arm) mark the child conversation's
+                            // lifecycle boundaries for the UI. Everything else
+                            // (tool approvals/progress/errors, already stamped
+                            // with the child's own `run_id`) is forwarded as-is.
+                            match update {
+                                UiUpdate::AppendText(text) => {
+                                    if let Some(run_id) = child_agent_manager
+                                        .as_ref()
+                                        .and_then(|manager| manager.running_run_id())
+                                    {
+                                        let _ = ui_tx
+                                            .send(UiUpdate::ChildAgentToken {
+                                                run_id,
+                                                text,
+                                                is_thinking: false,
+                                            })
+                                            .await;
+                                    }
+                                }
+                                UiUpdate::AppendThinking(text) => {
+                                    if let Some(run_id) = child_agent_manager
+                                        .as_ref()
+                                        .and_then(|manager| manager.running_run_id())
+                                    {
+                                        let _ = ui_tx
+                                            .send(UiUpdate::ChildAgentToken {
+                                                run_id,
+                                                text,
+                                                is_thinking: true,
+                                            })
+                                            .await;
+                                    }
+                                }
+                                UiUpdate::StreamStarted
+                                | UiUpdate::StreamDone
+                                | UiUpdate::StreamCancelled
+                                | UiUpdate::AgentIdle => {
+                                    // Intentionally swallowed — see comment above.
+                                }
+                                update @ UiUpdate::ChildContextUsage { .. } => {
+                                    // Child readouts are already scoped to their
+                                    // run; forward them so the TUI can retain each
+                                    // child independently of the parent view.
+                                    let _ = ui_tx.send(update).await;
+                                }
+                                other => {
+                                    let _ = ui_tx.send(other).await;
                                 }
                             }
-                            AgentCommand::ApproveTool { id } => {
-                                // Only valid in `ToolPending`; ignored otherwise.
-                                let is_front = mode == AgentMode::ToolPending
-                                    && pending_tools
-                                        .front()
-                                        .is_some_and(|pending| pending.call.id() == id);
-                                if is_front {
-                                    let pending =
-                                        pending_tools.pop_front().expect("checked front");
-                                    if pending.call.name()
-                                        == tools::spawn_subagent::SpawnSubagentTool::NAME
-                                    {
-                                        resolve_spawn_subagent(
-                                            pending,
-                                            &mut child_agent_manager,
+                        }
+                        _ = cancelled_or_pending(&parent_cancel) => {
+                            // The parent cancelled this child (e.g. it stopped
+                            // or was torn down). Abort whatever is in flight and
+                            // return immediately — nobody will drive this loop
+                            // with further commands.
+                            tracing::info!("child agent cancelled by parent");
+                            if let Some(cancel_token) = current_cancel.take() {
+                                cancel_token.cancel();
+                            }
+                            if let Some(tool_cancel) = current_tool_cancel.take() {
+                                tool_cancel.cancel();
+                            }
+                            pending_tools.clear();
+                            pending_steers.clear();
+                            return Ok(context);
+                        }
+                        outcome = compaction_rx.recv() => {
+                            // A background summary finished (or failed). The
+                            // loop itself applies it — never the summarizer —
+                            // and only at a safe boundary: idle with an empty
+                            // serial tool queue. Otherwise it stays pending
+                            // until the next completed turn.
+                            if let Some(outcome) = outcome {
+                                let summary_failure = match &outcome {
+                                    compaction::CompactionOutcome::SummaryFailed { reason, .. } => {
+                                        Some(reason.clone())
+                                    }
+                                    compaction::CompactionOutcome::SummaryReady { .. } => None,
+                                };
+                                compaction.on_outcome(outcome, generation);
+                                if mode == AgentMode::Idle && pending_tools.is_empty() {
+                                    let prefix_dropped = sweep_compaction_and_report(
+                                        &mut compaction,
+                                        &mut context,
+                                        engine.as_ref(),
+                                        &registry.schemas(),
+                                        generation,
+                                        own_run_id,
+                                        &ui_tx,
+                                    )
+                                    .await;
+                                    if is_child && prefix_dropped {
+                                        resume_child_after_compaction(
                                             &mut context,
+                                            &mut mode,
+                                            &mut current_cancel,
+                                            &engine,
+                                            &registry,
                                             &ui_tx,
-                                            &mut spawn_content_sections,
+                                            &agent_tx,
+                                            generation,
+                                            own_run_id,
+                                            session_id,
+                                        );
+                                    }
+                                }
+                                if let Some(reason) = summary_failure {
+                                    report_compaction_failure(&ui_tx, own_run_id, &reason).await;
+                                }
+                            }
+                        }
+                        cmd = cmd_rx.recv() => {
+                            let Some(cmd) = cmd else {
+                                // AgentLoop dropped → cmd_tx closed → clean shutdown:
+                                // return the final committed Context (read-only history).
+                                return Ok(context);
+                            };
+                            log_agent_command(
+                                &cmd,
+                                mode,
+                                current_cancel.is_some(),
+                                current_tool_cancel.is_some(),
+                            );
+                            match cmd {
+                                AgentCommand::Prompt(text) => {
+                                    if text.is_empty() {
+                                        continue;
+                                    }
+                                    if mode == AgentMode::Idle {
+                                        // A fresh turn is a safe boundary too:
+                                        // applying (or forcing) compaction here
+                                        // keeps the request that follows inside
+                                        // the active context window.
+                                        sweep_compaction_and_report(
+                                            &mut compaction,
+                                            &mut context,
+                                            engine.as_ref(),
+                                            &registry.schemas(),
+                                            generation,
+                                            own_run_id,
+                                            &ui_tx,
                                         )
                                         .await;
+                                        iterations = 1;
+                                        context.push_user(text);
+                                        mode = AgentMode::Streaming;
+                                        current_cancel = Some(start_request(
+                                            &context,
+                                            engine.clone(),
+                                            registry.schemas(),
+                                            ui_tx.clone(),
+                                            agent_tx.clone(),
+                                            generation,
+                                            own_run_id,
+                                            session_id,
+                                        ));
+                                    } else {
+                                        // Cooperative steering: never cancel the live
+                                        // stream. Queued from ToolPending too; injection
+                                        // is deferred (Phase 4 adds descope_pending_tools).
+                                        pending_steers.push_back(text);
+                                        let _ = ui_tx
+                                            .send(UiUpdate::SteerQueued {
+                                                run_id: own_run_id,
+                                            })
+                                            .await;
+                                    }
+                                }
+                                AgentCommand::ApproveTool { id } => {
+                                    // Only valid in `ToolPending`; ignored otherwise.
+                                    let is_front = mode == AgentMode::ToolPending
+                                        && pending_tools
+                                            .front()
+                                            .is_some_and(|pending| pending.call.id() == id);
+                                    if is_front {
+                                        let pending =
+                                            pending_tools.pop_front().expect("checked front");
+                                        if pending.call.name()
+                                            == tools::spawn_subagent::SpawnSubagentTool::NAME
+                                        {
+                                            resolve_spawn_subagent(
+                                                pending,
+                                                &mut child_agent_manager,
+                                                &mut context,
+                                                &ui_tx,
+                                                &mut spawn_content_sections,
+                                            )
+                                            .await;
+                                            advance_tool_queue(
+                                                &mut pending_tools,
+                                                &mut context,
+                                                &mut mode,
+                                                &mut current_cancel,
+                                                &mut current_tool_cancel,
+                                                &mut iterations,
+                                                max_tool_iterations,
+                                                true,
+                                                engine.clone(),
+                                                Arc::clone(&registry),
+                                                ui_tx.clone(),
+                                                agent_tx.clone(),
+                                                generation,
+                                                &mut clarify_started_at,
+                                                &mut pending_steers,
+                                                &mut child_agent_manager,
+                                                &mut spawn_content_sections,
+                                                own_run_id,
+                                                &mut pending_child_finish_reprompt,
+                                                &mut iteration_cap_exceeded,
+                                                session_id,
+                                                Some(&mut compaction),
+                                            )
+                                            .await;
+                                        } else {
+                                            let name = pending.call.name().to_string();
+                                            let call_id = pending.call.id();
+                                            let arguments = pending.call.arguments().clone();
+                                            let content_sections =
+                                                pending.call.pending_content_sections();
+                                            let title_arguments = pending.call.title_arguments();
+                                            tracing::info!(tool = %name, tool_call_id = %call_id, "tool approved");
+                                            current_tool_cancel = Some(PendingTool::execute(
+                                                pending,
+                                                agent_tx.clone(),
+                                                generation,
+                                            ));
+                                            let _ = ui_tx
+                                                .send(UiUpdate::ToolStart {
+                                                    name: name.clone(),
+                                                    id: call_id,
+                                                    arguments: arguments.clone(),
+                                                    content_sections,
+                                                    title_arguments,
+                                                    run_id: own_run_id,
+                                                })
+                                                .await;
+                                        }
+                                    }
+                                }
+                                AgentCommand::DenyTool { id, reason } => {
+                                    // Only valid in `ToolPending`; ignored otherwise.
+                                    let is_front = mode == AgentMode::ToolPending
+                                        && pending_tools
+                                            .front()
+                                            .is_some_and(|pending| pending.call.id() == id);
+                                    if is_front {
+                                        let denied =
+                                            pending_tools.pop_front().expect("checked front");
+                                        let name = denied.call.name().to_string();
+                                        let call_id = denied.call.id();
+                                        let denied_content_sections =
+                                            denied.call.pending_content_sections();
+                                        tracing::info!(tool = %name, tool_call_id = %call_id, "tool denied");
+                                        let mut error = format!("Tool '{name}' was denied by the user");
+                                        if !reason.is_empty() {
+                                            error.push_str(&format!(
+                                                ". Here is their reason for the denial:\n\n{reason}"
+                                            ));
+                                        }
+                                        context.push_tool_error(
+                                            call_id,
+                                            name.clone(),
+                                            error.clone(),
+                                            None,
+                                            std::time::Duration::ZERO,
+                                            denied_content_sections.clone(),
+                                        );
+                                        // When the user supplied a reason, also push a
+                                        // `user` role message so the model reads the
+                                        // correction through the authoritative instruction
+                                        // channel rather than just the tool-error envelope.
+                                        if !reason.is_empty() {
+                                            context.push_implicit_user(format!(
+                                                "I denied the '{name}' tool call \
+                                                 ( tool_call_id={call_id} ). \
+                                                 Here is my reason for the denial:\n\n{reason}"
+                                            ));
+                                        }
+                                        let _ = ui_tx
+                                            .send(UiUpdate::ToolError {
+                                                id: call_id,
+                                                error,
+                                                duration: std::time::Duration::ZERO,
+                                                content_sections: denied_content_sections,
+                                                run_id: own_run_id,
+                                            })
+                                            .await;
                                         advance_tool_queue(
                                             &mut pending_tools,
                                             &mut context,
@@ -2621,394 +2935,241 @@ impl AgentLoop {
                                             &mut pending_child_finish_reprompt,
                                             &mut iteration_cap_exceeded,
                                             session_id,
+                                            Some(&mut compaction),
                                         )
                                         .await;
-                                    } else {
-                                        let name = pending.call.name().to_string();
+                                    }
+                                }
+                                AgentCommand::AnswerClarify(answer) => {
+                                    let is_front = mode == AgentMode::ClarifyPending
+                                        && pending_tools
+                                            .front()
+                                            .is_some_and(|pending| pending.call.name() == "clarify");
+                                    if is_front {
+                                        let pending = pending_tools.pop_front().expect("checked front");
                                         let call_id = pending.call.id();
-                                        let arguments = pending.call.arguments().clone();
-                                        let content_sections =
-                                            pending.call.pending_content_sections();
-                                        let title_arguments = pending.call.title_arguments();
-                                        tracing::info!(tool = %name, tool_call_id = %call_id, "tool approved");
-                                        current_tool_cancel = Some(PendingTool::execute(
-                                            pending,
-                                            agent_tx.clone(),
-                                            generation,
-                                        ));
-                                        let _ = ui_tx
-                                            .send(UiUpdate::ToolStart {
-                                                name: name.clone(),
+                                        let choices_sections =
+                                            tools::clarify::ClarifyTool::answer_display_sections(
+                                                pending.call.arguments(),
+                                            );
+                                        let duration = clarify_started_at
+                                            .take()
+                                            .map(|started| started.elapsed())
+                                            .unwrap_or(std::time::Duration::ZERO);
+                                        context.push_tool_result(
+                                            ToolResult {
                                                 id: call_id,
-                                                arguments: arguments.clone(),
-                                                content_sections,
-                                                title_arguments,
-                                                run_id: own_run_id,
-                                            })
-                                            .await;
-                                    }
-                                }
-                            }
-                            AgentCommand::DenyTool { id, reason } => {
-                                // Only valid in `ToolPending`; ignored otherwise.
-                                let is_front = mode == AgentMode::ToolPending
-                                    && pending_tools
-                                        .front()
-                                        .is_some_and(|pending| pending.call.id() == id);
-                                if is_front {
-                                    let denied =
-                                        pending_tools.pop_front().expect("checked front");
-                                    let name = denied.call.name().to_string();
-                                    let call_id = denied.call.id();
-                                    let denied_content_sections =
-                                        denied.call.pending_content_sections();
-                                    tracing::info!(tool = %name, tool_call_id = %call_id, "tool denied");
-                                    let mut error = format!("Tool '{name}' was denied by the user");
-                                    if !reason.is_empty() {
-                                        error.push_str(&format!(
-                                            ". Here is their reason for the denial:\n\n{reason}"
-                                        ));
-                                    }
-                                    context.push_tool_error(
-                                        call_id,
-                                        name.clone(),
-                                        error.clone(),
-                                        None,
-                                        std::time::Duration::ZERO,
-                                        denied_content_sections.clone(),
-                                    );
-                                    // When the user supplied a reason, also push a
-                                    // `user` role message so the model reads the
-                                    // correction through the authoritative instruction
-                                    // channel rather than just the tool-error envelope.
-                                    if !reason.is_empty() {
-                                        context.push_implicit_user(format!(
-                                            "I denied the '{name}' tool call \
-                                             ( tool_call_id={call_id} ). \
-                                             Here is my reason for the denial:\n\n{reason}"
-                                        ));
-                                    }
-                                    let _ = ui_tx
-                                        .send(UiUpdate::ToolError {
-                                            id: call_id,
-                                            error,
-                                            duration: std::time::Duration::ZERO,
-                                            content_sections: denied_content_sections,
-                                            run_id: own_run_id,
-                                        })
-                                        .await;
-                                    advance_tool_queue(
-                                        &mut pending_tools,
-                                        &mut context,
-                                        &mut mode,
-                                        &mut current_cancel,
-                                        &mut current_tool_cancel,
-                                        &mut iterations,
-                                        max_tool_iterations,
-                                        true,
-                                        engine.clone(),
-                                        Arc::clone(&registry),
-                                        ui_tx.clone(),
-                                        agent_tx.clone(),
-                                        generation,
-                                        &mut clarify_started_at,
-                                        &mut pending_steers,
-                                        &mut child_agent_manager,
-                                        &mut spawn_content_sections,
-                                        own_run_id,
-                                        &mut pending_child_finish_reprompt,
-                                        &mut iteration_cap_exceeded,
-                                        session_id,
-                                    )
-                                    .await;
-                                }
-                            }
-                            AgentCommand::AnswerClarify(answer) => {
-                                let is_front = mode == AgentMode::ClarifyPending
-                                    && pending_tools
-                                        .front()
-                                        .is_some_and(|pending| pending.call.name() == "clarify");
-                                if is_front {
-                                    let pending = pending_tools.pop_front().expect("checked front");
-                                    let call_id = pending.call.id();
-                                    let choices_sections =
-                                        tools::clarify::ClarifyTool::answer_display_sections(
-                                            pending.call.arguments(),
-                                        );
-                                    let duration = clarify_started_at
-                                        .take()
-                                        .map(|started| started.elapsed())
-                                        .unwrap_or(std::time::Duration::ZERO);
-                                    context.push_tool_result(
-                                        ToolResult {
-                                            id: call_id,
-                                            name: tools::clarify::ClarifyTool::NAME.to_string(),
-                                            result: answer.clone(),
-                                            attachments: vec![],
-                                            result_section_id: Some(
-                                                crate::tui_reducer_state::result_section_ids::USER_ANSWER
-                                                    .to_string(),
-                                            ),
-                                            result_metadata: None,
-                                            result_metadata_schema: None,
-                                            summary: vec![],
-                                            content_sections: choices_sections.clone(),
-                                            duration,
-                                        },
-                                    );
-                                    let _ = ui_tx
-                                        .send(UiUpdate::ToolDone {
-                                            id: call_id,
-                                            name: tools::clarify::ClarifyTool::NAME.to_string(),
-                                            result_section: crate::tui_reducer_state::ResultSection {
-                                                id: crate::tui_reducer_state::result_section_ids::USER_ANSWER.to_string(),
-                                                content: answer,
+                                                name: tools::clarify::ClarifyTool::NAME.to_string(),
+                                                result: answer.clone(),
+                                                attachments: vec![],
+                                                result_section_id: Some(
+                                                    crate::tui_reducer_state::result_section_ids::USER_ANSWER
+                                                        .to_string(),
+                                                ),
+                                                result_metadata: None,
+                                                result_metadata_schema: None,
+                                                summary: vec![],
+                                                content_sections: choices_sections.clone(),
+                                                duration,
                                             },
-                                            summary: vec![],
-                                            duration,
-                                            content_sections: choices_sections,
-                                            run_id: own_run_id,
-                                        })
-                                        .await;
-                                    mode = AgentMode::ToolPending;
-                                    advance_tool_queue(
-                                        &mut pending_tools,
-                                        &mut context,
-                                        &mut mode,
-                                        &mut current_cancel,
-                                        &mut current_tool_cancel,
-                                        &mut iterations,
-                                        max_tool_iterations,
-                                        true,
-                                        engine.clone(),
-                                        Arc::clone(&registry),
-                                        ui_tx.clone(),
-                                        agent_tx.clone(),
-                                        generation,
-                                        &mut clarify_started_at,
-                                        &mut pending_steers,
-                                        &mut child_agent_manager,
-                                        &mut spawn_content_sections,
-                                        own_run_id,
-                                        &mut pending_child_finish_reprompt,
-                                        &mut iteration_cap_exceeded,
-                                        session_id,
-                                    )
-                                    .await;
-                                }
-                            }
-                            AgentCommand::AbortClarify => {
-                                let is_front = mode == AgentMode::ClarifyPending
-                                    && pending_tools
-                                        .front()
-                                        .is_some_and(|pending| pending.call.name() == "clarify");
-                                if is_front {
-                                    let pending = pending_tools.pop_front().expect("checked front");
-                                    let call_id = pending.call.id();
-                                    let error =
-                                        "User aborted the clarify question without answering."
-                                            .to_string();
-                                    context.push_tool_error(
-                                        call_id,
-                                        tools::clarify::ClarifyTool::NAME.to_string(),
-                                        error.clone(),
-                                        None,
-                                        std::time::Duration::ZERO,
-                                        vec![],
-                                    );
-                                    let _ = ui_tx
-                                        .send(UiUpdate::ToolError {
-                                            id: call_id,
-                                            error,
-                                            duration: std::time::Duration::ZERO,
-                                            content_sections: vec![],
-                                            run_id: own_run_id,
-                                        })
-                                        .await;
-                                    mode = AgentMode::ToolPending;
-                                    advance_tool_queue(
-                                        &mut pending_tools,
-                                        &mut context,
-                                        &mut mode,
-                                        &mut current_cancel,
-                                        &mut current_tool_cancel,
-                                        &mut iterations,
-                                        max_tool_iterations,
-                                        true,
-                                        engine.clone(),
-                                        Arc::clone(&registry),
-                                        ui_tx.clone(),
-                                        agent_tx.clone(),
-                                        generation,
-                                        &mut clarify_started_at,
-                                        &mut pending_steers,
-                                        &mut child_agent_manager,
-                                        &mut spawn_content_sections,
-                                        own_run_id,
-                                        &mut pending_child_finish_reprompt,
-                                        &mut iteration_cap_exceeded,
-                                        session_id,
-                                    )
-                                    .await;
-                                }
-                            }
-                            AgentCommand::Stop { reason } => {
-                                if let Some(manager) = child_agent_manager.as_mut() {
-                                    let cancelled_spawns = manager.cancel_all();
-                                    let cancelled_count = cancelled_spawns.len();
-                                    for (index, cancelled) in cancelled_spawns.into_iter().enumerate() {
-                                        // Store integration (child_result JSONL
-                                        // record) lands in Phase 6.11; for now
-                                        // the cancellation is only logged, but
-                                        // the tool bubble/context still get a
-                                        // proper terminal state below instead
-                                        // of being left stuck mid-flight.
-                                        tracing::info!(
-                                            run_id = %cancelled.run_id,
-                                            tool_call_id = %cancelled.call_id,
-                                            "child agent cancelled on parent stop"
                                         );
-                                        cancelled_run_ids.insert(cancelled.run_id);
-                                        let mut content_sections = spawn_content_sections
-                                            .remove(&cancelled.call_id)
-                                            .unwrap_or_default();
-                                        content_sections.push(tools::Section::Content(
-                                            tools::ContentSection {
-                                                label: Some("Result".to_string()),
-                                                content: "Cancelled: the parent agent stopped before the child finished.".to_string(),
-                                                file_extension: Some("md".to_string()),
-                                                line_number_offset: None,
-                                            },
-                                        ));
-                                        let cancellation_result = crate::child_agent_manager::FinishResult {
-                                            run_id: cancelled.run_id,
-                                            call_id: cancelled.call_id,
-                                            origin: crate::child_agent_manager::FinishResultOrigin::Runtime,
-                                            status: "cancelled".to_string(),
-                                            result: None,
-                                            error: Some(
-                                                "The parent agent stopped before the child finished."
-                                                    .to_string(),
-                                            ),
-                                            sources: vec![],
-                                        };
-                                        let outstanding_count =
-                                            cancelled_count.saturating_sub(index + 1);
-                                        let result_text = serde_json::to_string(
-                                            &cancellation_result.to_completion_json(
-                                                &cancelled.label,
-                                                outstanding_count,
-                                            ),
-                                        )
-                                        .unwrap_or_default();
-                                        context.push_async_harness_notice(format!(
-                                            "Subagent completion event for \
-                                             `{tool_name}`; the structured JSON is harness \
-                                             metadata, not a user-facing message. The parent \
-                                             stop cancelled this child, so no continuation will \
-                                             be started:\n{result_text}",
-                                            tool_name = tools::spawn_subagent::SpawnSubagentTool::NAME,
-                                        ));
                                         let _ = ui_tx
                                             .send(UiUpdate::ToolDone {
-                                                id: cancelled.call_id,
-                                                name: tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
-                                                result_section: crate::tui_reducer_state::ResultSection::plain(String::new()),
-                                                summary: vec![("status".to_string(), "cancelled".to_string())],
-                                                duration: std::time::Duration::ZERO,
-                                                content_sections,
+                                                id: call_id,
+                                                name: tools::clarify::ClarifyTool::NAME.to_string(),
+                                                result_section: crate::tui_reducer_state::ResultSection {
+                                                    id: crate::tui_reducer_state::result_section_ids::USER_ANSWER.to_string(),
+                                                    content: answer,
+                                                },
+                                                summary: vec![],
+                                                duration,
+                                                content_sections: choices_sections,
                                                 run_id: own_run_id,
                                             })
                                             .await;
+                                        mode = AgentMode::ToolPending;
+                                        advance_tool_queue(
+                                            &mut pending_tools,
+                                            &mut context,
+                                            &mut mode,
+                                            &mut current_cancel,
+                                            &mut current_tool_cancel,
+                                            &mut iterations,
+                                            max_tool_iterations,
+                                            true,
+                                            engine.clone(),
+                                            Arc::clone(&registry),
+                                            ui_tx.clone(),
+                                            agent_tx.clone(),
+                                            generation,
+                                            &mut clarify_started_at,
+                                            &mut pending_steers,
+                                            &mut child_agent_manager,
+                                            &mut spawn_content_sections,
+                                            own_run_id,
+                                            &mut pending_child_finish_reprompt,
+                                            &mut iteration_cap_exceeded,
+                                            session_id,
+                                            Some(&mut compaction),
+                                        )
+                                        .await;
                                     }
                                 }
-                                // Interrupt: hard-abort the current round.
-                                pending_steers.clear();
-                                if let Some(cancel_token) = current_cancel.take() {
-                                    cancel_token.cancel();
-                                }
-                                if let Some(tool_cancel) = current_tool_cancel.take() {
-                                    tool_cancel.cancel();
-                                }
-                                if mode == AgentMode::ClarifyPending {
-                                    if let Some(pending) = pending_tools.pop_front() {
-                                        let name = pending.call.name().to_string();
-                                        let id = pending.call.id();
-                                        let content_sections =
-                                            pending.call.pending_content_sections();
-                                        let mut error =
-                                            format!("Tool '{name}' was denied by the user");
-                                        if !reason.is_empty() {
-                                            error.push_str(&format!(
-                                                ". Here is their reason for the denial:\n\n{reason}"
-                                            ));
-                                        }
+                                AgentCommand::AbortClarify => {
+                                    let is_front = mode == AgentMode::ClarifyPending
+                                        && pending_tools
+                                            .front()
+                                            .is_some_and(|pending| pending.call.name() == "clarify");
+                                    if is_front {
+                                        let pending = pending_tools.pop_front().expect("checked front");
+                                        let call_id = pending.call.id();
+                                        let error =
+                                            "User aborted the clarify question without answering."
+                                                .to_string();
                                         context.push_tool_error(
-                                            id,
-                                            name,
+                                            call_id,
+                                            tools::clarify::ClarifyTool::NAME.to_string(),
                                             error.clone(),
                                             None,
                                             std::time::Duration::ZERO,
-                                            content_sections.clone(),
+                                            vec![],
                                         );
                                         let _ = ui_tx
                                             .send(UiUpdate::ToolError {
-                                                id,
+                                                id: call_id,
                                                 error,
                                                 duration: std::time::Duration::ZERO,
-                                                content_sections,
+                                                content_sections: vec![],
                                                 run_id: own_run_id,
                                             })
                                             .await;
+                                        mode = AgentMode::ToolPending;
+                                        advance_tool_queue(
+                                            &mut pending_tools,
+                                            &mut context,
+                                            &mut mode,
+                                            &mut current_cancel,
+                                            &mut current_tool_cancel,
+                                            &mut iterations,
+                                            max_tool_iterations,
+                                            true,
+                                            engine.clone(),
+                                            Arc::clone(&registry),
+                                            ui_tx.clone(),
+                                            agent_tx.clone(),
+                                            generation,
+                                            &mut clarify_started_at,
+                                            &mut pending_steers,
+                                            &mut child_agent_manager,
+                                            &mut spawn_content_sections,
+                                            own_run_id,
+                                            &mut pending_child_finish_reprompt,
+                                            &mut iteration_cap_exceeded,
+                                            session_id,
+                                            Some(&mut compaction),
+                                        )
+                                        .await;
                                     }
-                                    for pending in pending_tools.iter() {
-                                        let name = pending.call.name().to_string();
-                                        let id = pending.call.id();
-                                        let mut error =
-                                            format!("Tool '{name}' was denied by the user");
-                                        if !reason.is_empty() {
-                                            error.push_str(&format!(
-                                                ". Here is their reason for the denial:\n\n{reason}"
+                                }
+                                AgentCommand::Stop { reason } => {
+                                    if let Some(manager) = child_agent_manager.as_mut() {
+                                        let cancelled_spawns = manager.cancel_all();
+                                        let cancelled_count = cancelled_spawns.len();
+                                        for (index, cancelled) in cancelled_spawns.into_iter().enumerate() {
+                                            // Store integration (child_result JSONL
+                                            // record) lands in Phase 6.11; for now
+                                            // the cancellation is only logged, but
+                                            // the tool bubble/context still get a
+                                            // proper terminal state below instead
+                                            // of being left stuck mid-flight.
+                                            tracing::info!(
+                                                run_id = %cancelled.run_id,
+                                                tool_call_id = %cancelled.call_id,
+                                                "child agent cancelled on parent stop"
+                                            );
+                                            cancelled_run_ids.insert(cancelled.run_id);
+                                            let mut content_sections = spawn_content_sections
+                                                .remove(&cancelled.call_id)
+                                                .unwrap_or_default();
+                                            content_sections.push(tools::Section::Content(
+                                                tools::ContentSection {
+                                                    label: Some("Result".to_string()),
+                                                    content: "Cancelled: the parent agent stopped before the child finished.".to_string(),
+                                                    file_extension: Some("md".to_string()),
+                                                    line_number_offset: None,
+                                                },
                                             ));
+                                            let cancellation_result = crate::child_agent_manager::FinishResult {
+                                                run_id: cancelled.run_id,
+                                                call_id: cancelled.call_id,
+                                                origin: crate::child_agent_manager::FinishResultOrigin::Runtime,
+                                                status: "cancelled".to_string(),
+                                                result: None,
+                                                error: Some(
+                                                    "The parent agent stopped before the child finished."
+                                                        .to_string(),
+                                                ),
+                                                sources: vec![],
+                                            };
+                                            let outstanding_count =
+                                                cancelled_count.saturating_sub(index + 1);
+                                            let result_text = serde_json::to_string(
+                                                &cancellation_result.to_completion_json(
+                                                    &cancelled.label,
+                                                    outstanding_count,
+                                                ),
+                                            )
+                                            .unwrap_or_default();
+                                            context.push_async_harness_notice(format!(
+                                                "Subagent completion event for \
+                                                 `{tool_name}`; the structured JSON is harness \
+                                                 metadata, not a user-facing message. The parent \
+                                                 stop cancelled this child, so no continuation will \
+                                                 be started:\n{result_text}",
+                                                tool_name = tools::spawn_subagent::SpawnSubagentTool::NAME,
+                                            ));
+                                            let _ = ui_tx
+                                                .send(UiUpdate::ToolDone {
+                                                    id: cancelled.call_id,
+                                                    name: tools::spawn_subagent::SpawnSubagentTool::NAME.to_string(),
+                                                    result_section: crate::tui_reducer_state::ResultSection::plain(String::new()),
+                                                    summary: vec![("status".to_string(), "cancelled".to_string())],
+                                                    duration: std::time::Duration::ZERO,
+                                                    content_sections,
+                                                    run_id: own_run_id,
+                                                })
+                                                .await;
                                         }
-                                        context.push_tool_error(
-                                            id,
-                                            name,
-                                            error,
-                                            None,
-                                            std::time::Duration::ZERO,
-                                            pending.call.pending_content_sections(),
-                                        );
                                     }
-                                    pending_tools.clear();
-                                    mode = AgentMode::Idle;
-                                } else if mode == AgentMode::ToolPending {
-                                    // Record a denial result for every pending
-                                    // tool so the model history stays consistent
-                                    // (every tool call must have a result).
-                                    // Only the front tool has a visible bubble;
-                                    // the rest are queued without one yet.
-                                    let mut first = true;
-                                    for pending in pending_tools.iter() {
-                                        let name = pending.call.name().to_string();
-                                        let id = pending.call.id();
-                                        let content_sections =
-                                            pending.call.pending_content_sections();
-                                        let mut error = format!("Tool '{name}' was denied by the user");
-                                        if !reason.is_empty() {
-                                            error.push_str(&format!(
-                                                ". Here is their reason for the denial:\n\n{reason}"
-                                            ));
-                                        }
-                                        context.push_tool_error(
-                                            id,
-                                            name,
-                                            error.clone(),
-                                            None,
-                                            std::time::Duration::ZERO,
-                                            content_sections.clone(),
-                                        );
-                                        if first {
+                                    // Interrupt: hard-abort the current round.
+                                    pending_steers.clear();
+                                    if let Some(cancel_token) = current_cancel.take() {
+                                        cancel_token.cancel();
+                                    }
+                                    if let Some(tool_cancel) = current_tool_cancel.take() {
+                                        tool_cancel.cancel();
+                                    }
+                                    if mode == AgentMode::ClarifyPending {
+                                        if let Some(pending) = pending_tools.pop_front() {
+                                            let name = pending.call.name().to_string();
+                                            let id = pending.call.id();
+                                            let content_sections =
+                                                pending.call.pending_content_sections();
+                                            let mut error =
+                                                format!("Tool '{name}' was denied by the user");
+                                            if !reason.is_empty() {
+                                                error.push_str(&format!(
+                                                    ". Here is their reason for the denial:\n\n{reason}"
+                                                ));
+                                            }
+                                            context.push_tool_error(
+                                                id,
+                                                name,
+                                                error.clone(),
+                                                None,
+                                                std::time::Duration::ZERO,
+                                                content_sections.clone(),
+                                            );
                                             let _ = ui_tx
                                                 .send(UiUpdate::ToolError {
                                                     id,
@@ -3018,119 +3179,177 @@ impl AgentLoop {
                                                     run_id: own_run_id,
                                                 })
                                                 .await;
-                                            first = false;
+                                        }
+                                        for pending in pending_tools.iter() {
+                                            let name = pending.call.name().to_string();
+                                            let id = pending.call.id();
+                                            let mut error =
+                                                format!("Tool '{name}' was denied by the user");
+                                            if !reason.is_empty() {
+                                                error.push_str(&format!(
+                                                    ". Here is their reason for the denial:\n\n{reason}"
+                                                ));
+                                            }
+                                            context.push_tool_error(
+                                                id,
+                                                name,
+                                                error,
+                                                None,
+                                                std::time::Duration::ZERO,
+                                                pending.call.pending_content_sections(),
+                                            );
+                                        }
+                                        pending_tools.clear();
+                                        mode = AgentMode::Idle;
+                                    } else if mode == AgentMode::ToolPending {
+                                        // Record a denial result for every pending
+                                        // tool so the model history stays consistent
+                                        // (every tool call must have a result).
+                                        // Only the front tool has a visible bubble;
+                                        // the rest are queued without one yet.
+                                        let mut first = true;
+                                        for pending in pending_tools.iter() {
+                                            let name = pending.call.name().to_string();
+                                            let id = pending.call.id();
+                                            let content_sections =
+                                                pending.call.pending_content_sections();
+                                            let mut error = format!("Tool '{name}' was denied by the user");
+                                            if !reason.is_empty() {
+                                                error.push_str(&format!(
+                                                    ". Here is their reason for the denial:\n\n{reason}"
+                                                ));
+                                            }
+                                            context.push_tool_error(
+                                                id,
+                                                name,
+                                                error.clone(),
+                                                None,
+                                                std::time::Duration::ZERO,
+                                                content_sections.clone(),
+                                            );
+                                            if first {
+                                                let _ = ui_tx
+                                                    .send(UiUpdate::ToolError {
+                                                        id,
+                                                        error,
+                                                        duration: std::time::Duration::ZERO,
+                                                        content_sections,
+                                                        run_id: own_run_id,
+                                                    })
+                                                    .await;
+                                                first = false;
+                                            }
+                                        }
+                                        pending_tools.clear();
+                                        mode = AgentMode::Idle;
+                                    }
+                                    if mode == AgentMode::Idle {
+                                        let _ = ui_tx.send(UiUpdate::AgentIdle).await;
+                                    }
+                                }
+                                AgentCommand::ClearContext => {
+                                    // Interrupt whatever was in flight before
+                                    // swapping in `fresh_context`, mirroring
+                                    // `AgentCommand::Stop`'s cleanup — otherwise
+                                    // the old stream/tool/children keep running
+                                    // against a `Context` nobody can see anymore
+                                    // and their eventual `AgentEvent`s land in the
+                                    // new, unrelated conversation instead (see
+                                    // the `generation` bump below for the part
+                                    // cancellation alone can't cover).
+                                    generation = generation.wrapping_add(1);
+                                    // A summary (pending or in flight) belongs to
+                                    // the conversation being cleared; its result
+                                    // must never shape the replacement's model
+                                    // view. The background task keeps running —
+                                    // its outcome is dropped by the generation
+                                    // check above.
+                                    compaction.reset();
+                                    pending_steers.clear();
+                                    pending_tools.clear();
+                                    if let Some(cancel_token) = current_cancel.take() {
+                                        cancel_token.cancel();
+                                    }
+                                    if let Some(tool_cancel) = current_tool_cancel.take() {
+                                        tool_cancel.cancel();
+                                    }
+                                    if let Some(manager) = child_agent_manager.as_mut() {
+                                        for cancelled in manager.cancel_all() {
+                                            tracing::info!(
+                                                run_id = %cancelled.run_id,
+                                                tool_call_id = %cancelled.call_id,
+                                                "child agent cancelled on clear_context"
+                                            );
+                                            cancelled_run_ids.insert(cancelled.run_id);
+                                            spawn_content_sections.remove(&cancelled.call_id);
                                         }
                                     }
-                                    pending_tools.clear();
                                     mode = AgentMode::Idle;
+                                    let mut fresh_context = match system_prompt.as_deref() {
+                                        Some(system_prompt) => {
+                                            Context::with_system_prompt(system_prompt)
+                                        }
+                                        None => Context::new(),
+                                    };
+                                    if let Some(store) = &store_for_commands {
+                                        let config = engine.config();
+                                        match store.start_new_session(
+                                            &config.provider_connection,
+                                            &config.model,
+                                            None,
+                                            agent_type.as_deref(),
+                                        ) {
+                                            Ok(new_store) => fresh_context.set_store(new_store),
+                                            Err(error) => tracing::warn!(
+                                                %error,
+                                                "could not start a new session file; the cleared conversation is not persisted"
+                                            ),
+                                        }
+                                    }
+                                    context = fresh_context;
+                                    session_id = context.store().map(|store| store.session_id());
+                                    *current_store
+                                        .lock()
+                                        .expect("current store mutex is not poisoned") =
+                                        context.store();
                                 }
-                                if mode == AgentMode::Idle {
-                                    let _ = ui_tx.send(UiUpdate::AgentIdle).await;
-                                }
-                            }
-                            AgentCommand::ClearContext => {
-                                // Interrupt whatever was in flight before
-                                // swapping in `fresh_context`, mirroring
-                                // `AgentCommand::Stop`'s cleanup — otherwise
-                                // the old stream/tool/children keep running
-                                // against a `Context` nobody can see anymore
-                                // and their eventual `AgentEvent`s land in the
-                                // new, unrelated conversation instead (see
-                                // the `generation` bump below for the part
-                                // cancellation alone can't cover).
-                                generation = generation.wrapping_add(1);
-                                // A summary (pending or in flight) belongs to
-                                // the conversation being cleared; its result
-                                // must never shape the replacement's model
-                                // view. The background task keeps running —
-                                // its outcome is dropped by the generation
-                                // check above.
-                                compaction.reset();
-                                pending_steers.clear();
-                                pending_tools.clear();
-                                if let Some(cancel_token) = current_cancel.take() {
-                                    cancel_token.cancel();
-                                }
-                                if let Some(tool_cancel) = current_tool_cancel.take() {
-                                    tool_cancel.cancel();
-                                }
-                                if let Some(manager) = child_agent_manager.as_mut() {
-                                    for cancelled in manager.cancel_all() {
-                                        tracing::info!(
-                                            run_id = %cancelled.run_id,
-                                            tool_call_id = %cancelled.call_id,
-                                            "child agent cancelled on clear_context"
-                                        );
-                                        cancelled_run_ids.insert(cancelled.run_id);
-                                        spawn_content_sections.remove(&cancelled.call_id);
+                                AgentCommand::RecordModelChanged {
+                                    provider_connection,
+                                    model,
+                                } => {
+                                    // The common local baseline does not change
+                                    // across provider/model switches.
+                                    if let Some(store) = context.store() {
+                                        store.record_model_changed(&provider_connection, &model);
                                     }
                                 }
-                                mode = AgentMode::Idle;
-                                let mut fresh_context = match system_prompt.as_deref() {
-                                    Some(system_prompt) => {
-                                        Context::with_system_prompt(system_prompt)
-                                    }
-                                    None => Context::new(),
-                                };
-                                if let Some(store) = &store_for_commands {
-                                    let config = engine.config();
-                                    match store.start_new_session(
-                                        &config.provider_connection,
-                                        &config.model,
-                                        None,
-                                        agent_type.as_deref(),
-                                    ) {
-                                        Ok(new_store) => fresh_context.set_store(new_store),
-                                        Err(error) => tracing::warn!(
-                                            %error,
-                                            "could not start a new session file; the cleared conversation is not persisted"
-                                        ),
-                                    }
-                                }
-                                context = fresh_context;
-                                session_id = context.store().map(|store| store.session_id());
-                                *current_store
-                                    .lock()
-                                    .expect("current store mutex is not poisoned") =
-                                    context.store();
-                            }
-                            AgentCommand::RecordModelChanged {
-                                provider_connection,
-                                model,
-                            } => {
-                                // The common local baseline does not change
-                                // across provider/model switches.
-                                if let Some(store) = context.store() {
-                                    store.record_model_changed(&provider_connection, &model);
-                                }
-                            }
-                            AgentCommand::ForChild { run_id, command } => {
-                                // Only a root loop's `child_agent_manager` can
-                                // resolve `run_id` to a live child command
-                                // channel; forward the inner command verbatim
-                                // — the child's own loop never sees `ForChild`
-                                // itself, only plain `ApproveTool`/`DenyTool`/
-                                // `AnswerClarify`/`AbortClarify` on its own
-                                // channel, exactly as if sent directly.
-                                let sender = child_agent_manager
-                                    .as_ref()
-                                    .and_then(|manager| manager.running_command_sender(run_id));
-                                match sender {
-                                    Some(sender) => {
-                                        let _ = sender.send(*command).await;
-                                    }
-                                    None => {
-                                        tracing::warn!(
-                                            %run_id,
-                                            "AgentCommand::ForChild targets a run_id with no \
-                                             running child (already finished/cancelled); dropping"
-                                        );
+                                AgentCommand::ForChild { run_id, command } => {
+                                    // Only a root loop's `child_agent_manager` can
+                                    // resolve `run_id` to a live child command
+                                    // channel; forward the inner command verbatim
+                                    // — the child's own loop never sees `ForChild`
+                                    // itself, only plain `ApproveTool`/`DenyTool`/
+                                    // `AnswerClarify`/`AbortClarify` on its own
+                                    // channel, exactly as if sent directly.
+                                    let sender = child_agent_manager
+                                        .as_ref()
+                                        .and_then(|manager| manager.running_command_sender(run_id));
+                                    match sender {
+                                        Some(sender) => {
+                                            let _ = sender.send(*command).await;
+                                        }
+                                        None => {
+                                            tracing::warn!(
+                                                %run_id,
+                                                "AgentCommand::ForChild targets a run_id with no \
+                                                 running child (already finished/cancelled); dropping"
+                                            );
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                }
 
                 // A `Role::Child` loop has nobody left to drive it once it
                 // goes idle (no user, no more steers) — the "unstructured
@@ -3147,6 +3366,39 @@ impl AgentLoop {
                 // exactly the right shape (`status: "failure"`, explicit
                 // `error`, no fabricated `result`).
                 if is_child && mode == AgentMode::Idle {
+                    if compaction.summary_pending() {
+                        continue;
+                    }
+                    if compaction.enabled() && context.compaction().is_none() {
+                        let prefix_dropped = sweep_compaction_and_report(
+                            &mut compaction,
+                            &mut context,
+                            engine.as_ref(),
+                            &registry.schemas(),
+                            generation,
+                            own_run_id,
+                            &ui_tx,
+                        )
+                        .await;
+                        if prefix_dropped {
+                            resume_child_after_compaction(
+                                &mut context,
+                                &mut mode,
+                                &mut current_cancel,
+                                &engine,
+                                &registry,
+                                &ui_tx,
+                                &agent_tx,
+                                generation,
+                                own_run_id,
+                                session_id,
+                            );
+                            continue;
+                        }
+                        if compaction.summary_pending() {
+                            continue;
+                        }
+                    }
                     if let Some(message) = stream_error.take() {
                         return Err(anyhow::anyhow!(message));
                     }
@@ -3420,6 +3672,7 @@ async fn advance_tool_queue(
     pending_child_finish_reprompt: &mut bool,
     iteration_cap_exceeded: &mut Option<String>,
     session_id: Option<Uuid>,
+    compaction: Option<&mut compaction::CompactionRuntime>,
 ) {
     // `spawn_subagent` and auto-denied tools resolve synchronously within
     // this same loop (unlike a normally-executing auto-approved tool, which
@@ -3461,6 +3714,18 @@ async fn advance_tool_queue(
                     let _ = ui_tx
                         .send(UiUpdate::SteerApplied { run_id: own_run_id })
                         .await;
+                }
+                if let Some(compaction) = compaction {
+                    sweep_compaction_and_report(
+                        compaction,
+                        context,
+                        engine.as_ref(),
+                        &registry.schemas(),
+                        generation,
+                        own_run_id,
+                        &ui_tx,
+                    )
+                    .await;
                 }
                 // This re-prompt's `context` already carries any child result
                 // that arrived (and was deferred) while the root was mid-turn
@@ -3652,6 +3917,21 @@ fn start_request(
 ) -> CancellationToken {
     let cancel = CancellationToken::new();
     let messages = context.model_messages();
+    let request_tools = tools.clone();
+    let usage_update_sender = ui_tx.clone();
+    let on_request_estimate = Box::new(move |estimated_tokens, request_context_length| {
+        let usage_update_sender = usage_update_sender.clone();
+        Box::pin(async move {
+            send_context_usage_estimate(
+                &usage_update_sender,
+                estimated_tokens,
+                request_context_length,
+                own_run_id,
+            )
+            .await;
+        }) as futures::future::BoxFuture<'static, ()>
+    });
+    let request_dump_failure_handler = crate::http::RequestDumpFailureHandler::default();
     let inner_cancel = cancel.clone();
     // `run_id` is `None` for the root loop and `Some(...)` for a child loop
     // (see `AgentLoop::own_run_id`); attaching it to this span lets every
@@ -3663,7 +3943,14 @@ fn start_request(
     tokio::spawn(
         async move {
             let mut stream = match engine
-                .chat_with_session_id(messages, tools, inner_cancel.clone(), session_id)
+                .chat_with_session_id_and_diagnostics(
+                    messages,
+                    request_tools,
+                    inner_cancel.clone(),
+                    session_id,
+                    on_request_estimate,
+                    Some(request_dump_failure_handler),
+                )
                 .await
             {
                 Ok(stream) => stream,
@@ -3725,6 +4012,20 @@ fn start_request(
                         let _ = ui_tx.send(UiUpdate::AppendThinking(text)).await;
                     }
                     StreamEvent::Delta(delta) => {
+                        if !accumulators.contains_key(&delta.tool_call_index)
+                            && accumulators.len() >= MAX_TOOL_CALLS_PER_RESPONSE
+                        {
+                            inner_cancel.cancel();
+                            let _ = agent_tx
+                                .send((
+                                    generation,
+                                    AgentEvent::ToolCallLimitExceeded {
+                                        limit: MAX_TOOL_CALLS_PER_RESPONSE,
+                                    },
+                                ))
+                                .await;
+                            break;
+                        }
                         let accumulator =
                             accumulators
                                 .entry(delta.tool_call_index)
@@ -3903,31 +4204,368 @@ mod tests {
         ))
     }
 
-    #[test]
-    fn context_usage_log_reports_estimate_window_and_ratio() {
-        let log = capture_logs(async {
-            let mut context = Context::new();
-            context.set_token_estimator(crate::llm::TokenEstimator::FourCharactersPerToken);
-            context.push_user("a request with measurable content".to_string());
-            let expected_tokens = context.model_view_token_count();
-            let (ui_tx, mut ui_rx) = mpsc::channel(1);
+    fn test_engine_with_context_length(context_length: usize) -> Arc<dyn Engine> {
+        Arc::new(EngineImpl::new(
+            Arc::new(MockProvider::new(vec![], Duration::from_millis(0))),
+            EngineConfig {
+                provider_connection: "mock".to_string(),
+                model: "test-model".to_string(),
+                temperature: None,
+                context_length: Some(context_length),
+                api_base_url: None,
+                api_key: None,
+                reasoning: None,
+                compact_target_ratio: 0.4,
+                soft_compaction_threshold: 0.5,
+                hard_compaction_threshold: 0.8,
+            },
+        ))
+    }
 
-            send_context_usage(&ui_tx, &context, test_engine().as_ref(), None).await;
+    struct ToolResultTrackingProvider {
+        requests: Arc<Mutex<Vec<Vec<Message>>>>,
+        request_received: Arc<tokio::sync::Notify>,
+    }
+
+    impl Provider for ToolResultTrackingProvider {
+        fn name(&self) -> &str {
+            "tool-result-tracking"
+        }
+
+        fn chat<'a>(
+            &'a self,
+            messages: Vec<Message>,
+            _tools: Vec<ToolSchema>,
+            _cancel: CancellationToken,
+        ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+            let request_index = {
+                let mut requests = self
+                    .requests
+                    .lock()
+                    .expect("request tracking lock is not poisoned");
+                let request_index = requests.len();
+                requests.push(messages);
+                request_index
+            };
+            self.request_received.notify_one();
+            Box::pin(async move {
+                let (stream_tx, stream_rx) = mpsc::channel(4);
+                tokio::spawn(async move {
+                    if request_index == 0 {
+                        let _ = stream_tx
+                            .send(StreamEvent::Delta(DeltaChunk {
+                                tool_call_index: 0,
+                                tool_call_id: Some("read-large-context".to_string()),
+                                function_name: Some("read".to_string()),
+                                arguments_fragment: Some(
+                                    r#"{"path":"src/agent.rs","mode":"lines","limit":1200}"#
+                                        .to_string(),
+                                ),
+                            }))
+                            .await;
+                    } else {
+                        let _ = stream_tx
+                            .send(StreamEvent::Text("Read result incorporated.".to_string()))
+                            .await;
+                    }
+                    let _ = stream_tx.send(StreamEvent::Done).await;
+                });
+                Ok(stream_rx)
+            })
+        }
+
+        fn chat_with_session_id_and_estimate<'a>(
+            &'a self,
+            messages: Vec<Message>,
+            tools: Vec<ToolSchema>,
+            cancel: CancellationToken,
+            _session_id: Option<Uuid>,
+            on_estimate: Box<dyn FnOnce(usize, usize) -> BoxFuture<'static, ()> + Send>,
+        ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+            let estimator = crate::llm::TokenEstimator::Tiktoken;
+            let estimated_input_tokens = messages
+                .iter()
+                .map(|message| estimate_message_tokens(estimator, message))
+                .sum::<usize>()
+                + tool_schema_token_count(&tools);
+            let context_length = 10_000;
+            Box::pin(async move {
+                on_estimate(estimated_input_tokens, context_length).await;
+                self.chat(messages, tools, cancel).await
+            })
+        }
+
+        fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+    }
+
+    #[test]
+    fn footer_usage_updates_after_a_large_tool_result_before_follow_up_request() {
+        crate::test_support::run_locked(async {
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let request_received = Arc::new(tokio::sync::Notify::new());
+            let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+                Arc::new(ToolResultTrackingProvider {
+                    requests: Arc::clone(&requests),
+                    request_received: Arc::clone(&request_received),
+                }),
+                EngineConfig {
+                    provider_connection: "tool-result-tracking".to_string(),
+                    model: "test-model".to_string(),
+                    temperature: None,
+                    context_length: Some(10_000),
+                    api_base_url: None,
+                    api_key: None,
+                    reasoning: None,
+                    compact_target_ratio: 0.4,
+                    soft_compaction_threshold: 0.5,
+                    hard_compaction_threshold: 0.8,
+                },
+            ));
+            let registry = Arc::new(tools::default_registry(
+                test_sandbox(),
+                tools::ToolRegistryConfig {
+                    allowed_tools: vec![tools::read::ReadTool::NAME.to_string()],
+                    auto_approve: std::collections::HashSet::from([tools::AutoApproveTool::Read]),
+                    ..Default::default()
+                },
+            ));
+            let tool_schemas = registry.schemas();
+            let (agent_loop, mut ui_rx) = AgentLoop::new(engine, registry);
+            let mut agent_loop =
+                agent_loop.with_compaction_engine(test_engine_with_context_length(10_000));
+            let handle = agent_loop.run();
+            agent_loop
+                .send_command(AgentCommand::Prompt(
+                    "Read the requested source file.".to_string(),
+                ))
+                .await;
+
+            let first_context_usage = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if let UiUpdate::ContextUsage {
+                        estimated_tokens,
+                        context_length,
+                    } = ui_rx.recv().await.expect("agent update channel stays open")
+                    {
+                        break (estimated_tokens, context_length);
+                    }
+                }
+            })
+            .await
+            .expect("request estimate arrives before stream events");
+            request_received.notified().await;
+            let expected_first_usage = {
+                let first_request = requests
+                    .lock()
+                    .expect("request tracking lock is not poisoned")[0]
+                    .clone();
+                let estimator = crate::llm::TokenEstimator::Tiktoken;
+                first_request
+                    .iter()
+                    .map(|message| estimate_message_tokens(estimator, message))
+                    .sum::<usize>()
+                    + tool_schema_token_count(&tool_schemas)
+            };
+            assert_eq!(first_context_usage, (expected_first_usage, 10_000));
+
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if requests
+                        .lock()
+                        .expect("request tracking lock is not poisoned")
+                        .len()
+                        >= 2
+                    {
+                        break;
+                    }
+                    request_received.notified().await;
+                }
+            })
+            .await
+            .expect("follow-up request starts after the tool result is committed");
+
+            let second_request = requests
+                .lock()
+                .expect("request tracking lock is not poisoned")[1]
+                .clone();
+            assert!(
+                !second_request.iter().any(|message| matches!(
+                    message,
+                    Message::ToolResult { value } if value.name == tools::read::ReadTool::NAME
+                )),
+                "the oversized tool result is removed before the follow-up request"
+            );
+            let estimate_messages = |messages: &[Message]| {
+                let estimator = crate::llm::TokenEstimator::Tiktoken;
+                messages
+                    .iter()
+                    .map(|message| estimate_message_tokens(estimator, message))
+                    .sum::<usize>()
+                    + tool_schema_token_count(&tool_schemas)
+            };
+            let expected_usage = estimate_messages(&second_request);
+            let first_request = requests
+                .lock()
+                .expect("request tracking lock is not poisoned")[0]
+                .clone();
+            let initial_usage = estimate_messages(&first_request);
+            let mut observed_usage = Vec::new();
+            let mut observed_synchronous_compaction_notice = false;
+            while observed_usage.last().copied() != Some(expected_usage) {
+                let update = tokio::time::timeout(Duration::from_secs(3), ui_rx.recv())
+                    .await
+                    .expect("context usage arrives before the follow-up request")
+                    .expect("agent update channel stays open");
+                if matches!(
+                    &update,
+                    UiUpdate::Notice { text, run_id: None }
+                        if text.contains("synchronously")
+                ) {
+                    observed_synchronous_compaction_notice = true;
+                }
+                if let UiUpdate::ContextUsage {
+                    estimated_tokens, ..
+                } = update
+                {
+                    observed_usage.push(estimated_tokens);
+                }
+            }
+            assert!(
+                observed_usage.contains(&expected_usage) && expected_usage < initial_usage,
+                "footer reflects the smaller post-compaction request: before={initial_usage}, after={observed_usage:?}"
+            );
+            assert!(
+                observed_synchronous_compaction_notice,
+                "the UI reports the synchronous compaction before re-prompting"
+            );
+
+            drop(agent_loop);
+            let _ = tokio::time::timeout(Duration::from_secs(3), handle)
+                .await
+                .expect("agent loop terminates after drop");
+        });
+    }
+
+    #[test]
+    fn reports_background_compaction_start_in_the_transcript() {
+        crate::test_support::run_locked(async {
+            let (ui_tx, mut ui_rx) = mpsc::channel(4);
+            let mut context = Context::new();
+            context.push_user("word ".repeat(10_000));
+            let active_engine = test_engine_with_context_length(16_000);
+            let compact_engine = test_engine();
+            let (mut compaction, _outcome_rx) = compaction::CompactionRuntime::new(
+                Some(compact_engine),
+                compaction::COMPACTION_SUMMARY_PROMPT.to_string(),
+                Duration::from_secs(compaction::DEFAULT_COMPACTION_TIMEOUT_SECS),
+            );
+
+            sweep_compaction_and_report(
+                &mut compaction,
+                &mut context,
+                active_engine.as_ref(),
+                &[],
+                0,
+                None,
+                &ui_tx,
+            )
+            .await;
+
+            assert!(matches!(
+                ui_rx.recv().await,
+                Some(UiUpdate::Notice { text, run_id: None })
+                    if text == "Started background context compaction."
+            ));
+        });
+    }
+
+    #[test]
+    fn reports_compaction_failure_and_clears_stale_context_usage() {
+        crate::test_support::run_locked(async {
+            let (ui_tx, mut ui_rx) = mpsc::channel(8);
+            let mut context = Context::new();
+            context.push_user("old context".to_string());
+            let active_engine = test_engine_with_context_length(16_000);
+            let compact_engine = test_engine();
+            let (mut compaction, mut outcome_rx) = compaction::CompactionRuntime::new(
+                Some(compact_engine),
+                compaction::COMPACTION_SUMMARY_PROMPT.to_string(),
+                Duration::from_secs(compaction::DEFAULT_COMPACTION_TIMEOUT_SECS),
+            );
+            ui_tx
+                .send(UiUpdate::ContextUsage {
+                    estimated_tokens: 12_000,
+                    context_length: 16_000,
+                })
+                .await
+                .expect("seed stale usage");
+            let _ = compaction.sweep(&mut context, active_engine.as_ref(), &[], 0);
+            // Drive the real reporting function's post-compaction path using
+            // a forced fallback outcome at the next safe boundary.
+            compaction.on_outcome(
+                compaction::CompactionOutcome::SummaryFailed {
+                    generation: 0,
+                    reason: "compaction summary timed out after 60 seconds".to_string(),
+                },
+                0,
+            );
+            sweep_compaction_and_report(
+                &mut compaction,
+                &mut context,
+                active_engine.as_ref(),
+                &[],
+                0,
+                None,
+                &ui_tx,
+            )
+            .await;
+
+            let updates = std::iter::from_fn(|| ui_rx.try_recv().ok()).collect::<Vec<_>>();
+            assert!(updates.iter().any(|update| matches!(
+                update,
+                UiUpdate::Notice { text, run_id: None }
+                    if text.contains("synchronously")
+            )));
+            assert!(updates.contains(&UiUpdate::ContextUsageCleared));
+            assert!(outcome_rx.try_recv().is_err());
+        });
+    }
+
+    #[test]
+    fn reports_compaction_failure_reason_as_transcript_notice() {
+        crate::test_support::run_locked(async {
+            let (ui_tx, mut ui_rx) = mpsc::channel(1);
+            report_compaction_failure(
+                &ui_tx,
+                None,
+                "compaction summary timed out after 60 seconds",
+            )
+            .await;
+
+            assert!(matches!(
+                ui_rx.recv().await,
+                Some(UiUpdate::Notice { text, run_id: None })
+                    if text.contains("failed") && text.contains("timed out after 60 seconds")
+            ));
+        });
+    }
+
+    #[test]
+    fn request_estimate_updates_footer_with_the_sent_request_window() {
+        crate::test_support::run_locked(async {
+            let (ui_tx, mut ui_rx) = mpsc::channel(1);
+            send_context_usage_estimate(&ui_tx, 46_977, 65_536, None).await;
 
             assert!(matches!(
                 ui_rx.recv().await,
                 Some(UiUpdate::ContextUsage {
-                    estimated_tokens,
-                    context_length: crate::llm::DEFAULT_CONTEXT_LENGTH,
-                }) if estimated_tokens == expected_tokens
+                    estimated_tokens: 46_977,
+                    context_length: 65_536,
+                })
             ));
         });
-
-        assert!(log.contains("model-view context usage reported"));
-        assert!(log.contains("estimated_tokens="));
-        assert!(log.contains("context_length=128000"));
-        assert!(log.contains("usage_ratio="));
-        assert!(log.contains("run_id=None"));
     }
 
     /// Engine double that reports one pending notice, for asserting the
@@ -4002,22 +4640,23 @@ mod tests {
                 .send_command(AgentCommand::Prompt("hello".to_string()))
                 .await;
 
-            let first = tokio::time::timeout(Duration::from_millis(500), ui_rx.recv())
-                .await
-                .expect("the first update arrives")
-                .expect("the UI channel stays open");
-            let second = tokio::time::timeout(Duration::from_millis(500), ui_rx.recv())
-                .await
-                .expect("the second update arrives")
-                .expect("the UI channel stays open");
+            let mut updates = Vec::new();
+            while !updates
+                .iter()
+                .any(|update| matches!(update, UiUpdate::StreamStarted))
+            {
+                updates.push(
+                    tokio::time::timeout(Duration::from_millis(500), ui_rx.recv())
+                        .await
+                        .expect("the stream starts after initial updates")
+                        .expect("the UI channel stays open"),
+                );
+            }
             assert!(
-                matches!(&first, UiUpdate::Notice { text, run_id: None }
-                    if text.contains("does not advertise reasoning effort")),
-                "the engine notice must be forwarded first: {first:?}"
-            );
-            assert!(
-                matches!(second, UiUpdate::StreamStarted),
-                "the notice must precede the stream: {second:?}"
+                matches!(updates.first(), Some(UiUpdate::Notice { run_id: None, .. }))
+                    && matches!(updates.first(), Some(UiUpdate::Notice { text, .. })
+                        if text.contains("does not advertise reasoning effort")),
+                "the engine notice must be forwarded before the stream: {updates:?}"
             );
 
             drop(agent);
@@ -4304,6 +4943,9 @@ mod tests {
     #[test]
     fn session_begins_with_seeded_system_messages() {
         let context = Context::new();
+        assert!(TOOL_PROTOCOL_SYSTEM_PROMPT.contains(&format!(
+            "at most {MAX_TOOL_CALLS_PER_RESPONSE} distinct tool calls"
+        )));
         assert_eq!(
             context.messages(),
             &[
@@ -5012,12 +5654,18 @@ mod tests {
     /// which it sits inside the soft-threshold band (`≈80%`), with the
     /// rebuilt system prompts alone well under the compaction target so the
     /// drop fallback has somewhere to go.
+    fn compaction_test_tools() -> Vec<ToolSchema> {
+        tools::default_registry(test_sandbox(), tools::ToolRegistryConfig::default()).schemas()
+    }
+
     fn first_turn_window(prompt: &str, target_usage: f64) -> usize {
         let mut probe = Context::new();
         probe.set_token_estimator(crate::llm::TokenEstimator::Tiktoken);
-        let system_tokens = probe.model_view_token_count();
+        let tools = compaction_test_tools();
+        let engine = test_engine();
+        let system_tokens = probe.estimated_model_tokens(&tools, engine.as_ref());
         probe.push_user(prompt.to_string());
-        let total_tokens = probe.model_view_token_count();
+        let total_tokens = probe.estimated_model_tokens(&tools, engine.as_ref());
         assert!(
             total_tokens * 10 >= system_tokens * 19,
             "the prompt must carry enough tokens that the system prompts \
@@ -5035,13 +5683,15 @@ mod tests {
     /// Grow a prompt until it carries enough tokens for
     /// [`first_turn_window`]'s budget assertions.
     fn sized_prompt() -> String {
+        let tools = compaction_test_tools();
+        let engine = test_engine();
         let mut prompt = "note ".repeat(64);
         loop {
             let mut probe = Context::new();
             probe.set_token_estimator(crate::llm::TokenEstimator::Tiktoken);
-            let system_tokens = probe.model_view_token_count();
+            let system_tokens = probe.estimated_model_tokens(&tools, engine.as_ref());
             probe.push_user(prompt.clone());
-            if probe.model_view_token_count() * 10 >= system_tokens * 19 {
+            if probe.estimated_model_tokens(&tools, engine.as_ref()) * 10 >= system_tokens * 19 {
                 return prompt;
             }
             prompt = prompt.repeat(2);
@@ -5053,6 +5703,7 @@ mod tests {
     async fn a_completed_turn_above_the_soft_threshold_compacts_the_model_view() {
         let prompt = sized_prompt();
         let context_length = first_turn_window(&prompt, 0.8);
+        let recorded = Arc::new(Mutex::new(Vec::new()));
         let active_config = EngineConfig {
             provider_connection: "mock".to_string(),
             model: "test-model".to_string(),
@@ -5065,7 +5716,6 @@ mod tests {
             soft_compaction_threshold: 0.7,
             hard_compaction_threshold: 0.9,
         };
-        let recorded = Arc::new(Mutex::new(Vec::new()));
         let active: Arc<dyn Engine> = Arc::new(EngineImpl::new(
             Arc::new(MockProvider::new(vec!["ok".to_string()], Duration::ZERO)),
             active_config.clone(),
@@ -5102,27 +5752,9 @@ mod tests {
         agent_loop
             .send_command(AgentCommand::Prompt(prompt.clone()))
             .await;
-        let updates =
+        let _updates =
             collect_updates_until(&mut ui_rx, |update| matches!(update, UiUpdate::StreamDone))
                 .await;
-        let reported_usage = updates
-            .iter()
-            .find_map(|update| match update {
-                UiUpdate::ContextUsage {
-                    estimated_tokens,
-                    context_length,
-                } => Some((*estimated_tokens, *context_length)),
-                _ => None,
-            })
-            .expect("the loop reports the model-view size at least once");
-        assert_eq!(
-            reported_usage.1, context_length,
-            "the readout carries the active window"
-        );
-        assert!(
-            reported_usage.0 > 0,
-            "the readout carries a non-zero estimate"
-        );
         settle_background_tasks().await;
 
         let requests = recorded
@@ -5390,8 +6022,13 @@ mod tests {
         agent_loop
             .send_command(AgentCommand::Prompt(prompt.clone()))
             .await;
-        collect_updates_until(&mut ui_rx, |update| matches!(update, UiUpdate::StreamDone)).await;
+        let mut updates = collect_updates_until(&mut ui_rx, |update| {
+            matches!(update, UiUpdate::Notice { text, .. }
+                if text.contains("Compacted context synchronously"))
+        })
+        .await;
         settle_background_tasks().await;
+        updates.extend(std::iter::from_fn(|| ui_rx.try_recv().ok()));
 
         assert!(
             recorded
@@ -5401,7 +6038,21 @@ mod tests {
             "above the hard threshold the loop drops synchronously instead of waiting \
              for a background summary"
         );
-
+        assert!(
+            updates
+                .iter()
+                .any(|update| matches!(update, UiUpdate::Notice { text, .. }
+                if text.contains("Compacted context synchronously"))),
+            "the synchronous fallback is announced"
+        );
+        assert_eq!(
+            updates
+                .iter()
+                .filter(|update| matches!(update, UiUpdate::StreamDone))
+                .count(),
+            1,
+            "compaction does not start another conversation request"
+        );
         drop(agent_loop);
         let context = tokio::time::timeout(Duration::from_secs(5), handle)
             .await
@@ -5416,10 +6067,14 @@ mod tests {
             context.model_messages().len(),
             context.messages().len()
         );
+        let active_tools = compaction_test_tools();
+        let active_engine = test_engine();
+        let trimmed_usage = context.estimated_model_tokens(&active_tools, active_engine.as_ref())
+            as f64
+            / context_length as f64;
         assert!(
-            (context.estimated_usage_ratio(context_length) - 0.5).abs() < 0.4,
-            "the trimmed view is near the compaction target: {}",
-            context.estimated_usage_ratio(context_length)
+            (trimmed_usage - 0.5).abs() < 0.4,
+            "the trimmed view is near the compaction target: {trimmed_usage}"
         );
         assert!(
             context.messages().iter().any(|message| matches!(
@@ -6086,6 +6741,7 @@ mod tests {
             &mut false,
             &mut None,
             None,
+            None,
         )
         .await;
 
@@ -6154,6 +6810,7 @@ mod tests {
             &mut false,
             &mut None,
             None,
+            None,
         )
         .await;
 
@@ -6216,6 +6873,7 @@ mod tests {
             None,
             &mut false,
             &mut None,
+            None,
             None,
         )
         .await;
@@ -6628,7 +7286,6 @@ mod tests {
             // Drain the ui updates emitted along the way; we only assert that a
             // ToolDone for "agent_finish" was sent among them.
             let mut saw_finish_tool_done = false;
-            let mut saw_child_context_usage = false;
             while let Ok(Some(update)) =
                 tokio::time::timeout(Duration::from_millis(50), ui_rx.recv()).await
             {
@@ -6636,26 +7293,10 @@ mod tests {
                 {
                     saw_finish_tool_done = true;
                 }
-                if matches!(
-                    update,
-                    UiUpdate::ChildContextUsage {
-                        run_id: reported_run_id,
-                        estimated_tokens,
-                        context_length,
-                    } if reported_run_id == run_id
-                        && estimated_tokens > 0
-                        && context_length == 128_000
-                ) {
-                    saw_child_context_usage = true;
-                }
             }
             assert!(
                 saw_finish_tool_done,
                 "expected a ToolDone update for finish"
-            );
-            assert!(
-                saw_child_context_usage,
-                "the child reports its own context estimate tagged with its run id"
             );
         });
     }

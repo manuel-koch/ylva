@@ -32,7 +32,10 @@ mod web_search;
 
 pub use agent::AgentConfig;
 pub use agent_type_file::AgentTypeDefinition;
-pub use profile::{profile_config_source_path, ProfileConfig, ToolSandboxConfig};
+pub use profile::{
+    profile_config_source_path, AgentCompactionConfig, CompactionConfig, ProfileConfig,
+    ToolSandboxConfig,
+};
 pub use provider::{ProviderConfig, ProviderConnectionConfig};
 pub use web_fetch::WebFetchConfig;
 pub use web_search::{
@@ -210,7 +213,7 @@ pub enum ConfigError {
     )]
     InvalidMaxToolIterations { path: PathBuf, agent_type: String },
     #[error(
-        "profile config at {} has an invalid compaction setting for engine '{engine}': {detail}",
+        "profile config at {} has an invalid compaction setting for '{engine}': {detail}",
         path.display()
     )]
     InvalidCompactionSetting {

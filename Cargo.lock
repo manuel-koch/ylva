@@ -4588,6 +4588,7 @@ dependencies = [
  "futures",
  "glob",
  "htmd",
+ "httpdate",
  "ignore",
  "infer",
  "jsonschema",

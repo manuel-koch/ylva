@@ -244,6 +244,7 @@ pub struct MockLlmServer {
     cumulative_connections: Arc<AtomicUsize>,
     captured_requests: CapturedRequests,
     handle: JoinHandle<()>,
+    maximum_show_requests: Option<Arc<AtomicUsize>>,
 }
 
 impl MockLlmServer {
@@ -260,6 +261,74 @@ impl MockLlmServer {
         connection_frames: Vec<Vec<String>>,
     ) -> std::io::Result<Self> {
         Self::start_with_connection_frame_rules(config, connection_frames, Vec::new()).await
+    }
+
+    pub async fn start_ollama_catalog(
+        models: Vec<String>,
+        response_delay: Duration,
+    ) -> std::io::Result<Self> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let live_connections = Arc::new(AtomicUsize::new(0));
+        let cumulative_connections = Arc::new(AtomicUsize::new(0));
+        let captured_requests = CapturedRequests::new();
+        let maximum_show_requests = Arc::new(AtomicUsize::new(0));
+        let active_show_requests = Arc::new(AtomicUsize::new(0));
+        let server_maximum_show_requests = Arc::clone(&maximum_show_requests);
+        let server_active_show_requests = Arc::clone(&active_show_requests);
+        let server_live_connections = Arc::clone(&live_connections);
+        let server_cumulative_connections = Arc::clone(&cumulative_connections);
+        let server_requests = captured_requests.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                let (stream, _) = match listener.accept().await {
+                    Ok(connection) => connection,
+                    Err(_) => break,
+                };
+                server_live_connections.fetch_add(1, Ordering::SeqCst);
+                server_cumulative_connections.fetch_add(1, Ordering::SeqCst);
+                let models = models.clone();
+                let captured_requests = server_requests.clone();
+                let maximum_show_requests = Arc::clone(&server_maximum_show_requests);
+                let active_show_requests = Arc::clone(&server_active_show_requests);
+                let live_connections = Arc::clone(&server_live_connections);
+                tokio::spawn(async move {
+                    let (mut reader, mut writer) = stream.into_split();
+                    let (request_target, request_headers, request_body) =
+                        match read_request_head(&mut reader).await {
+                            Ok(request) => request,
+                            Err(_) => {
+                                live_connections.fetch_sub(1, Ordering::SeqCst);
+                                return;
+                            }
+                        };
+                    captured_requests.record_headers(request_headers);
+                    if let Ok(body) = String::from_utf8(request_body) {
+                        if !body.is_empty() {
+                            captured_requests.record_body(body);
+                        }
+                    }
+                    if request_target.ends_with("/api/tags") {
+                        write_ollama_tags_response(&mut writer, &models, None).await;
+                    } else if request_target.ends_with("/api/show") {
+                        let active = active_show_requests.fetch_add(1, Ordering::SeqCst) + 1;
+                        maximum_show_requests.fetch_max(active, Ordering::SeqCst);
+                        tokio::time::sleep(response_delay).await;
+                        write_ollama_show_response(&mut writer, None, None, None).await;
+                        active_show_requests.fetch_sub(1, Ordering::SeqCst);
+                    }
+                    live_connections.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+        });
+        Ok(Self {
+            addr,
+            live_connections,
+            cumulative_connections,
+            captured_requests,
+            handle,
+            maximum_show_requests: Some(maximum_show_requests),
+        })
     }
 
     /// Bind and start the server with connection frames plus optional
@@ -321,6 +390,7 @@ impl MockLlmServer {
             cumulative_connections,
             captured_requests,
             handle,
+            maximum_show_requests: None,
         })
     }
 
@@ -330,6 +400,12 @@ impl MockLlmServer {
 
     pub fn cumulative_connections(&self) -> usize {
         self.cumulative_connections.load(Ordering::SeqCst)
+    }
+
+    pub fn maximum_show_requests(&self) -> usize {
+        self.maximum_show_requests
+            .as_ref()
+            .map_or(0, |requests| requests.load(Ordering::SeqCst))
     }
 
     pub fn request_bodies(&self) -> Vec<String> {

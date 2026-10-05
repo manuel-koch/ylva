@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use super::profile::AgentCompactionConfig;
 use super::profile::ToolSandboxConfig;
 use super::{AgentConfig, ConfigError};
 
@@ -247,6 +248,8 @@ pub(crate) struct AgentConfigOverrides {
     #[serde(default)]
     pub engine: Option<String>,
     #[serde(default)]
+    pub compaction: Option<AgentCompactionConfig>,
+    #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
     pub allowed_tools: Option<Vec<String>>,
@@ -353,6 +356,33 @@ persona = "Investigate the evidence."
             definition.config.persona.as_deref(),
             Some("Investigate the evidence.")
         );
+    }
+
+    #[test]
+    fn agent_compaction_overrides_parse_from_agent_type_files() {
+        let toml_definition = parse_agent_type_contents(
+            Path::new("research.toml"),
+            "[compaction]\nengine = \"summary\"\ntimeout_sec = \"180\"\n",
+        )
+        .expect("TOML agent settings parse");
+        let compaction = toml_definition
+            .config
+            .compaction
+            .expect("compaction overrides");
+        assert_eq!(compaction.engine.as_deref(), Some("summary"));
+        assert_eq!(compaction.timeout_sec, Some(180));
+
+        let yaml_definition = parse_agent_type_contents(
+            Path::new("research.md"),
+            "---\ncompaction:\n  engine: summary\n  timeout_sec: 240\n---\nResearch.\n",
+        )
+        .expect("YAML agent settings parse");
+        let compaction = yaml_definition
+            .config
+            .compaction
+            .expect("compaction overrides");
+        assert_eq!(compaction.engine.as_deref(), Some("summary"));
+        assert_eq!(compaction.timeout_sec, Some(240));
     }
 
     #[test]

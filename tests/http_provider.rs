@@ -179,6 +179,32 @@ async fn ollama_provider_lists_native_models_and_loads_details() {
 }
 
 #[tokio::test]
+async fn ollama_catalog_limits_parallel_model_detail_requests() {
+    let models = (0..24)
+        .map(|index| format!("model-{index}"))
+        .collect::<Vec<_>>();
+    let server = MockLlmServer::start_ollama_catalog(models.clone(), Duration::from_millis(30))
+        .await
+        .expect("bind catalog server");
+    let provider = OllamaProvider::new(
+        format!("catalog-cap-test-{}", uuid::Uuid::new_v4()),
+        server.base_url(),
+        "model-0".to_string(),
+        None,
+    );
+
+    let listed_models = provider.list_models().await.expect("catalog response");
+
+    assert_eq!(listed_models.len(), models.len());
+    assert!(
+        server.maximum_show_requests() <= ylva::llm::MAX_CONCURRENT_PROVIDER_REQUESTS,
+        "observed {} parallel metadata requests, above configured cap {}",
+        server.maximum_show_requests(),
+        ylva::llm::MAX_CONCURRENT_PROVIDER_REQUESTS,
+    );
+}
+
+#[tokio::test]
 async fn ollama_details_map_vision_to_image_without_file_support() {
     let config = MockLlmConfig {
         models: vec!["gemma4:vision".to_string()],
@@ -679,7 +705,7 @@ async fn outbound_requests_carry_the_ylva_user_agent() {
 #[tokio::test]
 async fn list_models_reports_a_non_success_status_as_an_error() {
     let config = MockLlmConfig {
-        statuses: vec![500],
+        statuses: vec![500, 500, 500, 500],
         ..Default::default()
     };
     let server = MockLlmServer::start(config).await.expect("bind failed");
@@ -1054,6 +1080,125 @@ async fn real_provider_surfaces_tool_call_delta_over_http() {
         other => panic!("expected Delta, got {other:?}"),
     }
     assert!(matches!(rx.recv().await, Some(StreamEvent::Done)));
+    server.abort();
+}
+
+#[tokio::test]
+async fn agent_loop_rejects_model_response_with_too_many_tool_calls() {
+    const MAX_TOOL_CALLS_PER_RESPONSE: usize = 128;
+    let frames = (0..=MAX_TOOL_CALLS_PER_RESPONSE)
+        .map(|index| tool_call_frame(index, "read", "{}"))
+        .collect();
+    let server = MockLlmServer::start_with_connection_frames(
+        MockLlmConfig {
+            end_after_frames: true,
+            ..Default::default()
+        },
+        vec![
+            frames,
+            vec![content_frame("Recovered after the rejected batch.")],
+        ],
+    )
+    .await
+    .expect("bind failed");
+    let provider = provider_for(&server);
+    let (mut agent, mut ui_rx) = AgentLoop::new(
+        Arc::new(EngineImpl::new(provider, common::test_engine_config())),
+        Arc::new(ToolRegistry::new()),
+    );
+    agent
+        .send_command(AgentCommand::Prompt("call some tools".into()))
+        .await;
+    let handle = agent.run();
+
+    let updates = collect_until(&mut ui_rx, |update| matches!(update, UiUpdate::StreamDone)).await;
+
+    let chat_requests = server
+        .request_bodies()
+        .into_iter()
+        .filter_map(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+        .filter(|body| body.get("messages").is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        chat_requests.len(),
+        2,
+        "the rejected response is retried once"
+    );
+    assert!(chat_requests[1]["messages"]
+        .to_string()
+        .contains("exceeded the limit of 128 tool calls. None of those calls were executed"));
+    assert!(updates.iter().any(|update| matches!(
+        update,
+        UiUpdate::AppendText(text) if text == "Recovered after the rejected batch."
+    )));
+    assert!(
+        !updates
+            .iter()
+            .any(|update| matches!(update, UiUpdate::ToolStart { .. })),
+        "no tool may execute from an incomplete, over-limit response"
+    );
+
+    drop(agent);
+    handle
+        .await
+        .expect("agent loop task panicked")
+        .expect("agent loop returned an error");
+    server.abort();
+}
+
+#[tokio::test]
+async fn agent_loop_surfaces_provider_sse_error_to_the_conversation() {
+    let provider_error = serde_json::json!({
+        "error": {
+            "code": 502,
+            "message": "Upstream provider unavailable",
+            "metadata": { "error_type": "provider_unavailable" }
+        }
+    });
+    let server = MockLlmServer::start_with_connection_frames(
+        MockLlmConfig {
+            end_after_frames: true,
+            ..Default::default()
+        },
+        vec![vec![format!("data: {provider_error}\n\n")]],
+    )
+    .await
+    .expect("bind error-frame provider server");
+    let (mut agent, mut ui_receiver) = AgentLoop::new(
+        Arc::new(EngineImpl::new(
+            provider_for(&server),
+            common::test_engine_config(),
+        )),
+        Arc::new(ToolRegistry::new()),
+    );
+    let handle = agent.run();
+    agent
+        .send_command(AgentCommand::Prompt("start work".to_string()))
+        .await;
+
+    let error_message = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(UiUpdate::Error {
+                message,
+                run_id: None,
+            }) = ui_receiver.recv().await
+            {
+                break message;
+            }
+        }
+    })
+    .await
+    .expect("provider failure is surfaced to the UI");
+    assert_eq!(
+        error_message,
+        "provider returned HTTP 502: Upstream provider unavailable (provider_unavailable)"
+    );
+
+    drop(agent);
+    handle
+        .await
+        .expect("agent loop task panicked")
+        .expect("agent loop stopped cleanly");
     server.abort();
 }
 

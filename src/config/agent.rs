@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
-use super::profile::ToolSandboxConfig;
+use super::profile::{AgentCompactionConfig, ToolSandboxConfig};
 
 /// Per-agent configuration within a profile.
 #[derive(Debug, Clone, Deserialize)]
@@ -25,6 +25,10 @@ pub struct AgentConfig {
     /// `ProfileConfig::default_engine`.
     #[serde(default)]
     pub engine: Option<String>,
+    /// Optional per-agent compaction engine and summary timeout overrides.
+    /// Omitted fields inherit from the profile's `[compaction]` table.
+    #[serde(default)]
+    pub compaction: Option<AgentCompactionConfig>,
     /// Optional model-facing summary of the tasks this agent type is suited
     /// for. The root agent receives this in the `spawn_subagent` tool
     /// description when choosing a child type.

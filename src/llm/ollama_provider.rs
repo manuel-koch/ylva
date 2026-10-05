@@ -84,20 +84,31 @@ impl Provider for OllamaProvider {
         let show_url = self.api_url("show");
         let client = self.inner.http_client();
         let api_key = self.inner.api_key().map(str::to_owned);
+        let request_limiter = crate::llm::provider_request_limiter(self.name());
 
         Box::pin(async move {
-            let tags_body =
-                get_json(&client, &tags_url, api_key.as_deref(), "model listing").await?;
+            let tags_body = {
+                let _permit = request_limiter.acquire().await?;
+                get_json(&client, &tags_url, api_key.as_deref(), "model listing").await?
+            };
             let models = parse_tags(&tags_body);
             let requests = models.into_iter().map(|mut model| {
                 let client = client.clone();
                 let api_key = api_key.clone();
                 let show_url = show_url.clone();
+                let request_limiter = request_limiter.clone();
                 async move {
                     // `/api/tags` carries no `thinking` object, so the
                     // show-response enrichment below is the only source of
                     // thinking levels and the advertised default.
                     let request_body = serde_json::json!({ "model": model.id });
+                    let _permit = match request_limiter.acquire().await {
+                        Ok(permit) => permit,
+                        Err(error) => {
+                            tracing::warn!(model = %model.id, %error, "failed to acquire provider request slot");
+                            return model;
+                        }
+                    };
                     match post_json(
                         &client,
                         &show_url,
@@ -163,6 +174,46 @@ impl Provider for OllamaProvider {
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
         self.inner
             .chat_with_session_id(messages, tools, cancel, session_id)
+    }
+
+    fn chat_with_session_id_and_estimate<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        session_id: Option<uuid::Uuid>,
+        on_estimate: Box<
+            dyn FnOnce(usize, usize) -> futures::future::BoxFuture<'static, ()> + Send,
+        >,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        self.inner.chat_with_session_id_and_estimate(
+            messages,
+            tools,
+            cancel,
+            session_id,
+            on_estimate,
+        )
+    }
+
+    fn chat_with_session_id_and_diagnostics<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        session_id: Option<uuid::Uuid>,
+        on_estimate: Box<
+            dyn FnOnce(usize, usize) -> futures::future::BoxFuture<'static, ()> + Send,
+        >,
+        on_failure: Option<crate::http::RequestDumpFailureHandler>,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        self.inner.chat_with_session_id_and_diagnostics(
+            messages,
+            tools,
+            cancel,
+            session_id,
+            on_estimate,
+            on_failure,
+        )
     }
 }
 

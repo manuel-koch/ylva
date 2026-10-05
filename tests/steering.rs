@@ -48,7 +48,7 @@ async fn steer_is_injected_at_natural_point_without_cancelling_stream() {
     let handle = agent.run();
 
     let before_steer = collect_until(&mut ui_rx, is_stream_started).await;
-    assert_eq!(before_steer[0], UiUpdate::StreamStarted);
+    assert!(matches!(before_steer.last(), Some(UiUpdate::StreamStarted)));
 
     // While the first stream is live, queue a steer. It must never abort.
     agent

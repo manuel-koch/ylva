@@ -950,7 +950,11 @@ async fn run_cli_to_with_title(
             }
             Some(UiUpdate::SteerQueued { .. }) | Some(UiUpdate::SteerApplied { .. }) => {}
             // Headless output has no footer for the model-view readout.
-            Some(UiUpdate::ContextUsage { .. } | UiUpdate::ChildContextUsage { .. }) => {}
+            Some(
+                UiUpdate::ContextUsage { .. }
+                | UiUpdate::ChildContextUsage { .. }
+                | UiUpdate::ContextUsageCleared,
+            ) => {}
             // Headless output renders messages inline as they stream, so a
             // transcript marker has nothing to be inserted into.
             Some(UiUpdate::CompactionApplied { .. }) => {}

@@ -655,7 +655,11 @@ fn to_tool_schema(tool: &dyn Tool) -> ToolSchema {
         serde_json::to_value(tool.input_schema()).unwrap_or_else(|_| serde_json::json!({}));
     ToolSchema {
         name: tool.name().to_string(),
-        description: tool.description().to_string(),
+        description: format!(
+            "{}\n\nAcross all tools combined, a single assistant response may contain at most {} distinct tool calls. Keep each batch within this limit; if more work is needed, continue in a later response.",
+            tool.description(),
+            crate::agent::MAX_TOOL_CALLS_PER_RESPONSE,
+        ),
         parameters,
     }
 }
@@ -1058,7 +1062,11 @@ mod tests {
         let schemas = registry.schemas();
         assert_eq!(schemas.len(), 1);
         assert_eq!(schemas[0].name, "test");
-        assert_eq!(schemas[0].description, "a test tool");
+        assert!(schemas[0].description.starts_with("a test tool"));
+        assert!(schemas[0].description.contains(&format!(
+            "at most {} distinct tool calls",
+            crate::agent::MAX_TOOL_CALLS_PER_RESPONSE
+        )));
         assert_eq!(
             schemas[0].parameters["required"],
             serde_json::json!(["field"])

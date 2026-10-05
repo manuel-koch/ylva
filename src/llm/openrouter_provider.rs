@@ -103,6 +103,46 @@ impl Provider for OpenRouterProvider {
         self.inner
             .chat_with_session_id(messages, tools, cancel, session_id)
     }
+
+    fn chat_with_session_id_and_estimate<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        session_id: Option<uuid::Uuid>,
+        on_estimate: Box<
+            dyn FnOnce(usize, usize) -> futures::future::BoxFuture<'static, ()> + Send,
+        >,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        self.inner.chat_with_session_id_and_estimate(
+            messages,
+            tools,
+            cancel,
+            session_id,
+            on_estimate,
+        )
+    }
+
+    fn chat_with_session_id_and_diagnostics<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        session_id: Option<uuid::Uuid>,
+        on_estimate: Box<
+            dyn FnOnce(usize, usize) -> futures::future::BoxFuture<'static, ()> + Send,
+        >,
+        on_failure: Option<crate::http::RequestDumpFailureHandler>,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        self.inner.chat_with_session_id_and_diagnostics(
+            messages,
+            tools,
+            cancel,
+            session_id,
+            on_estimate,
+            on_failure,
+        )
+    }
 }
 
 #[cfg(test)]

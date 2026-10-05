@@ -182,6 +182,7 @@ fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
             estimated_tokens: *estimated_tokens,
             context_length: *context_length,
         }),
+        UiUpdate::ContextUsageCleared => Some(DomainEvent::ContextUsageCleared),
         UiUpdate::ChildContextUsage {
             run_id,
             estimated_tokens,

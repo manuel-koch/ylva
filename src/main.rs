@@ -930,6 +930,7 @@ mod tests {
                 name.to_string(),
                 ylva::AgentConfig {
                     engine: None,
+                    compaction: None,
                     description: None,
                     allowed_tools: None,
                     tools: HashMap::new(),

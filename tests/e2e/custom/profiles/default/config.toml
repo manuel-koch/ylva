@@ -1,5 +1,9 @@
 default_engine = "ollama/local"
 
+[compaction]
+#engine = "ollama/local"
+timeout_sec = 180
+
 [provider_connections.ollama-local]
 provider = "ollama"
 api_base_url = "http://localhost:11434"
@@ -17,6 +21,7 @@ api_key = "${OPENROUTER_API_KEY}"
 [engines."ollama/local"]
 provider_connection = "ollama-local"
 model = "gemma4:e4b-mlx"
+context_length = "96kb"
 compact_target_ratio = 0.4
 soft_compaction_threshold = 0.5
 hard_compaction_threshold = 0.8
@@ -39,10 +44,19 @@ model = "deepseek/deepseek-v4-flash-0731"
 context_length = "265kb"
 reasoning = "max"
 
+[engines.openrouter-dense]
+provider_connection = "openrouter"
+model = "xiaomi/mimo-v2.6-flash"
+context_length = "96kb"
+
 [agents.local-discovery]
 description = "An agent that can perform read-only discovery tasks in workspace solely using builtin tools and a local AI-Model."
 engine = "local-llm"
 allowed_tools = ["read", "glob", "search"]
+
+#[agents.local-discovery.compaction]
+#engine = "ollama/local"
+#timeout_sec = 120
 
 [web_search]
 backend = "${YLVA_WEB_SEARCH_BACKEND}"

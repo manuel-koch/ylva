@@ -42,10 +42,9 @@ pub struct ProfileConfig {
     /// `AgentConfig::engine`.
     #[serde(default = "default_engine_name")]
     pub default_engine: String,
-    /// Name of the engine used for compact/summarisation tasks. When `None`,
-    /// falls back to `default_engine`. Phase 10 wires this at runtime.
+    /// Compaction engine selection and summary-request timeout.
     #[serde(default)]
-    pub compact_engine: Option<String>,
+    pub compaction: CompactionConfig,
     /// Name of the isolated utility engine used for session-title generation.
     /// When `None`, falls back to `default_engine`.
     #[serde(default)]
@@ -103,6 +102,62 @@ pub struct ProfileConfig {
     /// when the profile loads.
     #[serde(default)]
     pub web_fetch: WebFetchConfig,
+}
+
+/// Settings for background conversation-summary compaction.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CompactionConfig {
+    /// Engine used for summaries. When absent, uses `default_engine`.
+    #[serde(default)]
+    pub engine: Option<String>,
+    /// Wall-clock seconds allowed for one summary request.
+    #[serde(default = "default_compaction_timeout_secs")]
+    pub timeout_sec: u64,
+}
+
+/// Optional compaction overrides for one agent type.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct AgentCompactionConfig {
+    /// Engine used to summarize this agent's context. When absent, inherits
+    /// the profile's `[compaction].engine` or `default_engine`.
+    #[serde(default)]
+    pub engine: Option<String>,
+    /// Wall-clock summary timeout. When absent, inherits the profile value.
+    #[serde(default, deserialize_with = "deserialize_optional_u64_or_string")]
+    pub timeout_sec: Option<u64>,
+}
+
+fn deserialize_optional_u64_or_string<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum TimeoutValue {
+        Number(u64),
+        Text(String),
+    }
+
+    match Option::<TimeoutValue>::deserialize(deserializer)? {
+        Some(TimeoutValue::Number(value)) => Ok(Some(value)),
+        Some(TimeoutValue::Text(value)) => value.trim().parse::<u64>().map(Some).map_err(|error| {
+            serde::de::Error::custom(format!("invalid compaction timeout_sec '{value}': {error}"))
+        }),
+        None => Ok(None),
+    }
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            engine: None,
+            timeout_sec: default_compaction_timeout_secs(),
+        }
+    }
+}
+
+fn default_compaction_timeout_secs() -> u64 {
+    crate::agent::compaction::DEFAULT_COMPACTION_TIMEOUT_SECS
 }
 
 /// A single `[tools.<name>]` TOML table: currently just the ordered
@@ -230,7 +285,7 @@ fn validate_agent_max_tool_iterations(
     Ok(())
 }
 
-/// Validate every `[engines.<name>]` compaction knob.
+/// Validate every `[engines.<name>]` compaction setting.
 ///
 /// The three ratios must be fractions in `(0, 1]` and ordered
 /// `compact_target_ratio < soft_compaction_threshold <
@@ -277,6 +332,52 @@ fn validate_compaction_settings(
     Ok(())
 }
 
+fn validate_compaction_timeout(
+    compaction: &CompactionConfig,
+    default_engine: &str,
+    path: &Path,
+) -> Result<(), ConfigError> {
+    if compaction.timeout_sec == 0 {
+        return Err(ConfigError::InvalidCompactionSetting {
+            path: path.to_path_buf(),
+            engine: compaction
+                .engine
+                .as_deref()
+                .unwrap_or(default_engine)
+                .to_string(),
+            detail: "compaction timeout must be greater than 0".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_agent_compaction_settings(
+    agents: &HashMap<String, AgentConfig>,
+    profile_compaction: &CompactionConfig,
+    path: &Path,
+) -> Result<(), ConfigError> {
+    for (agent_type, agent_config) in agents {
+        let Some(compaction) = &agent_config.compaction else {
+            continue;
+        };
+        if compaction.timeout_sec == Some(0) {
+            return Err(ConfigError::InvalidCompactionSetting {
+                path: path.to_path_buf(),
+                engine: compaction
+                    .engine
+                    .as_deref()
+                    .or(profile_compaction.engine.as_deref())
+                    .unwrap_or("default_engine")
+                    .to_string(),
+                detail: format!(
+                    "[agents.{agent_type}.compaction].timeout_sec must be greater than 0"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn default_engine_name() -> String {
     DEFAULT_PROFILE_NAME.to_string()
 }
@@ -309,6 +410,7 @@ where
 fn default_agent_config() -> AgentConfig {
     AgentConfig {
         engine: None,
+        compaction: None,
         description: None,
         allowed_tools: None,
         timeout_secs: None,
@@ -326,7 +428,7 @@ impl Default for ProfileConfig {
     fn default() -> Self {
         ProfileConfig {
             default_engine: default_engine_name(),
-            compact_engine: None,
+            compaction: CompactionConfig::default(),
             utility_engine: None,
             provider_connections: HashMap::new(),
             engines: HashMap::new(),
@@ -510,6 +612,8 @@ impl ProfileConfig {
         }
         validate_agent_max_tool_iterations(&profile.agents, &path)?;
         validate_compaction_settings(&profile.engines, &path)?;
+        validate_compaction_timeout(&profile.compaction, &profile.default_engine, &path)?;
+        validate_agent_compaction_settings(&profile.agents, &profile.compaction, &path)?;
         tracing::info!(
             path = %path.display(),
             ?layer,
@@ -542,6 +646,8 @@ impl ProfileConfig {
         }
         validate_agent_max_tool_iterations(&profile.agents, built_in_path)?;
         validate_compaction_settings(&profile.engines, built_in_path)?;
+        validate_compaction_timeout(&profile.compaction, &profile.default_engine, built_in_path)?;
+        validate_agent_compaction_settings(&profile.agents, &profile.compaction, built_in_path)?;
         Ok(profile)
     }
 
@@ -559,12 +665,32 @@ impl ProfileConfig {
         }
     }
 
-    /// Engine name used for compaction: `compact_engine` when set, else
+    /// Engine name used for compaction: `[compaction].engine` when set, else
     /// `default_engine` (see `docs/configuration.md`).
-    pub fn compact_engine_name(&self) -> &str {
-        self.compact_engine
+    pub fn compaction_engine_name(&self) -> &str {
+        self.compaction
+            .engine
             .as_deref()
             .unwrap_or(self.default_engine.as_str())
+    }
+
+    /// Compaction engine for one agent type, with its optional override.
+    pub fn compaction_engine_name_for(&self, agent_type: &str) -> &str {
+        self.agents
+            .get(agent_type)
+            .and_then(|agent_config| agent_config.compaction.as_ref())
+            .and_then(|compaction| compaction.engine.as_deref())
+            .or(self.compaction.engine.as_deref())
+            .unwrap_or_else(|| self.engine_name_for(agent_type))
+    }
+
+    /// Summary timeout for one agent type, with its optional override.
+    pub fn compaction_timeout_secs_for(&self, agent_type: &str) -> u64 {
+        self.agents
+            .get(agent_type)
+            .and_then(|agent_config| agent_config.compaction.as_ref())
+            .and_then(|compaction| compaction.timeout_sec)
+            .unwrap_or(self.compaction.timeout_sec)
     }
 
     /// Engine name used for utility tasks such as session-title generation:
@@ -678,6 +804,7 @@ fn load_agent_types(
     for (agent_type, overrides) in inline_agents {
         let config = agents.entry(agent_type).or_insert_with(|| AgentConfig {
             engine: None,
+            compaction: None,
             description: None,
             allowed_tools: None,
             timeout_secs: None,
@@ -694,6 +821,17 @@ fn load_agent_types(
 fn apply_agent_config_overrides(config: &mut AgentConfig, overrides: AgentConfigOverrides) {
     if overrides.engine.is_some() {
         config.engine = overrides.engine;
+    }
+    if let Some(compaction_overrides) = overrides.compaction {
+        let agent_compaction = config
+            .compaction
+            .get_or_insert_with(AgentCompactionConfig::default);
+        if compaction_overrides.engine.is_some() {
+            agent_compaction.engine = compaction_overrides.engine;
+        }
+        if compaction_overrides.timeout_sec.is_some() {
+            agent_compaction.timeout_sec = compaction_overrides.timeout_sec;
+        }
     }
     if overrides.description.is_some() {
         config.description = overrides.description;
@@ -837,7 +975,8 @@ mod tests {
 
     use super::*;
     use crate::agent::compaction::{
-        DEFAULT_HARD_COMPACTION_THRESHOLD, DEFAULT_SOFT_COMPACTION_THRESHOLD,
+        DEFAULT_COMPACTION_TIMEOUT_SECS, DEFAULT_HARD_COMPACTION_THRESHOLD,
+        DEFAULT_SOFT_COMPACTION_THRESHOLD,
     };
 
     /// Write `contents` as `<root>/<profile_name>/config.toml`.
@@ -861,10 +1000,13 @@ mod tests {
             "work",
             r#"
 default_engine = "fast"
-compact_engine = "cheap"
 default_model = "gemma4:e4b-mlx"
 theme = "light"
 input_history_limit = 25
+
+[compaction]
+engine = "cheap"
+timeout_sec = 180
 
 [keybindings]
 submit = "enter"
@@ -902,7 +1044,8 @@ persona = "You explore code."
         let profile = ProfileConfig::load(temp.path(), "work").expect("the fixture loads");
 
         assert_eq!(profile.default_engine, "fast");
-        assert_eq!(profile.compact_engine_name(), "cheap");
+        assert_eq!(profile.compaction_engine_name(), "cheap");
+        assert_eq!(profile.compaction.timeout_sec, 180);
         assert_eq!(profile.theme, ThemeName::Light);
         assert_eq!(profile.input_history_limit, 25);
         assert_eq!(
@@ -1710,6 +1853,10 @@ api_base_url = "${YLVA_PHASE10_2_PROJECT_URL}"
 [agents.research]
 persona = "Be concise."
 timeout_secs = 30
+
+[agents.research.compaction]
+engine = "summary"
+timeout_sec = 240
 "#,
         );
         write_agent_type_file(
@@ -1726,6 +1873,20 @@ timeout_secs = 30
             "the inline persona replaces the file-sourced persona"
         );
         assert_eq!(research.timeout_secs, Some(30));
+        assert_eq!(
+            research
+                .compaction
+                .as_ref()
+                .and_then(|settings| settings.engine.as_deref()),
+            Some("summary")
+        );
+        assert_eq!(
+            research
+                .compaction
+                .as_ref()
+                .and_then(|settings| settings.timeout_sec),
+            Some(240)
+        );
         assert!(research.can_spawn);
     }
 
@@ -1843,6 +2004,10 @@ timeout_secs = 30
         );
 
         let profile = ProfileConfig::load(&profiles_root, "work").expect("the fixture loads");
+        assert_eq!(
+            profile.compaction.timeout_sec,
+            DEFAULT_COMPACTION_TIMEOUT_SECS
+        );
         let fast = profile.engines.get("fast").expect("the fast engine");
         assert_eq!(fast.compact_target_ratio, 0.5, "target defaults to half");
         assert_eq!(
@@ -1912,6 +2077,83 @@ timeout_secs = 30
             assert!(message.contains(expected_fragment), "{message}");
             assert!(message.contains("fast"), "{message}");
         }
+    }
+
+    #[test]
+    fn compaction_timeout_must_be_positive() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let profiles_root = temp.path().join(PROFILES_DIRECTORY_NAME);
+        write_profile_config(
+            &profiles_root,
+            "work",
+            "default_engine = \"chat\"\n[compaction]\nengine = \"summarizer\"\ntimeout_sec = 0\n",
+        );
+
+        let error = ProfileConfig::load(&profiles_root, "work")
+            .expect_err("zero timeout cannot define a useful summary deadline");
+        assert!(error.to_string().contains("summarizer"), "{error}");
+        assert!(error.to_string().contains("greater than 0"), "{error}");
+    }
+
+    #[test]
+    fn agent_compaction_settings_parse_and_override_independently() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "agent-compaction",
+            r#"
+default_engine = "chat"
+
+[compaction]
+engine = "profile-summary"
+timeout_sec = 90
+
+[agents.my-agent]
+engine = "agent-chat"
+
+[agents.my-agent.compaction]
+engine = "agent-summary"
+timeout_sec = "240"
+
+[agents.timeout-only.compaction]
+timeout_sec = 180
+"#,
+        );
+
+        let profile = ProfileConfig::load(temp.path(), "agent-compaction")
+            .expect("per-agent compaction settings load");
+        let agent_compaction = profile.agents["my-agent"]
+            .compaction
+            .as_ref()
+            .expect("agent compaction settings");
+        assert_eq!(agent_compaction.engine.as_deref(), Some("agent-summary"));
+        assert_eq!(agent_compaction.timeout_sec, Some(240));
+        let timeout_only_compaction = profile.agents["timeout-only"]
+            .compaction
+            .as_ref()
+            .expect("timeout-only override");
+        assert_eq!(timeout_only_compaction.engine, None);
+        assert_eq!(timeout_only_compaction.timeout_sec, Some(180));
+        assert_eq!(
+            profile.compaction.engine.as_deref(),
+            Some("profile-summary")
+        );
+        assert_eq!(profile.compaction.timeout_sec, 90);
+    }
+
+    #[test]
+    fn zero_agent_compaction_timeout_is_rejected() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_profile_config(
+            temp.path(),
+            "invalid-agent-compaction",
+            "default_engine = \"chat\"\n[agents.my-agent.compaction]\ntimeout_sec = 0\n",
+        );
+
+        let error = ProfileConfig::load(temp.path(), "invalid-agent-compaction")
+            .expect_err("zero per-agent compaction timeout is invalid");
+        assert!(error.to_string().contains("my-agent"), "{error}");
+        assert!(error.to_string().contains("greater than 0"), "{error}");
     }
 
     #[test]
@@ -2155,20 +2397,20 @@ engine = "ollama/local"
     }
 
     #[test]
-    fn compact_engine_falls_back_to_the_default_engine() {
+    fn compaction_engine_falls_back_to_the_default_engine() {
         let profile = ProfileConfig {
             default_engine: "main".to_string(),
-            compact_engine: None,
+            compaction: CompactionConfig::default(),
             ..ProfileConfig::default()
         };
-        assert_eq!(profile.compact_engine_name(), "main");
+        assert_eq!(profile.compaction_engine_name(), "main");
     }
 
     #[test]
     fn utility_engine_falls_back_to_default_and_honors_explicit_selection() {
         let mut profile = ProfileConfig {
             default_engine: "main".to_string(),
-            compact_engine: None,
+            compaction: CompactionConfig::default(),
             utility_engine: None,
             ..ProfileConfig::default()
         };
@@ -2181,11 +2423,12 @@ engine = "ollama/local"
     fn profile_config_field_access() {
         let profile = ProfileConfig {
             default_engine: "default".to_string(),
-            compact_engine: None,
+            compaction: CompactionConfig::default(),
             agents: HashMap::from([(
                 "main".to_string(),
                 AgentConfig {
                     engine: Some("fast".to_string()),
+                    compaction: None,
                     description: None,
                     allowed_tools: Some(vec!["bash".to_string()]),
                     timeout_secs: Some(120),
@@ -2199,7 +2442,7 @@ engine = "ollama/local"
         };
 
         assert_eq!(profile.default_engine, "default");
-        assert!(profile.compact_engine.is_none());
+        assert!(profile.compaction.engine.is_none());
 
         let agent_config = profile.agents.get("main").unwrap();
         assert_eq!(agent_config.engine.as_deref(), Some("fast"));
@@ -2219,6 +2462,7 @@ engine = "ollama/local"
     fn agent_config_defaults_to_no_engine_override() {
         let agent_config = AgentConfig {
             engine: None,
+            compaction: None,
             description: None,
             allowed_tools: None,
             timeout_secs: None,

@@ -1101,6 +1101,8 @@ pub enum DomainEvent {
         estimated_tokens: usize,
         context_length: usize,
     },
+    /// The model view changed after its last serialized-request estimate.
+    ContextUsageCleared,
     /// A compaction snapshot was applied this run; see
     /// `UiUpdate::CompactionApplied` and [`ChatEntry::CompactionMarker`].
     CompactionApplied {
@@ -1139,6 +1141,7 @@ impl DomainEvent {
             DomainEvent::ChildAgentDone { .. } => "ChildAgentDone",
             DomainEvent::BubbleClickWindowExpired => "BubbleClickWindowExpired",
             DomainEvent::ContextUsage { .. } => "ContextUsage",
+            DomainEvent::ContextUsageCleared => "ContextUsageCleared",
             DomainEvent::CompactionApplied { .. } => "CompactionApplied",
         }
     }

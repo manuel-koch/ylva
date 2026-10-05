@@ -10,13 +10,17 @@ for the user-facing contract.
 
 The calibration follow-up is implemented. The per-message/context estimate and
 the separate per-request baseline both use `tiktoken-rs` `cl100k_base`. Before
-each OpenAI-compatible Chat Completions request is sent, Ylva estimates its
-serialized request body. When `YLVA_TOKEN_USAGE_DUMP_PATH` is set, it appends a
+each OpenAI-compatible Chat Completions request is sent, Ylva applies that
+encoding to the serialized JSON request body as text. This is not a simulation
+of provider-side request processing or the selected model's tokenizer. When
+`YLVA_TOKEN_USAGE_DUMP_PATH` is set, it appends a
 metadata-only JSONL record containing a request ID, provider and connection,
 model, estimate/source, and provider-reported input count/source if available.
 The request enables streaming usage and recognizes `usage.prompt_tokens` and
 `usage.input_tokens`. Missing usage, including an interrupted stream, remains
-`null`. The file is independent of request dumps, session persistence, and
+`null`. The provider-reported count is the serving-side observation when
+available; the local serialized-body estimate is a comparison baseline. The
+file is independent of request dumps, session persistence, and
 compaction state; it contains no prompt or payload content. See the
 [CLI-options record contract](../cli-options.md#debug).
 
@@ -447,16 +451,26 @@ unnecessary compaction.
 
 - Current estimator implementation: [`src/llm/token_estimate.rs`](../../src/llm/token_estimate.rs).
 - Current message accounting: [`estimate_message_tokens`](../../src/agent.rs),
-  which ignores role framing and estimates each message when committed.
+  which caches payload-only counts as messages are committed. The footer and
+  compaction budget separately estimate model-visible content, including tool
+  definitions and excluding JSON/API transport framing.
 - Provider serialization: [`src/llm/openai_compatible_messages.rs`](../../src/llm/openai_compatible_messages.rs)
   and `src/llm/openai_compatible_provider.rs`.
 - `Context::set_token_estimator` recalculates cached message counts on model
-  or estimator changes, which is useful for model-aware local fallback, but a
-  full-request observed count cannot be substituted into each entry without a
-  new accounting model.
+  or estimator changes. The model-view readout does not sum these cached
+  payload-only values; it projects the complete active view and tools before
+  estimating model-visible content for compaction. The footer instead shows
+  the estimate of the exact serialized request body emitted by the provider
+  before it waits for the response.
 - OpenAI-compatible stream decoding captures the final usage chunk directly
   into the optional per-request dump. It does not add usage to the agent event
   protocol or use it to change compaction budgeting.
+- Caller-side compaction timeouts append a `[failure]` line to the matching
+  response dump when request dumping is enabled. The request-scoped callback is
+  bound before the provider waits for response headers so it can record a
+  timeout even after stream processing is cancelled. The wall-clock timeout is
+  `[compaction].timeout_sec`, not on the engine whose conversation is being
+  compacted. `[compaction].engine` selects the summarizer independently.
 - OpenRouter's model catalog includes `architecture.tokenizer`; current
   `ModelInfo` does not retain this field. Ollama `/api/show` includes tokenizer
   metadata and a model template; neither is equivalent to a loaded generic
@@ -545,7 +559,9 @@ actual response payloads.
   Phase 12 (the checklist this idea refines)
 - `docs/ideas/tool-result-size-guard.md` (per-result wire guard; defers the
   aggregate to this idea)
-- `docs/configuration.md` (`compact_engine`, `context_length`)
+- `docs/configuration.md` (`[compaction].engine`, `context_length`)
+- `docs/features.md` (root and child compaction scope)
+- `docs/implementation-notes.md` (child lifecycle and per-agent setting resolution)
 - `docs/persistence.md` (append-only contract, resume, `parent_session`)
 
 ## Deferred

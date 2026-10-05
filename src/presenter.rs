@@ -1370,6 +1370,10 @@ fn domain_child_lifecycle(state: &mut AppState, event: DomainEvent) -> Vec<Effec
             });
             vec![]
         }
+        DomainEvent::ContextUsageCleared => {
+            state.context_usage = None;
+            vec![]
+        }
         other => match state.mode.clone() {
             TuiMode::Idle => domain_idle(state, other),
             TuiMode::Pending => domain_pending(state, other),
@@ -5000,6 +5004,52 @@ mod tests {
             }),
             "finished child readout remains available while its transcript is drilled in"
         );
+    }
+
+    #[test]
+    fn clearing_context_usage_removes_the_stale_root_footer_value() {
+        let mut state = AppState::new();
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ContextUsage {
+                estimated_tokens: 76_915,
+                context_length: 98_304,
+            }),
+            &empty_textarea(),
+        );
+        assert!(state.context_usage.is_some());
+
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ContextUsageCleared),
+            &empty_textarea(),
+        );
+
+        assert_eq!(state.context_usage, None);
+        assert_eq!(state.active_context_usage(), None);
+    }
+
+    #[test]
+    fn context_usage_clear_does_not_interrupt_the_follow_up_response_state() {
+        let mut state = AppState::new();
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::StreamDone),
+            &empty_textarea(),
+        );
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ContextUsageCleared),
+            &empty_textarea(),
+        );
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::StreamStarted),
+            &empty_textarea(),
+        );
+
+        assert_eq!(state.mode, TuiMode::Streaming);
+        assert_eq!(state.active_context_usage(), None);
     }
 
     #[test]

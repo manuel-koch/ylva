@@ -113,12 +113,15 @@ The filesystem boundary that governs which paths tools may access and when user
 approval is required.
 
 **Token estimate**:
-An approximate token count of a message, model view, or exact serialized model
-request, produced locally with `tiktoken-rs` `cl100k_base`. For an opt-in
-per-request diagnostic dump, the estimate is recorded beside any provider-
-reported prompt/input token count observed on that same request. It budgets
-compaction and the footer readout; it is advisory and never billed usage or a
-claim about the active model's tokenizer.
+An approximate token count produced locally with `tiktoken-rs` `cl100k_base`.
+The compaction budget estimates the model view and active tool definitions;
+the TUI footer applies `cl100k_base` to the serialized JSON request body sent
+by OpenAI-compatible providers. This counts that body as text. It does not
+reproduce the provider's request processing or the selected model's tokenizer.
+An opt-in per-request diagnostic dump records this local estimate beside any
+provider-reported prompt/input token count observed on the same request. The
+provider count reflects the serving side's accounting when available. Local
+estimates are advisory and are never billed usage.
 _Avoid_: token count, usage
 
 **Reported input-token count**:
@@ -149,6 +152,11 @@ The per-engine usage fractions of the context window that decide when to act:
 the soft threshold starts a background summary after a completed turn, the
 hard threshold forces a synchronous drop instead of waiting for one.
 
+**Per-agent compaction settings**:
+An agent type may override the profile's compaction engine and summary timeout.
+Each omitted override inherits independently. Root and child runs use the
+settings resolved for their own agent type.
+
 ## Models and providers
 
 **LLM**:
@@ -161,6 +169,10 @@ The service integration that communicates with a model.
 **Provider connection**:
 A named endpoint and credential configuration for one provider. Multiple
 connections may use the same provider.
+
+**Provider request concurrency cap**:
+The maximum number of simultaneous requests sent through a provider connection;
+it is shared by engines and agents using that connection.
 
 **Engine**:
 A reusable runtime selection that binds a model to a provider connection and

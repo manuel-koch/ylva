@@ -320,3 +320,62 @@ Search for "agent harness" and report first 30 repository URLs.
 DON'T tweak the `per_page` query-param. This will keep the result-size within limits!
 
 ---
+
+<Sample prompts that will likely stress a LLM and cause filling up of context>
+
+## Map the agent tool-call lifecycle
+
+Trace how a model tool call moves through Ylva, from the provider response to tool
+execution and back into the next model request.
+
+Work in stages. First, locate and read the core agent loop, tool registry,
+tool-call/result types, and provider message serialization. Then trace one
+filesystem tool and one delegated subagent call through their execution and
+persistence paths. Finally, compare the paths and explain how approval,
+errors, displayed results, and model-facing results are handled.
+
+Use repository tools to inspect files and search for relevant symbols. Cite file
+paths and line ranges for each claim. Do not modify files or run commands that
+change the workspace. If the trace is too large for one response, continue with
+another focused stage until you have covered the full lifecycle. End with a
+concise sequence diagram in plain text and a list of unresolved questions.
+
+## Audit session persistence and resume
+
+Build a detailed account of Ylva session persistence, resume, and clone behavior.
+
+Work in stages. Start by finding the session store, serialized event types,
+and tests that define the persistence contract. Then trace fresh-session creation,
+incremental writes, resume reconstruction, clone behavior, locking,
+and recovery after interrupted writes. Check how root and subagent transcripts
+relate, and how compaction events affect the reconstructed model view while
+preserving the visible transcript.
+
+Use repository tools to inspect source, tests, and relevant docs. Cite file paths
+and line ranges. Do not edit files, create sessions, or run commands that mutate
+the workspace. Continue with focused stages until you have covered all the
+behaviors above. Finish with a lifecycle outline, a table of key invariants
+and where each is enforced, and any inconsistencies you find between implementation,
+tests, and documentation.
+
+## Follow context budgeting and compaction
+
+Explain exactly how Ylva estimates context size and decides when and how to
+compact a conversation.
+
+Work in stages. First inspect token estimation and the footer readout.
+Then trace threshold evaluation, background summary generation, safe
+application boundaries, synchronous fallback, and the construction of the
+model view after compaction. Finally, follow persistence and resume to
+determine how the summary and boundary are restored, and identify tests
+for edge cases such as failed summaries, oversized tool results, or
+incomplete tool-call pairs.
+
+Use repository tools to search and read the implementation, tests, and docs.
+Cite file paths and line ranges for each claim. Do not edit files or run
+commands that change the workspace. Keep investigating in additional focused
+stages if needed. Finish with a decision-flow outline, a worked example
+using hypothetical token estimates, and any gaps between the documented
+contract and tested behavior.
+
+---

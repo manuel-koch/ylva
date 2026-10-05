@@ -38,12 +38,31 @@ Display the following info for each session:
 
 Sort sessions by descending last-used timestamp ( i.e. newest first ).
 
+## /compact
+
+Trigger conversation compaction for current agent conversation.
+
 ## /status
 
 Show the sources of the composed system prompt in a popup, so it is visible
 where the model's instructions came from:
 
-- the resolved `SOUL.md` layer path ( workspace `.ylva/SOUL.md`, Ylva home
-  `SOUL.md`, or the built-in value )
-- every trusted instruction file that was loaded, with its sentinel source
-  ( e.g. `$YLVA_HOME/AGENTS.md`, `sub/AGENTS.md` ) and its file size
+## -
+
+- current provider/engine
+  - connection
+  - engine
+  - model
+  - model parameters if available/configured ( reasoning effort, context-size,
+    temperature etc )
+- current agent type
+  - configuration ( allowed tools )
+- current context usage, grouped by origin; incl its estimated token contribution
+  - system prompt
+    - soul (the resolved `SOUL.md` layer path, workspace `.ylva/SOUL.md`,
+      Ylva home `SOUL.md`, or the built-in value)
+    - instructions (every trusted instruction file that was loaded,
+      with its sentinel source e.g. `$YLVA_HOME/AGENTS.md`, `sub/AGENTS.md`)
+    - tool schema description
+  - tool calls ( the call and its result )
+  - user messages

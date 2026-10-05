@@ -25,7 +25,7 @@ The decisions for this plan are:
   defaults: `compact_target_ratio` (`0.5`), `soft_compaction_threshold`
   (`0.7`), and `hard_compaction_threshold` (`0.9`), validated at profile load
   to stay in `(0, 1]` and in ascending order.
-- Use `compact_engine` to summarize an immutable old-prefix snapshot. Keep the
+- Use `[compaction].engine` to summarize an immutable old-prefix snapshot. Keep the
   full transcript and append a compaction snapshot event to the same JSONL
   session. Newer events supersede earlier snapshots through a monotonically
   advancing message boundary.
@@ -34,10 +34,11 @@ The decisions for this plan are:
 - Write the summary prompt from a user-overridable `COMPACTION.md`, resolved
   home then workspace like `SOUL.md`, falling back to the built-in prompt when
   neither exists.
-- Show the estimated model-view size and its fill of the active window in the
-  footer (`64.2K (45%)`), computed from the same token estimates that drive
-  compaction. Cost and billing totals stay deferred.
-- Compact root conversations only. Do not add a manual `/compact` command.
+- Show the estimated serialized-request size and its fill of the active
+  window in the footer (`64.2K (45%)`). Compaction retains its separate
+  model-view estimate. Cost and billing totals stay deferred.
+- Compact root and child agent contexts with their resolved compaction settings.
+  Do not add a manual `/compact` command.
 - Add per-agent `max_tool_iterations`, default `50`, used by root and child
   loops. Reject zero.
 - Add `--agent <type>` for both TUI and headless runs. Persist the selected
@@ -139,7 +140,7 @@ later session.
          and the effective context length supplied by the active engine.
 
 4. [x] Implement automatic summary compaction and the hard-limit fallback.
-   - [x] Use the profile's `compact_engine` for a tool-free summary of an
+   - [x] Use the profile's `[compaction].engine` for a tool-free summary of an
          immutable prefix snapshot. Start summarization after a completed turn
          at 70% usage and apply the result at the next safe boundary.
    - [x] Add `compact_target_ratio` to `EngineConfig`, defaulting to `0.5`,
@@ -188,11 +189,11 @@ later session.
          fallback, and a prompt whose text reaches `build_summary_request`.
 
 7. [x] Show the model-view context usage in the TUI footer.
-   - [x] Emit the estimated model-view token count and its fill of the active
-         window as `UiUpdate::ContextUsage` when a turn settles (and once
-         after hydration on resume), map it through `DomainEvent::ContextUsage`
-         to `AppState::context_usage`, and render it right-aligned on the
-         footer's key-hints row as `64.2K (45%)`.
+   - [x] Emit the estimated serialized request token count and its fill of the
+         active window as `UiUpdate::ContextUsage` when each request starts,
+         map it through `DomainEvent::ContextUsage` to
+         `AppState::context_usage`, and render it right-aligned on the footer's
+         key-hints row as `64.2K (45%)`.
    - [x] Unit-test the number formatting, the driver-to-state routing, the
          right-aligned rendering, and the loop's emission; cost and billing
          totals remain deferred.
@@ -298,7 +299,7 @@ later session.
   unknown fields. No ADR is requested for this change.
 - `EngineConfig::effective_context_length` in `src/llm/engine.rs` resolves the
   configured value, then provider catalog value, then `DEFAULT_CONTEXT_LENGTH`
-  (`128_000`). `ProfileConfig::compact_engine_name()` already falls back to
+  (`128_000`). `ProfileConfig::compaction_engine_name()` falls back to
   `default_engine`.
 - Existing focused tests include
   `iteration_guard_stops_after_max_reprompts` in
@@ -342,3 +343,7 @@ practice. The estimate remains advisory and is not billed usage.
    observations, environment variable, and data contract.
 6. [x] Run `rumdl fmt` and the Markdown linter on changed Markdown files, then
    run `make format lint` and `make test-coverage`.
+7. [x] Update the footer from the estimate of the exact serialized request
+   before waiting for the provider response. Keep this readout separate from
+   the model-view estimate used by compaction, and update the feature and
+   implementation docs to state when each estimate is reported.

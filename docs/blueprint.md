@@ -1112,7 +1112,7 @@ comparison between the estimate of each exact serialized request and provider-
 reported input usage for that request, when available; never treat either as
 billed usage. See [CLI options — Debug](./cli-options.md#debug).
 
-**Summary generation:** Use the configured `compact_engine` without tools. It
+**Summary generation:** Use the configured `[compaction].engine` without tools. It
 summarizes an immutable prefix snapshot; the outer agent loop applies the
 result. If summary generation fails or times out, log the failure and drop
 old complete turns or oversized old results to reach the target. Do not cut a
@@ -1127,8 +1127,9 @@ complete transcript with a compaction marker; the model receives a marked,
 provider-safe summary followed by the tail. Do not insert a mid-conversation
 `system` message.
 
-**Scope:** Compaction is automatic and applies to root conversations only.
-Child contexts are short-lived; a manual `/compact` command is deferred. The
+**Scope:** Compaction is automatic for root and child agent contexts. Child
+contexts use their agent type's compaction overrides and may compact repeatedly
+before reporting their result. A manual `/compact` command is deferred. The
 per-result 512 KiB wire guard and bounded `glob` are also deferred to
 `docs/ideas/tool-result-size-guard.md`. The earlier 8–16 KiB insertion-time
 truncation proposal is not selected.
@@ -1179,7 +1180,7 @@ The user can interrupt the current conversation with `Esc`/`Ctrl+C`; steering do
 pending tool sequence.
 
 The earlier rolling-window sketch is superseded by the Phase 12 design above:
-cached estimates, background summarization through `compact_engine`, a hard
+cached estimates, background summarization through `[compaction].engine`, a hard
 drop fallback, and an append-only compaction event. The summary is projected
 with a provider-safe marked message, not a mid-conversation `system` role.
 
@@ -1820,7 +1821,9 @@ explicit `<role>_engine` → `default_engine` → hard error.
 ```toml
 # Future roles, added when the corresponding feature is implemented:
 utility_engine = "openrouter_small"  # session title generator (Phase 9)
-compact_engine = "openrouter_small"   # context compaction summarizer (Phase 12)
+[compaction]
+engine = "openrouter_small"            # context compaction summarizer (Phase 12)
+timeout_sec = 120
 # curator_engine = "openrouter_small" # reserved for a future curator child agent
 ```
 
@@ -2806,7 +2809,7 @@ See reducer-state-handling-plan.md.
       for a future `/models` slash command.
 
 - [x] **Config refactor:** rename `provider_type` → `provider` in `EngineConfig`;
-      add profile-level `default_engine` (required) and `compact_engine` (optional,
+      add profile-level `default_engine` (required) and `[compaction].engine` (optional,
       resolves to `default_engine`); document quoted-key engine names
       (`[engines."ollama/local"]`) as opt-in.
 
@@ -2973,9 +2976,9 @@ See reducer-state-handling-plan.md.
       message into the `meta` header.
 
 - [x] Add the profile-level `utility_engine` setting alongside `default_engine`
-      and `compact_engine`; when unset, resolve `utility_engine` to
+      and `[compaction].engine`; when unset, resolve `utility_engine` to
       `default_engine`. Resolve it independently of the active conversation
-      engine and the context-compaction `compact_engine`. The utility request
+      engine and the context-compaction `[compaction].engine`. The utility request
       must not change the active engine or its runtime model settings.
 
 - [x] After the first conversation turn completes, capture the first explicit
@@ -3012,7 +3015,7 @@ See reducer-state-handling-plan.md.
 
 **Key crates:** none new (extends the existing `Engine` abstraction and JSONL
 `Store`; add the configured `utility_engine` slot alongside
-`compact_engine`).
+`[compaction].engine`).
 
 ### Phase 10: Full Configuration & Persona System
 
@@ -3128,7 +3131,7 @@ hard usage errors: stderr, exit 2).
       reached before the summary applies, synchronously drop old complete turns
       or oversized old results until the target is met.
 
-- [x] Summarize the old prefix with the configured `compact_engine`. The
+- [x] Summarize the old prefix with the configured `[compaction].engine`. The
       summary must preserve decisions, open work, file paths, identifiers, user
       constraints, and the boundary before the verbatim tail. On summarizer
       failure or timeout, use the synchronous drop fallback and log the
@@ -3150,8 +3153,9 @@ hard usage errors: stderr, exit 2).
       message.
 
 - [x] Re-evaluate the active budget when `/models` switches to a model with a
-      different context length. Compaction applies to root sessions only; child
-      contexts are short-lived. No manual `/compact` command is included.
+      different context length. Root and child contexts use the compaction
+      settings resolved for their agent type. No manual `/compact` command is
+      included.
 
 - [x] Keep per-result wire-size protection and a default `glob` ceiling out of
       this phase. They are deferred to

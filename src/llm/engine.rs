@@ -48,10 +48,8 @@ pub const DEFAULT_COMPACT_TARGET_RATIO: f64 = 0.5;
 /// - **Phase 10 (Full Configuration & Persona System)** supplies the
 ///   project/home/built-in fallback chain and will add persona/`agents/*.md`
 ///   sourcing, which populate this same struct through additional layers.
-/// - **Phase 12 (Context Compaction & Token Budgeting)** reads
-///   `context_length` and `compact_target_ratio` to bound the model view
-///   (see `crate::agent::compaction`); the compaction thresholds themselves
-///   stay fixed and are not configurable here.
+/// - **Context compaction** reads per-engine settings to budget the model view
+///   (see `crate::agent::compaction`).
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct EngineConfig {
     /// Named provider connection. Legacy flat profiles may use `provider`,
@@ -329,6 +327,33 @@ pub trait Engine: Send + Sync {
         _session_id: Option<uuid::Uuid>,
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
         self.chat(messages, tools, cancel)
+    }
+
+    /// Start a request and report its serialized token estimate before the
+    /// provider waits for response headers. Engines without request metadata
+    /// retain the normal chat behavior.
+    fn chat_with_session_id_and_estimate<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        session_id: Option<uuid::Uuid>,
+        _on_estimate: Box<dyn FnOnce(usize, usize) -> BoxFuture<'static, ()> + Send>,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        self.chat_with_session_id(messages, tools, cancel, session_id)
+    }
+
+    /// Start a request with optional diagnostics for caller-side failures.
+    fn chat_with_session_id_and_diagnostics<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        session_id: Option<uuid::Uuid>,
+        on_estimate: Box<dyn FnOnce(usize, usize) -> BoxFuture<'static, ()> + Send>,
+        _on_failure: Option<crate::http::RequestDumpFailureHandler>,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        self.chat_with_session_id_and_estimate(messages, tools, cancel, session_id, on_estimate)
     }
 
     /// A snapshot of the engine's configuration.
@@ -650,6 +675,46 @@ impl Engine for EngineRouter {
         })
     }
 
+    fn chat_with_session_id_and_estimate<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        session_id: Option<uuid::Uuid>,
+        on_estimate: Box<dyn FnOnce(usize, usize) -> BoxFuture<'static, ()> + Send>,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        Box::pin(async move {
+            let (_engine_name, engine) = self.active_engine_entry();
+            engine
+                .chat_with_session_id_and_estimate(messages, tools, cancel, session_id, on_estimate)
+                .await
+        })
+    }
+
+    fn chat_with_session_id_and_diagnostics<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        session_id: Option<uuid::Uuid>,
+        on_estimate: Box<dyn FnOnce(usize, usize) -> BoxFuture<'static, ()> + Send>,
+        on_failure: Option<crate::http::RequestDumpFailureHandler>,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        Box::pin(async move {
+            let (_engine_name, engine) = self.active_engine_entry();
+            engine
+                .chat_with_session_id_and_diagnostics(
+                    messages,
+                    tools,
+                    cancel,
+                    session_id,
+                    on_estimate,
+                    on_failure,
+                )
+                .await
+        })
+    }
+
     fn config(&self) -> EngineConfig {
         self.active_engine().config()
     }
@@ -895,6 +960,46 @@ impl Engine for EngineImpl {
             self.hydrate_catalog_metadata().await;
             self.provider
                 .chat_with_session_id(messages, tools, cancel, session_id)
+                .await
+        })
+    }
+
+    fn chat_with_session_id_and_estimate<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        session_id: Option<uuid::Uuid>,
+        on_estimate: Box<dyn FnOnce(usize, usize) -> BoxFuture<'static, ()> + Send>,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        Box::pin(async move {
+            self.hydrate_catalog_metadata().await;
+            self.provider
+                .chat_with_session_id_and_estimate(messages, tools, cancel, session_id, on_estimate)
+                .await
+        })
+    }
+
+    fn chat_with_session_id_and_diagnostics<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        session_id: Option<uuid::Uuid>,
+        on_estimate: Box<dyn FnOnce(usize, usize) -> BoxFuture<'static, ()> + Send>,
+        on_failure: Option<crate::http::RequestDumpFailureHandler>,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        Box::pin(async move {
+            self.hydrate_catalog_metadata().await;
+            self.provider
+                .chat_with_session_id_and_diagnostics(
+                    messages,
+                    tools,
+                    cancel,
+                    session_id,
+                    on_estimate,
+                    on_failure,
+                )
                 .await
         })
     }

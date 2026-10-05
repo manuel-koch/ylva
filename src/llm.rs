@@ -31,6 +31,28 @@ pub mod provider_registry;
 pub mod token_estimate;
 pub(crate) mod token_usage;
 
+/// Maximum number of simultaneous HTTP requests per provider connection.
+pub const MAX_CONCURRENT_PROVIDER_REQUESTS: usize = 4;
+
+/// Return the shared HTTP request limiter for a provider connection.
+pub(crate) fn provider_request_limiter(
+    provider_connection: &str,
+) -> crate::http::RequestConcurrencyLimiter {
+    static LIMITERS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, crate::http::RequestConcurrencyLimiter>>,
+    > = std::sync::OnceLock::new();
+    let limiters = LIMITERS.get_or_init(Default::default);
+    let mut limiters = limiters
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    limiters
+        .entry(provider_connection.to_string())
+        .or_insert_with(|| {
+            crate::http::RequestConcurrencyLimiter::new(MAX_CONCURRENT_PROVIDER_REQUESTS)
+        })
+        .clone()
+}
+
 pub use engine::{
     Engine, EngineConfig, EngineDisplayInfo, EngineImpl, EngineRouter, EngineRuntimeConfig,
     EngineRuntimeConfigHandle, ProviderModelOption, DEFAULT_CONTEXT_LENGTH,
@@ -41,6 +63,7 @@ pub use openai_compatible_provider::OpenAiCompatibleProvider;
 pub use openrouter_provider::OpenRouterProvider;
 pub use provider_registry::{ProviderEnv, ProviderRegistry, ProviderSelection};
 pub use token_estimate::TokenEstimator;
+pub use MAX_CONCURRENT_PROVIDER_REQUESTS as DEFAULT_MAX_CONCURRENT_PROVIDER_REQUESTS;
 
 /// A single tool definition in the OpenAI chat-completions wire shape.
 ///
@@ -190,6 +213,36 @@ pub trait Provider: Send + Sync {
         self.chat(messages, tools, cancel)
     }
 
+    /// Start a request and report its serialized token estimate before the
+    /// provider waits for response headers. Providers without a request-body
+    /// estimate use the default implementation.
+    fn chat_with_session_id_and_estimate<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        session_id: Option<uuid::Uuid>,
+        _on_estimate: Box<dyn FnOnce(usize, usize) -> BoxFuture<'static, ()> + Send>,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        self.chat_with_session_id(messages, tools, cancel, session_id)
+    }
+
+    /// Start a request with an optional callback for recording a failure that
+    /// occurs outside provider stream processing (for example, a caller-side
+    /// timeout). The default implementation preserves providers without dump
+    /// support.
+    fn chat_with_session_id_and_diagnostics<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        session_id: Option<uuid::Uuid>,
+        on_estimate: Box<dyn FnOnce(usize, usize) -> BoxFuture<'static, ()> + Send>,
+        _on_failure: Option<crate::http::RequestDumpFailureHandler>,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        self.chat_with_session_id_and_estimate(messages, tools, cancel, session_id, on_estimate)
+    }
+
     /// Return the short name identifying this provider connection or the
     /// built-in implementation (e.g. `"ollama-cloud"`, `"openrouter"`,
     /// `"mock"`).
@@ -295,6 +348,32 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn provider_request_limiters_are_shared_by_connection_name() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let provider_connection = format!("limiter-test-{}", uuid::Uuid::new_v4());
+            let first = provider_request_limiter(&provider_connection);
+            let second = provider_request_limiter(&provider_connection);
+            let permits = futures::future::try_join_all(
+                (0..MAX_CONCURRENT_PROVIDER_REQUESTS).map(|_| first.acquire()),
+            )
+            .await
+            .expect("all available permits");
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(10), second.acquire(),)
+                    .await
+                    .is_err(),
+                "all engines for the connection share one cap"
+            );
+            drop(permits);
+            let _released_permit = second.acquire().await.expect("released permit");
+        });
     }
 
     #[test]
