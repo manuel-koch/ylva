@@ -6,6 +6,10 @@ Footer hints render each keybinding in bold and its action in normal text.
 Multiple hints are separated by ` · `, for example:
 `enter send · esc cancel · ctrl-c cancel & quit · F1 help`.
 
+The context-usage readout stays right-aligned on the second footer row,
+including beside tool-approval buttons. On narrow terminals it is omitted
+rather than overwriting the controls.
+
 While the main conversation is shown, the footer also reports separate
 running and queued subagent counts in a compact label such as
 `Subagents: 1 running, 1 queued`; finished subagents are not included.

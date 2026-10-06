@@ -47,8 +47,6 @@ Trigger conversation compaction for current agent conversation.
 Show the sources of the composed system prompt in a popup, so it is visible
 where the model's instructions came from:
 
-## -
-
 - current provider/engine
   - connection
   - engine

@@ -166,6 +166,9 @@ fn project_for_draw(state: &AppState) -> TuiState {
         display_metadata: state.display_metadata.clone(),
         parent_agent_mode,
         agent_mode,
+        compacting: state
+            .compaction_requests
+            .contains_key(&showing_child_run_id),
         active_subagent_counts,
         engine_display,
         chat_entries,
@@ -179,12 +182,9 @@ fn project_for_draw(state: &AppState) -> TuiState {
         pending_approval_is_subagent,
         input_history: state.input_history.clone(),
         history_index: state.history_index,
-        context_usage_text: state.active_context_usage().map(|usage| {
-            crate::tui_reducer_state::format_context_usage(
-                usage.estimated_tokens,
-                usage.context_length,
-            )
-        }),
+        context_usage_text: state
+            .active_context_usage()
+            .map(crate::tui_reducer_state::format_context_usage_readout),
         draft: state.draft.clone(),
         input_area: state.layout.input_area.rect,
         toast: state.toast.clone(),

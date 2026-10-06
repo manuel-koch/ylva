@@ -52,9 +52,10 @@ pub use agent::tools::{
 };
 pub use agent::{
     AgentCommand, AgentEvent, AgentLoop, AgentMode, AssembledToolCall, AssistantStatus,
-    ChildRoleConfig, Context, DeltaChunk, Message, PendingTool, Role, StreamEvent, ToolAttachment,
-    ToolCallRequest, ToolResult, UiUpdate, UserMessageKind, DEFAULT_MAX_TOOL_USE_ITERATIONS,
-    DEFAULT_TOOL_TIMEOUT_SECS, MAX_TOOL_CALLS_PER_RESPONSE, TOOL_PROTOCOL_SYSTEM_PROMPT,
+    ChildRoleConfig, Context, ContextUsageSource, DeltaChunk, Message, PendingTool, Role,
+    StreamEvent, ToolAttachment, ToolCallRequest, ToolResult, UiUpdate, UserMessageKind,
+    DEFAULT_MAX_TOOL_USE_ITERATIONS, DEFAULT_TOOL_TIMEOUT_SECS, MAX_TOOL_CALLS_PER_RESPONSE,
+    TOOL_PROTOCOL_SYSTEM_PROMPT,
 };
 pub use agent_factory::AgentFactory;
 pub use app::App;

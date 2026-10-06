@@ -212,7 +212,7 @@ fn log_agent_command(command: &AgentCommand, mode: AgentMode, has_stream: bool, 
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum AgentEvent {
     StreamDone {
         partial: String,
@@ -255,6 +255,12 @@ pub enum AgentEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiUpdate {
+    /// Background summary request activity, independent of the agent mode.
+    CompactionActivity {
+        run_id: Option<Uuid>,
+        request_id: Uuid,
+        active: bool,
+    },
     AppendText(String),
     StreamStarted,
     StreamDone,
@@ -426,26 +432,22 @@ pub enum UiUpdate {
         status: String,
         result: Option<String>,
     },
-    /// The model view's estimated size against the active context window,
-    /// reported once hydration finishes and again whenever a turn settles so
-    /// the footer can show e.g. `64.2K (45%)`. The estimate is the same
-    /// advisory token count compaction budgets with — not billed usage.
+    /// An estimated size against the active context window for the root run.
+    /// `source` distinguishes a serialized request estimate from the model-view
+    /// estimate reported after compaction changes that view.
     ContextUsage {
         estimated_tokens: usize,
         context_length: usize,
+        source: ContextUsageSource,
     },
-    /// Clear the request estimate because the model view changed after the
-    /// latest request was sent and no current serialized-request estimate is
-    /// available yet.
-    ContextUsageCleared,
-    /// The model view's estimated size against the active context window for
-    /// one child run. The parent loop forwards this update unchanged; the TUI
-    /// keeps it keyed by `run_id` so background children cannot replace the
-    /// root footer value.
+    /// An estimate against the active context window for one child run. The
+    /// parent loop forwards this update unchanged; the TUI keeps it keyed by
+    /// `run_id` so background children cannot replace the root footer value.
     ChildContextUsage {
         run_id: Uuid,
         estimated_tokens: usize,
         context_length: usize,
+        source: ContextUsageSource,
     },
     /// A compaction snapshot was applied to the model view this run: the
     /// transcript keeps every message, and the TUI marks where the verbatim
@@ -456,6 +458,16 @@ pub enum UiUpdate {
         entry_index: usize,
         summarized_messages: usize,
     },
+}
+
+/// Identifies which request/model-view representation a token estimate covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextUsageSource {
+    /// Estimate of the exact serialized provider request.
+    SerializedRequest,
+    /// Estimate of the model view plus active tool definitions, used by
+    /// compaction budgeting.
+    ModelView,
 }
 
 /// Tell the UI where a freshly applied compaction sits in the transcript it
@@ -496,6 +508,29 @@ async fn sweep_compaction_and_report(
 ) -> bool {
     let boundary_before = context.compaction().map(|snapshot| snapshot.boundary);
     let result = compaction.sweep(context, engine, tools, generation);
+    if result.summary_applied {
+        let _ = ui_tx
+            .send(UiUpdate::Notice {
+                text: "Background context compaction completed. Older context was summarized; \
+                       the full transcript is preserved. If compaction becomes frequent, \
+                       consider narrowing the task or starting a new conversation with a \
+                       concise handoff, as repeated compaction may lose detail."
+                    .to_string(),
+                run_id,
+            })
+            .await;
+    }
+    if result.prefix_dropped {
+        let _ = ui_tx
+            .send(UiUpdate::Notice {
+                text: "Compacted context synchronously to fit the context window. \
+                       Older context was removed from the model view; some details may no \
+                       longer be available to the model. The full transcript is preserved."
+                    .to_string(),
+                run_id,
+            })
+            .await;
+    }
     if result.summary_started {
         let _ = ui_tx
             .send(UiUpdate::Notice {
@@ -504,24 +539,15 @@ async fn sweep_compaction_and_report(
             })
             .await;
     }
-    if result.prefix_dropped {
-        let _ = ui_tx
-            .send(UiUpdate::Notice {
-                text: "Compacted context synchronously to fit the context window.".to_string(),
-                run_id,
-            })
-            .await;
-    }
-    if result.summary_applied {
-        let _ = ui_tx
-            .send(UiUpdate::Notice {
-                text: "Background context compaction completed.".to_string(),
-                run_id,
-            })
-            .await;
-    }
     if result.prefix_dropped || result.summary_applied {
-        let _ = ui_tx.send(UiUpdate::ContextUsageCleared).await;
+        send_context_usage_estimate(
+            ui_tx,
+            context.estimated_model_tokens(tools, engine),
+            engine.effective_context_length(),
+            run_id,
+            ContextUsageSource::ModelView,
+        )
+        .await;
     }
     if !compaction.enabled() {
         return result.prefix_dropped;
@@ -539,6 +565,7 @@ async fn send_context_usage_estimate(
     estimated_tokens: usize,
     context_length: usize,
     run_id: Option<Uuid>,
+    source: ContextUsageSource,
 ) {
     tracing::debug!(
         run_id = ?run_id,
@@ -549,17 +576,20 @@ async fn send_context_usage_estimate(
         } else {
             estimated_tokens as f64 / context_length as f64
         },
-        "serialized request token estimate reported"
+        source = ?source,
+        "context usage estimate reported"
     );
     let update = match run_id {
         Some(run_id) => UiUpdate::ChildContextUsage {
             run_id,
             estimated_tokens,
             context_length,
+            source,
         },
         None => UiUpdate::ContextUsage {
             estimated_tokens,
             context_length,
+            source,
         },
     };
     let _ = ui_tx.send(update).await;
@@ -1224,6 +1254,23 @@ impl Context {
         self.model_view_token_count() + tool_schema_token_count(tools)
     }
 
+    /// Approximate tokens available for one additional model-facing result
+    /// while reserving space for a normal reply and compaction safety margin.
+    pub fn available_result_token_budget(
+        &self,
+        tools: &[ToolSchema],
+        context_length: usize,
+    ) -> usize {
+        let current_tokens = self.model_view_token_count() + tool_schema_token_count(tools);
+        let reply_reserve = context_length / 10;
+        let safety_margin = context_length / 20;
+        context_length
+            .saturating_sub(reply_reserve)
+            .saturating_sub(safety_margin)
+            .saturating_sub(512)
+            .saturating_sub(current_tokens)
+    }
+
     /// Approximate payload-only size of the model view. Retained for callers
     /// that need transcript message accounting.
     pub fn model_view_token_count(&self) -> usize {
@@ -1304,7 +1351,7 @@ impl Context {
 
     /// Oldest-first token budget the prefix a new summary must cover so the
     /// model view lands at `target_tokens`: the smallest prefix (counted from
-    /// the first message after the leading system block) whose removal
+    /// the first message in the visible tail) whose removal
     /// reaches the target, snapped forward to a cut that keeps every
     /// tool-call/result group intact.
     ///
@@ -1313,31 +1360,31 @@ impl Context {
     /// summary's own size is unknown when this runs, so reaching the target
     /// is best-effort — a later sweep trims the remainder.
     pub fn summary_boundary_for_target(&self, target_tokens: usize) -> Option<usize> {
-        let leading_system_len = self.leading_system_len();
+        let view_start = self.model_view_start();
         let tokens_to_remove = self.model_view_token_count().saturating_sub(target_tokens);
         if tokens_to_remove == 0 {
             return None;
         }
         let mut accumulated = 0usize;
-        for index in leading_system_len..self.entries.len() {
+        for index in view_start..self.entries.len() {
             accumulated += self.entries[index].token_count;
             if accumulated >= tokens_to_remove {
                 return crate::agent::compaction::first_safe_boundary_from(
                     &self.messages,
-                    (index + 1).max(leading_system_len + 1),
+                    index + 1,
                 )
-                .filter(|boundary| *boundary > leading_system_len);
+                .filter(|boundary| *boundary > view_start);
             }
         }
-        (self.entries.len() > leading_system_len)
+        (self.entries.len() > view_start)
             .then(|| {
                 crate::agent::compaction::first_safe_boundary_from(
                     &self.messages,
-                    leading_system_len + 1,
+                    self.entries.len(),
                 )
             })
             .flatten()
-            .filter(|boundary| *boundary > leading_system_len)
+            .filter(|boundary| *boundary > view_start)
     }
 
     /// Find the oldest safe prefix whose removal brings model-visible content
@@ -1447,10 +1494,12 @@ impl PendingTool {
     /// `agent_tx` (`ToolDone`/`ToolError`/`ToolKilled`); returns the token the
     /// outer loop stores as the running tool's cancel.
     pub fn execute(
-        self,
+        mut self,
         agent_tx: mpsc::Sender<(u64, AgentEvent)>,
         generation: u64,
+        max_output_tokens: Option<usize>,
     ) -> CancellationToken {
+        self.call.set_runtime_output_token_limit(max_output_tokens);
         let cancel = CancellationToken::new();
         let run_cancel = cancel.clone();
         let id = self.call.id();
@@ -1953,6 +2002,7 @@ impl AgentLoop {
         let compaction_engine = self.compaction_engine.take();
         let compaction_timeout = self.compaction_timeout;
         let compaction_summary_prompt = std::mem::take(&mut self.compaction_summary_prompt);
+        let result_summary_prompt = compaction_summary_prompt.clone();
         let agent_type = self.agent_type.clone();
         let store = self.store.clone();
         let mut session_id = self.session_id;
@@ -1986,10 +2036,11 @@ impl AgentLoop {
                 context.set_store(store);
             }
             let (mut compaction, mut compaction_rx) = compaction::CompactionRuntime::new(
-                compaction_engine,
+                compaction_engine.clone(),
                 compaction_summary_prompt,
                 compaction_timeout,
             );
+            compaction.set_activity_sender(ui_tx.clone(), own_run_id);
             if let Some(briefing) = briefing {
                 context.push_system(briefing);
             }
@@ -2227,6 +2278,7 @@ impl AgentLoop {
                                 }
                                 AgentEvent::ToolCall { calls } => {
                                     let mut requests = Vec::with_capacity(calls.len());
+                                    let mut unknown_tools = Vec::new();
                                     for assembled in calls {
                                         let pending_call = registry.create_call(
                                             &assembled.name,
@@ -2249,19 +2301,7 @@ impl AgentLoop {
                                             None => {
                                                 let error =
                                                     format!("Unknown tool '{}'", assembled.name);
-                                                let _ = agent_tx
-                                                    .send((
-                                                        generation,
-                                                        AgentEvent::ToolError {
-                                                            id: assembled.id,
-                                                            name: assembled.name.clone(),
-                                                            error,
-                                                            partial_output: None,
-                                                            duration: std::time::Duration::ZERO,
-                                                            content_sections: vec![],
-                                                        },
-                                                    ))
-                                                    .await;
+                                                unknown_tools.push((assembled.id, assembled.name, error));
                                             }
                                         }
                                     }
@@ -2270,6 +2310,20 @@ impl AgentLoop {
                                         AssistantStatus::Complete,
                                         requests,
                                     );
+                                    let unknown_only_round = !unknown_tools.is_empty() && pending_tools.is_empty();
+                                    // Registry failures are synchronous results, not
+                                    // completions of the tool currently executing.
+                                    for (id, name, error) in unknown_tools {
+                                        tracing::error!(tool = %name, tool_call_id = %id, error = %error, "tool failed");
+                                        context.push_tool_error(
+                                            id, name, error.clone(), None,
+                                            std::time::Duration::ZERO, vec![],
+                                        );
+                                        let _ = ui_tx.send(UiUpdate::ToolError {
+                                            id, error, duration: std::time::Duration::ZERO,
+                                            content_sections: vec![], run_id: own_run_id,
+                                        }).await;
+                                    }
                                     mode = AgentMode::ToolPending;
                                     advance_tool_queue(
                                         &mut pending_tools,
@@ -2279,7 +2333,7 @@ impl AgentLoop {
                                         &mut current_tool_cancel,
                                         &mut iterations,
                                         max_tool_iterations,
-                                        false,
+                                        unknown_only_round,
                                         engine.clone(),
                                         Arc::clone(&registry),
                                         ui_tx.clone(),
@@ -2489,16 +2543,160 @@ impl AgentLoop {
                                 .map(|manager| manager.outstanding_count_after_completion(run_id))
                                 .unwrap_or(0);
                             let all_done = outstanding_count == 0;
+                            if mode == AgentMode::Idle && pending_tools.is_empty() {
+                                // Apply any completed prefix summary or hard
+                                // fallback before deciding whether this child
+                                // report itself needs summarization.
+                                sweep_compaction_and_report(
+                                    &mut compaction,
+                                    &mut context,
+                                    engine.as_ref(),
+                                    &registry.schemas(),
+                                    generation,
+                                    own_run_id,
+                                    &ui_tx,
+                                )
+                                .await;
+                                while compaction.summary_pending() {
+                                    let Some(outcome) = compaction_rx.recv().await else {
+                                        break;
+                                    };
+                                    let summary_failure = match &outcome {
+                                        compaction::CompactionOutcome::SummaryFailed {
+                                            reason, ..
+                                        } => Some(reason.clone()),
+                                        compaction::CompactionOutcome::SummaryReady { .. } => None,
+                                    };
+                                    compaction.on_outcome(outcome, generation);
+                                    sweep_compaction_and_report(
+                                        &mut compaction,
+                                        &mut context,
+                                        engine.as_ref(),
+                                        &registry.schemas(),
+                                        generation,
+                                        own_run_id,
+                                        &ui_tx,
+                                    )
+                                    .await;
+                                    if let Some(reason) = summary_failure {
+                                        report_compaction_failure(&ui_tx, own_run_id, &reason).await;
+                                    }
+                                }
+                            }
+                            let mut parent_result = finish_result.result.clone();
+                            let result_token_budget = context.available_result_token_budget(
+                                &registry.schemas(),
+                                engine.effective_context_length(),
+                            );
+                            let original_parent_result = parent_result.clone();
+                            if let Some(result) = parent_result.as_deref() {
+                                let result_estimator = crate::llm::TokenEstimator::Tiktoken;
+                                if result_estimator.estimate_tokens(result) > result_token_budget {
+                                    let expected_task = spawn_content_sections
+                                        .get(&call_id)
+                                        .into_iter()
+                                        .flatten()
+                                        .filter_map(|section| match section {
+                                            tools::Section::Content(content)
+                                                if matches!(content.label.as_deref(), Some("Task" | "Briefing")) =>
+                                            {
+                                                Some((content.label.as_deref().unwrap_or("Task"), content.content.as_str()))
+                                            }
+                                            _ => None,
+                                        })
+                                        .map(|(label, content)| format!("{label}:\n{content}"))
+                                        .collect::<Vec<_>>()
+                                        .join("\n\n");
+                                    if let Some(compact_engine) = compaction_engine.as_ref() {
+                                        match compaction::summarize_result_for_parent(
+                                            compact_engine.clone(),
+                                            &result_summary_prompt,
+                                            &expected_task,
+                                            result,
+                                            result_token_budget,
+                                            session_id,
+                                            compaction_timeout,
+                                        )
+                                        .await
+                                        {
+                                            Ok(summary)
+                                                if result_estimator.estimate_tokens(&summary)
+                                                    <= result_token_budget =>
+                                            {
+                                                tracing::info!(
+                                                    run_id = %finish_result.run_id,
+                                                    result_tokens = result_estimator.estimate_tokens(result),
+                                                    summary_tokens = result_estimator.estimate_tokens(&summary),
+                                                    result_token_budget,
+                                                    "summarized subagent result for parent context"
+                                                );
+                                                parent_result = Some(summary);
+                                            }
+                                            Ok(summary) => {
+                                                tracing::warn!(
+                                                    run_id = %finish_result.run_id,
+                                                    summary_tokens = result_estimator.estimate_tokens(&summary),
+                                                    result_token_budget,
+                                                    "subagent result summary still exceeds parent budget"
+                                                );
+                                                parent_result = Some(
+                                                    crate::llm::token_estimate::truncate_text_to_token_budget(
+                                                        result_estimator,
+                                                        &summary,
+                                                        result_token_budget,
+                                                    ).0,
+                                                );
+                                            }
+                                            Err(error) => {
+                                                tracing::warn!(
+                                                    run_id = %finish_result.run_id,
+                                                    %error,
+                                                    result_token_budget,
+                                                    "failed to summarize subagent result for parent context"
+                                                );
+                                                parent_result = Some(
+                                                    crate::llm::token_estimate::truncate_text_to_token_budget(
+                                                        result_estimator,
+                                                        result,
+                                                        result_token_budget,
+                                                    ).0,
+                                                );
+                                            }
+                                        }
+                                    } else {
+                                        tracing::warn!(
+                                            run_id = %finish_result.run_id,
+                                            result_token_budget,
+                                            "no compaction engine available for oversized subagent result"
+                                        );
+                                        parent_result = Some(
+                                            crate::llm::token_estimate::truncate_text_to_token_budget(
+                                                result_estimator,
+                                                result,
+                                                result_token_budget,
+                                            ).0,
+                                        );
+                                    }
+                                }
+                            }
                             // The LLM-facing notice stays structured JSON (the
                             // model reads correlation/lifecycle fields as well as
                             // `status`/`result`/`error`/`sources`); only the TUI
                             // bubble renders result content as Markdown sections.
+                            let mut completion_event = finish_result
+                                .to_completion_json(&label, outstanding_count);
+                                            completion_event["result"] = parent_result
+                                                .clone()
+                                                .map(serde_json::Value::String)
+                                                .unwrap_or(serde_json::Value::Null);
+                                            completion_event["result_summarized"] = serde_json::Value::Bool(
+                                                finish_result.result != parent_result,
+                                            );
+                            completion_event["result_summarized"] = serde_json::Value::Bool(
+                                original_parent_result != parent_result,
+                            );
                             let result_text =
-                                serde_json::to_string(&finish_result.to_completion_json(
-                                    &label,
-                                    outstanding_count,
-                                ))
-                                .unwrap_or_default();
+                                serde_json::to_string(&completion_event).unwrap_or_default();
                             let mut content_sections = spawn_content_sections
                                 .remove(&call_id)
                                 .unwrap_or_default();
@@ -2510,7 +2708,10 @@ impl AgentLoop {
                                      This is an intermediate completion; do not produce an \
                                      acknowledgement or a user-facing progress update solely for \
                                      this event. The harness will provide one continuation after \
-                                     all outstanding child results are available."
+                                     all outstanding child results are available. This is expected, \
+                                     normal operation — do not reason about scheduler/concurrency \
+                                     internals or speculate on timing; simply continue your own \
+                                     independent work now."
                                 )
                             } else {
                                 "All spawned subagent runs are now terminal. Combine this result with \
@@ -2847,10 +3048,17 @@ impl AgentLoop {
                                                 pending.call.pending_content_sections();
                                             let title_arguments = pending.call.title_arguments();
                                             tracing::info!(tool = %name, tool_call_id = %call_id, "tool approved");
+                                            let max_output_tokens = tool_output_token_limit(
+                                                &name,
+                                                &context,
+                                                &registry.schemas(),
+                                                engine.effective_context_length(),
+                                            );
                                             current_tool_cancel = Some(PendingTool::execute(
                                                 pending,
                                                 agent_tx.clone(),
                                                 generation,
+                                                max_output_tokens,
                                             ));
                                             let _ = ui_tx
                                                 .send(UiUpdate::ToolStart {
@@ -3072,6 +3280,7 @@ impl AgentLoop {
                                     }
                                 }
                                 AgentCommand::Stop { reason } => {
+                                    compaction.reset().await;
                                     if let Some(manager) = child_agent_manager.as_mut() {
                                         let cancelled_spawns = manager.cancel_all();
                                         let cancelled_count = cancelled_spawns.len();
@@ -3261,10 +3470,8 @@ impl AgentLoop {
                                     // A summary (pending or in flight) belongs to
                                     // the conversation being cleared; its result
                                     // must never shape the replacement's model
-                                    // view. The background task keeps running —
-                                    // its outcome is dropped by the generation
-                                    // check above.
-                                    compaction.reset();
+                                    // view. Abort the request and clear its activity.
+                                    compaction.reset().await;
                                     pending_steers.clear();
                                     pending_tools.clear();
                                     if let Some(cancel_token) = current_cancel.take() {
@@ -3424,6 +3631,22 @@ fn log_tool_approval_request(call: &dyn ToolCall) {
         args = %serde_json::to_string(&safe_args).unwrap_or_else(|_| "{}".to_string()),
         "tool approval requested"
     );
+}
+
+fn tool_output_token_limit(
+    tool_name: &str,
+    context: &Context,
+    tools: &[ToolSchema],
+    context_length: usize,
+) -> Option<usize> {
+    if !matches!(
+        tool_name,
+        tools::read::ReadTool::NAME | tools::search::SearchTool::NAME | tools::glob::GlobTool::NAME
+    ) {
+        return None;
+    }
+    let context_budget = context.available_result_token_budget(tools, context_length);
+    Some(context_budget)
 }
 
 /// Resolve an approved `spawn_subagent` call immediately against
@@ -3794,8 +4017,18 @@ async fn advance_tool_queue(
                         let content_sections = pending.call.pending_content_sections();
                         let title_arguments = pending.call.title_arguments();
                         tracing::info!(tool = %name, tool_call_id = %call_id, "tool auto-approved");
-                        *current_tool_cancel =
-                            Some(PendingTool::execute(pending, agent_tx.clone(), generation));
+                        let max_output_tokens = tool_output_token_limit(
+                            &name,
+                            context,
+                            &registry.schemas(),
+                            engine.effective_context_length(),
+                        );
+                        *current_tool_cancel = Some(PendingTool::execute(
+                            pending,
+                            agent_tx.clone(),
+                            generation,
+                            max_output_tokens,
+                        ));
                         let _ = ui_tx
                             .send(UiUpdate::ToolStart {
                                 name,
@@ -3927,6 +4160,7 @@ fn start_request(
                 estimated_tokens,
                 request_context_length,
                 own_run_id,
+                ContextUsageSource::SerializedRequest,
             )
             .await;
         }) as futures::future::BoxFuture<'static, ()>
@@ -4225,6 +4459,7 @@ mod tests {
     struct ToolResultTrackingProvider {
         requests: Arc<Mutex<Vec<Vec<Message>>>>,
         request_received: Arc<tokio::sync::Notify>,
+        reproduce_unknown_tool_overlap: bool,
     }
 
     impl Provider for ToolResultTrackingProvider {
@@ -4248,18 +4483,48 @@ mod tests {
                 request_index
             };
             self.request_received.notify_one();
+            let reproduce_unknown_tool_overlap = self.reproduce_unknown_tool_overlap;
             Box::pin(async move {
                 let (stream_tx, stream_rx) = mpsc::channel(4);
                 tokio::spawn(async move {
                     if request_index == 0 {
+                        if reproduce_unknown_tool_overlap {
+                            for tool_call_index in [1, 2] {
+                                let _ = stream_tx
+                                    .send(StreamEvent::Delta(DeltaChunk {
+                                        tool_call_index,
+                                        tool_call_id: Some(format!(
+                                            "unknown-grep-{tool_call_index}"
+                                        )),
+                                        function_name: Some("grep".to_string()),
+                                        arguments_fragment: Some("{}".to_string()),
+                                    }))
+                                    .await;
+                            }
+                        }
                         let _ = stream_tx
                             .send(StreamEvent::Delta(DeltaChunk {
                                 tool_call_index: 0,
                                 tool_call_id: Some("read-large-context".to_string()),
                                 function_name: Some("read".to_string()),
                                 arguments_fragment: Some(
-                                    r#"{"path":"src/agent.rs","mode":"lines","limit":1200}"#
-                                        .to_string(),
+                                    if reproduce_unknown_tool_overlap {
+                                        r#"{"path":"src/agent.rs","mode":"lines","limit":1}"#
+                                    } else {
+                                        r#"{"path":"src/agent.rs","mode":"lines","limit":1200}"#
+                                    }
+                                    .to_string(),
+                                ),
+                            }))
+                            .await;
+                    } else if request_index == 1 && reproduce_unknown_tool_overlap {
+                        let _ = stream_tx
+                            .send(StreamEvent::Delta(DeltaChunk {
+                                tool_call_index: 0,
+                                tool_call_id: Some("approved-bash".to_string()),
+                                function_name: Some("bash".to_string()),
+                                arguments_fragment: Some(
+                                    r#"{"command":"printf regression-approved"}"#.to_string(),
                                 ),
                             }))
                             .await;
@@ -4301,7 +4566,220 @@ mod tests {
     }
 
     #[test]
-    fn footer_usage_updates_after_a_large_tool_result_before_follow_up_request() {
+    fn unknown_only_batch_counts_once_and_respects_iteration_cap() {
+        crate::test_support::run_locked(async {
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+                Arc::new(ToolResultTrackingProvider {
+                    requests: Arc::clone(&requests),
+                    request_received: Arc::new(tokio::sync::Notify::new()),
+                    reproduce_unknown_tool_overlap: true,
+                }),
+                test_engine().config(),
+            ));
+            let (agent_loop, mut ui_rx) = AgentLoop::new(engine, Arc::new(ToolRegistry::new()));
+            let mut agent_loop = agent_loop.with_max_tool_iterations(1);
+            let handle = agent_loop.run();
+            agent_loop
+                .send_command(AgentCommand::Prompt("Run the tools.".to_string()))
+                .await;
+            let mut unknown_tool_errors = 0;
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    match ui_rx.recv().await.expect("agent channel stays open") {
+                        UiUpdate::ToolError { .. } => unknown_tool_errors += 1,
+                        UiUpdate::Error { message, .. } => {
+                            assert!(message.contains("Max tool-use iterations (1) exceeded."));
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .expect("all-unknown batch reaches iteration cap");
+            drop(agent_loop);
+            let context = tokio::time::timeout(Duration::from_secs(3), handle)
+                .await
+                .expect("agent stops")
+                .expect("agent task succeeds")
+                .expect("root returns context");
+            assert_eq!(unknown_tool_errors, 3);
+            assert_eq!(requests.lock().expect("requests lock").len(), 1);
+            assert_eq!(context.messages().iter().filter(|message| matches!(message, Message::Assistant { tool_calls, .. } if !tool_calls.is_empty())).count(), 1);
+        });
+    }
+
+    #[test]
+    fn unknown_tool_does_not_leave_bash_approval_idle() {
+        crate::test_support::run_locked(async {
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let request_received = Arc::new(tokio::sync::Notify::new());
+            let release_read = Arc::new(tokio::sync::Notify::new());
+            let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+                Arc::new(ToolResultTrackingProvider {
+                    requests: Arc::clone(&requests),
+                    request_received: Arc::clone(&request_received),
+                    reproduce_unknown_tool_overlap: true,
+                }),
+                EngineConfig {
+                    provider_connection: "tool-result-tracking".to_string(),
+                    model: "test-model".to_string(),
+                    temperature: None,
+                    context_length: None,
+                    api_base_url: None,
+                    api_key: None,
+                    reasoning: None,
+                    compact_target_ratio: 0.4,
+                    soft_compaction_threshold: 0.5,
+                    hard_compaction_threshold: 0.8,
+                },
+            ));
+            let mut registry =
+                tools::default_registry(test_sandbox(), tools::ToolRegistryConfig::default());
+            registry.register(Arc::new(GatedReadTool {
+                inner: tools::read::ReadTool::new(SandboxContext::new(test_sandbox())),
+                release: Arc::clone(&release_read),
+            }));
+            let (mut agent_loop, mut ui_rx) = AgentLoop::new(engine, Arc::new(registry));
+            let handle = agent_loop.run();
+            agent_loop
+                .send_command(AgentCommand::Prompt("Run the tools.".to_string()))
+                .await;
+            request_received.notified().await;
+            let mut premature_follow_up = false;
+            let bash_id = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    match ui_rx.recv().await.expect("agent channel stays open") {
+                        UiUpdate::ToolStart { name, .. } if name == "read" => {
+                            premature_follow_up = tokio::time::timeout(
+                                Duration::from_millis(100),
+                                request_received.notified(),
+                            )
+                            .await
+                            .is_ok();
+                            if !premature_follow_up {
+                                release_read.notify_one();
+                            }
+                        }
+                        UiUpdate::ToolPending { id, name, .. } if name == "bash" => break id,
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .expect("bash approval arrives");
+            if premature_follow_up {
+                release_read.notify_one();
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while !matches!(ui_rx.recv().await, Some(UiUpdate::StreamDone)) {}
+                })
+                .await
+                .expect("premature stream finishes while bash awaits approval");
+            }
+            agent_loop
+                .send_command(AgentCommand::ApproveTool { id: bash_id })
+                .await;
+            let completed = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if matches!(ui_rx.recv().await, Some(UiUpdate::ToolDone { id, .. }) if id == bash_id) {
+                        break;
+                    }
+                }
+            }).await.is_ok();
+            drop(agent_loop);
+            let _ = tokio::time::timeout(Duration::from_secs(3), handle).await;
+            assert!(
+                completed,
+                "approved bash must execute rather than be ignored in Idle"
+            );
+            let requests = requests.lock().expect("requests lock");
+            assert_eq!(requests.len(), 3, "one follow-up per completed tool batch");
+            assert_eq!(
+                requests[1].iter().filter(|message| matches!(message, Message::ToolError { name, .. } if name == "grep")).count(),
+                2,
+                "unknown-tool results reach the model in the same completed batch",
+            );
+            assert!(requests[1].iter().any(
+                |message| matches!(message, Message::ToolResult { value } if value.name == "read")
+            ));
+            assert!(requests[2].iter().any(
+                |message| matches!(message, Message::ToolResult { value } if value.name == "bash")
+            ));
+        });
+    }
+
+    struct GatedReadTool {
+        inner: tools::read::ReadTool,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl tools::Tool for GatedReadTool {
+        fn name(&self) -> &str {
+            "read"
+        }
+        fn description(&self) -> &str {
+            "Gated read regression fixture"
+        }
+        fn input_schema(&self) -> schemars::schema::RootSchema {
+            tools::Tool::input_schema(&self.inner)
+        }
+        fn needs_approval(&self, _: &serde_json::Value) -> crate::sandbox::ApprovalCheck {
+            crate::sandbox::ApprovalCheck::AutoApproved
+        }
+        fn timeout_secs(&self) -> u64 {
+            10
+        }
+        fn non_default_redacted_arguments(
+            &self,
+            arguments: &serde_json::Value,
+        ) -> Vec<(String, serde_json::Value)> {
+            tools::Tool::non_default_redacted_arguments(&self.inner, arguments)
+        }
+        fn create_call(&self, id: Uuid, arguments: serde_json::Value) -> Box<dyn ToolCall> {
+            Box::new(GatedReadCall {
+                inner: tools::Tool::create_call(&self.inner, id, arguments),
+                release: Arc::clone(&self.release),
+            })
+        }
+    }
+
+    struct GatedReadCall {
+        inner: Box<dyn ToolCall>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl ToolCall for GatedReadCall {
+        fn id(&self) -> Uuid {
+            self.inner.id()
+        }
+        fn name(&self) -> &str {
+            self.inner.name()
+        }
+        fn arguments(&self) -> &serde_json::Value {
+            self.inner.arguments()
+        }
+        fn timeout_secs(&self) -> u64 {
+            10
+        }
+        fn argument_order(&self, key: &str) -> usize {
+            self.inner.argument_order(key)
+        }
+        fn non_default_redacted_arguments(&self) -> Vec<(String, serde_json::Value)> {
+            self.inner.non_default_redacted_arguments()
+        }
+        fn run(
+            self: Box<Self>,
+        ) -> BoxFuture<'static, Result<Box<dyn tools::ToolCallResult>, tools::ToolError>> {
+            Box::pin(async move {
+                self.release.notified().await;
+                self.inner.run().await
+            })
+        }
+    }
+
+    #[test]
+    fn large_read_result_is_capped_to_remaining_context_before_follow_up_request() {
         crate::test_support::run_locked(async {
             let requests = Arc::new(Mutex::new(Vec::new()));
             let request_received = Arc::new(tokio::sync::Notify::new());
@@ -4309,6 +4787,7 @@ mod tests {
                 Arc::new(ToolResultTrackingProvider {
                     requests: Arc::clone(&requests),
                     request_received: Arc::clone(&request_received),
+                    reproduce_unknown_tool_overlap: false,
                 }),
                 EngineConfig {
                     provider_connection: "tool-result-tracking".to_string(),
@@ -4347,6 +4826,7 @@ mod tests {
                     if let UiUpdate::ContextUsage {
                         estimated_tokens,
                         context_length,
+                        ..
                     } = ui_rx.recv().await.expect("agent update channel stays open")
                     {
                         break (estimated_tokens, context_length);
@@ -4390,12 +4870,22 @@ mod tests {
                 .lock()
                 .expect("request tracking lock is not poisoned")[1]
                 .clone();
+            let read_result = second_request.iter().find_map(|message| match message {
+                Message::ToolResult { value } if value.name == tools::read::ReadTool::NAME => {
+                    Some(value)
+                }
+                _ => None,
+            });
+            let read_result = read_result.expect("bounded read result remains in the model view");
+            let result_token_budget = 10_000usize
+                .saturating_sub(10_000 / 10)
+                .saturating_sub(10_000 / 20)
+                .saturating_sub(512)
+                .saturating_sub(first_context_usage.0);
             assert!(
-                !second_request.iter().any(|message| matches!(
-                    message,
-                    Message::ToolResult { value } if value.name == tools::read::ReadTool::NAME
-                )),
-                "the oversized tool result is removed before the follow-up request"
+                crate::llm::TokenEstimator::Tiktoken.estimate_tokens(&read_result.result)
+                    <= result_token_budget,
+                "read result fits its execution-time output budget"
             );
             let estimate_messages = |messages: &[Message]| {
                 let estimator = crate::llm::TokenEstimator::Tiktoken;
@@ -4412,19 +4902,11 @@ mod tests {
                 .clone();
             let initial_usage = estimate_messages(&first_request);
             let mut observed_usage = Vec::new();
-            let mut observed_synchronous_compaction_notice = false;
             while observed_usage.last().copied() != Some(expected_usage) {
                 let update = tokio::time::timeout(Duration::from_secs(3), ui_rx.recv())
                     .await
                     .expect("context usage arrives before the follow-up request")
                     .expect("agent update channel stays open");
-                if matches!(
-                    &update,
-                    UiUpdate::Notice { text, run_id: None }
-                        if text.contains("synchronously")
-                ) {
-                    observed_synchronous_compaction_notice = true;
-                }
                 if let UiUpdate::ContextUsage {
                     estimated_tokens, ..
                 } = update
@@ -4433,14 +4915,9 @@ mod tests {
                 }
             }
             assert!(
-                observed_usage.contains(&expected_usage) && expected_usage < initial_usage,
-                "footer reflects the smaller post-compaction request: before={initial_usage}, after={observed_usage:?}"
+                observed_usage.contains(&expected_usage) && expected_usage < 10_000,
+                "footer reflects the bounded follow-up request: initial={initial_usage}, after={observed_usage:?}"
             );
-            assert!(
-                observed_synchronous_compaction_notice,
-                "the UI reports the synchronous compaction before re-prompting"
-            );
-
             drop(agent_loop);
             let _ = tokio::time::timeout(Duration::from_secs(3), handle)
                 .await
@@ -4482,7 +4959,98 @@ mod tests {
     }
 
     #[test]
-    fn reports_compaction_failure_and_clears_stale_context_usage() {
+    fn reports_summary_before_synchronous_drop_in_the_same_sweep() {
+        crate::test_support::run_locked(async {
+            let (ui_tx, mut ui_rx) = mpsc::channel(8);
+            let mut context = Context::new();
+            context.push_user("old context".to_string());
+            let summary_boundary = context.messages().len();
+            context.push_user("word ".repeat(20_000));
+            context.push_user("current task".to_string());
+            let active_engine = test_engine_with_context_length(16_000);
+            let (mut compaction, _outcome_rx) = compaction::CompactionRuntime::new(
+                Some(test_engine()),
+                compaction::COMPACTION_SUMMARY_PROMPT.to_string(),
+                Duration::from_secs(compaction::DEFAULT_COMPACTION_TIMEOUT_SECS),
+            );
+            compaction.on_outcome(
+                compaction::CompactionOutcome::SummaryReady {
+                    generation: 0,
+                    boundary: summary_boundary,
+                    summary: "Earlier work.".to_string(),
+                },
+                0,
+            );
+            sweep_compaction_and_report(
+                &mut compaction,
+                &mut context,
+                active_engine.as_ref(),
+                &[],
+                0,
+                None,
+                &ui_tx,
+            )
+            .await;
+            assert!(matches!(
+                ui_rx.recv().await,
+                Some(UiUpdate::Notice { text, .. })
+                    if text.starts_with("Background context compaction completed.")
+            ));
+            assert!(matches!(
+                ui_rx.recv().await,
+                Some(UiUpdate::Notice { text, .. })
+                    if text.starts_with("Compacted context synchronously")
+            ));
+        });
+    }
+
+    #[test]
+    fn reports_background_compaction_completion_with_detail_loss_guidance() {
+        crate::test_support::run_locked(async {
+            let (ui_tx, mut ui_rx) = mpsc::channel(8);
+            let mut context = Context::new();
+            context.push_user("old context".to_string());
+            let active_engine = test_engine_with_context_length(16_000);
+            let (mut compaction, _outcome_rx) = compaction::CompactionRuntime::new(
+                Some(test_engine()),
+                compaction::COMPACTION_SUMMARY_PROMPT.to_string(),
+                Duration::from_secs(compaction::DEFAULT_COMPACTION_TIMEOUT_SECS),
+            );
+            let run_id = Some(Uuid::new_v4());
+            compaction.on_outcome(
+                compaction::CompactionOutcome::SummaryReady {
+                    generation: 0,
+                    boundary: context.messages().len(),
+                    summary: "Earlier work.".to_string(),
+                },
+                0,
+            );
+            sweep_compaction_and_report(
+                &mut compaction,
+                &mut context,
+                active_engine.as_ref(),
+                &[],
+                0,
+                run_id,
+                &ui_tx,
+            )
+            .await;
+            assert!(matches!(
+                ui_rx.recv().await,
+                Some(UiUpdate::Notice { text, run_id: notice_run_id })
+                    if notice_run_id == run_id
+                        && text.starts_with("Background context compaction completed.")
+                        && text.contains("the full transcript is preserved")
+                        && text.contains("If compaction becomes frequent")
+                        && text.contains("narrowing the task")
+                        && text.contains("concise handoff")
+                        && text.contains("repeated compaction may lose detail")
+            ));
+        });
+    }
+
+    #[test]
+    fn reports_compaction_failure_and_refreshes_model_view_usage() {
         crate::test_support::run_locked(async {
             let (ui_tx, mut ui_rx) = mpsc::channel(8);
             let mut context = Context::new();
@@ -4498,6 +5066,7 @@ mod tests {
                 .send(UiUpdate::ContextUsage {
                     estimated_tokens: 12_000,
                     context_length: 16_000,
+                    source: ContextUsageSource::SerializedRequest,
                 })
                 .await
                 .expect("seed stale usage");
@@ -4527,8 +5096,30 @@ mod tests {
                 update,
                 UiUpdate::Notice { text, run_id: None }
                     if text.contains("synchronously")
+                        && text.contains("Older context was removed from the model view")
+                        && text.contains("some details may no longer be available to the model")
+                        && text.contains("The full transcript is preserved")
             )));
-            assert!(updates.contains(&UiUpdate::ContextUsageCleared));
+            assert!(updates.iter().any(|update| matches!(
+                update,
+                UiUpdate::ContextUsage {
+                    source: ContextUsageSource::ModelView,
+                    ..
+                }
+            )));
+            let expected_usage = context.estimated_model_tokens(&[], active_engine.as_ref());
+            let refreshed_usage = updates.iter().find_map(|update| match update {
+                UiUpdate::ContextUsage {
+                    estimated_tokens,
+                    context_length,
+                    source: ContextUsageSource::ModelView,
+                } => Some((*estimated_tokens, *context_length)),
+                _ => None,
+            });
+            assert!(
+                refreshed_usage == Some((expected_usage, 16_000)),
+                "compaction reports the current model-view estimate: expected {expected_usage}"
+            );
             assert!(outcome_rx.try_recv().is_err());
         });
     }
@@ -4556,13 +5147,21 @@ mod tests {
     fn request_estimate_updates_footer_with_the_sent_request_window() {
         crate::test_support::run_locked(async {
             let (ui_tx, mut ui_rx) = mpsc::channel(1);
-            send_context_usage_estimate(&ui_tx, 46_977, 65_536, None).await;
+            send_context_usage_estimate(
+                &ui_tx,
+                46_977,
+                65_536,
+                None,
+                ContextUsageSource::SerializedRequest,
+            )
+            .await;
 
             assert!(matches!(
                 ui_rx.recv().await,
                 Some(UiUpdate::ContextUsage {
                     estimated_tokens: 46_977,
                     context_length: 65_536,
+                    source: ContextUsageSource::SerializedRequest,
                 })
             ));
         });
@@ -5756,6 +6355,19 @@ mod tests {
             collect_updates_until(&mut ui_rx, |update| matches!(update, UiUpdate::StreamDone))
                 .await;
         settle_background_tasks().await;
+        let post_compaction_usage =
+            std::iter::from_fn(|| ui_rx.try_recv().ok()).find_map(|update| match update {
+                UiUpdate::ContextUsage {
+                    estimated_tokens,
+                    context_length,
+                    source: ContextUsageSource::ModelView,
+                } => Some((estimated_tokens, context_length)),
+                _ => None,
+            });
+        assert!(
+            post_compaction_usage.is_some(),
+            "applying the background summary refreshes the footer with the model-view estimate"
+        );
 
         let requests = recorded
             .lock()
@@ -5770,7 +6382,9 @@ mod tests {
         assert!(
             matches!(
                 request.first(),
-                Some(Message::System { content }) if content == compaction::COMPACTION_SUMMARY_PROMPT
+                Some(Message::System { content })
+                    if content.starts_with(compaction::COMPACTION_SUMMARY_PROMPT)
+                        && content.contains("is the signal to produce the summary")
             ),
             "the summarizer gets its framing instruction first: {request:?}"
         );
@@ -6234,6 +6848,35 @@ mod tests {
     }
 
     #[test]
+    fn summary_boundary_advances_past_a_synchronously_dropped_prefix() {
+        let mut context = Context::new();
+        context.set_token_estimator(crate::llm::TokenEstimator::FourCharactersPerToken);
+        context.push_user("old source ".repeat(2_000));
+        context.push_assistant("old answer".to_string(), AssistantStatus::Complete);
+        let dropped_boundary = context.messages().len();
+        context.push_user("new source ".repeat(100));
+        assert!(context.drop_model_view_to(context.model_view_token_count_from(dropped_boundary)));
+        let boundary = context
+            .summary_boundary_for_target(context.model_view_token_count() - 10)
+            .expect("visible tail can be summarized");
+        assert!(boundary > dropped_boundary);
+    }
+
+    #[test]
+    fn summary_boundary_does_not_resummarize_an_empty_visible_tail() {
+        let _lock = crate::test_support::SUBSCRIBER_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut context = Context::new();
+        context.push_user("old source".to_string());
+        assert!(context.set_compaction(compaction::CompactionSnapshot {
+            boundary: context.messages().len(),
+            summary: "large summary ".repeat(100),
+        }));
+        assert_eq!(context.summary_boundary_for_target(1), None);
+    }
+
+    #[test]
     fn summary_boundary_for_target_never_cuts_a_tool_call_result_group() {
         let mut context = Context::new();
         context.set_token_estimator(crate::llm::TokenEstimator::FourCharactersPerToken);
@@ -6658,7 +7301,7 @@ mod tests {
                     )
                     .expect("write tool registered"),
             };
-            let _cancel = pending.execute(agent_tx, 0);
+            let _cancel = pending.execute(agent_tx, 0, None);
             tokio::time::timeout(Duration::from_secs(2), async {
                 while let Some((_generation, event)) = agent_rx.recv().await {
                     if matches!(event, AgentEvent::ToolDone { .. }) {
@@ -7008,6 +7651,117 @@ mod tests {
 
             // Drain the ui updates; just ensure the channel didn't panic/drop.
             while ui_rx.try_recv().is_ok() {}
+        });
+    }
+
+    #[test]
+    fn oversized_child_result_is_summarized_before_parent_context_insertion() {
+        crate::test_support::run_locked(async {
+            use crate::agent::tools::{default_registry, ToolRegistryConfig};
+            use crate::child_agent_manager::{ChildAgentManager, FinishResult};
+
+            let root_engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+                Arc::new(MockProvider::with_script(
+                    vec![MockEvent::Text("I will combine the results.".to_string())],
+                    Duration::ZERO,
+                )),
+                EngineConfig {
+                    provider_connection: "mock".to_string(),
+                    model: "root-model".to_string(),
+                    temperature: None,
+                    context_length: Some(20_000),
+                    api_base_url: None,
+                    api_key: None,
+                    reasoning: None,
+                    compact_target_ratio: 0.4,
+                    soft_compaction_threshold: 0.5,
+                    hard_compaction_threshold: 0.8,
+                },
+            ));
+            let recorded_summaries = Arc::new(Mutex::new(Vec::new()));
+            let summary_engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+                Arc::new(ScriptedSummaryProvider {
+                    recorded: Arc::clone(&recorded_summaries),
+                    fail: false,
+                }),
+                EngineConfig {
+                    provider_connection: "mock".to_string(),
+                    model: "summary-model".to_string(),
+                    temperature: None,
+                    context_length: Some(16_000),
+                    api_base_url: None,
+                    api_key: None,
+                    reasoning: None,
+                    compact_target_ratio: 0.5,
+                    soft_compaction_threshold: 0.7,
+                    hard_compaction_threshold: 0.9,
+                },
+            ));
+            let (subagent_ui_tx, _subagent_ui_rx) = mpsc::channel(8);
+            let manager = ChildAgentManager::new(
+                subagent_ui_tx,
+                Box::new(
+                    |_request, _cancel, _ui_tx| crate::child_agent_manager::SpawnOutcome {
+                        command_sender: None,
+                        handle: tokio::spawn(async {}),
+                    },
+                ),
+            );
+            let (finish_tx, finish_rx) = mpsc::channel(1);
+            let (_parent_subagent_ui_tx, parent_subagent_ui_rx) = mpsc::channel(8);
+            let (agent_loop, _ui_rx) = AgentLoop::new(
+                root_engine,
+                Arc::new(default_registry(
+                    test_sandbox(),
+                    ToolRegistryConfig::default(),
+                )),
+            );
+            let mut agent_loop = agent_loop
+                .with_child_agent_manager(manager, finish_rx, parent_subagent_ui_rx)
+                .with_compaction_engine(summary_engine);
+            let handle = agent_loop.run();
+            agent_loop
+                .send_command(AgentCommand::Prompt("Use the child findings.".to_string()))
+                .await;
+
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            finish_tx
+                .send(FinishResult {
+                    run_id: Uuid::new_v4(),
+                    call_id: Uuid::new_v4(),
+                    origin: crate::child_agent_manager::FinishResultOrigin::Agent,
+                    status: "success".to_string(),
+                    result: Some("verbose child report ".repeat(6_000)),
+                    error: None,
+                    sources: vec!["src/store.rs".to_string()],
+                })
+                .await
+                .expect("parent completion receiver remains open");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            drop(agent_loop);
+            let context = tokio::time::timeout(Duration::from_secs(2), handle)
+                .await
+                .expect("root loop stops")
+                .expect("root task joins")
+                .expect("root loop succeeds");
+
+            let completion_notice = context.messages().iter().find_map(|message| match message {
+                Message::User {
+                    content,
+                    kind: UserMessageKind::ImplicitToolNote,
+                } if content.contains("Subagent completion event") => Some(content),
+                _ => None,
+            });
+            let completion_notice = completion_notice.expect("completion event reaches parent");
+            assert!(completion_notice.contains("Decided to keep the transcript in the store."));
+            assert!(!completion_notice.contains("verbose child report"));
+            assert!(
+                !recorded_summaries
+                    .lock()
+                    .expect("summary requests")
+                    .is_empty(),
+                "oversized report is summarized before parent insertion"
+            );
         });
     }
 

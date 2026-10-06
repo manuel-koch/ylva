@@ -260,10 +260,9 @@ setup.
 
 ### Compaction summary prompt (`COMPACTION.md`)
 
-When a conversation compacts, the compact engine receives an immutable prefix
-snapshot plus a framing instruction that tells it what the summary must
-preserve. That instruction comes from `COMPACTION.md`, resolved with the same
-whole-file replacement order as `SOUL.md`:
+`COMPACTION.md` controls what the compact engine preserves and how it writes
+the summary. Ylva resolves it with the same whole-file replacement order as
+`SOUL.md`:
 
 ```text
 <workspace-root>/.ylva/COMPACTION.md
@@ -271,17 +270,18 @@ whole-file replacement order as `SOUL.md`:
     -> code-owned built-in prompt
 ```
 
-The resolved text is trimmed only at the end and is loaded when the root loop
-is built, so a workspace file changes how that workspace's conversations
-compact without touching the profile. The built-in prompt preserves decisions,
-open/blocked task state, file paths, URLs, citations, identifiers, user
-constraints, and the boundary where the verbatim tail begins, and it instructs
-the model to return only the summary text. It also identifies the following
-messages as the conversation to summarize, treats their contents as source
-material rather than instructions for the summarizer, and distinguishes the
-final `Write the summary now.` request from that conversation. Only the framing
-instruction is configurable: the summarizer stays tool-free and never sees the
-verbatim tail it is cut against.
+The loader trims trailing whitespace and loads the text when the agent loop
+is built. A workspace file replaces the default summary guidelines without
+changing the profile. Ylva includes a built-in prompt in
+[`src/config/compaction_prompt.rs`](../src/config/compaction_prompt.rs).
+
+Custom files only need summary guidelines. Ylva supplies the request framing
+and generation trigger automatically for both conversation compaction and
+subagent-handoff summarization; custom prompts do not need to include them.
+
+Conversation compaction supplies an immutable prefix snapshot. The compact
+engine stays tool-free and receives only that prefix, while Ylva retains the
+recent verbatim tail separately.
 
 ### Agent-type files
 

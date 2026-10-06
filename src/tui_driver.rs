@@ -178,19 +178,22 @@ fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
         UiUpdate::ContextUsage {
             estimated_tokens,
             context_length,
+            source,
         } => Some(DomainEvent::ContextUsage {
             estimated_tokens: *estimated_tokens,
             context_length: *context_length,
+            source: *source,
         }),
-        UiUpdate::ContextUsageCleared => Some(DomainEvent::ContextUsageCleared),
         UiUpdate::ChildContextUsage {
             run_id,
             estimated_tokens,
             context_length,
+            source,
         } => Some(DomainEvent::ChildContextUsage {
             run_id: *run_id,
             estimated_tokens: *estimated_tokens,
             context_length: *context_length,
+            source: *source,
         }),
         UiUpdate::CompactionApplied {
             entry_index,
@@ -198,6 +201,15 @@ fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
         } => Some(DomainEvent::CompactionApplied {
             entry_index: *entry_index,
             summarized_messages: *summarized_messages,
+        }),
+        UiUpdate::CompactionActivity {
+            run_id,
+            request_id,
+            active,
+        } => Some(DomainEvent::CompactionActivity {
+            run_id: *run_id,
+            request_id: *request_id,
+            active: *active,
         }),
         UiUpdate::SteerQueued { run_id } => Some(DomainEvent::SteerQueued { run_id: *run_id }),
         UiUpdate::SteerApplied { run_id } => Some(DomainEvent::SteerApplied { run_id: *run_id }),
@@ -975,10 +987,11 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
     let chat_area_rect = app.layout.chat_area.rect;
     let slash_overlay_drag = app.slash_overlay_drag_selection();
     let active_subagent_counts = app.active_subagent_counts();
-    let context_usage_text = app.active_context_usage().map(|usage| {
-        crate::tui_reducer_state::format_context_usage(usage.estimated_tokens, usage.context_length)
-    });
+    let context_usage_text = app
+        .active_context_usage()
+        .map(crate::tui_reducer_state::format_context_usage_readout);
     TuiState {
+        compacting: false,
         display_metadata: app.display_metadata,
         parent_agent_mode: agent_mode,
         agent_mode,
@@ -2241,6 +2254,7 @@ mod tests {
             &UiUpdate::ContextUsage {
                 estimated_tokens: 64_200,
                 context_length: 128_000,
+                source: crate::tui_reducer_state::ContextUsageSource::SerializedRequest,
             },
             &mut MouseDrag::default(),
             &mut NoopClipboard,
@@ -2254,6 +2268,7 @@ mod tests {
             Some(crate::tui_reducer_state::ContextUsage {
                 estimated_tokens: 64_200,
                 context_length: 128_000,
+                source: crate::tui_reducer_state::ContextUsageSource::SerializedRequest,
             }),
             "the readout is stored as reported, not pre-formatted"
         );
@@ -2273,6 +2288,7 @@ mod tests {
             &UiUpdate::ContextUsage {
                 estimated_tokens: 1_000,
                 context_length: 128_000,
+                source: crate::tui_reducer_state::ContextUsageSource::SerializedRequest,
             },
             &mut MouseDrag::default(),
             &mut NoopClipboard,
@@ -2284,6 +2300,7 @@ mod tests {
             Some(crate::tui_reducer_state::ContextUsage {
                 estimated_tokens: 1_000,
                 context_length: 128_000,
+                source: crate::tui_reducer_state::ContextUsageSource::SerializedRequest,
             })
         );
         assert_eq!(state.mode, TuiMode::Streaming, "the mode is untouched");
@@ -2303,6 +2320,7 @@ mod tests {
         state.context_usage = Some(crate::tui_reducer_state::ContextUsage {
             estimated_tokens: 12_000,
             context_length: 128_000,
+            source: crate::tui_reducer_state::ContextUsageSource::SerializedRequest,
         });
         state.switch_to_child_view(run_id);
 
@@ -2310,6 +2328,7 @@ mod tests {
             run_id,
             estimated_tokens: 4_000,
             context_length: 32_000,
+            source: crate::tui_reducer_state::ContextUsageSource::ModelView,
         })
         .expect("child usage update maps to a domain event");
         presenter::update(
@@ -2323,6 +2342,7 @@ mod tests {
             Some(crate::tui_reducer_state::ContextUsage {
                 estimated_tokens: 12_000,
                 context_length: 128_000,
+                source: crate::tui_reducer_state::ContextUsageSource::SerializedRequest,
             }),
             "child usage must not replace the root readout"
         );
@@ -2331,6 +2351,7 @@ mod tests {
             Some(crate::tui_reducer_state::ContextUsage {
                 estimated_tokens: 4_000,
                 context_length: 32_000,
+                source: crate::tui_reducer_state::ContextUsageSource::ModelView,
             }),
             "the active child view selects its own readout"
         );

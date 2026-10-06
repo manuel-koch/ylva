@@ -31,3 +31,24 @@
       Strange behaviour happens even when the input field doesn't use scroll bar.
       Clicking or selecting text in last line of input-field doesn't work as expected.
       It alwas seems to affect the first line instead.
+
+- [x] LLM keeps "thinking" after spawning many subagents. Thinks about whether the
+      subagent results will come in and when, just keeps thinking about the issue !?
+      See tests/e2e/custom/logs/tui_20261006163112.log
+      ```text
+      ....
+      I’ve completed everything else, and now it looks like I just need to take care of the child results, write
+      what’s necessary, and run a lint check. That seems straightforward! I want to ensure all aspects are
+      polished and tidy before considering anything done. So, the final steps will be to check these little
+      details to make sure everything is functioning properly. I’m on the right path! Considering task completion
+
+      I'm thinking that the child tasks might be getting blocked because only one agent is currently running,
+      while the others are queued up. It seems like the first task needs to be completed before the second can
+      start, which is a serial process. Since there have already been 12 completions over time, it looks like the
+      remaining 7 should be coming up soon. I’ll keep an eye on how things progress!▊
+
+      I’m considering whether there might be a bug in the harness that's causing events not to release properly.
+      It’s a bit frustrating, but all I can really do is wait and see how it unfolds. The developer has advised
+      against status polling, which feels like a good thing since it can be counterproductive. I’ll just have to
+      be patient and rely on the updates.▊
+      ```

@@ -84,6 +84,10 @@ the opt-in `cross_filesystem` rule that matches paths on a different
 filesystem (device) than the workspace root — see
 [Sandbox (tool-approval rules)](./configuration.md#sandbox-tool-approval-rules).
 
+Unknown tool names return per-call errors to the model without interrupting
+other calls in the batch. The next model request starts only after the batch's
+known tools have completed, including any pending user approval.
+
 Tool status lines render as `[tool] <title> …` (e.g. `[tool] Read docs/features.md [limit=32]`);
 bracketed props come from the tool's title arguments ranked by schema field
 order, so a labeled `bash` call renders `[tool] Bash echo hi [label=Greet the user]`.
@@ -168,8 +172,12 @@ without losing anything the user can still read.
   not reproduce provider-side request processing or the selected model's
   tokenizer, so it is not the serving model's actual input-token count. It
   updates when each request starts and remains the last request's estimate
-  until another request is sent. With `YLVA_TOKEN_USAGE_DUMP_PATH` set, Ylva
-  appends a metadata-only JSONL record with the same local estimate, a UTC
+  until another request is sent. After compaction applies a summary or drops
+  context, the footer switches to the refreshed model-view estimate (including
+  active tool definitions) until another request starts. The footer shows the
+  token count and percentage without an estimate-source label. With
+  `YLVA_TOKEN_USAGE_DUMP_PATH` set, Ylva appends a metadata-only JSONL record
+  with the same local estimate, a UTC
   timestamp, its session ID when available, and any provider-reported
   prompt/input count received for that request. The provider count reflects
   serving-side accounting when available. Neither estimate is billed usage.
@@ -182,7 +190,19 @@ without losing anything the user can still read.
   `soft_compaction_threshold` (default `0.7` of the effective context
   window), a background summary of the oldest prefix is started; it is
   applied at the next safe boundary — a turn boundary with an empty serial
-  tool queue. After a tool-use round finishes, Ylva also checks the updated
+  tool queue. Subsequent summaries advance past the current visible-tail
+  boundary; already summarized or synchronously dropped messages do not count
+  toward the tokens to remove. An empty visible tail cannot start another
+  summary. While a summary request is in flight, the visible conversation's
+  footer independently adds `· Compacting…` to its normal agent state (for
+  example, `Idle · Compacting…`); input and idle behavior remain unchanged.
+  A failed, timed-out, or cancelled request clears the indicator immediately
+  — there is nothing left to apply. A successful request instead keeps the
+  indicator active until its summary is actually applied at the next safe
+  boundary, so the footer never implies completion before the model view has
+  changed; clearing the conversation also clears it immediately. Root and
+  child indicators are scoped separately.
+  After a tool-use round finishes, Ylva also checks the updated
   context and compacts before sending its follow-up request. Above
   `hard_compaction_threshold` (default `0.9`), or after a
   failed or timed-out summary, the model view is instead dropped
@@ -192,10 +212,17 @@ without losing anything the user can still read.
   out background summaries report their failure in the transcript; a timeout
   also appends a `[failure]` line with the reason to the matching response dump
   when request dumping is enabled. A successful summary reports completion,
-  and applied or dropped context clears the footer's stale serialized-request
-  estimate until the next model request starts. The TUI also adds a transcript
+  and applied or dropped context replaces the footer's stale serialized-request
+  estimate with a refreshed model-view estimate. Completion notices explain
+  that the transcript is preserved and repeated compaction may lose detail,
+  suggesting a narrower task or a new conversation with a concise handoff
+  if compaction becomes frequent. Synchronous-drop notices explicitly warn
+  that removed context may no longer be available to the model.
+  The TUI also adds a transcript
   notice when background compaction starts and when synchronous compaction
-  drops context. Compaction logs
+  drops context. When a sweep applies a background summary and then drops
+  more context synchronously, the notices appear in that same operation order.
+  Compaction logs
   report each sweep's estimated model-view tokens, active window, usage ratio,
   thresholds, and chosen action, plus estimated tokens before and after a
   summary or synchronous drop, signed estimated token savings (which can be
@@ -204,19 +231,12 @@ without losing anything the user can still read.
   request estimate, active window, and ratio; compaction sweep logs include
   their separate model-view estimate. These are local estimates, not
   provider-reported usage or billed tokens.
-- **Summary generation.** The configured `[compaction].engine` (resolved to
-  `default_engine`) answers a tool-free request framed by the loaded
-  [`COMPACTION.md`](./configuration.md#compaction-summary-prompt-compactionmd)
-  instruction: it must preserve decisions, open work, file paths, identifiers,
-  user constraints, and where the verbatim tail begins. The built-in framing
-  instruction marks subsequent messages as source conversation, not additional
-  instructions, and excludes the final `Write the summary now.` request from
-  the material being summarized. The summary's wall-clock timeout comes from
-  `[compaction].timeout_sec` (default `60` seconds), independent of the engine
-  serving the conversation being compacted. See
-  [engine configuration](./configuration.md#engine-configuration) for the
-  setting and example. Agent types can override engine and timeout separately
-  under `[agents.<type>.compaction]`.
+- **Summary generation.** Compaction summarizes earlier conversation to reduce
+  model context while retaining the information needed to continue the work.
+  Summary guidelines can be customized through
+  [`COMPACTION.md`](./configuration.md#compaction-summary-prompt-compactionmd).
+  See [engine configuration](./configuration.md#engine-configuration) for
+  engine and timeout settings.
 - **Scope.** Root and child agent contexts compact independently using the
   settings resolved for their agent type. Children wait for pending summaries
   before reporting completion and resume work after compaction changes their
@@ -228,9 +248,10 @@ without losing anything the user can still read.
 - **In the TUI.** The transcript keeps every message and shows a
   `── compaction · N messages summarized ──` divider at the boundary (both
   on replay and when a summary is applied live), and the footer's
-  key-hints row right-aligns the latest serialized-request readout
-  (`64.2K (45%)`). It is cleared after a compaction changes the model view
-  until the next request estimate arrives.
+  key-hints row right-aligns the latest usage readout (`64.2K (45%)`).
+  Compaction refreshes it immediately from the compacted
+  model view; the next request replaces it with that serialized request's
+  estimate.
 
 ## TUI Runtime
 
@@ -374,6 +395,18 @@ attachments) are exempt, because a truncated image or PDF is unusable and
 `media_type` is only recognized for complete files. An exempt whole file is
 still limited to 8388608 bytes (8 MiB): a larger complete media file fails
 with an explicit size error instead of being truncated or loaded unbounded.
+At execution time, Ylva also supplies a token allowance derived from the
+current model view, tool definitions, context window, and response/safety
+reserves. The effective output ceiling is the stricter of that runtime
+allowance, the per-call `limit`, and existing byte caps; it is advisory
+`cl100k_base` accounting. A complete binary media result that exceeds the
+allowance fails with a retry hint rather than being corrupted by truncation.
+The `read file` debug event records full-source `source_size_bytes` and
+`source_lines` alongside `raw_selected_bytes`/`raw_selected_lines` after the
+tool's byte cap. The later `read result size` event records
+`returned_bytes`/`returned_lines` after the runtime token cap, plus the
+truncation flag. Source line counts are unavailable for binary reads and
+partial byte ranges.
 Continue a capped read with `offset`/`limit`. Reads auto-approve when the sandbox abstains; a path
 outside the workspace or with a dot-prefixed component requires user
 approval instead. Any explicit verdict from a configured `[tools.read]`
@@ -457,6 +490,10 @@ sum of the other two fields, plus a boolean `truncated`. `truncated` is `false` 
 matching paths are returned and `true` when `limit` omits additional paths; it does not report
 an omission count. Optional `only_count` returns no paths and exposes the same counts; the result
 text retains the matching total.
+At execution time, Ylva supplies a token allowance derived from the current
+model view, tool definitions, context window, and response/safety reserves. Returned paths
+obey both this runtime allowance and the call's `limit`; truncation is reported
+in result metadata. This uses advisory `cl100k_base` estimates.
 CLI/TUI summaries use a tool-provided display projection: `glob` omits zero-valued `files` and
 `directories` and `truncated=false`. It omits `total` when either type count is zero, because
 the total is then inferable, except that an empty result displays `total=0`; the complete
@@ -509,7 +546,12 @@ entry per occurrence, ignoring context lines, like `grep -o`. `files_with_matche
 `only_matches` are mutually exclusive. Result paths mirror the form of the input: a
 relative `path` argument produces relative result paths; an absolute argument produces
 absolute result paths. Output is capped at 1000 whole output lines (`truncated` field
-present in result metadata when capped). Paths inside the
+present in result metadata when capped). Ylva also supplies an execution-time
+token allowance derived from the current model view, tool definitions, context
+window, and response/safety reserves; the effective cap is the stricter of
+this allowance and existing line/byte caps. This uses advisory `cl100k_base`
+estimates.
+Paths inside the
 workspace are auto-approved; paths outside require user approval.
 
 ### `web_search`
@@ -665,11 +707,14 @@ streaming/running tools in the background:
   specific child's transcript. `Esc` (with an empty draft) navigates back to
   the root conversation.
 - Spawning a child never switches your view automatically — you stay on
-  whatever you were looking at. The view only auto-switches to a child when
-  that specific child pauses for its own tool approval or clarify question,
-  so you don't miss an interactive prompt from a backgrounded child; it
-  auto-returns afterward only if the switch itself was automatic (a manual
-  drill-in is never yanked away).
+  whatever you were looking at. The view only auto-switches when a tool
+  approval or clarify question actually pauses for input, and it always
+  switches to wherever that pause lives — the root conversation, the
+  pausing subagent's own transcript, or a *different* subagent's transcript
+  than the one you're currently drilled into — so an approval is never
+  stranded behind an unrelated conversation; it auto-returns afterward only
+  if the switch itself was automatic (a manual drill-in is never yanked
+  away).
 - While viewing a child's transcript, a header above it shows the original
   `spawn_subagent` bubble (task/label/agent type) so context isn't lost.
   Completed child bubbles highlight `status=failure` in red in both the root
@@ -721,7 +766,8 @@ module structure (model/presenter/view/driver split).
   view-only entry: it is never sent to the model and never seeds input
   history. See the [resume contract](persistence.md#resume-contract) for how
   the model view and the transcript stay separate.
-- **Context-usage readout:** the key-hints row right-aligns the local estimate
+- **Context-usage readout:** the key-hints row (or tool-approval button row)
+  right-aligns the local estimate
   of the latest serialized model request against the active context window —
   e.g. `64.2K (45%)`. It updates as each request starts, before the provider
   responds. A resumed session has no latest request estimate until it sends

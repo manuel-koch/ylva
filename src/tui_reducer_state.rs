@@ -33,6 +33,7 @@ use crossterm::event::KeyEvent;
 use ratatui::layout::Rect;
 use uuid::Uuid;
 
+pub use crate::agent::ContextUsageSource;
 use crate::agent::{AgentMode, AssistantStatus, Message, UserMessageKind};
 use crate::llm::engine::{EngineDisplayInfo, ProviderModelOption};
 use crate::llm::InputModality;
@@ -964,6 +965,11 @@ pub enum InputEvent {
 /// calling `presenter::update()`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DomainEvent {
+    CompactionActivity {
+        run_id: Option<Uuid>,
+        request_id: Uuid,
+        active: bool,
+    },
     /// Provider started streaming (first token / acknowledgement).
     StreamStarted,
     /// A text chunk arrived from the provider.
@@ -1075,12 +1081,13 @@ pub enum DomainEvent {
         text: String,
         is_thinking: bool,
     },
-    /// The child run's model-view estimate against its own active context
-    /// window. See `UiUpdate::ChildContextUsage`.
+    /// The child run's estimate against its own active context window. See
+    /// `UiUpdate::ChildContextUsage` for the estimate source.
     ChildContextUsage {
         run_id: Uuid,
         estimated_tokens: usize,
         context_length: usize,
+        source: ContextUsageSource,
     },
     /// The child agent run identified by `run_id` has finished.
     /// See `UiUpdate::ChildAgentDone`.
@@ -1095,14 +1102,13 @@ pub enum DomainEvent {
     /// (see `AppState::last_bubble_click`). A no-op if a second click (or a
     /// click on a different bubble) already resolved/cleared it first.
     BubbleClickWindowExpired,
-    /// The model view's estimated size against the active context window;
-    /// see [`ContextUsage`] and `UiUpdate::ContextUsage`.
+    /// Estimated size against the active context window; see [`ContextUsage`]
+    /// and `UiUpdate::ContextUsage` for the estimate source.
     ContextUsage {
         estimated_tokens: usize,
         context_length: usize,
+        source: ContextUsageSource,
     },
-    /// The model view changed after its last serialized-request estimate.
-    ContextUsageCleared,
     /// A compaction snapshot was applied this run; see
     /// `UiUpdate::CompactionApplied` and [`ChatEntry::CompactionMarker`].
     CompactionApplied {
@@ -1117,6 +1123,7 @@ impl DomainEvent {
     /// logging stays cheap and never leaks tool output into the log.
     pub(crate) fn kind(&self) -> &'static str {
         match self {
+            DomainEvent::CompactionActivity { .. } => "CompactionActivity",
             DomainEvent::StreamStarted => "StreamStarted",
             DomainEvent::StreamChunk(_) => "StreamChunk",
             DomainEvent::StreamDone => "StreamDone",
@@ -1141,7 +1148,6 @@ impl DomainEvent {
             DomainEvent::ChildAgentDone { .. } => "ChildAgentDone",
             DomainEvent::BubbleClickWindowExpired => "BubbleClickWindowExpired",
             DomainEvent::ContextUsage { .. } => "ContextUsage",
-            DomainEvent::ContextUsageCleared => "ContextUsageCleared",
             DomainEvent::CompactionApplied { .. } => "CompactionApplied",
         }
     }
@@ -1287,18 +1293,18 @@ fn format_input_modality_markers(input_modalities: Option<&[InputModality]>) -> 
     }
 }
 
-/// The model view's estimated size against the active context window, as
-/// reported by `UiUpdate::ContextUsage`.
+/// Estimated context size against the active context window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContextUsage {
-    /// Estimated tokens of the model view (the same advisory estimate
-    /// compaction budgets with).
+    /// Estimated token count.
     pub estimated_tokens: usize,
     /// The active window the estimate is measured against.
     pub context_length: usize,
+    /// The representation this estimate covers.
+    pub source: ContextUsageSource,
 }
 
-/// Render a context-usage readout for the footer, e.g. `64.2K (45%)`.
+/// Render the token count and fill percentage for a context-usage estimate.
 ///
 /// The percentage is the estimate's fill of the active window, rounded to a
 /// whole percent and clamped to `100%` (an estimate can overshoot briefly
@@ -1315,6 +1321,11 @@ pub fn format_context_usage(estimated_tokens: usize, context_length: usize) -> S
         "{} ({percentage}%)",
         format_token_estimate(estimated_tokens)
     )
+}
+
+/// Format the footer value independently of the estimate source.
+pub fn format_context_usage_readout(context_usage: ContextUsage) -> String {
+    format_context_usage(context_usage.estimated_tokens, context_usage.context_length)
 }
 
 /// Abbreviate a token estimate: `950`, `64.2K`, `1.2M`.
@@ -1873,6 +1884,8 @@ pub struct AppState {
     /// marker lands where the model view was cut. `None` when the session
     /// never compacted or its snapshot predates the field.
     pub replay_compaction_boundary: Option<usize>,
+    /// In-flight summary request identity per conversation, not agent activity.
+    pub compaction_requests: std::collections::HashMap<Option<Uuid>, Uuid>,
 
     // ── transient UI ────────────────────────────────────────────────────────
     /// Floating notification, auto-dismissed after [`TOAST_DURATION`].
@@ -1933,19 +1946,19 @@ pub struct AppState {
     /// `child_conversations`). Populated on `ChildAgentStarted`, cleared on
     /// `ChildAgentDone`.
     pub running_child: Option<ChildRunInfo>,
-    /// `true` when `active_view` was switched to `Child` automatically (an
-    /// interactive pause), rather than by explicit user navigation (click).
-    /// Gates whether the view auto-returns to
-    /// `pre_pause_view`/`Root` once that pause resolves or the child
-    /// finishes.
+    /// `true` when `active_view` was switched automatically (an interactive
+    /// pause — `note_interactive_pause`), to `Child` *or* `Root`, rather than
+    /// by explicit user navigation (click/Esc). Gates whether the view
+    /// auto-returns to `pre_pause_view` once that pause resolves or the
+    /// owning child finishes.
     pub auto_switched_to_child: bool,
     /// Snapshot of `active_view` from immediately before an auto-switch
-    /// (`note_child_interactive_pause`), so `resolve_possible_child_pause`
+    /// (`note_interactive_pause`), so `resolve_possible_interactive_pause`
     /// can restore *that* view — which may be `Root` or a different,
     /// already-finished child's view the user had manually drilled into —
     /// instead of unconditionally landing back on `Root`. Populated only by
-    /// `note_child_interactive_pause`, consumed (taken) by
-    /// `resolve_possible_child_pause`.
+    /// `note_interactive_pause`, consumed (taken) by
+    /// `resolve_possible_interactive_pause`.
     pub pre_pause_view: Option<ConversationView>,
     /// `(bubble_id, clicked_at)` of the most recent plain click on a chat
     /// bubble's title row, used to detect a second click on the same
@@ -2001,6 +2014,7 @@ impl AppState {
             engine_display: EngineDisplayInfo::default(),
             context_usage: None,
             replay_compaction_boundary: None,
+            compaction_requests: std::collections::HashMap::new(),
 
             chat_entries: Vec::new(),
             turn_buffer: TurnBuffer::default(),
@@ -2228,66 +2242,72 @@ impl AppState {
     }
 
     /// Called whenever a `ToolPending`/`ClarifyPending` bubble tagged with
-    /// `run_id` is created. When it belongs to the currently-*running*
-    /// child and the user isn't already looking at that exact child's view,
-    /// auto-switches `active_view` to it (armed for auto-return via
-    /// `auto_switched_to_child`), snapshotting whatever view was active
-    /// beforehand into `pre_pause_view` so `resolve_possible_child_pause`
-    /// can restore it — this may be `Root` *or* a different (e.g. already
-    /// finished) child's drill-in view the user had manually navigated to;
-    /// an approval belonging to a background child must never get stranded
-    /// behind whatever transcript happens to be on screen. If the user is
-    /// already viewing this exact running child (manually or via an earlier
-    /// auto-switch), no further switch/re-arm happens — if `active_view` is
-    /// already `Child`, `auto_switched_to_child` is set to `false` (the user
-    /// navigated manually; no auto-return).
-    pub(crate) fn note_child_interactive_pause(&mut self, run_id: Option<Uuid>) {
-        let Some(child) = self.running_child.clone() else {
-            return;
+    /// `run_id` is created. Auto-switches `active_view` to wherever this
+    /// bubble actually lives — the root conversation when `run_id` is `None`
+    /// or unrecognised, or that specific child's transcript when `run_id`
+    /// identifies a tracked child — regardless of which conversation (root
+    /// or any other subagent) is currently on screen, so an approval is
+    /// never stranded behind an unrelated transcript. Armed for auto-return
+    /// via `auto_switched_to_child`, snapshotting whatever view was active
+    /// beforehand into `pre_pause_view` so `resolve_possible_interactive_pause`
+    /// can restore it exactly. If the user is already looking at the view
+    /// this bubble belongs to (manually or via an earlier auto-switch), no
+    /// further switch/re-arm happens — `auto_switched_to_child` is reset to
+    /// `false` (the user is there on their own terms; no auto-return).
+    pub(crate) fn note_interactive_pause(&mut self, run_id: Option<Uuid>) {
+        let target_view = match run_id.and_then(|id| self.child_conversations.get(&id)) {
+            Some(conversation) => ConversationView::Child {
+                run_id: conversation.info.run_id,
+                agent_type: conversation.info.agent_type.clone(),
+                task: conversation.info.task.clone(),
+                label: conversation.info.label.clone(),
+            },
+            None => ConversationView::Root,
         };
-        if run_id != Some(child.run_id) {
-            return;
-        }
-        let already_viewing_this_child = matches!(
-            &self.active_view,
-            ConversationView::Child { run_id: r, .. } if *r == child.run_id
-        );
-        if already_viewing_this_child {
+        let already_viewing_target = match (&self.active_view, &target_view) {
+            (ConversationView::Root, ConversationView::Root) => true,
+            (
+                ConversationView::Child { run_id: a, .. },
+                ConversationView::Child { run_id: b, .. },
+            ) => a == b,
+            _ => false,
+        };
+        if already_viewing_target {
             self.auto_switched_to_child = false;
             return;
         }
         self.pre_pause_view = Some(self.active_view.clone());
-        self.active_view = ConversationView::Child {
-            run_id: child.run_id,
-            agent_type: child.agent_type,
-            task: child.task,
-            label: child.label,
-        };
+        self.active_view = target_view;
         self.auto_switched_to_child = true;
     }
 
     /// Called whenever a tool/clarify bubble identified by `id` reaches a
-    /// terminal state (or is denied). If `id` lives in the child transcript
-    /// currently being viewed and the drill-in view was auto-switched there
-    /// for it, auto-returns to whatever view was active before the
-    /// auto-switch (`pre_pause_view` — `Root` or a different child's view),
-    /// falling back to `Root` if none was recorded — matches Phase 6.10
-    /// step 74: "When child interactive pause resolves: auto-return to
-    /// `Root` only if `auto_switched_to_child` is `true`."
-    pub(crate) fn resolve_possible_child_pause(&mut self, id: Uuid) {
+    /// terminal state (or is denied). If `id` lives in whichever transcript
+    /// is currently being viewed (root or a child) and the drill-in view
+    /// was auto-switched there for it, auto-returns to whatever view was
+    /// active before the auto-switch (`pre_pause_view` — `Root` or a
+    /// different child's view), falling back to `Root` if none was
+    /// recorded — matches Phase 6.10 step 74: "When child interactive pause
+    /// resolves: auto-return to `Root` only if `auto_switched_to_child` is
+    /// `true`," generalized to cover an auto-switch into `Root` for a
+    /// root-owned approval as well.
+    pub(crate) fn resolve_possible_interactive_pause(&mut self, id: Uuid) {
         if !self.auto_switched_to_child {
             return;
         }
-        let ConversationView::Child { run_id, .. } = &self.active_view else {
-            return;
-        };
-        let run_id = *run_id;
-        let was_child_pause = self.child_conversations.get(&run_id).is_some_and(|conversation| {
-            conversation.messages.iter().any(
+        let bubble_is_in_current_view = match &self.active_view {
+            ConversationView::Root => self.chat_entries.iter().any(
                 |entry| matches!(entry, ChatEntry::ToolBubble { id: entry_id, .. } if *entry_id == id),
-            )
-        });
-        if was_child_pause {
+            ),
+            ConversationView::Child { run_id, .. } => {
+                self.child_conversations.get(run_id).is_some_and(|conversation| {
+                    conversation.messages.iter().any(
+                        |entry| matches!(entry, ChatEntry::ToolBubble { id: entry_id, .. } if *entry_id == id),
+                    )
+                })
+            }
+        };
+        if bubble_is_in_current_view {
             self.active_view = self.pre_pause_view.take().unwrap_or(ConversationView::Root);
             self.auto_switched_to_child = false;
         }
@@ -2453,7 +2473,7 @@ impl AppState {
     /// child — new messages/tool bubbles can shift row indices at or below
     /// the saved offset, landing it past the target bubble otherwise.
     /// `saved_root_scroll`/`saved_root_scroll_bubble` are `None` when the
-    /// child view was entered via auto-switch (`note_child_interactive_pause`)
+    /// child view was entered via auto-switch (`note_interactive_pause`)
     /// rather than manual navigation; in that case the shared scroll fields
     /// were never touched, so there is nothing to restore.
     pub fn switch_to_root_view(&mut self) {
@@ -2478,6 +2498,7 @@ impl AppState {
     /// the agent loop owns those and resets them on `AgentCommand::ClearContext`
     /// (blueprint §4C).
     pub fn clear_conversation(&mut self) {
+        self.compaction_requests.clear();
         self.chat_entries.clear();
         self.turn_buffer = TurnBuffer::default();
         self.queued_steer_texts.clear();
@@ -3251,7 +3272,7 @@ impl AppState {
             self.focus = Focus::MainInput;
             self.mode = TuiMode::Idle;
         }
-        self.resolve_possible_child_pause(id);
+        self.resolve_possible_interactive_pause(id);
     }
 
     /// Create a `Denied` bubble for a tool that was auto-denied by the sandbox
@@ -3320,7 +3341,7 @@ impl AppState {
                 title_arguments: preserved_title_arguments,
             };
         }
-        self.resolve_possible_child_pause(id);
+        self.resolve_possible_interactive_pause(id);
     }
 }
 
@@ -3415,6 +3436,22 @@ mod tests {
     #[test]
     fn context_usage_formats_as_tokens_and_fill_percentage() {
         assert_eq!(format_context_usage(64_200, 128_000), "64.2K (50%)");
+        assert_eq!(
+            format_context_usage_readout(ContextUsage {
+                estimated_tokens: 9_854,
+                context_length: 98_304,
+                source: ContextUsageSource::ModelView,
+            }),
+            "9.9K (10%)"
+        );
+        assert_eq!(
+            format_context_usage_readout(ContextUsage {
+                estimated_tokens: 64_200,
+                context_length: 128_000,
+                source: ContextUsageSource::SerializedRequest,
+            }),
+            "64.2K (50%)"
+        );
         assert_eq!(format_context_usage(950, 128_000), "950 (1%)");
         assert_eq!(format_context_usage(1_260_000, 2_000_000), "1.3M (63%)");
         assert_eq!(format_context_usage(0, 128_000), "0 (0%)");
@@ -4881,7 +4918,7 @@ mod tests {
 
     #[test]
     fn switch_to_root_view_is_a_no_op_on_scroll_when_child_was_auto_switched() {
-        // `note_child_interactive_pause` auto-switches into the child view
+        // `note_interactive_pause` auto-switches into the child view
         // without going through `switch_to_child_view`, so it never
         // populates `saved_root_scroll`. The scroll fields it leaves behind
         // belong to whatever was on screen while viewing `Root` and must be

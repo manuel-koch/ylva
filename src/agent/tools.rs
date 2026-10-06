@@ -273,6 +273,10 @@ pub trait ToolCall: Send + Sync {
     fn arguments(&self) -> &serde_json::Value;
     fn timeout_secs(&self) -> u64;
 
+    /// Supply a runtime token ceiling for model-facing output. Tools that
+    /// collect potentially large output may combine this with argument limits.
+    fn set_runtime_output_token_limit(&mut self, _max_output_tokens: Option<usize>) {}
+
     /// Returns `true` when `key` names an argument whose value belongs in a
     /// content section rather than an inline invocation summary.
     fn is_body_argument(&self, _key: &str) -> bool {

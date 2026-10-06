@@ -1,8 +1,9 @@
-default_engine = "ollama/local"
+#default_engine = "ollama/local"
+default_engine = "openrouter-dense"
 
 [compaction]
 #engine = "ollama/local"
-timeout_sec = 180
+timeout_sec = 600
 
 [provider_connections.ollama-local]
 provider = "ollama"
@@ -46,8 +47,9 @@ reasoning = "max"
 
 [engines.openrouter-dense]
 provider_connection = "openrouter"
-model = "xiaomi/mimo-v2.6-flash"
+model = "openai/gpt-6-luna"
 context_length = "96kb"
+reasoning = "max"
 
 [agents.local-discovery]
 description = "An agent that can perform read-only discovery tasks in workspace solely using builtin tools and a local AI-Model."

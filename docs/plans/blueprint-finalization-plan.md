@@ -35,8 +35,9 @@ The decisions for this plan are:
   home then workspace like `SOUL.md`, falling back to the built-in prompt when
   neither exists.
 - Show the estimated serialized-request size and its fill of the active
-  window in the footer (`64.2K (45%)`). Compaction retains its separate
-  model-view estimate. Cost and billing totals stay deferred.
+  window in the footer (`64.2K (45%)`). After compaction changes the
+  model view, show its separate estimate (`9.9K (10%)`) until another
+  request starts. Cost and billing totals stay deferred.
 - Compact root and child agent contexts with their resolved compaction settings.
   Do not add a manual `/compact` command.
 - Add per-agent `max_tool_iterations`, default `50`, used by root and child
@@ -188,7 +189,8 @@ later session.
    - [x] Add loader tests for workspace override, home fallback, built-in
          fallback, and a prompt whose text reaches `build_summary_request`.
 
-7. [x] Show the model-view context usage in the TUI footer.
+7. [x] Show context usage in the TUI footer, identifying request and
+       post-compaction model-view estimates separately.
    - [x] Emit the estimated serialized request token count and its fill of the
          active window as `UiUpdate::ContextUsage` when each request starts,
          map it through `DomainEvent::ContextUsage` to

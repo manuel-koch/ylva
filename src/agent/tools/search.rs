@@ -61,7 +61,7 @@ static SEARCH_DESCRIPTION: LazyLock<String> = LazyLock::new(|| {
         searched files. `files_with_matches: true` returns only file paths. `only_matches: true` \
         returns only matched substrings, like `grep -o`. `files_with_matches`/`only_matches` are \
         mutually exclusive. The `path` argument accepts `~` and `$ENVVAR`/`${{ENVVAR}}` tokens; \
-        they are expanded before use.",
+         they are expanded before use.",
         SEARCH_OUTPUT_LIMIT_BYTES
     )
 });
@@ -125,6 +125,78 @@ pub struct SearchResult {
     pub files_with_matches: bool,
     /// Pre-formatted text for the LLM.
     text: String,
+}
+
+impl SearchResult {
+    fn truncate_to_token_budget(&mut self, max_output_tokens: usize) {
+        if crate::llm::TokenEstimator::Tiktoken.estimate_tokens(&self.text) <= max_output_tokens {
+            return;
+        }
+        let estimator = crate::llm::TokenEstimator::Tiktoken;
+        let mut sections = Vec::new();
+        let mut output_lines = Vec::new();
+        let mut used_tokens = 0usize;
+        'sections: for section in &self.sections {
+            let mut retained_lines = Vec::new();
+            if self.files_with_matches {
+                let separator_tokens = usize::from(!output_lines.is_empty());
+                let remaining = max_output_tokens.saturating_sub(used_tokens + separator_tokens);
+                let (file_path, line_truncated) = estimator.truncate(&section.file_path, remaining);
+                if file_path.is_empty() {
+                    break;
+                }
+                let cost = estimator.estimate_tokens(&file_path) + separator_tokens;
+                used_tokens += cost;
+                output_lines.push(file_path.clone());
+                sections.push(SearchResultSection {
+                    file_path,
+                    file_extension: None,
+                    lines: vec![],
+                });
+                if line_truncated {
+                    break;
+                }
+                continue;
+            }
+            for mut line in section.lines.iter().cloned() {
+                let prefix = if line.is_match {
+                    format!("{}:{}: ", section.file_path, line.line_number)
+                } else {
+                    format!("{}-{}- ", section.file_path, line.line_number)
+                };
+                let separator_tokens = usize::from(!output_lines.is_empty());
+                let remaining = max_output_tokens.saturating_sub(used_tokens + separator_tokens);
+                let prefix_tokens = estimator.estimate_tokens(&prefix);
+                if prefix_tokens >= remaining {
+                    break 'sections;
+                }
+                let content_budget = remaining.saturating_sub(prefix_tokens);
+                let (content, line_truncated) = estimator.truncate(&line.content, content_budget);
+                if content.is_empty() {
+                    break 'sections;
+                }
+                line.content = content;
+                let rendered = format!("{prefix}{}", line.content);
+                let cost = estimator.estimate_tokens(&rendered) + separator_tokens;
+                used_tokens += cost;
+                output_lines.push(rendered);
+                retained_lines.push(line);
+                if line_truncated {
+                    break 'sections;
+                }
+            }
+            if !retained_lines.is_empty() {
+                sections.push(SearchResultSection {
+                    file_path: section.file_path.clone(),
+                    file_extension: section.file_extension.clone(),
+                    lines: retained_lines,
+                });
+            }
+        }
+        self.text = output_lines.join("\n");
+        self.sections = sections;
+        self.truncated = true;
+    }
 }
 
 impl SearchResult {
@@ -222,6 +294,7 @@ pub struct SearchCall {
     id: uuid::Uuid,
     raw_arguments: Value,
     timeout_secs: u64,
+    runtime_output_token_limit: Option<usize>,
 }
 
 impl ToolCall for SearchCall {
@@ -244,6 +317,9 @@ impl ToolCall for SearchCall {
     fn timeout_secs(&self) -> u64 {
         self.timeout_secs
     }
+    fn set_runtime_output_token_limit(&mut self, max_output_tokens: Option<usize>) {
+        self.runtime_output_token_limit = max_output_tokens;
+    }
 
     fn non_default_redacted_arguments(&self) -> Vec<(String, Value)> {
         self.raw_arguments
@@ -258,15 +334,18 @@ impl ToolCall for SearchCall {
         self: Box<Self>,
     ) -> futures::future::BoxFuture<'static, Result<Box<dyn ToolCallResult>, ToolError>> {
         let serialized = serde_json::to_string(&self.raw_arguments).unwrap_or_default();
+        let runtime_output_token_limit = self.runtime_output_token_limit;
         let span = tracing::info_span!("tool_args", args = %serialized);
         Box::pin(
             async move {
                 let args = serde_json::from_value::<SearchInputArgs>(self.raw_arguments).map_err(
                     |error| ToolError::failed("search", format!("invalid arguments: {error}")),
                 )?;
-                search_files(args)
-                    .await
-                    .map(|result| -> Box<dyn ToolCallResult> { Box::new(result) })
+                let mut result = search_files(args).await?;
+                if let Some(max_output_tokens) = runtime_output_token_limit {
+                    result.truncate_to_token_budget(max_output_tokens);
+                }
+                Ok(Box::new(result) as Box<dyn ToolCallResult>)
             }
             .instrument(span),
         )
@@ -372,6 +451,7 @@ impl Tool for SearchTool {
             id,
             raw_arguments: arguments,
             timeout_secs: self.timeout_secs(),
+            runtime_output_token_limit: None,
         })
     }
 }
@@ -975,6 +1055,28 @@ mod tests {
                 result.sections[0].file_path,
                 file_path.display().to_string()
             );
+        });
+    }
+
+    #[test]
+    fn runtime_token_budget_caps_search_results_and_marks_them_truncated() {
+        crate::test_support::run_locked(async {
+            let dir = TempDir::new().expect("tempdir");
+            std::fs::write(
+                dir.path().join("results.txt"),
+                "needle alpha\nneedle beta\n",
+            )
+            .expect("write fixture");
+            let mut call = SearchTool::default().create_call(
+                uuid::Uuid::new_v4(),
+                json!({"pattern":"needle", "path":dir.path().display().to_string()}),
+            );
+            call.set_runtime_output_token_limit(Some(3));
+
+            let result = call.run().await.expect("search result");
+
+            assert!(crate::llm::TokenEstimator::Tiktoken.estimate_tokens(&result.text()) <= 3);
+            assert_eq!(result.metadata().expect("metadata")["truncated"], true);
         });
     }
 

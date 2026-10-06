@@ -27,12 +27,17 @@ Environment-discovered engine sets use the same validation path.
 `COMPACTION.md` resolves through the same layers as `SOUL.md` (workspace
 `.ylva/`, then the Ylva home, then the built-in default) via
 `load_compaction_prompt`. `AgentFactory` loads it where it wires each agent
-type's compact engine, and that framing instruction reaches every background
+type's compact engine, and those summary guidelines reach every background
 summary request; loops built outside the factory keep the built-in prompt. The
-request places the framing instruction in a system message, followed by the
-immutable prefix and a final user trigger. The built-in instruction calls out
-those message boundaries so source conversation text is not mistaken for new
-summarizer instructions.
+`build_summary_request` appends code-owned framing to the resolved guidelines
+in one system message, followed by the source messages and a final user trigger.
+Conversation compaction and subagent-handoff summarization share this builder.
+The framing derives its trigger description from the same constant as the final
+user message and calls out message boundaries so source text is not mistaken for new
+summarizer instructions. Positive compaction guidelines prioritize the latest
+established state, merge repetition, and preserve actionable details and
+uncertainty. The prompt requests only facts grounded in the supplied prefix;
+the boundary of the unseen verbatim tail is managed by the runtime.
 
 ## Engine and provider runtime configuration
 
@@ -97,6 +102,14 @@ re-prompts when the per-turn iteration budget permits. No tool execution,
 approval bubble, or per-call failure bubble is created for the rejected batch.
 The per-response limit is separate from `max_tool_iterations`, which counts
 rounds after tool execution completes.
+
+Unknown tool names are resolved synchronously in the `ToolCall` handler, after
+the assistant's full batch has entered `Context` and before the serial queue
+starts. They must not enqueue `AgentEvent::ToolError`: that completion path clears
+the active tool's cancellation token and advances the queue, so an unrelated
+registry failure could start overlapping requests and let one stream's
+completion reset another stream's pending approval to idle. An all-unknown batch
+counts as one completed tool-use iteration.
 
 ## Binary result projection
 
@@ -183,6 +196,11 @@ added. This treats the JSON representation as text; it does not simulate
 provider-side request processing or the model's tokenizer. The transport calls
 the agent's estimate callback before waiting for the response, so the TUI footer
 follows the latest request even when the provider takes a long time to respond.
+When a compaction summary or synchronous drop changes the model view, the outer
+loop emits a fresh model-view estimate with the active tool definitions and
+context window until a later request estimate replaces it. `ContextUsageSource`
+retains the estimate source internally; the footer displays only the token
+count and percentage.
 The same local estimate is paired with usage-only SSE chunks
 (`usage.prompt_tokens` or `usage.input_tokens`) from that request. Each request
 gets a correlation ID; the optional
@@ -210,6 +228,25 @@ type's compact engine. The summary deadline is read from `[compaction]` after
 resolving any agent-type override, not from the compact engine's own model settings. It
 default to 60 seconds and is validated as positive.
 
+The summary task emits a scoped `UiUpdate::CompactionActivity` start update with
+a unique request ID. The presenter retains in-flight IDs per root/child
+conversation and projects only the visible conversation's activity into the
+footer's `· Compacting` suffix. This does not change `AgentMode`, input
+routing, or idle behavior. A failure or timeout clears activity as soon as
+`CompactionRuntime::on_outcome` records it — there is nothing left to apply.
+A success instead leaves activity active until `CompactionRuntime::sweep`
+reaches a safe boundary and actually applies (or fails to apply) the pending
+snapshot, so the indicator never implies completion before the model view has
+changed. Stop and clear abort the task and clear activity immediately;
+request IDs prevent a late completion from clearing a newer request's
+indicator.
+
+`Context::summary_boundary_for_target` counts removable tokens from
+`model_view_start`, not from the retained transcript's oldest entry. Every
+new summary boundary therefore advances past the already summarized or
+synchronously dropped prefix. With no visible tail it returns `None`, avoiding
+repeated summary requests whose snapshots cannot advance the model view.
+
 `[agents.<type>.compaction]` overrides the profile engine and timeout
 independently. `AgentFactory::build` resolves these settings for both roots and
 children. A child that goes idle waits for its in-flight summary; after a
@@ -229,7 +266,8 @@ Each serialized-request estimate logs `estimated_input_tokens`,
 compaction sweep logs its model-view estimate, active window, `target_tokens`,
 the configured thresholds, whether a summary is in flight, and the selected
 `CompactionAction` — including `None`. These separate DEBUG events show the
-footer request estimate and the compaction budget evaluation.
+footer request estimate and the compaction budget evaluation. The post-change
+model-view estimate is also sent to the footer after compaction.
 
 Persistence: `StoreEvent::Compaction` carries the live `boundary` the context
 restore uses plus the `transcript_boundary` the TUI positions its marker
@@ -240,11 +278,32 @@ inserted either at replay (`AppState::replay_messages`) or live
 (`DomainEvent::CompactionApplied`, deduplicated by boundary).
 The sweep reports background-summary starts, completion, summary failure, and
 synchronous prefix drops as `UiUpdate::Notice`; the TUI displays each notice in
-the transcript. A `ContextUsageCleared` update invalidates the latest request
-estimate when a summary or drop changes the model view. The OpenAI-compatible
-provider binds a request-scoped failure callback to that request's response
-dump, allowing caller-side compaction timeouts to append their reason even
-after the streaming future has been dropped.
+the transcript. Completion notices include conditional guidance for frequent
+compaction and its potential detail loss; synchronous-drop notices distinguish
+removed model context from the preserved transcript. A compaction update replaces the stale serialized-request
+estimate with a model-view estimate scoped to the root or child run. The
+OpenAI-compatible provider binds a request-scoped failure callback to that
+request's response dump, allowing caller-side compaction timeouts to append
+their reason even after the streaming future has been dropped.
+
+Before `read`, `search`, or `glob` executes, the outer loop calculates an
+execution-time result allowance from the current model-view estimate, active
+tool definitions, context window, and reserves for the response and safety
+margin, with a small allowance for transport metadata. Each tool combines it
+with its call arguments and existing byte/line caps while collecting output.
+The `read file` DEBUG event logs full-source byte/line counts separately from
+raw selected-content counts after the byte cap; the later `read result size`
+event reports the returned-content counts after the runtime token cap. Source
+line count is unavailable for binary reads and partial byte ranges.
+
+Child completion events are checked against the parent's current model view at
+delivery time, after applying any ready parent compaction when idle. An oversized
+child report is summarized through the parent's configured compaction engine,
+with the original task and briefing as expected-deliverable context. Only the
+parent-facing event result is replaced; child persistence and the drill-in bubble
+keep the complete report. The completion event marks whether its result was
+summarized. If summarization fails or still exceeds budget, Ylva uses a bounded
+prefix as a fallback.
 
 ## Session cloning
 
@@ -284,10 +343,15 @@ assume execution is sequential. `ChildAgentManager` forwards token updates but
 consumes subagent stream lifecycle events so they cannot change the root TUI
 mode.
 
-For a pending tool or clarify update tagged with the running subagent's
-`run_id`, the TUI saves the current view before switching and restores it when
-the pause resolves. It skips the switch if that subagent's view is already
-open, so a manual drill-in does not trigger an automatic return.
+For a pending tool or clarify update tagged with `run_id`, `AppState::
+note_interactive_pause` always switches `active_view` to wherever that bubble
+actually lives — the root transcript when `run_id` is `None`/unrecognised, or
+that specific child's transcript otherwise — regardless of which conversation
+(root or a different, possibly already-finished, subagent) is currently on
+screen. It saves the current view into `pre_pause_view` before switching and
+`resolve_possible_interactive_pause` restores it once the pause resolves. It
+skips the switch if the owning view is already open, so a manual drill-in does
+not trigger an automatic return.
 See [features](./features.md#drill-in-tui-conversation-view) for the visible
 behavior.
 

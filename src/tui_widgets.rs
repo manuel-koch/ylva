@@ -2722,6 +2722,9 @@ fn draw_normal_footer(
         hint.to_string()
     } else {
         let mut row_1_text = format!(" {spinner_prefix}{mode_word}");
+        if state.compacting {
+            row_1_text.push_str(" · Compacting…");
+        }
         if let Some(active_subagent_label) =
             active_subagent_footer_label(state.active_subagent_counts)
         {
@@ -2781,17 +2784,7 @@ fn draw_footer_hints(
     hints: &[FooterHint],
     context_usage_text: Option<&str>,
 ) {
-    let usage_width = context_usage_text
-        .map(|usage| usage.chars().count() as u16 + 1)
-        .unwrap_or(0);
-    let has_room_for_both = usage_width > 0 && area.width > usage_width + 8;
-    let (hints_area, usage_area) = if has_room_for_both {
-        let [hints_area, usage_area] =
-            Layout::horizontal([Constraint::Min(0), Constraint::Length(usage_width)]).areas(area);
-        (hints_area, Some(usage_area))
-    } else {
-        (area, None)
-    };
+    let hints_area = draw_footer_context_usage(frame, area, context_usage_text, 9);
 
     let normal_style = Style::default().fg(MUTED_TEXT_COLOR);
     let key_style = normal_style.add_modifier(Modifier::BOLD);
@@ -2812,14 +2805,32 @@ fn draw_footer_hints(
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), hints_area);
+}
 
-    if let (Some(usage_area), Some(usage)) = (usage_area, context_usage_text) {
+fn draw_footer_context_usage(
+    frame: &mut Frame,
+    area: Rect,
+    context_usage_text: Option<&str>,
+    minimum_controls_width: u16,
+) -> Rect {
+    if let Some(usage) = context_usage_text {
+        let usage_width = usage.chars().count() as u16 + 1;
+        if area.width < usage_width.saturating_add(minimum_controls_width) {
+            return area;
+        }
+        let [controls_area, usage_area] =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(usage_width)]).areas(area);
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(format!(" {usage}"), normal_style)))
-                .alignment(Alignment::Right),
+            Paragraph::new(Line::styled(
+                format!(" {usage}"),
+                Style::default().fg(MUTED_TEXT_COLOR),
+            ))
+            .alignment(Alignment::Right),
             usage_area,
         );
+        return controls_area;
     }
+    area
 }
 
 /// Draw the slash-command overlay as a floating panel whose bottom edge sits
@@ -3230,13 +3241,19 @@ fn draw_approval_footer(
     };
     let approve_width = approve_label.chars().count() as u16;
     let deny_width = deny_label.chars().count() as u16;
+    let controls_area = draw_footer_context_usage(
+        frame,
+        row_2,
+        state.context_usage_text.as_deref(),
+        1 + approve_width + 2 + deny_width,
+    );
 
     // Indent buttons by 1 char so they align with the leading space of the
     // approval title above.
     let [_, buttons_area] = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(1), Constraint::Fill(1)])
-        .areas(row_2);
+        .areas(controls_area);
     let [approve_area, _, deny_area] = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([

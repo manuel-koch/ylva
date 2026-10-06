@@ -1219,6 +1219,93 @@ fn compaction_marker_renders_between_the_summarized_and_the_verbatim_turns() {
 }
 
 #[test]
+fn footer_shows_compacting_independently_of_agent_mode() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::{tui_widgets, AgentMode, TuiState};
+
+    for agent_mode in [AgentMode::Idle, AgentMode::Streaming] {
+        for compacting in [false, true] {
+            let mut terminal = Terminal::new(TestBackend::new(100, 20)).expect("terminal");
+            let mut state = TuiState {
+                agent_mode,
+                compacting,
+                ..TuiState::new()
+            };
+            terminal
+                .draw(|frame| {
+                    tui_widgets::draw(
+                        frame,
+                        &mut state,
+                        &mut TextArea::default(),
+                        None,
+                        None,
+                        &ylva::ToolRegistry::new(),
+                    );
+                })
+                .expect("draw");
+            let buffer = terminal.backend().buffer();
+            let rendered: String = (0..20u16)
+                .flat_map(|row| (0..100u16).map(move |column| (column, row)))
+                .map(|position| buffer.cell(position).unwrap().symbol())
+                .collect();
+            assert_eq!(rendered.contains("Compacting…"), compacting);
+            assert_eq!(state.agent_mode, agent_mode);
+        }
+    }
+}
+
+#[test]
+fn approval_footer_keeps_context_usage_beside_buttons() {
+    use ratatui_textarea::TextArea;
+    use ylva::tui_widgets;
+    use ylva::TuiState;
+
+    for is_subagent in [false, true] {
+        for denial_reason in ["", "Do not execute this"] {
+            let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
+            let mut state = TuiState {
+                context_usage_text: Some("64.2K (45%)".to_string()),
+                pending_approval: Some((
+                    uuid::Uuid::new_v4(),
+                    "bash".to_string(),
+                    serde_json::json!({"command": "echo hello"}),
+                )),
+                pending_approval_is_subagent: is_subagent,
+                ..TuiState::new()
+            };
+            let mut textarea = TextArea::default();
+            textarea.insert_str(denial_reason);
+            let mut buttons = None;
+            terminal
+                .draw(|frame| {
+                    buttons = tui_widgets::draw(
+                        frame,
+                        &mut state,
+                        &mut textarea,
+                        None,
+                        None,
+                        &ylva::ToolRegistry::new(),
+                    );
+                })
+                .expect("draw");
+            let buttons = buttons.expect("approval buttons");
+            let buffer = terminal.backend().buffer();
+            let line: String = (0..80)
+                .map(|column| buffer.cell((column, buttons.approve.y)).unwrap().symbol())
+                .collect();
+            assert!(
+                line.ends_with("64.2K (45%)"),
+                "approval row must retain the right-aligned readout: {line:?}"
+            );
+            assert!(line.contains("Approve") && line.contains("Deny"));
+            assert!(buttons.deny.right() <= 80 - "64.2K (45%)".len() as u16);
+        }
+    }
+}
+
+#[test]
 fn footer_shows_the_model_view_readout_right_aligned_on_the_hint_row() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -1267,7 +1354,7 @@ fn footer_shows_the_model_view_readout_right_aligned_on_the_hint_row() {
 
     assert!(
         line.contains("64.2K (45%)"),
-        "the hint row carries the model-view readout: {line:?}"
+        "the hint row carries the context readout: {line:?}"
     );
     assert!(
         line.starts_with(' ') && line.contains("enter send"),
@@ -1288,6 +1375,45 @@ fn footer_shows_the_model_view_readout_right_aligned_on_the_hint_row() {
         !line.contains("enter send   64.2K"),
         "hints and readout must not run together: {line:?}"
     );
+}
+
+#[test]
+fn narrow_approval_footer_preserves_buttons_without_context_usage() {
+    use ratatui_textarea::TextArea;
+    use ylva::tui_widgets;
+    use ylva::TuiState;
+
+    let mut terminal = Terminal::new(TestBackend::new(50, 20)).expect("terminal");
+    let mut state = TuiState {
+        context_usage_text: Some("64.2K (45%)".to_string()),
+        pending_approval: Some((
+            uuid::Uuid::new_v4(),
+            "bash".to_string(),
+            serde_json::json!({"command": "echo hello"}),
+        )),
+        ..TuiState::new()
+    };
+    let mut textarea = TextArea::default();
+    terminal
+        .draw(|frame| {
+            let buttons = tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            )
+            .expect("approval buttons");
+            assert!(buttons.deny.right() <= 50);
+        })
+        .expect("draw");
+    let buffer = terminal.backend().buffer();
+    let rendered: String = (0..20)
+        .flat_map(|row| (0..50).map(move |column| buffer.cell((column, row)).unwrap().symbol()))
+        .collect();
+    assert!(!rendered.contains("64.2K (45%)"), "{rendered:?}");
+    assert!(rendered.contains("Approve (enter)") && rendered.contains("Deny (esc)"));
 }
 
 #[test]

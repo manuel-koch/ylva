@@ -115,9 +115,10 @@ approval is required.
 **Token estimate**:
 An approximate token count produced locally with `tiktoken-rs` `cl100k_base`.
 The compaction budget estimates the model view and active tool definitions;
-the TUI footer applies `cl100k_base` to the serialized JSON request body sent
-by OpenAI-compatible providers. This counts that body as text. It does not
-reproduce the provider's request processing or the selected model's tokenizer.
+the TUI footer shows the serialized JSON request-body estimate during requests
+and the model-view estimate after compaction changes the view. Serialized-body
+estimates count that body as text. Neither estimate reproduces provider request
+processing or the selected model's tokenizer.
 An opt-in per-request diagnostic dump records this local estimate beside any
 provider-reported prompt/input token count observed on the same request. The
 provider count reflects the serving side's accounting when available. Local

@@ -46,6 +46,41 @@ impl TokenEstimator {
             Self::FourCharactersPerToken => text.chars().count().div_ceil(4),
         }
     }
+
+    /// Keep the longest UTF-8 prefix whose estimate fits `max_tokens`.
+    pub fn truncate(&self, text: &str, max_tokens: usize) -> (String, bool) {
+        truncate_text_to_token_budget(*self, text, max_tokens)
+    }
+}
+
+/// Keep the longest UTF-8 prefix of `text` whose local estimate does not
+/// exceed `max_tokens`. The returned boolean says whether content was cut.
+pub fn truncate_text_to_token_budget(
+    estimator: TokenEstimator,
+    text: &str,
+    max_tokens: usize,
+) -> (String, bool) {
+    if estimator.estimate_tokens(text) <= max_tokens {
+        return (text.to_string(), false);
+    }
+    if max_tokens == 0 || text.is_empty() {
+        return (String::new(), !text.is_empty());
+    }
+
+    let mut boundaries: Vec<usize> = text.char_indices().map(|(index, _)| index).collect();
+    boundaries.push(text.len());
+    let mut low = 0usize;
+    let mut high = boundaries.len() - 1;
+    while low < high {
+        let middle = low + (high - low).div_ceil(2);
+        let boundary = boundaries[middle];
+        if estimator.estimate_tokens(&text[..boundary]) <= max_tokens {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    (text[..boundaries[low]].to_string(), true)
 }
 
 #[cfg(test)]
@@ -97,5 +132,18 @@ mod tests {
                 "cached counts must be reproducible: {estimator:?}"
             );
         }
+    }
+
+    #[test]
+    fn token_budget_truncation_preserves_utf8_and_respects_the_limit() {
+        let text = "αβγδεζηθικλμνξοπρστυφχψω";
+        let estimator = TokenEstimator::Tiktoken;
+        let budget = 3;
+
+        let (truncated, was_truncated) = truncate_text_to_token_budget(estimator, text, budget);
+
+        assert!(was_truncated);
+        assert!(text.starts_with(&truncated));
+        assert!(estimator.estimate_tokens(&truncated) <= budget);
     }
 }

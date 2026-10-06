@@ -171,14 +171,58 @@ pub struct GlobResult {
     pub matches: GlobMatchCounts,
     /// `true` when `limit` omitted additional matching paths.
     pub truncated: bool,
+    matched_path_kinds: Vec<GlobPathKind>,
 }
 
 impl GlobResult {
-    fn new(matched_paths: Vec<String>, matches: GlobMatchCounts, truncated: bool) -> Self {
+    fn new(
+        matched_paths: Vec<String>,
+        matched_path_kinds: Vec<GlobPathKind>,
+        matches: GlobMatchCounts,
+        truncated: bool,
+    ) -> Self {
         GlobResult {
             matched_paths,
+            matched_path_kinds,
             matches,
             truncated,
+        }
+    }
+
+    fn truncate_to_token_budget(&mut self, max_output_tokens: usize) {
+        let estimator = crate::llm::TokenEstimator::Tiktoken;
+        let mut retained_paths = Vec::new();
+        let mut used_tokens = 0usize;
+        for path in &self.matched_paths {
+            let separator_tokens = usize::from(!retained_paths.is_empty());
+            let remaining = max_output_tokens.saturating_sub(used_tokens + separator_tokens);
+            let (path_prefix, truncated_path) = estimator.truncate(path, remaining);
+            if path_prefix.is_empty() {
+                break;
+            }
+            let cost = estimator.estimate_tokens(&path_prefix) + separator_tokens;
+            used_tokens += cost;
+            retained_paths.push(path_prefix);
+            if truncated_path {
+                break;
+            }
+        }
+        if retained_paths.len() < self.matched_paths.len()
+            || retained_paths
+                .iter()
+                .zip(&self.matched_paths)
+                .any(|(left, right)| left != right)
+        {
+            self.truncated = true;
+            self.matched_paths = retained_paths;
+            self.matched_path_kinds.truncate(self.matched_paths.len());
+            self.matches = self.matched_path_kinds.iter().fold(
+                GlobMatchCounts::default(),
+                |mut counts, path_kind| {
+                    counts.add_path_kind(*path_kind);
+                    counts
+                },
+            );
         }
     }
 }
@@ -247,6 +291,7 @@ pub struct GlobCall {
     id: uuid::Uuid,
     raw_arguments: serde_json::Value,
     timeout_secs: u64,
+    runtime_output_token_limit: Option<usize>,
 }
 
 impl ToolCall for GlobCall {
@@ -261,6 +306,9 @@ impl ToolCall for GlobCall {
     }
     fn timeout_secs(&self) -> u64 {
         self.timeout_secs
+    }
+    fn set_runtime_output_token_limit(&mut self, max_output_tokens: Option<usize>) {
+        self.runtime_output_token_limit = max_output_tokens;
     }
     fn argument_order(&self, key: &str) -> usize {
         GlobTool::default().argument_order(key)
@@ -280,15 +328,18 @@ impl ToolCall for GlobCall {
         self: Box<Self>,
     ) -> futures::future::BoxFuture<'static, Result<Box<dyn ToolCallResult>, ToolError>> {
         let serialized = serde_json::to_string(&self.raw_arguments).unwrap_or_default();
+        let runtime_output_token_limit = self.runtime_output_token_limit;
         let span = tracing::info_span!("tool_args", args = %serialized);
         Box::pin(
             async move {
                 let args = serde_json::from_value::<GlobInputArgs>(self.raw_arguments).map_err(
                     |error| ToolError::failed("glob", format!("invalid arguments: {error}")),
                 )?;
-                glob_files(&args)
-                    .await
-                    .map(|o| -> Box<dyn ToolCallResult> { Box::new(o) })
+                let mut result = glob_files(&args).await?;
+                if let Some(max_output_tokens) = runtime_output_token_limit {
+                    result.truncate_to_token_budget(max_output_tokens);
+                }
+                Ok(Box::new(result) as Box<dyn ToolCallResult>)
             }
             .instrument(span),
         )
@@ -354,7 +405,7 @@ impl Tool for GlobTool {
         flat `files`, `directories`, and `total` counts plus a boolean `truncated`, which is \
         `false` when all matching paths are returned and `true` when `limit` omits additional \
         paths. The `pattern` argument accepts `~` and `$ENVVAR`/`${ENVVAR}` tokens; they are \
-        expanded before use."
+        expanded before use. Use the optional `limit` to keep large result sets manageable."
     }
 
     fn input_schema(&self) -> RootSchema {
@@ -429,6 +480,7 @@ impl Tool for GlobTool {
             id,
             raw_arguments: arguments,
             timeout_secs: self.timeout_secs(),
+            runtime_output_token_limit: None,
         })
     }
 }
@@ -592,16 +644,23 @@ async fn glob_files(args: &GlobInputArgs) -> Result<GlobResult, ToolError> {
 
     let mut matches = GlobMatchCounts::default();
     let mut matched_paths = Vec::with_capacity(selected_candidates.len());
+    let mut matched_path_kinds = Vec::with_capacity(selected_candidates.len());
     for candidate in selected_candidates {
         matches.add_path_kind(candidate.path_kind);
         matched_paths.push(candidate.path.display().to_string());
+        matched_path_kinds.push(candidate.path_kind);
     }
 
     if args.only_count {
         matched_paths.clear();
     }
     tracing::debug!(matches = matches.total, truncated, "glob searched");
-    Ok(GlobResult::new(matched_paths, matches, truncated))
+    Ok(GlobResult::new(
+        matched_paths,
+        matched_path_kinds,
+        matches,
+        truncated,
+    ))
 }
 
 #[cfg(test)]
@@ -884,7 +943,7 @@ mod tests {
 
     #[test]
     fn glob_display_summary_omits_default_attributes() {
-        let empty_result = GlobResult::new(vec![], path_counts(0, 0), false);
+        let empty_result = GlobResult::new(vec![], vec![], path_counts(0, 0), false);
         assert_eq!(
             empty_result.display_summary(),
             vec![("total".to_string(), "0".to_string())]
@@ -894,13 +953,13 @@ mod tests {
         assert_eq!(empty_metadata["directories"], json!(0));
         assert_eq!(empty_metadata["truncated"], json!(false));
 
-        let files_result = GlobResult::new(vec![], path_counts(2, 0), false);
+        let files_result = GlobResult::new(vec![], vec![], path_counts(2, 0), false);
         assert_eq!(
             files_result.display_summary(),
             vec![("files".to_string(), "2".to_string())]
         );
 
-        let directories_result = GlobResult::new(vec![], path_counts(0, 3), true);
+        let directories_result = GlobResult::new(vec![], vec![], path_counts(0, 3), true);
         assert_eq!(
             directories_result.display_summary(),
             vec![
@@ -909,7 +968,7 @@ mod tests {
             ]
         );
 
-        let mixed_result = GlobResult::new(vec![], path_counts(2, 3), false);
+        let mixed_result = GlobResult::new(vec![], vec![], path_counts(2, 3), false);
         assert_eq!(
             mixed_result.display_summary(),
             vec![
@@ -1173,13 +1232,45 @@ mod tests {
 
     #[test]
     fn glob_result_content_sections_empty_and_nonempty() {
-        let empty_result = GlobResult::new(vec![], path_counts(0, 0), false);
+        let empty_result = GlobResult::new(vec![], vec![], path_counts(0, 0), false);
         assert!(empty_result.content_sections().is_empty());
 
-        let result = GlobResult::new(vec!["src/main.rs".to_string()], path_counts(1, 0), false);
+        let result = GlobResult::new(
+            vec!["src/main.rs".to_string()],
+            vec![GlobPathKind::File],
+            path_counts(1, 0),
+            false,
+        );
         let sections = result.content_sections();
         assert_eq!(sections.len(), 1);
         assert!(matches!(sections[0], super::Section::Content(_)));
+    }
+
+    #[test]
+    fn runtime_token_budget_caps_glob_results_and_marks_them_truncated() {
+        crate::test_support::run_locked(async {
+            let directory = TempDir::new().expect("tempdir");
+            for name in [
+                "alpha-long-name.txt",
+                "beta-long-name.txt",
+                "gamma-long-name.txt",
+            ] {
+                std::fs::write(directory.path().join(name), "fixture").expect("write fixture");
+            }
+            let mut call = GlobTool::default().create_call(
+                uuid::Uuid::new_v4(),
+                json!({
+                    "pattern": format!("{}/*.txt", directory.path().display()),
+                    "git_ignore": false
+                }),
+            );
+            call.set_runtime_output_token_limit(Some(3));
+
+            let result = call.run().await.expect("glob result");
+
+            assert!(crate::llm::TokenEstimator::Tiktoken.estimate_tokens(&result.text()) <= 3);
+            assert_eq!(result.metadata().expect("metadata")["truncated"], true);
+        });
     }
 
     #[test]
