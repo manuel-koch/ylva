@@ -177,6 +177,23 @@ pub struct EngineDisplayInfo {
     pub model: String,
     /// Explicit reasoning effort, or `None` when the provider default is used.
     pub reasoning_effort: Option<String>,
+    /// Current summary-engine identity and whether it follows or shares the
+    /// conversation engine.
+    pub compaction_engine: Option<CompactionEngineDisplayInfo>,
+    /// Whether this conversation shares an Engine runtime with its parent agent.
+    pub inherits_parent_runtime: bool,
+}
+
+/// Display-only selection and context window of the engine used for summaries.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CompactionEngineDisplayInfo {
+    pub engine_name: String,
+    pub provider_connection: String,
+    pub model: String,
+    /// Effective context window in tokens.
+    pub context_length: usize,
+    pub follows_conversation: bool,
+    pub shares_conversation: bool,
 }
 
 impl EngineDisplayInfo {
@@ -188,6 +205,8 @@ impl EngineDisplayInfo {
             provider_connection: config.provider_connection,
             model: config.model,
             reasoning_effort: engine.reasoning_effort(),
+            compaction_engine: None,
+            inherits_parent_runtime: false,
         }
     }
 }
@@ -199,6 +218,8 @@ impl From<&EngineConfig> for EngineDisplayInfo {
             provider_connection: config.provider_connection.clone(),
             model: config.model.clone(),
             reasoning_effort: None,
+            compaction_engine: None,
+            inherits_parent_runtime: false,
         }
     }
 }
@@ -257,8 +278,9 @@ fn parse_context_length(text: &str) -> Result<usize, String> {
 /// Mutable engine settings shared by an [`Engine`] and its [`Provider`].
 ///
 /// A provider snapshots this value before starting a request, so all
-/// request-level settings come from one coherent state even when a runtime
-/// update happens concurrently. Connection settings remain in [`EngineConfig`]
+/// request-level settings come from one coherent state even when an Engine
+/// Engine runtime update happens concurrently. Connection settings remain in
+/// [`EngineConfig`]
 /// and are immutable for the lifetime of the engine.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EngineRuntimeConfig {
@@ -304,7 +326,64 @@ pub struct ProviderModelOption {
     pub reasoning_effort: Option<String>,
 }
 
-/// Runtime abstraction over a chat-completions-style streaming backend.
+/// How a named-engine shortcut should treat the engine's current reasoning
+/// setting.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReasoningEffortChange {
+    /// Keep the named engine's current Engine runtime effort.
+    Unchanged,
+    /// Apply the picker value, where `None` selects the provider default.
+    Set(Option<String>),
+}
+
+/// A model-picker selection that keeps named-engine identity separate from
+/// raw provider/model catalog choices.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ModelSelection {
+    NamedEngine {
+        engine_name: String,
+        option: ProviderModelOption,
+        reasoning_effort: ReasoningEffortChange,
+    },
+    ProviderModel(ProviderModelOption),
+}
+
+impl ModelSelection {
+    pub fn provider_connection(&self) -> &str {
+        match self {
+            Self::NamedEngine { option, .. } | Self::ProviderModel(option) => {
+                &option.provider_connection
+            }
+        }
+    }
+
+    pub fn model_id(&self) -> &str {
+        match self {
+            Self::NamedEngine { option, .. } | Self::ProviderModel(option) => &option.model.id,
+        }
+    }
+}
+
+/// Non-mutating routing result and effective context window for a model-picker
+/// selection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelSelectionTarget {
+    pub engine_name: Option<String>,
+    pub provider_connection: String,
+    pub model: String,
+    /// Effective context window after applying the selection, in tokens.
+    pub context_length: usize,
+}
+
+/// Engine runtime settings displayed for one named engine.
+#[derive(Clone, Debug)]
+pub struct NamedEngineInfo {
+    pub name: String,
+    pub config: EngineConfig,
+    pub reasoning_effort: Option<String>,
+}
+
+/// Execution interface over a chat-completions-style streaming backend.
 ///
 /// Keeps `AgentLoop` independent of concrete provider implementations while
 /// allowing the agent factory to construct root and child engines consistently.
@@ -411,6 +490,22 @@ pub trait Engine: Send + Sync {
         Vec::new()
     }
 
+    /// Return named engines with their current Engine runtime reasoning selection.
+    ///
+    /// Non-routed engines may expose configured engine snapshots through
+    /// `named_engines`; their initial configured effort is the best available
+    /// fallback. Routers override this to report each engine's live value.
+    fn named_engine_info(&self) -> Vec<NamedEngineInfo> {
+        self.named_engines()
+            .into_iter()
+            .map(|(name, config)| NamedEngineInfo {
+                reasoning_effort: config.reasoning.clone(),
+                name,
+                config,
+            })
+            .collect()
+    }
+
     /// Point this engine — and therefore every agent sharing it — at
     /// `model` for all subsequent turns.
     fn switch_model(&self, model: &str) -> anyhow::Result<()>;
@@ -511,6 +606,113 @@ pub trait Engine: Send + Sync {
         self.adopt_catalog_context_length(option.model.context_length);
         Ok(())
     }
+
+    /// Apply a picker selection. Named shortcuts activate the exact existing
+    /// engine; raw catalog options retain provider-based routing.
+    fn select_model(&self, selection: &ModelSelection) -> anyhow::Result<()> {
+        match selection {
+            ModelSelection::ProviderModel(option) => self.switch_model_option(option),
+            ModelSelection::NamedEngine {
+                engine_name,
+                option,
+                reasoning_effort,
+            } => {
+                anyhow::ensure!(
+                    self.active_engine_name().as_deref() == Some(engine_name),
+                    "engine '{engine_name}' is not available for named selection"
+                );
+                validate_named_engine_option(&self.config(), option, reasoning_effort)?;
+                if let ReasoningEffortChange::Set(reasoning_effort) = reasoning_effort {
+                    self.set_reasoning_effort(reasoning_effort.as_deref())?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Resolve the exact engine a picker selection would affect without
+    /// changing Engine runtime state. The router overrides this for cross-connection
+    /// catalog selections and inactive named-engine shortcuts.
+    fn preview_model_selection(
+        &self,
+        selection: &ModelSelection,
+    ) -> anyhow::Result<ModelSelectionTarget> {
+        let config = self.config();
+        let engine_name = match selection {
+            ModelSelection::NamedEngine {
+                engine_name,
+                option,
+                reasoning_effort,
+            } => {
+                anyhow::ensure!(
+                    self.active_engine_name().as_deref() == Some(engine_name),
+                    "engine '{engine_name}' is not available for named selection"
+                );
+                validate_named_engine_option(&config, option, reasoning_effort)?;
+                Some(engine_name.clone())
+            }
+            ModelSelection::ProviderModel(option) => {
+                anyhow::ensure!(
+                    config.provider_connection == option.provider_connection,
+                    "engine uses provider connection '{}', not '{}'",
+                    config.provider_connection,
+                    option.provider_connection
+                );
+                self.active_engine_name()
+            }
+        };
+        let context_length = match selection {
+            ModelSelection::NamedEngine { .. } => self.effective_context_length(),
+            ModelSelection::ProviderModel(option) => config
+                .context_length
+                .or(option.model.context_length)
+                .unwrap_or_else(|| self.effective_context_length()),
+        };
+        Ok(ModelSelectionTarget {
+            engine_name,
+            provider_connection: selection.provider_connection().to_string(),
+            model: selection.model_id().to_string(),
+            context_length,
+        })
+    }
+}
+
+fn validate_named_engine_option(
+    config: &EngineConfig,
+    option: &ProviderModelOption,
+    reasoning_effort: &ReasoningEffortChange,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        config.provider_connection == option.provider_connection,
+        "engine uses provider connection '{}', not '{}'",
+        config.provider_connection,
+        option.provider_connection
+    );
+    anyhow::ensure!(
+        config.model == option.model.id,
+        "engine uses model '{}', not '{}'",
+        config.model,
+        option.model.id
+    );
+    match reasoning_effort {
+        ReasoningEffortChange::Unchanged => {}
+        ReasoningEffortChange::Set(Some(effort)) => anyhow::ensure!(
+            option.model.advertises_reasoning_effort(effort),
+            "model '{}' does not advertise reasoning effort '{}'",
+            option.model.id,
+            effort
+        ),
+        ReasoningEffortChange::Set(None) => anyhow::ensure!(
+            option
+                .model
+                .reasoning_efforts
+                .as_ref()
+                .is_some_and(|efforts| !efforts.is_empty()),
+            "model '{}' does not advertise selectable reasoning efforts",
+            option.model.id
+        ),
+    }
+    Ok(())
 }
 
 /// Routes chat and model operations to one active engine from a configured
@@ -601,6 +803,19 @@ impl EngineRouter {
             .collect();
         providers.sort_by(|left, right| left.0.cmp(&right.0));
         providers
+    }
+
+    fn provider_engine_for(
+        &self,
+        provider_connection: &str,
+    ) -> anyhow::Result<(String, Arc<dyn Engine>)> {
+        self.provider_engines()
+            .into_iter()
+            .find(|(connection, _, _)| connection == provider_connection)
+            .map(|(_, engine_name, engine)| (engine_name, engine))
+            .ok_or_else(|| {
+                anyhow::anyhow!("provider connection '{provider_connection}' is not configured")
+            })
     }
 }
 
@@ -816,29 +1031,89 @@ impl Engine for EngineRouter {
         engines
     }
 
+    fn named_engine_info(&self) -> Vec<NamedEngineInfo> {
+        let mut engines: Vec<NamedEngineInfo> = self
+            .engines
+            .iter()
+            .map(|(name, engine)| NamedEngineInfo {
+                name: name.clone(),
+                config: engine.config(),
+                reasoning_effort: engine.reasoning_effort(),
+            })
+            .collect();
+        engines.sort_by(|left, right| left.name.cmp(&right.name));
+        engines
+    }
+
     fn switch_model_option(&self, option: &ProviderModelOption) -> anyhow::Result<()> {
-        let (provider_connection, engine_name, engine) = self
-            .provider_engines()
-            .into_iter()
-            .find(|(provider_connection, _, _)| provider_connection == &option.provider_connection)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "provider connection '{}' is not configured",
-                    option.provider_connection
-                )
-            })?;
-        anyhow::ensure!(
-            provider_connection == option.provider_connection,
-            "provider connection '{}' does not match '{}'",
-            provider_connection,
-            option.provider_connection
-        );
+        let (engine_name, engine) = self.provider_engine_for(&option.provider_connection)?;
         engine.switch_model_option(option)?;
         *self
             .active_engine
             .write()
             .map_err(|_| anyhow::anyhow!("the active engine lock is poisoned"))? = engine_name;
         Ok(())
+    }
+
+    fn preview_model_selection(
+        &self,
+        selection: &ModelSelection,
+    ) -> anyhow::Result<ModelSelectionTarget> {
+        let (engine_name, target_engine) = match selection {
+            ModelSelection::NamedEngine {
+                engine_name,
+                option,
+                reasoning_effort,
+            } => {
+                let target_engine = self.engines.get(engine_name).ok_or_else(|| {
+                    anyhow::anyhow!("named engine '{engine_name}' is not configured")
+                })?;
+                validate_named_engine_option(&target_engine.config(), option, reasoning_effort)?;
+                (engine_name.clone(), target_engine.clone())
+            }
+            ModelSelection::ProviderModel(option) => {
+                self.provider_engine_for(&option.provider_connection)?
+            }
+        };
+        let config = target_engine.config();
+        let context_length = match selection {
+            ModelSelection::NamedEngine { .. } => target_engine.effective_context_length(),
+            ModelSelection::ProviderModel(option) => config
+                .context_length
+                .or(option.model.context_length)
+                .unwrap_or_else(|| target_engine.effective_context_length()),
+        };
+        Ok(ModelSelectionTarget {
+            engine_name: Some(engine_name),
+            provider_connection: config.provider_connection,
+            model: selection.model_id().to_string(),
+            context_length,
+        })
+    }
+
+    fn select_model(&self, selection: &ModelSelection) -> anyhow::Result<()> {
+        match selection {
+            ModelSelection::ProviderModel(option) => self.switch_model_option(option),
+            ModelSelection::NamedEngine {
+                engine_name,
+                option,
+                reasoning_effort,
+            } => {
+                let engine = self.engines.get(engine_name).ok_or_else(|| {
+                    anyhow::anyhow!("named engine '{engine_name}' is not configured")
+                })?;
+                validate_named_engine_option(&engine.config(), option, reasoning_effort)?;
+                let mut active_engine = self
+                    .active_engine
+                    .write()
+                    .map_err(|_| anyhow::anyhow!("the active engine lock is poisoned"))?;
+                if let ReasoningEffortChange::Set(reasoning_effort) = reasoning_effort {
+                    engine.set_reasoning_effort(reasoning_effort.as_deref())?;
+                }
+                *active_engine = engine_name.clone();
+                Ok(())
+            }
+        }
     }
 }
 
@@ -2127,6 +2402,201 @@ model = "local"
             .expect("provider/model switch");
         assert_eq!(router.config().provider_connection, "openrouter");
         assert_eq!(router.config().model, "hosted");
+    }
+
+    #[test]
+    fn direct_engine_previews_the_selected_effective_context_length() {
+        let option = |context_length| {
+            ModelSelection::ProviderModel(ProviderModelOption {
+                provider_connection: "mock".to_string(),
+                model: ModelInfo {
+                    id: "candidate".to_string(),
+                    context_length,
+                    reasoning_efforts: None,
+                    reasoning_default: None,
+                    input_modalities: None,
+                },
+                reasoning_effort: None,
+            })
+        };
+
+        let pinned_engine = CatalogEngine::new("mock", "current", &[]);
+        pinned_engine
+            .config
+            .write()
+            .expect("engine config lock")
+            .context_length = Some(32_000);
+        assert_eq!(
+            pinned_engine
+                .preview_model_selection(&option(Some(64_000)))
+                .expect("pinned model preview")
+                .context_length,
+            32_000
+        );
+
+        let catalog_engine = CatalogEngine::new("mock", "current", &[]);
+        assert_eq!(
+            catalog_engine
+                .preview_model_selection(&option(Some(64_000)))
+                .expect("catalog model preview")
+                .context_length,
+            64_000
+        );
+        assert_eq!(
+            catalog_engine
+                .preview_model_selection(&option(None))
+                .expect("model without catalog metadata preview")
+                .context_length,
+            DEFAULT_CONTEXT_LENGTH
+        );
+    }
+
+    #[test]
+    fn engine_router_previews_the_same_target_used_for_named_and_catalog_selection() {
+        let engine_a = CatalogEngine::new("ollama", "shared", &[]);
+        engine_a
+            .config
+            .write()
+            .expect("engine config lock")
+            .context_length = Some(32_000);
+        let engine_a: Arc<dyn Engine> = Arc::new(engine_a);
+        let engine_b: Arc<dyn Engine> = Arc::new(CatalogEngine::new("ollama", "shared", &[]));
+        let engine_c: Arc<dyn Engine> = Arc::new(CatalogEngine::new("openrouter", "hosted", &[]));
+        let router = EngineRouter::new(
+            HashMap::from([
+                ("engine-a".to_string(), engine_a),
+                ("engine-b".to_string(), engine_b),
+                ("engine-c".to_string(), engine_c),
+            ]),
+            "engine-a",
+        )
+        .expect("router construction");
+        let option = |connection: &str, model: &str| ProviderModelOption {
+            provider_connection: connection.to_string(),
+            model: ModelInfo {
+                id: model.to_string(),
+                context_length: Some(64_000),
+                reasoning_efforts: None,
+                reasoning_default: None,
+                input_modalities: None,
+            },
+            reasoning_effort: None,
+        };
+
+        let named_target = router
+            .preview_model_selection(&ModelSelection::NamedEngine {
+                engine_name: "engine-b".to_string(),
+                option: option("ollama", "shared"),
+                reasoning_effort: ReasoningEffortChange::Unchanged,
+            })
+            .expect("named target preview");
+        assert_eq!(named_target.engine_name.as_deref(), Some("engine-b"));
+        assert_eq!(named_target.context_length, DEFAULT_CONTEXT_LENGTH);
+        assert_eq!(
+            router.active_engine_name().as_deref(),
+            Some("engine-a"),
+            "previewing a named shortcut must not change the active engine"
+        );
+
+        let active_connection_target = router
+            .preview_model_selection(&ModelSelection::ProviderModel(option(
+                "ollama",
+                "catalog-model",
+            )))
+            .expect("active connection target preview");
+        assert_eq!(
+            active_connection_target.engine_name.as_deref(),
+            Some("engine-a"),
+            "raw rows on the active connection must target the active named engine"
+        );
+        assert_eq!(
+            active_connection_target.context_length, 32_000,
+            "an explicit engine window takes precedence over catalog metadata"
+        );
+
+        let other_connection_target = router
+            .preview_model_selection(&ModelSelection::ProviderModel(option(
+                "openrouter",
+                "another-model",
+            )))
+            .expect("catalog target preview");
+        assert_eq!(
+            other_connection_target.engine_name.as_deref(),
+            Some("engine-c")
+        );
+        assert_eq!(
+            other_connection_target.model, "another-model",
+            "catalog preview carries the requested model on the routed engine"
+        );
+        assert_eq!(other_connection_target.context_length, 64_000);
+        assert_eq!(
+            router.active_engine_name().as_deref(),
+            Some("engine-a"),
+            "previewing a catalog row must not change the active engine"
+        );
+    }
+
+    #[test]
+    fn named_engine_selection_rejects_invalid_targets_without_switching() {
+        let engine_a: Arc<dyn Engine> = Arc::new(CatalogEngine::new("mock", "shared", &[]));
+        let engine_b: Arc<dyn Engine> = Arc::new(CatalogEngine::new("mock", "shared", &[]));
+        let router = EngineRouter::new(
+            HashMap::from([
+                ("engine-a".to_string(), engine_a),
+                ("engine-b".to_string(), engine_b),
+            ]),
+            "engine-a",
+        )
+        .expect("router construction");
+        let option = |provider_connection: &str, reasoning_efforts: Option<Vec<&str>>, id: &str| {
+            ProviderModelOption {
+                provider_connection: provider_connection.to_string(),
+                model: ModelInfo {
+                    id: id.to_string(),
+                    context_length: None,
+                    reasoning_efforts: reasoning_efforts
+                        .map(|efforts| efforts.into_iter().map(str::to_string).collect()),
+                    reasoning_default: None,
+                    input_modalities: None,
+                },
+                reasoning_effort: None,
+            }
+        };
+
+        let unknown_engine = ModelSelection::NamedEngine {
+            engine_name: "missing".to_string(),
+            option: option("mock", None, "shared"),
+            reasoning_effort: ReasoningEffortChange::Unchanged,
+        };
+        assert!(
+            router.select_model(&unknown_engine).is_err(),
+            "an unknown engine name must be rejected"
+        );
+
+        let wrong_connection = ModelSelection::NamedEngine {
+            engine_name: "engine-b".to_string(),
+            option: option("other", None, "shared"),
+            reasoning_effort: ReasoningEffortChange::Unchanged,
+        };
+        assert!(
+            router.select_model(&wrong_connection).is_err(),
+            "a named shortcut cannot target another provider connection"
+        );
+
+        let unsupported_effort = ModelSelection::NamedEngine {
+            engine_name: "engine-b".to_string(),
+            option: option("mock", Some(vec!["low"]), "shared"),
+            reasoning_effort: ReasoningEffortChange::Set(Some("max".to_string())),
+        };
+        assert!(
+            router.select_model(&unsupported_effort).is_err(),
+            "an edited effort must be advertised by the selected model"
+        );
+        assert_eq!(
+            router.active_engine_name().as_deref(),
+            Some("engine-a"),
+            "failed selection must not change the active engine"
+        );
     }
 
     #[tokio::test]

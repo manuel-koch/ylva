@@ -272,6 +272,7 @@ impl AgentFactory {
         inherited_engine: Option<Arc<dyn Engine>>,
     ) -> anyhow::Result<(AgentLoop, mpsc::Receiver<UiUpdate>)> {
         let engine_name = resolve_engine_name(profile, agent_type);
+        let inherits_parent_runtime = inherited_engine.is_some();
 
         let configured_engine = engines
             .get(engine_name)
@@ -361,6 +362,7 @@ impl AgentFactory {
         let (agent_loop, ui_rx) = AgentLoop::new(Arc::clone(&engine), registry);
         let mut agent_loop = agent_loop
             .with_configured_engine_name(engine_name)
+            .with_inherited_parent_runtime(inherits_parent_runtime)
             .with_agent_type(agent_type)
             .with_max_tool_iterations(profile.max_tool_iterations_for(agent_type));
         if let Some(system_prompt) =
@@ -392,18 +394,32 @@ impl AgentFactory {
             );
         }
 
-        let compaction_engine_name = profile.compaction_engine_name_for(agent_type);
-        let compaction_engine = engines.get(compaction_engine_name).cloned().ok_or_else(|| {
-            anyhow::anyhow!(
-                "agent type '{agent_type}' references compaction engine '{compaction_engine_name}', but no such engine is configured"
-            )
-        })?;
+        let explicit_compaction_engine_name = profile
+            .explicit_compaction_engine_name_for(agent_type)
+            .map(str::to_string);
+        let compaction_engine = match explicit_compaction_engine_name.as_deref() {
+            Some(compaction_engine_name) => {
+                engines.get(compaction_engine_name).cloned().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "agent type '{agent_type}' references compaction engine '{compaction_engine_name}', but no such engine is configured"
+                    )
+                })?
+            }
+            None => engine.clone(),
+        };
+        let compaction_engine_name = explicit_compaction_engine_name
+            .clone()
+            .unwrap_or_else(|| engine_name.to_string());
         {
             let summary_prompt = crate::config::compaction_prompt::load_compaction_prompt(
                 crate::config::layered::current_workspace_root().as_deref(),
             )?;
             agent_loop = agent_loop
-                .with_compaction_engine(compaction_engine)
+                .with_compaction_engine_selection(
+                    compaction_engine,
+                    Some(compaction_engine_name),
+                    explicit_compaction_engine_name.is_none(),
+                )
                 .with_compaction_timeout_secs(profile.compaction_timeout_secs_for(agent_type))
                 .with_compaction_summary_prompt(summary_prompt);
             if !is_child {
@@ -418,23 +434,28 @@ impl AgentFactory {
                     .map(|configured_type| {
                         let conversation_engine_name =
                             resolve_engine_name(profile, configured_type);
-                        let summary_engine_name =
-                            profile.compaction_engine_name_for(configured_type);
-                        Ok(crate::agent::compaction::AgentCompactionCapacityCheck {
-                            agent_type: configured_type.clone(),
-                            conversation_engine: engines
-                                .get(conversation_engine_name)
-                                .cloned()
-                                .ok_or_else(|| {
-                                    anyhow::anyhow!("unknown engine: {conversation_engine_name}")
-                                })?,
-                            summary_engine: engines.get(summary_engine_name).cloned().ok_or_else(
-                                || {
+                        let conversation_engine = engines
+                            .get(conversation_engine_name)
+                            .cloned()
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("unknown engine: {conversation_engine_name}")
+                            })?;
+                        let explicit_summary_engine =
+                            profile.explicit_compaction_engine_name_for(configured_type);
+                        let summary_engine = match explicit_summary_engine {
+                            Some(summary_engine_name) => {
+                                engines.get(summary_engine_name).cloned().ok_or_else(|| {
                                     anyhow::anyhow!(
                                         "unknown compaction engine: {summary_engine_name}"
                                     )
-                                },
-                            )?,
+                                })?
+                            }
+                            None => conversation_engine.clone(),
+                        };
+                        Ok(crate::agent::compaction::AgentCompactionCapacityCheck {
+                            agent_type: configured_type.clone(),
+                            conversation_engine,
+                            summary_engine,
                         })
                     })
                     .collect::<anyhow::Result<Vec<_>>>()?;
@@ -1111,6 +1132,49 @@ mod tests {
         }
     }
 
+    struct SelectableMockProvider {
+        inner: MockProvider,
+    }
+
+    impl Provider for SelectableMockProvider {
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn chat<'a>(
+            &'a self,
+            messages: Vec<Message>,
+            tools: Vec<ToolSchema>,
+            cancel: CancellationToken,
+        ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+            self.inner.chat(messages, tools, cancel)
+        }
+
+        fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
+            Box::pin(async {
+                Ok([
+                    "main-model",
+                    "fast-model",
+                    "main-catalog-model",
+                    "fast-catalog-model",
+                ]
+                .into_iter()
+                .map(|id| ModelInfo {
+                    id: id.to_string(),
+                    context_length: Some(32_000),
+                    reasoning_efforts: None,
+                    reasoning_default: None,
+                    input_modalities: None,
+                })
+                .collect())
+            })
+        }
+
+        fn set_model(&self, _model: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
     fn test_engine_config() -> EngineConfig {
         EngineConfig {
             provider_connection: "mock".to_string(),
@@ -1164,6 +1228,45 @@ mod tests {
         let (_agent_loop, ui_rx) = result.unwrap();
         // The channel should still be open (sender not dropped).
         assert!(!ui_rx.is_closed(), "UiUpdate receiver should be open");
+    }
+
+    #[test]
+    fn running_agent_preserves_compaction_engine_display_metadata() {
+        crate::test_support::run_locked(async {
+            let (factory, profile) = make_factory();
+            let (mut agent, _ui_rx) = factory
+                .create(&profile, "default", Role::Root)
+                .expect("factory creates the root agent");
+            let before_run = agent.engine_display_info();
+            assert!(
+                before_run
+                    .compaction_engine
+                    .as_ref()
+                    .is_some_and(|compaction| compaction.follows_conversation),
+                "factory-created agents use their selected engine for compaction"
+            );
+            assert_eq!(
+                before_run
+                    .compaction_engine
+                    .as_ref()
+                    .expect("compaction engine display")
+                    .context_length,
+                agent.engine().effective_context_length()
+            );
+
+            let handle = agent.run();
+            let after_run = agent.engine_display_info();
+            assert!(
+                after_run
+                    .compaction_engine
+                    .as_ref()
+                    .is_some_and(|compaction| compaction.follows_conversation),
+                "starting the agent must not drop its compaction display metadata"
+            );
+
+            handle.abort();
+            let _ = handle.await;
+        });
     }
 
     #[test]
@@ -1259,6 +1362,23 @@ mod tests {
         }
     }
 
+    fn factory_for_two_engine_profile(profile: &ProfileConfig) -> AgentFactory {
+        let provider = Arc::new(SelectableMockProvider {
+            inner: MockProvider::new(vec![], Duration::ZERO),
+        });
+        let engines = profile
+            .engines
+            .iter()
+            .map(|(name, config)| {
+                (
+                    name.clone(),
+                    Arc::new(EngineImpl::new(provider.clone(), config.clone())) as Arc<dyn Engine>,
+                )
+            })
+            .collect();
+        AgentFactory::new(engines)
+    }
+
     #[test]
     fn from_profile_builds_every_configured_engine_and_honors_agent_overrides() {
         let profile = two_engine_profile();
@@ -1273,6 +1393,198 @@ mod tests {
             .create(&profile, "quick", Role::Root)
             .expect("the overriding agent type resolves to its own engine");
         assert_eq!(quick.engine().config().model, "fast-model");
+    }
+
+    #[test]
+    fn implicit_summarizer_follows_root_named_engine_activation() {
+        let profile = two_engine_profile();
+        let factory = factory_for_two_engine_profile(&profile);
+        let (root, _ui_rx) = factory
+            .create(&profile, "default", Role::Root)
+            .expect("root agent builds");
+        let engine = root.engine();
+
+        assert!(
+            root.engine_display_info()
+                .compaction_engine
+                .expect("implicit summarizer display")
+                .follows_conversation
+        );
+        let named_engine = engine
+            .named_engine_info()
+            .into_iter()
+            .find(|named_engine| named_engine.name == "fast")
+            .expect("fast shortcut");
+        engine
+            .select_model(&crate::llm::engine::ModelSelection::NamedEngine {
+                engine_name: named_engine.name,
+                option: crate::llm::ProviderModelOption {
+                    provider_connection: named_engine.config.provider_connection,
+                    model: crate::llm::ModelInfo {
+                        id: named_engine.config.model,
+                        context_length: None,
+                        reasoning_efforts: None,
+                        reasoning_default: None,
+                        input_modalities: None,
+                    },
+                    reasoning_effort: named_engine.reasoning_effort,
+                },
+                reasoning_effort: crate::llm::engine::ReasoningEffortChange::Unchanged,
+            })
+            .expect("activate named engine");
+
+        assert_eq!(engine.config().model, "fast-model");
+        assert_eq!(
+            root.compaction_engine_config()
+                .expect("implicit summarizer remains enabled")
+                .model,
+            "fast-model",
+            "an implicit summarizer must share the conversation router"
+        );
+        let display = root.engine_display_info();
+        assert_eq!(
+            display.compaction_engine.as_ref().unwrap().engine_name,
+            "fast"
+        );
+        assert!(
+            display
+                .compaction_engine
+                .as_ref()
+                .unwrap()
+                .follows_conversation
+        );
+        assert!(
+            display
+                .compaction_engine
+                .as_ref()
+                .unwrap()
+                .shares_conversation
+        );
+        engine
+            .switch_model_option(&crate::llm::ProviderModelOption {
+                provider_connection: "mock".to_string(),
+                model: crate::llm::ModelInfo {
+                    id: "fast-catalog-model".to_string(),
+                    context_length: Some(24_000),
+                    reasoning_efforts: None,
+                    reasoning_default: None,
+                    input_modalities: None,
+                },
+                reasoning_effort: None,
+            })
+            .expect("raw model selection on the active connection");
+        assert_eq!(
+            root.compaction_engine_config()
+                .expect("implicit summarizer remains enabled")
+                .model,
+            "fast-catalog-model",
+            "implicit summaries must follow raw model changes too"
+        );
+    }
+
+    #[test]
+    fn explicit_summarizer_stays_bound_when_conversation_engine_changes() {
+        let mut profile = two_engine_profile();
+        profile.compaction.engine = Some("main".to_string());
+        let factory = factory_for_two_engine_profile(&profile);
+        let (root, _ui_rx) = factory
+            .create(&profile, "default", Role::Root)
+            .expect("root agent builds");
+        let engine = root.engine();
+        assert!(
+            root.engine_display_info()
+                .compaction_engine
+                .as_ref()
+                .expect("explicit summarizer display")
+                .shares_conversation
+        );
+        let named_engine = engine
+            .named_engine_info()
+            .into_iter()
+            .find(|named_engine| named_engine.name == "fast")
+            .expect("fast shortcut");
+        engine
+            .select_model(&crate::llm::engine::ModelSelection::NamedEngine {
+                engine_name: named_engine.name,
+                option: crate::llm::ProviderModelOption {
+                    provider_connection: named_engine.config.provider_connection,
+                    model: crate::llm::ModelInfo {
+                        id: named_engine.config.model,
+                        context_length: None,
+                        reasoning_efforts: None,
+                        reasoning_default: None,
+                        input_modalities: None,
+                    },
+                    reasoning_effort: named_engine.reasoning_effort,
+                },
+                reasoning_effort: crate::llm::engine::ReasoningEffortChange::Unchanged,
+            })
+            .expect("activate named engine");
+
+        assert_eq!(engine.config().model, "fast-model");
+        assert_eq!(
+            root.compaction_engine_config()
+                .expect("explicit summarizer remains enabled")
+                .model,
+            "main-model"
+        );
+        let display = root.engine_display_info();
+        let compaction = display
+            .compaction_engine
+            .as_ref()
+            .expect("explicit summarizer display");
+        assert_eq!(compaction.engine_name, "main");
+        assert!(!compaction.follows_conversation);
+        assert!(!compaction.shares_conversation);
+
+        let main_engine = engine
+            .named_engine_info()
+            .into_iter()
+            .find(|named_engine| named_engine.name == "main")
+            .expect("main shortcut");
+        engine
+            .select_model(&crate::llm::engine::ModelSelection::NamedEngine {
+                engine_name: main_engine.name,
+                option: crate::llm::ProviderModelOption {
+                    provider_connection: main_engine.config.provider_connection,
+                    model: crate::llm::ModelInfo {
+                        id: main_engine.config.model,
+                        context_length: None,
+                        reasoning_efforts: None,
+                        reasoning_default: None,
+                        input_modalities: None,
+                    },
+                    reasoning_effort: main_engine.reasoning_effort,
+                },
+                reasoning_effort: crate::llm::engine::ReasoningEffortChange::Unchanged,
+            })
+            .expect("reactivate the explicit summarizer engine");
+        engine
+            .switch_model_option(&crate::llm::ProviderModelOption {
+                provider_connection: "mock".to_string(),
+                model: crate::llm::ModelInfo {
+                    id: "main-catalog-model".to_string(),
+                    context_length: Some(32_000),
+                    reasoning_efforts: None,
+                    reasoning_default: None,
+                    input_modalities: None,
+                },
+                reasoning_effort: None,
+            })
+            .expect("mutate the named explicit summarizer");
+        assert_eq!(
+            root.compaction_engine_config()
+                .expect("explicit summarizer remains enabled")
+                .model,
+            "main-catalog-model",
+            "an explicit summarizer follows mutations to its own named engine"
+        );
+        assert!(
+            root.engine_display_info()
+                .compaction_engine
+                .expect("summarizer display")
+                .shares_conversation
+        );
     }
 
     #[test]
@@ -1987,7 +2299,10 @@ mod tests {
                 "myagent".to_string(),
                 AgentConfig {
                     engine: Some("custom".to_string()),
-                    compaction: None,
+                    compaction: Some(crate::config::AgentCompactionConfig {
+                        engine: None,
+                        timeout_sec: Some(123),
+                    }),
                     description: None,
                     allowed_tools: None,
                     timeout_secs: None,
@@ -1999,10 +2314,31 @@ mod tests {
             )]),
             ..ProfileConfig::default()
         };
-        let result = factory.create(&profile, "myagent", Role::Root);
+        let (agent, _ui_rx) = factory
+            .create(&profile, "myagent", Role::Root)
+            .expect("should resolve engine from AgentConfig.engine override");
+        let display = agent.engine_display_info();
+        assert_eq!(display.engine_name, "custom");
+        assert_eq!(
+            display
+                .compaction_engine
+                .as_ref()
+                .expect("implicit summarizer display")
+                .engine_name,
+            "custom",
+            "an implicit summarizer follows a root agent's engine override"
+        );
         assert!(
-            result.is_ok(),
-            "should resolve engine from AgentConfig.engine override"
+            display
+                .compaction_engine
+                .as_ref()
+                .expect("implicit summarizer display")
+                .follows_conversation
+        );
+        assert_eq!(
+            agent.compaction_timeout(),
+            Duration::from_secs(123),
+            "an independent timeout override applies without binding a summarizer engine"
         );
     }
 

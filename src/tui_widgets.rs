@@ -33,15 +33,15 @@ use crate::theme::{
     APPROVE_BACKGROUND_COLOR, APPROVE_HOVER_BACKGROUND_COLOR, ASSISTANT_STREAM_BORDER_COLOR,
     BUILD_INFO_COLOR, BUTTON_TEXT_COLOR, CHAT_SCROLLBAR_COLOR, CHAT_SELECTION_BG,
     CHILD_VIEW_SEPARATOR_COLOR, CLARIFY_BANNER_FG_COLOR, CLARIFY_BANNER_SCROLL_INDICATOR_COLOR,
-    CLARIFY_BANNER_SELECTION_FG_COLOR, CONTENT_COLOR, DENY_BACKGROUND_COLOR,
-    DENY_HOVER_BACKGROUND_COLOR, DIFF_ADDED_COLOR, DIFF_CONTEXT_COLOR, DIFF_REMOVED_COLOR,
-    ERROR_COLOR, FOOTER_STATUS_COLOR, HELP_POPUP_BORDER_COLOR, HELP_POPUP_HEADING_COLOR,
-    INPUT_BORDER_COLOR, INTERRUPTED_COLOR, LIST_BORDER_COLOR, LIST_SELECTION_BACKGROUND_COLOR,
-    LIST_SELECTION_FOREGROUND_COLOR, LIST_TEXT_COLOR, LOGO_COLOR, MUTED_TEXT_COLOR, NOTICE_COLOR,
-    OVERLAY_SELECTION_COLOR, SEPARATOR_LINE_COLOR, THINKING_BORDER_COLOR, TOAST_BG_COLOR,
-    TOAST_FG_COLOR, TOOL_BUBBLE_BORDER_COLOR, USER_MESSAGE_BG_COLOR, USER_MESSAGE_BORDER_COLOR,
-    USER_MESSAGE_CANCELLED_BORDER_COLOR, USER_MESSAGE_QUEUED_BORDER_COLOR,
-    USER_MESSAGE_STEERED_BORDER_COLOR,
+    CLARIFY_BANNER_SELECTION_FG_COLOR, COMPACTION_MISMATCH_COLOR, CONTENT_COLOR,
+    DENY_BACKGROUND_COLOR, DENY_HOVER_BACKGROUND_COLOR, DIFF_ADDED_COLOR, DIFF_CONTEXT_COLOR,
+    DIFF_REMOVED_COLOR, ERROR_COLOR, FOOTER_STATUS_COLOR, HELP_POPUP_BORDER_COLOR,
+    HELP_POPUP_HEADING_COLOR, INPUT_BORDER_COLOR, INTERRUPTED_COLOR, LIST_BORDER_COLOR,
+    LIST_SELECTION_BACKGROUND_COLOR, LIST_SELECTION_FOREGROUND_COLOR, LIST_TEXT_COLOR, LOGO_COLOR,
+    MUTED_TEXT_COLOR, NOTICE_COLOR, OVERLAY_SELECTION_COLOR, SEPARATOR_LINE_COLOR,
+    THINKING_BORDER_COLOR, TOAST_BG_COLOR, TOAST_FG_COLOR, TOOL_BUBBLE_BORDER_COLOR,
+    USER_MESSAGE_BG_COLOR, USER_MESSAGE_BORDER_COLOR, USER_MESSAGE_CANCELLED_BORDER_COLOR,
+    USER_MESSAGE_QUEUED_BORDER_COLOR, USER_MESSAGE_STEERED_BORDER_COLOR,
 };
 
 use crate::agent::tools::ToolRegistry;
@@ -566,6 +566,7 @@ pub fn draw(
         input_area,
         &state.slash_overlay,
         state.slash_overlay_drag,
+        &state.engine_display,
         &mut state.slash_overlay_layout,
     );
 
@@ -2857,6 +2858,7 @@ fn draw_slash_overlay(
     input_area: Rect,
     overlay: &SlashOverlay,
     drag: Option<BannerDragSelection>,
+    engine_display: &crate::llm::engine::EngineDisplayInfo,
     overlay_layout: &mut SlashOverlayLayout,
 ) {
     let previous_first_visible = overlay_layout.first_visible_row;
@@ -2900,8 +2902,19 @@ fn draw_slash_overlay(
     // Cap the panel at half the space above the input so a provider with
     // hundreds of models cannot hide the conversation entirely.
     let max_content_height = (input_area.y.saturating_sub(1) / 2).max(1);
-    let content_height = (rows.len() as u16).min(max_content_height);
-    let panel_height = content_height + 2;
+    let detail_lines = model_picker_detail_lines(
+        overlay,
+        engine_display,
+        input_area.width.saturating_sub(4) as usize,
+        max_content_height,
+    );
+    let detail_height = detail_lines.len() as u16;
+    let detail_separator_height = u16::from(detail_height > 0);
+    let list_max_height = max_content_height
+        .saturating_sub(detail_height + detail_separator_height)
+        .max(1);
+    let content_height = (rows.len() as u16).min(list_max_height);
+    let panel_height = content_height + detail_height + detail_separator_height + 2;
     let panel_area = Rect {
         x: input_area.x,
         y: input_area.y.saturating_sub(panel_height),
@@ -2970,10 +2983,17 @@ fn draw_slash_overlay(
     let inner_area = block.inner(panel_area);
     frame.render_widget(block, panel_area);
 
+    let [list_area, detail_area] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(content_height),
+            Constraint::Length(detail_height + detail_separator_height),
+        ])
+        .areas(inner_area);
     let [content_area, scrollbar_area] = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Fill(1), Constraint::Length(1)])
-        .areas(inner_area);
+        .areas(list_area);
     overlay_layout.content_area = content_area;
     overlay_layout.first_visible_row = first_visible;
     if let Some(selection) = drag {
@@ -3002,6 +3022,27 @@ fn draw_slash_overlay(
     }
     frame.render_widget(Paragraph::new(lines), content_area);
 
+    if detail_height > 0 {
+        let [separator_area, details_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(detail_separator_height),
+                Constraint::Length(detail_height),
+            ])
+            .areas(detail_area);
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                "─".repeat(inner_area.width.saturating_sub(1) as usize),
+                Style::default().fg(MUTED_TEXT_COLOR),
+            )),
+            separator_area,
+        );
+        frame.render_widget(
+            Paragraph::new(detail_lines).style(Style::default().fg(MUTED_TEXT_COLOR)),
+            details_area,
+        );
+    }
+
     if rows.len() > content_height as usize {
         render_chat_scrollbar(
             frame,
@@ -3013,6 +3054,84 @@ fn draw_slash_overlay(
             CHAT_SCROLLBAR_COLOR,
         );
     }
+}
+
+fn model_picker_detail_lines(
+    overlay: &SlashOverlay,
+    engine_display: &crate::llm::engine::EngineDisplayInfo,
+    width: usize,
+    available_height: u16,
+) -> Vec<Line<'static>> {
+    let SlashOverlay::ModelPicker {
+        choices,
+        filter,
+        selected,
+    } = overlay
+    else {
+        return Vec::new();
+    };
+    if width < 40 || available_height < 3 || matching_model_indices(choices, filter).is_empty() {
+        return Vec::new();
+    }
+
+    let selected_choice = matching_model_indices(choices, filter)
+        .get(*selected)
+        .and_then(|choice_index| choices.get(*choice_index));
+    let compaction_effect = selected_choice.map_or_else(
+        || Line::from("Select an engine or model to preview compaction."),
+        |choice| {
+            if let Some(error) = &choice.selection_preview_error {
+                return Line::from(format!("Compaction effect unavailable: {error}"));
+            }
+            let Some(target) = &choice.selection_target else {
+                return Line::from("Compaction effect preview unavailable.");
+            };
+            let Some(compaction) = &engine_display.compaction_engine else {
+                return Line::from("Compaction is disabled.");
+            };
+            let target_is_compaction_engine = target.engine_name.as_deref()
+                == Some(compaction.engine_name.as_str())
+                || (target.engine_name.is_none()
+                    && compaction.engine_name.is_empty()
+                    && compaction.shares_conversation);
+            let selection_becomes_compaction_engine =
+                compaction.follows_conversation || target_is_compaction_engine;
+            let mismatch = !selection_becomes_compaction_engine
+                && (target.provider_connection != compaction.provider_connection
+                    || target.model != compaction.model
+                    || target.context_length != compaction.context_length);
+            let (provider_connection, model, context_length) =
+                if selection_becomes_compaction_engine {
+                    (
+                        target.provider_connection.as_str(),
+                        target.model.as_str(),
+                        target.context_length,
+                    )
+                } else {
+                    (
+                        compaction.provider_connection.as_str(),
+                        compaction.model.as_str(),
+                        compaction.context_length,
+                    )
+                };
+            let color = if mismatch {
+                COMPACTION_MISMATCH_COLOR
+            } else {
+                MUTED_TEXT_COLOR
+            };
+            Line::styled(
+                format!(
+                    "Compaction uses {provider_connection}/{model}, context: {}",
+                    crate::tui_reducer_state::format_context_length(context_length)
+                ),
+                Style::default().fg(color),
+            )
+        },
+    );
+    if compaction_effect.width() > width {
+        return Vec::new();
+    }
+    vec![compaction_effect]
 }
 
 #[expect(clippy::too_many_arguments)]
@@ -3477,7 +3596,7 @@ fn draw_help_popup(frame: &mut Frame, state: &mut TuiState) {
         match section.heading {
             "Environment" => {
                 let home_directory = dirs::home_dir();
-                let runtime_entries = [
+                let environment_entries = [
                     ("Profile:", state.display_metadata.profile_name.clone()),
                     (
                         "Profile path:",
@@ -3505,12 +3624,12 @@ fn draw_help_popup(frame: &mut Frame, state: &mut TuiState) {
                             ),
                     ),
                 ];
-                let label_width = runtime_entries
+                let label_width = environment_entries
                     .iter()
                     .map(|(label, _)| label.chars().count())
                     .max()
                     .unwrap_or(0);
-                for (label, value) in runtime_entries {
+                for (label, value) in environment_entries {
                     all_lines.push(Line::from(format!("  {label:<label_width$} {value}")));
                 }
             }
@@ -3915,7 +4034,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_bubble_renders_runtime_error_content_literally() {
+    fn tool_bubble_renders_execution_error_content_literally() {
         use super::{append_tool_bubble_lines, ToolBubbleArgs};
         use crate::agent::tools::{ContentSection, Section};
         use crate::tui_reducer_state::{ResultSection, ToolCallState};

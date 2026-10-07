@@ -2328,6 +2328,7 @@ pub struct AgentLoop {
     /// The configured profile engine name for a directly constructed engine.
     /// Routers report their current active name dynamically instead.
     configured_engine_name: Option<String>,
+    inherits_parent_runtime: bool,
     registry: Arc<ToolRegistry>,
     cmd_tx: mpsc::Sender<AgentCommand>,
     cmd_rx: Option<mpsc::Receiver<AgentCommand>>,
@@ -2359,10 +2360,12 @@ pub struct AgentLoop {
     /// tool-use iteration limit for this loop, applied by the shared
     /// iteration guard. Defaults to [`DEFAULT_MAX_TOOL_USE_ITERATIONS`].
     max_tool_iterations: usize,
-    /// Set via [`AgentLoop::with_compaction_engine`] from the profile's
-    /// `[compaction].engine`: the engine background prefix summaries run on.
-    /// `None` (no compact engine configured) disables compaction for this loop.
+    /// Engine used for background prefix summaries. Factory-built loops bind
+    /// implicit selection to their conversation Engine runtime and explicit selection
+    /// to its configured named engine. `None` disables compaction.
     compaction_engine: Option<Arc<dyn Engine>>,
+    compaction_engine_name: Option<String>,
+    compaction_follows_conversation_engine: bool,
     /// Wall-clock budget configured by `[compaction].timeout_sec` for
     /// requests made by `compaction_engine`.
     compaction_timeout: Duration,
@@ -2431,6 +2434,7 @@ impl AgentLoop {
         let agent = AgentLoop {
             engine,
             configured_engine_name: None,
+            inherits_parent_runtime: false,
             #[cfg(test)]
             test_batch_cap: MAX_EXECUTED_TOOL_CALLS_PER_BATCH,
             registry,
@@ -2448,6 +2452,8 @@ impl AgentLoop {
             subagent_ui_rx: None,
             max_tool_iterations: DEFAULT_MAX_TOOL_USE_ITERATIONS,
             compaction_engine: None,
+            compaction_engine_name: None,
+            compaction_follows_conversation_engine: false,
             compaction_timeout: Duration::from_secs(compaction::DEFAULT_COMPACTION_TIMEOUT_SECS),
             compaction_summary_prompt: crate::config::compaction_prompt::DEFAULT_COMPACTION_PROMPT
                 .to_string(),
@@ -2464,6 +2470,14 @@ impl AgentLoop {
     /// directly constructed (non-router) engine.
     pub fn with_configured_engine_name(mut self, engine_name: impl Into<String>) -> Self {
         self.configured_engine_name = Some(engine_name.into());
+        self
+    }
+
+    /// Mark this loop as sharing its conversation Engine runtime with its
+    /// parent agent. Display projections use this to reflect later parent
+    /// engine switches in a drilled-in child conversation.
+    pub fn with_inherited_parent_runtime(mut self, inherited: bool) -> Self {
+        self.inherits_parent_runtime = inherited;
         self
     }
 
@@ -2489,10 +2503,24 @@ impl AgentLoop {
         self
     }
 
-    /// Set the engine background prefix summaries run on (the profile's
-    /// `[compaction].engine`). Applied to root and child loops.
+    /// Set the engine background prefix summaries run on.
     pub fn with_compaction_engine(mut self, engine: Arc<dyn Engine>) -> Self {
+        self.compaction_engine_name = engine.active_engine_name();
         self.compaction_engine = Some(engine);
+        self
+    }
+
+    /// Set the summary engine and record whether it follows the active
+    /// conversation Engine runtime or is explicitly bound to a named engine.
+    pub fn with_compaction_engine_selection(
+        mut self,
+        engine: Arc<dyn Engine>,
+        engine_name: Option<String>,
+        follows_conversation: bool,
+    ) -> Self {
+        self.compaction_engine = Some(engine);
+        self.compaction_engine_name = engine_name;
+        self.compaction_follows_conversation_engine = follows_conversation;
         self
     }
 
@@ -2591,6 +2619,30 @@ impl AgentLoop {
         if display.engine_name.is_empty() {
             display.engine_name = self.configured_engine_name.clone().unwrap_or_default();
         }
+        display.inherits_parent_runtime = self.inherits_parent_runtime;
+        if let Some(compaction_engine) = &self.compaction_engine {
+            let compaction_config = compaction_engine.config();
+            let compaction_engine_name = if self.compaction_follows_conversation_engine {
+                display.engine_name.clone()
+            } else {
+                self.compaction_engine_name
+                    .clone()
+                    .or_else(|| compaction_engine.active_engine_name())
+                    .unwrap_or_default()
+            };
+            let shares_conversation = self.compaction_follows_conversation_engine
+                || (!display.engine_name.is_empty()
+                    && compaction_engine_name == display.engine_name)
+                || (display.engine_name.is_empty() && Arc::ptr_eq(&self.engine, compaction_engine));
+            display.compaction_engine = Some(crate::llm::CompactionEngineDisplayInfo {
+                engine_name: compaction_engine_name,
+                provider_connection: compaction_config.provider_connection,
+                model: compaction_config.model,
+                context_length: compaction_engine.effective_context_length(),
+                follows_conversation: self.compaction_follows_conversation_engine,
+                shares_conversation,
+            });
+        }
         display
     }
 
@@ -2650,7 +2702,7 @@ impl AgentLoop {
         let batch_cap = self.test_batch_cap;
         #[cfg(not(test))]
         let batch_cap = MAX_EXECUTED_TOOL_CALLS_PER_BATCH;
-        let compaction_engine = self.compaction_engine.take();
+        let compaction_engine = self.compaction_engine.clone();
         let compaction_timeout = self.compaction_timeout;
         let compaction_summary_prompt = std::mem::take(&mut self.compaction_summary_prompt);
         let startup_compaction_checks = std::mem::take(&mut self.startup_compaction_checks);
@@ -4837,8 +4889,12 @@ async fn advance_tool_queue(
                 );
                 if let Some(allowance) = result_allowance {
                     if allowance < MINIMUM_USEFUL_RESULT_TOKENS {
-                        if compaction.as_deref_mut().is_some_and(|runtime| {
-                            runtime.defer_request(context, engine.as_ref(), &registry.schemas())
+                        if compaction.as_deref_mut().is_some_and(|compaction_state| {
+                            compaction_state.defer_request(
+                                context,
+                                engine.as_ref(),
+                                &registry.schemas(),
+                            )
                         }) {
                             let _ = ui_tx.send(UiUpdate::Notice {
                                 text: "Paused not-yet-started tools for the existing context summary; running tools are not cancelled.".to_string(),

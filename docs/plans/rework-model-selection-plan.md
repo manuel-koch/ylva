@@ -3,10 +3,11 @@
 ## Context
 
 Ylva is a Rust terminal and command-line agent harness. Its `/models` picker
-offers both named-engine shortcuts and provider catalog rows. An engine is a
-reusable runtime selection binding a model, provider connection, and request
-settings. Two named engines can use the same provider connection and even the
-same model while having different temperature, reasoning, context-window, or
+offers both named-engine shortcuts and provider catalog rows. An Engine is a
+reusable model configuration binding a model, provider connection, and request
+settings; its Engine runtime is the live selection and effective settings. Two
+named engines can use the same provider connection and even the same model
+while having different temperature, reasoning, context-window, or
 compaction-threshold settings.
 
 The picker currently retains the engine name for display but discards it on
@@ -18,8 +19,9 @@ change a summarizer sharing that engine.
 The goal is to preserve named-engine identity end to end and explain the
 relationship between the conversation engine and the engine summarizing its
 context. This plan addresses the "Clarify/fix `/models` engine selection and
-its effect on compaction" backlog item. It is not authorization to implement,
-stage, or commit source changes.
+its effect on compaction" backlog item. The user authorized execution of this
+plan; implementation and verification are complete. Changes remain unstaged
+and uncommitted.
 
 ### Agreed behavior
 
@@ -42,18 +44,23 @@ stage, or commit source changes.
 - Already-dispatched summaries retain their request snapshots, original
   deadlines, and normal safe-application rules. Switching affects subsequent
   requests; it does not cancel/restart a summary or force compaction.
-- The picker has a detail area showing the current conversation engine,
-  summarizer engine/model, shared versus separate, and the highlighted
-  selection's effect on summarization. Switch notices explain the resulting
-  relationship. The normal footer stays compact.
-- Named-engine settings remain owned by their existing runtime handles. No
+- The picker detail previews the resulting compaction provider-connection/model
+  and effective context window. It does not repeat the conversation
+  engine/model already shown in the TUI footer. The detail is orange when a
+  fixed compaction engine would remain on a different provider/model or
+  effective context window from the highlighted choice; following compaction
+  and choices that update the compaction engine show the resulting pair
+  without a mismatch warning. Switch notices use compaction terminology to
+  explain the resulting selection.
+- Named-engine settings remain owned by their existing Engine runtime handles. No
   provider reconstruction, engine cloning, configuration writes, or new knobs
   are required.
 - Existing provider/model persistence and resume behavior remain unchanged.
   Engine identity and reasoning effort are not newly persisted.
 
 The user confirmed this contract through a grilling interview. All product
-questions are resolved; implementation still requires separate authorization.
+questions are resolved. This contract was implemented and verified under the
+execution authorization.
 
 ### Acceptance criteria
 
@@ -77,11 +84,14 @@ questions are resolved; implementation still requires separate authorization.
   explicitly separate summarizer retains its model, settings, and window.
   Switching away leaves an explicit summarizer bound, whereas an implicit
   summarizer follows the newly activated conversation engine.
-- The TUI identifies the conversation and summarizer selections and whether
-  they share the same engine, without mistaking identical provider/model pairs
-  for shared runtime identity. This information is available while idle and
-  inspecting `/models` and after a successful switch, without sending a prompt.
-  Highlighting previews the effect without mutating any runtime engine.
+- The TUI detail identifies the compaction provider-connection/model and
+  effective context window that will result from the highlighted choice,
+  without duplicating the conversation engine/model already visible in the
+  footer or mistaking identical provider/model pairs for shared Engine runtime
+  identity. A fixed compaction engine is orange when its provider/model differs
+  from the highlighted choice. The detail is available while idle and
+  inspecting `/models`; highlighting previews the effect without mutating any
+  Engine runtime.
 - Capacity warnings still run immediately after successful switches, remain
   cancellable and responsive, and do not repeat an unchanged warning on the
   next prompt. Selection failure does not trigger a success record.
@@ -98,7 +108,7 @@ An implementing agent must change each `[ ]` to `[x]` immediately after
 completing that step and rewrite this file in place. Keep numbering consecutive
 and preserve completed checkbox states when refining the plan.
 
-1. [ ] Establish the regression baseline before source implementation.
+1. [x] Establish the regression baseline before source implementation.
    Read `src/presenter.rs` at the model-picker Enter handler first, then
    `ModelChoice` and `Effect` in `src/tui_reducer_state.rs`, and
    `EngineRouter::switch_model_option` in `src/llm/engine.rs`.
@@ -107,9 +117,9 @@ and preserve completed checkbox states when refining the plan.
    connection with distinguishable settings; confirm the shortcut's identity
    is lost through the actual presenter/effect/driver path rather than testing
    only a newly added router method.
-2. [ ] Preserve the selection target in a typed runtime operation. Distinguish
-   named-engine activation from raw provider/model selection; do not make
-   the LLM runtime depend on TUI `ModelChoice` or display labels. Carry the
+2. [x] Preserve the selection target in a typed engine-selection operation.
+   Distinguish named-engine activation from raw provider/model selection; do
+   not make the Engine layer depend on TUI `ModelChoice` or display labels. Carry the
    identity from the presenter's Enter handler through `Effect::SwitchModel`
    and `execute_slash_effects`. Route named selections by exact map key,
    and activate the existing engine without restoring a picker snapshot of its
@@ -124,7 +134,7 @@ and preserve completed checkbox states when refining the plan.
    the existing single/unnamed-engine path. If a named operation carries
    provider/model metadata, reject mismatched identity rather than accidentally
    rewriting the selected engine to a stale or foreign picker value.
-3. [ ] Correct picker identity and metadata in
+3. [x] Correct picker identity and metadata in
    `src/tui_driver.rs::apply_model_list_result` and the related label/selection
    helpers in `src/tui_reducer_state.rs`. Use the actual engine key for named
    shortcut active status and preselection; initialize a shortcut's reasoning
@@ -140,7 +150,7 @@ and preserve completed checkbox states when refining the plan.
    after an Engine runtime model/effort change, unavailable catalog metadata, empty
    filters, no matches, reasoning cycling, and mouse highlight versus Enter
    confirmation. Preserve one catalog query per connection.
-4. [ ] Implement explicit versus implicit summarizer binding in
+4. [x] Implement explicit versus implicit summarizer binding in
    `src/config/profile.rs`, `src/agent_factory.rs`, and `src/agent.rs`.
    Retain selection provenance instead of inferring explicitness from the
    fallback name returned by `compaction_engine_name_for`.
@@ -155,17 +165,20 @@ and preserve completed checkbox states when refining the plan.
    `default_engine`, inherited subagent routers, and independent subagent
    engines. Preserve current request snapshots and deadlines, without
    cancellation/restart on switch.
-5. [ ] Expose truthful conversation/summarizer display metadata from
+5. [x] Expose truthful conversation/compaction display metadata from
    `src/agent.rs` and factory wiring in `src/agent_factory.rs`. Keep explicit
-   summarizer identity separately from the conversation router; implicit
-   summarizer identity follows that router's active engine. Derive sharing
-   from resolved runtime engine identity, not model equality.
+   compaction identity separately from the conversation router; implicit
+   compaction identity follows that router's active engine. Derive sharing
+   from resolved Engine runtime identity, not model equality.
    Carry display-only snapshots through `UiUpdate`, presenter state,
    `src/tui_render_state.rs`, and root/subagent projections as needed.
-   Render current relationship and highlighted-selection consequences in a
-   picker detail area in `src/tui_widgets.rs`; include actual engine identity
-   and resulting sharing in switch notices. Keep the normal footer unchanged.
-   Share target resolution with runtime routing instead of reproducing
+   Render only the highlighted selection's compaction outcome in a picker
+   detail area in `src/tui_widgets.rs`; do not duplicate the conversation
+   engine/model already shown in the TUI footer. Show the resulting
+   provider-connection/model and effective context window, and color the detail
+   orange when a fixed compaction engine would remain on a different pair.
+   Keep switch notices consistent with this terminology. Share target and
+   context resolution with engine routing instead of reproducing
    representative-engine ordering in the UI. Distinguish "mutates shared
    engine", "implicit summarizer follows", and "explicit summarizer stays".
    Use the existing update path; do not duplicate Engine runtime configuration into
@@ -192,7 +205,7 @@ and preserve completed checkbox states when refining the plan.
    in `tests/cli_driver.rs` for exact named activation without redefining
    inheritance, and verify utility-engine isolation. Do not introduce live
    provider dependencies.
-7. [ ] Update `docs/features.md` (model provider, slash commands, compaction),
+7. [x] Update `docs/features.md` (model provider, slash commands, compaction),
    `docs/configuration.md` (initial selection, engine settings, compaction
    fallback and sharing), `docs/implementation-notes.md` (identity routing
    and display snapshots), `docs/keybindings.md` (Enter target semantics),
@@ -206,102 +219,67 @@ and preserve completed checkbox states when refining the plan.
    Mark only the corresponding `docs/backlog-issues.md` item complete when
    its implementation is verified. Reconcile relevant `/models` statements
    in `docs/blueprint.md`; avoid unrelated documentation cleanup.
-8. [ ] Run the smallest combined targeted tests covering the changes while
+8. [x] Run the smallest combined targeted tests covering the changes while
    implementing. Before reporting completion run `make format lint`, then
    `make test-coverage` as the single mandatory full-suite gate, enforcing
    at least 80% line coverage. Do not also run `make test` as a duplicate
    mandatory gate. Check changed Markdown with repository-configured
    `rumdl`. Record implementation progress and any justified adjustments in
-   this plan; do not stage or commit without separate user consent.
+   this plan; do not stage or commit without separate user consent. The
+   factory tests use a selectable mock provider because `MockProvider`
+   intentionally rejects model changes. `make format lint` and
+   `make test-coverage` passed; the coverage gate ran all suites with
+   1,388 unit tests passing, all integration suites passing, and 92.17% total
+   line coverage. `rumdl` formatting and checks passed for the changed Markdown
+   except for four pre-existing MD013 warnings in an unrelated quoted log
+   block in `docs/backlog-issues.md`.
 
 ## Implementation Hints
 
-- `src/presenter.rs` currently clones only `choice.selection` in the Enter
-  handler, dropping `choice.engine_name`.
-- `src/tui_reducer_state.rs::ModelChoice` already contains
-  `engine_name: Option<String>`, whereas `Effect::SwitchModel` currently
-  contains only `ProviderModelOption`.
-- The grilling interview resolved shortcuts as exact current-runtime
-  activation, not restoration of original profile values. Only user-edited
-  effort is applied, including a change to provider default. Missing catalog
-  metadata does not invalidate unchanged effort; offline shortcut discovery
-  is outside the agreed scope.
-- `ProviderModelOption` and `EngineDisplayInfo` live in `src/llm/engine.rs`.
-  The latter currently carries the conversation's engine name, provider
-  connection, model, and reasoning effort, but no summarizer identity.
-- `EngineRouter::provider_engines` chooses the active engine for its connection
-  and the first engine by sorted name for other connections.
-  `switch_model_option` uses that representative; `named_engines` returns
-  sorted current runtime configuration snapshots, not immutable profile values.
-- `apply_model_list_result` marks named shortcuts active by provider/model
-  equality and also borrows the active effort using that equality. This is
-  incorrect when separate named engines share a provider/model pair.
-- Shortcut rows currently embed their effective context length in `ModelInfo`;
-  raw catalog rows carry provider-reported lengths. An explicit profile window
-  and advertised catalog capacity are different sources of information.
-- `Engine::switch_model_option` validates provider connection and advertised
-  reasoning effort, updates reasoning/model/modalities, and adopts catalog
-  context length. `EngineConfig::effective_context_length` gives an explicit
-  window precedence over catalog metadata and the built-in fallback.
-- `AgentFactory::build` initially resolves the root agent's configured engine
-  and constructs a router when there is more than one engine. The one-engine
-  path uses a direct engine; `AgentLoop::engine_display_info` supplies its
-  configured name as a display fallback.
-- The factory resolves the compaction engine once with
-  `ProfileConfig::compaction_engine_name_for` and passes its existing
-  `Arc<dyn Engine>` to the loop. Per-agent selection precedes profile
-  selection; with neither set, the configured conversation engine is used.
-  It is not the mutable conversation router.
-- The confirmed exception is selection provenance: absent agent and profile
-  compaction-engine fields means following that agent's active conversation
-  runtime. Explicit engine fields remain bound regardless of the engine's
-  spelling or equality with `default_engine`. Timeout-only overrides do not
-  count as explicit engine selection.
-- `src/config/profile.rs::CompactionConfig` stores the optional engine field;
-  `compaction_engine_name_for` currently collapses explicit selection and
-  fallback into one returned name. The user confirmed independent per-agent
-  and profile engine/timeout precedence stays unchanged.
-- `src/agent/compaction.rs::CompactionRuntime` owns its summarizer handle.
-  A `None` handle disables compaction; it does not mean "use conversation".
-  The user confirmed already-dispatched summary requests keep their original
-  snapshot/deadline and apply under existing safe-boundary rules.
-- The confirmed TUI surface is a picker detail area plus switch notices, not
-  a persistent summarizer footer. Picker information includes the current
-  relationship and highlighted-selection consequences without runtime mutation.
-- `AgentFactory::build_child_agent_manager` compares a subagent's configured
-  engine name with the parent's original configured engine name. A match
-  inherits the parent's runtime engine/router. A mismatch uses the subagent's
-  independently resolved selection. This is an existing contract, not a
-  comparison with the parent's current active engine name.
-- `EngineImpl` and its provider share `EngineRuntimeConfigHandle`.
-  Providers snapshot request settings before network I/O; later switches do
-  not rewrite an already-dispatched request. Compaction budgets read active
-  conversation settings at safe boundaries.
-- Successful switch persistence goes through
-  `AgentCommand::RecordModelChanged`; its outer-loop handler records
-  provider/model and schedules the cancellable compaction capacity check.
-  TUI switch notices are not inserted as model-facing system messages.
-- `TuiDriver` refreshes conversation display metadata with
-  `agent.engine_display_info`; subagent displays are separately keyed by run ID.
-  `tests/tui_render_state.rs` has footer and responsive model-switch warning
-  tests, and `tests/cli_driver.rs` has post-switch subagent inheritance tests.
-- `docs/persistence.md` records provider/model on every process start and
-  successful switch. Resume resolves engines from current configuration;
-  these records do not restore a named engine's runtime settings.
-- The user confirmed provider/model-only records and current-configuration
-  resume remain in scope unchanged, including an engine-only switch between
-  identical provider/model pairs. No named-engine/effort persistence or session
-  schema expansion is part of this plan.
-- `docs/configuration.md` currently says both "first configured engine" and
-  "`default_engine`" are initially active. The factory actually resolves the
-  selected root agent type's engine override, falling back to `default_engine`.
-  The conflicting initial-selection sentence is directly related stale
-  documentation.
-- `docs/architecture-design-records/` currently contains only `.gitkeep`;
-  there is no existing ADR governing this change. Other plan files are in
-  `docs/plans/`; this file uses the user's corrected explicit destination.
-- `docs/development-workflow.md` owns implementation verification and test
-  conventions. `docs/known-test-issues.md` documents tracing/cwd locking,
-  asynchronous store-lock release, library `cfg(test)` limitations, and
-  bounded agent UI-channel draining. Integration helpers live in
-  `tests/common.rs`; integration-facing types must be exported by `src/lib.rs`.
+- `src/llm/engine.rs` defines typed `ModelSelection` variants for named-engine
+  activation and raw provider/model routing. The router resolves raw catalog
+  targets through its active engine for that connection or the first
+  engine-name-sorted match for other connections. Selection previews use the
+  same resolver and do not mutate Engine runtime state.
+- Named selection validates provider/model identity and only changes reasoning
+  when the picker records an explicit edit. It activates the existing Engine runtime
+  handle; it does not restore profile snapshots. Catalog-derived model metadata
+  remains distinct from a named engine's effective context-window override.
+- `src/tui_reducer_state.rs::ModelChoice` and `Effect::SwitchModel` carry the
+  selection identity through `src/presenter.rs` and `src/tui_driver.rs`.
+  Shortcut active state and preselection use engine identity; raw catalog
+  activity continues to use provider connection/model.
+- `EngineImpl` and its provider share `EngineRuntimeConfigHandle`. Provider
+  request settings are snapshotted before network I/O, so later model changes
+  do not rewrite an already-dispatched request.
+- `ProfileConfig::explicit_compaction_engine_name_for` preserves the
+  distinction between an explicit engine key and an implicit fallback.
+  Per-agent engine selection wins over profile selection; timeout resolution
+  remains independent. A timeout-only override therefore does not make the
+  summarizer explicit.
+- `AgentFactory` binds explicit summaries to the configured engine and
+  implicit summaries to that agent's conversation engine/router. Startup
+  capacity checks use the same distinction for root and configured agent
+  types. Child-agent inheritance still compares the child's configured engine
+  name with the parent's original configured engine name.
+- `src/agent/compaction.rs::CompactionRuntime` owns the selected summarizer
+  handle. In-flight summaries retain their request snapshots and deadlines;
+  completed results are applied at existing safe boundaries.
+- `EngineDisplayInfo` and `CompactionEngineDisplayInfo` expose display-only
+  conversation and summarizer identities, including whether the summarizer
+  follows or shares the conversation engine. Child projections also indicate
+  when they inherit the parent's Engine runtime.
+- The `/models` detail area and switch notices are rendered by
+  `src/tui_widgets.rs`; picker previews are generated by `src/tui_driver.rs`.
+  The layout yields detail space on narrow terminals while keeping controls
+  available.
+- Successful switches still persist provider connection/model only and schedule
+  the cancellable capacity check. Engine identity and reasoning effort are not
+  persisted, and resume continues to resolve engines from current configuration.
+- `docs/architecture-design-records/` contains only `.gitkeep`; no existing ADR
+  governs this change. Project test and final-check conventions are defined in
+  `docs/development-workflow.md`.
+- The regression coverage is in `src/llm/engine.rs`, `src/agent_factory.rs`,
+  `src/config/profile.rs`, `tests/cli_driver.rs`, and
+  `tests/tui_render_state.rs`. The factory behavior tests use a selectable
+  mock provider because `MockProvider` intentionally rejects model changes.

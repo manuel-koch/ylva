@@ -145,6 +145,12 @@ conversation, including that first one. A child-agent session gets its own
 independent `model_changed` history, starting with the child's own resolved
 engine — it never needs to cross-reference the parent's.
 
+Named-engine identity and reasoning effort are not persisted. Resuming resolves
+the current profile and starts from its configured agent/default engine; a
+same-provider/model shortcut activation may therefore have no distinguishable
+engine-only record. Engine runtime settings are not restored from the session
+history.
+
 ### `child_start` / `child_result`
 
 Written to the **parent** session when a child agent run begins and when it

@@ -667,7 +667,7 @@ fn handle_key_main(
             KeyCode::Enter => {
                 let picked = state
                     .selected_model()
-                    .map(|choice| choice.selection.clone());
+                    .map(|choice| choice.to_model_selection());
                 state.slash_overlay = SlashOverlay::Hidden;
                 let mut effects = vec![Effect::ClearTextarea];
                 if let Some(model) = picked {
@@ -2730,6 +2730,7 @@ mod tests {
             choices: (0..10)
                 .map(|index| ModelChoice {
                     label: format!("stub/model-{index}"),
+                    initial_reasoning_effort: None,
                     selection: ProviderModelOption {
                         provider_connection: "stub".to_string(),
                         model: crate::llm::ModelInfo {
@@ -2743,6 +2744,8 @@ mod tests {
                     },
                     is_active: false,
                     engine_name: None,
+                    selection_target: None,
+                    selection_preview_error: None,
                 })
                 .collect(),
             filter: String::new(),
@@ -3896,6 +3899,7 @@ mod tests {
             choices: (0..3)
                 .map(|index| ModelChoice {
                     label: format!("stub/model-{index}"),
+                    initial_reasoning_effort: None,
                     selection: ProviderModelOption {
                         provider_connection: "stub".to_string(),
                         model: crate::llm::ModelInfo {
@@ -3909,6 +3913,8 @@ mod tests {
                     },
                     is_active: false,
                     engine_name: None,
+                    selection_target: None,
+                    selection_preview_error: None,
                 })
                 .collect(),
             filter: String::new(),
@@ -3941,6 +3947,7 @@ mod tests {
     fn mouse_click_on_model_picker_entry_selects_without_switching() {
         let model_choice = |model_id: &str| ModelChoice {
             label: format!("stub/{model_id}"),
+            initial_reasoning_effort: None,
             selection: ProviderModelOption {
                 provider_connection: "stub".to_string(),
                 model: crate::llm::ModelInfo {
@@ -3954,6 +3961,8 @@ mod tests {
             },
             is_active: false,
             engine_name: None,
+            selection_target: None,
+            selection_preview_error: None,
         };
         let mut state = AppState::new();
         state.slash_overlay = SlashOverlay::ModelPicker {
@@ -3990,6 +3999,7 @@ mod tests {
     fn slash_overlay_model_drag_copies_the_filtered_model_label() {
         let model_choice = |label: &str, provider_connection: &str, model_id: &str| ModelChoice {
             label: label.to_string(),
+            initial_reasoning_effort: None,
             selection: ProviderModelOption {
                 provider_connection: provider_connection.to_string(),
                 model: crate::llm::ModelInfo {
@@ -4003,6 +4013,8 @@ mod tests {
             },
             is_active: false,
             engine_name: None,
+            selection_target: None,
+            selection_preview_error: None,
         };
         let expected_text = "provider/provider-model";
         let mut state = AppState::new();
@@ -4391,6 +4403,8 @@ mod tests {
                     provider_connection: "ollama".to_string(),
                     model: "child-model".to_string(),
                     reasoning_effort: None,
+                    compaction_engine: None,
+                    inherits_parent_runtime: false,
                 },
             }),
             &empty_textarea(),
@@ -4403,6 +4417,8 @@ mod tests {
                 provider_connection: "ollama".to_string(),
                 model: "child-model".to_string(),
                 reasoning_effort: None,
+                compaction_engine: None,
+                inherits_parent_runtime: false,
             })
         );
     }

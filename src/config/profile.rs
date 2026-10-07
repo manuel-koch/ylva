@@ -108,7 +108,7 @@ pub struct ProfileConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct CompactionConfig {
     /// Profile-level summarizer engine, unless an agent type overrides it.
-    /// When absent, each agent uses its configured conversation engine.
+    /// When absent, each agent follows its active conversation Engine runtime.
     #[serde(default)]
     pub engine: Option<String>,
     /// Wall-clock seconds allowed for one summary request.
@@ -677,14 +677,25 @@ impl ProfileConfig {
             .unwrap_or(self.default_engine.as_str())
     }
 
-    /// Compaction engine for one agent type: its compaction override, then
-    /// the profile's compaction engine, then its configured conversation engine.
-    pub fn compaction_engine_name_for(&self, agent_type: &str) -> &str {
+    /// Explicit compaction-engine selection for one agent type, if configured.
+    ///
+    /// The per-agent value wins over the profile value. `None` means
+    /// compaction follows the agent's active conversation Engine runtime.
+    pub fn explicit_compaction_engine_name_for(&self, agent_type: &str) -> Option<&str> {
         self.agents
             .get(agent_type)
             .and_then(|agent_config| agent_config.compaction.as_ref())
             .and_then(|compaction| compaction.engine.as_deref())
             .or(self.compaction.engine.as_deref())
+    }
+
+    /// Initial compaction engine name for validation and startup checks: its
+    /// explicit compaction override, then the profile's explicit compaction
+    /// engine, then its configured conversation engine. Engine runtime binding
+    /// for an implicit selection follows the conversation engine's active
+    /// Engine runtime.
+    pub fn compaction_engine_name_for(&self, agent_type: &str) -> &str {
+        self.explicit_compaction_engine_name_for(agent_type)
             .unwrap_or_else(|| self.engine_name_for(agent_type))
     }
 
@@ -2408,6 +2419,64 @@ engine = "ollama/local"
             ..ProfileConfig::default()
         };
         assert_eq!(profile.compaction_engine_name(), "main");
+    }
+
+    #[test]
+    fn compaction_engine_selection_distinguishes_explicit_binding_from_fallback() {
+        let mut profile = ProfileConfig {
+            default_engine: "main".to_string(),
+            compaction: CompactionConfig::default(),
+            agents: HashMap::from([(
+                "review".to_string(),
+                AgentConfig {
+                    engine: Some("fast".to_string()),
+                    compaction: None,
+                    description: None,
+                    allowed_tools: None,
+                    timeout_secs: None,
+                    max_tool_iterations: None,
+                    persona: None,
+                    can_spawn: false,
+                    tools: HashMap::new(),
+                },
+            )]),
+            ..ProfileConfig::default()
+        };
+
+        assert_eq!(profile.explicit_compaction_engine_name_for("review"), None);
+        assert_eq!(profile.compaction_engine_name_for("review"), "fast");
+        profile.agents.get_mut("review").unwrap().compaction = Some(AgentCompactionConfig {
+            engine: None,
+            timeout_sec: Some(45),
+        });
+        assert_eq!(
+            profile.explicit_compaction_engine_name_for("review"),
+            None,
+            "a timeout-only agent override must remain an implicit engine selection"
+        );
+        assert_eq!(profile.compaction_timeout_secs_for("review"), 45);
+
+        profile.compaction.engine = Some("main".to_string());
+        assert_eq!(
+            profile.explicit_compaction_engine_name_for("review"),
+            Some("main"),
+            "an explicit binding to default_engine remains explicit"
+        );
+        profile.compaction.engine = Some("default".to_string());
+        assert_eq!(
+            profile.explicit_compaction_engine_name_for("review"),
+            Some("default"),
+            "an engine literally named default remains an explicit binding"
+        );
+        profile.agents.get_mut("review").unwrap().compaction = Some(AgentCompactionConfig {
+            engine: Some("agent-summary".to_string()),
+            timeout_sec: Some(120),
+        });
+        assert_eq!(
+            profile.explicit_compaction_engine_name_for("review"),
+            Some("agent-summary"),
+            "the agent's explicit compaction engine takes precedence"
+        );
     }
 
     #[test]

@@ -592,16 +592,20 @@ async fn child_spawn_after_root_model_switch_uses_the_root_active_engine() {
         .expect("factory creates the root agent");
 
     root.engine()
-        .switch_model_option(&ProviderModelOption {
-            provider_connection: "alternate-provider".to_string(),
-            model: ModelInfo {
-                id: "alternate-model".to_string(),
-                context_length: None,
-                reasoning_efforts: None,
-                reasoning_default: None,
-                input_modalities: None,
+        .select_model(&ylva::engine::ModelSelection::NamedEngine {
+            engine_name: "alternate".to_string(),
+            option: ProviderModelOption {
+                provider_connection: "alternate-provider".to_string(),
+                model: ModelInfo {
+                    id: "alternate-model".to_string(),
+                    context_length: None,
+                    reasoning_efforts: None,
+                    reasoning_default: None,
+                    input_modalities: None,
+                },
+                reasoning_effort: None,
             },
-            reasoning_effort: None,
+            reasoning_effort: ylva::engine::ReasoningEffortChange::Unchanged,
         })
         .expect("root model switch succeeds");
     assert_eq!(

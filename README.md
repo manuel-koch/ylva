@@ -44,7 +44,7 @@ Ylva is highly customizable to adapt to user needs.
   - [x] Per-agent tool-use iteration limit (`max_tool_iterations`)
 - [x] TUI drill-in view to inspect a spawned child agent's own conversation
 - [x] Slash commands in TUI
-  - [x] `/models` to change current provider + model
+  - [x] `/models` to switch named engines or provider-catalog models
   - [x] `/clear` to clear/reset current session
 - [ ] Tracking billed token usage and cost totals in current context (an
       approximate context-size readout is already shown in the TUI footer)

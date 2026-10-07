@@ -140,7 +140,7 @@ _Avoid_: max context, token limit
 Replacing the oldest summarized part of the model view with a durable summary
 so a long conversation keeps fitting its context window, while the transcript
 stays intact and browsable.
-_Avoid_: truncation, history compression
+_Avoid_: truncation, history compression, summarizer
 
 **Compaction boundary**:
 The transcript index where the summarized prefix ends and the verbatim tail

@@ -1113,7 +1113,10 @@ comparison between the estimate of each exact serialized request and provider-
 reported input usage for that request, when available; never treat either as
 billed usage. See [CLI options — Debug](./cli-options.md#debug).
 
-**Summary generation:** Use the configured `[compaction].engine` without tools. It
+**Summary generation:** Use the explicitly configured `[compaction].engine`
+or per-agent override without tools; when neither names an engine, follow that
+agent's active conversation Engine runtime. An explicit summarizer remains bound to
+its named engine, including when it is also the conversation engine. It
 summarizes an immutable prefix snapshot; the outer agent loop applies the
 result. If summary generation fails or times out, log the failure and drop
 old complete turns or oversized old results to reach the target. Do not cut a
@@ -1181,8 +1184,8 @@ The user can interrupt the current conversation with `Esc`/`Ctrl+C`; steering do
 pending tool sequence.
 
 The earlier rolling-window sketch is superseded by the Phase 12 design above:
-cached estimates, background summarization through `[compaction].engine`, a hard
-drop fallback, and an append-only compaction event. The summary is projected
+cached estimates, background summarization through the resolved explicit or
+implicit engine, a hard drop fallback, and an append-only compaction event. The summary is projected
 with a provider-safe marked message, not a mid-conversation `system` role.
 
 ### D. Tool Registry + Dynamic Schemas
@@ -1964,6 +1967,9 @@ store (see §4H). Two JSONL record shapes are written per parent session file:
 {"type":"child_start","v":1,"id":"<run-uuid>","parent_session":"<uuid>","agent_type":"research","task":"…","created_at":"…"}
 {"type":"child_result","v":1,"id":"<run-uuid>","parent_session":"<uuid>","status":"success|timeout|max_iterations|error|aborted_by_user","result":"…","sources":["…"],"origin":"agent|runtime","completed_at":"…"}
 ```
+
+Here `origin: "runtime"` is the serialized value for outcomes produced by
+Ylva's harness; it does not refer to an Engine runtime.
 
 - The parent-session link is explicit (`parent_session`, `parent_message_index`).
 - The full child conversation is stored as its **own session file** under
@@ -2910,9 +2916,11 @@ See reducer-state-handling-plan.md.
 
 - [x] `/commands` in input box, recognised only when `/` is the first character
       of the draft message (never mid-paste): `/models` (list available models
-      from every configured provider via `Provider::list_models()`, §4A, and
-      switch the active engine and model on selection — supersedes the
-      standalone `SwitchModel` placeholder), `/tools` (show the active agent's
+      from every configured provider via `Provider::list_models()`, §4A;
+      named-engine shortcuts activate their exact Engine runtime identity, while raw
+      catalog entries use provider-based routing; the picker previews the
+      summarizer effect — supersedes the standalone `SwitchModel` placeholder),
+      `/tools` (show the active agent's
       allowed tool list), `/clear`/`/reset` (aliases; reset `Context` and start
       a fresh `Store` session). `/save` is dropped — it had no behavior
       distinct from the `Store`'s existing automatic per-line flush, §4H
@@ -3134,7 +3142,9 @@ hard usage errors: stderr, exit 2).
       reached before the summary applies, synchronously drop old complete turns
       or oversized old results until the target is met.
 
-- [x] Summarize the old prefix with the configured `[compaction].engine`. The
+- [x] Summarize the old prefix with the explicitly configured summarizer, or
+      follow the active conversation Engine runtime when neither profile nor agent
+      type selects one. The
       summary must preserve decisions, open work, file paths, identifiers, user
       constraints, and the boundary before the verbatim tail. On summarizer
       failure or timeout, use the synchronous drop fallback and log the
@@ -3422,7 +3432,7 @@ where they are documented in the body of this document.
 | **Headless safety**            | Mutating tools require `--auto-approve-*`; proposed exit code `4` is deferred                                                                                                                 | §4E Safety, §7 CLI Surface                   |
 | **Session cloning**            | `--conversation-id <id> --clone` forks a top-level session into a new UUID with copied events and `cloned_from`; the source is read-only                                                         | §4H Persistence, §7 CLI Surface               |
 | **Conversation titles**        | Utility-engine conversation generates a concise title from the first user message and first assistant reply, then atomically persists a single-line value in the `meta` header (§4H decision 8) | §7 Phase 9, §4H decision 8                   |
-| **Model switching**            | Supported mid-conversation via `/models`, which queries each configured provider connection once and switches the selected connection/model through `EngineRouter`; the `SwitchModel` command placeholder was dropped | §4B ReAct Loop, §6 Commands |
+| **Model switching**            | `/models` queries each configured provider once; named shortcuts activate exact engines, raw catalog entries use provider routing, and picker previews show compaction effects | §4B ReAct Loop, §6 Commands |
 | **App state**                  | Dumb view model; agent loop owns state machine                                                                                                                                                 | §4B ReAct Loop                               |
 | **Config format**              | Profiles and `.toml` agent files use TOML; `.md` agent files accept `+++` TOML or `---` YAML frontmatter                                                                                         | §4G Agent-Type File Formats                  |
 | **Engine vs Provider mapping** | `Engine` = named model configuration; `provider_connection` = named endpoint/credential connection; `provider` = implementation kind; `Provider` = provider trait object built from a connection at startup | §4A Provider Trait, §4G Engine Definitions |

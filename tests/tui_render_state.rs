@@ -116,6 +116,7 @@ fn model_picker_choices(choice_count: usize) -> Vec<ylva::tui_reducer_state::Mod
     (0..choice_count)
         .map(|index| ylva::tui_reducer_state::ModelChoice {
             label: format!("stub/model-{index}"),
+            initial_reasoning_effort: None,
             selection: ylva::ProviderModelOption {
                 provider_connection: "stub".to_string(),
                 model: ylva::ModelInfo {
@@ -129,6 +130,8 @@ fn model_picker_choices(choice_count: usize) -> Vec<ylva::tui_reducer_state::Mod
             },
             is_active: false,
             engine_name: None,
+            selection_target: None,
+            selection_preview_error: None,
         })
         .collect()
 }
@@ -1523,6 +1526,8 @@ fn footer_shows_the_active_named_engine_and_model() {
             provider_connection: "ollama".to_string(),
             model: "llama3.2".to_string(),
             reasoning_effort: Some("max".to_string()),
+            compaction_engine: None,
+            inherits_parent_runtime: false,
         },
         ..TuiState::new()
     };
@@ -2063,6 +2068,7 @@ fn model_picker_footer_shows_picker_controls_instead_of_send() {
         slash_overlay: SlashOverlay::ModelPicker {
             choices: vec![ModelChoice {
                 label: "stub/thinking  reasoning: default ⚙".to_string(),
+                initial_reasoning_effort: None,
                 selection: ProviderModelOption {
                     provider_connection: "stub".to_string(),
                     model: ModelInfo {
@@ -2076,6 +2082,8 @@ fn model_picker_footer_shows_picker_controls_instead_of_send() {
                 },
                 is_active: false,
                 engine_name: None,
+                selection_target: None,
+                selection_preview_error: None,
             }],
             filter: String::new(),
             selected: 0,
@@ -2125,6 +2133,263 @@ fn model_picker_footer_shows_picker_controls_instead_of_send() {
     assert!(
         !rendered.contains("enter send"),
         "model picker must not advertise sending: {rendered:?}"
+    );
+}
+
+#[test]
+fn model_picker_details_show_highlighted_compaction_effect() {
+    use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_reducer_state::{ModelChoice, SlashOverlay};
+    use ylva::tui_widgets;
+    use ylva::{
+        CompactionEngineDisplayInfo, EngineDisplayInfo, ModelInfo, ModelSelectionTarget,
+        ProviderModelOption, TuiState,
+    };
+
+    let make_choice = |name: &str, provider_connection: &str, model_id: &str| {
+        let context_length = if model_id == "model-a" {
+            131_072
+        } else {
+            65_536
+        };
+        ModelChoice {
+            label: format!(
+                "{name} → {provider_connection}/{model_id}  context: {}kb",
+                context_length / 1024
+            ),
+            selection: ProviderModelOption {
+                provider_connection: provider_connection.to_string(),
+                model: ModelInfo {
+                    id: model_id.to_string(),
+                    context_length: Some(context_length),
+                    reasoning_efforts: None,
+                    reasoning_default: None,
+                    input_modalities: None,
+                },
+                reasoning_effort: None,
+            },
+            initial_reasoning_effort: None,
+            is_active: name == "engine-a",
+            engine_name: Some(name.to_string()),
+            selection_target: Some(ModelSelectionTarget {
+                engine_name: Some(name.to_string()),
+                provider_connection: provider_connection.to_string(),
+                model: model_id.to_string(),
+                context_length,
+            }),
+            selection_preview_error: None,
+        }
+    };
+    let mut state = TuiState {
+        engine_display: EngineDisplayInfo {
+            engine_name: "engine-a".to_string(),
+            provider_connection: "mock".to_string(),
+            model: "model-a".to_string(),
+            reasoning_effort: None,
+            compaction_engine: Some(CompactionEngineDisplayInfo {
+                engine_name: "engine-a".to_string(),
+                provider_connection: "mock".to_string(),
+                model: "model-a".to_string(),
+                context_length: 32_768,
+                follows_conversation: false,
+                shares_conversation: true,
+            }),
+            inherits_parent_runtime: false,
+        },
+        slash_overlay: SlashOverlay::ModelPicker {
+            choices: vec![
+                make_choice("engine-a", "mock", "model-a"),
+                make_choice("engine-b", "mock", "model-b"),
+                make_choice("engine-c", "mock", "model-a"),
+                make_choice("engine-d", "mock-alt", "model-a"),
+            ],
+            filter: String::new(),
+            selected: 1,
+        },
+        ..TuiState::new()
+    };
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
+    let mut textarea = TextArea::default();
+    let footer_foreground = |terminal: &Terminal<TestBackend>| {
+        let buffer = terminal.backend().buffer();
+        let row_width = buffer.area.width as usize;
+        buffer
+            .content()
+            .chunks(row_width)
+            .find(|row| {
+                row.iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+                    .contains("Compaction uses")
+            })
+            .and_then(|row| row.iter().find(|cell| cell.symbol() == "C"))
+            .map(|cell| cell.fg)
+            .expect("compaction detail foreground")
+    };
+
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
+        })
+        .expect("draw");
+    let rendered: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(!rendered.contains("Conversation:"));
+    assert!(rendered.contains("Compaction uses mock/model-a, context: 32kb"));
+    assert!(!rendered.contains("Compaction uses mock/model-a, context: 32kb."));
+    assert_eq!(footer_foreground(&terminal), Color::Rgb(255, 165, 0));
+
+    if let SlashOverlay::ModelPicker { selected, .. } = &mut state.slash_overlay {
+        *selected = 0;
+    }
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
+        })
+        .expect("redraw");
+    let rendered: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(rendered.contains("Compaction uses mock/model-a, context: 128kb"));
+    assert_eq!(footer_foreground(&terminal), Color::DarkGray);
+
+    if let SlashOverlay::ModelPicker { selected, .. } = &mut state.slash_overlay {
+        *selected = 2;
+    }
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
+        })
+        .expect("redraw with matching provider/model");
+    let rendered: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(rendered.contains("engine-c → mock/model-a  context: 128kb"));
+    assert!(rendered.contains("Compaction uses mock/model-a, context: 32kb"));
+    assert_eq!(footer_foreground(&terminal), Color::Rgb(255, 165, 0));
+
+    if let SlashOverlay::ModelPicker { selected, .. } = &mut state.slash_overlay {
+        *selected = 3;
+    }
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
+        })
+        .expect("redraw with a different provider connection");
+    let rendered: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(rendered.contains("Compaction uses mock/model-a, context: 32kb"));
+    assert_eq!(footer_foreground(&terminal), Color::Rgb(255, 165, 0));
+
+    state
+        .engine_display
+        .compaction_engine
+        .as_mut()
+        .expect("compaction engine display")
+        .follows_conversation = true;
+    if let SlashOverlay::ModelPicker { selected, .. } = &mut state.slash_overlay {
+        *selected = 1;
+    }
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
+        })
+        .expect("redraw with implicit compaction engine");
+    let rendered: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(rendered.contains("Compaction uses mock/model-b, context: 64kb"));
+    assert_eq!(footer_foreground(&terminal), Color::DarkGray);
+    assert!(!rendered.contains("No summarizer is configured."));
+
+    let mut narrow_state = state;
+    let mut narrow_terminal = Terminal::new(TestBackend::new(36, 20)).expect("narrow terminal");
+    narrow_terminal
+        .draw(|frame| {
+            tui_widgets::draw(
+                frame,
+                &mut narrow_state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
+        })
+        .expect("narrow draw");
+    assert!(
+        narrow_state.slash_overlay_layout.content_area.height > 0,
+        "the picker rows must remain usable when details do not fit"
+    );
+    let rendered: String = narrow_terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(
+        !rendered.contains("Conversation:"),
+        "the detail area should yield to picker controls on narrow terminals"
     );
 }
 
@@ -2343,8 +2608,13 @@ fn model_picker_moves_selection_up_inside_scrolled_window() {
     }
     let first_visible_row = state.layout.slash_overlay.first_visible_row;
     assert!(first_visible_row > 0);
-
-    for expected_model_index in [9, 8, 7, 6, 5, 4] {
+    let current_model_index = state
+        .selected_model()
+        .and_then(|choice| choice.selection.model.id.strip_prefix("model-"))
+        .and_then(|index| index.parse::<usize>().ok())
+        .expect("selected model index");
+    let moves_inside_window = current_model_index - first_visible_row;
+    for step in 1..=moves_inside_window {
         ylva::presenter::update(
             &mut state,
             TuiEvent::Input(InputEvent::KeyInput(KeyEvent::new(
@@ -2369,7 +2639,7 @@ fn model_picker_moves_selection_up_inside_scrolled_window() {
             state
                 .selected_model()
                 .map(|choice| choice.selection.model.id.as_str()),
-            Some(format!("model-{expected_model_index}").as_str())
+            Some(format!("model-{}", current_model_index - step).as_str())
         );
         assert_eq!(
             state.layout.slash_overlay.first_visible_row, first_visible_row,
@@ -2377,34 +2647,33 @@ fn model_picker_moves_selection_up_inside_scrolled_window() {
         );
     }
 
-    for expected_model_index in [3, 2] {
-        ylva::presenter::update(
-            &mut state,
-            TuiEvent::Input(InputEvent::KeyInput(KeyEvent::new(
-                KeyCode::Up,
-                KeyModifiers::NONE,
-            ))),
-            &textarea_context,
-        );
-        terminal
-            .draw(|frame| {
-                ylva::render::render(
-                    frame,
-                    &mut state,
-                    &mut textarea,
-                    None,
-                    None,
-                    &ylva::ToolRegistry::new(),
-                );
-            })
-            .expect("upper-bound navigation draw");
-        assert_eq!(
-            state
-                .selected_model()
-                .map(|choice| choice.selection.model.id.as_str()),
-            Some(format!("model-{expected_model_index}").as_str())
-        );
-    }
+    ylva::presenter::update(
+        &mut state,
+        TuiEvent::Input(InputEvent::KeyInput(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        ))),
+        &textarea_context,
+    );
+    terminal
+        .draw(|frame| {
+            ylva::render::render(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
+        })
+        .expect("upper-bound navigation draw");
+    assert_eq!(
+        state
+            .selected_model()
+            .and_then(|choice| choice.selection.model.id.strip_prefix("model-"))
+            .and_then(|index| index.parse::<usize>().ok()),
+        Some(first_visible_row - 1)
+    );
     assert_eq!(
         state.layout.slash_overlay.first_visible_row,
         first_visible_row - 1,
@@ -2480,6 +2749,7 @@ fn model_picker_shows_a_message_instead_of_vanishing_when_the_filter_matches_not
         slash_overlay: SlashOverlay::ModelPicker {
             choices: vec![ModelChoice {
                 label: "stub/thinking  reasoning: default".to_string(),
+                initial_reasoning_effort: None,
                 selection: ProviderModelOption {
                     provider_connection: "stub".to_string(),
                     model: ModelInfo {
@@ -2493,6 +2763,8 @@ fn model_picker_shows_a_message_instead_of_vanishing_when_the_filter_matches_not
                 },
                 is_active: false,
                 engine_name: None,
+                selection_target: None,
+                selection_preview_error: None,
             }],
             filter: "no-such-model".to_string(),
             selected: 0,
@@ -4256,7 +4528,7 @@ fn dragging_across_logo_build_lines_copies_version_and_profile() {
 }
 
 #[test]
-fn startup_logo_shows_selected_runtime_profile() {
+fn startup_logo_shows_selected_profile() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use ratatui_textarea::TextArea;
@@ -4340,6 +4612,10 @@ fn help_popup_shows_profile_paths() {
     assert!(
         rendered.contains("  Profile path:   /tmp/ylva-home/profiles/work/config.toml"),
         "help popup should show the resolved profile path: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("Environment"),
+        "help popup should label profile and workspace details as environment: {rendered:?}"
     );
     assert!(
         rendered.contains("  Profile:        work"),
@@ -4462,7 +4738,3 @@ fn dragging_scrolled_help_popup_line_copies_rendered_text() {
         "dragging a scrolled help line should copy its rendered text: {effects:?}"
     );
 }
-    assert!(
-        rendered.contains("Environment"),
-        "help popup should label profile and workspace details as environment: {rendered:?}"
-    );

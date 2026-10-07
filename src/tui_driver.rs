@@ -45,7 +45,7 @@ use crate::agent_factory::AgentFactory;
 use crate::app::App;
 use crate::config::ProfileConfig;
 use crate::events::{spawn_crossterm_bridge, AppAction};
-use crate::llm::engine::{Engine, EngineConfig, EngineImpl};
+use crate::llm::engine::{Engine, EngineConfig, EngineImpl, ModelSelection};
 use crate::llm::Provider;
 use crate::presenter::{self, TextareaContext, TuiEvent};
 use crate::render;
@@ -679,6 +679,7 @@ fn apply_model_list_result(
         ModelListResult::Models(models) => {
             let active_config = engine.config();
             let active_reasoning_effort = engine.reasoning_effort();
+            let active_engine_name = engine.active_engine_name();
             let is_active_option = |provider_connection: &str, model_id: &str| {
                 provider_connection == active_config.provider_connection
                     && model_id == active_config.model
@@ -704,25 +705,22 @@ fn apply_model_list_result(
             // shortcuts to the provider/model/config they name, ahead of the
             // raw catalog below.
             let engine_choices: Vec<ModelChoice> = engine
-                .named_engines()
+                .named_engine_info()
                 .into_iter()
-                .map(|(engine_name, engine_config)| {
-                    let is_active =
-                        is_active_option(&engine_config.provider_connection, &engine_config.model);
+                .map(|named_engine| {
+                    let engine_name = named_engine.name;
+                    let engine_config = named_engine.config;
+                    let initial_reasoning_effort = named_engine.reasoning_effort;
+                    let is_active = active_engine_name.as_deref() == Some(&engine_name);
                     let catalog_model = catalog_by_identity.get(&(
                         engine_config.provider_connection.clone(),
                         engine_config.model.clone(),
                     ));
-                    // The engine's own configured budget wins if TOML set
-                    // one; otherwise fall back to the provider's advertised
-                    // context length for this model, and finally to the
-                    // built-in default.
-                    let effective_context_length = engine_config.effective_context_length(
-                        catalog_model.and_then(|model| model.context_length),
-                    );
                     let model = crate::llm::ModelInfo {
-                        id: engine_config.model,
-                        context_length: Some(effective_context_length),
+                        id: engine_config.model.clone(),
+                        context_length: engine_config
+                            .context_length
+                            .or_else(|| catalog_model.and_then(|model| model.context_length)),
                         reasoning_efforts: catalog_model
                             .and_then(|model| model.reasoning_efforts.clone()),
                         reasoning_default: catalog_model
@@ -730,21 +728,19 @@ fn apply_model_list_result(
                         input_modalities: catalog_model
                             .and_then(|model| model.input_modalities.clone()),
                     };
-                    let reasoning_effort = if is_active {
-                        active_reasoning_effort.clone()
-                    } else {
-                        engine_config.reasoning
-                    };
                     let selection = crate::llm::ProviderModelOption {
                         provider_connection: engine_config.provider_connection,
                         model,
-                        reasoning_effort,
+                        reasoning_effort: initial_reasoning_effort.clone(),
                     };
                     ModelChoice {
                         label: engine_choice_label(&engine_name, &selection, is_active),
+                        initial_reasoning_effort,
                         selection,
                         is_active,
                         engine_name: Some(engine_name),
+                        selection_target: None,
+                        selection_preview_error: None,
                     }
                 })
                 .collect();
@@ -757,21 +753,36 @@ fn apply_model_list_result(
                     }
                     ModelChoice {
                         label: model_choice_label(&option, is_active),
+                        initial_reasoning_effort: option.reasoning_effort.clone(),
                         selection: option,
                         is_active,
                         engine_name: None,
+                        selection_target: None,
+                        selection_preview_error: None,
                     }
                 })
                 .collect();
-            let choices: Vec<ModelChoice> =
+            let mut choices: Vec<ModelChoice> =
                 engine_choices.into_iter().chain(model_choices).collect();
+            for choice in &mut choices {
+                match engine.preview_model_selection(&choice.to_model_selection()) {
+                    Ok(target) => choice.selection_target = Some(target),
+                    Err(error) => choice.selection_preview_error = Some(error.to_string()),
+                }
+            }
             let filter = filter.unwrap_or_default();
             let selected = matching_model_indices(&choices, &filter)
                 .into_iter()
                 .position(|index| {
-                    choices[index].selection.provider_connection
-                        == active_config.provider_connection
-                        && choices[index].selection.model.id == active_config.model
+                    let choice = &choices[index];
+                    match choice.engine_name.as_deref() {
+                        Some(engine_name) => active_engine_name.as_deref() == Some(engine_name),
+                        None => {
+                            choice.selection.provider_connection
+                                == active_config.provider_connection
+                                && choice.selection.model.id == active_config.model
+                        }
+                    }
                 })
                 .unwrap_or(0);
             state.slash_overlay = SlashOverlay::ModelPicker {
@@ -838,45 +849,193 @@ async fn execute_slash_effects(
                 let result = fetch_model_list(Arc::clone(engine)).await;
                 apply_model_list_result(state, filter, result, engine);
             }
-            Effect::SwitchModel(selection) => match engine.switch_model_option(&selection) {
-                Ok(()) => {
-                    let config = engine.config();
-                    let confirmation = match selection.model.reasoning_efforts.as_ref() {
-                        Some(_) => format!(
-                            "Switched to {}/{} (reasoning: {}).",
-                            config.provider_connection,
-                            config.model,
-                            selection.reasoning_effort.as_deref().unwrap_or("default")
-                        ),
-                        None => format!(
-                            "Switched to {}/{}.",
-                            config.provider_connection, config.model
-                        ),
-                    };
-                    // TUI-only: never injected into the conversation, since a
-                    // mid-conversation `role:"system"` message is rejected by
-                    // some providers/chat templates and the switch is already
-                    // durably recorded below via `RecordModelChanged`.
-                    state.push_notice(confirmation);
-                    // Read both values from the live engine because a
-                    // selection may have changed the active provider as well
-                    // as its model.
-                    let _ = cmd_tx
-                        .send(AgentCommand::RecordModelChanged {
-                            provider_connection: config.provider_connection,
-                            model: config.model,
-                        })
-                        .await;
+            Effect::SwitchModel(selection) => {
+                let preview = engine.preview_model_selection(&selection);
+                match engine.select_model(&selection) {
+                    Ok(()) => {
+                        let config = engine.config();
+                        let mut confirmation = match &selection {
+                            ModelSelection::NamedEngine { engine_name, .. } => format!(
+                                "Switched to engine '{engine_name}' ({}/{}).",
+                                config.provider_connection, config.model
+                            ),
+                            ModelSelection::ProviderModel(option) => {
+                                match option.model.reasoning_efforts.as_ref() {
+                                    Some(_) => format!(
+                                        "Switched to {}/{} (reasoning: {}).",
+                                        config.provider_connection,
+                                        config.model,
+                                        option.reasoning_effort.as_deref().unwrap_or("default")
+                                    ),
+                                    None => format!(
+                                        "Switched to {}/{}.",
+                                        config.provider_connection, config.model
+                                    ),
+                                }
+                            }
+                        };
+                        match preview {
+                            Ok(target) => {
+                                if let Some(effect) =
+                                    compaction_switch_notice(&state.engine_display, &target)
+                                {
+                                    confirmation.push(' ');
+                                    confirmation.push_str(&effect);
+                                }
+                                refresh_engine_display_after_selection(state, engine, &target);
+                            }
+                            Err(error) => {
+                                confirmation.push_str(&format!(
+                                    " Could not resolve compaction effect: {error}."
+                                ));
+                            }
+                        }
+                        // TUI-only: never injected into the conversation, since a
+                        // mid-conversation `role:"system"` message is rejected by
+                        // some providers/chat templates and the switch is already
+                        // durably recorded below via `RecordModelChanged`.
+                        state.push_notice(confirmation);
+                        // Read both values from the live engine because a
+                        // selection may have changed the active provider as well
+                        // as its model.
+                        let _ = cmd_tx
+                            .send(AgentCommand::RecordModelChanged {
+                                provider_connection: config.provider_connection,
+                                model: config.model,
+                            })
+                            .await;
+                    }
+                    Err(error) => {
+                        state.push_notice(format!(
+                            "Could not switch to {}/{}: {error}",
+                            selection.provider_connection(),
+                            selection.model_id()
+                        ));
+                    }
                 }
-                Err(error) => {
-                    state.push_notice(format!(
-                        "Could not switch to {}/{}: {error}",
-                        selection.provider_connection, selection.model.id
-                    ));
-                }
-            },
+            }
             _ => {}
         }
+    }
+}
+
+fn refresh_engine_display_after_selection(
+    state: &mut AppState,
+    engine: &Arc<dyn Engine>,
+    target: &crate::llm::engine::ModelSelectionTarget,
+) {
+    let runtime_display = crate::llm::engine::EngineDisplayInfo::from_engine(engine.as_ref());
+    let mut conversation_display = state.engine_display.clone();
+    if !runtime_display.engine_name.is_empty() {
+        conversation_display.engine_name = runtime_display.engine_name;
+    }
+    conversation_display.provider_connection = runtime_display.provider_connection;
+    conversation_display.model = runtime_display.model;
+    conversation_display.reasoning_effort = runtime_display.reasoning_effort;
+    let conversation_engine_name = conversation_display.engine_name.clone();
+    let conversation_provider_connection = conversation_display.provider_connection.clone();
+    let conversation_model = conversation_display.model.clone();
+    refresh_compaction_display(
+        &mut conversation_display,
+        target,
+        &conversation_engine_name,
+        &conversation_provider_connection,
+        &conversation_model,
+    );
+    state.engine_display = conversation_display.clone();
+
+    for child_display in state.child_engine_displays.values_mut() {
+        if child_display.inherits_parent_runtime {
+            child_display.engine_name = conversation_display.engine_name.clone();
+            child_display.provider_connection = conversation_display.provider_connection.clone();
+            child_display.model = conversation_display.model.clone();
+            child_display.reasoning_effort = conversation_display.reasoning_effort.clone();
+        }
+        let child_engine_name = child_display.engine_name.clone();
+        let child_provider_connection = child_display.provider_connection.clone();
+        let child_model = child_display.model.clone();
+        refresh_compaction_display(
+            child_display,
+            target,
+            &child_engine_name,
+            &child_provider_connection,
+            &child_model,
+        );
+    }
+}
+
+fn refresh_compaction_display(
+    display: &mut crate::llm::engine::EngineDisplayInfo,
+    target: &crate::llm::engine::ModelSelectionTarget,
+    conversation_engine_name: &str,
+    conversation_provider_connection: &str,
+    conversation_model: &str,
+) {
+    let Some(compaction) = &mut display.compaction_engine else {
+        return;
+    };
+    let selected_summarizer = target.engine_name.as_deref()
+        == Some(compaction.engine_name.as_str())
+        || (target.engine_name.is_none()
+            && compaction.engine_name.is_empty()
+            && compaction.shares_conversation);
+    if compaction.follows_conversation {
+        compaction.engine_name = conversation_engine_name.to_string();
+        compaction.provider_connection = conversation_provider_connection.to_string();
+        compaction.model = conversation_model.to_string();
+        compaction.context_length = target.context_length;
+    } else if selected_summarizer {
+        compaction.provider_connection = target.provider_connection.clone();
+        compaction.model = target.model.clone();
+        compaction.context_length = target.context_length;
+    }
+    compaction.shares_conversation = compaction.follows_conversation
+        || (!compaction.engine_name.is_empty()
+            && compaction.engine_name == conversation_engine_name)
+        || (compaction.engine_name.is_empty()
+            && conversation_engine_name.is_empty()
+            && compaction.shares_conversation);
+}
+
+fn compaction_switch_notice(
+    engine_display: &crate::llm::engine::EngineDisplayInfo,
+    target: &crate::llm::engine::ModelSelectionTarget,
+) -> Option<String> {
+    let compaction = engine_display.compaction_engine.as_ref()?;
+    if compaction.follows_conversation {
+        let target_name = target
+            .engine_name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&target.provider_connection);
+        return Some(format!(
+            "Compaction now uses selected engine '{target_name}'."
+        ));
+    }
+
+    let target_is_compaction_engine = match target.engine_name.as_deref() {
+        Some(target_name) if !compaction.engine_name.is_empty() => {
+            target_name == compaction.engine_name
+        }
+        None => compaction.engine_name.is_empty() && compaction.shares_conversation,
+        _ => false,
+    };
+    if target_is_compaction_engine {
+        let target_name = target
+            .engine_name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&target.provider_connection);
+        Some(format!(
+            "Compaction uses '{target_name}', shared with the conversation."
+        ))
+    } else {
+        let compaction_engine_name = if compaction.engine_name.is_empty() {
+            format!("{}/{}", compaction.provider_connection, compaction.model)
+        } else {
+            compaction.engine_name.clone()
+        };
+        Some(format!("Compaction remains on '{compaction_engine_name}'."))
     }
 }
 
@@ -1929,7 +2088,6 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    use crate::llm::engine::DEFAULT_CONTEXT_LENGTH;
     use crate::tui_reducer_state::{ChatEntry, ConversationView, ToolCallState};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tokio::sync::mpsc;
@@ -1946,6 +2104,59 @@ mod tests {
             cursor_row: textarea.cursor().0,
             cursor_row_is_last: textarea.cursor().0 + 1 >= textarea.lines().len().max(1),
         }
+    }
+
+    #[test]
+    fn compaction_switch_notices_explain_engine_selection_effects() {
+        use crate::llm::engine::{CompactionEngineDisplayInfo, EngineDisplayInfo};
+
+        let target = crate::llm::engine::ModelSelectionTarget {
+            engine_name: Some("engine-b".to_string()),
+            provider_connection: "mock".to_string(),
+            model: "model-b".to_string(),
+            context_length: 65_536,
+        };
+        let mut display = EngineDisplayInfo {
+            engine_name: "engine-a".to_string(),
+            provider_connection: "mock".to_string(),
+            model: "model-a".to_string(),
+            reasoning_effort: None,
+            compaction_engine: Some(CompactionEngineDisplayInfo {
+                engine_name: "engine-a".to_string(),
+                provider_connection: "mock".to_string(),
+                model: "model-a".to_string(),
+                context_length: 131_072,
+                follows_conversation: true,
+                shares_conversation: true,
+            }),
+            inherits_parent_runtime: false,
+        };
+        assert_eq!(
+            compaction_switch_notice(&display, &target).as_deref(),
+            Some("Compaction now uses selected engine 'engine-b'.")
+        );
+
+        let compaction = display
+            .compaction_engine
+            .as_mut()
+            .expect("summarizer details");
+        compaction.follows_conversation = false;
+        compaction.engine_name = "engine-a".to_string();
+        assert_eq!(
+            compaction_switch_notice(&display, &target).as_deref(),
+            Some("Compaction remains on 'engine-a'.")
+        );
+
+        let shared_target = crate::llm::engine::ModelSelectionTarget {
+            engine_name: Some("engine-a".to_string()),
+            provider_connection: "mock".to_string(),
+            model: "model-a".to_string(),
+            context_length: 131_072,
+        };
+        assert_eq!(
+            compaction_switch_notice(&display, &shared_target).as_deref(),
+            Some("Compaction uses 'engine-a', shared with the conversation.")
+        );
     }
 
     #[test]
@@ -3559,6 +3770,7 @@ mod tests {
         state.slash_overlay = SlashOverlay::ModelPicker {
             choices: vec![ModelChoice {
                 label: "stub/deepseek-v3".to_string(),
+                initial_reasoning_effort: None,
                 selection: crate::llm::ProviderModelOption {
                     provider_connection: "stub".to_string(),
                     model: crate::llm::ModelInfo {
@@ -3572,6 +3784,8 @@ mod tests {
                 },
                 is_active: true,
                 engine_name: None,
+                selection_target: None,
+                selection_preview_error: None,
             }],
             filter: "deep".to_string(),
             selected: 0,
@@ -4522,9 +4736,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn models_lists_an_engine_shortcut_falling_back_to_the_built_in_default_context_length() {
+    async fn models_lists_an_engine_shortcut_without_inventing_context_metadata() {
         // When neither TOML nor the catalog advertise a context length, the
-        // shortcut must show the built-in default rather than nothing.
+        // picker must not present the engine's context fallback as catalog metadata.
         let (mut state, _textarea, cmd_tx, _cmd_rx) = setup();
         let engine: Arc<dyn Engine> = StubEngine::with_named_engine(
             &["small", "thinking"],
@@ -4553,9 +4767,8 @@ mod tests {
             .find(|choice| choice.engine_name.is_some())
             .expect("the named engine must appear as a shortcut");
         assert_eq!(
-            shortcut.selection.model.context_length,
-            Some(DEFAULT_CONTEXT_LENGTH),
-            "an unconfigured, unadvertised context_length must fall back to the built-in default"
+            shortcut.selection.model.context_length, None,
+            "an unconfigured, unadvertised context_length must remain unknown in the picker"
         );
     }
 
@@ -4737,9 +4950,12 @@ mod tests {
         state.slash_overlay = SlashOverlay::ModelPicker {
             choices: vec![ModelChoice {
                 label: "stub/thinking  reasoning: default".to_string(),
+                initial_reasoning_effort: selection.reasoning_effort.clone(),
                 selection,
                 is_active: false,
                 engine_name: None,
+                selection_target: None,
+                selection_preview_error: None,
             }],
             filter: String::new(),
             selected: 0,
@@ -4836,7 +5052,10 @@ mod tests {
         );
         assert_eq!(
             effects,
-            vec![Effect::ClearTextarea, Effect::SwitchModel(picked)]
+            vec![
+                Effect::ClearTextarea,
+                Effect::SwitchModel(ModelSelection::ProviderModel(picked))
+            ]
         );
         assert_eq!(state.slash_overlay, SlashOverlay::Hidden);
 
@@ -4860,6 +5079,131 @@ mod tests {
             AgentCommand::RecordModelChanged { model, .. } if model == "small"
         ));
         assert!(cmd_rx.try_recv().is_err(), "no further commands are sent");
+    }
+
+    #[tokio::test]
+    async fn selecting_a_named_engine_shortcut_activates_that_exact_engine() {
+        use crate::llm::EngineRouter;
+
+        let (mut state, textarea, cmd_tx, _cmd_rx) = setup();
+        let engine_a = StubEngine::with_models(&["shared-model"], "shared-model");
+        let engine_b = StubEngine::with_models(&["shared-model"], "shared-model");
+        {
+            let engine_config = &mut *engine_a.config.lock().expect("engine A config lock");
+            engine_config.temperature = Some(0.1);
+            engine_config.context_length = Some(8_192);
+            engine_config.soft_compaction_threshold = 0.6;
+        }
+        {
+            let engine_config = &mut *engine_b.config.lock().expect("engine B config lock");
+            engine_config.temperature = Some(0.8);
+            engine_config.context_length = Some(32_768);
+            engine_config.soft_compaction_threshold = 0.8;
+        }
+        let router = EngineRouter::new(
+            HashMap::from([
+                (
+                    "engine-a".to_string(),
+                    Arc::clone(&engine_a) as Arc<dyn Engine>,
+                ),
+                (
+                    "engine-b".to_string(),
+                    Arc::clone(&engine_b) as Arc<dyn Engine>,
+                ),
+            ]),
+            "engine-a",
+        )
+        .expect("router");
+        let engine: Arc<dyn Engine> = Arc::new(router);
+
+        execute_slash_effects(
+            &mut state,
+            vec![Effect::ListModels { filter: None }],
+            &engine,
+            &cmd_tx,
+        )
+        .await;
+
+        let SlashOverlay::ModelPicker {
+            choices, selected, ..
+        } = &state.slash_overlay
+        else {
+            panic!("expected the model picker, got {:?}", state.slash_overlay);
+        };
+        assert_eq!(
+            choices
+                .iter()
+                .filter(|choice| choice.is_active)
+                .filter_map(|choice| choice.engine_name.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["engine-a"],
+            "only the active named engine is marked active when sibling shortcuts share a model"
+        );
+        assert_eq!(*selected, 0, "the active engine shortcut is preselected");
+
+        state.move_slash_selection(1);
+        assert_eq!(
+            state
+                .selected_model()
+                .and_then(|choice| choice.engine_name.as_deref()),
+            Some("engine-b"),
+            "the test must select engine B's named shortcut"
+        );
+        let effects = presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+            &textarea_ctx_from(&textarea),
+        );
+        execute_slash_effects(&mut state, effects, &engine, &cmd_tx).await;
+
+        assert_eq!(
+            engine.active_engine_name().as_deref(),
+            Some("engine-b"),
+            "the exact named shortcut, not a provider representative, must become active"
+        );
+        assert_eq!(
+            engine_a.config().model,
+            "shared-model",
+            "activating engine B must not mutate engine A"
+        );
+        assert_eq!(engine_b.config().model, "shared-model");
+        assert_eq!(engine.config().temperature, Some(0.8));
+        assert_eq!(engine.config().context_length, Some(32_768));
+        assert_eq!(engine.config().soft_compaction_threshold, 0.8);
+        assert_eq!(engine_a.config().temperature, Some(0.1));
+        assert_eq!(engine_a.config().context_length, Some(8_192));
+        assert_eq!(engine_a.config().soft_compaction_threshold, 0.6);
+
+        execute_slash_effects(
+            &mut state,
+            vec![Effect::ListModels { filter: None }],
+            &engine,
+            &cmd_tx,
+        )
+        .await;
+        let SlashOverlay::ModelPicker {
+            choices, selected, ..
+        } = &state.slash_overlay
+        else {
+            panic!(
+                "expected the reopened model picker, got {:?}",
+                state.slash_overlay
+            );
+        };
+        assert!(
+            choices.iter().any(|choice| {
+                choice.engine_name.as_deref() == Some("engine-b") && choice.is_active
+            }),
+            "reopening the picker must mark the active same-model engine by name"
+        );
+        assert_eq!(
+            state
+                .selected_model()
+                .and_then(|choice| choice.engine_name.as_deref()),
+            Some("engine-b"),
+            "reopening the picker must preselect the exact active engine"
+        );
+        assert_eq!(*selected, 1);
     }
 
     #[tokio::test]

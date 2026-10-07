@@ -169,9 +169,11 @@ without losing anything the user can still read.
   warning on the next prompt. They also warn
   before an actual oversized summary request. Warnings are advisory: attempts
   still run and existing failure recovery is unchanged. Each agent type can
-  select its own compaction engine. When a compaction engine is explicitly
-  configured, changing only the conversation engine does not enlarge the
-  summarizer. See
+  select its own compaction engine. When neither the profile nor agent type
+  explicitly selects one, the summarizer follows that agent's active
+  conversation engine. An explicit summarizer stays bound to its named engine;
+  if it shares the conversation engine, changes to that engine affect future
+  summaries too. See
   [per-agent configuration](./configuration.md#per-agent-configuration).
 - **Transcript vs. model view.** The transcript is the durable, ordered
   record of every message and never loses one. The *model view* is what a
@@ -295,9 +297,22 @@ Named provider connections are constructed independently, so multiple
 connections can use the same implementation (for example, local Ollama and
 Ollama Cloud). The conversation footer shows the active named engine and model
 when a profile engine name is available; direct unnamed engines show only the
-model. `/models` queries each connection once and lists
-`provider_connection/model` entries so a selection can change both connection
-and model.
+model. `/models` queries each connection once and lists configured named
+engine shortcuts before raw `provider_connection/model` catalog entries.
+Selecting a shortcut activates that exact engine's current Engine runtime settings,
+even when another engine uses the same connection and model. A raw catalog
+entry keeps provider-based routing: it changes the active engine for its
+connection, or the deterministic representative engine for another connection.
+The picker detail previews the provider-connection/model and effective context
+window compaction will use for the highlighted selection, without repeating
+the active conversation engine and model already shown in the TUI footer. It
+uses the form `Compaction uses <provider_connection>/<model>, context: <window>`.
+The detail turns orange when a fixed compaction engine would remain on a
+different provider-connection/model or effective context window than the
+highlighted choice. Compaction that follows the conversation selection, or a
+choice that itself changes the compaction engine, shows the resulting pair
+without a mismatch warning. Switch notices describe the resulting
+compaction-engine selection.
 
 Model discovery also advertises optional reasoning-effort support. Ylva keeps
 three provider-neutral states:
@@ -323,8 +338,11 @@ model. Each picker row labels reasoning as `unavailable`, `default`, or the
 current value followed by `⚙` when it can be adjusted, so models that do not
 respond to `←`/`→` are distinguishable. While an overlay is open, the footer
 replaces the normal send hint with the controls for that overlay.
-`Enter` applies both the model and the selected effort to subsequent requests.
-The selected effort is runtime state and is not added to the session's
+`Enter` activates the exact named-engine shortcut or applies the raw catalog
+model and selected effort to subsequent requests. On a named shortcut, the
+engine keeps its current Engine runtime model/settings; only a reasoning-effort edit
+in the picker is reapplied. The choice preview does not mutate an engine.
+The selected effort is live Engine runtime state and is not added to the session's
 provider/model metadata. A profile's `reasoning` value is validated against
 the catalog once, lazily before the first chat: a value the model does not
 advertise is dropped to the provider default and surfaced as a notice above
@@ -1065,11 +1083,14 @@ identities without another provider round-trip. A multi-word filter (e.g.
 identity, case-insensitively and in any order — not the joined phrase as one
 substring. A filter that matches nothing keeps the panel open with a
 "Nothing matched your model filter." message rather than vanishing, so the
-user can keep editing it. `Enter` confirms the highlighted model and clears
-the input; `Esc` cancels and clears it too.
+user can keep editing it. The detail area previews the compaction engine used
+by the highlighted choice without duplicating the conversation engine/model
+shown in the TUI footer. It shrinks away when the terminal cannot fit it,
+leaving the picker controls usable. `Enter` confirms the highlighted choice
+and clears the input; `Esc` cancels and clears it too.
 
 | Command | Effect | Result bubble |
 | --- | --- | --- |
-| `/models [filter]` | Queries every configured provider connection once, lists them as `provider_connection/model`, and switches the engine to the picked connection/model. `filter` (typed after the command, and refined live afterwards) narrows the displayed/selectable choices to those matching every filter word, case-insensitively and in any order, without re-querying. `↑`/`↓`, the mouse wheel, and left-click select, with left-click only highlighting and preserving the current popup window when the row is already visible; `page-up`/`fn-up` and `page-down`/`fn-down` move by a page, `←`/`→` cycle reasoning effort when available, `Enter` confirms, `Esc` cancels. | Persisted — the switch changes which provider connection/model later turns use; the reasoning effort applies to the current runtime |
+| `/models [filter]` | Queries every configured provider connection once, lists named-engine shortcuts before raw `provider_connection/model` catalog entries, and previews summarizer effects. A shortcut activates that exact engine's existing Engine runtime settings; a raw catalog row retains provider-based routing. `filter` narrows choices live without re-querying. `↑`/`↓`, the mouse wheel, and left-click select (left-click only highlights); page keys move by a page; `←`/`→` cycle reasoning effort when available; `Enter` confirms; `Esc` cancels. | Persisted — the provider connection/model is recorded; engine identity and reasoning effort remain live-only |
 | `/tools` | Lists the tools the running agent may call, as resolved for its agent type. | Transient |
 | `/clear` (alias `/reset`) | Drops the conversation and continues in a brand-new session file; earlier prompts stay recallable with `↑`. | Transient |

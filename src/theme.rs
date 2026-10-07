@@ -76,6 +76,8 @@ pub(crate) const MUTED_TEXT_COLOR: Color = Color::DarkGray;
 pub(crate) const LOGO_COLOR: Color = Color::Blue;
 pub(crate) const BUILD_INFO_COLOR: Color = MUTED_TEXT_COLOR;
 pub(crate) const FOOTER_STATUS_COLOR: Color = Color::Yellow;
+/// Orange warning for a compaction engine that differs from the picker choice.
+pub(crate) const COMPACTION_MISMATCH_COLOR: Color = Color::Rgb(255, 165, 0);
 
 // Diff palette.
 pub(crate) const DIFF_ADDED_COLOR: Color = Color::Green;

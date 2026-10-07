@@ -94,6 +94,11 @@ engines or provider connections are configured, the supported environment
 providers are discovered instead. When no backend is configured, the
 `MockProvider` (deterministic streaming tokens) is used.
 
+In the TUI, `/models` presents named-engine shortcuts before raw catalog
+choices. Shortcuts activate the exact current Engine runtime; raw catalog
+choices retain provider-connection routing. The picker previews how each
+selection affects the conversation's summarizer.
+
 | Variable | Default | Description |
 | --- | --- | --- |
 | `OLLAMA_BASE_URL` | — | Origin of the Ollama server (for example, `http://localhost:11434`). The provider derives its `/v1` chat and native `/api` model endpoints. A non-empty value configures the Ollama backend. |

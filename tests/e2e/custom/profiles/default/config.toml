@@ -1,8 +1,8 @@
-#default_engine = "ollama/local"
-default_engine = "openrouter-dense"
+default_engine = "local-dense"
+#default_engine = "openrouter-dense"
 
 [compaction]
-engine = "ollama/local"
+engine = "local-dense"
 timeout_sec = 600
 
 [provider_connections.ollama-local]
@@ -19,15 +19,15 @@ provider = "openrouter"
 api_base_url = "https://openrouter.ai"
 api_key = "${OPENROUTER_API_KEY}"
 
-[engines."ollama/local"]
+[engines.local-dense]
 provider_connection = "ollama-local"
 model = "gemma4:e4b-mlx"
-context_length = "32kb"
+context_length = "96kb"
 compact_target_ratio = 0.4
 soft_compaction_threshold = 0.5
 hard_compaction_threshold = 0.8
 
-[engines.local-llm]
+[engines.local]
 provider_connection = "ollama-local"
 model = "gemma4:e4b-mlx"
 
@@ -53,7 +53,7 @@ reasoning = "max"
 
 [agents.local-discovery]
 description = "An agent that can perform read-only discovery tasks in workspace solely using builtin tools and a local AI-Model."
-engine = "local-llm"
+engine = "local"
 allowed_tools = ["read", "glob", "search"]
 
 #[agents.local-discovery.compaction]

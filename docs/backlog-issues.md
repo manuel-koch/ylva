@@ -19,19 +19,13 @@
       change the compaction engine's capacity. Agent types can now override
       their compaction engine independently.
 
-- [ ] Clarify/fix `/models` engine selection and its effect on compaction.
-      Within the same provider connection, `/models` changes the active engine's
-      model, initially `default_engine` unless the root agent overrides it.
-      A summarizer sharing that named engine follows the model change too;
-      catalog-derived context length changes with it, while an explicit
-      `context_length` remains fixed. Selecting another provider connection
-      activates another engine and leaves the original compaction engine bound
-      to its existing named engine.
-      Although the picker displays named-engine shortcuts, confirmation discards
-      `engine_name` and routes only provider/model. Users therefore cannot reliably
-      activate another named engine on the same provider connection.
-      Preserve the selected engine identity when activating named-engine shortcuts
-      and make conversation/summarizer engine sharing clear in the TUI.
+- [x] Clarify/fix `/models` engine selection and its effect on compaction.
+      Named-engine shortcuts activate the exact Engine runtime selected, while
+      raw catalog rows retain provider/model routing. An implicit summarizer
+      follows its conversation Engine runtime; an explicitly configured summarizer
+      remains bound to its named engine. The picker previews these effects and
+      switch notices explain the resulting relationship. Provider/model
+      persistence remains unchanged.
 
 - [ ] Recall a (multiline) draft message in TUI from conversation history.
       Cursor is a the beginning of the message in input-field.
@@ -102,3 +96,11 @@
 
 - [x] Tool spawn_subagent doesn't show the current running duration in
       parent/child conversation while the subagent is running.
+
+- [ ] In help popup the order for "Environment" entries should be adjusted to
+      ```text
+      Ylva home:      <ylva_home>
+      Profile:        <profile>
+      Profile path:   <profile_path>
+      Workspace root: <workspace_root>
+      ```

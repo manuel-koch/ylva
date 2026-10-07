@@ -84,8 +84,9 @@ pub use highlight::{active_theme, set_active_theme, ThemeName};
 pub use init_command::{run_init, run_init_workspace, InitReport};
 pub use llm::engine;
 pub use llm::engine::{
-    Engine, EngineConfig, EngineDisplayInfo, EngineImpl, EngineRouter, EngineRuntimeConfig,
-    EngineRuntimeConfigHandle, ProviderModelOption, DEFAULT_CONTEXT_LENGTH,
+    CompactionEngineDisplayInfo, Engine, EngineConfig, EngineDisplayInfo, EngineImpl, EngineRouter,
+    EngineRuntimeConfig, EngineRuntimeConfigHandle, ModelSelectionTarget, ProviderModelOption,
+    DEFAULT_CONTEXT_LENGTH,
 };
 pub use llm::{
     InputModality, MockEvent, MockProvider, ModelInfo, OllamaProvider, OpenAiCompatibleProvider,

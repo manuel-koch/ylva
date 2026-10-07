@@ -60,6 +60,22 @@ queues a notice; `EngineRouter` drains it and `AgentLoop` forwards
 Each provider wrapper supplies a request-body customization function. The
 shared transport leaves provider-specific wire fields to those wrappers.
 
+`ModelSelection` keeps named-engine shortcuts distinct from raw catalog
+options. `EngineRouter` resolves preview and confirmation through the same
+provider-to-engine target helper: named choices activate their exact map key,
+while raw catalog choices use the active engine for that connection or the
+sorted representative for another connection. The presenter carries this
+typed selection to the driver, so equal provider/model pairs do not erase
+engine identity. Picker display metadata is a snapshot only; the Engine runtime
+handles remain the source of request settings. While the agent is running, its
+display snapshot retains a shared compaction-engine reference alongside the
+background task, so frame refreshes continue to report the configured
+compaction selection. A model-selection target carries the resolved effective
+context window with its provider-connection/model identity. The picker uses
+that preview for a following compaction engine, and colors a fixed engine's
+detail orange only when its resulting provider/model differs from the
+highlighted pair.
+
 `llm::provider_request_limiter` owns one shared generic HTTP semaphore per
 provider connection name; provider connections use the default cap of four.
 Catalog and Ollama detail calls acquire a permit until the response body is
@@ -226,7 +242,8 @@ not session data or billed usage. See
 
 `src/agent/compaction.rs` owns the policy: `plan_compaction` maps one usage
 evaluation onto `StartSummary`/`DropFallback`, `safe_boundaries_from` keeps
-tool-call/result pairs intact, and `CompactionRuntime::sweep` — called only
+tool-call/result pairs intact, and the compaction coordinator's
+`CompactionRuntime::sweep` — called only
 from the outer loop at safe boundaries via `sweep_compaction_and_report`, after
 completed turns and before tool-loop follow-up requests —
 applies a finished summary, honors a forced fallback, then re-evaluates the
@@ -235,7 +252,11 @@ a `/models` switch re-prices the budget on the next turn. The three ratios
 are validated as `0 < target < soft < hard ≤ 1` when the profile loads
 (`validate_compaction_settings` in `src/config/profile.rs`), and
 `COMPACTION.md` resolves like `SOUL.md` where the factory wires each agent
-type's compact engine. The summary deadline is read from `[compaction]` after
+type's compact engine. An explicit profile/agent summarizer is bound to its
+named engine; without either engine field, the factory supplies that agent's
+conversation Engine runtime itself, so model/engine switches affect subsequent
+summaries. Per-agent engine and timeout precedence is independent. The summary
+deadline is read from `[compaction]` after
 resolving any agent-type override, not from the compact engine's own model settings. It
 defaults to 60 seconds and is validated as positive. Scheduling after every tool
 outcome uses only completed eligible prefixes and never applies snapshots inside
@@ -275,8 +296,9 @@ and clear discard that waiting request. Explicit context lengths avoid catalog r
 `RecordModelChanged` schedules an immediate capacity recheck, polled alongside
 commands and events rather than blocking controls on catalog metadata. A newer
 switch replaces a pending switch check; dropping the loop cancels it. The check
-uses the live conversation engine and the existing independent compaction engine,
-without sending a conversation request. `EngineRouter` forwards catalog hydration
+uses the live conversation engine and the resolved summarizer engine, evaluating
+their Engine runtime settings without sending a conversation request.
+`EngineRouter` forwards catalog hydration
 to the active named engine so checks use its catalog-derived context window.
 `CompactionRuntime::capacity_warning` hydrates metadata for unconfigured context
 lengths at startup, after model switches, and before a request's
@@ -292,6 +314,15 @@ emits a root/child-scoped `UiUpdate::Notice` if it exceeds the summarizer window
 Neither check clips source messages or changes summary/fallback policy.
 If catalog hydration changes the conversation window during preflight,
 `ContextWindowChanged` re-enters the outer loop's budget gate before dispatch.
+
+The TUI's `EngineDisplayInfo` snapshot includes both conversation and
+summarizer identities plus `follows_conversation`/`shares_conversation` flags.
+The `/models` detail area asks `Engine::preview_model_selection` for the actual
+router target and computes the highlighted choice's summarizer effect without
+mutating Engine runtime state. After activation, the driver refreshes root and stored
+child display snapshots; inherited child views project the parent's live
+Engine runtime identity. These fields are view-only and do not extend session
+provider/model records.
 
 Hard-limit recovery is `Context::recover_model_view`, using shared reducers in
 `src/agent/compaction/recovery.rs`. Its five measured stages clip older outcome

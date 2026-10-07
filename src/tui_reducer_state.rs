@@ -35,7 +35,10 @@ use uuid::Uuid;
 
 pub use crate::agent::ContextUsageSource;
 use crate::agent::{AgentMode, AssistantStatus, Message, UserMessageKind};
-use crate::llm::engine::{EngineDisplayInfo, ProviderModelOption};
+use crate::llm::engine::{
+    EngineDisplayInfo, ModelSelection, ModelSelectionTarget, ProviderModelOption,
+    ReasoningEffortChange,
+};
 use crate::llm::InputModality;
 use crate::slash_command::{slash_command_suggestions, SlashCommandInfo};
 use crate::store::ChildRunRecord;
@@ -1180,9 +1183,11 @@ impl DomainEvent {
 /// One selectable entry of the `/models` picker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelChoice {
-    /// Named provider connection and model passed to
-    /// `Engine::switch_model_option`.
+    /// Provider connection and model represented by this picker row.
     pub selection: ProviderModelOption,
+    /// Engine runtime effort when the picker was populated. Used to distinguish an
+    /// untouched named-engine shortcut from an explicit user edit.
+    pub initial_reasoning_effort: Option<String>,
     /// Human-readable line shown in the picker.
     pub label: String,
     /// Whether this choice is the model currently serving the conversation.
@@ -1193,9 +1198,33 @@ pub struct ModelChoice {
     /// separated from it by a divider. `None` for a plain provider/model
     /// entry from the catalog itself.
     pub engine_name: Option<String>,
+    /// Resolved without mutation through the engine router when the picker
+    /// was populated, so the detail area previews the actual routing target.
+    pub selection_target: Option<ModelSelectionTarget>,
+    /// Reason a selection target could not be resolved for preview.
+    pub selection_preview_error: Option<String>,
 }
 
 impl ModelChoice {
+    /// Convert the highlighted row into an Engine runtime selection without losing
+    /// named-engine identity or treating an untouched effort as an override.
+    pub fn to_model_selection(&self) -> ModelSelection {
+        match &self.engine_name {
+            Some(engine_name) => ModelSelection::NamedEngine {
+                engine_name: engine_name.clone(),
+                option: self.selection.clone(),
+                reasoning_effort: if self.selection.reasoning_effort
+                    == self.initial_reasoning_effort
+                {
+                    ReasoningEffortChange::Unchanged
+                } else {
+                    ReasoningEffortChange::Set(self.selection.reasoning_effort.clone())
+                },
+            },
+            None => ModelSelection::ProviderModel(self.selection.clone()),
+        }
+    }
+
     /// Refresh the row text after changing its selected reasoning effort.
     pub fn refresh_label(&mut self) {
         self.label = match &self.engine_name {
@@ -1347,7 +1376,7 @@ fn format_token_estimate(estimated_tokens: usize) -> String {
     }
 }
 
-fn format_context_length(context_length: usize) -> String {
+pub(crate) fn format_context_length(context_length: usize) -> String {
     const KILOBYTE: usize = 1024;
     const MEGABYTE: usize = KILOBYTE * 1024;
 
@@ -1563,7 +1592,7 @@ pub enum Effect {
     /// optionally narrowed by a typed model filter.
     ListModels { filter: Option<String> },
     /// A provider-connection/model was picked: activate it and confirm in the transcript.
-    SwitchModel(ProviderModelOption),
+    SwitchModel(ModelSelection),
 }
 
 // ─── AppLayout ────────────────────────────────────────────────────────────────
@@ -1801,8 +1830,8 @@ fn move_selection(selected: &mut usize, choices_length: usize, delta: isize) {
 
 // ─── AppState ────────────────────────────────────────────────────────────────
 
-/// Runtime identity and paths displayed in the TUI's startup logo and help
-/// popup.
+/// Active profile and workspace paths displayed in the TUI's startup logo
+/// and help popup.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TuiDisplayMetadata {
     pub profile_name: String,
@@ -1838,8 +1867,8 @@ pub struct AppState {
     pub mode: TuiMode,
     pub focus: Focus,
     pub layout: AppLayout,
-    /// Runtime identity and paths shown by the TUI's startup logo and help
-    /// popup.
+    /// Active profile and workspace paths shown by the TUI's startup logo
+    /// and help popup.
     pub display_metadata: TuiDisplayMetadata,
     /// Provider/model identity for the root conversation. The Driver refreshes
     /// this from the live root engine before each frame so Engine runtime model
@@ -3847,6 +3876,7 @@ mod tests {
     fn matching_model_indices_requires_every_filter_word_in_any_order() {
         let choice = |provider_connection: &str, model_id: &str| ModelChoice {
             label: format!("{provider_connection}/{model_id}"),
+            initial_reasoning_effort: None,
             selection: ProviderModelOption {
                 provider_connection: provider_connection.to_string(),
                 model: crate::llm::ModelInfo {
@@ -3860,6 +3890,8 @@ mod tests {
             },
             is_active: false,
             engine_name: None,
+            selection_target: None,
+            selection_preview_error: None,
         };
         let choices = vec![
             choice("openrouter", "deepseek-v3"),
@@ -4038,6 +4070,7 @@ mod tests {
         let choice =
             |label: &str, provider_connection: &str, engine_name: Option<&str>| ModelChoice {
                 label: label.to_string(),
+                initial_reasoning_effort: None,
                 selection: ProviderModelOption {
                     provider_connection: provider_connection.to_string(),
                     model: crate::llm::ModelInfo {
@@ -4051,6 +4084,8 @@ mod tests {
                 },
                 is_active: false,
                 engine_name: engine_name.map(str::to_string),
+                selection_target: None,
+                selection_preview_error: None,
             };
         let choices = vec![
             choice("engine/model", "engine", Some("engine")),
@@ -4109,6 +4144,51 @@ mod tests {
         assert_eq!(
             model_choice_label(&model_option(Some(vec!["low".to_string()])), false),
             "stub/model  reasoning: default ⚙"
+        );
+    }
+
+    #[test]
+    fn named_engine_choice_preserves_untouched_effort_and_tracks_default_reset() {
+        let choice = ModelChoice {
+            label: "reasoning → stub/model".to_string(),
+            selection: ProviderModelOption {
+                provider_connection: "stub".to_string(),
+                model: crate::llm::ModelInfo {
+                    id: "model".to_string(),
+                    context_length: None,
+                    reasoning_efforts: Some(vec!["low".to_string(), "high".to_string()]),
+                    reasoning_default: None,
+                    input_modalities: None,
+                },
+                reasoning_effort: Some("high".to_string()),
+            },
+            initial_reasoning_effort: Some("high".to_string()),
+            is_active: false,
+            engine_name: Some("reasoning".to_string()),
+            selection_target: None,
+            selection_preview_error: None,
+        };
+
+        assert_eq!(
+            choice.to_model_selection(),
+            ModelSelection::NamedEngine {
+                engine_name: "reasoning".to_string(),
+                option: choice.selection.clone(),
+                reasoning_effort: ReasoningEffortChange::Unchanged,
+            },
+            "confirming an untouched named shortcut must retain its Engine runtime effort"
+        );
+
+        let mut reset_to_default = choice;
+        reset_to_default.selection.reasoning_effort = None;
+        assert_eq!(
+            reset_to_default.to_model_selection(),
+            ModelSelection::NamedEngine {
+                engine_name: "reasoning".to_string(),
+                option: reset_to_default.selection.clone(),
+                reasoning_effort: ReasoningEffortChange::Set(None),
+            },
+            "cycling an effort back to the provider default must be distinguishable from no edit"
         );
     }
 

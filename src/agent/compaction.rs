@@ -22,7 +22,7 @@
 //!
 //! Scheduling follows the selected option C: a completed turn above
 //! [`DEFAULT_SOFT_COMPACTION_THRESHOLD`] starts a background summary through the
-//! configured `[compaction].engine`, which the outer loop applies at the next safe
+//! configured summarizer engine, which the outer loop applies at the next safe
 //! boundary. Above [`DEFAULT_HARD_COMPACTION_THRESHOLD`] — or when the summary fails
 //! or times out — the loop drops old messages synchronously instead.
 
@@ -616,9 +616,9 @@ impl Drop for CompactionRuntime {
 }
 
 impl CompactionRuntime {
-    /// Create the runtime and the receiver the loop polls for summary
-    /// outcomes. `engine` is the profile's `[compaction].engine`; `None` (child
-    /// loops, or a profile without one) disables compaction entirely.
+    /// Create the compaction coordinator and the receiver the loop polls for
+    /// summary outcomes. `engine` is the resolved summarizer engine handle;
+    /// `None` disables compaction entirely.
     /// `summary_prompt` is the framing instruction the compact engine gets.
     pub(crate) fn new(
         engine: Option<Arc<dyn Engine>>,

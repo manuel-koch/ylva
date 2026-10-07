@@ -54,8 +54,9 @@ pub(crate) fn provider_request_limiter(
 }
 
 pub use engine::{
-    Engine, EngineConfig, EngineDisplayInfo, EngineImpl, EngineRouter, EngineRuntimeConfig,
-    EngineRuntimeConfigHandle, ProviderModelOption, DEFAULT_CONTEXT_LENGTH,
+    CompactionEngineDisplayInfo, Engine, EngineConfig, EngineDisplayInfo, EngineImpl, EngineRouter,
+    EngineRuntimeConfig, EngineRuntimeConfigHandle, ModelSelectionTarget, ProviderModelOption,
+    DEFAULT_CONTEXT_LENGTH,
 };
 pub use mock_provider::{MockEvent, MockProvider};
 pub use ollama_provider::OllamaProvider;
