@@ -36,7 +36,7 @@ pub(crate) mod recovery;
 
 use crate::agent::{Context, Message, StreamEvent, UserMessageKind};
 use crate::llm::engine::Engine;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 
 /// Default wall-clock budget for one background compaction summary request.
 pub const DEFAULT_COMPACTION_TIMEOUT_SECS: u64 = 60;
@@ -339,6 +339,114 @@ pub fn build_summary_request(prefix: &[Message], prompt: &str) -> Vec<Message> {
     request
 }
 
+fn summary_request_tokens(request: &[Message]) -> usize {
+    request
+        .iter()
+        .fold(REQUEST_FIXED_OVERHEAD_TOKENS, |tokens, message| {
+            tokens.saturating_add(super::estimate_message_tokens(
+                crate::llm::TokenEstimator::Tiktoken,
+                message,
+            ))
+        })
+}
+
+fn summary_request_capacity_warning(request: &[Message], engine: &dyn Engine) -> Option<String> {
+    let estimated_tokens = summary_request_tokens(request);
+    let context_length = engine.effective_context_length();
+    if estimated_tokens <= context_length {
+        return None;
+    }
+    let config = engine.config();
+    Some(format!(
+        "Warning: compaction engine '{}/{}' has an effective context length of {context_length} \
+         tokens, but this summary request needs approximately {estimated_tokens} tokens, including \
+         the summarized prefix, compaction prompt and request overhead. The summary may fail; \
+         select a compaction engine with a larger context window.",
+        config.provider_connection, config.model,
+    ))
+}
+
+pub(crate) struct AgentCompactionCapacityCheck {
+    pub(crate) agent_type: String,
+    pub(crate) conversation_engine: Arc<dyn Engine>,
+    pub(crate) summary_engine: Arc<dyn Engine>,
+}
+
+impl AgentCompactionCapacityCheck {
+    pub(crate) async fn warning(&self, summary_prompt: &str) -> Option<String> {
+        configured_capacity_warning(
+            self.conversation_engine.as_ref(),
+            self.summary_engine.as_ref(),
+            summary_prompt,
+        )
+        .await
+    }
+}
+
+pub(crate) fn group_capacity_warnings(warnings: Vec<(String, String)>) -> Vec<String> {
+    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+    for (agent_label, warning) in warnings {
+        if let Some((_, agent_labels)) = groups.iter_mut().find(|(text, _)| text == &warning) {
+            agent_labels.push(agent_label);
+        } else {
+            groups.push((warning, vec![agent_label]));
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(warning, agent_labels)| format!("{}: {warning}", agent_labels.join(", ")))
+        .collect()
+}
+
+async fn configured_capacity_warning(
+    conversation_engine: &dyn Engine,
+    summary_engine: &dyn Engine,
+    summary_prompt: &str,
+) -> Option<String> {
+    // Explicit windows need no catalog lookup. Otherwise hydrate in order:
+    // the conversation router can delegate to this same summarizer.
+    if conversation_engine.config().context_length.is_none() {
+        conversation_engine.hydrate_catalog_metadata().await;
+    }
+    if summary_engine.config().context_length.is_none() {
+        summary_engine.hydrate_catalog_metadata().await;
+    }
+    let conversation_config = conversation_engine.config();
+    let conversation_context_length = conversation_engine.effective_context_length();
+    let soft_threshold_tokens = (conversation_context_length as f64
+        * conversation_config.soft_compaction_threshold) as usize;
+    let overhead_tokens = summary_request_tokens(&build_summary_request(&[], summary_prompt));
+    let summary_context_length = summary_engine.effective_context_length();
+    if soft_threshold_tokens.saturating_add(overhead_tokens) <= summary_context_length {
+        return None;
+    }
+    let summary_config = summary_engine.config();
+    Some(format!(
+        "Warning: conversation engine '{}/{}' reaches its soft compaction threshold \
+         at approximately {soft_threshold_tokens} tokens ({conversation_context_length} × {}). \
+         Compaction engine '{}/{}' has an effective context length of \
+         {summary_context_length} tokens, with approximately {overhead_tokens} tokens \
+         needed for the compaction prompt and request overhead. A summary prefix may \
+         not fit. Select a larger compaction engine, lower the conversation engine's \
+         soft_compaction_threshold, or override this agent type's compaction.engine. \
+         Selecting a different conversation engine does not enlarge the compaction engine.",
+        conversation_config.provider_connection,
+        conversation_config.model,
+        conversation_config.soft_compaction_threshold,
+        summary_config.provider_connection,
+        summary_config.model,
+    ))
+}
+
+pub(crate) async fn report_capacity_warning(
+    sender: &mpsc::Sender<super::UiUpdate>,
+    text: String,
+    run_id: Option<Uuid>,
+) {
+    tracing::warn!(%text, "compaction engine capacity may be insufficient");
+    let _ = sender.send(super::UiUpdate::Notice { text, run_id }).await;
+}
+
 /// Result of one background summary attempt, delivered back to the outer
 /// loop (which — and only which — mutates [`Context`](crate::agent::Context)).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -369,7 +477,15 @@ async fn generate_summary(
     session_id: Option<uuid::Uuid>,
     cancellation_token: CancellationToken,
     request_dump_failure_handler: crate::http::RequestDumpFailureHandler,
+    notice_sender: Option<(mpsc::Sender<super::UiUpdate>, Option<Uuid>)>,
 ) -> anyhow::Result<String> {
+    engine.hydrate_catalog_metadata().await;
+    if let Some(text) = summary_request_capacity_warning(&request, engine.as_ref()) {
+        tracing::warn!(%text, "compaction summary exceeds summarizer capacity");
+        if let Some((sender, run_id)) = notice_sender {
+            let _ = sender.send(super::UiUpdate::Notice { text, run_id }).await;
+        }
+    }
     let mut stream = engine
         .chat_with_session_id_and_diagnostics(
             request,
@@ -401,6 +517,7 @@ async fn generate_summary(
     Ok(summary)
 }
 
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn generate_summary_attempt(
     engine: Arc<dyn Engine>,
     request: Vec<Message>,
@@ -409,6 +526,7 @@ pub(crate) async fn generate_summary_attempt(
     boundary: usize,
     timeout: Duration,
     request_dump_failure_handler: crate::http::RequestDumpFailureHandler,
+    notice_sender: Option<(mpsc::Sender<super::UiUpdate>, Option<Uuid>)>,
 ) -> CompactionOutcome {
     let cancellation_token = CancellationToken::new();
     let _cancellation_guard = cancellation_token.clone().drop_guard();
@@ -420,6 +538,7 @@ pub(crate) async fn generate_summary_attempt(
             session_id,
             cancellation_token.clone(),
             request_dump_failure_handler.clone(),
+            notice_sender,
         ),
     )
     .await
@@ -474,6 +593,7 @@ pub(crate) struct CompactionRuntime {
     /// Framing instruction for every summary request: the resolved
     /// `COMPACTION.md`, or its built-in default.
     summary_prompt: String,
+    last_capacity_warning: Arc<Mutex<Option<String>>>,
     outcome_tx: mpsc::Sender<CompactionOutcome>,
     summary_in_flight: bool,
     pending: Option<CompactionSnapshot>,
@@ -511,6 +631,7 @@ impl CompactionRuntime {
                 engine,
                 summary_timeout,
                 summary_prompt,
+                last_capacity_warning: Arc::new(Mutex::new(None)),
                 outcome_tx,
                 summary_in_flight: false,
                 pending: None,
@@ -529,6 +650,30 @@ impl CompactionRuntime {
     /// Whether this loop has a configured compaction engine.
     pub(crate) fn enabled(&self) -> bool {
         self.engine.is_some()
+    }
+
+    pub(crate) fn capacity_warning(
+        &self,
+        conversation_engine: Arc<dyn Engine>,
+    ) -> impl std::future::Future<Output = Option<String>> + Send + 'static {
+        let summary_engine = self.engine.clone();
+        let summary_prompt = self.summary_prompt.clone();
+        let last_capacity_warning = self.last_capacity_warning.clone();
+        async move {
+            let summary_engine = summary_engine?;
+            let mut previous = last_capacity_warning.lock().await;
+            let warning = configured_capacity_warning(
+                conversation_engine.as_ref(),
+                summary_engine.as_ref(),
+                &summary_prompt,
+            )
+            .await;
+            if *previous == warning {
+                return None;
+            }
+            *previous = warning.clone();
+            warning
+        }
     }
 
     pub(crate) fn set_activity_sender(
@@ -970,6 +1115,7 @@ impl CompactionRuntime {
                 boundary,
                 timeout,
                 request_dump_failure_handler,
+                activity_sender,
             )
             .await;
             match &mut outcome {
@@ -1164,6 +1310,180 @@ mod tests {
         let mut context = Context::new();
         context.push_user("Summarize this.".to_string());
         (runtime, outcomes, updates, run_id, engine, context)
+    }
+
+    fn capacity_test_engine(context_length: Option<usize>) -> Arc<dyn Engine> {
+        Arc::new(crate::llm::EngineImpl::new(
+            Arc::new(RecordingSummaryProvider {
+                recorded: Arc::new(Mutex::new(Vec::new())),
+                reply: "A summary.".to_string(),
+            }),
+            crate::llm::EngineConfig {
+                provider_connection: "mock".to_string(),
+                model: "capacity-model".to_string(),
+                temperature: None,
+                context_length,
+                api_base_url: None,
+                api_key: None,
+                reasoning: None,
+                compact_target_ratio: 0.5,
+                soft_compaction_threshold: 0.7,
+                hard_compaction_threshold: 0.9,
+            },
+        ))
+    }
+
+    #[tokio::test]
+    async fn capacity_warning_uses_summarizer_window_and_counts_prompt_overhead() {
+        let (runtime, _, _, _, _, _) = new_recording_runtime("A summary.");
+        let overhead =
+            summary_request_tokens(&build_summary_request(&[], COMPACTION_SUMMARY_PROMPT));
+        for summary_context_length in [14_000 + overhead, 14_000 + overhead - 1] {
+            let (boundary_runtime, _) = CompactionRuntime::new(
+                Some(capacity_test_engine(Some(summary_context_length))),
+                COMPACTION_SUMMARY_PROMPT.to_string(),
+                Duration::from_secs(1),
+            );
+            assert_eq!(
+                boundary_runtime
+                    .capacity_warning(capacity_test_engine(Some(20_000)))
+                    .await
+                    .is_some(),
+                summary_context_length < 14_000 + overhead,
+                "prompt and request overhead must decide the exact capacity boundary",
+            );
+        }
+        let summary_engine = runtime.engine.as_ref().unwrap();
+        let conversation_engine = capacity_test_engine(Some(20_000));
+        summary_engine.adopt_catalog_context_length(Some(100_000));
+        assert!(runtime
+            .capacity_warning(conversation_engine)
+            .await
+            .is_none());
+
+        let conversation_engine = capacity_test_engine(Some(24_000));
+        let warning = runtime
+            .capacity_warning(conversation_engine.clone())
+            .await
+            .expect("soft trigger plus overhead exceeds the summarizer's explicit window");
+        assert!(warning.contains("16800 tokens (24000"));
+        assert!(warning.contains("16000 tokens"));
+        assert!(warning.contains(&format!("{overhead} tokens")));
+        assert!(runtime
+            .capacity_warning(conversation_engine)
+            .await
+            .is_none());
+
+        assert!(runtime
+            .capacity_warning(capacity_test_engine(Some(10_000)))
+            .await
+            .is_none());
+        assert!(
+            runtime
+                .capacity_warning(capacity_test_engine(Some(24_000)))
+                .await
+                .is_some(),
+            "returning to an unsafe configuration warns again"
+        );
+    }
+
+    #[tokio::test]
+    async fn capacity_warning_follows_catalog_windows_and_conversation_switches() {
+        let summary_engine = capacity_test_engine(None);
+        summary_engine.adopt_catalog_context_length(Some(8_000));
+        let (runtime, _) = CompactionRuntime::new(
+            Some(summary_engine.clone()),
+            COMPACTION_SUMMARY_PROMPT.to_string(),
+            Duration::from_secs(1),
+        );
+        let conversation_engine = capacity_test_engine(None);
+        conversation_engine.adopt_catalog_context_length(Some(20_000));
+        let warning = runtime
+            .capacity_warning(conversation_engine.clone())
+            .await
+            .expect("catalog capacities are used");
+        assert!(warning.contains("14000 tokens (20000"));
+        assert!(warning.contains("8000 tokens"));
+        conversation_engine.adopt_catalog_context_length(Some(40_000));
+        let warning = runtime
+            .capacity_warning(conversation_engine.clone())
+            .await
+            .expect("changed conversation window is checked again");
+        assert!(warning.contains("28000 tokens (40000"));
+        assert!(warning.contains("8000 tokens"));
+        summary_engine.adopt_catalog_context_length(Some(40_000));
+        assert!(runtime
+            .capacity_warning(conversation_engine)
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn disabled_compaction_has_no_capacity_warning() {
+        let (runtime, _) = CompactionRuntime::new(None, String::new(), Duration::from_secs(1));
+        assert!(runtime
+            .capacity_warning(capacity_test_engine(Some(100_000)))
+            .await
+            .is_none());
+    }
+
+    #[test]
+    fn summary_request_capacity_checks_exact_boundary_with_framing_and_overhead() {
+        let prefix = vec![user("source ".repeat(500).as_str())];
+        let request = build_summary_request(&prefix, &"guidelines ".repeat(100));
+        let estimated_tokens = summary_request_tokens(&request);
+        let prefix_tokens =
+            super::super::estimate_message_tokens(crate::llm::TokenEstimator::Tiktoken, &prefix[0]);
+        assert!(estimated_tokens > prefix_tokens + REQUEST_FIXED_OVERHEAD_TOKENS);
+        assert!(summary_request_capacity_warning(
+            &request,
+            capacity_test_engine(Some(estimated_tokens)).as_ref(),
+        )
+        .is_none());
+        let warning = summary_request_capacity_warning(
+            &request,
+            capacity_test_engine(Some(estimated_tokens - 1)).as_ref(),
+        )
+        .expect("one token above capacity warns");
+        assert!(warning.contains(&format!("{estimated_tokens} tokens")));
+        assert!(warning.contains("compaction prompt and request overhead"));
+    }
+
+    #[tokio::test]
+    async fn oversized_summary_requests_emit_root_and_child_notices_without_changing_source() {
+        for is_child in [false, true] {
+            let (mut runtime, mut outcomes, mut updates, run_id, _, context) =
+                new_recording_runtime("A summary.");
+            let run_id = if is_child { run_id } else { None };
+            let (sender, receiver) = mpsc::channel(4);
+            runtime.set_activity_sender(sender, run_id);
+            updates.close();
+            updates = receiver;
+            runtime.summary_prompt = "long guidelines ".repeat(10_000);
+            let transcript = context.messages().to_vec();
+            runtime.start_summary(&context, 100_000, 50_000, 0, |context, _| {
+                Some(context.messages().len())
+            });
+            let outcome = tokio::time::timeout(Duration::from_secs(1), outcomes.recv())
+                .await
+                .expect("summary finishes")
+                .expect("summary outcome");
+            assert!(matches!(outcome, CompactionOutcome::SummaryReady { .. }));
+            let mut notices = Vec::new();
+            while let Ok(update) = updates.try_recv() {
+                if let super::super::UiUpdate::Notice {
+                    text,
+                    run_id: notice_run_id,
+                } = update
+                {
+                    assert_eq!(notice_run_id, run_id);
+                    notices.push(text);
+                }
+            }
+            assert_eq!(notices.len(), 1);
+            assert!(notices[0].contains("this summary request needs approximately"));
+            assert_eq!(context.messages(), transcript);
+        }
     }
 
     #[tokio::test]
@@ -1827,6 +2147,7 @@ mod tests {
             None,
             CancellationToken::new(),
             crate::http::RequestDumpFailureHandler::default(),
+            None,
         )
         .await
         .expect("summary generated");
@@ -1928,6 +2249,7 @@ mod tests {
             None,
             CancellationToken::new(),
             crate::http::RequestDumpFailureHandler::default(),
+            None,
         )
         .await
         .expect_err("an empty summary must fail so the fallback runs");
@@ -1998,6 +2320,7 @@ mod tests {
             1,
             Duration::from_millis(1),
             handler,
+            None,
         )
         .await;
 

@@ -2810,8 +2810,9 @@ See reducer-state-handling-plan.md.
       for a future `/models` slash command.
 
 - [x] **Config refactor:** rename `provider_type` → `provider` in `EngineConfig`;
-      add profile-level `default_engine` (required) and `[compaction].engine` (optional,
-      resolves to `default_engine`); document quoted-key engine names
+      add profile-level `default_engine` (required) and `[compaction].engine` (optional;
+      see [per-agent configuration](./configuration.md#per-agent-configuration)
+      for engine resolution); document quoted-key engine names
       (`[engines."ollama/local"]`) as opt-in.
 
 - [x] **Child-agent construction** (§4G) uses

@@ -735,6 +735,11 @@ impl Engine for EngineRouter {
         self.active_engine().input_modalities()
     }
 
+    fn hydrate_catalog_metadata(&self) -> BoxFuture<'_, ()> {
+        let engine = self.active_engine();
+        Box::pin(async move { engine.hydrate_catalog_metadata().await })
+    }
+
     /// Drain pending notices from every configured engine, not just the
     /// active one: a chat may have hydrated one connection while a `/models`
     /// switch made another connection active before the notice was taken.
@@ -1112,6 +1117,9 @@ impl Engine for EngineImpl {
             match self.list_models().await {
                 Ok(models) => {
                     let active_model_info = models.iter().find(|model| model.id == active_model);
+                    self.adopt_catalog_context_length(
+                        active_model_info.and_then(|model| model.context_length),
+                    );
                     if let Some(input_modalities) =
                         active_model_info.and_then(|model| model.input_modalities.clone())
                     {
@@ -1813,6 +1821,25 @@ model = "local"
 
             assert_eq!(engine.input_modalities(), Some(vec![InputModality::Image]));
             assert_eq!(provider.list_models_calls(), 1);
+        });
+    }
+
+    #[test]
+    fn engine_impl_hydration_resolves_catalog_context_length_unless_profile_overrides_it() {
+        crate::test_support::run_locked(async {
+            for configured_context_length in [None, Some(32_000)] {
+                let mut model = model_info_with_modalities("test-model", None);
+                model.context_length = Some(8_000);
+                let provider = Arc::new(CatalogProvider::new(vec![model]));
+                let mut config = make_engine_config();
+                config.context_length = configured_context_length;
+                let engine = EngineImpl::new(provider, config);
+                engine.hydrate_catalog_metadata().await;
+                assert_eq!(
+                    engine.effective_context_length(),
+                    configured_context_length.unwrap_or(8_000),
+                );
+            }
         });
     }
 

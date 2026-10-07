@@ -15,7 +15,7 @@
 mod common;
 
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
 use std::time::Duration;
@@ -148,6 +148,41 @@ struct DelayedCatalogEngine {
     release_catalog: Arc<Notify>,
     chat_started: Option<Arc<Notify>>,
     release_chat: Option<Arc<Notify>>,
+    hydrate_catalog: bool,
+    catalog_hydrated: AtomicBool,
+    chat_calls: AtomicUsize,
+}
+
+struct CatalogMockProvider {
+    provider: MockProvider,
+    models: Vec<ModelInfo>,
+}
+
+impl ylva::Provider for CatalogMockProvider {
+    fn name(&self) -> &str {
+        ylva::Provider::name(&self.provider)
+    }
+
+    fn list_models(&self) -> futures::future::BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
+        Box::pin(async { Ok(self.models.clone()) })
+    }
+
+    fn set_model(&self, model: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.models.iter().any(|candidate| candidate.id == model),
+            "test model '{model}' is not in the catalog",
+        );
+        Ok(())
+    }
+
+    fn chat<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+    ) -> futures::future::BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        ylva::Provider::chat(&self.provider, messages, tools, cancel)
+    }
 }
 
 impl DelayedCatalogEngine {
@@ -158,6 +193,9 @@ impl DelayedCatalogEngine {
             release_catalog,
             chat_started: None,
             release_chat: None,
+            hydrate_catalog: false,
+            catalog_hydrated: AtomicBool::new(false),
+            chat_calls: AtomicUsize::new(0),
         }
     }
 
@@ -173,7 +211,16 @@ impl DelayedCatalogEngine {
             release_catalog,
             chat_started: Some(chat_started),
             release_chat: Some(release_chat),
+            hydrate_catalog: false,
+            catalog_hydrated: AtomicBool::new(false),
+            chat_calls: AtomicUsize::new(0),
         }
+    }
+
+    fn with_catalog_hydration(mut self) -> Self {
+        self.config.context_length = None;
+        self.hydrate_catalog = true;
+        self
     }
 }
 
@@ -192,6 +239,7 @@ impl Engine for DelayedCatalogEngine {
             .clone()
             .expect("chat release notification configured with chat start");
         Box::pin(async move {
+            self.chat_calls.fetch_add(1, Ordering::SeqCst);
             chat_started.notify_one();
             release_chat.notified().await;
             let (stream_tx, stream_rx) = mpsc::channel(4);
@@ -230,6 +278,15 @@ impl Engine for DelayedCatalogEngine {
     fn switch_model(&self, _model: &str) -> anyhow::Result<()> {
         Ok(())
     }
+
+    fn hydrate_catalog_metadata(&self) -> futures::future::BoxFuture<'_, ()> {
+        Box::pin(async move {
+            if self.hydrate_catalog && !self.catalog_hydrated.load(Ordering::SeqCst) {
+                self.list_models().await.expect("catalog lookup succeeds");
+                self.catalog_hydrated.store(true, Ordering::SeqCst);
+            }
+        })
+    }
 }
 
 /// Type `text` into the (driver-owned) textarea and press Enter.
@@ -263,6 +320,394 @@ fn rendered_text(buffer: &Buffer) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[tokio::test]
+async fn compaction_capacity_warning_is_rendered_at_startup_before_any_prompt() {
+    let (backend, last_buffer, _) = InspectableTestBackend::new(120, 40);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let (action_tx, action_rx) = mpsc::channel(64);
+    let mut conversation_config = common::test_engine_config();
+    conversation_config.context_length = Some(98_304);
+    let mut summary_config = common::test_engine_config();
+    summary_config.context_length = Some(32_768);
+    summary_config.model = "small-summarizer".to_string();
+    let conversation_engine = Arc::new(EngineImpl::new(
+        Arc::new(MockProvider::new(
+            vec!["the answer".to_string()],
+            Duration::ZERO,
+        )),
+        conversation_config,
+    ));
+    let summary_engine = Arc::new(EngineImpl::new(
+        Arc::new(MockProvider::new(Vec::new(), Duration::ZERO)),
+        summary_config,
+    ));
+    let (agent, ui_rx) = AgentLoop::new(conversation_engine, Arc::new(ToolRegistry::new()));
+    let agent = agent.with_compaction_engine(summary_engine);
+    let run_handle = tokio::spawn(async move {
+        tui_driver::run_tui(
+            &mut terminal,
+            agent,
+            ui_rx,
+            None,
+            action_rx,
+            &mut NoopClipboard,
+        )
+        .await
+        .expect("run_tui completed")
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let rendered = rendered_text(&last_buffer.lock().expect("buffer snapshot lock"));
+            if rendered.contains("small-summarizer")
+                && rendered.contains("Warning: conversation engine")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("capacity warning must render at startup without a user prompt");
+    type_and_enter(&action_tx, "question").await;
+    let rendered = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let rendered = rendered_text(&last_buffer.lock().expect("buffer snapshot lock"));
+            if rendered.contains("the answer") {
+                break rendered;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("warning and response should render");
+    assert!(rendered.contains("small-summarizer"), "{rendered}");
+    assert!(rendered.contains("32768"), "{rendered}");
+    assert!(rendered.contains("68812"), "{rendered}");
+    assert_eq!(
+        rendered.matches("Warning: conversation engine").count(),
+        1,
+        "{rendered}"
+    );
+    assert!(
+        rendered
+            .find("Warning: conversation engine")
+            .expect("capacity warning")
+            < rendered.find("the answer").expect("response"),
+        "{rendered}",
+    );
+    drop(action_tx);
+    run_handle.await.expect("run task joined");
+}
+
+#[tokio::test]
+async fn switching_models_rechecks_compaction_capacity_before_any_prompt() {
+    for switch_provider_connection in [false, true] {
+        let (backend, last_buffer, _) = InspectableTestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let (action_tx, action_rx) = mpsc::channel(64);
+        let mut safe_config = common::test_engine_config();
+        safe_config.provider_connection = "safe-provider".to_string();
+        safe_config.model = "safe-conversation".to_string();
+        safe_config.context_length = None;
+        let mut large_config = safe_config.clone();
+        if switch_provider_connection {
+            large_config.provider_connection = "large-provider".to_string();
+        }
+        large_config.model = "large-conversation".to_string();
+        let mut summary_config = common::test_engine_config();
+        summary_config.model = "small-summarizer".to_string();
+        summary_config.context_length = Some(32_768);
+        let large_model = ModelInfo {
+            id: "large-conversation".to_string(),
+            context_length: Some(98_304),
+            reasoning_efforts: None,
+            reasoning_default: None,
+            input_modalities: None,
+        };
+        let safe_engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+            Arc::new(CatalogMockProvider {
+                provider: MockProvider::new(vec!["the answer".to_string()], Duration::ZERO),
+                models: vec![
+                    ModelInfo {
+                        id: "safe-conversation".to_string(),
+                        context_length: Some(32_768),
+                        ..large_model.clone()
+                    },
+                    large_model.clone(),
+                ],
+            }),
+            safe_config,
+        ));
+        let large_engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+            Arc::new(CatalogMockProvider {
+                provider: MockProvider::new(vec!["the answer".to_string()], Duration::ZERO),
+                models: vec![large_model],
+            }),
+            large_config,
+        ));
+        let conversation_engine = Arc::new(
+            ylva::EngineRouter::new(
+                std::collections::HashMap::from([
+                    ("safe".to_string(), safe_engine),
+                    ("large".to_string(), large_engine),
+                ]),
+                "safe",
+            )
+            .expect("test router"),
+        );
+        let summary_engine = Arc::new(EngineImpl::new(
+            Arc::new(MockProvider::new(Vec::new(), Duration::ZERO)),
+            summary_config,
+        ));
+        let (agent, ui_rx) = AgentLoop::new(conversation_engine, Arc::new(ToolRegistry::new()));
+        let agent = agent.with_compaction_engine(summary_engine);
+        let run_handle = tokio::spawn(async move {
+            tui_driver::run_tui(
+                &mut terminal,
+                agent,
+                ui_rx,
+                None,
+                action_rx,
+                &mut NoopClipboard,
+            )
+            .await
+            .expect("run_tui completed")
+        });
+        type_and_enter(&action_tx, "/models large").await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let rendered = rendered_text(&last_buffer.lock().expect("buffer snapshot lock"));
+                if rendered.contains("large-conversation") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the large model appears in the picker");
+        type_and_enter(&action_tx, "").await;
+        let rendered = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let rendered = rendered_text(&last_buffer.lock().expect("buffer snapshot lock"));
+                if rendered.contains("Warning: conversation engine")
+                    && rendered.contains("small-summarizer")
+                {
+                    break rendered;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "switching must warn while idle, without sending a conversation prompt:\n{}",
+                rendered_text(&last_buffer.lock().expect("buffer snapshot lock")),
+            )
+        });
+        assert!(rendered.contains("98304"), "{rendered}");
+        assert!(rendered.contains("32768"), "{rendered}");
+        assert!(rendered.contains("Idle"), "{rendered}");
+        assert!(!rendered.contains("the answer"), "{rendered}");
+        type_and_enter(&action_tx, "question").await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let rendered = rendered_text(&last_buffer.lock().expect("buffer snapshot lock"));
+                if rendered.contains("the answer") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the first prompt completes");
+        drop(action_tx);
+        let state = run_handle.await.expect("run task joined");
+        assert_eq!(
+            state
+                .chat_entries
+                .iter()
+                .filter(|entry| matches!(
+                    entry, ChatEntry::Notice { text } if text.contains("Warning: conversation engine")
+                ))
+                .count(),
+            1,
+            "the first request must not repeat the model-switch warning: {:?}",
+            state.chat_entries,
+        );
+    }
+}
+
+#[tokio::test]
+async fn model_switch_capacity_checks_keep_controls_responsive_and_replace_pending_checks() {
+    let catalog_started = Arc::new(Notify::new());
+    let release_catalog = Arc::new(Notify::new());
+    let mut engines: std::collections::HashMap<String, Arc<dyn Engine>> =
+        std::collections::HashMap::new();
+    for (engine_name, context_length) in [
+        ("safe", Some(32_768)),
+        ("delayed", None),
+        ("latest", Some(98_304)),
+    ] {
+        let mut engine =
+            DelayedCatalogEngine::new(catalog_started.clone(), release_catalog.clone());
+        engine.config.provider_connection = format!("{engine_name}-provider");
+        engine.config.model = format!("{engine_name}-model");
+        engine.config.context_length = context_length;
+        if context_length.is_none() {
+            engine = engine.with_catalog_hydration();
+        }
+        engines.insert(engine_name.to_string(), Arc::new(engine));
+    }
+    let summary_engine = engines["safe"].clone();
+    let conversation_engine =
+        Arc::new(ylva::EngineRouter::new(engines, "safe").expect("test router"));
+    let (mut agent, mut updates) =
+        AgentLoop::new(conversation_engine.clone(), Arc::new(ToolRegistry::new()));
+    agent = agent.with_compaction_engine(summary_engine);
+    let handle = agent.run();
+    agent
+        .send_command(ylva::AgentCommand::Stop {
+            reason: "startup barrier".to_string(),
+        })
+        .await;
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), updates.recv()).await,
+        Ok(Some(ylva::UiUpdate::AgentIdle)),
+    ));
+    for engine_name in ["delayed", "latest"] {
+        let provider_connection = format!("{engine_name}-provider");
+        let model = format!("{engine_name}-model");
+        conversation_engine
+            .switch_model_option(&ylva::ProviderModelOption {
+                provider_connection: provider_connection.clone(),
+                model: ModelInfo {
+                    id: model.clone(),
+                    context_length: None,
+                    reasoning_efforts: None,
+                    reasoning_default: None,
+                    input_modalities: None,
+                },
+                reasoning_effort: None,
+            })
+            .expect("switch to the requested provider");
+        agent
+            .send_command(ylva::AgentCommand::RecordModelChanged {
+                provider_connection,
+                model,
+            })
+            .await;
+        if engine_name == "delayed" {
+            tokio::time::timeout(Duration::from_secs(1), catalog_started.notified())
+                .await
+                .expect("model-switch capacity check resolves missing metadata");
+            agent
+                .send_command(ylva::AgentCommand::Stop {
+                    reason: "controls must remain responsive".to_string(),
+                })
+                .await;
+            assert!(matches!(
+                tokio::time::timeout(Duration::from_secs(1), updates.recv()).await,
+                Ok(Some(ylva::UiUpdate::AgentIdle)),
+            ));
+        }
+    }
+    let update = tokio::time::timeout(Duration::from_secs(1), updates.recv())
+        .await
+        .expect("the latest switch must replace the blocked check")
+        .expect("capacity warning");
+    assert!(matches!(
+        update,
+        ylva::UiUpdate::Notice { text, run_id: None }
+            if text.contains("latest-provider/latest-model")
+                && text.contains("98304")
+                && text.contains("32768")
+                && !text.contains("delayed-model")
+    ));
+    drop(agent);
+    handle.await.expect("loop joins").expect("loop shuts down");
+    release_catalog.notify_one();
+    assert!(
+        updates.try_recv().is_err(),
+        "no stale switch notice is emitted"
+    );
+}
+
+#[tokio::test]
+async fn startup_catalog_checks_keep_the_tui_responsive_and_cancel_a_waiting_prompt() {
+    let catalog_started = Arc::new(Notify::new());
+    let release_catalog = Arc::new(Notify::new());
+    let chat_started = Arc::new(Notify::new());
+    let release_chat = Arc::new(Notify::new());
+    let engine = Arc::new(
+        DelayedCatalogEngine::with_chat(
+            catalog_started.clone(),
+            release_catalog.clone(),
+            chat_started.clone(),
+            release_chat.clone(),
+        )
+        .with_catalog_hydration(),
+    );
+    let (backend, last_buffer, _) = InspectableTestBackend::new(120, 40);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let (action_tx, action_rx) = mpsc::channel(64);
+    let (agent, ui_rx) = AgentLoop::new(engine.clone(), Arc::new(ToolRegistry::new()));
+    let agent = agent.with_compaction_engine(engine.clone());
+    let run_handle = tokio::spawn(async move {
+        tui_driver::run_tui(
+            &mut terminal,
+            agent,
+            ui_rx,
+            None,
+            action_rx,
+            &mut NoopClipboard,
+        )
+        .await
+        .expect("run_tui completed")
+    });
+    tokio::time::timeout(Duration::from_secs(1), catalog_started.notified())
+        .await
+        .expect("startup resolves an unconfigured context window");
+    type_and_enter(&action_tx, "cancel this waiting prompt").await;
+    send(&action_tx, AppAction::Escape).await;
+    send(&action_tx, AppAction::Escape).await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let rendered = rendered_text(&last_buffer.lock().expect("buffer snapshot lock"));
+            if rendered.contains("cancel this waiting prompt") && rendered.contains("Idle") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("input and cancellation must work while startup metadata is pending");
+    release_catalog.notify_one();
+    type_and_enter(&action_tx, "new question").await;
+    tokio::time::timeout(Duration::from_secs(1), chat_started.notified())
+        .await
+        .expect("a new prompt starts normally after cancelling the waiting prompt");
+    release_chat.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let rendered = rendered_text(&last_buffer.lock().expect("buffer snapshot lock"));
+            if rendered.contains("conversation update") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the replacement prompt completes");
+    drop(action_tx);
+    let state = run_handle.await.expect("run task joined");
+    assert_eq!(state.agent_mode, ylva::AgentMode::Idle);
+    assert_eq!(
+        engine.chat_calls.load(Ordering::SeqCst),
+        1,
+        "the cancelled waiting prompt must never reach the provider",
+    );
 }
 
 #[tokio::test]

@@ -128,6 +128,8 @@ pub enum AgentCommand {
     /// "system"` message injected mid-conversation is rejected by some
     /// providers/chat templates (see `HARNESS_NOTICE_MARKER`'s doc comment),
     /// and `model_changed` already gives replay/resume everything it needs.
+    /// Also recheck the live engines' compaction capacity asynchronously,
+    /// without waiting for the next conversation request.
     RecordModelChanged {
         provider_connection: String,
         model: String,
@@ -239,6 +241,7 @@ pub enum AgentEvent {
     },
     StreamError(String),
     ContextWindowRejected(String),
+    ContextWindowChanged,
     PreflightNotice {
         text: String,
         acknowledgement: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
@@ -2366,6 +2369,7 @@ pub struct AgentLoop {
     /// Framing instruction for background summary requests: the resolved
     /// `COMPACTION.md` layered like `SOUL.md`, or its built-in default.
     compaction_summary_prompt: String,
+    startup_compaction_checks: Vec<compaction::AgentCompactionCapacityCheck>,
     /// Set via [`AgentLoop::with_agent_type`]: the root agent type this loop
     /// was created for. Stamped into the `meta` header of the replacement
     /// session `/clear` starts, so a cleared conversation keeps advertising
@@ -2447,6 +2451,7 @@ impl AgentLoop {
             compaction_timeout: Duration::from_secs(compaction::DEFAULT_COMPACTION_TIMEOUT_SECS),
             compaction_summary_prompt: crate::config::compaction_prompt::DEFAULT_COMPACTION_PROMPT
                 .to_string(),
+            startup_compaction_checks: Vec::new(),
             agent_type: None,
             store: None,
             session_id: None,
@@ -2503,6 +2508,14 @@ impl AgentLoop {
     /// built outside the factory still summarize with a sane instruction.
     pub fn with_compaction_summary_prompt(mut self, summary_prompt: impl Into<String>) -> Self {
         self.compaction_summary_prompt = summary_prompt.into();
+        self
+    }
+
+    pub(crate) fn with_startup_compaction_checks(
+        mut self,
+        checks: Vec<compaction::AgentCompactionCapacityCheck>,
+    ) -> Self {
+        self.startup_compaction_checks = checks;
         self
     }
 
@@ -2640,6 +2653,7 @@ impl AgentLoop {
         let compaction_engine = self.compaction_engine.take();
         let compaction_timeout = self.compaction_timeout;
         let compaction_summary_prompt = std::mem::take(&mut self.compaction_summary_prompt);
+        let startup_compaction_checks = std::mem::take(&mut self.startup_compaction_checks);
         let agent_type = self.agent_type.clone();
         let store = self.store.clone();
         let mut session_id = self.session_id;
@@ -2674,10 +2688,36 @@ impl AgentLoop {
             }
             let (mut compaction, mut compaction_rx) = compaction::CompactionRuntime::new(
                 compaction_engine.clone(),
-                compaction_summary_prompt,
+                compaction_summary_prompt.clone(),
                 compaction_timeout,
             );
             compaction.set_activity_sender(ui_tx.clone(), own_run_id);
+            let root_capacity_warning = compaction.capacity_warning(engine.clone());
+            let startup_ui_tx = ui_tx.clone();
+            let startup_agent_label = agent_type
+                .as_ref()
+                .map(|agent_type| format!("Agent type '{agent_type}'"))
+                .unwrap_or_else(|| "Root agent".to_string());
+            let startup_checks = async move {
+                let mut warnings = Vec::new();
+                if let Some(text) = root_capacity_warning.await {
+                    warnings.push((startup_agent_label, text));
+                }
+                for check in startup_compaction_checks {
+                    if let Some(text) = check.warning(&compaction_summary_prompt).await {
+                        warnings.push((format!("Agent type '{}'", check.agent_type), text));
+                    }
+                }
+                for text in compaction::group_capacity_warnings(warnings) {
+                    compaction::report_capacity_warning(&startup_ui_tx, text, own_run_id).await;
+                }
+            };
+            tokio::pin!(startup_checks);
+            let mut startup_checks_finished = false;
+            let mut request_waiting_for_startup_checks = false;
+            let mut model_change_capacity_check: Option<
+                futures::future::BoxFuture<'static, Option<String>>,
+            > = None;
             if let Some(briefing) = briefing {
                 context.push_system(briefing);
             }
@@ -2753,6 +2793,36 @@ impl AgentLoop {
             loop {
                 tokio::select! {
                         biased;
+                        _ = &mut startup_checks, if !startup_checks_finished => {
+                            startup_checks_finished = true;
+                            if std::mem::take(&mut request_waiting_for_startup_checks) {
+                                current_cancel = Some(start_request(
+                                    &mut context,
+                                    Some(&mut compaction),
+                                    engine.clone(),
+                                    registry.schemas(),
+                                    ui_tx.clone(),
+                                    agent_tx.clone(),
+                                    generation,
+                                    own_run_id,
+                                    session_id,
+                                ));
+                            }
+                            // Startup completion is not a completed child turn.
+                            continue;
+                        }
+                        warning = async {
+                            match model_change_capacity_check.as_mut() {
+                                Some(check) => check.await,
+                                None => std::future::pending().await,
+                            }
+                        }, if model_change_capacity_check.is_some() => {
+                            model_change_capacity_check = None;
+                            if let Some(text) = warning {
+                                compaction::report_capacity_warning(&ui_tx, text, own_run_id).await;
+                            }
+                            continue;
+                        }
                         Some((event_generation, event)) = agent_rx.recv() => {
                             if event_generation != generation {
                                 tracing::debug!(
@@ -2898,6 +2968,17 @@ impl AgentLoop {
                                         "provider rejected context; retrying once with request-local extra margin"
                                     );
                                     context.retry_after_context_rejection = true;
+                                    current_cancel = Some(start_request(
+                                        &mut context, Some(&mut compaction), engine.clone(),
+                                        registry.schemas(), ui_tx.clone(), agent_tx.clone(),
+                                        generation, own_run_id, session_id,
+                                    ));
+                                }
+                                AgentEvent::ContextWindowChanged => {
+                                    tracing::debug!(
+                                        context_length = engine.effective_context_length(),
+                                        "context window changed during preflight; re-evaluating the request budget"
+                                    );
                                     current_cancel = Some(start_request(
                                         &mut context, Some(&mut compaction), engine.clone(),
                                         registry.schemas(), ui_tx.clone(), agent_tx.clone(),
@@ -3634,17 +3715,21 @@ impl AgentLoop {
                                         iterations = 1;
                                         context.push_user(text);
                                         mode = AgentMode::Streaming;
-                                        current_cancel = Some(start_request(
-                                            &mut context,
-                                            Some(&mut compaction),
-                                            engine.clone(),
-                                            registry.schemas(),
-                                            ui_tx.clone(),
-                                            agent_tx.clone(),
-                                            generation,
-                                            own_run_id,
-                                            session_id,
-                                        ));
+                                        if startup_checks_finished {
+                                            current_cancel = Some(start_request(
+                                                &mut context,
+                                                Some(&mut compaction),
+                                                engine.clone(),
+                                                registry.schemas(),
+                                                ui_tx.clone(),
+                                                agent_tx.clone(),
+                                                generation,
+                                                own_run_id,
+                                                session_id,
+                                            ));
+                                        } else {
+                                            request_waiting_for_startup_checks = true;
+                                        }
                                     } else {
                                         // Cooperative steering: never cancel the live
                                         // stream. Queued from ToolPending too; injection
@@ -4036,6 +4121,11 @@ impl AgentLoop {
                                         }
                                     }
                                     // Interrupt: hard-abort the current round.
+                                    if std::mem::take(&mut request_waiting_for_startup_checks) {
+                                        context.push_assistant(String::new(), AssistantStatus::Interrupted);
+                                        mode = AgentMode::Idle;
+                                        let _ = ui_tx.send(UiUpdate::StreamCancelled).await;
+                                    }
                                     pending_steers.clear();
                                     if let Some(cancel_token) = current_cancel.take() {
                                         cancel_token.cancel();
@@ -4142,6 +4232,7 @@ impl AgentLoop {
                                     }
                                 }
                                 AgentCommand::ClearContext => {
+                                    request_waiting_for_startup_checks = false;
                                     // Interrupt whatever was in flight before
                                     // swapping in `fresh_context`, mirroring
                                     // `AgentCommand::Stop`'s cleanup — otherwise
@@ -4214,6 +4305,8 @@ impl AgentLoop {
                                     if let Some(store) = context.store() {
                                         store.record_model_changed(&provider_connection, &model);
                                     }
+                                    model_change_capacity_check =
+                                        Some(Box::pin(compaction.capacity_warning(engine.clone())));
                                 }
                                 AgentCommand::ForChild { run_id, command } => {
                                     // Only a root loop's `child_agent_manager` can
@@ -4971,6 +5064,10 @@ fn start_request(
 ) -> CancellationToken {
     let cancel = CancellationToken::new();
     let mut notices = Vec::new();
+    let preflight_context_length = engine.effective_context_length();
+    let capacity_warning = compaction
+        .as_ref()
+        .map(|runtime| runtime.capacity_warning(engine.clone()));
     let send_notices = |notices: Vec<String>| {
         let sender = agent_tx.clone();
         tokio::spawn(async move {
@@ -5067,6 +5164,14 @@ fn start_request(
     let span = tracing::info_span!("agent_stream", run_id = ?own_run_id);
     tokio::spawn(
         async move {
+            if let Some(capacity_warning) = capacity_warning {
+                if let Some(notice) = capacity_warning.await {
+                    tracing::warn!(%notice, "compaction engine capacity may be insufficient");
+                    if !send_preflight_notice(&agent_tx, generation, notice).await {
+                        return;
+                    }
+                }
+            }
             for notice in notices {
                 if !send_preflight_notice(&agent_tx, generation, notice).await {
                     return;
@@ -5081,6 +5186,12 @@ fn start_request(
                             partial: String::new(),
                         },
                     ))
+                    .await;
+                return;
+            }
+            if engine.effective_context_length() != preflight_context_length {
+                let _ = agent_tx
+                    .send((generation, AgentEvent::ContextWindowChanged))
                     .await;
                 return;
             }

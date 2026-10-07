@@ -10,7 +10,7 @@
       pub async fn run_tui_on_stdout(
       ```
 
-- [ ] Warn in CLI and TUI when the `[compaction].engine` context window is too
+- [x] Warn in CLI and TUI when the `[compaction].engine` context window is too
       small for the summary request it receives. Estimate the summarized prefix
       against the selected summarizer's effective context length, accounting for
       its prompt and request overhead. Compare each root or agent engine's
@@ -18,6 +18,20 @@
       effective context length; using a different conversation engine does not
       change the compaction engine's capacity. Agent types can now override
       their compaction engine independently.
+
+- [ ] Clarify/fix `/models` engine selection and its effect on compaction.
+      Within the same provider connection, `/models` changes the active engine's
+      model, initially `default_engine` unless the root agent overrides it.
+      A summarizer sharing that named engine follows the model change too;
+      catalog-derived context length changes with it, while an explicit
+      `context_length` remains fixed. Selecting another provider connection
+      activates another engine and leaves the original compaction engine bound
+      to its existing named engine.
+      Although the picker displays named-engine shortcuts, confirmation discards
+      `engine_name` and routes only provider/model. Users therefore cannot reliably
+      activate another named engine on the same provider connection.
+      Preserve the selected engine identity when activating named-engine shortcuts
+      and make conversation/summarizer engine sharing clear in the TUI.
 
 - [ ] Recall a (multiline) draft message in TUI from conversation history.
       Cursor is a the beginning of the message in input-field.

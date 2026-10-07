@@ -177,6 +177,8 @@ whole response before any tool executes.
 An agent type may override the profile's compaction engine and summary timeout.
 Each omitted override inherits independently. Root and child runs use the
 settings resolved for their own agent type.
+When neither layer selects a compaction engine, the agent type's configured
+conversation engine is used.
 
 ## Models and providers
 

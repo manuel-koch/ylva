@@ -406,6 +406,40 @@ impl AgentFactory {
                 .with_compaction_engine(compaction_engine)
                 .with_compaction_timeout_secs(profile.compaction_timeout_secs_for(agent_type))
                 .with_compaction_summary_prompt(summary_prompt);
+            if !is_child {
+                let mut agent_types: Vec<_> = profile
+                    .agents
+                    .keys()
+                    .filter(|configured_type| configured_type.as_str() != agent_type)
+                    .collect();
+                agent_types.sort();
+                let checks = agent_types
+                    .into_iter()
+                    .map(|configured_type| {
+                        let conversation_engine_name =
+                            resolve_engine_name(profile, configured_type);
+                        let summary_engine_name =
+                            profile.compaction_engine_name_for(configured_type);
+                        Ok(crate::agent::compaction::AgentCompactionCapacityCheck {
+                            agent_type: configured_type.clone(),
+                            conversation_engine: engines
+                                .get(conversation_engine_name)
+                                .cloned()
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!("unknown engine: {conversation_engine_name}")
+                                })?,
+                            summary_engine: engines.get(summary_engine_name).cloned().ok_or_else(
+                                || {
+                                    anyhow::anyhow!(
+                                        "unknown compaction engine: {summary_engine_name}"
+                                    )
+                                },
+                            )?,
+                        })
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                agent_loop = agent_loop.with_startup_compaction_checks(checks);
+            }
         }
 
         // Only the root agent streams into the session file; a child's
@@ -1285,6 +1319,165 @@ mod tests {
             "summary-model"
         );
         assert_eq!(child.compaction_timeout(), Duration::from_secs(240));
+    }
+
+    #[test]
+    fn startup_checks_unused_agent_types_with_their_independent_compaction_engines() {
+        crate::test_support::run_locked(async {
+            for dedicated_summarizer in [false, true] {
+                let mut profile = two_engine_profile();
+                profile.compaction.engine = Some("main".to_string());
+                profile.engines.get_mut("main").unwrap().context_length = Some(32_768);
+                profile.engines.get_mut("fast").unwrap().context_length = Some(98_304);
+                if dedicated_summarizer {
+                    profile.agents.get_mut("quick").unwrap().compaction =
+                        Some(crate::config::AgentCompactionConfig {
+                            engine: Some("fast".to_string()),
+                            timeout_sec: None,
+                        });
+                }
+                let factory =
+                    AgentFactory::from_profile(&profile).expect("profile engines validate");
+                let (mut root, mut updates) = factory
+                    .create(&profile, "default", Role::Root)
+                    .expect("root builds");
+                let handle = root.run();
+                if dedicated_summarizer {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    assert!(
+                        updates.try_recv().is_err(),
+                        "a dedicated sufficiently large agent summarizer must not warn",
+                    );
+                } else {
+                    let update = tokio::time::timeout(Duration::from_secs(1), updates.recv())
+                        .await
+                        .expect("an unused agent must be checked without any prompt")
+                        .expect("startup notice");
+                    assert!(matches!(update, UiUpdate::Notice { text, run_id: None }
+                            if text.contains("Agent type 'quick'")
+                                && text.contains("68812 tokens")
+                                && text.contains("32768 tokens")),);
+                }
+                drop(root);
+                handle.await.expect("loop joins").expect("loop shuts down");
+            }
+        });
+    }
+
+    #[test]
+    fn startup_groups_equivalent_capacity_warnings_without_merging_different_budgets() {
+        crate::test_support::run_locked(async {
+            for (
+                root_shares_engine,
+                different_window,
+                different_threshold,
+                different_summary_window,
+            ) in [
+                (false, false, false, false),
+                (true, false, false, false),
+                (true, true, false, false),
+                (true, false, true, false),
+                (true, false, false, true),
+            ] {
+                let mut profile = two_engine_profile();
+                profile.compaction.engine = Some("main".to_string());
+                for (engine_name, context_length) in [("main", 32_768), ("fast", 131_072)] {
+                    let config = profile.engines.get_mut(engine_name).unwrap();
+                    config.model = "shared-model".to_string();
+                    config.context_length = Some(context_length);
+                }
+                let mut research_agent = profile.agents["quick"].clone();
+                if root_shares_engine {
+                    profile.agents.get_mut("default").unwrap().engine = Some("fast".to_string());
+                }
+                if different_window || different_threshold {
+                    let mut different_engine = profile.engines["fast"].clone();
+                    if different_window {
+                        different_engine.context_length = Some(65_536);
+                    }
+                    if different_threshold {
+                        different_engine.soft_compaction_threshold = 0.6;
+                    }
+                    profile
+                        .engines
+                        .insert("different".to_string(), different_engine);
+                    research_agent.engine = Some("different".to_string());
+                }
+                if different_summary_window {
+                    let mut smaller_summary_engine = profile.engines["main"].clone();
+                    smaller_summary_engine.context_length = Some(16_384);
+                    profile
+                        .engines
+                        .insert("smaller-summary".to_string(), smaller_summary_engine);
+                    research_agent.compaction = Some(crate::config::AgentCompactionConfig {
+                        engine: Some("smaller-summary".to_string()),
+                        timeout_sec: None,
+                    });
+                }
+                profile
+                    .agents
+                    .insert("research-and-discover".to_string(), research_agent);
+                let factory = AgentFactory::from_profile(&profile).expect("profile validates");
+                let (mut root, mut updates) = factory
+                    .create(&profile, "default", Role::Root)
+                    .expect("root builds");
+                let handle = root.run();
+                let first_update = tokio::time::timeout(Duration::from_secs(1), updates.recv())
+                    .await
+                    .expect("startup warning arrives before any prompt")
+                    .expect("startup notice");
+                let mut notices = Vec::new();
+                if let UiUpdate::Notice { text, run_id: None } = first_update {
+                    notices.push(text);
+                } else {
+                    panic!("expected a root startup notice, got {first_update:?}");
+                }
+                root.send_command(crate::agent::AgentCommand::Prompt("hello".to_string()))
+                    .await;
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while let Some(update) = updates.recv().await {
+                        match update {
+                            UiUpdate::Notice { text, run_id: None } => notices.push(text),
+                            UiUpdate::StreamDone => return,
+                            _ => {}
+                        }
+                    }
+                    panic!("UI channel closed before the first turn completed");
+                })
+                .await
+                .expect("first turn completes after all startup checks");
+                drop(root);
+                handle.await.expect("loop joins").expect("loop shuts down");
+                let different_budget =
+                    different_window || different_threshold || different_summary_window;
+                assert_eq!(
+                    notices.len(),
+                    if different_budget { 2 } else { 1 },
+                    "equivalent startup warnings must share one notice: {notices:?}",
+                );
+                assert!(notices[0].contains("Agent type 'quick'"), "{notices:?}");
+                assert_eq!(
+                    notices[0].contains("Agent type 'default'"),
+                    root_shares_engine,
+                    "{notices:?}",
+                );
+                if different_budget {
+                    assert!(!notices[0].contains("research-and-discover"), "{notices:?}");
+                    assert!(notices[1].contains("research-and-discover"), "{notices:?}");
+                    if different_window {
+                        assert!(notices[1].contains("65536"), "{notices:?}");
+                    }
+                    if different_threshold {
+                        assert!(notices[1].contains("0.6"), "{notices:?}");
+                    }
+                    if different_summary_window {
+                        assert!(notices[1].contains("16384"), "{notices:?}");
+                    }
+                } else {
+                    assert!(notices[0].contains("research-and-discover"), "{notices:?}");
+                }
+            }
+        });
     }
 
     #[test]

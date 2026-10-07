@@ -158,6 +158,21 @@ contract.
 A long conversation must keep fitting the active model's context window
 without losing anything the user can still read.
 
+- **Summarizer capacity warnings.** CLI and TUI check the selected root and all
+  configured agent types at startup, even before any user prompt or subagent
+  spawn. Equivalent startup warnings are consolidated into one notice listing
+  all affected agent types; different capacity conditions remain separate.
+  They warn when a root or subagent's
+  soft compaction trigger, including prompt and request overhead, can exceed
+  its selected compaction engine's effective context window. `/models` switches
+  recheck capacity immediately, even while idle, without repeating an unchanged
+  warning on the next prompt. They also warn
+  before an actual oversized summary request. Warnings are advisory: attempts
+  still run and existing failure recovery is unchanged. Each agent type can
+  select its own compaction engine. When a compaction engine is explicitly
+  configured, changing only the conversation engine does not enlarge the
+  summarizer. See
+  [per-agent configuration](./configuration.md#per-agent-configuration).
 - **Transcript vs. model view.** The transcript is the durable, ordered
   record of every message and never loses one. The *model view* is what a
   request actually carries: the leading system block, an optional compaction

@@ -97,7 +97,7 @@ engine = "ollama/local"
 | Key | Type | Description |
 |---|---|---|
 | `default_engine` | string | Name of the `[engines.*]` entry used when an agent type names none. Defaults to `default`. |
-| `[compaction].engine` | string (optional) | Engine used to summarize old conversation prefixes; resolves to `default_engine` when absent. |
+| `[compaction].engine` | string (optional) | Profile-level engine used to summarize old conversation prefixes. When absent and no per-agent compaction engine is set, uses that agent type's configured conversation engine. |
 | `[compaction].timeout_sec` | number (optional) | Wall-clock seconds allowed for each summary request made by the selected compaction engine (default `60`; must be greater than `0`). This is separate from the active conversation engine's settings. |
 | `utility_engine` | string (optional) | Isolated engine used to generate session titles from the first user message and completed assistant reply; resolves to `default_engine` when absent. |
 | `default_model` | string (optional) | Model filled into every `[engines.*]` entry that names none of its own. |
@@ -402,7 +402,7 @@ A profile groups engine selection and per-agent settings for a runtime session.
 | Field | Type | Description |
 |---|---|---|
 | `default_engine` | string | Name of the engine used when no agent-level override is present (required). |
-| `[compaction].engine` | string (optional) | Engine used for summarisation tasks — the compaction summary of an old conversation prefix. Resolves to `default_engine` when absent. Session-title generation uses `utility_engine`. |
+| `[compaction].engine` | string (optional) | Profile-level engine used to summarize old conversation prefixes. When absent and no per-agent compaction engine is set, uses that agent type's configured conversation engine. Session-title generation uses `utility_engine`. |
 | `utility_engine` | string (optional) | Isolated engine used for utility tasks such as session-title generation. Resolves to `default_engine` when absent and does not follow `/models` runtime switching. |
 | `provider_connections` | table | Named provider connections, keyed by connection name. |
 | `engines` | table | Named model/runtime configurations, keyed by engine name. |
@@ -419,7 +419,7 @@ A profile groups engine selection and per-agent settings for a runtime session.
 | `max_tool_iterations` | number (optional) | Cap on consecutive tool-use rounds one turn may spend, for this agent type's root and child loops alike. Defaults to `50` when omitted; `0` is rejected at profile load because it would trip the guard on the very first tool-use round. |
 | `persona` | string (optional) | The agent type's own persona: the single model-facing text this type contributes, composed after the global baseline (global SOUL plus trusted instruction sections) and before the tool protocol — it extends that baseline, never replaces it. Write it as `persona = "…"` in a `.toml` agent-type file, as the body of a `.md` agent-type file (the body *is* the persona), or as `persona = "…"` in an inline table, where it replaces a file-sourced persona. Applies when the type runs as root or child. |
 | `can_spawn` | boolean | When `true` (for a root agent), registers the `spawn_subagent` tool so this agent may delegate self-contained tasks to a concurrently-running child agent (one level deep; children cannot spawn further children). Use `--auto-approve-spawn` to skip the human-approval prompt for `spawn_subagent` calls. See "Child-agent delegation" in `docs/features.md`. |
-| `[agents.<type>.compaction].engine` | string (optional) | Summarizer engine for this agent type's context. Overrides `[compaction].engine`; if neither is set, uses `default_engine`. Applies to root and child runs of this agent type. |
+| `[agents.<type>.compaction].engine` | string (optional) | Summarizer engine for this agent type's context. Overrides `[compaction].engine`; if neither is set, uses the agent type's configured `engine`, or `default_engine` when that is absent. Applies to root and child runs of this agent type. |
 | `[agents.<type>.compaction].timeout_sec` | number (optional) | Summary request timeout for this agent type, in seconds. Overrides `[compaction].timeout_sec` (default `60`); must be greater than `0`. |
 | `tools` | table | Per-tool sandbox rule lists scoped to this agent type only, keyed by tool name (`[agents.<type>.tools.<name>]` inline tables, or a file-authored agent-type's own top-level `[tools.<name>]`/`tools: { <name>: ... }` table). Same shape as the profile-level `[tools.<name>]` table (see "Sandbox" below), resolved with higher precedence than it for this agent type. |
 
@@ -441,6 +441,40 @@ timeout_sec = 240
 
 Per-agent `engine` and `timeout_sec` values override independently. If one is
 omitted, it inherits the matching profile-level compaction setting.
+When neither layer specifies a compaction engine, the fallback is the agent
+type's configured conversation engine (`[agents.<type>].engine`, otherwise
+`default_engine`). This selects a named engine when the run is constructed;
+a later `/models` switch to another named conversation engine does not
+retarget the summarizer.
+
+CLI and TUI warn when an agent's conversation engine's effective
+`context_length × soft_compaction_threshold`, plus the compaction prompt and
+request overhead, exceeds its selected summarizer's effective context length.
+The comparison uses the resolved per-agent compaction engine, including
+catalog-derived context lengths. Startup checks the selected root and every
+configured agent type, including types that have not been spawned. Equivalent
+startup warnings share one notice listing all affected agent types, including
+the selected root when applicable. Different provider/model combinations,
+effective context lengths, soft thresholds, or estimated prompt/request
+overheads remain separate warnings. In the TUI these warnings appear without
+entering a prompt. Explicit context lengths need
+no catalog lookup; missing lengths are resolved in the background so the idle
+TUI remains responsive. A `/models` switch immediately triggers another capacity
+check without requiring a conversation prompt. Pending metadata lookups do not
+block controls, and a newer switch replaces the pending switch check. Each
+running root or subagent also checks before requests, without repeating an
+unchanged warning from startup or a model switch. The summarized
+prefix can be smaller than the soft threshold, so this is an advisory
+configuration warning, not a startup
+error. An explicitly selected compaction engine's capacity is independent of the
+conversation engine. Use a larger summarizer, lower the conversation
+engine's soft threshold, or select a per-agent compaction engine.
+
+Each actual summary request is also estimated with its source prefix, resolved
+`COMPACTION.md`, code-owned framing, final trigger, and request overhead.
+Requests estimated to exceed the summarizer's context window produce a warning
+before dispatch, without changing the prefix or preventing the attempt.
+These local estimates remain advisory, not provider-token guarantees.
 
 Every loaded profile has a `default` agent type. If `[agents.default]` is
 absent, Ylva supplies the built-in default configuration: it uses

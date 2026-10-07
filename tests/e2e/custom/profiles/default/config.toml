@@ -2,7 +2,7 @@
 default_engine = "openrouter-dense"
 
 [compaction]
-#engine = "ollama/local"
+engine = "ollama/local"
 timeout_sec = 600
 
 [provider_connections.ollama-local]
@@ -22,7 +22,7 @@ api_key = "${OPENROUTER_API_KEY}"
 [engines."ollama/local"]
 provider_connection = "ollama-local"
 model = "gemma4:e4b-mlx"
-context_length = "96kb"
+context_length = "32kb"
 compact_target_ratio = 0.4
 soft_compaction_threshold = 0.5
 hard_compaction_threshold = 0.8

@@ -47,7 +47,8 @@ the boundary of the unseen verbatim tail is managed by the runtime.
 request and releases the lock before network I/O. Updates therefore affect
 later requests without changing settings in an in-flight request.
 
-Catalog hydration runs once per engine before its first chat. A `/models`
+Catalog hydration resolves the effective context length and runs once per engine
+before its first chat. A `/models`
 selection supplies that model's metadata, so hydration skips another fetch.
 The engine does not repeat a hydration lookup after its one attempt; transient
 HTTP `429`/`5xx` responses inside that attempt use the shared bounded retry
@@ -258,6 +259,38 @@ snapshot, so the indicator never implies completion before the model view has
 changed. Stop and clear abort the task and clear activity immediately;
 request IDs prevent a late completion from clearing a newer request's
 indicator.
+
+`AgentFactory` supplies startup capacity checks for every configured agent type
+besides the selected root. `AgentLoop::run` polls these checks and the root's own
+check alongside commands. Once all startup checks finish,
+`group_capacity_warnings` combines identical warning bodies into one notice
+listing the affected agent types, in deterministic root-first check order.
+Warning bodies include both provider/model identities, effective windows,
+the soft threshold, and estimated prompt/request overhead, so different
+capacity conditions remain separate. Notices appear even in an idle TUI;
+dropping the loop cancels pending checks. The first conversation request waits for all startup
+checks so a fast CLI turn cannot exit before checking unused agent types; stop
+and clear discard that waiting request. Explicit context lengths avoid catalog requests.
+`RecordModelChanged` schedules an immediate capacity recheck, polled alongside
+commands and events rather than blocking controls on catalog metadata. A newer
+switch replaces a pending switch check; dropping the loop cancels it. The check
+uses the live conversation engine and the existing independent compaction engine,
+without sending a conversation request. `EngineRouter` forwards catalog hydration
+to the active named engine so checks use its catalog-derived context window.
+`CompactionRuntime::capacity_warning` hydrates metadata for unconfigured context
+lengths at startup, after model switches, and before a request's
+generation-checked preflight notice. It compares
+the conversation engine's soft trigger plus the estimated token overhead of an
+empty summary request against the independent summarizer window, suppressing
+unchanged warnings per run. Startup and request checks share an asynchronous
+lock with switch checks so they neither duplicate the root warning nor race its catalog lookup.
+`generate_summary` separately estimates the actual immutable summary request
+after summarizer metadata hydration and within the summary timeout,
+including message framing and the shared fixed request-overhead allowance, and
+emits a root/child-scoped `UiUpdate::Notice` if it exceeds the summarizer window.
+Neither check clips source messages or changes summary/fallback policy.
+If catalog hydration changes the conversation window during preflight,
+`ContextWindowChanged` re-enters the outer loop's budget gate before dispatch.
 
 Hard-limit recovery is `Context::recover_model_view`, using shared reducers in
 `src/agent/compaction/recovery.rs`. Its five measured stages clip older outcome

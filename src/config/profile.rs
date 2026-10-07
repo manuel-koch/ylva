@@ -107,7 +107,8 @@ pub struct ProfileConfig {
 /// Settings for background conversation-summary compaction.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CompactionConfig {
-    /// Engine used for summaries. When absent, uses `default_engine`.
+    /// Profile-level summarizer engine, unless an agent type overrides it.
+    /// When absent, each agent uses its configured conversation engine.
     #[serde(default)]
     pub engine: Option<String>,
     /// Wall-clock seconds allowed for one summary request.
@@ -119,7 +120,8 @@ pub struct CompactionConfig {
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct AgentCompactionConfig {
     /// Engine used to summarize this agent's context. When absent, inherits
-    /// the profile's `[compaction].engine` or `default_engine`.
+    /// the profile's `[compaction].engine`, then this agent type's configured
+    /// conversation engine (its `engine` or the profile's `default_engine`).
     #[serde(default)]
     pub engine: Option<String>,
     /// Wall-clock summary timeout. When absent, inherits the profile value.
@@ -665,8 +667,9 @@ impl ProfileConfig {
         }
     }
 
-    /// Engine name used for compaction: `[compaction].engine` when set, else
-    /// `default_engine` (see `docs/configuration.md`).
+    /// Profile-level compaction engine without agent-type resolution:
+    /// `[compaction].engine` when set, else `default_engine`.
+    /// Agent runs use [`Self::compaction_engine_name_for`] instead.
     pub fn compaction_engine_name(&self) -> &str {
         self.compaction
             .engine
@@ -674,7 +677,8 @@ impl ProfileConfig {
             .unwrap_or(self.default_engine.as_str())
     }
 
-    /// Compaction engine for one agent type, with its optional override.
+    /// Compaction engine for one agent type: its compaction override, then
+    /// the profile's compaction engine, then its configured conversation engine.
     pub fn compaction_engine_name_for(&self, agent_type: &str) -> &str {
         self.agents
             .get(agent_type)
