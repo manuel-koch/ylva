@@ -39,14 +39,12 @@ use ratatui_textarea::{Scrolling, TextArea};
 use tokio::select;
 use tokio::sync::mpsc;
 
-use crate::agent::tools::DEFAULT_TUI_TOOLS;
 use crate::agent::{AgentCommand, AgentLoop, AgentMode, Role, UiUpdate};
 use crate::agent_factory::AgentFactory;
 use crate::app::App;
 use crate::config::ProfileConfig;
 use crate::events::{spawn_crossterm_bridge, AppAction};
-use crate::llm::engine::{Engine, EngineConfig, EngineImpl, ModelSelection};
-use crate::llm::Provider;
+use crate::llm::engine::{Engine, ModelSelection};
 use crate::presenter::{self, TextareaContext, TuiEvent};
 use crate::render;
 use crate::session_title::{SessionTitleUpdate, TitleAttempt};
@@ -56,7 +54,6 @@ use crate::tui_reducer_state::{
     ModelChoice, SlashOverlay, TuiDisplayMetadata, TuiMode, UserMessageState, CONFIRM_TIMEOUT,
 };
 use crate::tui_render_state::TuiState;
-use crate::ToolRegistry;
 
 /// Abstracts writing text to the OS clipboard so the Driver can be tested
 /// without side-effects on the host machine.
@@ -2006,44 +2003,6 @@ impl App for TuiApp {
     }
 }
 
-/// Compatibility shim for `main.rs` until Phase 5 Step 9 migrates the binary
-/// to construct `TuiApp` directly.
-///
-/// TODO Phase 5 Step 9: remove this function.
-pub async fn run_tui_on_stdout(
-    provider: Arc<dyn Provider>,
-    registry: Arc<ToolRegistry>,
-    initial_prompt: Option<String>,
-) -> anyhow::Result<()> {
-    let engine_config = EngineConfig {
-        provider_connection: provider.name().to_string(),
-        model: String::new(),
-        temperature: None,
-        context_length: None,
-        api_base_url: None,
-        api_key: None,
-        reasoning: None,
-
-        compact_target_ratio: 0.5,
-        soft_compaction_threshold: 0.7,
-        hard_compaction_threshold: 0.9,
-    };
-    let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(provider, engine_config));
-    let factory = Arc::new(
-        AgentFactory::new(std::collections::HashMap::from([(
-            "default".to_string(),
-            engine,
-        )]))
-        .with_allowed_tools(DEFAULT_TUI_TOOLS),
-    );
-    let profile = ProfileConfig::default();
-    let _ = registry; // registry is created internally by AgentFactory; parameter kept for API compat
-    TuiApp::new(factory, profile, "default".to_string(), initial_prompt)
-        .run()
-        .await
-        .map(|_| ())
-}
-
 /// RAII guard restoring the terminal to its pre-TUI state.
 struct TerminalGuard;
 
@@ -2088,6 +2047,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    use crate::llm::engine::{EngineConfig, EngineImpl};
     use crate::tui_reducer_state::{ChatEntry, ConversationView, ToolCallState};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tokio::sync::mpsc;

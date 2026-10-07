@@ -1,6 +1,6 @@
 # Backlog of issues discovered while testing
 
-- [ ] Shouldn't this be removed ?
+- [x] Shouldn't this be removed ?
       src/tui_driver.rs(1790):
       ```rust
       /// Compatibility shim for `main.rs` until Phase 5 Step 9 migrates the binary
