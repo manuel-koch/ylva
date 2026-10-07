@@ -53,7 +53,7 @@
       be patient and rely on the updates.▊
       ```
 
-- [ ] LLM spawned subagent and instead of using its result, root agent
+- [x] LLM spawned subagent and instead of using its result, root agent
       just stated:
       "The subagent completed the analysis without editing files.
       Its findings are in the Markdown table above."

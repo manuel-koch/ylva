@@ -124,7 +124,11 @@ impl SpawnSubagentTool {
          Ending this response does not cancel the subagents or complete the user's task: the \
          harness will resume you after all outstanding subagents finish. Use a result only \
          when it helps with genuinely useful work; when all_done is true, combine the terminal \
-         results and answer the user. Never claim a child completed from the admission result alone."
+         results into a self-contained answer with the relevant findings, sources, and limitations. \
+         Preserve the user's requested format, including tables. Do not assume tool results or \
+         subagent responses are visible to the user; present the findings instead of merely announcing \
+         completion or referring to results 'above'. Report failures or missing findings explicitly \
+         without inventing details. Never claim a child completed from the admission result alone."
     }
 }
 
@@ -328,6 +332,12 @@ mod tests {
             assert!(description.contains("Do not keep thinking while waiting"));
             assert!(description.contains("Ending this response does not cancel the subagents"));
             assert!(description.contains("resume you after all outstanding subagents finish"));
+            assert!(description.contains("self-contained answer"));
+            assert!(description.contains("Preserve the user's requested format"));
+            assert!(description.contains(
+                "Do not assume tool results or subagent responses are visible to the user"
+            ));
+            assert!(!description.contains("bubbles"));
         }
     }
 

@@ -385,6 +385,11 @@ The tool description and intermediate completion notices tell the root to
 end its response when no independent work remains, rather than keep thinking
 while waiting. This is model guidance, not a runtime suspension or a change
 to completion scheduling; ending a response leaves subagents running.
+Both the tool description and completion notices require a self-contained
+answer with relevant findings when `all_done` is true, without assuming tool
+results or subagent responses are visible to the user. Completion notices retain
+this guidance in both canonical and reduced model projections; omitted report
+details must not be invented. These are model instructions, not output validation.
 
 Pending tool-approval and clarify updates carry a `run_id`. Drivers wrap the
 response in `AgentCommand::ForChild`, and the root loop forwards it to the

@@ -3309,9 +3309,15 @@ impl AgentLoop {
                             };
                             let projected_notice = format!(
                                 "Subagent completion event; the structured JSON is harness metadata, \
-                                 not a user-facing message. The child result is already shown to the \
-                                 user in the tool bubble's Result/Error/Sources sections; do not \
-                                 repeat or quote it. Do not quote the JSON verbatim:\n{result_text}\n\
+                                 not a user-facing message. Do not assume tool results or subagent \
+                                 responses are visible to the user. When all_done is true, use the \
+                                 relevant findings, sources, and limitations from these results to \
+                                 produce a self-contained answer to the user's request. Preserve \
+                                 the user's requested format, including tables. Present the actual \
+                                 findings, not just a completion acknowledgement or a reference to \
+                                 results 'above'. Report failures or missing findings explicitly; \
+                                 do not invent details omitted from a reduced result. Do not quote \
+                                 the harness JSON verbatim:\n{result_text}\n\
                                  {next_step_note}",
                             );
                             let mut canonical_event = finish_result.to_completion_json(&label, outstanding_count);
@@ -8865,6 +8871,24 @@ mod tests {
             ),
             "the child's finish result must be recorded in context as an implicit user message"
         );
+            let completion_notice = context
+                .model_messages()
+                .into_iter()
+                .find_map(|message| match message {
+                    Message::User {
+                        content,
+                        kind: UserMessageKind::ImplicitToolNote,
+                    } if content.contains("Subagent completion event") => Some(content),
+                    _ => None,
+                })
+                .expect("completion guidance reaches the root model");
+            assert!(completion_notice.contains("self-contained answer"));
+            assert!(completion_notice.contains("Preserve the user's requested format"));
+            assert!(completion_notice.contains(
+                "Do not assume tool results or subagent responses are visible to the user"
+            ));
+            assert!(!completion_notice.contains("bubbles"));
+            assert!(!completion_notice.contains("do not repeat or quote it"));
 
             // Drain the ui updates; just ensure the channel didn't panic/drop.
             while ui_rx.try_recv().is_ok() {}
@@ -8995,6 +9019,15 @@ mod tests {
                 .contains(compaction::recovery::RESULT_OMISSION_MARKER));
             assert_eq!(event["result_reduced"], true);
             assert!(projected_notice.len() < completion_notice.len());
+            for notice in [completion_notice, &projected_notice] {
+                assert!(notice.contains("self-contained answer"));
+                assert!(notice.contains("Preserve the user's requested format"));
+                assert!(notice.contains(
+                    "Do not assume tool results or subagent responses are visible to the user"
+                ));
+                assert!(!notice.contains("bubbles"));
+                assert!(!notice.contains("do not repeat or quote it"));
+            }
             assert!(
                 recorded_summaries
                     .lock()
