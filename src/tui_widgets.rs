@@ -3597,18 +3597,18 @@ fn draw_help_popup(frame: &mut Frame, state: &mut TuiState) {
             "Environment" => {
                 let home_directory = dirs::home_dir();
                 let environment_entries = [
+                    (
+                        "Ylva home:",
+                        state.display_metadata.ylva_home.as_deref().map_or_else(
+                            || "not resolved".to_string(),
+                            |path| format_home_relative_path(path, home_directory.as_deref()),
+                        ),
+                    ),
                     ("Profile:", state.display_metadata.profile_name.clone()),
                     (
                         "Profile path:",
                         state.display_metadata.profile_path.as_deref().map_or_else(
                             || "built-in default".to_string(),
-                            |path| format_home_relative_path(path, home_directory.as_deref()),
-                        ),
-                    ),
-                    (
-                        "Ylva home:",
-                        state.display_metadata.ylva_home.as_deref().map_or_else(
-                            || "not resolved".to_string(),
                             |path| format_home_relative_path(path, home_directory.as_deref()),
                         ),
                     ),

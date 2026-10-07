@@ -23,7 +23,7 @@
       Clicking or selecting text in last line of input-field doesn't work as expected.
       It alwas seems to affect the first line instead.
 
-- [ ] In help popup the order for "Environment" entries should be adjusted to
+- [x] In help popup the order for "Environment" entries should be adjusted to
       ```text
       Ylva home:      <ylva_home>
       Profile:        <profile>

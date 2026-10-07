@@ -4629,6 +4629,26 @@ fn help_popup_shows_profile_paths() {
         rendered.contains("  Workspace root: /workspace/example"),
         "help popup should show the discovered workspace root: {rendered:?}"
     );
+    let environment_entry_lines = [
+        "  Ylva home:      /tmp/ylva-home",
+        "  Profile:        work",
+        "  Profile path:   /tmp/ylva-home/profiles/work/config.toml",
+        "  Workspace root: /workspace/example",
+    ];
+    let environment_entry_positions: Vec<usize> = environment_entry_lines
+        .iter()
+        .map(|entry| {
+            rendered
+                .find(entry)
+                .unwrap_or_else(|| panic!("missing environment entry {entry:?}: {rendered:?}"))
+        })
+        .collect();
+    assert!(
+        environment_entry_positions
+            .windows(2)
+            .all(|pair| pair[0] < pair[1]),
+        "help popup environment entries should appear in the requested order: {rendered:?}"
+    );
     assert!(
         rendered.contains(&format!("  Version:  v{}", ylva::BUILD_INFO.version)),
         "build values should align after their labels: {rendered:?}"
