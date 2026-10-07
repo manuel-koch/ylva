@@ -21,6 +21,7 @@
 //! Presenter in production. It carries no reducer of its own — all state
 //! transitions live in [`crate::tui_reducer_state::AppState`] / `presenter::update`.
 
+use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::agent::AgentMode;
@@ -198,6 +199,7 @@ pub struct TuiState {
     /// Provider/model identity for the transcript currently being rendered.
     pub engine_display: EngineDisplayInfo,
     pub chat_entries: Vec<ChatEntry>,
+    pub subagent_started_at: HashMap<uuid::Uuid, Instant>,
     pub partial_assistant_text: String,
     /// In-flight extended-thinking/reasoning fragments, accumulated separately
     /// from `partial_assistant_text` so they never contaminate the assistant
@@ -282,6 +284,7 @@ pub struct TuiState {
 impl TuiState {
     pub fn new() -> Self {
         TuiState {
+            subagent_started_at: HashMap::new(),
             display_metadata: TuiDisplayMetadata::default(),
             parent_agent_mode: AgentMode::Idle,
             agent_mode: AgentMode::Idle,

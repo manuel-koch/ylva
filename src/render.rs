@@ -172,6 +172,7 @@ fn project_for_draw(state: &AppState) -> TuiState {
         active_subagent_counts,
         engine_display,
         chat_entries,
+        subagent_started_at: state.subagent_started_at(),
         partial_assistant_text,
         partial_thinking_text,
         thinking_started_at,

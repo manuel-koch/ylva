@@ -86,5 +86,5 @@
       stem from a subagent conversation.
       See tests/e2e/custom/logs/tui_20261006203945.log
 
-- [ ] Tool spawn_subagent doesn't show the current running duration in
+- [x] Tool spawn_subagent doesn't show the current running duration in
       parent/child conversation while the subagent is running.

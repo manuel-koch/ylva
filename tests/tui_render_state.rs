@@ -2295,12 +2295,149 @@ fn root_view_shows_live_thinking_progress_while_a_tool_bubble_is_running() {
     );
 }
 
-/// The child-view header re-renders the root `spawn_subagent` `ToolBubble`
-/// with a shortened `"Subagent"` title instead of the plain title-cased
-/// `"Spawn Subagent"` — the header sits directly above the subagent's own
-/// transcript, so "Spawn" only makes sense from the root conversation's
-/// point of view (regression test for the header always reading "Spawn
-/// Subagent ..." regardless of context).
+#[test]
+fn spawn_subagent_running_duration_is_visible_in_parent_and_child_views() {
+    use ratatui_textarea::TextArea;
+    use ylva::tui_reducer_state::ResultSection;
+    use ylva::{AppState, DomainEvent, TuiEvent};
+
+    for child_view in [false, true] {
+        for collapsed in [false, true] {
+            let bubble_id = uuid::Uuid::new_v4();
+            let run_id = uuid::Uuid::new_v4();
+            let mut state = AppState::new();
+            let apply_event = |state: &mut AppState, event| {
+                ylva::presenter::update(state, TuiEvent::Domain(event), &empty_textarea_context());
+            };
+            apply_event(
+                &mut state,
+                DomainEvent::ToolStart {
+                    id: bubble_id,
+                    name: "spawn_subagent".to_string(),
+                    arguments: serde_json::json!({"label": "Inspect"}),
+                    content_sections: vec![],
+                    title_arguments: vec![("label".to_string(), serde_json::json!("Inspect"))],
+                    run_id: None,
+                },
+            );
+            if let ChatEntry::ToolBubble {
+                collapsed: bubble_collapsed,
+                ..
+            } = &mut state.chat_entries[0]
+            {
+                *bubble_collapsed = collapsed;
+            }
+            let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
+            let mut textarea = TextArea::default();
+            let mut draw_title = |state: &mut AppState| {
+                terminal
+                    .draw(|frame| {
+                        ylva::render::render(
+                            frame,
+                            state,
+                            &mut textarea,
+                            None,
+                            None,
+                            &ToolRegistry::new(),
+                        );
+                    })
+                    .expect("draw");
+                let lines = if child_view {
+                    &state.child_view.header_rendered_lines
+                } else {
+                    &state.conversation.chat_rendered_lines
+                };
+                lines
+                    .iter()
+                    .find(|line| line.contains("Subagent"))
+                    .expect("subagent title")
+                    .clone()
+            };
+            if !child_view {
+                let title = draw_title(&mut state);
+                assert!(
+                    !title.contains("0.0s"),
+                    "admission is not execution: {title}"
+                );
+            }
+            apply_event(
+                &mut state,
+                DomainEvent::ChildAgentStarted {
+                    run_id,
+                    call_id: bubble_id,
+                    agent_type: "default".to_string(),
+                    task: "Inspect".to_string(),
+                    label: "Inspect".to_string(),
+                },
+            );
+            if child_view {
+                state.switch_to_child_view(run_id);
+            }
+            for elapsed_seconds in [12, 22] {
+                state
+                    .child_conversations
+                    .get_mut(&run_id)
+                    .expect("child")
+                    .started_at =
+                    Some(std::time::Instant::now() - Duration::from_secs(elapsed_seconds));
+                let started_at = state.child_conversations[&run_id].started_at;
+                apply_event(
+                    &mut state,
+                    DomainEvent::ToolProgress {
+                        id: bubble_id,
+                        title_arguments: vec![("status".to_string(), serde_json::json!("running"))],
+                    },
+                );
+                assert_eq!(state.child_conversations[&run_id].started_at, started_at);
+                let title = draw_title(&mut state);
+                let elapsed = title
+                    .split_whitespace()
+                    .last()
+                    .expect("duration")
+                    .strip_suffix('s')
+                    .expect("seconds suffix")
+                    .parse::<f64>()
+                    .expect("numeric duration");
+                assert!(
+                    (elapsed_seconds as f64..elapsed_seconds as f64 + 1.0).contains(&elapsed),
+                    "live duration must advance in the {} view: {title}",
+                    if child_view { "child" } else { "parent" }
+                );
+            }
+            apply_event(
+                &mut state,
+                DomainEvent::ToolProgress {
+                    id: bubble_id,
+                    title_arguments: vec![("status".to_string(), serde_json::json!("queued"))],
+                },
+            );
+            let title = draw_title(&mut state);
+            assert!(
+                !title.ends_with('s'),
+                "queued calls must not show a running duration: {title}"
+            );
+            apply_event(
+                &mut state,
+                DomainEvent::ToolDone {
+                    id: bubble_id,
+                    name: "spawn_subagent".to_string(),
+                    result_section: ResultSection::plain("Finished"),
+                    summary: vec![],
+                    duration: Duration::from_millis(1234),
+                    content_sections: vec![],
+                    run_id: None,
+                },
+            );
+            let title = draw_title(&mut state);
+            assert!(
+                title.ends_with("1.234s"),
+                "completion must replace the live timer: {title}"
+            );
+        }
+    }
+}
+
+/// The drill-in header shortens the root-relative "Spawn Subagent" title.
 #[test]
 fn child_view_header_shortens_spawn_subagent_title() {
     use ratatui::backend::TestBackend;

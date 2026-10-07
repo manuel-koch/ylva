@@ -406,6 +406,11 @@ matching subagent. `AgentLoop` logs and drops a stale or unknown `run_id`.
 `spawn_subagent` bubble id. Drill-in resolves that id rather than choosing the
 most recently started subagent.
 
+Live `ChildConversation::started_at` uses a monotonic clock initialized by
+`ChildAgentStarted`; replayed conversations have no live timer. Render projections
+key these start times by the originating bubble id, so the root bubble and drill-in
+header share one elapsed timer. Queued and terminal bubbles never render it.
+
 `AppState` keeps `active_view`, `running_child`, and
 `child_conversations` (keyed by `run_id`) separate. Finished conversations
 remain available while another subagent runs, and the view model does not

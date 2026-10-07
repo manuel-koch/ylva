@@ -231,6 +231,7 @@ pub fn draw(
                 state: bubble_state,
                 collapsed: *collapsed,
                 spinner_frame: state.spinner_frame,
+                started_at: state.subagent_started_at.get(bubble_id).copied(),
                 display_title_override: display_title_override.as_deref(),
                 subtype_argument,
             },
@@ -788,6 +789,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState, registry: &Too
                         state: bubble_state.as_ref(),
                         collapsed: *collapsed,
                         spinner_frame: state.spinner_frame,
+                        started_at: state.subagent_started_at.get(id).copied(),
                         display_title_override: display_title_override.as_deref(),
                         subtype_argument,
                     },
@@ -915,6 +917,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState, registry: &Too
                 state: bubble_state,
                 collapsed: *collapsed,
                 spinner_frame: state.spinner_frame,
+                started_at: state.subagent_started_at.get(bubble_id).copied(),
                 display_title_override: display_title_override.as_deref(),
                 subtype_argument,
             },
@@ -1526,6 +1529,7 @@ struct ToolBubbleArgs<'a> {
     state: &'a ToolCallState,
     collapsed: bool,
     spinner_frame: u8,
+    started_at: Option<std::time::Instant>,
     /// The bubble's display title: the tool's own `Tool::title()` label for
     /// `name`, looked up by the caller in the `ToolRegistry` at render time
     /// (e.g. `Web Search (Brave)`, which names the configured backend).
@@ -1637,6 +1641,7 @@ fn append_tool_bubble_lines(
         state,
         collapsed,
         spinner_frame,
+        started_at,
         display_title_override,
         subtype_argument,
     } = bubble;
@@ -1859,11 +1864,22 @@ fn append_tool_bubble_lines(
         .fg(ERROR_COLOR)
         .add_modifier(Modifier::BOLD);
 
-    // Duration and summary segments shown in the title for Done and Error
-    // states. The caller assigns each segment's style explicitly so summary
+    // The caller assigns each segment's style explicitly so summary
     // rendering does not need to infer special text from the final string.
     let mut summary_segments: Vec<SummarySegment> = vec![];
     let summary_text: String = match state {
+        ToolCallState::Running { .. } if is_subagent && !is_queued_subagent => {
+            if let Some(started_at) = started_at {
+                let duration_formatted = format!("{:.1}s", started_at.elapsed().as_secs_f64());
+                summary_segments.push(SummarySegment {
+                    text: duration_formatted.clone(),
+                    style: dim_white,
+                });
+                duration_formatted
+            } else {
+                String::new()
+            }
+        }
         ToolCallState::Done {
             summary, duration, ..
         } => {
@@ -3865,6 +3881,7 @@ mod tests {
                 state: &state,
                 collapsed: false,
                 spinner_frame: 0,
+                started_at: None,
                 display_title_override: None,
                 subtype_argument: None,
             },
@@ -3926,6 +3943,7 @@ mod tests {
                 state: &state,
                 collapsed: false,
                 spinner_frame: 0,
+                started_at: None,
                 display_title_override: None,
                 subtype_argument: None,
             },
@@ -3975,6 +3993,7 @@ mod tests {
                         state: &state,
                         collapsed,
                         spinner_frame: 0,
+                        started_at: None,
                         display_title_override,
                         subtype_argument: None,
                     },
@@ -4059,6 +4078,7 @@ mod tests {
                 state: &state,
                 collapsed: false,
                 spinner_frame: 3,
+                started_at: None,
                 display_title_override: None,
                 subtype_argument: None,
             },
@@ -4108,6 +4128,7 @@ mod tests {
                 state: &state,
                 collapsed: false,
                 spinner_frame: 0,
+                started_at: None,
                 display_title_override: None,
                 subtype_argument: None,
             },
@@ -4155,6 +4176,7 @@ mod tests {
                 state: &state,
                 collapsed: true,
                 spinner_frame: 0,
+                started_at: None,
                 display_title_override: None,
                 subtype_argument: None,
             },
@@ -4208,6 +4230,7 @@ mod tests {
                 state: &state,
                 collapsed: false,
                 spinner_frame: 0,
+                started_at: None,
                 display_title_override: Some("Subagent"),
                 subtype_argument: None,
             },

@@ -998,6 +998,7 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
     let chat_area_rect = app.layout.chat_area.rect;
     let slash_overlay_drag = app.slash_overlay_drag_selection();
     let active_subagent_counts = app.active_subagent_counts();
+    let subagent_started_at = app.subagent_started_at();
     let context_usage_text = app
         .active_context_usage()
         .map(crate::tui_reducer_state::format_context_usage_readout);
@@ -1008,6 +1009,7 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
         agent_mode,
         active_subagent_counts,
         chat_entries: app.chat_entries,
+        subagent_started_at,
         partial_assistant_text: app.turn_buffer.partial_assistant_text,
         partial_thinking_text: app.turn_buffer.partial_thinking_text,
         thinking_started_at: app.turn_buffer.thinking_started_at,

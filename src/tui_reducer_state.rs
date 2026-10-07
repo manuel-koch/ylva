@@ -523,6 +523,8 @@ pub struct ChildRunInfo {
 #[derive(Debug, Clone)]
 pub struct ChildConversation {
     pub info: ChildRunInfo,
+    /// Monotonic start of live execution; replayed runs have no live timer.
+    pub started_at: Option<Instant>,
     pub messages: Vec<ChatEntry>,
     pub turn_buffer: TurnBuffer,
     /// Latest context estimate reported by this child run. Kept with the
@@ -536,6 +538,7 @@ impl ChildConversation {
     pub(crate) fn new(info: ChildRunInfo) -> Self {
         ChildConversation {
             info,
+            started_at: Some(Instant::now()),
             messages: Vec::new(),
             turn_buffer: TurnBuffer::default(),
             context_usage: None,
@@ -546,6 +549,7 @@ impl ChildConversation {
     pub(crate) fn new_replay(info: ChildRunInfo) -> Self {
         ChildConversation {
             info,
+            started_at: None,
             messages: Vec::new(),
             turn_buffer: TurnBuffer::default(),
             context_usage: None,
@@ -2406,6 +2410,17 @@ impl AppState {
         self.running_child = Some(info.clone());
         self.child_conversations
             .insert(info.run_id, ChildConversation::new(info));
+    }
+
+    pub(crate) fn subagent_started_at(&self) -> HashMap<Uuid, Instant> {
+        self.child_conversations
+            .values()
+            .filter_map(|conversation| {
+                conversation
+                    .started_at
+                    .map(|started_at| (conversation.info.bubble_id, started_at))
+            })
+            .collect()
     }
 
     pub fn switch_to_child_view(&mut self, run_id: Uuid) {
