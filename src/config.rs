@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Runtime profile configuration and layered configuration resolution.
+//! Profile configuration and layered resolution.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

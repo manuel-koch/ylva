@@ -23,10 +23,10 @@ stage, or commit source changes.
 
 ### Agreed behavior
 
-- A named-engine shortcut activates that exact existing runtime engine.
+- A named-engine shortcut activates that exact existing Engine runtime.
   Only a reasoning effort changed by the user in the picker is reapplied and
   validated against the advertised alternatives.
-- Shortcuts represent current runtime selections, not commands to restore
+- Shortcuts represent current Engine runtime selections, not commands to restore
   engines to their original profile values.
 - A raw catalog row retains existing routing: on the active provider connection
   it changes the active named engine's model; on another connection it selects
@@ -68,9 +68,9 @@ questions are resolved; implementation still requires separate authorization.
   edited reasoning efforts fail visibly without activating a different
   engine or recording a successful switch.
 - A shortcut whose model is missing from the catalog still activates its
-  existing runtime state. Unknown reasoning metadata does not make an unchanged
+  existing Engine runtime state. Unknown reasoning metadata does not make an unchanged
   effort invalid; existing lazy hydration and warnings remain available.
-- Catalog context lengths follow runtime model changes only when the engine
+- Catalog context lengths follow Engine runtime model changes only when the engine
   has no explicit context length. Input modalities and reasoning metadata
   remain consistent with the selected model.
 - An explicit shared summarizer follows mutations of its own engine; an
@@ -128,7 +128,7 @@ and preserve completed checkbox states when refining the plan.
    `src/tui_driver.rs::apply_model_list_result` and the related label/selection
    helpers in `src/tui_reducer_state.rs`. Use the actual engine key for named
    shortcut active status and preselection; initialize a shortcut's reasoning
-   from that engine's runtime rather than borrowing the active sibling's
+   from that engine's current effective settings rather than borrowing the active sibling's
    value solely because their provider/model pairs match. Keep effective
    shortcut window display separate from genuine provider-catalog metadata
    so displaying an explicit override cannot become a catalog override.
@@ -137,7 +137,7 @@ and preserve completed checkbox states when refining the plan.
    unsupported values or rejecting the shortcut. Preserve existing overall
    catalog-loading errors and empty-result behavior.
    Test duplicate provider/model pairs, engine-name filtering, reopening
-   after a runtime model/effort change, unavailable catalog metadata, empty
+   after an Engine runtime model/effort change, unavailable catalog metadata, empty
    filters, no matches, reasoning cycling, and mouse highlight versus Enter
    confirmation. Preserve one catalog query per connection.
 4. [ ] Implement explicit versus implicit summarizer binding in
@@ -146,7 +146,7 @@ and preserve completed checkbox states when refining the plan.
    fallback name returned by `compaction_engine_name_for`.
    Per-agent explicit engine wins over profile explicit engine; timeout
    resolution stays independent. Bind explicit selection to its named engine,
-   and implicit selection to that loop's conversation runtime/router so
+   and implicit selection to that loop's conversation engine/router so
    subsequent summaries follow named activation and raw model changes.
    Do not pass `None` to disable compaction for implicit selection.
    Update startup capacity-check construction consistently for root and
@@ -168,13 +168,13 @@ and preserve completed checkbox states when refining the plan.
    Share target resolution with runtime routing instead of reproducing
    representative-engine ordering in the UI. Distinguish "mutates shared
    engine", "implicit summarizer follows", and "explicit summarizer stays".
-   Use the existing update path; do not duplicate runtime configuration into
+   Use the existing update path; do not duplicate Engine runtime configuration into
    TUI-owned state or add blocking metadata requests. Show unknown window
    metadata honestly. Test startup, idle switching, highlight-only preview,
    separate engines with identical model IDs, subagent drill-in, clear, and
    narrow-terminal behavior using `TestBackend`; controls remain usable when
    space cannot fit full details.
-6. [ ] Verify compaction and shared-runtime behavior through focused tests in
+6. [x] Verify compaction and shared-Engine-runtime behavior through focused tests in
    `src/llm/engine.rs`, `src/agent_factory.rs`, `src/agent.rs`, and
    `src/agent/compaction.rs`, plus `tests/tui_render_state.rs`.
    Cover a model mutation while conversation and explicit summarizer share
@@ -200,7 +200,7 @@ and preserve completed checkbox states when refining the plan.
    persistence boundaries), `docs/cli-options.md` (catalog/routing
    description), and `README.md` (the `/models` summary).
    Describe the intentional change: omitted compaction-engine selection now
-   follows the active conversation runtime; users who want a fixed summarizer
+   follows the active conversation Engine runtime; users who want a fixed summarizer
    must explicitly configure its engine. Explain that explicit sharing still
    follows mutations of that named engine, and preserve timeout independence.
    Mark only the corresponding `docs/backlog-issues.md` item complete when

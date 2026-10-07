@@ -343,7 +343,7 @@ mod tests {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("runtime")
+            .expect("build Tokio runtime")
     }
 
     #[test]

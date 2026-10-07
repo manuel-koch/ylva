@@ -53,7 +53,7 @@ lossy recovery; test-only cap four uses three batches plus final answer (four
 requests), eight skipped outcomes, ten executions, and no lossy recovery. Both
 retain the task in every request. These are deterministic synthetic measurements,
 not provider latency/cost measurements or evidence that six is optimal; the
-runtime cap remains six, never adaptive or configurable.
+fixed cap remains six, never adaptive or configurable.
 
 Compaction lifecycle events also report estimated model-view effectiveness:
 token estimates before and after, signed net token savings and percentage

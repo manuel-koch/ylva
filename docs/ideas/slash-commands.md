@@ -25,7 +25,7 @@ For every agent show info:
   user is currently viewing )
 - title/label ( elided if too long, ensure the other info can be displayed )
 - result (sucess/error), if avail
-- runtime duration ( counting up if currently running )
+- elapsed run duration ( counting up while the run is in progress )
 
 ## /session
 

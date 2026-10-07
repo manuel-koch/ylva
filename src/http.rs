@@ -1014,7 +1014,7 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("runtime");
+            .expect("build Tokio runtime");
         runtime.block_on(async {
             let limiter = RequestConcurrencyLimiter::new(3);
             let active_requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1054,7 +1054,7 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("runtime");
+            .expect("build Tokio runtime");
         runtime.block_on(async {
             let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
             let address = listener.local_addr().expect("server address");
@@ -1095,7 +1095,7 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("runtime");
+            .expect("build Tokio runtime");
         runtime.block_on(async {
             let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
             let address = listener.local_addr().expect("server address");
@@ -1210,7 +1210,7 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("runtime");
+            .expect("build Tokio runtime");
 
         let (base_url, server) = runtime.block_on(start_json_response_server());
         let (get_body, post_body) = runtime.block_on(async {

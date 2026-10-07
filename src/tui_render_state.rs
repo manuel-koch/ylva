@@ -184,8 +184,8 @@ impl Default for ConversationListState {
 }
 
 pub struct TuiState {
-    /// Runtime identity and paths displayed in the startup logo and help
-    /// popup.
+    /// Active profile and workspace paths displayed in the startup logo and
+    /// help popup.
     pub display_metadata: TuiDisplayMetadata,
     /// Status of the root/parent agent loop. While a child transcript is
     /// displayed, [`Self::agent_mode`] describes that visible child instead,

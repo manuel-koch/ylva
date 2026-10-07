@@ -184,7 +184,7 @@ later session.
    - [x] Resolve `COMPACTION.md` like `SOUL.md`: workspace file first, then
          `~/.ylva/COMPACTION.md`, then the built-in prompt that ships with
          Ylva. Load it alongside the other layered instructions when the root
-         loop is built and hand it to the compaction runtime.
+         loop is built and hand it to the compaction coordinator.
    - [x] Keep the request contract unchanged: the prompt frames an immutable
          prefix snapshot, the summarizer stays tool-free, and the response is
          a single concise paragraph preserving decisions, open work, file
@@ -295,7 +295,7 @@ later session.
   selected agent's engine.
 - `src/store.rs` writes tagged JSONL `StoreEvent`s. `SessionMeta` currently has
   no root agent type or `cloned_from` field; `StoreEvent::ModelChanged` is the
-  existing append-only pattern for runtime selection changes.
+  existing append-only pattern for Engine runtime selection changes.
   `Store::read_messages` ignores non-message events, and `Context::set_store`
   uses it to hydrate the model context. The TUI separately reads messages in
   `src/tui_driver.rs` and projects them through `AppState::replay_messages`.

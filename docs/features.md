@@ -45,7 +45,7 @@ failure is routed through the agent event loop once, so one failed request
 produces one user-facing error even though lower layers may record their own
 structured diagnostics.
 
-## CLI Runtime
+## CLI mode
 
 Non-interactive, one-shot session: the initial user turn is sent to the
 agent, and the assistant response is streamed to stdout as it arrives. The
@@ -273,7 +273,7 @@ without losing anything the user can still read.
   model view; the next request replaces it with that serialized request's
   estimate.
 
-## TUI Runtime
+## TUI mode
 
 Interactive terminal UI launched automatically when stdout is a terminal
 (see [TUI Architecture](#tui-architecture)). When stdout is not a terminal
@@ -535,7 +535,7 @@ pattern's root directory, not against each match.
 ### `bash`
 
 Execute a shell command or multi-line script via `bash -c` from the
-current working directory, which is the workspace root in normal runtime.
+current working directory, which is the workspace root during normal operation.
 Use relative paths directly; do not prefix commands with a redundant `cd` to
 the workspace root. Requires explicit human approval before execution. An
 optional `label` (3–6 word purpose of the command) describes what the
@@ -842,7 +842,7 @@ module structure (model/presenter/view/driver split).
   update before applying the selected quit-or-stay-open behavior. OS SIGINT
   stops immediately (no double-press).
 - **Help popup (`F1`):** toggles a centered popup with the full keybinding
-  table, the selected runtime profile and its config path, the resolved Ylva
+  table, the selected profile and its config path, the resolved Ylva
   home, the discovered workspace root, and build-info values. An unavailable
   path is shown explicitly. Paths beneath the operating-system home directory
   use `~` notation when applicable; other paths remain absolute. Mouse-dragging
@@ -857,7 +857,7 @@ module structure (model/presenter/view/driver split).
   the bottom.
 - **Wordmark:** while the conversation is empty, a centered ASCII-art "Ylva"
   wordmark is displayed with the version and git commit on one line and the
-  selected runtime profile on the next line. Mouse-dragging across those lines
+  selected profile on the next line. Mouse-dragging across those lines
   copies the selected text to the clipboard. Once the first message is sent,
   the wordmark disappears.
 - **Input history:** `↑` on the first line loads the previous sent message
@@ -945,7 +945,7 @@ module structure (model/presenter/view/driver split).
   Markdown and syntax highlighting are applied live while a response streams.
 - **Selectable syntax theme:** code blocks and file previews highlight with
   either the `dark` or the `light` theme, chosen with the `theme` key of the
-  runtime profile (see [configuration](./configuration.md#profile-file)).
+  selected profile (see [configuration](./configuration.md#profile-file)).
 - **Thinking bubble:** extended-thinking/reasoning output gets its own
   bubble: dim-blue border, Markdown rendering, shown before the assistant's
   reply. Starts expanded; title shows a live elapsed timer while streaming,
@@ -973,7 +973,7 @@ leave provider discovery to the environment variables as before.
 
 See [configuration](./configuration.md) for all available fields.
 
-### Runtime profiles
+### Profile selection and resolution
 
 A profile groups a default engine with optional per-agent overrides. Each agent
 type may also define a model-facing `description`; root agents that can spawn
@@ -1026,7 +1026,7 @@ code.
 
 The agent-type `persona` — one section, extending the baseline rather than
 replacing it — is then appended, followed by the tool protocol; a child
-additionally receives its task briefing and runtime-budget constraints. See
+additionally receives its task briefing and execution-budget constraints. See
 [configuration](./configuration.md#global-persona-soulmd) for the complete
 initial system-prompt contract.
 

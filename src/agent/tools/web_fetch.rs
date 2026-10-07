@@ -172,7 +172,7 @@ impl WebFetchResult {
         }
     }
 
-    /// Fit the model-facing text to the runtime context allowance. Text is
+    /// Fit the model-facing text to the per-request context allowance. Text is
     /// cut and flagged as truncated; a complete media body cannot be cut
     /// without corrupting the attachment, so it is rejected instead.
     fn fit_to_token_budget(&mut self, max_output_tokens: usize) -> Result<(), String> {

@@ -162,13 +162,13 @@ where
 /// The named engine, provider connection, and model shown for the conversation
 /// currently on screen.
 ///
-/// This intentionally contains only display metadata. Runtime request
+/// This intentionally contains only display metadata. Engine runtime request
 /// settings remain owned by [`EngineRuntimeConfig`], while the immutable
 /// connection details stay in [`EngineConfig`]. The reasoning effort is
-/// copied from the runtime snapshot for display only.
+/// copied from the Engine runtime snapshot for display only.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EngineDisplayInfo {
-    /// The profile key under `[engines.*]`, when the runtime has one.
+    /// The profile key under `[engines.*]`, when the Engine runtime has one.
     ///
     /// Directly constructed engines used by compatibility callers may not have
     /// a named-engine key and leave this empty.
@@ -364,7 +364,7 @@ pub trait Engine: Send + Sync {
     /// caller code.
     fn config(&self) -> EngineConfig;
 
-    /// Return the active profile engine name when this runtime routes among
+    /// Return the active profile engine name when this Engine runtime routes among
     /// named engines. A directly constructed engine has no named key.
     fn active_engine_name(&self) -> Option<String> {
         None
@@ -374,7 +374,7 @@ pub trait Engine: Send + Sync {
     fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>>;
 
     /// List models from every configured provider connection represented by
-    /// this runtime.
+    /// this engine or router.
     ///
     /// A regular engine exposes its own connection under its connection name.
     /// [`EngineRouter`] overrides this to query all configured provider
@@ -456,7 +456,7 @@ pub trait Engine: Send + Sync {
     ///
     /// Engines whose profile leaves `context_length` unset follow the
     /// catalog; an explicit profile value always wins. The default is a
-    /// no-op for engines with no runtime context length to update.
+    /// no-op for engines with no Engine runtime context length to update.
     fn adopt_catalog_context_length(&self, _catalog_context_length: Option<usize>) {}
 
     /// Discover the active model's provider-advertised catalog metadata —
@@ -519,7 +519,7 @@ pub trait Engine: Send + Sync {
 /// The router keeps connection settings in the underlying engines. Switching
 /// provider connections only changes which already-constructed engine receives
 /// future requests, while model changes continue to use each connection's existing
-/// runtime configuration handle.
+/// Engine runtime configuration handle.
 pub struct EngineRouter {
     engines: HashMap<String, Arc<dyn Engine>>,
     active_engine: RwLock<String>,
@@ -847,7 +847,7 @@ pub struct EngineImpl {
     provider: Arc<dyn Provider>,
     /// Connection settings are immutable after construction.
     config: EngineConfig,
-    /// Shared with providers that support runtime engine settings.
+    /// Shared with providers that support Engine runtime settings.
     runtime_config: EngineRuntimeConfigHandle,
     /// One-shot guard: the active model's catalog metadata — input
     /// modalities plus the profile reasoning-effort validation — is
@@ -1066,7 +1066,7 @@ impl Engine for EngineImpl {
     }
 
     fn effective_context_length(&self) -> usize {
-        // The profile's own value always wins; otherwise the runtime value
+        // The profile's own value always wins; otherwise the Engine runtime value
         // (seeded from the built-in default, replaced by the catalog length
         // a `/models` selection adopts).
         let runtime_context_length = self
@@ -1465,7 +1465,7 @@ reasoning = "xhigh"
         assert_eq!(
             runtime_config.reasoning_effort.as_deref(),
             Some("xhigh"),
-            "the initial runtime reasoning effort comes from the engine config"
+            "the initial Engine runtime reasoning effort comes from the engine config"
         );
     }
 

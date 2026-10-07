@@ -19,4 +19,4 @@ until completion and emitting JSON only after the run finishes.
 
 - [`cli-json-output.md`](./cli-json-output.md)
 - [`cli-exit-codes.md`](./cli-exit-codes.md)
-- [`docs/features.md`](../features.md#cli-runtime)
+- [`docs/features.md`](../features.md#cli-mode)

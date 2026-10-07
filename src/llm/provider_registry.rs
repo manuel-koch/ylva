@@ -198,7 +198,7 @@ impl ProviderSelection {
     }
 
     /// Convert this environment selection into the engine configuration that
-    /// owns its connection and initial runtime settings.
+    /// owns its connection and initial Engine runtime settings.
     pub fn engine_config(&self, default_model: Option<&str>) -> EngineConfig {
         match self {
             ProviderSelection::Mock => EngineConfig {
@@ -392,7 +392,7 @@ impl ProviderRegistry {
         )
     }
 
-    /// Build a provider from a named connection and an engine's runtime
+    /// Build a provider from a named connection and an engine's Engine runtime
     /// settings.
     pub fn provider_from_provider_config(
         provider_connection: &str,

@@ -121,7 +121,7 @@ a note, if earlier steps already satisfy the acceptance criteria (YAGNI).
    deterministic handoff built only from the request, any prior summary, and
    actual tool outcomes (never fabricated conclusions), with an explicit lossy
    marker. Extend `tool_output_token_limit` to `web_fetch`, `web_search`, and
-   `bash` so the existing runtime allowance applies to them; keep tool-local
+   `bash` so the existing per-request output allowance applies to them; keep tool-local
    ceilings and metadata/envelopes intact. Step 1's system-only regressions
    must pass after this step. Update the recovery description in
    `docs/features.md`.
@@ -283,7 +283,7 @@ a note, if earlier steps already satisfy the acceptance criteria (YAGNI).
     incident-pattern continuation after successful and failed summaries.
     Use a controlled cap-four versus cap-six comparison to measure model round
     trips, skipped calls, lossy recovery, and retained task continuity. Any
-    alternative cap is test-only, not a runtime adaptation or public knob.
+    alternative cap is test-only, not an adaptive policy or public knob.
     Correctness gates determine readiness; record measurements honestly rather
     than claiming six is optimal. A later cap change needs an explicit decision.
     Record the bounded best-effort guarantee, estimator limitations, unchanged
@@ -303,7 +303,7 @@ a note, if earlier steps already satisfy the acceptance criteria (YAGNI).
 ## Original baseline and implementation hints
 
 The descriptions of previous behavior below are historical investigation notes,
-not the current runtime contract. The completed steps and progress notes describe
+not the current contract. The completed steps and progress notes describe
 the replacement policy.
 
 - The user selected six as the uniform code-owned batch cap after considering
@@ -319,7 +319,7 @@ the replacement policy.
   `available_result_token_budget`, and the request/serial tool-queue lifecycle.
   `advance_tool_queue` currently sweeps only when the queue is empty.
 - `tool_output_token_limit` currently selects `read`, `search`, and `glob`.
-  It returns no runtime token allowance for `web_fetch`.
+  It returns no tool-output token allowance for `web_fetch`.
 - `src/agent/compaction.rs` owns `plan_compaction`, `safe_boundaries_from`,
   `CompactionRuntime`, snapshot construction, timeout handling, and effectiveness
   logging. Hard-threshold evaluation currently wins over an in-flight summary.
@@ -328,7 +328,7 @@ the replacement policy.
   retained group without splitting its protocol.
   Pausing between results does not create another boundary. Explicit matching
   errors can close skipped calls; a request with unanswered calls is not valid.
-- `CompactionOutcome` currently carries generation and boundary; runtime
+- `CompactionOutcome` currently carries generation and boundary; compaction
   activity has a request ID. `on_outcome` clears in-flight state before checking
   generation, which matters when stale/new outcomes overlap.
 - `Context::model_messages` currently projects only leading system messages,
@@ -340,7 +340,7 @@ the replacement policy.
 - `src/store.rs` owns append-only compaction events, hydration state, and cloning.
   `docs/persistence.md` distinguishes live and transcript-relative boundaries.
 - `src/agent/tools.rs` exposes canonical model text, separate display text,
-  structured metadata, attachments, and runtime output-limit hooks.
+  structured metadata, attachments, and execution-time output-limit hooks.
   `src/agent/tools/web_fetch.rs` already marks source-level text truncation and
   guarantees complete recognized media. Existing backend byte caps remain valid.
 - OpenAI-compatible attachment projection is provider-facing and can introduce

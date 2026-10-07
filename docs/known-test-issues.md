@@ -93,7 +93,8 @@ flaky rather than deterministic.
 
 ### Workaround
 
-After dropping the store, let the runtime turn over before re-opening:
+After dropping the store, let the Tokio scheduler run the writer task before
+re-opening:
 
 ```rust
 drop(store);

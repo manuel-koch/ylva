@@ -32,7 +32,7 @@ use super::{
     PROFILE_CONFIG_FILE_NAME,
 };
 
-/// Top-level runtime profile that groups engine selection and per-agent settings.
+/// Top-level Ylva profile that groups engine selection and per-agent settings.
 ///
 /// This is also the deserialization target of
 /// `~/.ylva/profiles/<name>/config.toml` — see [`ProfileConfig::load`].

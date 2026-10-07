@@ -209,7 +209,7 @@ pub struct BashCall {
 }
 
 impl BashResult {
-    /// Keep the head of the output within the runtime context allowance and
+    /// Keep the head of the output within the per-request context allowance and
     /// flag it as truncated.
     fn truncate_to_token_budget(&mut self, max_output_tokens: usize) {
         let (output, truncated) =

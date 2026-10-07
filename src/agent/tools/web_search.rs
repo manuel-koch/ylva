@@ -134,7 +134,7 @@ impl WebSearchResult {
             .join("\n")
     }
 
-    /// Drop the lowest-ranked hits until the text fits the runtime context
+    /// Drop the lowest-ranked hits until the text fits the per-request context
     /// allowance, keeping metadata and text consistent.
     fn fit_to_token_budget(&mut self, max_output_tokens: usize) {
         let estimator = crate::llm::TokenEstimator::Tiktoken;
@@ -565,7 +565,7 @@ mod tests {
             .await
     }
 
-    /// Run one call to completion on a current-thread runtime while holding
+    /// Run one call to completion on a current-thread Tokio runtime while holding
     /// the tracing subscriber lock (the established unit-test pattern).
     fn run_call(
         tool: &WebSearchTool,

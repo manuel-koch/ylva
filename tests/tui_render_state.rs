@@ -4293,12 +4293,12 @@ fn startup_logo_shows_selected_runtime_profile() {
         .collect();
     assert!(
         rendered.contains("profile: work"),
-        "startup logo should show the selected runtime profile: {rendered:?}"
+        "startup logo should show the selected profile: {rendered:?}"
     );
 }
 
 #[test]
-fn help_popup_shows_runtime_paths() {
+fn help_popup_shows_profile_paths() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use ratatui_textarea::TextArea;
@@ -4343,7 +4343,7 @@ fn help_popup_shows_runtime_paths() {
     );
     assert!(
         rendered.contains("  Profile:        work"),
-        "runtime values should align after their labels: {rendered:?}"
+        "profile values should align after their labels: {rendered:?}"
     );
     assert!(
         rendered.contains("  Ylva home:      /tmp/ylva-home"),
@@ -4462,3 +4462,7 @@ fn dragging_scrolled_help_popup_line_copies_rendered_text() {
         "dragging a scrolled help line should copy its rendered text: {effects:?}"
     );
 }
+    assert!(
+        rendered.contains("Environment"),
+        "help popup should label profile and workspace details as environment: {rendered:?}"
+    );

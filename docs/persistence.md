@@ -149,7 +149,8 @@ engine — it never needs to cross-reference the parent's.
 
 Written to the **parent** session when a child agent run begins and when it
 finishes. The result's `origin` is `agent` when the child called
-`agent_finish`, or `runtime` when the harness produced the outcome. Both
+`agent_finish`, or the serialized value `runtime` when the harness produced
+the outcome. Here `runtime` means Ylva's harness, not an Engine runtime. Both
 carry `parent_session`, so a child's records are always
 attributable. The child's own transcript is written separately, once, at
 completion, and its own `meta` line carries `parent_session` too (see above) —

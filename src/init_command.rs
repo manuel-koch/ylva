@@ -25,7 +25,7 @@ use crate::ylva_home::YLVA_DIR_NAME;
 
 const DEFAULT_PROFILE_STARTER: &str = r#"# Ylva profile configuration.
 # This file is a starter. Uncomment and fill in the provider connection and
-# engine examples below when this profile needs runtime settings.
+# engine examples below when this profile needs engine-specific settings.
 
 default_engine = "default"
 theme = "dark"

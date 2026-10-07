@@ -4,7 +4,7 @@ Reference for Ylva's configuration files.
 
 ## Profile file
 
-One TOML file describes a runtime profile. Ylva resolves that file through a
+One TOML file describes a Ylva profile. Ylva resolves that file through a
 three-layer, per-file fallback chain:
 
 ```text
@@ -149,7 +149,7 @@ it does not seed agent-type files. Use `ylva init --workspace` to seed the
 default profile config and `.env` starters plus `.gitignore` under the
 discovered workspace root. Both commands write only missing files unless
 `--force` is supplied. Global, profile-scoped, and project-scoped
-`agents/*.md` and `agents/*.toml` files are discovered at runtime; richer
+`agents/*.md` and `agents/*.toml` files are discovered while resolving profiles; richer
 examples are documented below rather than shipped as repository templates.
 
 ### Global persona (`SOUL.md`)
@@ -179,7 +179,7 @@ every part of a freshly created root or child context is composed, is:
    when at least one instruction file was found,
 3. the agent-type `persona`,
 4. the tool protocol,
-5. for a subagent, its briefing and runtime constraints.
+5. for a subagent, its briefing and execution constraints.
 
 #### Trusted instruction files
 
@@ -253,7 +253,7 @@ setup.
     "not found" are hard startup errors; a chain directory that does not
     exist is treated as empty.
 - **No prompt-level authority.** Instruction content cannot escape this
-  trust boundary and cannot override Ylva's runtime safety constraints: tool
+  trust boundary and cannot override Ylva's safety constraints: tool
   allowlists, approval floors, and the sandbox are enforced in code, never
   in prompt text. There is no configuration knob for any of the rules above —
   the allowlist and the limits are code-owned constants.
@@ -397,7 +397,7 @@ violated rule.
 
 ## Profile configuration
 
-A profile groups engine selection and per-agent settings for a runtime session.
+A profile groups engine selection and per-agent settings for an agent session.
 
 | Field | Type | Description |
 |---|---|---|
@@ -405,7 +405,7 @@ A profile groups engine selection and per-agent settings for a runtime session.
 | `[compaction].engine` | string (optional) | Profile-level engine used to summarize old conversation prefixes. When absent and no per-agent compaction engine is set, uses that agent type's configured conversation engine. Session-title generation uses `utility_engine`. |
 | `utility_engine` | string (optional) | Isolated engine used for utility tasks such as session-title generation. Resolves to `default_engine` when absent and does not follow `/models` runtime switching. |
 | `provider_connections` | table | Named provider connections, keyed by connection name. |
-| `engines` | table | Named model/runtime configurations, keyed by engine name. |
+| `engines` | table | Named model configurations, keyed by engine name. |
 | `agents` | table | Per-agent-type settings, keyed by agent-type name. |
 
 ### Per-agent configuration
@@ -490,7 +490,7 @@ temperature, context length, reasoning settings, or provider connection
 independently. If an agent needs specialized engine settings, define another
 `[engines.<name>]` entry and select that engine for the agent type.
 
-Agents that resolve the same named engine share its runtime selection. A
+Agents that resolve the same named engine share its Engine runtime selection. A
 provider/model or reasoning-effort change made through `/models` therefore
 applies to every agent using that engine, including already-running children.
 The change does not alter an in-flight LLM request; it is observed by the

@@ -74,7 +74,7 @@ Build a minimal raw `reqwest` + `eventsource-stream` client.
   the spike verifies **three distinct mechanisms** — adapter-only drop, adapter + `Response`
   drop, and `CancellationToken` abort — and reports which actually closes the connection.
 - Verify via `netstat`/`lsof` that the TCP connection closes immediately.
-- Verify no zombie tokio tasks remain by inspecting the runtime task count.
+- Verify no zombie Tokio tasks remain by inspecting the Tokio runtime task count.
 - Repeat for both OpenRouter and Ollama (`/v1/chat/completions`) endpoints.
 
 **Success criteria:**
@@ -82,7 +82,7 @@ Build a minimal raw `reqwest` + `eventsource-stream` client.
 - Aborting the **request future** closes the underlying HTTP connection immediately (no
   `CLOSE_WAIT` or `ESTABLISHED` linger). The SSE-**adapter-only** drop case is measured
   separately so the §4A cancellation path is proven rather than assumed (see §8 Pitfall #8).
-- The tokio runtime shows zero leaked tasks.
+- The Tokio runtime shows zero leaked tasks.
 - `CancellationToken` integration works reliably (no race between `cancelled()` and `stream.next()`).
 
 **Spike 2 outcome** (verified against the hermetic mock in
@@ -185,7 +185,7 @@ raw SSE captures are not retained in the repository.
 
 > **Agent-harness naming decision: Ylva.** The agent-harness is named **Ylva** (see
 > [naming-research.md](./naming-research.md)). Default config files live under
-> `~/.ylva/`. The term "Ylva" refers to the harness itself; "agent" is the runtime
+> `~/.ylva/`. The term "Ylva" refers to the harness itself; "agent" is the execution
 > loop that Ylva hosts.
 
 The application is a **ReAct agent** embedded inside a **TUI event loop**.
@@ -298,7 +298,7 @@ works even if crossterm's event queue is momentarily stuck.
 
 | Crate                            | Role                                                                                                       |
 | -------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `tokio`                          | Async runtime. Agent runs in a task; TUI on main thread                                                    |
+| `tokio`                          | Tokio async runtime. Agent runs in a task; TUI on main thread                                              |
 | `tokio-util`                     | `CancellationToken` for cooperative cancellation of streams                                                |
 | `futures`                        | `StreamExt::next()` inside `tokio::select!` for the agent loop                                             |
 | `async-openai`                   | ~~Primary for OpenRouter~~ **REMOVED** — see unified provider decision below                               |
@@ -376,19 +376,20 @@ All streaming logic — SSE parsing, `CancellationToken` polling, `ToolCallAccum
 
 ### A. Unified Provider & Engine Traits (with Abort)
 
-The runtime exposes **two** layers (see [class-diagram.mmd](./class-diagram.mmd)):
+Ylva's execution architecture exposes **two** layers (see [class-diagram.mmd](./class-diagram.mmd)):
 
 - **`Provider`** — low-level backend trait. A single raw HTTP implementation targets the OpenAI
   completions spec and supports **dropping the in-flight request** when the user interrupts or steers.
   Also exposes backend discovery (`list_models`).
-- **`Engine`** — the runtime abstraction an `AgentLoop` depends on. A thin `EngineImpl` wraps a
+- **`Engine`** — the execution interface an `AgentLoop` depends on. A thin `EngineImpl` wraps a
   `Provider` plus the `EngineConfig` (model, temperature, `context_length`, ...), so the agent loop
   talks to one seam and can read sampling parameters without separately holding config data.
 
 > **Terminology mapping:** the config calls this an **engine** (a named bundle of `base_url`, `model`,
 > `temperature`, etc.). At startup the `Config` module builds a `HashMap<String, Arc<dyn Engine>>`
 > from `EngineConfig` definitions + the resolved `Provider` per engine. The rest of the code only knows
-> the `Engine` trait; "engine" is the config concept, `Engine` the runtime trait, `Provider` the backend.
+> the `Engine` trait; "engine" is the config concept, `Engine` the
+> request-execution interface, `Provider` the backend.
 >
 > **`base_url` semantics (Phase 2 refinement):** `base_url` is a **generic provider concept**, not an
 > OpenAI-endpoint string. Its meaning — which endpoints and request paths exist under that base — is
@@ -446,7 +447,7 @@ enum InputModality {
     File,
 }
 
-/// Runtime abstraction an AgentLoop depends on. A thin `EngineImpl` wraps a
+/// Engine interface an AgentLoop depends on. A thin `EngineImpl` wraps a
 /// `Provider` plus the `EngineConfig` so the agent reads sampling parameters
 /// (`engine.config().context_length`) without holding config data separately.
 trait Engine: Send + Sync {
@@ -1086,7 +1087,7 @@ impl Context {
 - The resolved global SOUL is inherited exactly once by root and child
   contexts. An agent type then contributes its own `persona` and
   file-authored `system_prompt` body; the tool protocol follows, and a child
-  adds its briefing and runtime constraints after that shared prompt.
+  adds its briefing and execution constraints after that shared prompt.
 - `push_user(text)` → `Message::User { content: text }`
 - `push_assistant(content, status, tool_calls)` →
   `Message::Assistant { content, status, tool_calls }`
@@ -1316,7 +1317,7 @@ This prevents a non-interactive process from hanging indefinitely waiting for
 human input.
 
 **Dynamic tool filtering:** The `ToolRegistry` holds all compiled schemas at startup,
-but the `AgentLoop` builds the `tools` array sent to the LLM by **runtime filtering**
+but the `AgentLoop` builds the `tools` array sent to the LLM by **per-request filtering**
 based on active mode and configuration:
 
 - **TUI mode:** All registered tools (including `clarify`) are available unless
@@ -1482,7 +1483,7 @@ can run as the root conversation (the user types `ylva --agent research`) or as
 a child spawned by a coding root. The same config entry, the same factory call.
 
 What differs between those two cases is the agent's **role** — its position in
-the spawn tree. Role carries the runtime plumbing that the type config cannot
+the spawn tree. Role carries the execution plumbing that the type config cannot
 hold (live channels, a parent's `CancellationToken`, a curated briefing):
 
 | Concern | Decided by | Why |
@@ -1595,7 +1596,7 @@ Those are defined in the user's config hierarchy.
 
 ##### Config Source of Truth & Distribution
 
-The `~/.ylva/` layout above is the **runtime** home-directory tree. Its
+The `~/.ylva/` layout above is Ylva's home-directory tree. Its
 configuration files are user-authored and may be committed to a project or
 kept in the user's home directory. Ylva owns only the code-backed built-ins:
 the global SOUL text and `ProfileConfig::default()`. Richer profile and
@@ -1741,11 +1742,11 @@ experience. `ylva init` does not seed the example agent files.
 
 An **engine** is the configuration name for a reusable bundle of model and
 sampling parameters. A named provider connection owns the endpoint and
-credentials. At runtime, each engine definition is built into a concrete
+credentials. During agent construction, each engine definition is built into a concrete
 `Engine` trait object (a thin wrapper around a `Provider` plus the
-`EngineConfig`). The terms are separate concepts: **engine** = model/runtime
+`EngineConfig`). The terms are separate concepts: **engine** = named model
 configuration; **provider connection** = named endpoint and credentials;
-**provider** = implementation kind; **Engine** = runtime trait the agent
+**provider** = implementation kind; **Engine** = execution interface the agent
 depends on; **Provider** = low-level backend trait (see
 [class-diagram.mmd](./class-diagram.mmd)).
 
@@ -2158,7 +2159,7 @@ stored.
      resumed until the holder releases.
 
 8. **Findability — no index file; the session abstract is the grep surface:**
-   - **No separate per-project index/`.index` file** and no runtime browsing
+   - **No separate per-project index/`.index` file** and no built-in browsing
      built-in.
    - Every session's `meta` header carries an **auto-generated title** produced
      by a dedicated utility (`utility_engine`) conversation. The utility
@@ -2499,7 +2500,7 @@ top of a proven agent loop.
 - [x] **Build provenance surfaced via `--version`:** `ylva --version` prints
       `Version` / `Commit` / `Built` / `Profile` (from the `BUILD_INFO` const in
       `src/build_info.rs`, compiled in via `build.rs`) to stdout and exits `0`
-      before the runtime or provider are touched. The TUI "About" popup that renders
+      before the agent starts or a provider is initialized. The TUI "About" popup that renders
       the same values is Phase 4.
 
 **Success criteria:**
@@ -2536,7 +2537,7 @@ top of a proven agent loop.
 - [x] Implement the `OpenAiCompatibleProvider` struct (`base_url`, `model`,
       `api_key`, `reqwest::Client`) with the shared
       `serialize_messages_with_policy` projection. It preserves the ordinary
-      text-only projection and, when runtime model capabilities allow it,
+      text-only projection and, when active model capabilities allow it,
       expands supported tool attachments into a wire-only user content array.
       Append `/chat/completions` to `base_url` internally per the §4A
       `base_url` semantics note.
@@ -2705,7 +2706,7 @@ Decisions recorded during implementation:
   to tokio as `AppAction::SigInt` into the *action* channel (so the relay holds no `cmd_tx` clone
   and cannot keep the agent loop alive after a quit). A `spawn_blocking` watcher polls
   `recv_timeout` and exits as soon as the action receiver closes, so it never leaks a thread that
-  hangs runtime shutdown. `block_on` is never called inside the handler. No double-press for
+  hangs Tokio runtime shutdown. `block_on` is never called inside the handler. No double-press for
   OS-level SIGINT.
 - **Natural transition to Idle clears confirm state.** `StreamDone`/`StreamCancelled`/`Error`
   (observed via `UiUpdate`) reset the driver's confirm state as soon as the agent returns to
@@ -2790,7 +2791,7 @@ See reducer-state-handling-plan.md.
 
 ### Phase 5: Interface Seams
 
-- [x] **Goal:** Introduce the runtime interface layer (§4A, [class-diagram.mmd](./class-diagram.mmd))
+- [x] **Goal:** Introduce the Engine execution interface (§4A, [class-diagram.mmd](./class-diagram.mmd))
       so Phase 6 child agents build against `AgentFactory` and `Engine` from the start,
       not against the Phase 1 `Provider`-direct seam.
 
@@ -2981,7 +2982,7 @@ See reducer-state-handling-plan.md.
       and `[compaction].engine`; when unset, resolve `utility_engine` to
       `default_engine`. Resolve it independently of the active conversation
       engine and the context-compaction `[compaction].engine`. The utility request
-      must not change the active engine or its runtime model settings.
+      must not change the active engine or its Engine runtime model settings.
 
 - [x] After the first conversation turn completes, capture the first explicit
       user message and the first completed assistant reply. Do not trigger title
@@ -3167,7 +3168,7 @@ hard usage errors: stderr, exit 2).
 - [x] Add unit and integration coverage for cached estimates, threshold
       behavior, summary application, fallback, tool-call/result pairing,
       append-only persistence, resume replay, model switching, and the visible
-      TUI marker. Update `README.md`, `CONTEXT.md`, and the named runtime docs
+      TUI marker. Update `README.md`, `CONTEXT.md`, and the named feature docs
       in the finalization plan.
 
 **Key crates:** `tiktoken-rs`
@@ -3394,7 +3395,7 @@ where they are documented in the body of this document.
 | Area                           | Decision                                                                                                                                                                                       | Location                                     |
 | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
 | **Tool schema compilation**    | `schemars` derive at compile time; `ToolRegistry` holds all schemas                                                                                                                            | §4D Tool Registry                            |
-| **Tool visibility**            | **Dynamic filtering:** runtime subset built per request based on mode/profile/whitelist                                                                                                        | §4D Tool Registry                            |
+| **Tool visibility**            | **Dynamic filtering:** request-specific subset built per request based on mode/profile/whitelist                                                                                              | §4D Tool Registry                            |
 | **Agent loop architecture**    | Outer `tokio::select!` on `cmd_rx` + `agent_rx`; inner streaming task sends `AgentEvent` back to loop for state transitions                                                                    | §4B ReAct Loop                               |
 | **Context ownership**          | Outer agent loop owns `Context`; inner task sends events via channel                                                                                                                           | §1 Vision, §4B ReAct Loop, §4C Context       |
 | **Multi-line input**           | `Enter` sends; `Shift+Enter` inserts newline                                                                                                                                                   | §4B ReAct Loop                               |
@@ -3424,7 +3425,7 @@ where they are documented in the body of this document.
 | **Model switching**            | Supported mid-conversation via `/models`, which queries each configured provider connection once and switches the selected connection/model through `EngineRouter`; the `SwitchModel` command placeholder was dropped | §4B ReAct Loop, §6 Commands |
 | **App state**                  | Dumb view model; agent loop owns state machine                                                                                                                                                 | §4B ReAct Loop                               |
 | **Config format**              | Profiles and `.toml` agent files use TOML; `.md` agent files accept `+++` TOML or `---` YAML frontmatter                                                                                         | §4G Agent-Type File Formats                  |
-| **Engine vs Provider mapping** | `Engine` = named model/runtime configuration; `provider_connection` = named endpoint/credential connection; `provider` = implementation kind; `Provider` = runtime trait object built from a connection at startup | §4A Provider Trait, §4G Engine Definitions |
+| **Engine vs Provider mapping** | `Engine` = named model configuration; `provider_connection` = named endpoint/credential connection; `provider` = implementation kind; `Provider` = provider trait object built from a connection at startup | §4A Provider Trait, §4G Engine Definitions |
 | **Syntect themes**             | 2 built-in and selectable: dark, light; "monokai" is not bundled with `syntect` and stays an idea (`docs/ideas/monokai-theme.md`)                                                                | §4F Rich Chat Rendering                      |
 | **edit tool**             | Both search-and-replace and line-range modes                                                                                                                                                   | §4D Tool Registry                            |
 | **Slash commands**             | Only recognised at start of line                                                                                                                                                               | §7 CLI Surface                               |

@@ -4412,13 +4412,13 @@ fn log_tool_approval_request(call: &dyn ToolCall) {
     );
 }
 
-/// Whether a tool's model-facing result is subject to the shared runtime
+/// Whether a tool's model-facing result is subject to the shared per-request
 /// context allowance.
 fn is_result_budgeted(tool_name: &str) -> bool {
     tool_name != tools::agent_finish::AgentFinishTool::NAME
 }
 
-/// Runtime token allowance for the result of `tool_name`, or `None` for tools
+/// Per-request token allowance for the result of `tool_name`, or `None` for tools
 /// whose results are not context-budgeted.
 ///
 /// The remaining allowance of the request ceiling is reduced by the error
@@ -5067,7 +5067,7 @@ fn start_request(
     let preflight_context_length = engine.effective_context_length();
     let capacity_warning = compaction
         .as_ref()
-        .map(|runtime| runtime.capacity_warning(engine.clone()));
+        .map(|compaction_state| compaction_state.capacity_warning(engine.clone()));
     let send_notices = |notices: Vec<String>| {
         let sender = agent_tx.clone();
         tokio::spawn(async move {

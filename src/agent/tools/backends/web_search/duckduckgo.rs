@@ -242,7 +242,7 @@ fn parse_duckduckgo_results(html: &str, limit: usize) -> Result<Vec<WebSearchHit
 }
 
 /// Parse a CSS selector that is a compile-time constant in this module; a
-/// failure is a programming bug, not a runtime condition.
+/// failure is a programming bug, not an execution-time condition.
 fn parse_selector(css: &str) -> Result<scraper::Selector, WebSearchError> {
     scraper::Selector::parse(css)
         .map_err(|error| WebSearchError::Parse(format!("invalid selector '{css}': {error}")))
@@ -286,7 +286,7 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("runtime");
+            .expect("build Tokio runtime");
 
         runtime.block_on(async {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -582,7 +582,7 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("runtime");
+            .expect("build Tokio runtime");
         let backend = DuckDuckGoBackend::new(Duration::from_secs(30));
         let result =
             runtime.block_on(backend.search("search engine api structured data json limits", 3));
@@ -600,7 +600,7 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("runtime");
+            .expect("build Tokio runtime");
         let hits = runtime
             .block_on(backend.search("anything", 0))
             .expect("a zero limit must not hit the network");

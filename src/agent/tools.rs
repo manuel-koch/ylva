@@ -15,7 +15,7 @@
 //! Tool trait, registry, and the built-in file-system tools.
 //!
 //! Schemas are derived from typed argument structs via `schemars`, never
-//! hand-written JSON. The registry keeps a runtime `allowed` seam so a future
+//! hand-written JSON. The registry keeps a per-run `allowed` seam so a future
 //! whitelist or headless filtering can restrict the `tools` array without
 //! changing the agent loop.
 
@@ -273,7 +273,7 @@ pub trait ToolCall: Send + Sync {
     fn arguments(&self) -> &serde_json::Value;
     fn timeout_secs(&self) -> u64;
 
-    /// Supply a runtime token ceiling for model-facing output. Tools that
+    /// Supply a per-request token ceiling for model-facing output. Tools that
     /// collect potentially large output may combine this with argument limits.
     fn set_runtime_output_token_limit(&mut self, _max_output_tokens: Option<usize>) {}
 

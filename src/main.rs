@@ -196,7 +196,7 @@ fn main() {
     };
     apply_provider_env_to_profile(&mut profile, &provider_env);
 
-    let runtime = tokio::runtime::Runtime::new().expect("failed to start Tokio runtime");
+    let tokio_runtime = tokio::runtime::Runtime::new().expect("failed to start Tokio runtime");
 
     let conversation_id = cli.conversation_id;
     // `--clone` turns `--conversation-id` into the copy source: the run then
@@ -282,7 +282,7 @@ fn main() {
         .unwrap_or_else(|| ylva::DEFAULT_PROFILE_NAME.to_string());
     let prompt_from_flag = cli.prompt.clone();
 
-    let (result, session_hint) = runtime.block_on(async {
+    let (result, session_hint) = tokio_runtime.block_on(async {
         // Resolved once, up front, so both a fresh session's `meta` header
         // and the `model_changed` record below (written on every start,
         // fresh or resumed) use the exact same provider-connection/model.
@@ -290,7 +290,7 @@ fn main() {
         // default, so `--agent` and a restored type run on their own engine.
         let initial_engine_name = profile.engine_name_for(&root_agent_type.agent_type);
         let initial_engine_config = factory_without_store.engine_config(initial_engine_name);
-        // The store is opened inside the runtime: it spawns the writer task
+        // The store is opened inside the Tokio runtime: it spawns the writer task
         // that owns the session file.
         let store = match open_store(
             conversation_id,
@@ -511,7 +511,7 @@ fn read_stored_agent_type(session_id: uuid::Uuid) -> Result<Option<String>, Stri
     ylva::Store::read_latest_agent_type(&path).map_err(|error| error.to_string())
 }
 
-/// Load the runtime profile, or exit-worthy error text.
+/// Load the selected profile, or return exit-worthy error text.
 ///
 /// An explicitly named profile (`--profile <name>`) with no config file is a
 /// hard error: the user asked for that specific profile, so silently
@@ -642,7 +642,7 @@ fn apply_provider_env_to_profile(profile: &mut ProfileConfig, provider_env: &Pro
 ///
 /// The first provider retains the profile's default engine name and therefore
 /// remains the initial active engine. Additional providers use their provider
-/// names as engine names so the runtime router can switch to them.
+/// names as engine names so the engine router can switch to them.
 fn engines_from_environment(
     environment: &ProviderEnv,
     default_engine_name: &str,
@@ -682,7 +682,7 @@ fn engines_from_environment(
 /// started — Ylva never auto-resumes and never shows a startup picker.
 ///
 /// Fails when the Ylva home cannot be resolved or the session file cannot be
-/// created, resumed, or cloned. Persistence is mandatory for runtime
+/// created, resumed, or cloned. Persistence is mandatory for Ylva
 /// sessions; there is no transient, non-persisted mode.
 fn open_store(
     conversation_id: Option<uuid::Uuid>,

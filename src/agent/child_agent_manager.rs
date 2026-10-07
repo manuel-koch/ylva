@@ -61,8 +61,9 @@ pub struct SpawnRequest {
     pub label: String,
 }
 
-/// Identifies whether a child outcome came from the child itself or from the
-/// surrounding runtime.
+/// Identifies whether a child outcome came from the child itself or was
+/// produced by Ylva's harness. The latter is serialized as `runtime` for
+/// compatibility; it does not refer to an Engine runtime.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FinishResultOrigin {
@@ -129,7 +130,7 @@ impl FinishResult {
     /// Agent-reported results, errors, and sources are marked
     /// `file_extension: "md"` so
     /// `tui_widgets.rs` renders model-authored content through the project's
-    /// Markdown renderer. Runtime diagnostics remain plain text so identifiers
+    /// Markdown renderer. Harness diagnostics remain plain text so identifiers
     /// and punctuation are displayed literally. Empty/absent fields produce no
     /// section.
     pub fn content_sections(&self) -> Vec<crate::agent::tools::Section> {

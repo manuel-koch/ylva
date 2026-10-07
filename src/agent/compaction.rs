@@ -145,7 +145,7 @@ pub enum CompactionAction {
     None,
     /// At or above the soft threshold with nothing in flight: start a
     /// background summary of the old prefix. If a safe prefix cannot be
-    /// selected, the runtime takes no action.
+    /// selected, the compaction coordinator takes no action.
     StartSummary,
     /// Above the hard threshold (or a forced retry after a failed summary):
     /// drop old messages synchronously, without waiting.
@@ -580,7 +580,7 @@ pub(crate) async fn generate_summary_attempt(
     }
 }
 
-/// Runtime bookkeeping for background compaction inside the outer loop.
+/// Stateful coordinator for background compaction inside the outer loop.
 ///
 /// Owns the summary outcome channel plus the in-flight/pending state. The
 /// outer loop — the sole writer of [`Context`] — drives it only at safe
@@ -710,7 +710,7 @@ impl CompactionRuntime {
         }
     }
 
-    /// Whether this runtime still has a summary running or waiting to apply.
+    /// Whether compaction still has a summary running or waiting to apply.
     pub(crate) fn summary_pending(&self) -> bool {
         self.summary_in_flight || self.pending.is_some()
     }
@@ -1262,10 +1262,10 @@ mod tests {
         assert_eq!(empty_view.removed_model_view_messages(), 0);
     }
 
-    /// What [`new_recording_runtime`] builds: the runtime, its outcome
+    /// What [`new_recording_runtime`] builds: the compaction state, its outcome
     /// channel, the activity-update receiver, the `run_id` the activity
     /// sender was scoped to, a clone of the compact engine (as `sweep` takes
-    /// its own `engine` argument, separate from the runtime's internal
+    /// its own `engine` argument, separate from the coordinator's internal
     /// compact engine), and a context already primed with one user message
     /// to summarize.
     type RecordingRuntimeFixture = (

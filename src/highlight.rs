@@ -40,7 +40,7 @@ pub(crate) fn syntax_set() -> &'static SyntaxSet {
 }
 
 /// Selectable syntax-highlighting theme, resolved from the `theme` key of the
-/// runtime profile (see `docs/configuration.md`).
+/// selected profile (see `docs/configuration.md`).
 ///
 /// Deliberately only two variants: both are bundled with syntect, so no theme
 /// files ship with Ylva.

@@ -1842,7 +1842,7 @@ pub struct AppState {
     /// popup.
     pub display_metadata: TuiDisplayMetadata,
     /// Provider/model identity for the root conversation. The Driver refreshes
-    /// this from the live root engine before each frame so runtime model
+    /// this from the live root engine before each frame so Engine runtime model
     /// switches are reflected immediately.
     pub engine_display: EngineDisplayInfo,
 
@@ -3401,7 +3401,7 @@ impl AppState {
         self.resolve_possible_interactive_pause(id);
     }
 
-    /// Commit an approval locally before the runtime's `ToolStart` arrives.
+    /// Commit an approval locally before the corresponding `ToolStart` arrives.
     pub(crate) fn apply_tool_approved(&mut self, id: Uuid) {
         if let Some(ChatEntry::ToolBubble { state, .. }) = self.find_tool_bubble_mut(id) {
             if let ToolCallState::Pending {

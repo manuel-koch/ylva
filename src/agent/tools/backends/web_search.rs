@@ -315,7 +315,7 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("runtime");
+            .expect("build Tokio runtime");
         let actual = runtime.block_on(backend.search("anything", 5)).expect("ok");
         assert_eq!(actual, expected, "the seam must not alter backend hits");
     }
@@ -329,7 +329,7 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("runtime");
+            .expect("build Tokio runtime");
         let error = runtime
             .block_on(backend.search("anything", 5))
             .expect_err("the stub error must pass through");

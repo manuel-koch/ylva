@@ -137,7 +137,7 @@ pub(crate) static SUBSCRIBER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(
 /// subscriber was active have their interest cached as `Interest::never()`,
 /// causing events to be silently dropped even though the thread-local
 /// subscriber installed by `with_default` would want to see them.
-/// Runs an async body under `SUBSCRIBER_LOCK` on a current-thread runtime.
+/// Runs an async body under `SUBSCRIBER_LOCK` on a current-thread Tokio runtime.
 ///
 /// Use this in tests that call tracing-instrumented functions (such as
 /// `read_file`, `write_file`, `glob_files`) but do **not** need to capture
@@ -152,12 +152,12 @@ pub(crate) fn run_locked(body: impl std::future::Future<Output = ()>) {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .expect("build runtime")
+        .expect("build Tokio runtime")
         .block_on(body);
 }
 
-/// Like [`run_locked`], but on a runtime whose clock starts **paused**: time
-/// auto-advances to the next timer when the runtime is idle, so tests can
+/// Like [`run_locked`], but on a Tokio runtime whose clock starts **paused**:
+/// time auto-advances to the next timer when its scheduler is idle, so tests can
 /// assert on throttling/timeout behavior deterministically without wall-clock
 /// sleeps. `SUBSCRIBER_LOCK` is held for the whole body for the same reason
 /// [`run_locked`] holds it — see `docs/known-test-issues.md`.
@@ -169,7 +169,7 @@ pub(crate) fn run_locked_paused(body: impl std::future::Future<Output = ()>) {
         .enable_all()
         .start_paused(true)
         .build()
-        .expect("build paused runtime")
+        .expect("build paused Tokio runtime")
         .block_on(body);
 }
 
@@ -193,7 +193,7 @@ pub(crate) fn capture_logs(body: impl std::future::Future<Output = ()>) -> Strin
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("build runtime")
+            .expect("build Tokio runtime")
             .block_on(body);
     });
     log.read()

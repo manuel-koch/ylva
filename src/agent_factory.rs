@@ -181,7 +181,7 @@ impl AgentFactory {
     ///
     /// Unlike an [`EngineRouter`], this does not participate in active model
     /// or provider-connection selection. Utility requests use this accessor
-    /// so they cannot mutate the conversation engine's runtime selection.
+    /// so they cannot mutate the conversation engine's Engine runtime selection.
     pub fn engine(&self, name: &str) -> Option<Arc<dyn Engine>> {
         self.engines.get(name).cloned()
     }

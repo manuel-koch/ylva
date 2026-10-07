@@ -9,7 +9,7 @@ for success, general error, interruption, tool failure, and approval denial.
 | Code | Proposed meaning |
 | --- | --- |
 | `0` | Successful run |
-| `1` | General runtime error |
+| `1` | General execution error |
 | `2` | User interruption |
 | `3` | Tool failure |
 | `4` | Approval required but denied |

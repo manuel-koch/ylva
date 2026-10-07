@@ -161,14 +161,14 @@ mod tests {
         assert_eq!(provider.name(), "openrouter");
         let runtime_config = provider
             .runtime_config_handle()
-            .expect("OpenRouter exposes runtime settings");
+            .expect("OpenRouter exposes Engine runtime settings");
         provider
             .set_model("other/model")
             .expect("OpenRouter supports model switching");
         assert_eq!(
             runtime_config
                 .read()
-                .expect("runtime configuration lock")
+                .expect("Engine runtime configuration lock")
                 .model,
             "other/model"
         );

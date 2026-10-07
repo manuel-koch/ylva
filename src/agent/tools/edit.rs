@@ -171,7 +171,7 @@ impl ToolCallResult for EditResult {
 /// Invocation object for a single `edit` tool call.
 ///
 /// Built eagerly in `create_call`: for the happy path both `patched_content` and `diff` are
-/// pre-computed so the diff preview is available before the user approves. When a runtime
+/// pre-computed so the diff preview is available before the user approves. When an execution
 /// error occurs during that computation (file not found, `old_string` not found, …) the error
 /// is stored in `error` and surfaced by `run()`; `pending_content_sections` returns nothing.
 #[derive(Debug)]
@@ -464,7 +464,7 @@ impl Tool for EditTool {
 
 /// Build the `EditCall` synchronously: read the file and compute the patch.
 ///
-/// Runtime errors (missing file, old_string not found, …) are embedded in the returned
+/// Execution errors (missing file, old_string not found, …) are embedded in the returned
 /// `EditCall` and surfaced when `run()` is eventually called.
 fn create_edit_call(id: uuid::Uuid, arguments: serde_json::Value, timeout_secs: u64) -> EditCall {
     let args = match serde_json::from_value::<EditFileArgs>(arguments.clone()) {
@@ -1145,7 +1145,7 @@ mod tests {
         let tool = EditTool::default();
         let id = uuid::Uuid::new_v4();
         let args = make_args_search_replace("/no/such/file.txt", "x", "y");
-        // create_call embeds the runtime error into the EditCall; verify it is well-formed.
+        // create_call embeds the execution error into the EditCall; verify it is well-formed.
         let call = tool.create_call(id, args);
         assert_eq!(call.name(), "edit");
         assert_eq!(call.id(), id);

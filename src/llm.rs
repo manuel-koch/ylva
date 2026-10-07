@@ -177,7 +177,7 @@ pub(crate) fn format_input_modalities_for_log(
     }
 }
 
-/// Runtime abstraction over a chat-completions-style streaming provider.
+/// Provider interface for a chat-completions-style streaming backend.
 ///
 /// Native async trait (Rust 1.75+): no `async-trait` crate. The Provider
 /// creates its own internal `mpsc::channel` and returns the receiver, so
@@ -258,12 +258,12 @@ pub trait Provider: Send + Sync {
     /// for example, combines `/api/tags` with `/api/show` metadata.
     fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>>;
 
-    /// Return the shared runtime settings when this provider supports them.
+    /// Return the shared Engine runtime settings when this provider supports them.
     ///
     /// [`EngineImpl`](crate::llm::engine::EngineImpl) uses the handle to expose a
     /// coherent [`EngineConfig`](crate::llm::engine::EngineConfig) snapshot without
     /// maintaining a second mutable copy of provider settings. Providers that
-    /// do not expose mutable runtime settings may keep the default.
+    /// do not expose mutable Engine runtime settings may keep the default.
     fn runtime_config_handle(&self) -> Option<EngineRuntimeConfigHandle> {
         None
     }
@@ -355,7 +355,7 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("runtime");
+            .expect("build Tokio runtime");
         runtime.block_on(async {
             let provider_connection = format!("limiter-test-{}", uuid::Uuid::new_v4());
             let first = provider_request_limiter(&provider_connection);

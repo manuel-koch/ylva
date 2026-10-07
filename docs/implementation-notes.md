@@ -38,9 +38,10 @@ user message and calls out message boundaries so source text is not mistaken for
 summarizer instructions. Positive compaction guidelines prioritize the latest
 established state, merge repetition, and preserve actionable details and
 uncertainty. The prompt requests only facts grounded in the supplied prefix;
-the boundary of the unseen verbatim tail is managed by the runtime.
+the boundary of the unseen verbatim tail is managed by the conversation's
+Engine runtime.
 
-## Engine and provider runtime configuration
+## Engine runtime and provider request configuration
 
 `EngineImpl` and `OpenAiCompatibleProvider` share one
 `EngineRuntimeConfigHandle`. The provider snapshots it before building a
@@ -177,7 +178,7 @@ the displayed backend can differ from the one the agent calls.
 With `--auto-approve-spawn`, `cli_driver` keeps the process alive after the
 root's `StreamDone` until every spawned call reaches a terminal outcome. The
 immediate `spawn_subagent` result reports admission, not completion. See
-[features](./features.md#cli-runtime) for the CLI behavior.
+[features](./features.md#cli-mode) for the CLI behavior.
 
 ## Store and persistence
 
@@ -317,10 +318,10 @@ queued call) among unresolved budgeted calls, covering every tool except
 or skips a call whose share is below `MINIMUM_USEFUL_RESULT_TOKENS` (256).
 Approval recomputes the allowance before execution. A `BTreeMap` assembles calls
 in original index order; unknown/invalid/denied slots are never backfilled.
-The six-position cap is code-owned, with no runtime configuration/adaptation.
+The six-position cap is code-owned, with no user configuration or adaptation.
 Result/error commits preserve canonical source output, then add model-only
 overrides. Tool-local byte/line/network limits remain source limits; the harness
-does not call runtime output hooks to destructively enforce context pressure.
+does not call execution-time output hooks to destructively enforce context pressure.
 Binary payload/descriptors are kept whole or omitted together in the projection.
 Child event projection keeps valid structured lifecycle JSON and reduces only
 result/error text; immutable metadata can still force subsequent group recovery.
@@ -421,7 +422,7 @@ after all spawned work finishes. `AgentCommand::Stop` cancels running and
 queued work without resuming the root.
 The tool description and intermediate completion notices tell the root to
 end its response when no independent work remains, rather than keep thinking
-while waiting. This is model guidance, not a runtime suspension or a change
+while waiting. This is model guidance, not an agent suspension or a change
 to completion scheduling; ending a response leaves subagents running.
 Both the tool description and completion notices require a self-contained
 answer with relevant findings when `all_done` is true, without assuming tool
@@ -483,7 +484,7 @@ The TUI renders the same headless `AgentLoop`; it does not own agent state.
   terminal or channel I/O.
 - `src/render.rs` and `src/tui_widgets.rs` render the view and record geometry
   for mouse routing.
-- `src/tui_driver.rs` owns the terminal loop, maps runtime updates to domain
+- `src/tui_driver.rs` owns the terminal loop, maps live UI updates to domain
   events, and executes effects. `src/cli_driver.rs` owns the headless loop.
 
 The footer readout follows the request path end to end: the OpenAI-compatible

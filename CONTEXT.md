@@ -30,12 +30,11 @@ and how they are composed is code-owned; arbitrary Markdown is never loaded.
 _Avoid_: agents file, conventions file
 
 **Profile**:
-A named runtime configuration that selects engines and supplies settings for
-agents.
+A named configuration that selects engines and supplies settings for agents.
 
 **Agent type**:
 A named specialization describing an agent's persona, tools, delegation
-ability, and runtime settings.
+ability, and execution settings.
 
 **Root agent type selection**:
 The agent type a root conversation runs as: an explicit `--agent` wins, a
@@ -198,8 +197,14 @@ The maximum number of simultaneous requests sent through a provider connection;
 it is shared by engines and agents using that connection.
 
 **Engine**:
-A reusable runtime selection that binds a model to a provider connection and
-runtime settings.
+A reusable model configuration that binds a model to a provider connection
+and engine settings.
+
+**Engine runtime**:
+The live model selection and effective settings an agent uses for model
+requests. It starts from the engine's profile configuration and can change
+through `/models` without changing that configuration.
+_Avoid_: runtime, runtime configuration, runtime selection
 
 ## Persistence
 

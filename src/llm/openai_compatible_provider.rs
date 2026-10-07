@@ -1110,7 +1110,7 @@ mod tests {
                 let mut runtime_config = provider
                     .runtime_config
                     .write()
-                    .expect("runtime config lock");
+                    .expect("Engine runtime config lock");
                 runtime_config.temperature = Some(0.25);
                 runtime_config.context_length = 64_000;
                 runtime_config.reasoning_effort = Some("high".to_string());

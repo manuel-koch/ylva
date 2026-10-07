@@ -102,7 +102,7 @@ fn normalize_modified_enter(mut key: KeyEvent) -> KeyEvent {
 /// bridge during shutdown.
 ///
 /// A plain blocking `read()` would hold the thread forever and hang the Tokio
-/// runtime on shutdown (blocking threads are not interrupted), so the loop
+/// Tokio runtime on shutdown (blocking threads are not interrupted), so the loop
 /// `poll`s with a short timeout and observes channel closure, exiting promptly
 /// once the consumer is gone.
 pub fn spawn_crossterm_bridge(action_tx: mpsc::Sender<AppAction>) -> JoinHandle<()> {

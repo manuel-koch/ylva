@@ -3427,7 +3427,7 @@ fn help_sections() -> Vec<HelpSection> {
             ],
         },
         HelpSection {
-            heading: "Runtime",
+            heading: "Environment",
             entries: vec![],
         },
         HelpSection {
@@ -3475,7 +3475,7 @@ fn draw_help_popup(frame: &mut Frame, state: &mut TuiState) {
         }
         all_lines.push(Line::styled(section.heading, heading_style));
         match section.heading {
-            "Runtime" => {
+            "Environment" => {
                 let home_directory = dirs::home_dir();
                 let runtime_entries = [
                     ("Profile:", state.display_metadata.profile_name.clone()),
@@ -3958,11 +3958,11 @@ mod tests {
             .collect();
         assert!(
             rendered.contains("unknown engine: local-discovery_"),
-            "runtime diagnostic should remain literal, got: {rendered:?}"
+            "execution diagnostic should remain literal, got: {rendered:?}"
         );
         assert!(
             !rendered.contains("local-discovery _"),
-            "runtime diagnostic should not be reformatted as Markdown, got: {rendered:?}"
+            "execution diagnostic should not be reformatted as Markdown, got: {rendered:?}"
         );
     }
 

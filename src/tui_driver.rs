@@ -1785,7 +1785,7 @@ impl TuiApp {
         }
     }
 
-    /// Set the runtime identity and paths shown by the TUI.
+    /// Set the active profile and workspace paths shown by the TUI.
     pub fn with_display_metadata(mut self, display_metadata: TuiDisplayMetadata) -> Self {
         self.display_metadata = display_metadata;
         self
