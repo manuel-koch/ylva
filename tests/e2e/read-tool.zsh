@@ -31,7 +31,7 @@ function seperator() {
 }
 
 ylva << '__EOT__'
-Read lines 33 to 34 of (big file!) tests/e2e/read-tool.zsh and do a spell check.
+Read lines 34 to 35 of (big file!) tests/e2e/read-tool.zsh and do a spell check.
 Repoort only the findiings. Do not chaange anything!
 __EOT__
 
