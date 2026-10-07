@@ -261,13 +261,22 @@ pub fn draw(
     // the terminal height. Wrapped row count, not logical line count, drives
     // the height so long lines grow the box instead of scrolling it.
     let max_input = (area.height / USER_MESSAGE_INPUT_HEIGHT_TERMINAL_FRACTION).max(3);
-    let input_width = area.width.saturating_sub(1).max(1) as usize;
-    let wrapped_rows = textarea
-        .lines()
-        .iter()
-        .map(|line| textwrap::wrap(line, input_width).len().max(1))
-        .sum::<usize>();
-    let input_height = (wrapped_rows as u16).clamp(1, max_input);
+    let input_width = area.width.saturating_sub(1).max(1);
+    let wrapped_rows = {
+        let mut measurement = TextArea::from(textarea.lines().to_vec());
+        measurement.set_wrap_mode(textarea.wrap_mode());
+        measurement.set_tab_length(textarea.tab_length());
+        let measurement_area = Rect::new(0, 0, input_width, 1);
+        ratatui::widgets::Widget::render(
+            &measurement,
+            measurement_area,
+            &mut ratatui::buffer::Buffer::empty(measurement_area),
+        );
+        measurement.move_cursor(ratatui_textarea::CursorMove::Bottom);
+        measurement.move_cursor(ratatui_textarea::CursorMove::End);
+        measurement.screen_cursor().row + 1
+    };
+    let input_height = wrapped_rows.min(max_input as usize).max(1) as u16;
 
     // When a tool approval is pending the approval title and buttons appear
     // ABOVE the input field so the approve/deny controls sit immediately
@@ -496,23 +505,12 @@ pub fn draw(
     );
     frame.render_widget(&*textarea, input_area);
 
-    // Mirror ratatui-textarea's next_scroll_top algorithm using the public
-    // screen_cursor().row (wrapped screen row) to track which viewport window
-    // the textarea is currently showing. This persists in TuiState across
-    // frames so the state is correct regardless of cursor movement.
-    if wrapped_rows > input_height as usize {
-        let screen_row = textarea.screen_cursor().row;
-        let height = input_height as usize;
-        state.input_scroll_top = if screen_row < state.input_scroll_top {
-            screen_row
-        } else if state.input_scroll_top + height <= screen_row {
-            screen_row + 1 - height
-        } else {
-            state.input_scroll_top
-        };
-    } else {
-        state.input_scroll_top = 0;
-    }
+    // InViewport clamps an origin cursor to the actual rendered viewport top.
+    // Probe a clone so cursor movement and draft replacement cannot desync it.
+    let mut viewport_probe = textarea.clone();
+    viewport_probe.move_cursor(ratatui_textarea::CursorMove::Jump(0, 0));
+    viewport_probe.move_cursor(ratatui_textarea::CursorMove::InViewport);
+    state.input_scroll_top = viewport_probe.screen_cursor().row;
 
     // Show ↑/↓ based on the tracked viewport position, not the cursor row.
     if wrapped_rows > input_height as usize && input_area.height >= 1 && input_area.width >= 1 {

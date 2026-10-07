@@ -462,14 +462,14 @@ async fn execute_effects(
                 state.exit_input_history_browsing(&textarea.lines().join("\n"));
             }
             Effect::PlaceCursorAtMousePos { column, row } => {
-                if let Some((cursor_row, cursor_col)) =
-                    cursor_for_click(textarea, state.layout.input_area.rect, column, row)
-                {
+                if move_input_cursor_to_mouse(
+                    textarea,
+                    state.layout.input_area.rect,
+                    state.input_scroll_top,
+                    column,
+                    row,
+                ) {
                     state.exit_input_history_browsing(&textarea.lines().join("\n"));
-                    textarea.move_cursor(ratatui_textarea::CursorMove::Jump(
-                        cursor_row as u16,
-                        cursor_col as u16,
-                    ));
                     textarea.cancel_selection();
                     *mouse_drag = MouseDrag { moved: false };
                 }
@@ -479,17 +479,21 @@ async fn execute_effects(
                 mouse_drag.moved = true;
             }
             Effect::ExtendInputSelection { column, row } => {
-                if let Some((cursor_row, cursor_col)) =
-                    cursor_for_click(textarea, state.layout.input_area.rect, column, row)
+                let input_area = state.layout.input_area.rect;
+                if input_area.contains(ratatui::layout::Position::new(column, row))
+                    && column > input_area.x
                 {
                     if !mouse_drag.moved {
                         textarea.start_selection();
                         mouse_drag.moved = true;
                     }
-                    textarea.move_cursor(ratatui_textarea::CursorMove::Jump(
-                        cursor_row as u16,
-                        cursor_col as u16,
-                    ));
+                    move_input_cursor_to_mouse(
+                        textarea,
+                        input_area,
+                        state.input_scroll_top,
+                        column,
+                        row,
+                    );
                 }
             }
             Effect::FinalizeInputSelection => {
@@ -1546,7 +1550,7 @@ where
 
                 // Input-area scroll wheel is not handled by the Presenter
                 // (it returns vec![] for that case); the Driver applies it
-                // directly to the textarea and syncs input_scroll_top.
+                // directly to the textarea; rendering syncs its viewport.
                 if let AppAction::MouseInput(mouse) = action {
                     let mouse_kind = mouse.kind;
                     let mouse_col = mouse.column;
@@ -1566,11 +1570,6 @@ where
                                 1i16
                             };
                         textarea.scroll(Scrolling::Delta { rows: delta, cols: 0 });
-                        if delta < 0 {
-                            state.input_scroll_top = state.input_scroll_top.saturating_sub(1);
-                        } else {
-                            state.input_scroll_top = state.input_scroll_top.saturating_add(1);
-                        }
                         continue;
                     }
 
@@ -1782,47 +1781,54 @@ fn dedent(text: &str) -> String {
     lines[start..end].join("\n")
 }
 
-/// Translate a mouse `(column, row)` inside the input box `area` into a
-/// (line, column) cursor position in `textarea`. Returns `None` when the point
-/// is outside the input box (e.g. on its border).
-fn cursor_for_click(
-    textarea: &TextArea<'_>,
+/// Place the cursor using the textarea's own wrapped screen map.
+/// Returns `false` for points outside the content area.
+fn move_input_cursor_to_mouse(
+    textarea: &mut TextArea<'_>,
     area: ratatui::layout::Rect,
+    scroll_top: usize,
     column: u16,
     row: u16,
-) -> Option<(usize, usize)> {
-    if column < area.x.saturating_add(1) || row < area.y {
-        return None;
+) -> bool {
+    use ratatui_textarea::CursorMove;
+
+    if !area.contains(ratatui::layout::Position::new(column, row)) || column <= area.x {
+        return false;
     }
-    let width = area.width.saturating_sub(1).max(1) as usize;
-    let screen_row = (row - area.y) as usize;
-    let screen_col = (column - area.x - 1) as usize;
-    let lines = textarea.lines();
-    let mut row_start = 0usize;
-    for (line_index, line) in lines.iter().enumerate() {
-        let segments = textwrap::wrap(line, width);
-        let row_count = segments.len().max(1);
-        let row_end = row_start + row_count;
-        if screen_row < row_end {
-            let segment = screen_row.saturating_sub(row_start).min(row_count - 1);
-            let mut search_from = 0usize;
-            let mut start_col = 0usize;
-            for (index, part) in segments.iter().take(segment + 1).enumerate() {
-                let offset = line[search_from..].find(part.as_ref()).unwrap_or(0) + search_from;
-                start_col += line[search_from..offset].chars().count();
-                if index == segment {
-                    break;
-                }
-                start_col += part.chars().count();
-                search_from = offset + part.len();
-            }
-            let col = (start_col + screen_col).min(line.chars().count());
-            return Some((line_index, col));
+    let target_row = scroll_top.saturating_add((row - area.y) as usize);
+    let target_column = (column - area.x - 1) as usize;
+
+    // The dependency exposes screen positions but not screen-to-data conversion.
+    // Its native movements preserve wrapping, tabs, and Unicode display widths.
+    textarea.move_cursor(CursorMove::Head);
+    loop {
+        let current_row = textarea.screen_cursor().row;
+        if current_row == target_row {
+            break;
         }
-        row_start = row_end;
+        textarea.move_cursor(if current_row < target_row {
+            CursorMove::Down
+        } else {
+            CursorMove::Up
+        });
+        if textarea.screen_cursor().row == current_row {
+            textarea.move_cursor(CursorMove::End);
+            return true;
+        }
     }
-    let last = lines.len().saturating_sub(1);
-    Some((last, lines.get(last).map_or(0, |line| line.chars().count())))
+    loop {
+        let previous_cursor = textarea.cursor();
+        textarea.move_cursor(CursorMove::Forward);
+        let screen_cursor = textarea.screen_cursor();
+        if screen_cursor.row != target_row || screen_cursor.col > target_column {
+            textarea.move_cursor(CursorMove::Back);
+            break;
+        }
+        if textarea.cursor() == previous_cursor {
+            break;
+        }
+    }
+    true
 }
 
 /// Loads a history entry into the textarea. Returns `true` when a history
@@ -2440,6 +2446,222 @@ mod tests {
         let mut textarea = TextArea::default();
         configure_textarea(&mut textarea);
         (AppState::new(), textarea, cmd_tx, cmd_rx)
+    }
+
+    #[tokio::test]
+    async fn input_mouse_targets_the_visible_last_line() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::backend::TestBackend;
+
+        for line_count in [3usize, 12] {
+            let (mut state, mut textarea, cmd_tx, _cmd_rx) = setup();
+            state.input_history = vec![(0..line_count)
+                .map(|line| format!("line {line:02}"))
+                .collect::<Vec<_>>()
+                .join("\n")];
+            assert!(load_history_into_textarea(
+                HistoryDirection::Up,
+                &mut state,
+                &mut textarea,
+            ));
+            textarea.move_cursor(ratatui_textarea::CursorMove::Top);
+            textarea.move_cursor(ratatui_textarea::CursorMove::Head);
+            let mut terminal =
+                Terminal::new(TestBackend::new(40, 24)).expect("test terminal created");
+            let registry = crate::ToolRegistry::default();
+            let mut mouse_drag = MouseDrag::default();
+            let mut pending_run_ids = PendingRunIds::default();
+
+            terminal
+                .draw(|frame| {
+                    render::render(frame, &mut state, &mut textarea, None, None, &registry);
+                })
+                .expect("initial input frame");
+            for _ in 0..line_count.saturating_sub(state.layout.input_area.rect.height as usize) {
+                textarea.scroll(Scrolling::Delta { rows: 1, cols: 0 });
+                terminal
+                    .draw(|frame| {
+                        render::render(frame, &mut state, &mut textarea, None, None, &registry);
+                    })
+                    .expect("scrolled input frame");
+            }
+            let input_area = state.layout.input_area.rect;
+            let last_row = input_area.bottom() - 1;
+            let expected_scroll_top = line_count.saturating_sub(input_area.height as usize);
+            assert_eq!(state.input_scroll_top, expected_scroll_top);
+            let last_line = format!("line {:02}", line_count - 1);
+            assert_eq!(
+                (0..last_line.len())
+                    .map(|column| terminal.backend().buffer()
+                        [(input_area.x + 1 + column as u16, last_row)]
+                        .symbol())
+                    .collect::<String>(),
+                last_line,
+                "the actual rendered last line must be visible"
+            );
+            for (kind, column, expected_column) in [
+                (MouseEventKind::Down(MouseButton::Left), input_area.x + 1, 0),
+                (MouseEventKind::Drag(MouseButton::Left), input_area.x + 8, 7),
+                (MouseEventKind::Up(MouseButton::Left), input_area.x + 8, 7),
+            ] {
+                let effects = presenter::update(
+                    &mut state,
+                    TuiEvent::Mouse(MouseEvent {
+                        kind,
+                        column,
+                        row: last_row,
+                        modifiers: KeyModifiers::NONE,
+                    }),
+                    &textarea_ctx_from(&textarea),
+                );
+                execute_effects(
+                    &mut state,
+                    &mut textarea,
+                    &cmd_tx,
+                    effects,
+                    &mut mouse_drag,
+                    &mut NoopClipboard,
+                    &mut pending_run_ids,
+                )
+                .await;
+                assert_eq!(
+                    textarea.cursor(),
+                    (line_count - 1, expected_column),
+                    "{kind:?} must target the rendered last line ({line_count} lines)"
+                );
+                terminal
+                    .draw(|frame| {
+                        render::render(frame, &mut state, &mut textarea, None, None, &registry);
+                    })
+                    .expect("input frame after mouse event");
+                assert_eq!(
+                    state.input_scroll_top, expected_scroll_top,
+                    "mouse interaction must not jump the viewport upward"
+                );
+            }
+            assert_eq!(textarea.yank_text(), last_line);
+            assert_eq!(state.history_index, None);
+            execute_effects(
+                &mut state,
+                &mut textarea,
+                &cmd_tx,
+                vec![Effect::PlaceCursorAtMousePos {
+                    column: input_area.x + 4,
+                    row: last_row,
+                }],
+                &mut mouse_drag,
+                &mut NoopClipboard,
+                &mut pending_run_ids,
+            )
+            .await;
+            assert_eq!(textarea.cursor(), (line_count - 1, 3));
+            assert_eq!(textarea.selection_range(), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn input_mouse_uses_rendered_wrap_and_character_widths() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::backend::TestBackend;
+
+        for (text, width, target_column) in [
+            ("aaaaa-bbbbb-ccccc-ddddd", 12, 12),
+            ("a\tbc", 20, 2),
+            ("a\u{754c}bc", 20, 2),
+            ("abcdefghijklmnopqrst", 12, 15),
+            ("first          last", 12, 16),
+        ] {
+            let (mut state, _initial_textarea, cmd_tx, _cmd_rx) = setup();
+            let mut textarea = TextArea::from([text]);
+            configure_textarea(&mut textarea);
+            let mut terminal =
+                Terminal::new(TestBackend::new(width, 30)).expect("test terminal created");
+            let registry = crate::ToolRegistry::default();
+            terminal
+                .draw(|frame| {
+                    render::render(frame, &mut state, &mut textarea, None, None, &registry);
+                })
+                .expect("wrapped input frame");
+            textarea.move_cursor(ratatui_textarea::CursorMove::Bottom);
+            textarea.move_cursor(ratatui_textarea::CursorMove::End);
+            assert_eq!(
+                state.layout.input_area.rect.height as usize,
+                (textarea.screen_cursor().row + 1).min(10),
+                "input height must match the renderer for {text:?}"
+            );
+            textarea.move_cursor(ratatui_textarea::CursorMove::Jump(0, target_column));
+            let target = textarea.screen_cursor();
+            assert!(target.row < state.layout.input_area.rect.height as usize);
+            textarea.move_cursor(ratatui_textarea::CursorMove::Jump(0, 0));
+            let input_area = state.layout.input_area.rect;
+            let effects = presenter::update(
+                &mut state,
+                TuiEvent::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: input_area.x + 1 + target.col as u16,
+                    row: input_area.y + target.row as u16,
+                    modifiers: KeyModifiers::NONE,
+                }),
+                &textarea_ctx_from(&textarea),
+            );
+            execute_effects(
+                &mut state,
+                &mut textarea,
+                &cmd_tx,
+                effects,
+                &mut MouseDrag::default(),
+                &mut NoopClipboard,
+                &mut PendingRunIds::default(),
+            )
+            .await;
+            assert_eq!(
+                textarea.cursor(),
+                (0, target_column as usize),
+                "mouse placement must match the renderer for {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn input_viewport_tracks_replacement_and_resizing() {
+        use ratatui::backend::TestBackend;
+
+        let (mut state, _initial_textarea, _cmd_tx, _cmd_rx) = setup();
+        let registry = crate::ToolRegistry::default();
+        let mut terminal = Terminal::new(TestBackend::new(40, 24)).expect("test terminal created");
+        for line_count in [14usize, 10, 3] {
+            let mut textarea = TextArea::from((0..line_count).map(|line| format!("line {line}")));
+            configure_textarea(&mut textarea);
+            textarea.move_cursor(ratatui_textarea::CursorMove::Bottom);
+            textarea.move_cursor(ratatui_textarea::CursorMove::End);
+            terminal
+                .draw(|frame| {
+                    render::render(frame, &mut state, &mut textarea, None, None, &registry);
+                })
+                .expect("replacement draft frame");
+            assert_eq!(
+                state.input_scroll_top,
+                line_count.saturating_sub(state.layout.input_area.rect.height as usize),
+                "a replacement textarea must not inherit the previous viewport"
+            );
+        }
+
+        let mut textarea = TextArea::from(["abcdefghijklmnopqrstuvwxyz"]);
+        configure_textarea(&mut textarea);
+        terminal
+            .draw(|frame| {
+                render::render(frame, &mut state, &mut textarea, None, None, &registry);
+            })
+            .expect("wide terminal frame");
+        assert_eq!(state.layout.input_area.rect.height, 1);
+        terminal.backend_mut().resize(10, 24);
+        terminal
+            .draw(|frame| {
+                render::render(frame, &mut state, &mut textarea, None, None, &registry);
+            })
+            .expect("narrow terminal frame");
+        assert_eq!(state.layout.input_area.rect.height, 3);
+        assert_eq!(state.input_scroll_top, 0);
     }
 
     #[tokio::test]

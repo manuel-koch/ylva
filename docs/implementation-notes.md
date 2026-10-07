@@ -518,6 +518,14 @@ The TUI renders the same headless `AgentLoop`; it does not own agent state.
 - `src/tui_driver.rs` owns the terminal loop, maps live UI updates to domain
   events, and executes effects. `src/cli_driver.rs` owns the headless loop.
 
+Input height and mouse hit-testing use ratatui-textarea's native wrapped screen
+map rather than a separate `textwrap` approximation. Hit-testing adds the rendered
+viewport offset and uses native cursor movements to resolve screen cells,
+including tabs and wide characters. After rendering, an origin cursor clamped
+with `CursorMove::InViewport` on a clone supplies the actual viewport top;
+recalled or replaced drafts cannot inherit a stale offset. Input mouse-wheel
+events scroll the textarea, and the next frame synchronizes the offset.
+
 The footer readout follows the request path end to end: the OpenAI-compatible
 provider calls the estimate callback before response headers arrive; the agent
 loop maps it to `UiUpdate::ContextUsage` or

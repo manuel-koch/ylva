@@ -63,8 +63,8 @@ conversation. The original draft returns after all approvals are resolved.
 | `←` / `→` | Help popup open | Scroll help popup left / right by 4 columns |
 | `page-up` / `fn-up` | Any | Scroll chat up; when help popup is open, scroll popup up |
 | `page-down` / `fn-down` | Any | Scroll chat down; when help popup is open, scroll popup down |
-| Mouse wheel | Any | Scroll chat; when help popup is open, scroll popup (no focus needed) |
-| Left-click | Input focused | Move the cursor to the clicked character (word-wrapping honored) |
+| Mouse wheel | Any | Scroll input when over the input field, otherwise chat; when help popup is open, scroll popup (no focus needed) |
+| Left-click | Input focused | Move the cursor to the visible clicked character (input scrolling, word-wrapping, tabs, and Unicode display widths honored) |
 | Left-drag | Input focused | Select text; click (no drag) just places the cursor |
 | Left-click | Child-view header bubble | Toggle the header bubble expand/collapse state |
 | Left-drag | Chat or child-view header bubble | Select visible text; release copies a non-empty selection to the clipboard |

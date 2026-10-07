@@ -10,7 +10,7 @@
       pub async fn run_tui_on_stdout(
       ```
 
-- [ ] Recall a (multiline) draft message in TUI from conversation history.
+- [x] Recall a (multiline) draft message in TUI from conversation history.
       Cursor is a the beginning of the message in input-field.
       Use mouse to scroll to the end of the message.
       Drag over last line of message.
