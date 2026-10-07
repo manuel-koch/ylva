@@ -1112,6 +1112,7 @@ pub enum DomainEvent {
     /// A compaction snapshot was applied this run; see
     /// `UiUpdate::CompactionApplied` and [`ChatEntry::CompactionMarker`].
     CompactionApplied {
+        run_id: Option<Uuid>,
         entry_index: usize,
         summarized_messages: usize,
     },
@@ -2119,11 +2120,18 @@ impl AppState {
     }
 
     /// Replace a replay-discovered child's empty transcript after its first
-    /// drill-in read. Repeated drill-ins keep the loaded transcript.
-    pub fn load_child_messages(&mut self, run_id: Uuid, messages: &[Message]) {
+    /// drill-in read, retaining its persisted compaction boundary.
+    /// Repeated drill-ins keep the loaded transcript.
+    pub fn load_child_messages(
+        &mut self,
+        run_id: Uuid,
+        messages: &[Message],
+        compaction_boundary: Option<usize>,
+    ) {
         if let Some(conversation) = self.child_conversations.get_mut(&run_id) {
             if conversation.needs_lazy_load {
-                conversation.messages = project_messages(messages);
+                conversation.messages =
+                    project_messages_with_child_runs(messages, &[], compaction_boundary);
                 conversation.needs_lazy_load = false;
             }
         }
@@ -2293,6 +2301,7 @@ impl AppState {
     /// root-owned approval as well.
     pub(crate) fn resolve_possible_interactive_pause(&mut self, id: Uuid) {
         if !self.auto_switched_to_child {
+            self.resume_pending_tool_approval();
             return;
         }
         let bubble_is_in_current_view = match &self.active_view {
@@ -2310,6 +2319,40 @@ impl AppState {
         if bubble_is_in_current_view {
             self.active_view = self.pre_pause_view.take().unwrap_or(ConversationView::Root);
             self.auto_switched_to_child = false;
+        }
+        self.resume_pending_tool_approval();
+    }
+
+    fn resume_pending_tool_approval(&mut self) {
+        if matches!(self.focus, Focus::HelpPopup)
+            || matches!(
+                self.mode,
+                TuiMode::ClarifyPending { .. } | TuiMode::Aborting
+            )
+        {
+            return;
+        }
+        if let Focus::ToolApproval { tool_id, .. } = self.focus {
+            if matches!(
+                self.find_tool_bubble_mut(tool_id),
+                Some(ChatEntry::ToolBubble { state, .. })
+                    if matches!(state.as_ref(), ToolCallState::Pending { .. })
+            ) {
+                return;
+            }
+            self.focus = Focus::MainInput;
+        }
+        if let Some((tool_id, tool_name)) = self.pending_tool_approval() {
+            let run_id = self
+                .child_conversations
+                .iter()
+                .find_map(|(run_id, conversation)| {
+                    conversation.messages.iter().any(
+                    |entry| matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == tool_id),
+                ).then_some(*run_id)
+                });
+            self.focus = Focus::ToolApproval { tool_id, tool_name };
+            self.note_interactive_pause(run_id);
         }
     }
 
@@ -2498,6 +2541,7 @@ impl AppState {
     /// the agent loop owns those and resets them on `AgentCommand::ClearContext`
     /// (blueprint §4C).
     pub fn clear_conversation(&mut self) {
+        self.context_usage = None;
         self.compaction_requests.clear();
         self.chat_entries.clear();
         self.turn_buffer = TurnBuffer::default();
@@ -2556,10 +2600,8 @@ impl AppState {
     /// while a tool still awaits its verdict (and hide the approval
     /// controls), so the approval focus is resumed instead.
     pub fn restore_focus_after_help(&mut self) {
-        self.focus = match self.pending_tool_approval() {
-            Some((tool_id, tool_name)) => Focus::ToolApproval { tool_id, tool_name },
-            None => Focus::MainInput,
-        };
+        self.focus = Focus::MainInput;
+        self.resume_pending_tool_approval();
     }
 
     /// Recompute the suggestion overlay from the live draft.
@@ -3343,6 +3385,26 @@ impl AppState {
         }
         self.resolve_possible_interactive_pause(id);
     }
+
+    /// Commit an approval locally before the runtime's `ToolStart` arrives.
+    pub(crate) fn apply_tool_approved(&mut self, id: Uuid) {
+        if let Some(ChatEntry::ToolBubble { state, .. }) = self.find_tool_bubble_mut(id) {
+            if let ToolCallState::Pending {
+                arguments,
+                content_sections,
+                title_arguments,
+            } = state.as_mut()
+            {
+                **state = ToolCallState::Running {
+                    arguments: std::mem::take(arguments),
+                    content_sections: std::mem::take(content_sections),
+                    title_arguments: std::mem::take(title_arguments),
+                    progress_arguments: vec![],
+                };
+            }
+        }
+        self.resolve_possible_interactive_pause(id);
+    }
 }
 
 impl Default for AppState {
@@ -3737,7 +3799,7 @@ mod tests {
             .messages
             .is_empty());
 
-        state.load_child_messages(run_id, &child_messages);
+        state.load_child_messages(run_id, &child_messages, None);
         let loaded_messages = state
             .child_conversations
             .get(&run_id)
@@ -3754,6 +3816,7 @@ mod tests {
                 status: AssistantStatus::Complete,
                 tool_calls: vec![],
             }],
+            Some(1),
         );
         assert_eq!(
             state

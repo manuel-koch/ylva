@@ -32,6 +32,8 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+pub(crate) mod recovery;
+
 use crate::agent::{Context, Message, StreamEvent, UserMessageKind};
 use crate::llm::engine::Engine;
 use tokio::sync::mpsc;
@@ -51,6 +53,20 @@ pub const DEFAULT_SOFT_COMPACTION_THRESHOLD: f64 = 0.70;
 /// background summary and drops synchronously (blueprint §4C). See
 /// [`DEFAULT_SOFT_COMPACTION_THRESHOLD`] for why it is a `DEFAULT_`.
 pub const DEFAULT_HARD_COMPACTION_THRESHOLD: f64 = 0.90;
+
+/// Fixed allowance for request framing the local estimator does not count.
+const REQUEST_FIXED_OVERHEAD_TOKENS: usize = 512;
+
+/// The shared local ceiling every dispatched request must fit: the window
+/// minus the 10% reply reserve, the 5% safety margin, and the fixed framing
+/// allowance. Compaction targets and result allowances derive from this one
+/// definition.
+pub(crate) fn safe_request_ceiling(context_length: usize) -> usize {
+    context_length
+        .saturating_sub(context_length / 10)
+        .saturating_sub(context_length / 20)
+        .saturating_sub(REQUEST_FIXED_OVERHEAD_TOKENS)
+}
 
 /// Marker prefixing the summarized prefix in the model view.
 ///
@@ -98,6 +114,17 @@ pub struct CompactionSnapshot {
     pub summary: String,
 }
 
+/// Bounded model-only state. Coordinates exclude rebuilt system instructions.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ModelProjectionSnapshot {
+    pub projection_revision: u64,
+    pub transcript_start: usize,
+    pub message_overrides: Vec<(usize, Message)>,
+    pub summary_override: Option<String>,
+    pub handoff: Option<Message>,
+    pub anchor: Option<Message>,
+}
+
 impl CompactionSnapshot {
     /// The provider-safe projection of the summarized prefix: a `user`
     /// message carrying [`COMPACTION_SUMMARY_MARKER`], never a
@@ -143,7 +170,7 @@ pub fn plan_compaction(
     soft_threshold: f64,
     hard_threshold: f64,
 ) -> CompactionAction {
-    if usage_ratio > hard_threshold {
+    if usage_ratio > hard_threshold && !summary_in_flight {
         CompactionAction::DropFallback
     } else if usage_ratio >= soft_threshold && !summary_in_flight {
         CompactionAction::StartSummary
@@ -240,6 +267,11 @@ impl CompactionBudget {
         (self.context_length as f64 * self.target_ratio) as usize
     }
 
+    /// The local ceiling a dispatched request must fit.
+    pub fn safe_ceiling_tokens(self) -> usize {
+        safe_request_ceiling(self.context_length)
+    }
+
     /// Current usage of the model view against this window.
     pub fn usage_ratio(self, estimated_model_tokens: usize) -> f64 {
         if self.context_length == 0 {
@@ -317,12 +349,17 @@ pub enum CompactionOutcome {
         /// started before `AgentCommand::ClearContext` is dropped instead of
         /// being applied to an unrelated conversation.
         generation: u64,
+        request_id: Option<Uuid>,
         boundary: usize,
         summary: String,
     },
     /// The summary failed, timed out, or came back empty: the loop falls
     /// back to synchronous dropping at its next safe boundary.
-    SummaryFailed { generation: u64, reason: String },
+    SummaryFailed {
+        generation: u64,
+        request_id: Option<Uuid>,
+        reason: String,
+    },
 }
 
 /// Drive one tool-free summary request to completion and return its text.
@@ -374,6 +411,7 @@ pub(crate) async fn generate_summary_attempt(
     request_dump_failure_handler: crate::http::RequestDumpFailureHandler,
 ) -> CompactionOutcome {
     let cancellation_token = CancellationToken::new();
+    let _cancellation_guard = cancellation_token.clone().drop_guard();
     match tokio::time::timeout(
         timeout,
         generate_summary(
@@ -388,6 +426,7 @@ pub(crate) async fn generate_summary_attempt(
     {
         Ok(Ok(summary)) => CompactionOutcome::SummaryReady {
             generation,
+            request_id: None,
             boundary,
             summary,
         },
@@ -395,7 +434,11 @@ pub(crate) async fn generate_summary_attempt(
             tracing::warn!(%error, boundary, "compaction summary failed");
             let reason = error.to_string();
             request_dump_failure_handler.report(&reason);
-            CompactionOutcome::SummaryFailed { generation, reason }
+            CompactionOutcome::SummaryFailed {
+                generation,
+                request_id: None,
+                reason,
+            }
         }
         Err(_elapsed) => {
             cancellation_token.cancel();
@@ -409,127 +452,13 @@ pub(crate) async fn generate_summary_attempt(
                 timeout_secs = timeout.as_secs(),
                 "compaction summary timed out"
             );
-            CompactionOutcome::SummaryFailed { generation, reason }
+            CompactionOutcome::SummaryFailed {
+                generation,
+                request_id: None,
+                reason,
+            }
         }
     }
-}
-
-/// Summarize one child handoff for insertion into a parent's current model
-/// view. The child's full result remains available to persistence and the UI.
-pub(crate) async fn summarize_result_for_parent(
-    engine: Arc<dyn Engine>,
-    summary_prompt: &str,
-    expected_task: &str,
-    result: &str,
-    max_output_tokens: usize,
-    session_id: Option<Uuid>,
-    timeout: Duration,
-) -> anyhow::Result<String> {
-    let context_length = engine.effective_context_length();
-    anyhow::ensure!(
-        context_length > 0,
-        "compaction engine has no context window"
-    );
-    let prompt = format!(
-        "{summary_prompt}\n\nThis request summarizes one subagent handoff for its parent. \
-         Expected task and deliverable:\n{expected_task}\n\nReturn a concise, self-contained \
-         handoff that preserves the findings and evidence needed for that task. Do not repeat \
-         the task or include process narration. Keep the result within {max_output_tokens} \
-         estimated tokens."
-    );
-    let estimator = crate::llm::TokenEstimator::Tiktoken;
-    let context_length = context_length.min(max_output_tokens.saturating_add(context_length / 2));
-    let prompt = crate::llm::token_estimate::truncate_text_to_token_budget(
-        estimator,
-        &prompt,
-        context_length
-            .saturating_sub(1_536)
-            .saturating_sub(estimator.estimate_tokens(&summary_request_framing())),
-    )
-    .0;
-    let prompt_tokens = estimator.estimate_tokens(&frame_summary_prompt(&prompt));
-    let chunk_budget = context_length
-        .saturating_sub(prompt_tokens)
-        .saturating_sub(512)
-        .min(context_length / 2)
-        .max(1);
-    let mut pending_chunks = split_text_by_token_budget(result, estimator, chunk_budget);
-    for _round in 0..3 {
-        if pending_chunks.is_empty() {
-            break;
-        }
-        let mut next_round = Vec::new();
-        for chunk in pending_chunks {
-            let request = build_summary_request(
-                &[Message::User {
-                    content: format!("Subagent result source material:\n{chunk}"),
-                    kind: UserMessageKind::ImplicitToolNote,
-                }],
-                &prompt,
-            );
-            let request_dump_failure_handler = crate::http::RequestDumpFailureHandler::default();
-            let summary = tokio::time::timeout(
-                timeout,
-                generate_summary(
-                    engine.clone(),
-                    request,
-                    session_id,
-                    CancellationToken::new(),
-                    request_dump_failure_handler,
-                ),
-            )
-            .await
-            .map_err(|_| anyhow::anyhow!("subagent-result summary timed out"))??;
-            next_round.push(summary);
-        }
-        if next_round.len() == 1 && estimator.estimate_tokens(&next_round[0]) <= max_output_tokens {
-            return Ok(next_round.remove(0));
-        }
-        let combined = next_round.join("\n\n");
-        if estimator.estimate_tokens(&combined) <= max_output_tokens {
-            return Ok(combined);
-        }
-        pending_chunks = split_text_by_token_budget(&combined, estimator, chunk_budget);
-        if pending_chunks.len() == 1
-            && estimator.estimate_tokens(&pending_chunks[0]) <= max_output_tokens
-        {
-            return Ok(pending_chunks.remove(0));
-        }
-    }
-    let combined = pending_chunks.join("\n\n");
-    Ok(crate::llm::token_estimate::truncate_text_to_token_budget(
-        estimator,
-        &combined,
-        max_output_tokens,
-    )
-    .0)
-}
-
-fn split_text_by_token_budget(
-    text: &str,
-    estimator: crate::llm::TokenEstimator,
-    max_tokens: usize,
-) -> Vec<String> {
-    if text.is_empty() {
-        return vec![String::new()];
-    }
-    let mut chunks = Vec::new();
-    let mut remaining = text;
-    while !remaining.is_empty() {
-        let (chunk, truncated) = crate::llm::token_estimate::truncate_text_to_token_budget(
-            estimator, remaining, max_tokens,
-        );
-        if chunk.is_empty() {
-            break;
-        }
-        let chunk_length = chunk.len();
-        chunks.push(chunk);
-        if !truncated {
-            break;
-        }
-        remaining = &remaining[chunk_length..];
-    }
-    chunks
 }
 
 /// Runtime bookkeeping for background compaction inside the outer loop.
@@ -552,6 +481,9 @@ pub(crate) struct CompactionRuntime {
     activity_sender: Option<(mpsc::Sender<super::UiUpdate>, Option<Uuid>)>,
     summary_task: Option<tokio::task::JoinHandle<()>>,
     request_id: Option<Uuid>,
+    last_request_id: Option<Uuid>,
+    continuation_waiting: bool,
+    summary_deadline: Option<tokio::time::Instant>,
 }
 
 impl Drop for CompactionRuntime {
@@ -586,6 +518,9 @@ impl CompactionRuntime {
                 activity_sender: None,
                 summary_task: None,
                 request_id: None,
+                last_request_id: None,
+                continuation_waiting: false,
+                summary_deadline: None,
             },
             outcome_rx,
         )
@@ -616,11 +551,17 @@ impl CompactionRuntime {
         if let (Some(request_id), Some((sender, run_id))) =
             (self.request_id.take(), &self.activity_sender)
         {
-            let _ = sender.try_send(super::UiUpdate::CompactionActivity {
+            let update = super::UiUpdate::CompactionActivity {
                 run_id: *run_id,
                 request_id,
                 active: false,
-            });
+            };
+            if let Err(mpsc::error::TrySendError::Full(update)) = sender.try_send(update) {
+                let sender = sender.clone();
+                tokio::spawn(async move {
+                    let _ = sender.send(update).await;
+                });
+            }
         }
     }
 
@@ -629,47 +570,88 @@ impl CompactionRuntime {
         self.summary_in_flight || self.pending.is_some()
     }
 
+    pub(crate) fn defer_request(
+        &mut self,
+        context: &Context,
+        engine: &dyn Engine,
+        tools: &[crate::llm::ToolSchema],
+    ) -> bool {
+        let tokens = context.estimated_model_tokens(tools, engine);
+        let window = engine.effective_context_length();
+        if self.summary_in_flight
+            && (tokens > safe_request_ceiling(window)
+                || tokens as f64 > window as f64 * engine.config().hard_compaction_threshold)
+        {
+            self.continuation_waiting = true;
+            tracing::info!(
+                request_id = ?self.request_id,
+                remaining_milliseconds = self.summary_deadline.map(|deadline| deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis()),
+                estimated_tokens = tokens,
+                "continuation waiting for existing compaction attempt"
+            );
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn take_waiting_continuation(&mut self) -> bool {
+        if self.summary_in_flight {
+            return false;
+        }
+        std::mem::take(&mut self.continuation_waiting)
+    }
+
     /// Record one summary attempt's outcome. Results stamped with another
     /// generation — a summary started before `AgentCommand::ClearContext` —
-    /// are ignored, so a stale snapshot can never be applied to an unrelated
-    /// conversation. The in-flight flag clears regardless: the attempt it
-    /// tracks is over either way.
+    /// are ignored entirely, so a stale snapshot can never be applied to an
+    /// unrelated conversation and a late outcome can never clear the in-flight
+    /// state or footer indicator of a newer summary.
     ///
-    /// The footer's `· Compacting…` indicator, however, only clears here for
-    /// outcomes that will never be applied (a failure, or a stale/superseded
-    /// success): a *matching-generation* success leaves it active until
-    /// `sweep` reaches a safe boundary and actually applies the snapshot.
-    pub(crate) fn on_outcome(&mut self, outcome: CompactionOutcome, generation: u64) {
+    /// The footer's `· Compacting…` indicator only clears here for a failure
+    /// (nothing is left to apply): a matching-generation success leaves it
+    /// active until `sweep` reaches a safe boundary and actually applies the
+    /// snapshot.
+    pub(crate) fn on_outcome(&mut self, outcome: CompactionOutcome, generation: u64) -> bool {
+        let (outcome_generation, outcome_request_id) = match &outcome {
+            CompactionOutcome::SummaryReady {
+                generation,
+                request_id,
+                ..
+            }
+            | CompactionOutcome::SummaryFailed {
+                generation,
+                request_id,
+                ..
+            } => (*generation, *request_id),
+        };
+        if outcome_generation != generation || outcome_request_id != self.request_id {
+            // A late outcome from before `ClearContext` must not touch the
+            // in-flight flag or footer indicator of a newer summary.
+            tracing::debug!(
+                outcome_generation,
+                generation,
+                "dropping compaction outcome from a superseded generation"
+            );
+            return false;
+        }
+        if !self.summary_in_flight && (self.pending.is_some() || self.fallback_due) {
+            return false;
+        }
+        self.last_request_id = self.request_id;
         self.summary_in_flight = false;
+        self.summary_deadline = None;
         match outcome {
             CompactionOutcome::SummaryReady {
-                generation: outcome_generation,
-                boundary,
-                summary,
+                boundary, summary, ..
             } => {
-                if outcome_generation != generation {
-                    tracing::debug!(
-                        outcome_generation,
-                        generation,
-                        boundary,
-                        "dropping compaction summary from a superseded generation"
-                    );
-                    self.clear_activity();
-                    return;
-                }
                 self.pending = Some(CompactionSnapshot { boundary, summary });
             }
-            CompactionOutcome::SummaryFailed {
-                generation: outcome_generation,
-                reason: _,
-            } => {
+            CompactionOutcome::SummaryFailed { .. } => {
                 self.clear_activity();
-                if outcome_generation != generation {
-                    return;
-                }
                 self.fallback_due = true;
             }
         }
+        true
     }
 
     /// Forget everything recorded for the conversation `ClearContext` just
@@ -680,20 +662,13 @@ impl CompactionRuntime {
             task.abort();
             let _ = task.await;
         }
-        if let (Some(request_id), Some((sender, run_id))) =
-            (self.request_id.take(), &self.activity_sender)
-        {
-            let _ = sender
-                .send(super::UiUpdate::CompactionActivity {
-                    run_id: *run_id,
-                    request_id,
-                    active: false,
-                })
-                .await;
-        }
+        self.clear_activity();
         self.summary_in_flight = false;
         self.pending = None;
         self.fallback_due = false;
+        self.continuation_waiting = false;
+        self.summary_deadline = None;
+        self.last_request_id = None;
     }
 
     /// Apply whatever finished, honor a forced fallback, then evaluate the
@@ -713,13 +688,47 @@ impl CompactionRuntime {
             engine,
             generation,
             |context| context.estimated_model_tokens(tools, engine),
-            |context, target_tokens| {
-                context.drop_model_view_to_model_target(target_tokens, tools, engine)
+            |context, target_tokens, ceiling_tokens| {
+                context.recover_model_view(target_tokens, ceiling_tokens, tools)
             },
             |context, target_tokens| {
                 context.summary_boundary_for_model_target(target_tokens, tools, engine)
             },
         )
+    }
+
+    /// Start a background summary as soon as the soft threshold is reached,
+    /// without applying, dropping or recovering anything. Called after every
+    /// tool outcome — also in the middle of a serial tool batch — so the
+    /// summary runs while the remaining calls execute instead of only once
+    /// the whole batch has finished. Returns whether a summary was started.
+    pub(crate) fn schedule_summary(
+        &mut self,
+        context: &Context,
+        engine: &dyn Engine,
+        tools: &[crate::llm::ToolSchema],
+        generation: u64,
+    ) -> bool {
+        if !self.enabled() || self.summary_in_flight || self.pending.is_some() {
+            return false;
+        }
+        let Some(budget) = CompactionBudget::from_engine(engine) else {
+            return false;
+        };
+        let usage_ratio = budget.usage_ratio(context.estimated_model_tokens(tools, engine));
+        if usage_ratio < budget.soft_threshold {
+            return false;
+        }
+        self.start_summary(
+            context,
+            budget.context_length,
+            budget.target_tokens(),
+            generation,
+            |context, target_tokens| {
+                context.summary_boundary_for_model_target(target_tokens, tools, engine)
+            },
+        );
+        self.summary_in_flight
     }
 
     fn sweep_by(
@@ -728,7 +737,7 @@ impl CompactionRuntime {
         engine: &dyn Engine,
         generation: u64,
         estimate_tokens: impl Fn(&Context) -> usize,
-        drop_to_target: impl Fn(&mut Context, usize) -> bool,
+        recover: impl Fn(&mut Context, usize, usize) -> recovery::RecoveryReport,
         summary_boundary: impl Fn(&Context, usize) -> Option<usize>,
     ) -> CompactionSweepResult {
         let mut result = CompactionSweepResult::default();
@@ -739,6 +748,12 @@ impl CompactionRuntime {
             return result;
         };
         let context_length = budget.context_length;
+        context.compaction_request_id = self.request_id.or(self.last_request_id);
+        context.compaction_trigger = if self.fallback_due {
+            "summary_failure"
+        } else {
+            "hard_threshold"
+        };
         if let Some(snapshot) = self.pending.take() {
             let boundary = snapshot.boundary;
             let summary = snapshot.summary.clone();
@@ -761,6 +776,16 @@ impl CompactionRuntime {
                     store.record_compaction(boundary, context.leading_system_len(), &summary);
                 }
                 tracing::info!(
+                    trigger = "summary_applied",
+                    request_id = ?context.compaction_request_id,
+                    safe_boundary = boundary,
+                    stage = 0,
+                    clipped_results = 0,
+                    admitted_calls = context.batch_admitted_calls,
+                    skipped_calls = context.batch_skipped_calls,
+                    batch_cap = super::MAX_EXECUTED_TOOL_CALLS_PER_BATCH,
+                    remaining_result_allowance = context.available_result_token_budget(&[], context_length),
+                    terminal_reason = "summary_applied",
                     boundary,
                     summarized_messages = boundary.saturating_sub(context.leading_system_len()),
                     estimated_tokens_before = effectiveness.estimated_tokens_before,
@@ -769,6 +794,7 @@ impl CompactionRuntime {
                     estimated_reduction_percent = effectiveness.estimated_reduction_percent,
                     model_view_messages_before = effectiveness.model_view_messages_before,
                     model_view_messages_after = effectiveness.model_view_messages_after,
+                    projected_messages = effectiveness.model_view_messages_after,
                     model_view_messages_removed = effectiveness.removed_model_view_messages(),
                     "compaction summary applied at a safe boundary"
                 );
@@ -778,11 +804,16 @@ impl CompactionRuntime {
             self.clear_activity();
         }
         let target_tokens = budget.target_tokens();
+        let recovered_after_failure = self.fallback_due;
+        if result.summary_applied && estimate_tokens(context) > budget.safe_ceiling_tokens() {
+            result.prefix_dropped |=
+                recover(context, target_tokens, budget.safe_ceiling_tokens()).changed;
+        }
         if self.fallback_due {
             self.fallback_due = false;
             let tokens_before = estimate_tokens(context);
             let messages_before = context.model_view_message_count();
-            let dropped = drop_to_target(context, target_tokens);
+            let dropped = recover(context, target_tokens, budget.safe_ceiling_tokens()).changed;
             result.prefix_dropped |= dropped;
             let effectiveness = CompactionEffectiveness::measure(
                 tokens_before,
@@ -790,7 +821,7 @@ impl CompactionRuntime {
                 messages_before,
                 context.model_view_message_count(),
             );
-            tracing::warn!(
+            tracing::debug!(
                 dropped,
                 context_length,
                 target_tokens,
@@ -806,12 +837,16 @@ impl CompactionRuntime {
         }
         let estimated_tokens = estimate_tokens(context);
         let usage_ratio = budget.usage_ratio(estimated_tokens);
-        let action = plan_compaction(
-            usage_ratio,
-            self.summary_in_flight,
-            budget.soft_threshold,
-            budget.hard_threshold,
-        );
+        let action = if result.summary_applied || recovered_after_failure {
+            CompactionAction::None
+        } else {
+            plan_compaction(
+                usage_ratio,
+                self.summary_in_flight,
+                budget.soft_threshold,
+                budget.hard_threshold,
+            )
+        };
         tracing::debug!(
             context_length,
             estimated_tokens,
@@ -839,7 +874,7 @@ impl CompactionRuntime {
             CompactionAction::DropFallback => {
                 let tokens_before = estimate_tokens(context);
                 let messages_before = context.model_view_message_count();
-                let dropped = drop_to_target(context, target_tokens);
+                let dropped = recover(context, target_tokens, budget.safe_ceiling_tokens()).changed;
                 result.prefix_dropped |= dropped;
                 let effectiveness = CompactionEffectiveness::measure(
                     tokens_before,
@@ -847,7 +882,7 @@ impl CompactionRuntime {
                     messages_before,
                     context.model_view_message_count(),
                 );
-                tracing::warn!(
+                tracing::debug!(
                     usage_ratio,
                     dropped,
                     context_length,
@@ -888,12 +923,23 @@ impl CompactionRuntime {
             return;
         };
         let leading_system_len = context.leading_system_len();
-        let prefix = context.messages()[leading_system_len..boundary].to_vec();
+        let mut prefix = Vec::new();
+        if let Some(snapshot) = context.compaction() {
+            prefix.push(snapshot.summary_message());
+        }
+        if let Some(recovery) = &context.recovery {
+            prefix.push(recovery.handoff.clone());
+            prefix.extend(recovery.anchor.clone());
+        }
+        prefix.extend_from_slice(
+            &context.messages()[context.model_view_start().max(leading_system_len)..boundary],
+        );
         let request = build_summary_request(&prefix, &self.summary_prompt);
         let session_id = context.store().map(|store| store.session_id());
         let timeout = self.summary_timeout;
         let request_dump_failure_handler = crate::http::RequestDumpFailureHandler::default();
         self.summary_in_flight = true;
+        self.summary_deadline = Some(tokio::time::Instant::now() + timeout);
         let outcome_tx = self.outcome_tx.clone();
         tracing::info!(
             boundary,
@@ -914,7 +960,7 @@ impl CompactionRuntime {
                     })
                     .await;
             }
-            let outcome = generate_summary_attempt(
+            let mut outcome = generate_summary_attempt(
                 engine,
                 request,
                 session_id,
@@ -924,6 +970,18 @@ impl CompactionRuntime {
                 request_dump_failure_handler,
             )
             .await;
+            match &mut outcome {
+                CompactionOutcome::SummaryReady {
+                    request_id: identity,
+                    ..
+                }
+                | CompactionOutcome::SummaryFailed {
+                    request_id: identity,
+                    ..
+                } => {
+                    *identity = Some(request_id);
+                }
+            }
             // The footer's `· Compacting…` indicator is cleared by the loop
             // itself, through `on_outcome`/`sweep` — not here. A failure
             // clears it immediately (there's nothing left to apply), but a
@@ -1107,6 +1165,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn schedule_summary_starts_only_above_the_soft_threshold_and_only_once() {
+        let (mut runtime, _outcomes, _updates, _run_id, engine, mut context) =
+            new_recording_runtime("A summary.");
+        assert!(
+            !runtime.schedule_summary(&context, engine.as_ref(), &[], 0),
+            "a small view is below the soft threshold"
+        );
+        context.push_assistant("ok".to_string(), super::super::AssistantStatus::Complete);
+        context.push_user("filler ".repeat(12_000));
+        context.push_assistant("ok".to_string(), super::super::AssistantStatus::Complete);
+        context.push_user("next".to_string());
+        assert!(runtime.schedule_summary(&context, engine.as_ref(), &[], 0));
+        assert!(
+            !runtime.schedule_summary(&context, engine.as_ref(), &[], 0),
+            "a summary already in flight is never duplicated"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn request_gate_uses_the_existing_deadline_and_ignores_stale_identities() {
+        let (mut runtime, _outcomes, _updates, _run_id, engine, mut context) =
+            new_recording_runtime("A summary.");
+        context.push_user("task ".repeat(20_000));
+        let identity = Uuid::new_v4();
+        runtime.summary_in_flight = true;
+        runtime.request_id = Some(identity);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        runtime.summary_deadline = Some(deadline);
+        assert!(runtime.defer_request(&context, engine.as_ref(), &[]));
+        tokio::time::advance(Duration::from_secs(3)).await;
+        assert!(runtime.defer_request(&context, engine.as_ref(), &[]));
+        assert_eq!(runtime.summary_deadline, Some(deadline));
+        assert!(!runtime.on_outcome(
+            CompactionOutcome::SummaryFailed {
+                generation: 0,
+                request_id: Some(Uuid::new_v4()),
+                reason: "stale".to_string(),
+            },
+            0
+        ));
+        assert!(runtime.summary_in_flight);
+        assert!(!runtime.take_waiting_continuation());
+        assert!(runtime.on_outcome(
+            CompactionOutcome::SummaryFailed {
+                generation: 0,
+                request_id: Some(identity),
+                reason: "timeout".to_string(),
+            },
+            0
+        ));
+        assert!(runtime.take_waiting_continuation());
+        assert!(!runtime.take_waiting_continuation());
+        assert!(!runtime.on_outcome(
+            CompactionOutcome::SummaryReady {
+                generation: 0,
+                request_id: Some(identity),
+                boundary: context.messages().len(),
+                summary: "late duplicate".to_string(),
+            },
+            0
+        ));
+        runtime.reset().await;
+        assert!(!runtime.summary_pending());
+        assert!(!runtime.continuation_waiting);
+        assert!(runtime.summary_deadline.is_none());
+    }
+
+    #[tokio::test]
+    async fn scheduling_an_open_batch_summarizes_only_a_completed_prefix() {
+        let (mut runtime, mut outcomes, _updates, _run_id, engine, mut context) =
+            new_recording_runtime("A summary.");
+        context.push_assistant("older evidence ".repeat(12_000), AssistantStatus::Complete);
+        context.push_user("current task".to_string());
+        let open_index = context.messages().len();
+        context.push_assistant_tool_call(
+            String::new(),
+            AssistantStatus::Complete,
+            vec![ToolCallRequest {
+                id: Uuid::new_v4(),
+                name: "web_fetch".to_string(),
+                arguments: Value::Null,
+                persisted_title_arguments: Vec::new(),
+            }],
+        );
+        assert!(runtime.schedule_summary(&context, engine.as_ref(), &[], 0));
+        let outcome = outcomes.recv().await.expect("summary");
+        assert!(
+            matches!(outcome, CompactionOutcome::SummaryReady { boundary, .. } if boundary <= open_index)
+        );
+    }
+
+    #[tokio::test]
     async fn compaction_activity_ends_immediately_on_failure() {
         let (mut runtime, mut outcomes, mut updates, run_id, _engine, context) =
             new_recording_runtime("");
@@ -1146,6 +1296,42 @@ mod tests {
             } if actual_run_id == run_id && actual_request_id == request_id
         ));
         assert!(!runtime.summary_pending());
+    }
+
+    #[tokio::test]
+    async fn reset_delivers_scoped_activity_end_even_when_the_ui_channel_is_full() {
+        let (mut runtime, _) = CompactionRuntime::new(
+            None,
+            COMPACTION_SUMMARY_PROMPT.to_string(),
+            Duration::from_secs(10),
+        );
+        let (sender, mut updates) = mpsc::channel(1);
+        let request_id = Uuid::new_v4();
+        let run_id = Some(Uuid::new_v4());
+        sender
+            .send(super::super::UiUpdate::CompactionActivity {
+                run_id,
+                request_id,
+                active: true,
+            })
+            .await
+            .expect("start fills channel");
+        runtime.set_activity_sender(sender, run_id);
+        runtime.request_id = Some(request_id);
+        runtime.reset().await;
+        assert!(runtime.request_id.is_none());
+        assert!(matches!(
+            updates.recv().await,
+            Some(super::super::UiUpdate::CompactionActivity { active: true, .. })
+        ));
+        let ended = tokio::time::timeout(Duration::from_secs(1), updates.recv())
+            .await
+            .expect("end delivered");
+        assert!(
+            matches!(ended, Some(super::super::UiUpdate::CompactionActivity {
+            run_id: actual_run_id, request_id: actual_request_id, active: false,
+        }) if actual_run_id == run_id && actual_request_id == request_id)
+        );
     }
 
     #[tokio::test]
@@ -1352,8 +1538,8 @@ mod tests {
         );
         assert_eq!(
             plan_compaction(hard + 0.01, true, soft, hard),
-            CompactionAction::DropFallback,
-            "the hard trigger wins even while a summary is in flight"
+            CompactionAction::None,
+            "an in-flight summary keeps its original bounded chance to finish"
         );
         assert_eq!(
             plan_compaction(hard + 0.01, false, soft, hard),
@@ -1527,7 +1713,7 @@ mod tests {
                 summary: "Earlier work.".to_string(),
             }));
             context.push_user("new source ".repeat(400));
-            context.push_assistant("finished".to_string(), AssistantStatus::Complete);
+            context.push_assistant("finished answer ".repeat(100), AssistantStatus::Complete);
             let transcript = context.messages().to_vec();
             let recorded = Arc::new(Mutex::new(Vec::new()));
             let engine: Arc<dyn Engine> = Arc::new(crate::llm::EngineImpl::new(
@@ -1634,66 +1820,26 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn oversized_child_result_summary_uses_expected_task_and_fits_parent_budget() {
-        let recorded = Arc::new(Mutex::new(Vec::new()));
-        let engine: Arc<dyn Engine> = Arc::new(crate::llm::EngineImpl::new(
-            Arc::new(RecordingSummaryProvider {
-                recorded: Arc::clone(&recorded),
-                reply: "Keep the finding and path.".to_string(),
-            }),
-            crate::llm::EngineConfig {
-                provider_connection: "mock".to_string(),
-                model: "summary-model".to_string(),
-                temperature: None,
-                context_length: Some(16_000),
-                api_base_url: None,
-                api_key: None,
-                reasoning: None,
-                compact_target_ratio: 0.5,
-                soft_compaction_threshold: 0.7,
-                hard_compaction_threshold: 0.9,
-            },
-        ));
-
-        let summary = summarize_result_for_parent(
-            engine,
-            "Preserve the persistence findings.",
-            "Find the persistence invariant in src/store.rs",
-            &"verbose child report ".repeat(200),
-            16,
-            None,
-            Duration::from_secs(1),
-        )
-        .await
-        .expect("child result summary");
-
-        assert_eq!(summary, "Keep the finding and path.");
-        let requests = recorded.lock().expect("recording mutex");
-        for request in requests.iter() {
-            assert!(matches!(
-                request.messages.first(),
-                Some(Message::System { content })
-                    if content.starts_with("Preserve the persistence findings.")
-                        && content.ends_with(&summary_request_framing())
-            ));
-            assert!(matches!(
-                request.messages.last(),
-                Some(Message::User { content, .. }) if content == COMPACTION_SUMMARY_TRIGGER
-            ));
-        }
-        assert!(requests.iter().any(|request| {
-            request.messages.iter().any(|message| {
-                matches!(
-                    message,
-                    Message::System { content }
-                        if content.contains("Find the persistence invariant in src/store.rs")
-                )
-            })
-        }));
+    #[test]
+    fn oversized_child_report_projection_is_marked_and_bounded() {
+        let message = Message::User {
+            content: "verbose child report ".repeat(200),
+            kind: UserMessageKind::ImplicitToolNote,
+        };
+        let projection =
+            recovery::project_body(crate::llm::TokenEstimator::Tiktoken, &message, 256)
+                .expect("report projection");
         assert!(
-            crate::llm::TokenEstimator::Tiktoken.estimate_tokens(&summary) <= 16,
-            "summary must fit the supplied root-result budget"
+            crate::agent::estimate_message_tokens(
+                crate::llm::TokenEstimator::Tiktoken,
+                &projection
+            ) <= 256
+        );
+        assert!(
+            matches!(projection, Message::User { content, .. } if content.contains(recovery::RESULT_OMISSION_MARKER))
+        );
+        assert!(
+            matches!(message, Message::User { content, .. } if content == "verbose child report ".repeat(200))
         );
     }
 
@@ -1827,7 +1973,7 @@ mod tests {
         .await;
 
         assert!(
-            matches!(outcome, CompactionOutcome::SummaryFailed { generation: 3, ref reason } if reason.contains("timed out"))
+            matches!(outcome, CompactionOutcome::SummaryFailed { generation: 3, ref reason, .. } if reason.contains("timed out"))
         );
         assert_eq!(
             recorded_failure

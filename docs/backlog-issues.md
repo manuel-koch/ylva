@@ -52,3 +52,39 @@
       against status polling, which feels like a good thing since it can be counterproductive. I’ll just have to
       be patient and rely on the updates.▊
       ```
+
+- [ ] LLM spawned subagent and instead of using its result, root agent
+      just stated:
+      "The subagent completed the analysis without editing files.
+      Its findings are in the Markdown table above."
+      We already have a guideline for the agent to not assume that
+      subagent result is visible to the user.
+      See tests/e2e/custom/logs/tui_20261006202130.log
+
+- [ ] Test run now take 2-3x times longer. Can we investigate why
+      and whether that could be improved again ?
+
+- [x] LLM spawned subagent and is constantly thinking and waiting for the
+      result musing/thinking what it should do in the meantime.
+      See tests/e2e/custom/logs/tui_20261006203945.log
+      ```text
+      I’m wondering if the automatic results are delivered only after I produce the final output.
+      But from the tool API description, it states that "the harness delivers each subagent's
+      completion automatically once it is ready." So, I guess I don’t need to worry about it.
+      That’s good to know! It helps clarify how the process works and what I can expect.
+      ```
+      ```text
+      I think we're waiting too long. It seems possible that each task has a 300-second command
+      timeout due to agents searching through many files. But, you know, eventually, we're going to
+      get through it. I just want to make sure everything runs smoothly and efficiently. I hope
+      things speed up soon! It’s a bit frustrating, but I'm staying optimistic that we'll get the
+      results we're looking for.▊
+      ```
+
+- [x] Looks like TUI hints from compaction like "── compaction · 15 messages
+      summarized ──" end up in the root agent conversation although they
+      stem from a subagent conversation.
+      See tests/e2e/custom/logs/tui_20261006203945.log
+
+- [ ] Tool spawn_subagent doesn't show the current running duration in
+      parent/child conversation while the subagent is running.

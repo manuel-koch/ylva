@@ -122,13 +122,26 @@ impl WebSearchResult {
         for hit in &mut hits {
             hit.snippet = truncate_chars(&hit.snippet, WEB_SEARCH_SNIPPET_MAX_CHARS);
         }
-        let text = hits
-            .iter()
+        let text = Self::format_text(&hits);
+        WebSearchResult { hits, text }
+    }
+
+    fn format_text(hits: &[WebSearchHit]) -> String {
+        hits.iter()
             .enumerate()
             .map(|(index, hit)| format!("{}. {}\n   {}", index + 1, hit.title, hit.url))
             .collect::<Vec<_>>()
-            .join("\n");
-        WebSearchResult { hits, text }
+            .join("\n")
+    }
+
+    /// Drop the lowest-ranked hits until the text fits the runtime context
+    /// allowance, keeping metadata and text consistent.
+    fn fit_to_token_budget(&mut self, max_output_tokens: usize) {
+        let estimator = crate::llm::TokenEstimator::Tiktoken;
+        while estimator.estimate_tokens(&self.text) > max_output_tokens && self.hits.pop().is_some()
+        {
+            self.text = Self::format_text(&self.hits);
+        }
     }
 }
 
@@ -232,6 +245,7 @@ pub struct WebSearchCall {
     id: uuid::Uuid,
     raw_arguments: Value,
     tool: WebSearchTool,
+    runtime_output_token_limit: Option<usize>,
 }
 
 impl ToolCall for WebSearchCall {
@@ -255,6 +269,10 @@ impl ToolCall for WebSearchCall {
         self.tool.timeout_secs()
     }
 
+    fn set_runtime_output_token_limit(&mut self, max_output_tokens: Option<usize>) {
+        self.runtime_output_token_limit = max_output_tokens;
+    }
+
     fn non_default_redacted_arguments(&self) -> Vec<(String, Value)> {
         self.raw_arguments
             .as_object()
@@ -274,6 +292,7 @@ impl ToolCall for WebSearchCall {
                 let WebSearchCall {
                     raw_arguments,
                     tool,
+                    runtime_output_token_limit,
                     ..
                 } = *self;
                 let args = serde_json::from_value::<WebSearchInputArgs>(raw_arguments).map_err(
@@ -294,7 +313,11 @@ impl ToolCall for WebSearchCall {
                     .search(&args.terms, limit)
                     .await
                     .map_err(|error| ToolError::failed(WebSearchTool::NAME, error.to_string()))?;
-                Ok(Box::new(WebSearchResult::new(hits)) as Box<dyn ToolCallResult>)
+                let mut result = WebSearchResult::new(hits);
+                if let Some(max_output_tokens) = runtime_output_token_limit {
+                    result.fit_to_token_budget(max_output_tokens);
+                }
+                Ok(Box::new(result) as Box<dyn ToolCallResult>)
             }
             .instrument(span),
         )
@@ -419,6 +442,7 @@ impl Tool for WebSearchTool {
             id,
             raw_arguments: arguments,
             tool: self.clone(),
+            runtime_output_token_limit: None,
         })
     }
 }

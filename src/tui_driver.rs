@@ -196,9 +196,11 @@ fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
             source: *source,
         }),
         UiUpdate::CompactionApplied {
+            run_id,
             entry_index,
             summarized_messages,
         } => Some(DomainEvent::CompactionApplied {
+            run_id: *run_id,
             entry_index: *entry_index,
             summarized_messages: *summarized_messages,
         }),
@@ -371,13 +373,18 @@ async fn execute_effects(
                 // the rows the overlay draws on are taken over by the
                 // approval footer / clarify banner for the pause's duration.
                 let slash_overlay = state.slash_overlay.clone();
-                state.pending_input_snapshot = Some(InputSnapshot {
+                state.pending_input_snapshot.get_or_insert(InputSnapshot {
                     input_lines,
                     slash_overlay,
                 });
                 state.slash_overlay = SlashOverlay::Hidden;
             }
             Effect::RestoreInputState => {
+                if state.is_approval_pending() {
+                    *textarea = TextArea::default();
+                    configure_textarea(textarea);
+                    continue;
+                }
                 let snapshot = state.pending_input_snapshot.take();
                 *textarea = if let Some(InputSnapshot {
                     input_lines: Some(lines),
@@ -425,6 +432,7 @@ async fn execute_effects(
                 }
             }
             Effect::ApproveTool { id } => {
+                state.apply_tool_approved(id);
                 let run_id = pending_run_ids.tool_run_ids.remove(&id);
                 let _ = cmd_tx.try_send(route_command(run_id, AgentCommand::ApproveTool { id }));
             }
@@ -529,15 +537,18 @@ fn prepare_child_replay_effects(
         match effect {
             Effect::LoadChildTranscript { run_id } => {
                 if state.child_needs_lazy_load(run_id) {
-                    let messages = match store {
+                    let (messages, compaction_boundary) = match store {
                         Some(store) => {
                             let path = crate::store::session_path(
                                 store.chats_root(),
                                 store.project_key(),
                                 run_id,
                             );
-                            match crate::store::Store::read_messages(&path) {
-                                Ok(messages) => messages,
+                            match crate::store::Store::read_session_state(&path) {
+                                Ok(session_state) => (
+                                    session_state.messages,
+                                    session_state.compaction_transcript_boundary,
+                                ),
                                 Err(error) => {
                                     tracing::warn!(
                                         %error,
@@ -545,13 +556,13 @@ fn prepare_child_replay_effects(
                                         %run_id,
                                         "could not replay child transcript"
                                     );
-                                    Vec::new()
+                                    (Vec::new(), None)
                                 }
                             }
                         }
-                        None => Vec::new(),
+                        None => (Vec::new(), None),
                     };
-                    state.load_child_messages(run_id, &messages);
+                    state.load_child_messages(run_id, &messages, compaction_boundary);
                 }
                 state.switch_to_child_view(run_id);
             }
@@ -1917,7 +1928,7 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::llm::engine::DEFAULT_CONTEXT_LENGTH;
-    use crate::tui_reducer_state::{ChatEntry, ToolCallState};
+    use crate::tui_reducer_state::{ChatEntry, ConversationView, ToolCallState};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tokio::sync::mpsc;
     use uuid::Uuid;
@@ -1950,6 +1961,97 @@ mod tests {
             format_terminal_title(Some("Title\u{001b} \nwith controls")),
             "Title with controls - Ylva Agent Harness"
         );
+    }
+
+    #[tokio::test]
+    async fn replayed_child_restores_its_compaction_marker_on_first_drill_in() {
+        use crate::agent::{AssistantStatus, Message, UserMessageKind};
+        use crate::tui_reducer_state::{ChildConversation, ChildRunInfo};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = crate::store::Store::create(
+            &temp.path().join("chats"),
+            temp.path(),
+            Uuid::new_v4(),
+            "mock",
+            "conversation",
+            None,
+        )
+        .expect("parent store created");
+        let run_id = Uuid::new_v4();
+        let messages = vec![
+            Message::User {
+                content: "inspect the patch".to_string(),
+                kind: UserMessageKind::Explicit,
+            },
+            Message::User {
+                content: "hidden harness note".to_string(),
+                kind: UserMessageKind::ImplicitToolNote,
+            },
+            Message::Assistant {
+                content: "retained reply".to_string(),
+                status: AssistantStatus::Complete,
+                tool_calls: vec![],
+            },
+        ];
+        let child_store = store
+            .write_child_transcript_for_run_store(run_id, None, &messages)
+            .await
+            .expect("child transcript written");
+        child_store.record_compaction(2, 1, "old summary");
+        child_store.record_compaction(3, 1, "latest summary");
+        child_store.flush().await;
+
+        let mut state = AppState::new();
+        state.chat_entries.push(ChatEntry::UserMessage {
+            text: "root request".to_string(),
+            state: UserMessageState::Sent,
+        });
+        let root_entries = state.chat_entries.clone();
+        state.child_conversations.insert(
+            run_id,
+            ChildConversation::new_replay(ChildRunInfo {
+                run_id,
+                bubble_id: Uuid::new_v4(),
+                agent_type: "research".to_string(),
+                task: "inspect the patch".to_string(),
+                label: "Inspect".to_string(),
+            }),
+        );
+        assert!(state.child_conversations[&run_id].messages.is_empty());
+
+        assert!(prepare_child_replay_effects(
+            &mut state,
+            vec![Effect::LoadChildTranscript { run_id }],
+            Some(&store),
+        )
+        .is_empty());
+        assert_eq!(
+            state.child_conversations[&run_id].messages,
+            vec![
+                ChatEntry::UserMessage {
+                    text: "inspect the patch".to_string(),
+                    state: UserMessageState::Sent,
+                },
+                ChatEntry::CompactionMarker {
+                    summarized_messages: 2,
+                },
+                ChatEntry::AssistantMessage {
+                    text: "retained reply".to_string(),
+                    interrupted: false,
+                },
+            ],
+            "the latest persisted cut uses transcript indices, not rendered entry indices"
+        );
+        assert_eq!(state.chat_entries, root_entries);
+        assert!(!state.child_needs_lazy_load(run_id));
+        let loaded_entries = state.child_conversations[&run_id].messages.clone();
+        prepare_child_replay_effects(
+            &mut state,
+            vec![Effect::LoadChildTranscript { run_id }],
+            Some(&store),
+        );
+        assert_eq!(state.child_conversations[&run_id].messages, loaded_entries);
     }
 
     #[tokio::test]
@@ -2190,6 +2292,7 @@ mod tests {
             &cmd_tx,
             &textarea_context,
             &UiUpdate::CompactionApplied {
+                run_id: None,
                 entry_index: 2,
                 summarized_messages: 2,
             },
@@ -2221,6 +2324,7 @@ mod tests {
             &cmd_tx,
             &repeat_context,
             &UiUpdate::CompactionApplied {
+                run_id: None,
                 entry_index: 2,
                 summarized_messages: 2,
             },
@@ -2238,6 +2342,125 @@ mod tests {
             1,
             "the same boundary is marked once"
         );
+    }
+
+    #[tokio::test]
+    async fn child_compaction_marker_does_not_enter_the_root_transcript() {
+        let (mut state, mut textarea, cmd_tx, _cmd_rx) = setup();
+        let run_ids = [Uuid::new_v4(), Uuid::new_v4()];
+        for run_id in run_ids {
+            let mut conversation = crate::tui_reducer_state::ChildConversation::new(
+                crate::tui_reducer_state::ChildRunInfo {
+                    run_id,
+                    bubble_id: Uuid::new_v4(),
+                    agent_type: "default".to_string(),
+                    task: "Inspect material".to_string(),
+                    label: "Inspect".to_string(),
+                },
+            );
+            conversation.messages.push(ChatEntry::AssistantMessage {
+                text: "retained reply".to_string(),
+                interrupted: false,
+            });
+            state.child_conversations.insert(run_id, conversation);
+        }
+        let root_entries = state.chat_entries.clone();
+        let textarea_context = textarea_ctx_from(&textarea);
+        for active_view in [
+            ConversationView::Root,
+            ConversationView::Child {
+                run_id: run_ids[0],
+                agent_type: "default".to_string(),
+                task: "Inspect material".to_string(),
+                label: "Inspect".to_string(),
+            },
+        ] {
+            state.active_view = active_view.clone();
+            for run_id in run_ids {
+                process_one_update(
+                    &mut state,
+                    &mut textarea,
+                    &cmd_tx,
+                    &textarea_context,
+                    &UiUpdate::CompactionApplied {
+                        run_id: Some(run_id),
+                        entry_index: 0,
+                        summarized_messages: 15,
+                    },
+                    &mut MouseDrag::default(),
+                    &mut NoopClipboard,
+                    &mut PendingRunIds::default(),
+                )
+                .await;
+            }
+            assert_eq!(state.active_view, active_view);
+        }
+
+        assert_eq!(
+            state.chat_entries, root_entries,
+            "a forwarded child compaction must not add a root marker"
+        );
+        for run_id in run_ids {
+            assert_eq!(
+                state.child_conversations[&run_id].messages,
+                vec![
+                    ChatEntry::CompactionMarker {
+                        summarized_messages: 15,
+                    },
+                    ChatEntry::AssistantMessage {
+                        text: "retained reply".to_string(),
+                        interrupted: false,
+                    },
+                ],
+                "duplicate suppression is scoped to each child"
+            );
+        }
+
+        process_one_update(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            &textarea_context,
+            &UiUpdate::CompactionApplied {
+                run_id: None,
+                entry_index: 0,
+                summarized_messages: 15,
+            },
+            &mut MouseDrag::default(),
+            &mut NoopClipboard,
+            &mut PendingRunIds::default(),
+        )
+        .await;
+        assert_eq!(
+            state.chat_entries,
+            vec![ChatEntry::CompactionMarker {
+                summarized_messages: 15,
+            }],
+            "root compaction still routes to root while viewing a child"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_child_compaction_marker_does_not_enter_the_root_transcript() {
+        let (mut state, mut textarea, cmd_tx, _cmd_rx) = setup();
+        let textarea_context = textarea_ctx_from(&textarea);
+        process_one_update(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            &textarea_context,
+            &UiUpdate::CompactionApplied {
+                run_id: Some(Uuid::new_v4()),
+                entry_index: 0,
+                summarized_messages: 15,
+            },
+            &mut MouseDrag::default(),
+            &mut NoopClipboard,
+            &mut PendingRunIds::default(),
+        )
+        .await;
+        assert!(state.chat_entries.is_empty());
+        assert!(state.child_conversations.is_empty());
     }
 
     #[tokio::test]
@@ -2859,6 +3082,111 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn overlapping_approvals_resume_root_and_preserve_input() {
+        for approve_child in [true, false] {
+            let (mut state, _, cmd_tx, mut cmd_rx) = setup();
+            state.mode = TuiMode::Streaming;
+            let mut textarea = TextArea::from(vec!["unfinished draft".to_string()]);
+            let root_tool_id = uuid::Uuid::new_v4();
+            let child_tool_id = uuid::Uuid::new_v4();
+            let child_run_id = uuid::Uuid::new_v4();
+            state.start_child_run(crate::tui_reducer_state::ChildRunInfo {
+                run_id: child_run_id,
+                bubble_id: uuid::Uuid::new_v4(),
+                agent_type: "reviewer".to_string(),
+                task: "review".to_string(),
+                label: "Review".to_string(),
+            });
+            let mut pending_run_ids = PendingRunIds::default();
+            for (id, run_id) in [(root_tool_id, None), (child_tool_id, Some(child_run_id))] {
+                let context = textarea_ctx_from(&textarea);
+                process_one_update(
+                    &mut state,
+                    &mut textarea,
+                    &cmd_tx,
+                    &context,
+                    &UiUpdate::ToolPending {
+                        id,
+                        name: "bash".to_string(),
+                        arguments: serde_json::json!({"command": "echo ready"}),
+                        content_sections: vec![],
+                        title_arguments: vec![],
+                        run_id,
+                    },
+                    &mut MouseDrag::default(),
+                    &mut NoopClipboard,
+                    &mut pending_run_ids,
+                )
+                .await;
+            }
+            let context = textarea_ctx_from(&textarea);
+            let effects = presenter::update(
+                &mut state,
+                TuiEvent::Input(if approve_child {
+                    InputEvent::KeyInput(key_event(KeyCode::Enter))
+                } else {
+                    InputEvent::Escape
+                }),
+                &context,
+            );
+            execute_effects(
+                &mut state,
+                &mut textarea,
+                &cmd_tx,
+                effects,
+                &mut MouseDrag::default(),
+                &mut NoopClipboard,
+                &mut pending_run_ids,
+            )
+            .await;
+            assert!(matches!(
+                cmd_rx.try_recv(),
+                Ok(AgentCommand::ForChild { run_id, command })
+                    if run_id == child_run_id
+                        && if approve_child {
+                            matches!(*command, AgentCommand::ApproveTool { id } if id == child_tool_id)
+                        } else {
+                            matches!(*command, AgentCommand::DenyTool { id, .. } if id == child_tool_id)
+                        }
+            ));
+            assert!(
+                matches!(state.focus, Focus::ToolApproval { tool_id, .. } if tool_id == root_tool_id),
+                "root approval must remain actionable after approving the child: {:?}",
+                state.focus
+            );
+            assert_eq!(
+                state.active_view,
+                crate::tui_reducer_state::ConversationView::Root
+            );
+            assert_eq!(state.agent_mode(), crate::AgentMode::ToolPending);
+            assert_eq!(textarea.lines(), &[""]);
+
+            let context = textarea_ctx_from(&textarea);
+            let effects = presenter::update(
+                &mut state,
+                TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+                &context,
+            );
+            execute_effects(
+                &mut state,
+                &mut textarea,
+                &cmd_tx,
+                effects,
+                &mut MouseDrag::default(),
+                &mut NoopClipboard,
+                &mut pending_run_ids,
+            )
+            .await;
+            assert_eq!(
+                cmd_rx.try_recv(),
+                Ok(AgentCommand::ApproveTool { id: root_tool_id })
+            );
+            assert_eq!(state.focus, Focus::MainInput);
+            assert_eq!(textarea.lines(), &["unfinished draft"]);
+        }
+    }
+
+    #[tokio::test]
     async fn approval_enter_sends_approve_tool() {
         let (mut state, mut textarea, cmd_tx, mut cmd_rx) = setup();
         let tool_id = uuid::Uuid::new_v4();
@@ -3001,12 +3329,17 @@ mod tests {
         );
         assert_eq!(textarea.lines(), &[""]);
 
-        // Restore
+        let context = textarea_ctx_from(&textarea);
+        let effects = presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+            &context,
+        );
         execute_effects(
             &mut state,
             &mut textarea,
             &cmd_tx,
-            vec![Effect::RestoreInputState],
+            effects,
             &mut MouseDrag::default(),
             &mut NoopClipboard,
             &mut PendingRunIds::default(),
@@ -4553,28 +4886,64 @@ mod tests {
 
     #[tokio::test]
     async fn clear_resets_the_transcript_and_tells_the_agent_to_start_a_new_session() {
-        let (mut state, _textarea, cmd_tx, mut cmd_rx) = setup();
-        let engine: Arc<dyn Engine> = StubEngine::with_models(&[], "large");
-        state.push_user_bubble("earlier question".to_string(), UserMessageState::Sent);
+        for command in ["/clear", "/reset"] {
+            let (mut state, mut textarea, cmd_tx, mut cmd_rx) = setup();
+            let engine: Arc<dyn Engine> = StubEngine::with_models(&[], "large");
+            state.push_user_bubble("earlier question".to_string(), UserMessageState::Sent);
+            let textarea_context = textarea_ctx_from(&textarea);
+            presenter::update(
+                &mut state,
+                TuiEvent::Domain(DomainEvent::ContextUsage {
+                    estimated_tokens: 38_000,
+                    context_length: 98_000,
+                    source: crate::tui_reducer_state::ContextUsageSource::SerializedRequest,
+                }),
+                &textarea_context,
+            );
+            assert_eq!(
+                state
+                    .active_context_usage()
+                    .map(crate::tui_reducer_state::format_context_usage_readout),
+                Some("38.0K (39%)".to_string())
+            );
+            let (slash_effects, _) =
+                split_slash_effects(submit(&mut state, &mut textarea, command));
 
-        execute_slash_effects(
-            &mut state,
-            vec![Effect::ClearConversation],
-            &engine,
-            &cmd_tx,
-        )
-        .await;
+            execute_slash_effects(&mut state, slash_effects, &engine, &cmd_tx).await;
 
-        assert!(matches!(
-            state.chat_entries.as_slice(),
-            [crate::tui_reducer_state::ChatEntry::Notice { .. }]
-        ));
-        // The prompt stays recallable with ↑ even though the transcript is gone.
-        assert_eq!(state.input_history, vec!["earlier question".to_string()]);
-        assert!(matches!(
-            cmd_rx.try_recv().expect("a clear command"),
-            AgentCommand::ClearContext
-        ));
+            assert_eq!(
+                state.active_context_usage(),
+                None,
+                "{command} must discard the previous session's footer readout"
+            );
+            assert!(matches!(
+                state.chat_entries.as_slice(),
+                [crate::tui_reducer_state::ChatEntry::Notice { .. }]
+            ));
+            // The prompt stays recallable with ↑ even though the transcript is gone.
+            assert_eq!(state.input_history, vec!["earlier question".to_string()]);
+            assert!(matches!(
+                cmd_rx.try_recv().expect("a clear command"),
+                AgentCommand::ClearContext
+            ));
+            let textarea_context = textarea_ctx_from(&textarea);
+            presenter::update(
+                &mut state,
+                TuiEvent::Domain(DomainEvent::ContextUsage {
+                    estimated_tokens: 1_000,
+                    context_length: 98_000,
+                    source: crate::tui_reducer_state::ContextUsageSource::SerializedRequest,
+                }),
+                &textarea_context,
+            );
+            assert_eq!(
+                state
+                    .active_context_usage()
+                    .map(crate::tui_reducer_state::format_context_usage_readout),
+                Some("1.0K (1%)".to_string()),
+                "the new session must still show its own estimate"
+            );
+        }
     }
 
     #[tokio::test]

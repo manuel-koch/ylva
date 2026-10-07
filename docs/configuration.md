@@ -276,12 +276,13 @@ changing the profile. Ylva includes a built-in prompt in
 [`src/config/compaction_prompt.rs`](../src/config/compaction_prompt.rs).
 
 Custom files only need summary guidelines. Ylva supplies the request framing
-and generation trigger automatically for both conversation compaction and
-subagent-handoff summarization; custom prompts do not need to include them.
+and generation trigger automatically for conversation compaction; custom prompts
+do not need to include them. Oversized child reports use marked deterministic
+model-only reduction, not a separate blocking summary request.
 
 Conversation compaction supplies an immutable prefix snapshot. The compact
-engine stays tool-free and receives only that prefix, while Ylva retains the
-recent verbatim tail separately.
+engine stays tool-free and receives the prior summary/recovery handoff plus the
+newly eligible completed prefix, while Ylva retains the recent tail separately.
 
 ### Agent-type files
 
@@ -366,9 +367,9 @@ the provider.
 | `api_base_url` | string (optional) | Optional engine-level override for the connection's base URL. |
 | `api_key` | string (optional) | Optional engine-level override for the connection's API key. |
 | `reasoning` | string (optional) | Initial explicit reasoning effort applied when the engine is constructed. Omitted uses the provider's own default. Validated once, lazily before the first chat, against the model catalog: an advertised value is kept; a value the model does not advertise (including models that expose no selectable alternatives at all) is dropped to the provider default with a warning naming the model and effort; when the model is absent from the catalog or the catalog fetch fails, the value is kept unvalidated. Later changes go through `/models`, which validates the effort against the model's advertised options before switching. |
-| `compact_target_ratio` | number (optional) | Fraction of the effective context window that a compaction shrinks the model view to (default `0.5`). Must be `> 0` and `≤ 1`, and strictly below `soft_compaction_threshold`. |
-| `soft_compaction_threshold` | number (optional) | Fraction of the effective context window at or above which a completed turn starts a background compaction summary (default `0.7`). Must be `> 0` and `≤ 1`, and strictly below `hard_compaction_threshold`. |
-| `hard_compaction_threshold` | number (optional) | Fraction of the effective context window above which the model-view prefix is dropped synchronously instead of waiting for a summary (default `0.9`). Must be `> 0` and `≤ 1`. |
+| `compact_target_ratio` | number (optional) | Best-effort model-view target as a fraction of the effective window (default `0.5`). Task continuity takes priority when the separate safe request ceiling already fits. Must be `> 0` and `≤ 1`, and strictly below `soft_compaction_threshold`. |
+| `soft_compaction_threshold` | number (optional) | Fraction of the effective window at or above which a completed turn or tool outcome schedules a useful completed-prefix summary (default `0.7`). Soft pressure alone does not cancel running tools. Must be `> 0` and `≤ 1`, and strictly below `hard_compaction_threshold`. |
+| `hard_compaction_threshold` | number (optional) | Fraction above which a continuation waits for an existing summary within its remaining original deadline, then recovers lossily if necessary (default `0.9`). Every request also fits the separate local safe ceiling. Must be `> 0` and `≤ 1`. |
 
 For example, select a local summarizer and allow more time for its requests:
 

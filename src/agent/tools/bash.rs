@@ -205,6 +205,20 @@ pub struct BashCall {
     id: uuid::Uuid,
     raw_arguments: Value,
     timeout_secs: u64,
+    runtime_output_token_limit: Option<usize>,
+}
+
+impl BashResult {
+    /// Keep the head of the output within the runtime context allowance and
+    /// flag it as truncated.
+    fn truncate_to_token_budget(&mut self, max_output_tokens: usize) {
+        let (output, truncated) =
+            crate::llm::TokenEstimator::Tiktoken.truncate(&self.output, max_output_tokens);
+        if truncated {
+            self.output = output;
+            self.truncated = true;
+        }
+    }
 }
 
 impl ToolCall for BashCall {
@@ -244,6 +258,10 @@ impl ToolCall for BashCall {
         label_and_command_display_sections(command, label)
     }
 
+    fn set_runtime_output_token_limit(&mut self, max_output_tokens: Option<usize>) {
+        self.runtime_output_token_limit = max_output_tokens;
+    }
+
     fn timeout_secs(&self) -> u64 {
         // Return internal timeout plus a grace period so the outer wrapper
         // timeout in agent.rs always fires after bash's own internal timeout,
@@ -268,12 +286,18 @@ impl ToolCall for BashCall {
         let span = tracing::info_span!("tool_args", args = %serialized);
         Box::pin(
             async move {
+                let runtime_output_token_limit = self.runtime_output_token_limit;
                 let args = serde_json::from_value::<BashInputArgs>(self.raw_arguments).map_err(
                     |error| ToolError::failed("bash", format!("invalid arguments: {error}")),
                 )?;
-                run_bash(args, self.timeout_secs)
-                    .await
-                    .map(|result| -> Box<dyn ToolCallResult> { Box::new(result) })
+                run_bash(args, self.timeout_secs).await.map(
+                    |mut result| -> Box<dyn ToolCallResult> {
+                        if let Some(max_output_tokens) = runtime_output_token_limit {
+                            result.truncate_to_token_budget(max_output_tokens);
+                        }
+                        Box::new(result)
+                    },
+                )
             }
             .instrument(span),
         )
@@ -397,6 +421,7 @@ impl Tool for BashTool {
             id,
             raw_arguments: arguments,
             timeout_secs: self.timeout_secs(),
+            runtime_output_token_limit: None,
         })
     }
 }

@@ -1085,7 +1085,8 @@ async fn real_provider_surfaces_tool_call_delta_over_http() {
 
 #[tokio::test]
 async fn agent_loop_rejects_model_response_with_too_many_tool_calls() {
-    const MAX_TOOL_CALLS_PER_RESPONSE: usize = 128;
+    use ylva::MAX_TOOL_CALLS_PER_RESPONSE;
+    assert_eq!(MAX_TOOL_CALLS_PER_RESPONSE, 12);
     let frames = (0..=MAX_TOOL_CALLS_PER_RESPONSE)
         .map(|index| tool_call_frame(index, "read", "{}"))
         .collect();
@@ -1126,7 +1127,7 @@ async fn agent_loop_rejects_model_response_with_too_many_tool_calls() {
     );
     assert!(chat_requests[1]["messages"]
         .to_string()
-        .contains("exceeded the limit of 128 tool calls. None of those calls were executed"));
+        .contains("exceeded the limit of 12 tool calls. None of those calls were executed"));
     assert!(updates.iter().any(|update| matches!(
         update,
         UiUpdate::AppendText(text) if text == "Recovered after the rejected batch."

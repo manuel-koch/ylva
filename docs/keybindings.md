@@ -10,9 +10,18 @@ The context-usage readout stays right-aligned on the second footer row,
 including beside tool-approval buttons. On narrow terminals it is omitted
 rather than overwriting the controls.
 
+While a bounded continuation waits for an existing context summary, normal
+interrupt controls and `/clear` remain responsive. `Compacting…` is scoped to
+the displayed root/child conversation; successful summaries keep it active until
+safe application, while failure, timeout, stop, and clear remove it.
+
 While the main conversation is shown, the footer also reports separate
 running and queued subagent counts in a compact label such as
 `Subagents: 1 running, 1 queued`; finished subagents are not included.
+
+When root and subagent tool approvals overlap, approving or denying one
+restores the controls for another outstanding approval in its owning
+conversation. The original draft returns after all approvals are resolved.
 
 ## TUI keybindings (Phase 4)
 

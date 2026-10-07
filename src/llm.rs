@@ -306,22 +306,22 @@ pub trait Provider: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[schemars(title = "ToolResponseEnvelope")]
 pub struct ToolEnvelope {
-    ok: bool,
+    pub(crate) ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<String>,
+    pub(crate) result: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+    pub(crate) error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    result_metadata: Option<serde_json::Value>,
+    pub(crate) result_metadata: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    result_metadata_schema: Option<serde_json::Value>,
+    pub(crate) result_metadata_schema: Option<serde_json::Value>,
 }
 
 impl ToolEnvelope {
     /// Serialize this envelope to a JSON string for a `role:"tool"` message's
     /// `content`. The struct only holds strings/bools, so serialization never
     /// fails.
-    fn to_string_checked(&self) -> String {
+    pub(crate) fn to_string_checked(&self) -> String {
         serde_json::to_string(self).expect("ToolEnvelope always serializes")
     }
 }

@@ -166,9 +166,25 @@ summarized message stays in the file (the transcript is never pruned).
 | Field | Description |
 | --- | --- |
 | `compacted_at` | RFC 3339 UTC timestamp, millisecond precision. |
-| `boundary` | First transcript index kept verbatim as the tail, counted in the **live model context** — the rebuilt leading system prompts, which are never persisted, occupy the first slots. This is the value the context restore uses to rebuild the model view. |
+| `boundary` | First retained tail index in the **live model context**, including the leading system block. Current restore rebases `transcript_boundary` against rebuilt systems rather than assuming this live coordinate stays unchanged. |
 | `transcript_boundary` | The same cut in **persisted-transcript coordinates**: the system prompts excluded, so it indexes this file's `message` records directly. The TUI reads this to place its compaction marker without building a model context. `None` (omitted) for events written before the marker existed — those snapshots replay without a marker. |
 | `summary` | The compact-engine text representing `[..boundary]`. On resume it is projected as one marked user message ahead of the verbatim tail; it is never inserted into the transcript itself. |
+
+### `model_projection`
+
+Written whenever the bounded model view changes, before dispatch or after a safe
+compaction sweep. Canonical `message` records and UI sections are never replaced.
+Replay chooses the highest `projection_revision`, including updates at an
+unchanged boundary. Clone copies these events unchanged.
+
+The `projection` object carries `projection_revision`, `transcript_start`,
+`message_overrides` (transcript-relative index/message pairs), `summary_override`,
+and optional `handoff`/`anchor` messages. Overrides contain bounded model bodies,
+not duplicate rich UI sections. Tool IDs/names and safe boundaries are validated
+on restore; invalid state is logged and ignored. Coordinates exclude leading
+system messages, so rebuilt system blocks may have different lengths. A newer
+summary boundary supersedes obsolete overrides and recovery handoffs. Synthetic
+summaries/anchors are projected only; hydration never appends transcript copies.
 
 ## Schema tolerance
 
@@ -184,7 +200,8 @@ two different scopes, and can drift apart within a single file:
 - `schema_version` lives only on the `meta` header and describes the file as
   a whole. It is written once, at creation, and — as noted above — never
   rewritten, not even across a resume by a newer Ylva build.
-- `version` lives on **every** line (`meta` included) and describes just that
+- `version` lives on event lines (`meta` included), except `model_projection`,
+  which uses its nested `projection_revision` only, and describes just that
   one line's own shape. It is stamped fresh, from the *currently running*
   binary, every time a line is written.
 
@@ -262,7 +279,11 @@ Listing sessions takes no lock — it is a pure read.
   `spawn_subagent` bubble to the child's actual completed state or to a
   terminal error when the child has no result. Replay discovers child
   metadata eagerly, but reads the child's own transcript from the stable
-  run-id session path only on first drill-in. A `ChildStart`/`ChildResult`
+  run-id session path only on first drill-in. That read also restores the
+  latest persisted compaction marker at its transcript-relative boundary;
+  subsequent drill-ins reuse the loaded entries without duplicating the marker.
+  Snapshots without a transcript-relative boundary replay without a marker.
+  A `ChildStart`/`ChildResult`
   record without a `call_id` is legacy data: its bubble keeps the persisted
   running/queued text and is not drillable.
 - **Interrupted tools:** an unanswered non-`spawn_subagent` tool call is

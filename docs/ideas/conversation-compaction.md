@@ -24,6 +24,37 @@ file is independent of request dumps, session persistence, and
 compaction state; it contains no prompt or payload content. See the
 [CLI-options record contract](../cli-options.md#debug).
 
+### Ten-fetch incident and refined behavior
+
+On 2026-10-06, a ten-`web_fetch` batch grew the root's estimated context from
+54,292 to 99,622 against a 98,304-token window. Checks occurred only after the
+batch: no summary started, and the original hard fallback dropped all 41
+non-system messages. The system-only continuation answered
+`What would you like me to do?`. Evidence is the local
+`tests/e2e/custom/logs/tui_20261006174357.log` and adjacent request/response dumps;
+deterministic regressions use generated fixtures, not copied dump contents.
+
+The [refinement plan](../plans/refine-compaction-plan.md) replaces that fallback:
+completed-prefix summaries start after tool outcomes while later tools run;
+only the first six requested positions can execute, without backfill.
+Calls share a measured result allowance and can pause only for an existing
+summary's remaining deadline. Every continuation fits the advisory local safe
+ceiling or fails explicitly. Staged model-only reductions preserve a verbatim
+task anchor unless the ceiling requires disclosed shortening; they never turn
+an active task into a system-only or omission-only request. Original output and
+UI sections remain canonical, and persisted projections restore on resume/clone.
+Failed or inadequate summaries recover lossily rather than looping. Configured
+ratios and timeout defaults are unchanged.
+
+Controlled mock-provider measurements for ten small operations that explicitly
+resubmit only unfinished work: cap six uses two tool batches plus a final-answer
+request (three model requests), four skipped outcomes, ten executions, and no
+lossy recovery; test-only cap four uses three batches plus final answer (four
+requests), eight skipped outcomes, ten executions, and no lossy recovery. Both
+retain the task in every request. These are deterministic synthetic measurements,
+not provider latency/cost measurements or evidence that six is optimal; the
+runtime cap remains six, never adaptive or configurable.
+
 Compaction lifecycle events also report estimated model-view effectiveness:
 token estimates before and after, signed net token savings and percentage
 change, plus projected message counts before and after. The summary can
@@ -41,13 +72,13 @@ the active model's tokenizer:
 - Every model uses `tiktoken-rs` `cl100k_base`, although OpenRouter and Ollama
   serve models with many unrelated tokenizers and OpenAI model families also
   use different encodings.
-- Counts tokenize payload text only. They exclude role/message framing,
-  provider templates, tool definitions, some tool-call serialization details,
-  multimodal token costs, and other server-side input transformations.
-- Context entries cache counts when messages are committed. The model view is
-  rebuilt from a system prompt, optional compaction summary, tool schemas, and
-  the tail, but current cached message totals do not represent that exact
-  serialized request.
+- The model-view estimate includes projected bodies, tool definitions, result
+  envelopes, IDs, metadata, and a small fixed message-framing estimate. It still
+  excludes provider templates, exact multimodal accounting, and other serving
+  transformations; Base64 text counting is not native image/PDF token costing.
+- Context entries cache canonical counts, while overridden bodies,
+  summary/handoff, anchors, and schemas are measured in the current projection.
+  This still does not reproduce the exact serving-side request representation.
 
 These are not merely provider-family differences. The count can differ by
 model, exact request shape, and serving implementation. A context window is

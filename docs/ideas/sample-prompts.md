@@ -380,3 +380,31 @@ using hypothetical token estimates, and any gaps between the documented
 contract and tested behavior.
 
 ---
+
+Run a read-only smoke test of root-agent and subagent Bash tool execution.
+Execute the steps; do not merely describe them.
+
+1. As the root agent, use the Bash tool to run:
+   printf 'ROOT_BASH_START\n'; pwd
+
+2. Launch two subagents, in parallel if supported. Explicitly instruct each
+   subagent to use its own Bash tool, not ask the root agent to run commands:
+   - Subagent A: run `printf 'SUBAGENT_A_BASH\n' ; sleep 10 ; uname -s`
+   - Subagent B: run `printf 'SUBAGENT_B_BASH\n' ; sleep 10 ; printf '42\n'`
+   Each subagent must return the command, actual stdout, and exit status.
+   Do not allow further delegation.
+
+3. Wait for both subagents to finish. Then, as the root agent, use the Bash
+   tool again to run:
+   printf 'ROOT_BASH_END\n'
+
+4. Report a compact table with one row per Bash execution: agent,
+   command, stdout, exit status. Mark the test PASS only if both subagents
+   actually executed their Bash calls and both root Bash calls succeeded.
+   If a required tool is unavailable or execution fails, report FAIL and
+   the reason; do not simulate output or substitute root execution for a
+   subagent's execution.
+
+Do not edit files, install anything, access the network, or change Git state.
+
+---

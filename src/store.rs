@@ -207,6 +207,9 @@ pub enum StoreEvent {
         transcript_boundary: Option<usize>,
         summary: String,
     },
+    ModelProjection {
+        projection: Box<crate::agent::compaction::ModelProjectionSnapshot>,
+    },
 }
 
 /// The `meta` header record written as the first line of every session file.
@@ -295,6 +298,7 @@ pub struct SessionState {
     /// `None` when the session never compacted, or when the snapshot predates
     /// the field.
     pub compaction_transcript_boundary: Option<usize>,
+    pub model_projection: Option<crate::agent::compaction::ModelProjectionSnapshot>,
 }
 
 /// `~/.ylva/chats`, the production root of all persisted sessions.
@@ -999,6 +1003,15 @@ impl Store {
         });
     }
 
+    pub fn record_model_projection(
+        &self,
+        projection: crate::agent::compaction::ModelProjectionSnapshot,
+    ) {
+        self.record_event(StoreEvent::ModelProjection {
+            projection: Box::new(projection),
+        });
+    }
+
     /// Enqueue the `child_start` record written to the **parent** session
     /// before a child run begins (§4G *Persistence*).
     pub fn record_child_start(
@@ -1274,6 +1287,7 @@ impl Store {
         let mut messages = Vec::new();
         let mut compaction: Option<crate::agent::compaction::CompactionSnapshot> = None;
         let mut compaction_transcript_boundary: Option<usize> = None;
+        let mut model_projection: Option<crate::agent::compaction::ModelProjectionSnapshot> = None;
         for event in &events {
             match event {
                 StoreEvent::Message { message, .. } => messages.push(message.clone()),
@@ -1285,15 +1299,25 @@ impl Store {
                 } => {
                     // Append-only supersession: the newest snapshot wins, and
                     // a boundary never rewinds.
-                    let is_newer = compaction
-                        .as_ref()
-                        .is_none_or(|current| *boundary >= current.boundary);
+                    let is_newer = compaction.as_ref().is_none_or(|current| {
+                        match (transcript_boundary, compaction_transcript_boundary) {
+                            (Some(next), Some(previous)) => *next >= previous,
+                            _ => *boundary >= current.boundary,
+                        }
+                    });
                     if is_newer {
                         compaction = Some(crate::agent::compaction::CompactionSnapshot {
                             boundary: *boundary,
                             summary: summary.clone(),
                         });
                         compaction_transcript_boundary = *transcript_boundary;
+                    }
+                }
+                StoreEvent::ModelProjection { projection } => {
+                    if model_projection.as_ref().is_none_or(|current| {
+                        projection.projection_revision > current.projection_revision
+                    }) {
+                        model_projection = Some(projection.as_ref().clone());
                     }
                 }
                 _ => {}
@@ -1304,6 +1328,7 @@ impl Store {
             messages,
             compaction,
             compaction_transcript_boundary,
+            model_projection,
         })
     }
 
@@ -2950,6 +2975,14 @@ mod tests {
             Some(3),
             "replay-only readers get the cut without the system prompts"
         );
+        store.record_compaction(4, 0, "newer prefix after fewer rebuilt systems");
+        store.record_compaction(9, 6, "stale prefix with more rebuilt systems");
+        store.flush().await;
+        let state = Store::read_session_state(store.path()).expect("new state readable");
+        assert_eq!(state.compaction_transcript_boundary, Some(4));
+        let snapshot = state.compaction.expect("latest snapshot");
+        assert_eq!(snapshot.boundary, 4);
+        assert_eq!(snapshot.summary, "newer prefix after fewer rebuilt systems");
     }
 
     #[test]

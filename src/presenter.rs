@@ -1349,14 +1349,25 @@ fn domain_child_lifecycle(state: &mut AppState, event: DomainEvent) -> Vec<Effec
             vec![]
         }
         DomainEvent::CompactionApplied {
+            run_id,
             entry_index,
             summarized_messages,
         } => {
+            let entries = match run_id {
+                Some(run_id) => {
+                    let Some(conversation) = state.child_conversations.get_mut(&run_id) else {
+                        tracing::warn!(%run_id, "compaction marker has no owning child conversation");
+                        return vec![];
+                    };
+                    &mut conversation.messages
+                }
+                None => &mut state.chat_entries,
+            };
             // Mode-independent like the other transcript bookkeeping events:
             // a sweep applies compaction at a settled boundary, whatever the
             // view state happens to be. Duplicate emissions are dropped by
             // the boundary itself — it only ever grows.
-            let already_marked = state.chat_entries.iter().any(|entry| {
+            let already_marked = entries.iter().any(|entry| {
                 matches!(
                     entry,
                     ChatEntry::CompactionMarker {
@@ -1365,8 +1376,8 @@ fn domain_child_lifecycle(state: &mut AppState, event: DomainEvent) -> Vec<Effec
                 )
             });
             if !already_marked {
-                let insert_at = entry_index.min(state.chat_entries.len());
-                state.chat_entries.insert(
+                let insert_at = entry_index.min(entries.len());
+                entries.insert(
                     insert_at,
                     ChatEntry::CompactionMarker {
                         summarized_messages,

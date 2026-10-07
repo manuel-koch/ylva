@@ -100,8 +100,8 @@ _Avoid_: history, chat log
 
 **Model view**:
 The ordered message list actually sent to a model for a request: the leading
-system block, an optional compaction summary, and the verbatim tail after the
-compaction boundary.
+system block, an optional compaction summary/recovery handoff, the latest task
+anchor, and the retained tail with bounded model-only result overrides.
 _Avoid_: prompt payload, request messages
 
 **Tool**:
@@ -150,8 +150,28 @@ _Avoid_: cut point, split index
 
 **Compaction thresholds**:
 The per-engine usage fractions of the context window that decide when to act:
-the soft threshold starts a background summary after a completed turn, the
-hard threshold forces a synchronous drop instead of waiting for one.
+the soft threshold schedules a useful completed-prefix summary after a turn or
+tool outcome. At a hard-limit request boundary, an existing summary gets only
+its remaining deadline before bounded lossy recovery. The target is best-effort;
+the separate safe request ceiling gates every continuation.
+
+**Safe request ceiling**:
+The effective context window minus a 10% reply reserve, 5% safety margin, and
+512 estimated tokens of request overhead. The model view plus schemas must fit
+this advisory local ceiling before dispatch; it is not a provider-token guarantee.
+
+**Result allowance**:
+The remaining safe request budget, shared by unresolved budgeted calls after
+192 estimated tokens of error framing per queued call. Calls need at least
+256 estimated tokens to start; canonical output stays intact while its model
+projection is bounded.
+
+**Batch-count backstop**:
+Only the first six requested tool positions can execute, with no backfill for
+unknown, invalid, denied, or budget-skipped calls. Each skipped call has one
+not-executed outcome; only the model can explicitly resubmit it in a later round.
+The separate stream-accumulation backstop is 12 calls; exceeding it rejects the
+whole response before any tool executes.
 
 **Per-agent compaction settings**:
 An agent type may override the profile's compaction engine and summary timeout.

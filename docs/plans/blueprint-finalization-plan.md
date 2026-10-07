@@ -25,6 +25,10 @@ The decisions for this plan are:
   defaults: `compact_target_ratio` (`0.5`), `soft_compaction_threshold`
   (`0.7`), and `hard_compaction_threshold` (`0.9`), validated at profile load
   to stay in `(0, 1]` and in ascending order.
+  **Superseded recovery policy:** [refine-compaction-plan](./refine-compaction-plan.md)
+  adds mid-batch scheduling, bounded continuation waiting, staged model-only
+  projections and a protected task anchor. The original drop-only fallback must
+  not be used to construct a system-only continuation.
 - Use `[compaction].engine` to summarize an immutable old-prefix snapshot. Keep the
   full transcript and append a compaction snapshot event to the same JSONL
   session. Newer events supersede earlier snapshots through a monotonically
