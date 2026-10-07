@@ -20,7 +20,7 @@ function ylva() {
     export YLVA_TOKEN_USAGE_DUMP_PATH=${LOG_DIR}/token_stats.jsonl
     ${YLVA} --no-tui --color=yes \
             --log-file ${LOG_PATH} \
-            --log-level TRACE --log-format ${LOG_FORMAT} \
+            --log-level DEBUG --log-format ${LOG_FORMAT} \
             | tee ${OUT_PATH}
 }
 
