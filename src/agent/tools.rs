@@ -569,9 +569,8 @@ pub trait Tool: Send + Sync {
 
 /// Central store of every tool the agent may invoke.
 ///
-/// Dynamic filtering (§4D) is a seam: [`ToolRegistry::schemas`] returns every
-/// registered schema today; a future `allowed_tools` filter slots in without
-/// changing the agent loop.
+/// [`ToolRegistry::schemas`] returns every registered schema. Agent
+/// construction restricts the registry to the tools allowed by role and type.
 #[derive(Default)]
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,

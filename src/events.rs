@@ -16,7 +16,7 @@
 //!
 //! `crossterm::event::read()` blocks, so it is pushed onto a
 //! `spawn_blocking` thread and every event forwarded over a bounded `mpsc`
-//! channel. The async TUI loop never blocks on terminal I/O (blueprint §4B).
+//! channel. The async TUI loop never blocks on terminal I/O.
 //!
 //! This module only **maps** raw events to [`AppAction`]s. All context-dependent
 //! interpretation (what `Esc` means, double-press confirm state, tool-approval

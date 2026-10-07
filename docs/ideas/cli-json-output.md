@@ -1,12 +1,12 @@
 # JSON output for the CLI
 
-Deferred from blueprint finalization. The headless CLI currently streams
+The headless CLI currently streams
 assistant text to stdout and has no `--format` flag.
 
 ## Goal
 
 Add `--format json` for scripts that need a structured result instead of
-parsing terminal-oriented text. The blueprint proposes emitting one final JSON
+parsing terminal-oriented text. Emit one final JSON
 object after the run completes.
 
 ## Open questions

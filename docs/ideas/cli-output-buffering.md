@@ -1,8 +1,8 @@
 # CLI output buffering
 
-Deferred from blueprint finalization. The headless CLI currently streams
-assistant text to stdout as it arrives. The blueprint proposes buffering text
-until completion and emitting JSON only after the run finishes.
+The headless CLI currently streams assistant text to stdout as it arrives.
+Consider buffering text until completion; JSON output should be emitted only
+after the run finishes.
 
 ## Open questions
 

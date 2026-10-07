@@ -4228,7 +4228,7 @@ mod tests {
         let _ = tool_id; // used in setup
     }
 
-    // ── slash commands (Phase 7, blueprint §6) ──────────────────────────────
+    // ── slash commands ────────────────────────────────────────────────────
 
     /// Engine double whose model list and switch outcome are scripted, so the
     /// `/models` flow can be exercised without a provider.

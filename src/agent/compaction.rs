@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Automatic context compaction for root conversations (blueprint §4C;
-//! `docs/ideas/conversation-compaction.md`).
+//! Automatic context compaction for root and child conversations.
+//! See `docs/implementation-notes.md` for scheduling and recovery mechanics.
 //!
 //! The transcript in [`Context`](crate::agent::Context) is never rewritten.
 //! Compaction only changes the *model view*: the leading system instructions
@@ -42,16 +42,14 @@ use tokio::sync::{mpsc, Mutex};
 pub const DEFAULT_COMPACTION_TIMEOUT_SECS: u64 = 60;
 
 /// Default usage fraction of the active context window at or above which a
-/// completed turn starts a background summary (blueprint §4C).
+/// completed turn or eligible tool outcome starts a background summary.
 ///
-/// The blueprint keeps both triggers fixed — there is no profile knob for
-/// them — so today the `DEFAULT_` name only records that this is the value a
-/// future override would start from.
+/// Engines can override this through `soft_compaction_threshold`.
 pub const DEFAULT_SOFT_COMPACTION_THRESHOLD: f64 = 0.70;
 
-/// Default usage fraction above which the loop stops waiting for a
-/// background summary and drops synchronously (blueprint §4C). See
-/// [`DEFAULT_SOFT_COMPACTION_THRESHOLD`] for why it is a `DEFAULT_`.
+/// Default usage fraction that triggers bounded waiting for an existing
+/// summary before lossy recovery at a request boundary.
+/// Engines can override this through `hard_compaction_threshold`.
 pub const DEFAULT_HARD_COMPACTION_THRESHOLD: f64 = 0.90;
 
 /// Fixed allowance for request framing the local estimator does not count.
@@ -102,7 +100,7 @@ fn frame_summary_prompt(prompt: &str) -> String {
 /// `[..boundary]` are represented in the model view by [`Self::summary`].
 ///
 /// The transcript itself keeps every one of those messages — the snapshot
-/// only describes the model-facing view (blueprint §4C *record vs view*).
+/// only describes the model-facing view.
 /// Boundaries advance monotonically: a newer snapshot supersedes an older
 /// one, and persistence appends one event per snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,7 +135,7 @@ impl CompactionSnapshot {
     }
 }
 
-/// What one usage evaluation calls the outer loop to do (blueprint §4C).
+/// What one usage evaluation calls the outer loop to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompactionAction {
     /// Below the soft threshold, or a summary is already in flight: do
@@ -287,8 +285,7 @@ impl CompactionBudget {
 /// i.e. every cut that keeps each `tool_call_id` together with its one
 /// matching [`Message::ToolResult`] or [`Message::ToolError`].
 ///
-/// Compaction may only cut at one of these positions (blueprint §4C *tool
-/// protocol constraints*).
+/// Compaction may only cut at one of these positions.
 pub fn safe_boundaries_from(messages: &[Message], from: usize) -> Vec<usize> {
     let mut open_calls: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
     let mut boundaries = Vec::new();

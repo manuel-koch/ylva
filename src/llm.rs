@@ -71,7 +71,7 @@ pub use MAX_CONCURRENT_PROVIDER_REQUESTS as DEFAULT_MAX_CONCURRENT_PROVIDER_REQU
 /// This is the `{"type":"function","function":{name, description, parameters}}`
 /// envelope. `parameters` is a serde-serialized [`schemars::schema::RootSchema`]
 /// produced by deriving `JsonSchema` on a typed arguments struct — never a
-/// hand-written JSON schema (blueprint §4D).
+/// hand-written JSON schema.
 #[derive(Debug, Clone)]
 pub struct ToolSchema {
     pub name: String,
@@ -189,8 +189,8 @@ pub(crate) fn format_input_modalities_for_log(
 /// in-flight stream is aborted and the receiver eventually yields
 /// `StreamEvent::Cancelled`.
 ///
-/// `tools` carries the schemas the model may call (blueprint §4A Step 3
-/// refinement): the request body sends them so the model can emit
+/// `tools` carries the schemas the model may call: the request body sends
+/// them so the model can emit
 /// `delta.tool_calls`, surfaced as [`StreamEvent::Delta`] fragments that the
 /// agent's streaming task assembles. Tool assembly never happens here.
 pub trait Provider: Send + Sync {

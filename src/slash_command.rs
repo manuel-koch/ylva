@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Parsing of the TUI's slash commands (blueprint §6).
+//! Parsing of the TUI's slash commands; see `docs/features.md`.
 //!
 //! Deliberately a *closed* allowlist rather than an extensible registry: an
 //! input line is a command only when it starts with `/` **as its very first

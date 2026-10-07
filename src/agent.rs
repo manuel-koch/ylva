@@ -112,10 +112,10 @@ pub enum AgentCommand {
         run_id: Uuid,
         command: Box<AgentCommand>,
     },
-    /// `/clear` (blueprint §6): drop the conversation and continue in a
+    /// `/clear`: drop the conversation and continue in a
     /// brand-new persisted session.
     ///
-    /// Handled here rather than in the TUI Driver because the §4C ownership
+    /// Handled here rather than in the TUI Driver because the context ownership
     /// rule makes the outer loop the only mutator of `Context` — and, through
     /// it, the only writer to the session store.
     ClearContext,
@@ -667,7 +667,7 @@ async fn report_compaction_failure(
 }
 
 /// A raw tool-call fragment emitted by a provider, to be assembled by the
-/// agent's inner streaming task, never by the provider (blueprint §4A).
+/// agent's inner streaming task, never by the provider.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeltaChunk {
     pub tool_call_index: usize,
@@ -788,8 +788,7 @@ pub enum UserMessageKind {
 /// Persisted as one JSONL line by `crate::store` — hence the `serde`
 /// derives. The discriminant is serialized as a `role` field
 /// (`#[serde(tag = "role")]`) and **no** `deny_unknown_fields` is used, so a
-/// session file written by an older or newer build still deserializes
-/// (blueprint §4H decision 4).
+/// session file written by an older or newer build still deserializes.
 ///
 /// The tool-result variant intentionally stays inline so the persisted
 /// `#[serde(flatten)]` shape and the single-writer context API remain direct.
@@ -845,7 +844,7 @@ pub const HARNESS_NOTICE_MARKER: &str = "[harness notice — not from the user]"
 /// must parse and the per-response tool-call limit. The described JSON matches the schema derived from
 /// [`crate::llm::ToolEnvelope`] — the very struct used to serialize every
 /// `role:"tool"` message — so the instruction can never drift from the wire
-/// shape (blueprint §4D: schema from typed data, never hand-written). It is a
+/// shape. It is a
 /// `LazyLock` because the schema is generated at first use.
 pub static TOOL_PROTOCOL_SYSTEM_PROMPT: LazyLock<String> = LazyLock::new(|| {
     let mut schema_json =
@@ -867,7 +866,7 @@ pub static TOOL_PROTOCOL_SYSTEM_PROMPT: LazyLock<String> = LazyLock::new(|| {
     )
 });
 
-/// Priority tier of a message in the model-facing view (blueprint §4C).
+/// Priority tier of a message in the model-facing view.
 ///
 /// Tiers describe how the *model view* treats a message when the context
 /// window fills. The transcript itself is tier-agnostic: it keeps every
@@ -888,8 +887,7 @@ pub enum MessageTier {
 /// Bookkeeping cached for one transcript message when it enters the context:
 /// its tier in the model-facing view and its approximate token count.
 ///
-/// Held index-parallel to [`Context::messages`] (the blueprint's
-/// `TieredMessage` bookkeeping) so the transcript itself stays a plain
+/// Held index-parallel to [`Context::messages`] so the transcript stays a plain
 /// `Vec<Message>` for replay, persistence and cloning, and so no message text
 /// is stored twice.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -915,9 +913,9 @@ fn tier_for(index: usize, message: &Message) -> MessageTier {
 /// Approximate token count of one message's model-visible text.
 ///
 /// Counts the payload text only (content, tool-call arguments, tool result
-/// and error text); role framing and message separators are ignored, which
-/// is well inside the approximation's tolerance (blueprint §4C: counts are
-/// advisory, the `context_length × 0.9` margin absorbs the error).
+/// and error text); role framing and message separators are ignored.
+/// Request budgeting separately measures the projected model view and tools
+/// with reserved response space and safety margins.
 pub(crate) fn estimate_message_tokens(
     estimator: crate::llm::TokenEstimator,
     message: &Message,
@@ -1033,7 +1031,7 @@ pub struct Context {
     tool_schema_token_cache: Mutex<ToolSchemaTokenCache>,
     /// The latest applied compaction: `messages[..boundary]` is represented
     /// in the model view by its marked summary. The transcript keeps every
-    /// summarized message untouched (blueprint §4C *record vs view*).
+    /// summarized message untouched.
     compaction: Option<crate::agent::compaction::CompactionSnapshot>,
     /// First transcript index included in the model view after the leading
     /// system block. `0` means "nothing dropped"; [`Context::drop_model_view_to`]
@@ -1055,7 +1053,7 @@ pub struct Context {
     batch_admitted_calls: usize,
     batch_skipped_calls: usize,
     /// Session store this context appends its committed messages to, when
-    /// persistence is enabled (blueprint §4H). `None` for child agents and
+    /// persistence is enabled. `None` for child agents and
     /// for runs started without a store.
     store: Option<Store>,
 }
@@ -1301,8 +1299,7 @@ impl Context {
 
     /// Number of leading contiguous system messages: the rebuilt identity
     /// prompt and tool-protocol prompt (plus any instructions injected ahead
-    /// of the first user turn). Compaction neither summarizes nor drops them
-    /// (blueprint §4C *system tiers*).
+    /// of the first user turn). Compaction neither summarizes nor drops them.
     pub fn leading_system_len(&self) -> usize {
         self.messages
             .iter()
@@ -1373,7 +1370,7 @@ impl Context {
     /// The transcript stays intact no matter what the model sees: the
     /// leading system instructions, then the marked summary of the compacted
     /// prefix (when one is applied), then the verbatim tail after the
-    /// boundary (blueprint §4C). Without a compaction snapshot — and before
+    /// boundary. Without a compaction snapshot — and before
     /// the hard fallback drops anything — this is simply the whole transcript
     /// in order.
     pub fn model_messages(&self) -> Vec<Message> {
@@ -1667,8 +1664,7 @@ impl Context {
             .boundary
             .clamp(leading_system_len, self.messages.len());
         // Snap forward to a complete-turn cut: a persisted boundary must
-        // never re-split a tool call from its one result after a resume
-        // (blueprint §4C *tool protocol constraints*).
+        // never re-split a tool call from its one result after a resume.
         let Some(boundary) =
             crate::agent::compaction::first_safe_boundary_from(&self.messages, clamped_boundary)
         else {
@@ -1794,7 +1790,7 @@ impl Context {
     }
 
     /// Synchronously drop model-view messages — oldest first — until the view
-    /// fits `target_tokens` (blueprint §4C hard fallback).
+    /// fits `target_tokens`.
     ///
     /// Only complete turns are cut: every candidate position keeps each
     /// `tool_call_id` together with its one result, the leading system
@@ -2084,7 +2080,7 @@ impl Context {
 }
 
 /// A fully assembled, validated tool call, ready for the outer loop to queue
-/// for serial (one-at-a-time) execution (blueprint §4A/§4B).
+/// for serial (one-at-a-time) execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssembledToolCall {
     pub id: Uuid,
@@ -2110,7 +2106,7 @@ impl std::fmt::Debug for PendingTool {
     }
 }
 
-/// Default execution timeout for file-system tools (blueprint §4D).
+/// Default execution timeout for file-system tools.
 pub const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 5;
 
 impl PendingTool {
@@ -2269,7 +2265,7 @@ fn is_context_window_rejection(message: &str) -> bool {
         || message.contains("prompt is too long")
 }
 
-/// Non-blocking agent loop (blueprint §4B).
+/// Non-blocking agent loop.
 ///
 /// State machine: `Idle` receives a `Prompt` and starts a stream; further
 /// `Prompt`s while busy are queued as **steers** and injected at the next
@@ -2281,7 +2277,7 @@ fn is_context_window_rejection(message: &str) -> bool {
 ///
 /// Approval protocol is uniform across all tools: every call pauses at
 /// `ToolPending` and waits for an approve/deny command — the loop holds no
-/// approval policy, the driver decides (blueprint §4E, §4B).
+/// approval policy, the driver decides.
 ///
 /// Indicates whether an `AgentLoop` is acting as the root (top-level) agent
 /// or as a child agent spawned by a root agent.
@@ -5103,8 +5099,8 @@ async fn send_preflight_notice(
 /// the outer loop uses to abort this request.
 ///
 /// This task owns the [`ToolCallAccumulator`]s and assembles raw
-/// [`StreamEvent::Delta`] fragments into a batch of [`AssembledToolCall`]s
-/// (blueprint §4A refinement); the outer loop stays the sole writer of
+/// [`StreamEvent::Delta`] fragments into a batch of [`AssembledToolCall`]s;
+/// the outer loop stays the sole writer of
 /// `Context`, and this task never writes it.
 #[expect(clippy::too_many_arguments)]
 fn start_request(
@@ -5418,7 +5414,7 @@ fn start_request(
     cancel
 }
 
-/// Buffers the fragmented pieces of one tool call (blueprint §4A).
+/// Buffers the fragmented pieces of one tool call.
 ///
 /// Raw `Delta` fragments for a given `tool_call_index` are concatenated in
 /// order; the name is captured from the first fragment that carries it and the

@@ -1,6 +1,6 @@
 # One-off CLI model override
 
-Deferred from blueprint finalization. Headless runs currently select a model
+Headless runs currently select a model
 through the active profile and its named engines. The CLI has no `--model`
 flag.
 

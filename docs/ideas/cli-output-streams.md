@@ -1,8 +1,8 @@
 # Separate CLI content and status streams
 
-Deferred from blueprint finalization. Assistant text and tool/status output
-currently share the CLI driver's output writer. Errors and the session resume
-hint go to stderr.
+Assistant text, user echoes, thinking, tool/status output, and agent errors
+currently share the CLI driver's output writer. Fatal startup errors and the
+session resume hint go to stderr.
 
 ## Proposed contract
 

@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Append-only JSONL persistence for conversations and child-agent runs
-//! (blueprint §4H).
+//! Append-only JSONL persistence for conversations and child-agent runs.
+//! See `docs/persistence.md` for the on-disk and replay contracts.
 //!
 //! On-disk layout:
 //!
@@ -31,9 +31,8 @@
 //! streaming fragments never touch disk. Writes go through a dedicated writer
 //! task fed by an `mpsc` channel so the agent loop and the TUI never block on
 //! disk I/O; each line is written and `flush()`ed (no per-line `fsync`), which
-//! makes the store process-crash-safe but not power-cut-safe (§4H decision
-//! 10). A truncated trailing line left behind by a power cut is repaired on
-//! the next resume (§4H decision 6).
+//! makes the store process-crash-safe but not power-cut-safe. A truncated
+//! trailing line left behind by a power cut is repaired on the next resume.
 
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -50,11 +49,11 @@ use crate::sandbox::SandboxContext;
 use crate::ylva_home::ylva_home;
 
 /// Version of the whole-file schema, written into the `meta` header. Bumped
-/// only for a semantic break that needs an upgrader (§4H decision 4).
+/// only for a semantic break that needs an upgrader.
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// Version stamped on every individual event line, so an old reader can take
-/// an event-type-specific path even without the header (§4H decision 4).
+/// an event-type-specific path even without the header.
 pub const EVENT_VERSION: u32 = 1;
 
 /// Maximum number of characters kept in a generated session `meta` title.
@@ -102,7 +101,7 @@ pub enum StoreError {
 /// Serialized with `#[serde(tag = "type")]` and **never**
 /// `#[serde(deny_unknown_fields)]`, so a reader built against an older or
 /// newer schema still loads the file: unknown fields are ignored and unknown
-/// `type` values fail only that one line (§4H decision 4).
+/// `type` values fail only that one line.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StoreEvent {
@@ -122,7 +121,7 @@ pub enum StoreEvent {
         timestamp: String,
         message: Message,
     },
-    /// A child-agent run is about to start (§4G *Persistence*).
+    /// A child-agent run is about to start.
     ChildStart {
         #[serde(default, alias = "v")]
         version: u32,
@@ -136,7 +135,7 @@ pub enum StoreEvent {
         #[serde(default)]
         label: String,
     },
-    /// A child-agent run finished (§4G *Persistence*).
+    /// A child-agent run finished.
     ChildResult {
         #[serde(default, alias = "v")]
         version: u32,
@@ -184,8 +183,7 @@ pub enum StoreEvent {
     },
     /// The model-facing context was compacted through `boundary`: transcript
     /// messages `[..boundary]` are represented from here on by `summary`,
-    /// while every one of them stays in this append-only file (blueprint §4C
-    /// *record vs view*).
+    /// while every one of them stays in this append-only file.
     ///
     /// Appended, never rewritten: a later event with a larger boundary
     /// supersedes an earlier one, so replay keeps the latest snapshot and the
@@ -314,7 +312,7 @@ pub fn default_chats_root() -> Result<PathBuf, StoreError> {
 }
 
 /// Stable content hash grouping every session launched from the same physical
-/// directory (§4H decision 2).
+/// directory.
 ///
 /// The path is canonicalized first (symlinks resolved, `..` collapsed) with
 /// the very same helper the sandbox uses for its workspace root, so two paths
@@ -512,9 +510,9 @@ impl Store {
     ///
     /// A session id with no matching file is a hard error
     /// ([`StoreError::SessionNotFound`]) — never a silent fresh-session
-    /// fallback (§4H decision 5). A corrupt trailing line (a write cut short
+    /// fallback. A corrupt trailing line (a write cut short
     /// by a power loss) is truncated before the first append so the repaired
-    /// file never carries mid-file corruption (§4H decision 6). If the prior
+    /// file never carries mid-file corruption. If the prior
     /// run never got far enough to generate the title (killed mid-turn), the
     /// title inputs are re-derived from the transcript so this run can retry
     /// generation immediately.
@@ -1013,7 +1011,7 @@ impl Store {
     }
 
     /// Enqueue the `child_start` record written to the **parent** session
-    /// before a child run begins (§4G *Persistence*).
+    /// before a child run begins.
     pub fn record_child_start(
         &self,
         run_id: Uuid,
@@ -1035,7 +1033,7 @@ impl Store {
     }
 
     /// Enqueue the `child_result` record written to the **parent** session
-    /// when a child run completes (§4G *Persistence*).
+    /// when a child run completes.
     pub fn record_child_result(
         &self,
         run_id: Uuid,
@@ -1212,7 +1210,7 @@ impl Store {
 
     /// Every committed message of a persisted session, in append order.
     /// A pure read: unparseable lines are skipped in memory, never repaired
-    /// on disk (§4H decision 6).
+    /// on disk.
     pub fn read_messages(path: &Path) -> Result<Vec<Message>, StoreError> {
         let content = std::fs::read_to_string(path).map_err(|source| StoreError::Io {
             path: path.to_path_buf(),
@@ -1527,7 +1525,7 @@ fn file_length(path: &Path) -> Result<u64, StoreError> {
 }
 
 /// A session file holding its exclusive advisory lock for as long as it is
-/// alive. On unix this is a real `flock(LOCK_EX | LOCK_NB)` (§4H decision 7);
+/// alive. On unix this is a real `flock(LOCK_EX | LOCK_NB)`;
 /// on other platforms the file is opened unlocked, since `nix` — and with it
 /// `flock` — is a unix-only dependency of this crate.
 #[cfg(unix)]
@@ -1600,8 +1598,8 @@ fn append_event_line(
 }
 
 /// Truncate a corrupt trailing JSON line (a write cut short by a power loss)
-/// so the append-resume that follows can never leave corruption mid-file
-/// (§4H decision 6). Only ever called on a resume/append open — a pure read
+/// so the append-resume that follows can never leave corruption mid-file.
+/// Only ever called on a resume/append open — a pure read
 /// never mutates the file.
 fn repair_trailing_corruption(file: &mut LockedSessionFile, path: &Path) -> Result<(), StoreError> {
     let content = std::fs::read_to_string(path).map_err(|source| StoreError::Io {
@@ -1739,8 +1737,7 @@ impl SessionWriter {
         self.write_line(&event);
     }
 
-    /// Rewrite the `meta` line in place (temp file + atomic `rename()`, the
-    /// same pattern used for schema-upgrade rewrites — §4H decision 4) so it
+    /// Rewrite the `meta` line in place (temp file + atomic `rename()`) so it
     /// carries the supplied generated title. A no-op once already finalized.
     fn set_title(&mut self, title: &str) -> Result<(), StoreError> {
         let Some((mut meta, meta_line_len)) = self.meta_awaiting_title.take() else {

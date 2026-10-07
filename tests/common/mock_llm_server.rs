@@ -232,7 +232,7 @@ impl CapturedRequests {
 }
 
 /// An in-process OpenAI-spec SSE mock server bound to an ephemeral loopback
-/// port, modeled on `spikes/spike-http-stream-cancel/src/mock_server.rs`.
+/// port, with live-connection tracking for hermetic cancellation checks.
 ///
 /// Connections carry a [`MockLlmConfig`]-derived [`Behavior`]; text streams
 /// emit frames on a [`FRAME_TICK`] cadence until the client disconnects or the

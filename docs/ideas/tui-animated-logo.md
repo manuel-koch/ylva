@@ -1,8 +1,7 @@
 # TUI animated logo
 
 The empty conversation currently shows a static ASCII Ylva wordmark. This idea
-is only for adding an animated wolf alongside that shipped wordmark, and is
-deferred from blueprint finalization.
+is only for adding an animated wolf alongside that shipped wordmark.
 
 Show an animated howling wolf asci-art next to the Ylva logo.
 

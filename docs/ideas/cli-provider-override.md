@@ -1,6 +1,6 @@
 # One-off CLI provider override
 
-Deferred from blueprint finalization. Provider selection currently comes from
+Provider selection currently comes from
 the selected profile or environment-based discovery. The CLI has no
 `--provider` flag.
 

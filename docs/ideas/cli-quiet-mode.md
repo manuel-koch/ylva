@@ -1,6 +1,6 @@
 # Quiet mode for the CLI
 
-Deferred from blueprint finalization. The headless CLI currently emits progress
+The headless CLI currently emits progress
 and tool status while a run is active and has no `--quiet` flag.
 
 ## Proposed behavior

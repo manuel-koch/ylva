@@ -91,7 +91,7 @@ pub struct EngineConfig {
     #[serde(default)]
     pub reasoning: Option<String>,
     /// Target fraction of the context window a compaction shrinks the model
-    /// view back to (blueprint §4C). Configured per `[engines.*]` table and
+    /// view back to. Configured per `[engines.*]` table and
     /// defaults to [`DEFAULT_COMPACT_TARGET_RATIO`].
     #[serde(default = "default_compact_target_ratio")]
     pub compact_target_ratio: f64,
@@ -542,7 +542,7 @@ pub trait Engine: Send + Sync {
     /// provider-catalog length adopted by the last `/models` selection,
     /// otherwise [`DEFAULT_CONTEXT_LENGTH`]. Compaction re-reads this on
     /// every sweep, so switching to a model with a different window
-    /// re-evaluates the budget (blueprint §4C).
+    /// re-evaluates the budget.
     fn effective_context_length(&self) -> usize {
         self.config().effective_context_length(None)
     }

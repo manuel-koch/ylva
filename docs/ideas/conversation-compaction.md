@@ -1,10 +1,9 @@
 # Conversation compaction
 
-Implemented by [the blueprint finalization plan](../plans/blueprint-finalization-plan.md)
-(Phase 12). The design choices below are the record of what shipped: the
-implementation preserves the full session transcript while giving the model a
-compacted view. See [features](../features.md#context-management-and-compaction)
-for the user-facing contract.
+Implemented for root and subagent conversations. The implementation preserves
+the full session transcript while giving the model a compacted view. See
+[features](../features.md#context-management-and-compaction) for the current
+user-facing contract; this note retains the research and remaining ideas.
 
 ## Current implementation
 
@@ -34,7 +33,8 @@ non-system messages. The system-only continuation answered
 `tests/e2e/custom/logs/tui_20261006174357.log` and adjacent request/response dumps;
 deterministic regressions use generated fixtures, not copied dump contents.
 
-The [refinement plan](../plans/refine-compaction-plan.md) replaces that fallback:
+The [current implementation](../implementation-notes.md#context-management-and-compaction)
+replaces that fallback:
 completed-prefix summaries start after tool outcomes while later tools run;
 only the first six requested positions can execute, without backfill.
 Calls share a measured result allowance and can pause only for an existing
@@ -482,9 +482,10 @@ unnecessary compaction.
 
 - Current estimator implementation: [`src/llm/token_estimate.rs`](../../src/llm/token_estimate.rs).
 - Current message accounting: [`estimate_message_tokens`](../../src/agent.rs),
-  which caches payload-only counts as messages are committed. The footer and
-  compaction budget separately estimate model-visible content, including tool
-  definitions and excluding JSON/API transport framing.
+  which caches payload-only counts as messages are committed. The compaction
+  budget estimates the projected model view and tool definitions. During a
+  request, the footer instead estimates the serialized JSON body, including
+  transport framing; after compaction applies, it shows the model-view estimate.
 - Provider serialization: [`src/llm/openai_compatible_messages.rs`](../../src/llm/openai_compatible_messages.rs)
   and `src/llm/openai_compatible_provider.rs`.
 - `Context::set_token_estimator` recalculates cached message counts on model
@@ -586,8 +587,10 @@ actual response payloads.
 
 ## Related
 
-- `docs/blueprint.md` §4C (tiered context, hysteresis, token counting) and
-  Phase 12 (the checklist this idea refines)
+- [Context management and compaction](../features.md#context-management-and-compaction)
+  (current behavior, budgeting, root and subagent scope)
+- [Compaction implementation](../implementation-notes.md#context-management-and-compaction)
+  (cached estimates, model projections, scheduling, and persistence)
 - `docs/ideas/tool-result-size-guard.md` (per-result wire guard; defers the
   aggregate to this idea)
 - `docs/configuration.md` (`[compaction].engine`, `context_length`)
@@ -598,7 +601,6 @@ actual response payloads.
 ## Deferred
 
 - A manual `/compact` command.
-- Compaction for child-agent contexts.
 - Hierarchical summarization if the compact engine cannot accept the selected
   prefix.
 - Per-result wire-size protection and the default `glob` ceiling. See

@@ -1390,7 +1390,7 @@ pub(crate) fn format_context_length(context_length: usize) -> String {
 }
 
 /// Overlay rendered above the input while a slash command is being composed
-/// or resolved (blueprint §6).
+/// or resolved.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum SlashOverlay {
     /// No slash command is in play.
@@ -2582,8 +2582,7 @@ impl AppState {
     /// earlier prompts) and the captured tool names.
     ///
     /// The in-memory `Context` and the session file are *not* touched here —
-    /// the agent loop owns those and resets them on `AgentCommand::ClearContext`
-    /// (blueprint §4C).
+    /// the agent loop owns those and resets them on `AgentCommand::ClearContext`.
     pub fn clear_conversation(&mut self) {
         self.context_usage = None;
         self.compaction_requests.clear();

@@ -1,15 +1,14 @@
 # Fallback: defer Markdown parsing until streaming is Done
 
-`docs/blueprint.md` §4F originally prescribed rendering the partial
-assistant/thinking message as plain text while streaming, deferring
-`pulldown-cmark`/`syntect` parsing until the message is `Done`, purely as a
-precaution against per-frame parsing cost. This was never implemented and
-was explicitly dropped during Phase 7 planning: the shipped behavior (live
+Deferring `pulldown-cmark`/`syntect` parsing until the message is `Done`, with
+plain text shown while streaming, was proposed only as a precaution against
+per-frame parsing cost. This was never implemented and
+was explicitly dropped: the shipped behavior (live
 `render_markdown` on the growing partial buffer every frame, with `syntect`
 code-fence highlighting served from `src/highlight.rs`'s content-addressed
-`highlighted_lines_cached`) already works without reported jank, and Spike 1
-(§0) never actually measured `pulldown-cmark`/`syntect` cost during
-streaming — only raw token throughput.
+`highlighted_lines_cached`) already works without reported jank. The historical
+throughput experiment measured only raw token handling, not
+`pulldown-cmark`/`syntect` cost during streaming.
 
 **Only revisit this** if a real, measured frame-time regression appears
 during streaming (e.g. via `tracing`-logged frame times, or user-reported

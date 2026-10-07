@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Approximate token estimation for context budgeting (blueprint §4C).
+//! Approximate token estimation for context budgeting.
 //!
 //! Counts are cached once when a message enters the context and are
 //! **advisory**: they drive compaction thresholds, they are never billed

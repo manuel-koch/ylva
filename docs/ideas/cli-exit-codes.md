@@ -1,7 +1,7 @@
 # Structured CLI exit codes
 
-Deferred from blueprint finalization. The current CLI uses exit code `2` for
-usage and fatal startup errors; the blueprint proposes codes `0` through `4`
+The current CLI uses exit code `2` for
+usage and fatal startup errors; this proposal assigns codes `0` through `4`
 for success, general error, interruption, tool failure, and approval denial.
 
 ## Proposed mapping
