@@ -194,6 +194,11 @@ state and transcript-indexed `model_overrides`. `model_messages()` builds the
 request from the leading system block, summary/recovery handoff, latest task
 anchor, and retained tail with bounded overrides. Compaction
 estimates this model view plus active tool definitions with `cl100k_base`.
+`Context` caches the tool-definition token count for one active schema snapshot,
+keyed by the exact name, description, and serialized parameter text (including
+JSON field order). Budget checks reuse it until those inputs change; message,
+window, and engine-dependent calculations remain live. The request-deferral gate
+skips estimation when no background summary is running.
 The OpenAI-compatible transport separately applies `cl100k_base` to the
 serialized JSON request body after provider-specific fields and tools have been
 added. This treats the JSON representation as text; it does not simulate

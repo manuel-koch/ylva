@@ -576,11 +576,13 @@ impl CompactionRuntime {
         engine: &dyn Engine,
         tools: &[crate::llm::ToolSchema],
     ) -> bool {
+        if !self.summary_in_flight {
+            return false;
+        }
         let tokens = context.estimated_model_tokens(tools, engine);
         let window = engine.effective_context_length();
-        if self.summary_in_flight
-            && (tokens > safe_request_ceiling(window)
-                || tokens as f64 > window as f64 * engine.config().hard_compaction_threshold)
+        if tokens > safe_request_ceiling(window)
+            || tokens as f64 > window as f64 * engine.config().hard_compaction_threshold
         {
             self.continuation_waiting = true;
             tracing::info!(
@@ -1180,6 +1182,33 @@ mod tests {
         assert!(
             !runtime.schedule_summary(&context, engine.as_ref(), &[], 0),
             "a summary already in flight is never duplicated"
+        );
+    }
+
+    #[test]
+    fn inactive_request_gate_does_not_tokenize_tool_schemas() {
+        let (mut runtime, _outcomes, _updates, _run_id, engine, mut context) =
+            new_recording_runtime("A summary.");
+        context.set_token_estimator(crate::llm::TokenEstimator::FourCharactersPerToken);
+        let tools = vec![crate::llm::ToolSchema {
+            name: "read".to_string(),
+            description: "Read a file.".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+        let tokenizer = tiktoken_rs::cl100k_base_singleton();
+        let tokenizer_lock = tokenizer.lock();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let deferred = runtime.defer_request(&context, engine.as_ref(), &tools);
+            sender.send(deferred).expect("send gate decision");
+        });
+
+        let result = receiver.recv_timeout(Duration::from_secs(1));
+        drop(tokenizer_lock);
+        worker.join().expect("request gate worker");
+        assert!(
+            !result.expect("an inactive gate must not wait for the tokenizer"),
+            "only a running summary can defer a request"
         );
     }
 

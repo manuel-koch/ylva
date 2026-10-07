@@ -61,7 +61,7 @@
       subagent result is visible to the user.
       See tests/e2e/custom/logs/tui_20261006202130.log
 
-- [ ] Test run now take 2-3x times longer. Can we investigate why
+- [x] Test run now take 2-3x times longer. Can we investigate why
       and whether that could be improved again ?
 
 - [x] LLM spawned subagent and is constantly thinking and waiting for the

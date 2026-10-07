@@ -969,6 +969,7 @@ pub(crate) fn estimate_message_tokens(
     payload + 8
 }
 
+#[cfg(test)]
 fn tool_schema_token_count(tools: &[ToolSchema]) -> usize {
     let estimator = crate::llm::TokenEstimator::Tiktoken;
     tools
@@ -979,6 +980,35 @@ fn tool_schema_token_count(tools: &[ToolSchema]) -> usize {
                 + estimator.estimate_tokens(&tool.parameters.to_string())
         })
         .sum()
+}
+
+#[derive(Debug, Default)]
+struct ToolSchemaTokenCache {
+    inputs: Vec<String>,
+    token_count: usize,
+}
+
+impl ToolSchemaTokenCache {
+    fn count(&mut self, tools: &[ToolSchema]) -> usize {
+        let inputs: Vec<String> = tools
+            .iter()
+            .flat_map(|tool| {
+                [
+                    tool.name.clone(),
+                    tool.description.clone(),
+                    tool.parameters.to_string(),
+                ]
+            })
+            .collect();
+        if self.inputs != inputs {
+            self.token_count = inputs
+                .iter()
+                .map(|text| crate::llm::TokenEstimator::Tiktoken.estimate_tokens(text))
+                .sum();
+            self.inputs = inputs;
+        }
+        self.token_count
+    }
 }
 
 /// The conversation as the agent loop records it: every committed message, in
@@ -997,6 +1027,7 @@ pub struct Context {
     /// active engine's provider connection and refreshed when the model
     /// switches.
     estimator: crate::llm::TokenEstimator,
+    tool_schema_token_cache: Mutex<ToolSchemaTokenCache>,
     /// The latest applied compaction: `messages[..boundary]` is represented
     /// in the model view by its marked summary. The transcript keeps every
     /// summarized message untouched (blueprint §4C *record vs view*).
@@ -1037,6 +1068,7 @@ impl Context {
             store: None,
             entries: Vec::new(),
             estimator: crate::llm::TokenEstimator::default(),
+            tool_schema_token_cache: Mutex::default(),
             compaction: None,
             view_start: 0,
             recovery: None,
@@ -1544,7 +1576,14 @@ impl Context {
     /// Approximate model-view size including the active tool definitions, but
     /// excluding API/JSON transport framing.
     pub fn estimated_model_tokens(&self, tools: &[ToolSchema], _engine: &dyn Engine) -> usize {
-        self.model_view_token_count() + tool_schema_token_count(tools)
+        self.model_view_token_count() + self.tool_schema_token_count(tools)
+    }
+
+    fn tool_schema_token_count(&self, tools: &[ToolSchema]) -> usize {
+        self.tool_schema_token_cache
+            .lock()
+            .expect("tool schema token cache poisoned")
+            .count(tools)
     }
 
     /// Approximate tokens available for one additional model-facing result
@@ -1554,7 +1593,7 @@ impl Context {
         tools: &[ToolSchema],
         context_length: usize,
     ) -> usize {
-        let current_tokens = self.model_view_token_count() + tool_schema_token_count(tools);
+        let current_tokens = self.model_view_token_count() + self.tool_schema_token_count(tools);
         crate::agent::compaction::safe_request_ceiling(context_length)
             .saturating_sub(current_tokens)
     }
@@ -1726,7 +1765,7 @@ impl Context {
     ) -> Option<usize> {
         let _ = _engine;
         let minimum_boundary = self.summary_boundary_for_target(
-            target_tokens.saturating_sub(tool_schema_token_count(tools)),
+            target_tokens.saturating_sub(self.tool_schema_token_count(tools)),
         )?;
         compaction::safe_boundaries_from(&self.messages, self.model_view_start())
             .into_iter()
@@ -1803,7 +1842,7 @@ impl Context {
             build_projection, marked_text, ProjectionBudget, RecoveryReport,
             REQUEST_OMISSION_MARKER, SUMMARY_OMISSION_MARKER,
         };
-        let schema_tokens = tool_schema_token_count(tools);
+        let schema_tokens = self.tool_schema_token_count(tools);
         let target = target_tokens.saturating_sub(schema_tokens);
         let ceiling = ceiling_tokens.saturating_sub(schema_tokens);
         let tokens_before = self.model_view_token_count();
@@ -7162,14 +7201,127 @@ mod tests {
         }
     }
 
-    /// Build the first turn of a conversation and pick a context window in
-    /// which it sits inside the soft-threshold band (`≈80%`), with the
-    /// rebuilt system prompts alone well under the compaction target so the
-    /// drop fallback has somewhere to go.
     fn compaction_test_tools() -> Vec<ToolSchema> {
         tools::default_registry(test_sandbox(), tools::ToolRegistryConfig::default()).schemas()
     }
 
+    #[test]
+    fn tool_schema_budget_reuses_counts_without_retokenizing() {
+        let mut context = Context::new();
+        context.set_token_estimator(crate::llm::TokenEstimator::FourCharactersPerToken);
+        context.push_user("A bounded task.".to_string());
+        let tools = compaction_test_tools();
+        let expected_budget = context.available_result_token_budget(&tools, 64_000);
+        let expected_tokens = context.model_view_token_count() + tool_schema_token_count(&tools);
+        let tokenizer = tiktoken_rs::cl100k_base_singleton();
+        let tokenizer_lock = tokenizer.lock();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let engine = test_engine();
+            assert_eq!(
+                context.estimated_model_tokens(&tools, engine.as_ref()),
+                expected_tokens
+            );
+            assert!(context
+                .summary_boundary_for_model_target(64_000, &tools, engine.as_ref())
+                .is_none());
+            assert!(
+                context
+                    .recover_model_view(64_000, 64_000, &tools)
+                    .fits_ceiling
+            );
+            let budget = context.available_result_token_budget(&tools, 64_000);
+            sender.send(budget).expect("send budget");
+        });
+
+        let result = receiver.recv_timeout(Duration::from_secs(1));
+        drop(tokenizer_lock);
+        worker.join().expect("budget worker");
+        assert_eq!(
+            result.expect("unchanged schemas must not wait for the tokenizer"),
+            expected_budget
+        );
+    }
+
+    #[test]
+    fn tool_schema_budget_refreshes_when_definitions_change() {
+        let mut context = Context::new();
+        context.set_token_estimator(crate::llm::TokenEstimator::FourCharactersPerToken);
+        let engine = test_engine();
+        let mut tools = vec![ToolSchema {
+            name: "read".to_string(),
+            description: "Read a file.".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+        let check_estimate = |tools: &[ToolSchema]| {
+            let expected_tokens = context.model_view_token_count() + tool_schema_token_count(tools);
+            assert_eq!(
+                context.estimated_model_tokens(tools, engine.as_ref()),
+                expected_tokens
+            );
+            assert_eq!(
+                context.available_result_token_budget(tools, 64_000),
+                compaction::safe_request_ceiling(64_000).saturating_sub(expected_tokens)
+            );
+        };
+
+        check_estimate(&tools);
+        tools[0].name = "a different tool name ".repeat(10);
+        check_estimate(&tools);
+        tools[0].description = "A changed description with more details. ".repeat(20);
+        check_estimate(&tools);
+        tools[0].parameters = serde_json::json!({
+            "type": "object",
+            "properties": {"path": {"type": "string", "description": "A file path."}},
+        });
+        check_estimate(&tools);
+        let parameters = tools[0].parameters.as_object_mut().expect("parameters");
+        let parameter_type = parameters.shift_remove("type").expect("type");
+        parameters.insert("type".to_string(), parameter_type);
+        check_estimate(&tools);
+        assert_eq!(
+            context
+                .tool_schema_token_cache
+                .lock()
+                .expect("tool schema cache")
+                .inputs[2],
+            tools[0].parameters.to_string(),
+            "JSON field order is part of the tokenizer input"
+        );
+        tools.push(tools[0].clone());
+        check_estimate(&tools);
+        tools.remove(0);
+        check_estimate(&tools);
+        check_estimate(&[]);
+        check_estimate(&tools);
+    }
+
+    #[test]
+    fn cached_tool_schema_budget_tracks_message_and_window_changes() {
+        let mut context = Context::new();
+        let tools = compaction_test_tools();
+        let initial_budget = context.available_result_token_budget(&tools, 64_000);
+        context.push_user("Additional context ".repeat(100));
+        let updated_budget = context.available_result_token_budget(&tools, 64_000);
+        assert!(updated_budget < initial_budget);
+        let smaller_window = 32_000;
+        assert_eq!(
+            context.available_result_token_budget(&tools, smaller_window),
+            compaction::safe_request_ceiling(smaller_window)
+                .saturating_sub(context.model_view_token_count() + tool_schema_token_count(&tools))
+        );
+        context.set_token_estimator(crate::llm::TokenEstimator::FourCharactersPerToken);
+        assert_eq!(
+            context.available_result_token_budget(&tools, smaller_window),
+            compaction::safe_request_ceiling(smaller_window)
+                .saturating_sub(context.model_view_token_count() + tool_schema_token_count(&tools))
+        );
+    }
+
+    /// Build the first turn of a conversation and pick a context window in
+    /// which it sits inside the soft-threshold band (`≈80%`), with the
+    /// rebuilt system prompts alone well under the compaction target so the
+    /// drop fallback has somewhere to go.
     fn first_turn_window(prompt: &str, target_usage: f64) -> usize {
         let mut probe = Context::new();
         probe.set_token_estimator(crate::llm::TokenEstimator::Tiktoken);
