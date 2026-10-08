@@ -30,12 +30,29 @@ and how they are composed is code-owned; arbitrary Markdown is never loaded.
 _Avoid_: agents file, conventions file
 
 **Profile**:
-A named runtime configuration that selects engines and supplies settings for
-agents.
+A named configuration that selects engines and supplies settings for agents.
 
 **Agent type**:
 A named specialization describing an agent's persona, tools, delegation
-ability, and runtime settings.
+ability, and execution settings.
+
+**Root agent type selection**:
+The agent type a root conversation runs as: an explicit `--agent` wins, a
+resume otherwise continues with the type the session last stored, and a fresh
+session starts as `default`.
+_Avoid_: active agent, chosen persona
+
+**Tool-use iteration limit**:
+The per-agent-type cap (`max_tool_iterations`) on consecutive tool-use rounds
+a single turn may spend; it defaults to 50 for root and subagent loops and a
+value of zero is rejected.
+_Avoid_: tool loop cap, max iterations
+
+**Compaction prompt**:
+The instruction framing a compaction summary request, resolved from
+`COMPACTION.md` like the global SOUL (workspace, Ylva home, built-in) and
+supplied to the compact engine.
+_Avoid_: summary system prompt
 
 ## Agent identity and execution
 
@@ -74,6 +91,18 @@ including the global SOUL with its trusted instruction content and any
 applicable agent-type guidance.
 _Avoid_: root agent's initial system message
 
+**Transcript**:
+The durable, ordered record of a conversation's messages as persisted and
+replayed in the UI. Compaction never prunes it: every original message stays
+browsable before and after a resume.
+_Avoid_: history, chat log
+
+**Model view**:
+The ordered message list actually sent to a model for a request: the leading
+system block, an optional compaction summary/recovery handoff, the latest task
+anchor, and the retained tail with bounded model-only result overrides.
+_Avoid_: prompt payload, request messages
+
 **Tool**:
 A named capability that an agent can invoke, such as reading files, editing
 files, searching, running commands, spawning agents, or asking the user for clarification.
@@ -81,6 +110,74 @@ files, searching, running commands, spawning agents, or asking the user for clar
 **Sandbox**:
 The filesystem boundary that governs which paths tools may access and when user
 approval is required.
+
+**Token estimate**:
+An approximate token count produced locally with `tiktoken-rs` `cl100k_base`.
+The compaction budget estimates the model view and active tool definitions;
+the TUI footer shows the serialized JSON request-body estimate during requests
+and the model-view estimate after compaction changes the view. Serialized-body
+estimates count that body as text. Neither estimate reproduces provider request
+processing or the selected model's tokenizer.
+An opt-in per-request diagnostic dump records this local estimate beside any
+provider-reported prompt/input token count observed on the same request. The
+provider count reflects the serving side's accounting when available. Local
+estimates are advisory and are never billed usage.
+_Avoid_: token count, usage
+
+**Reported input-token count**:
+A provider-reported prompt/input token count for one completed model request,
+when the provider returns it. It is distinct from the local token estimate and
+may be unavailable when usage is omitted or a stream is interrupted.
+_Avoid_: billed usage, exact token estimate
+
+**Context window**:
+The active model's effective token capacity, resolved per engine from the
+profile's `context_length`, then the provider catalog, then the built-in
+default.
+_Avoid_: max context, token limit
+
+**Compaction**:
+Replacing the oldest summarized part of the model view with a durable summary
+so a long conversation keeps fitting its context window, while the transcript
+stays intact and browsable.
+_Avoid_: truncation, history compression, summarizer
+
+**Compaction boundary**:
+The transcript index where the summarized prefix ends and the verbatim tail
+begins. It never separates a tool call from its one matching result.
+_Avoid_: cut point, split index
+
+**Compaction thresholds**:
+The per-engine usage fractions of the context window that decide when to act:
+the soft threshold schedules a useful completed-prefix summary after a turn or
+tool outcome. At a hard-limit request boundary, an existing summary gets only
+its remaining deadline before bounded lossy recovery. The target is best-effort;
+the separate safe request ceiling gates every continuation.
+
+**Safe request ceiling**:
+The effective context window minus a 10% reply reserve, 5% safety margin, and
+512 estimated tokens of request overhead. The model view plus schemas must fit
+this advisory local ceiling before dispatch; it is not a provider-token guarantee.
+
+**Result allowance**:
+The remaining safe request budget, shared by unresolved budgeted calls after
+192 estimated tokens of error framing per queued call. Calls need at least
+256 estimated tokens to start; canonical output stays intact while its model
+projection is bounded.
+
+**Batch-count backstop**:
+Only the first six requested tool positions can execute, with no backfill for
+unknown, invalid, denied, or budget-skipped calls. Each skipped call has one
+not-executed outcome; only the model can explicitly resubmit it in a later round.
+The separate stream-accumulation backstop is 12 calls; exceeding it rejects the
+whole response before any tool executes.
+
+**Per-agent compaction settings**:
+An agent type may override the profile's compaction engine and summary timeout.
+Each omitted override inherits independently. Root and child runs use the
+settings resolved for their own agent type.
+When neither layer selects a compaction engine, the agent type's configured
+conversation engine is used.
 
 ## Models and providers
 
@@ -95,9 +192,19 @@ The service integration that communicates with a model.
 A named endpoint and credential configuration for one provider. Multiple
 connections may use the same provider.
 
+**Provider request concurrency cap**:
+The maximum number of simultaneous requests sent through a provider connection;
+it is shared by engines and agents using that connection.
+
 **Engine**:
-A reusable runtime selection that binds a model to a provider connection and
-runtime settings.
+A reusable model configuration that binds a model to a provider connection
+and engine settings.
+
+**Engine runtime**:
+The live model selection and effective settings an agent uses for model
+requests. It starts from the engine's profile configuration and can change
+through `/models` without changing that configuration.
+_Avoid_: runtime, runtime configuration, runtime selection
 
 ## Persistence
 
@@ -111,3 +218,10 @@ delegation events.
 
 **Conversation ID**:
 The identifier used to reopen a persisted session for continuation.
+
+**Session clone**:
+A new session that replays another session's logical events under its own
+session ID, linked back by `cloned_from`. The source file is only read — it
+is never repaired, appended to, or rewritten — and all new writes go to the
+clone. Only top-level sessions can be cloned.
+_Avoid_: copy, fork, duplicate

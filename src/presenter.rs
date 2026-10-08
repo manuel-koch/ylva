@@ -31,8 +31,8 @@ use crate::markdown::render_markdown;
 use crate::slash_command::{parse_slash_command_invocation, SlashCommand, SlashCommandInvocation};
 use crate::tui_reducer_state::{
     model_picker_row_entries, slash_overlay_text_rows, AppState, ChatEntry, ChatSelection,
-    ChildRunInfo, ConfirmKey, ConversationView, DomainEvent, Effect, Focus, HistoryDirection,
-    InputEvent, SlashOverlay, ToolCallState, TuiMode, UserMessageState,
+    ChildRunInfo, ConfirmKey, ContextUsage, ConversationView, DomainEvent, Effect, Focus,
+    HistoryDirection, InputEvent, SlashOverlay, ToolCallState, TuiMode, UserMessageState,
     HELP_HORIZONTAL_SCROLL_COLUMNS,
 };
 
@@ -667,7 +667,7 @@ fn handle_key_main(
             KeyCode::Enter => {
                 let picked = state
                     .selected_model()
-                    .map(|choice| choice.selection.clone());
+                    .map(|choice| choice.to_model_selection());
                 state.slash_overlay = SlashOverlay::Hidden;
                 let mut effects = vec![Effect::ClearTextarea];
                 if let Some(model) = picked {
@@ -1213,6 +1213,9 @@ fn route_mouse(
 // ─── Domain routing ───────────────────────────────────────────────────────────
 
 fn route_domain(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
+    if matches!(event, DomainEvent::StreamCancelled) {
+        state.compaction_requests.remove(&None);
+    }
     let event_kind = event.kind();
     let correlation_id = event.correlation_id();
     let mode_before = state.mode.kind();
@@ -1240,6 +1243,18 @@ fn route_domain(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
 /// handlers.
 fn domain_child_lifecycle(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
     match event {
+        DomainEvent::CompactionActivity {
+            run_id,
+            request_id,
+            active,
+        } => {
+            if active {
+                state.compaction_requests.insert(run_id, request_id);
+            } else if state.compaction_requests.get(&run_id) == Some(&request_id) {
+                state.compaction_requests.remove(&run_id);
+            }
+            vec![]
+        }
         DomainEvent::ChildAgentStarted {
             run_id,
             call_id,
@@ -1284,7 +1299,23 @@ fn domain_child_lifecycle(state: &mut AppState, event: DomainEvent) -> Vec<Effec
             }
             vec![]
         }
+        DomainEvent::ChildContextUsage {
+            run_id,
+            estimated_tokens,
+            context_length,
+            source,
+        } => {
+            if let Some(conversation) = state.child_conversations.get_mut(&run_id) {
+                conversation.context_usage = Some(ContextUsage {
+                    estimated_tokens,
+                    context_length,
+                    source,
+                });
+            }
+            vec![]
+        }
         DomainEvent::ChildAgentDone { run_id, .. } => {
+            state.compaction_requests.remove(&Some(run_id));
             state.flush_child_partial_text(run_id);
             // Only auto-return if the user is currently viewing *this*
             // finished child's transcript — a different child may still be
@@ -1317,6 +1348,59 @@ fn domain_child_lifecycle(state: &mut AppState, event: DomainEvent) -> Vec<Effec
             }
             vec![]
         }
+        DomainEvent::CompactionApplied {
+            run_id,
+            entry_index,
+            summarized_messages,
+        } => {
+            let entries = match run_id {
+                Some(run_id) => {
+                    let Some(conversation) = state.child_conversations.get_mut(&run_id) else {
+                        tracing::warn!(%run_id, "compaction marker has no owning child conversation");
+                        return vec![];
+                    };
+                    &mut conversation.messages
+                }
+                None => &mut state.chat_entries,
+            };
+            // Mode-independent like the other transcript bookkeeping events:
+            // a sweep applies compaction at a settled boundary, whatever the
+            // view state happens to be. Duplicate emissions are dropped by
+            // the boundary itself — it only ever grows.
+            let already_marked = entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    ChatEntry::CompactionMarker {
+                        summarized_messages: existing
+                    } if *existing == summarized_messages
+                )
+            });
+            if !already_marked {
+                let insert_at = entry_index.min(entries.len());
+                entries.insert(
+                    insert_at,
+                    ChatEntry::CompactionMarker {
+                        summarized_messages,
+                    },
+                );
+            }
+            vec![]
+        }
+        DomainEvent::ContextUsage {
+            estimated_tokens,
+            context_length,
+            source,
+        } => {
+            // Mode-independent like the child-lifecycle events: a settled
+            // turn reports the readout while the loop is idle, and a summary
+            // outcome can do so without touching the mode.
+            state.context_usage = Some(ContextUsage {
+                estimated_tokens,
+                context_length,
+                source,
+            });
+            vec![]
+        }
         other => match state.mode.clone() {
             TuiMode::Idle => domain_idle(state, other),
             TuiMode::Pending => domain_pending(state, other),
@@ -1334,9 +1418,11 @@ fn domain_child_lifecycle(state: &mut AppState, event: DomainEvent) -> Vec<Effec
 
 /// Shared handling for `DomainEvent::ToolPending`, used identically by
 /// `domain_idle`, `domain_pending`, and `domain_streaming`: creates the
-/// `Pending` bubble in whichever transcript `run_id` targets (root or the
-/// current child), arms `Focus::ToolApproval`, and — when this pending call
-/// belongs to the tracked child — auto-switches the drill-in view to it.
+/// `Pending` bubble in whichever transcript `run_id` targets (root or a
+/// child), arms `Focus::ToolApproval`, and always auto-switches the drill-in
+/// view to wherever this pending call actually lives — root or that
+/// specific child — regardless of which conversation is currently on
+/// screen (see `AppState::note_interactive_pause`).
 fn push_tool_pending_bubble(
     state: &mut AppState,
     id: Uuid,
@@ -1370,7 +1456,7 @@ fn push_tool_pending_bubble(
     // the draft alone cannot reproduce) into `pending_input_snapshot` and
     // hides it until `RestoreInputState` brings draft and overlay back
     // together when the approval resolves.
-    state.note_child_interactive_pause(run_id);
+    state.note_interactive_pause(run_id);
     vec![Effect::SaveInputStateAndClear]
 }
 
@@ -1422,7 +1508,7 @@ fn push_clarify_pending_bubble(
     // are visible immediately; clamped to max_scroll on render.
     state.clarify_banner_state.clarify_scroll_offset = usize::MAX;
     state.focus = Focus::MainInput;
-    state.note_child_interactive_pause(run_id);
+    state.note_interactive_pause(run_id);
     // The banner sits on the same rows above the input as the approval
     // footer, so this save parks draft *and* overlay together — see
     // `InputSnapshot`.
@@ -2127,7 +2213,7 @@ fn update_tool_bubble_to_running(
     // A tool moving from Pending to Running means its approval step (if any)
     // is over — if this was the child's interactive pause we auto-switched
     // for, auto-return to Root now that the child is unblocked again.
-    state.resolve_possible_child_pause(id);
+    state.resolve_possible_interactive_pause(id);
 }
 
 /// Patches `progress_arguments` on an existing `Running` tool bubble without
@@ -2240,7 +2326,7 @@ fn update_tool_bubble_to_done(state: &mut AppState, payload: ToolDonePayload) {
                 collapsed: true,
             });
     }
-    state.resolve_possible_child_pause(id);
+    state.resolve_possible_interactive_pause(id);
 }
 
 fn update_tool_bubble_to_killed(state: &mut AppState, id: Uuid, run_id: Option<Uuid>) {
@@ -2265,7 +2351,7 @@ fn update_tool_bubble_to_killed(state: &mut AppState, id: Uuid, run_id: Option<U
     if matches!(state.focus, Focus::ToolApproval { tool_id, .. } if tool_id == id) {
         state.focus = Focus::MainInput;
     }
-    state.resolve_possible_child_pause(id);
+    state.resolve_possible_interactive_pause(id);
 }
 
 fn update_tool_bubble_to_denied(state: &mut AppState, id: Uuid) {
@@ -2300,7 +2386,7 @@ fn update_tool_bubble_to_denied(state: &mut AppState, id: Uuid) {
             title_arguments: preserved_title_arguments,
         };
     }
-    state.resolve_possible_child_pause(id);
+    state.resolve_possible_interactive_pause(id);
 }
 
 // ─── Dedent helper ────────────────────────────────────────────────────────────
@@ -2339,8 +2425,8 @@ mod tests {
     };
     use crate::agent::{AssistantStatus, Message, ToolCallRequest, ToolResult};
     use crate::tui_reducer_state::{
-        AppState, ChatEntry, ChatSelection, ConversationView, Focus, InputEvent, ModelChoice,
-        ResultSection, SlashOverlay, ToolCallState, TuiMode,
+        AppState, ChatEntry, ChatSelection, ContextUsageSource, ConversationView, Focus,
+        InputEvent, ModelChoice, ResultSection, SlashOverlay, ToolCallState, TuiMode,
     };
     use crate::ProviderModelOption;
 
@@ -2482,7 +2568,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let mut replayed_state = AppState::new();
-        replayed_state.replay_messages(&replayed_messages, child_runs);
+        replayed_state.replay_messages(&replayed_messages, child_runs, None);
         let replayed_entries = replayed_state.chat_entries.clone();
 
         // Keep the surrounding frame identical so this compares the actual
@@ -2555,7 +2641,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let mut replayed_state = AppState::new();
-        replayed_state.replay_messages(&replayed_messages, &[]);
+        replayed_state.replay_messages(&replayed_messages, &[], None);
         let replayed_entries = replayed_state.chat_entries.clone();
 
         live_state.mode = TuiMode::Idle;
@@ -2644,6 +2730,7 @@ mod tests {
             choices: (0..10)
                 .map(|index| ModelChoice {
                     label: format!("stub/model-{index}"),
+                    initial_reasoning_effort: None,
                     selection: ProviderModelOption {
                         provider_connection: "stub".to_string(),
                         model: crate::llm::ModelInfo {
@@ -2657,6 +2744,8 @@ mod tests {
                     },
                     is_active: false,
                     engine_name: None,
+                    selection_target: None,
+                    selection_preview_error: None,
                 })
                 .collect(),
             filter: String::new(),
@@ -2821,6 +2910,52 @@ mod tests {
             "manual navigation must not auto-return: {:?}",
             state.active_view
         );
+    }
+
+    #[test]
+    fn root_tool_pending_while_drilled_into_a_child_auto_switches_to_root_and_restores_the_child_view_on_resolve(
+    ) {
+        // Regression: a root-owned approval must not be stranded behind a
+        // subagent's transcript the user happens to be drilled into — it
+        // has to pull the view back to Root, then restore the child view
+        // once the approval resolves.
+        let mut state = AppState::new();
+        state.mode = TuiMode::Streaming;
+        let run_id = tracked_child(&mut state);
+        state.switch_to_child_view(run_id);
+        assert!(!state.auto_switched_to_child);
+
+        let id = Uuid::new_v4();
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolPending {
+                id,
+                name: "bash".to_string(),
+                arguments: serde_json::json!({}),
+                content_sections: vec![],
+                title_arguments: vec![],
+                run_id: None,
+            }),
+            &empty_textarea(),
+        );
+        assert_eq!(
+            state.active_view,
+            ConversationView::Root,
+            "expected auto-switch to root for the root-owned approval"
+        );
+        assert!(state.auto_switched_to_child);
+
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ToolDenied { id }),
+            &empty_textarea(),
+        );
+        assert!(
+            matches!(state.active_view, ConversationView::Child { run_id: r, .. } if r == run_id),
+            "expected to return to the previously-viewed child, got {:?}",
+            state.active_view
+        );
+        assert!(!state.auto_switched_to_child);
     }
 
     #[test]
@@ -3764,6 +3899,7 @@ mod tests {
             choices: (0..3)
                 .map(|index| ModelChoice {
                     label: format!("stub/model-{index}"),
+                    initial_reasoning_effort: None,
                     selection: ProviderModelOption {
                         provider_connection: "stub".to_string(),
                         model: crate::llm::ModelInfo {
@@ -3777,6 +3913,8 @@ mod tests {
                     },
                     is_active: false,
                     engine_name: None,
+                    selection_target: None,
+                    selection_preview_error: None,
                 })
                 .collect(),
             filter: String::new(),
@@ -3809,6 +3947,7 @@ mod tests {
     fn mouse_click_on_model_picker_entry_selects_without_switching() {
         let model_choice = |model_id: &str| ModelChoice {
             label: format!("stub/{model_id}"),
+            initial_reasoning_effort: None,
             selection: ProviderModelOption {
                 provider_connection: "stub".to_string(),
                 model: crate::llm::ModelInfo {
@@ -3822,6 +3961,8 @@ mod tests {
             },
             is_active: false,
             engine_name: None,
+            selection_target: None,
+            selection_preview_error: None,
         };
         let mut state = AppState::new();
         state.slash_overlay = SlashOverlay::ModelPicker {
@@ -3858,6 +3999,7 @@ mod tests {
     fn slash_overlay_model_drag_copies_the_filtered_model_label() {
         let model_choice = |label: &str, provider_connection: &str, model_id: &str| ModelChoice {
             label: label.to_string(),
+            initial_reasoning_effort: None,
             selection: ProviderModelOption {
                 provider_connection: provider_connection.to_string(),
                 model: crate::llm::ModelInfo {
@@ -3871,6 +4013,8 @@ mod tests {
             },
             is_active: false,
             engine_name: None,
+            selection_target: None,
+            selection_preview_error: None,
         };
         let expected_text = "provider/provider-model";
         let mut state = AppState::new();
@@ -4259,6 +4403,8 @@ mod tests {
                     provider_connection: "ollama".to_string(),
                     model: "child-model".to_string(),
                     reasoning_effort: None,
+                    compaction_engine: None,
+                    inherits_parent_runtime: false,
                 },
             }),
             &empty_textarea(),
@@ -4271,6 +4417,8 @@ mod tests {
                 provider_connection: "ollama".to_string(),
                 model: "child-model".to_string(),
                 reasoning_effort: None,
+                compaction_engine: None,
+                inherits_parent_runtime: false,
             })
         );
     }
@@ -4852,6 +5000,221 @@ mod tests {
     }
 
     #[test]
+    fn child_context_usage_is_kept_per_run_and_selected_only_for_drilled_view() {
+        let mut state = AppState::new();
+        let first_run_id = Uuid::new_v4();
+        let second_run_id = Uuid::new_v4();
+        for (run_id, label) in [(first_run_id, "First"), (second_run_id, "Second")] {
+            state.start_child_run(ChildRunInfo {
+                run_id,
+                bubble_id: Uuid::new_v4(),
+                agent_type: "reviewer".to_string(),
+                task: format!("Review {label}"),
+                label: label.to_string(),
+            });
+        }
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ChildContextUsage {
+                run_id: first_run_id,
+                estimated_tokens: 2_000,
+                context_length: 16_000,
+                source: ContextUsageSource::SerializedRequest,
+            }),
+            &empty_textarea(),
+        );
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ChildContextUsage {
+                run_id: second_run_id,
+                estimated_tokens: 6_000,
+                context_length: 32_000,
+                source: ContextUsageSource::ModelView,
+            }),
+            &empty_textarea(),
+        );
+
+        assert_eq!(
+            state.context_usage, None,
+            "a background child's report must not overwrite root usage"
+        );
+        assert_eq!(
+            state.active_context_usage(),
+            None,
+            "root view selects root usage"
+        );
+
+        state.switch_to_child_view(first_run_id);
+        assert_eq!(
+            state.active_context_usage(),
+            Some(ContextUsage {
+                estimated_tokens: 2_000,
+                context_length: 16_000,
+                source: ContextUsageSource::SerializedRequest,
+            })
+        );
+        state.switch_to_child_view(second_run_id);
+        assert_eq!(
+            state.active_context_usage(),
+            Some(ContextUsage {
+                estimated_tokens: 6_000,
+                context_length: 32_000,
+                source: ContextUsageSource::ModelView,
+            })
+        );
+
+        state.switch_to_root_view();
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ContextUsage {
+                estimated_tokens: 8_000,
+                context_length: 64_000,
+                source: ContextUsageSource::ModelView,
+            }),
+            &empty_textarea(),
+        );
+        assert_eq!(
+            state.active_context_usage(),
+            Some(ContextUsage {
+                estimated_tokens: 8_000,
+                context_length: 64_000,
+                source: ContextUsageSource::ModelView,
+            }),
+            "root view returns to root usage"
+        );
+
+        state.switch_to_child_view(first_run_id);
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ChildAgentDone {
+                run_id: first_run_id,
+                status: "success".to_string(),
+                result: Some("done".to_string()),
+            }),
+            &empty_textarea(),
+        );
+        assert_eq!(
+            state.active_context_usage(),
+            Some(ContextUsage {
+                estimated_tokens: 2_000,
+                context_length: 16_000,
+                source: ContextUsageSource::SerializedRequest,
+            }),
+            "finished child readout remains available while its transcript is drilled in"
+        );
+    }
+
+    #[test]
+    fn compaction_activity_is_scoped_and_preserves_agent_mode() {
+        let mut state = AppState::new();
+        let root_request_id = Uuid::new_v4();
+        let child_run_id = Uuid::new_v4();
+        let child_request_id = Uuid::new_v4();
+        for (run_id, request_id) in [
+            (None, root_request_id),
+            (Some(child_run_id), child_request_id),
+        ] {
+            update(
+                &mut state,
+                TuiEvent::Domain(DomainEvent::CompactionActivity {
+                    run_id,
+                    request_id,
+                    active: true,
+                }),
+                &empty_textarea(),
+            );
+        }
+        assert_eq!(state.mode, TuiMode::Idle);
+        assert_eq!(state.compaction_requests.len(), 2);
+        for request_id in [Uuid::new_v4(), root_request_id] {
+            update(
+                &mut state,
+                TuiEvent::Domain(DomainEvent::CompactionActivity {
+                    run_id: None,
+                    request_id,
+                    active: false,
+                }),
+                &empty_textarea(),
+            );
+            if request_id != root_request_id {
+                assert_eq!(state.compaction_requests.get(&None), Some(&root_request_id));
+            }
+        }
+        assert!(!state.compaction_requests.contains_key(&None));
+        assert_eq!(
+            state.compaction_requests.get(&Some(child_run_id)),
+            Some(&child_request_id)
+        );
+        state.clear_conversation();
+        assert!(state.compaction_requests.is_empty());
+    }
+
+    #[test]
+    fn compaction_replaces_the_stale_root_footer_value() {
+        let mut state = AppState::new();
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ContextUsage {
+                estimated_tokens: 76_915,
+                context_length: 98_304,
+                source: ContextUsageSource::SerializedRequest,
+            }),
+            &empty_textarea(),
+        );
+        assert!(state.context_usage.is_some());
+
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ContextUsage {
+                estimated_tokens: 9_854,
+                context_length: 98_304,
+                source: ContextUsageSource::ModelView,
+            }),
+            &empty_textarea(),
+        );
+
+        assert_eq!(
+            state.active_context_usage(),
+            Some(ContextUsage {
+                estimated_tokens: 9_854,
+                context_length: 98_304,
+                source: ContextUsageSource::ModelView,
+            }),
+            "post-compaction model-view estimate replaces the stale request estimate"
+        );
+    }
+
+    #[test]
+    fn compaction_usage_update_does_not_interrupt_the_follow_up_response_state() {
+        let mut state = AppState::new();
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::StreamDone),
+            &empty_textarea(),
+        );
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::ContextUsage {
+                estimated_tokens: 9_854,
+                context_length: 98_304,
+                source: ContextUsageSource::ModelView,
+            }),
+            &empty_textarea(),
+        );
+        update(
+            &mut state,
+            TuiEvent::Domain(DomainEvent::StreamStarted),
+            &empty_textarea(),
+        );
+
+        assert_eq!(state.mode, TuiMode::Streaming);
+        assert_eq!(
+            state.active_context_usage().map(|usage| usage.source),
+            Some(ContextUsageSource::ModelView)
+        );
+    }
+
+    #[test]
     fn domain_stream_started_clears_partial_thinking_text() {
         let mut state = AppState::new();
         state.mode = TuiMode::Pending;
@@ -5274,7 +5637,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let mut replayed_state = AppState::new();
-        replayed_state.replay_messages(&replayed_messages, &[]);
+        replayed_state.replay_messages(&replayed_messages, &[], None);
         let replayed_entries = replayed_state.chat_entries.clone();
 
         live_state.mode = TuiMode::Idle;

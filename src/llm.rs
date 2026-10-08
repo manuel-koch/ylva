@@ -28,23 +28,50 @@ pub(crate) mod openai_compatible_messages;
 pub mod openai_compatible_provider;
 pub mod openrouter_provider;
 pub mod provider_registry;
+pub mod token_estimate;
+pub(crate) mod token_usage;
+
+/// Maximum number of simultaneous HTTP requests per provider connection.
+pub const MAX_CONCURRENT_PROVIDER_REQUESTS: usize = 4;
+
+/// Return the shared HTTP request limiter for a provider connection.
+pub(crate) fn provider_request_limiter(
+    provider_connection: &str,
+) -> crate::http::RequestConcurrencyLimiter {
+    static LIMITERS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, crate::http::RequestConcurrencyLimiter>>,
+    > = std::sync::OnceLock::new();
+    let limiters = LIMITERS.get_or_init(Default::default);
+    let mut limiters = limiters
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    limiters
+        .entry(provider_connection.to_string())
+        .or_insert_with(|| {
+            crate::http::RequestConcurrencyLimiter::new(MAX_CONCURRENT_PROVIDER_REQUESTS)
+        })
+        .clone()
+}
 
 pub use engine::{
-    Engine, EngineConfig, EngineDisplayInfo, EngineImpl, EngineRouter, EngineRuntimeConfig,
-    EngineRuntimeConfigHandle, ProviderModelOption, DEFAULT_CONTEXT_LENGTH,
+    CompactionEngineDisplayInfo, Engine, EngineConfig, EngineDisplayInfo, EngineImpl, EngineRouter,
+    EngineRuntimeConfig, EngineRuntimeConfigHandle, ModelSelectionTarget, ProviderModelOption,
+    DEFAULT_CONTEXT_LENGTH,
 };
 pub use mock_provider::{MockEvent, MockProvider};
 pub use ollama_provider::OllamaProvider;
 pub use openai_compatible_provider::OpenAiCompatibleProvider;
 pub use openrouter_provider::OpenRouterProvider;
 pub use provider_registry::{ProviderEnv, ProviderRegistry, ProviderSelection};
+pub use token_estimate::TokenEstimator;
+pub use MAX_CONCURRENT_PROVIDER_REQUESTS as DEFAULT_MAX_CONCURRENT_PROVIDER_REQUESTS;
 
 /// A single tool definition in the OpenAI chat-completions wire shape.
 ///
 /// This is the `{"type":"function","function":{name, description, parameters}}`
 /// envelope. `parameters` is a serde-serialized [`schemars::schema::RootSchema`]
 /// produced by deriving `JsonSchema` on a typed arguments struct — never a
-/// hand-written JSON schema (blueprint §4D).
+/// hand-written JSON schema.
 #[derive(Debug, Clone)]
 pub struct ToolSchema {
     pub name: String,
@@ -151,7 +178,7 @@ pub(crate) fn format_input_modalities_for_log(
     }
 }
 
-/// Runtime abstraction over a chat-completions-style streaming provider.
+/// Provider interface for a chat-completions-style streaming backend.
 ///
 /// Native async trait (Rust 1.75+): no `async-trait` crate. The Provider
 /// creates its own internal `mpsc::channel` and returns the receiver, so
@@ -162,8 +189,8 @@ pub(crate) fn format_input_modalities_for_log(
 /// in-flight stream is aborted and the receiver eventually yields
 /// `StreamEvent::Cancelled`.
 ///
-/// `tools` carries the schemas the model may call (blueprint §4A Step 3
-/// refinement): the request body sends them so the model can emit
+/// `tools` carries the schemas the model may call: the request body sends
+/// them so the model can emit
 /// `delta.tool_calls`, surfaced as [`StreamEvent::Delta`] fragments that the
 /// agent's streaming task assembles. Tool assembly never happens here.
 pub trait Provider: Send + Sync {
@@ -173,6 +200,49 @@ pub trait Provider: Send + Sync {
         tools: Vec<ToolSchema>,
         cancel: CancellationToken,
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>>;
+
+    /// Start a chat request associated with a persisted session when one is
+    /// available. Providers that do not record session metadata can use the
+    /// default implementation.
+    fn chat_with_session_id<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        _session_id: Option<uuid::Uuid>,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        self.chat(messages, tools, cancel)
+    }
+
+    /// Start a request and report its serialized token estimate before the
+    /// provider waits for response headers. Providers without a request-body
+    /// estimate use the default implementation.
+    fn chat_with_session_id_and_estimate<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        session_id: Option<uuid::Uuid>,
+        _on_estimate: Box<dyn FnOnce(usize, usize) -> BoxFuture<'static, ()> + Send>,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        self.chat_with_session_id(messages, tools, cancel, session_id)
+    }
+
+    /// Start a request with an optional callback for recording a failure that
+    /// occurs outside provider stream processing (for example, a caller-side
+    /// timeout). The default implementation preserves providers without dump
+    /// support.
+    fn chat_with_session_id_and_diagnostics<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        session_id: Option<uuid::Uuid>,
+        on_estimate: Box<dyn FnOnce(usize, usize) -> BoxFuture<'static, ()> + Send>,
+        _on_failure: Option<crate::http::RequestDumpFailureHandler>,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        self.chat_with_session_id_and_estimate(messages, tools, cancel, session_id, on_estimate)
+    }
 
     /// Return the short name identifying this provider connection or the
     /// built-in implementation (e.g. `"ollama-cloud"`, `"openrouter"`,
@@ -189,12 +259,12 @@ pub trait Provider: Send + Sync {
     /// for example, combines `/api/tags` with `/api/show` metadata.
     fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>>;
 
-    /// Return the shared runtime settings when this provider supports them.
+    /// Return the shared Engine runtime settings when this provider supports them.
     ///
     /// [`EngineImpl`](crate::llm::engine::EngineImpl) uses the handle to expose a
     /// coherent [`EngineConfig`](crate::llm::engine::EngineConfig) snapshot without
     /// maintaining a second mutable copy of provider settings. Providers that
-    /// do not expose mutable runtime settings may keep the default.
+    /// do not expose mutable Engine runtime settings may keep the default.
     fn runtime_config_handle(&self) -> Option<EngineRuntimeConfigHandle> {
         None
     }
@@ -237,22 +307,22 @@ pub trait Provider: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[schemars(title = "ToolResponseEnvelope")]
 pub struct ToolEnvelope {
-    ok: bool,
+    pub(crate) ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<String>,
+    pub(crate) result: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+    pub(crate) error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    result_metadata: Option<serde_json::Value>,
+    pub(crate) result_metadata: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    result_metadata_schema: Option<serde_json::Value>,
+    pub(crate) result_metadata_schema: Option<serde_json::Value>,
 }
 
 impl ToolEnvelope {
     /// Serialize this envelope to a JSON string for a `role:"tool"` message's
     /// `content`. The struct only holds strings/bools, so serialization never
     /// fails.
-    fn to_string_checked(&self) -> String {
+    pub(crate) fn to_string_checked(&self) -> String {
         serde_json::to_string(self).expect("ToolEnvelope always serializes")
     }
 }
@@ -279,6 +349,32 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn provider_request_limiters_are_shared_by_connection_name() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build Tokio runtime");
+        runtime.block_on(async {
+            let provider_connection = format!("limiter-test-{}", uuid::Uuid::new_v4());
+            let first = provider_request_limiter(&provider_connection);
+            let second = provider_request_limiter(&provider_connection);
+            let permits = futures::future::try_join_all(
+                (0..MAX_CONCURRENT_PROVIDER_REQUESTS).map(|_| first.acquire()),
+            )
+            .await
+            .expect("all available permits");
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(10), second.acquire(),)
+                    .await
+                    .is_err(),
+                "all engines for the connection share one cap"
+            );
+            drop(permits);
+            let _released_permit = second.acquire().await.expect("released permit");
+        });
     }
 
     #[test]

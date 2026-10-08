@@ -160,15 +160,46 @@ fn project_for_draw(state: &AppState) -> TuiState {
         ConversationView::Root => parent_agent_mode,
     };
     let engine_display = showing_child_run_id
-        .and_then(|run_id| state.child_engine_displays.get(&run_id).cloned())
+        .and_then(|run_id| state.child_engine_displays.get(&run_id))
+        .map(|child_display| {
+            let mut child_display = child_display.clone();
+            if child_display.inherits_parent_runtime {
+                child_display.engine_name = state.engine_display.engine_name.clone();
+                child_display.provider_connection =
+                    state.engine_display.provider_connection.clone();
+                child_display.model = state.engine_display.model.clone();
+                child_display.reasoning_effort = state.engine_display.reasoning_effort.clone();
+                if let Some(compaction) = &mut child_display.compaction_engine {
+                    if compaction.follows_conversation {
+                        compaction.engine_name = child_display.engine_name.clone();
+                        compaction.provider_connection = child_display.provider_connection.clone();
+                        compaction.model = child_display.model.clone();
+                        if let Some(parent_compaction) =
+                            state.engine_display.compaction_engine.as_ref()
+                        {
+                            compaction.context_length = parent_compaction.context_length;
+                        }
+                        compaction.shares_conversation = true;
+                    } else {
+                        compaction.shares_conversation = !compaction.engine_name.is_empty()
+                            && compaction.engine_name == child_display.engine_name;
+                    }
+                }
+            }
+            child_display
+        })
         .unwrap_or_else(|| state.engine_display.clone());
     TuiState {
         display_metadata: state.display_metadata.clone(),
         parent_agent_mode,
         agent_mode,
+        compacting: state
+            .compaction_requests
+            .contains_key(&showing_child_run_id),
         active_subagent_counts,
         engine_display,
         chat_entries,
+        subagent_started_at: state.subagent_started_at(),
         partial_assistant_text,
         partial_thinking_text,
         thinking_started_at,
@@ -179,6 +210,9 @@ fn project_for_draw(state: &AppState) -> TuiState {
         pending_approval_is_subagent,
         input_history: state.input_history.clone(),
         history_index: state.history_index,
+        context_usage_text: state
+            .active_context_usage()
+            .map(crate::tui_reducer_state::format_context_usage_readout),
         draft: state.draft.clone(),
         input_area: state.layout.input_area.rect,
         toast: state.toast.clone(),
@@ -455,6 +489,8 @@ mod tests {
             provider_connection: "openrouter".to_string(),
             model: "root-model".to_string(),
             reasoning_effort: None,
+            compaction_engine: None,
+            inherits_parent_runtime: false,
         };
 
         let root_projection = project_for_draw(&state);
@@ -481,6 +517,8 @@ mod tests {
                 provider_connection: "ollama".to_string(),
                 model: "child-model".to_string(),
                 reasoning_effort: None,
+                compaction_engine: None,
+                inherits_parent_runtime: false,
             },
         );
         state.switch_to_child_view(run_id);
@@ -491,6 +529,68 @@ mod tests {
             "ollama"
         );
         assert_eq!(child_projection.engine_display.model, "child-model");
+    }
+
+    #[test]
+    fn inherited_child_projection_tracks_parent_engine_and_implicit_summarizer() {
+        let run_id = Uuid::new_v4();
+        let bubble_id = Uuid::new_v4();
+        let mut state = AppState::new();
+        state.engine_display = crate::llm::engine::EngineDisplayInfo {
+            engine_name: "engine-b".to_string(),
+            provider_connection: "mock".to_string(),
+            model: "model-b".to_string(),
+            reasoning_effort: Some("high".to_string()),
+            compaction_engine: Some(crate::llm::engine::CompactionEngineDisplayInfo {
+                engine_name: "engine-b".to_string(),
+                provider_connection: "mock".to_string(),
+                model: "model-b".to_string(),
+                context_length: 65_536,
+                follows_conversation: true,
+                shares_conversation: true,
+            }),
+            inherits_parent_runtime: false,
+        };
+        push_spawn_bubble(&mut state, bubble_id, "reviewer", "inspect the change");
+        state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id,
+            agent_type: "reviewer".to_string(),
+            task: "inspect the change".to_string(),
+            label: "Inspect change".to_string(),
+        });
+        state.child_engine_displays.insert(
+            run_id,
+            crate::llm::engine::EngineDisplayInfo {
+                engine_name: "engine-a".to_string(),
+                provider_connection: "mock".to_string(),
+                model: "model-a".to_string(),
+                reasoning_effort: None,
+                compaction_engine: Some(crate::llm::engine::CompactionEngineDisplayInfo {
+                    engine_name: "engine-a".to_string(),
+                    provider_connection: "mock".to_string(),
+                    model: "model-a".to_string(),
+                    context_length: 131_072,
+                    follows_conversation: true,
+                    shares_conversation: true,
+                }),
+                inherits_parent_runtime: true,
+            },
+        );
+        state.switch_to_child_view(run_id);
+
+        let child_projection = project_for_draw(&state);
+        assert_eq!(child_projection.engine_display.engine_name, "engine-b");
+        assert_eq!(child_projection.engine_display.model, "model-b");
+        let summarizer = child_projection
+            .engine_display
+            .compaction_engine
+            .expect("implicit child summarizer");
+        assert_eq!(summarizer.engine_name, "engine-b");
+        assert_eq!(summarizer.model, "model-b");
+        assert_eq!(summarizer.context_length, 65_536);
+        assert!(summarizer.follows_conversation);
+        assert!(summarizer.shares_conversation);
     }
 
     #[test]

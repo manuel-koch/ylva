@@ -25,7 +25,7 @@ classDiagram
             +create(profile, agent_type, role) AgentLoop
         }
         class Role {
-            <<runtime>>
+            <<execution>>
             +Root
             +Child(parent_cancel, subagent_ui_tx, agent_tx, briefing)
         }
@@ -46,7 +46,7 @@ classDiagram
         class Context {}
     }
 
-    namespace Runtime {
+    namespace EngineExecution {
         class EngineImpl {
             -provider: Arc~dyn Provider~
             -config: EngineConfig

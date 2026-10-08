@@ -29,3 +29,6 @@ target
 
 # Test chat persistence
 tests/e2e/custom/chats
+
+# Graphify output
+graphify-out

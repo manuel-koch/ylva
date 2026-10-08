@@ -59,7 +59,7 @@
 //!   than `NotFound` (an unreadable chain directory).
 //!
 //! Instruction content cannot escape this trust boundary and cannot override
-//! Ylva's runtime safety constraints — tool allowlists, approval floors, and
+//! Ylva's safety constraints — tool allowlists, approval floors, and
 //! the sandbox are enforced in code, never in prompt text.
 
 use std::ffi::OsStr;

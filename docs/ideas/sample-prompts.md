@@ -228,14 +228,15 @@ Use markdown table to structure your findings.
 
 Run each the following task(s) in subagent(s) and let them report their findings back:
 
-- Analyze the `read` tool functionality implemented in source code
-  and list currently implemented features in a brief markdown descriptions.
+Analyze the given tool functionality implemented in source code
+and list currently implemented features in a brief markdown descriptions.
 
-- Analyze the `write` tool functionality implemented in source code
-  and list currently implemented features in a brief markdown descriptions.
-
-- Analyze the `TUI` functionality implemented in source code
-  and list currently implemented features in a table with brief descriptions.
+- `read` tool
+- `write` tool
+- `glob` tool
+- `search` tool
+- `clarify` tool
+- `bash` tool
 
 ONLY use `bash` tool to search for relevant files!
 
@@ -268,7 +269,7 @@ Run the summary task on each file in separate subagent and let it report its fin
 Format the result using markdown headers (per file) and the
 related file summary paragraph.
 Save the complete summary to `logs/summary.md`, don't edit an existing file nor use
-its current content.
+its current content. If file exists, override it.
 
 ---
 
@@ -318,5 +319,92 @@ Do a search on Github using `web_fetch` and this URL template for url-encoded te
 `https://api.github.com/search/issues?per_page=3&page=1&q=<terms>+language:rust`.
 Search for "agent harness" and report first 30 repository URLs.
 DON'T tweak the `per_page` query-param. This will keep the result-size within limits!
+
+---
+
+<Sample prompts that will likely stress a LLM and cause filling up of context>
+
+## Map the agent tool-call lifecycle
+
+Trace how a model tool call moves through Ylva, from the provider response to tool
+execution and back into the next model request.
+
+Work in stages. First, locate and read the core agent loop, tool registry,
+tool-call/result types, and provider message serialization. Then trace one
+filesystem tool and one delegated subagent call through their execution and
+persistence paths. Finally, compare the paths and explain how approval,
+errors, displayed results, and model-facing results are handled.
+
+Use repository tools to inspect files and search for relevant symbols. Cite file
+paths and line ranges for each claim. Do not modify files or run commands that
+change the workspace. If the trace is too large for one response, continue with
+another focused stage until you have covered the full lifecycle. End with a
+concise sequence diagram in plain text and a list of unresolved questions.
+
+## Audit session persistence and resume
+
+Build a detailed account of Ylva session persistence, resume, and clone behavior.
+
+Work in stages. Start by finding the session store, serialized event types,
+and tests that define the persistence contract. Then trace fresh-session creation,
+incremental writes, resume reconstruction, clone behavior, locking,
+and recovery after interrupted writes. Check how root and subagent transcripts
+relate, and how compaction events affect the reconstructed model view while
+preserving the visible transcript.
+
+Use repository tools to inspect source, tests, and relevant docs. Cite file paths
+and line ranges. Do not edit files, create sessions, or run commands that mutate
+the workspace. Continue with focused stages until you have covered all the
+behaviors above. Finish with a lifecycle outline, a table of key invariants
+and where each is enforced, and any inconsistencies you find between implementation,
+tests, and documentation.
+
+## Follow context budgeting and compaction
+
+Explain exactly how Ylva estimates context size and decides when and how to
+compact a conversation.
+
+Work in stages. First inspect token estimation and the footer readout.
+Then trace threshold evaluation, background summary generation, safe
+application boundaries, synchronous fallback, and the construction of the
+model view after compaction. Finally, follow persistence and resume to
+determine how the summary and boundary are restored, and identify tests
+for edge cases such as failed summaries, oversized tool results, or
+incomplete tool-call pairs.
+
+Use repository tools to search and read the implementation, tests, and docs.
+Cite file paths and line ranges for each claim. Do not edit files or run
+commands that change the workspace. Keep investigating in additional focused
+stages if needed. Finish with a decision-flow outline, a worked example
+using hypothetical token estimates, and any gaps between the documented
+contract and tested behavior.
+
+---
+
+Run a read-only smoke test of root-agent and subagent Bash tool execution.
+Execute the steps; do not merely describe them.
+
+1. As the root agent, use the Bash tool to run:
+   printf 'ROOT_BASH_START\n'; pwd
+
+2. Launch two subagents, in parallel if supported. Explicitly instruct each
+   subagent to use its own Bash tool, not ask the root agent to run commands:
+   - Subagent A: run `printf 'SUBAGENT_A_BASH\n' ; sleep 10 ; uname -s`
+   - Subagent B: run `printf 'SUBAGENT_B_BASH\n' ; sleep 10 ; printf '42\n'`
+   Each subagent must return the command, actual stdout, and exit status.
+   Do not allow further delegation.
+
+3. Wait for both subagents to finish. Then, as the root agent, use the Bash
+   tool again to run:
+   printf 'ROOT_BASH_END\n'
+
+4. Report a compact table with one row per Bash execution: agent,
+   command, stdout, exit status. Mark the test PASS only if both subagents
+   actually executed their Bash calls and both root Bash calls succeeded.
+   If a required tool is unavailable or execution fails, report FAIL and
+   the reason; do not simulate output or substitute root execution for a
+   subagent's execution.
+
+Do not edit files, install anything, access the network, or change Git state.
 
 ---

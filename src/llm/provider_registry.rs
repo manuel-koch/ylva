@@ -198,7 +198,7 @@ impl ProviderSelection {
     }
 
     /// Convert this environment selection into the engine configuration that
-    /// owns its connection and initial runtime settings.
+    /// owns its connection and initial Engine runtime settings.
     pub fn engine_config(&self, default_model: Option<&str>) -> EngineConfig {
         match self {
             ProviderSelection::Mock => EngineConfig {
@@ -209,6 +209,10 @@ impl ProviderSelection {
                 api_base_url: None,
                 api_key: None,
                 reasoning: None,
+
+                compact_target_ratio: 0.5,
+                soft_compaction_threshold: 0.7,
+                hard_compaction_threshold: 0.9,
             },
             ProviderSelection::OpenAiCompatible {
                 provider_connection,
@@ -227,6 +231,10 @@ impl ProviderSelection {
                 api_base_url: Some(base_url.clone()),
                 api_key: api_key.clone(),
                 reasoning: None,
+
+                compact_target_ratio: 0.5,
+                soft_compaction_threshold: 0.7,
+                hard_compaction_threshold: 0.9,
             },
         }
     }
@@ -384,7 +392,7 @@ impl ProviderRegistry {
         )
     }
 
-    /// Build a provider from a named connection and an engine's runtime
+    /// Build a provider from a named connection and an engine's Engine runtime
     /// settings.
     pub fn provider_from_provider_config(
         provider_connection: &str,
@@ -574,6 +582,10 @@ mod tests {
             api_base_url: Some("http://localhost:11434".to_string()),
             api_key: None,
             reasoning: None,
+
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
         };
 
         environment.apply_missing_api_key(&mut engine);
@@ -594,6 +606,10 @@ mod tests {
             api_base_url: Some("https://example.test/v1".to_string()),
             api_key: None,
             reasoning: None,
+
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
         };
 
         let error = ProviderRegistry::from_engine_config(&config)
@@ -611,6 +627,10 @@ mod tests {
             api_base_url: None,
             api_key: None,
             reasoning: None,
+
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
         };
 
         let error = ProviderRegistry::from_engine_config(&config)
@@ -631,6 +651,10 @@ mod tests {
             api_base_url: None,
             api_key: None,
             reasoning: None,
+
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
         };
 
         let provider = ProviderRegistry::provider_from_engine_config(&config)
@@ -648,6 +672,10 @@ mod tests {
             api_base_url: Some("https://openrouter.ai".to_string()),
             api_key: Some("secret".to_string()),
             reasoning: None,
+
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
         };
 
         let provider = ProviderRegistry::provider_from_engine_config(&config)
@@ -670,6 +698,10 @@ mod tests {
             api_base_url: None,
             api_key: None,
             reasoning: None,
+
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
         };
 
         let selection = ProviderRegistry::from_provider_config(

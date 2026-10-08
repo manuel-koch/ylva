@@ -45,7 +45,7 @@ failure is routed through the agent event loop once, so one failed request
 produces one user-facing error even though lower layers may record their own
 structured diagnostics.
 
-## CLI Runtime
+## CLI mode
 
 Non-interactive, one-shot session: the initial user turn is sent to the
 agent, and the assistant response is streamed to stdout as it arrives. The
@@ -84,6 +84,10 @@ the opt-in `cross_filesystem` rule that matches paths on a different
 filesystem (device) than the workspace root — see
 [Sandbox (tool-approval rules)](./configuration.md#sandbox-tool-approval-rules).
 
+Unknown tool names return per-call errors to the model without interrupting
+other calls in the batch. The next model request starts only after the batch's
+known tools have completed, including any pending user approval.
+
 Tool status lines render as `[tool] <title> …` (e.g. `[tool] Read docs/features.md [limit=32]`);
 bracketed props come from the tool's title arguments ranked by schema field
 order, so a labeled `bash` call renders `[tool] Bash echo hi [label=Greet the user]`.
@@ -115,6 +119,12 @@ intact.
   directory, so the same checkout always lands in the same folder.
 - Every start begins a **fresh** session: Ylva never auto-resumes and shows no
   startup picker.
+- `--conversation-id <uuid> --clone` starts a **new** session that replays
+  an existing one: the source file is left byte-for-byte unchanged, the clone
+  gets its own session id with a `cloned_from` link in its header, and all new
+  writes go to the clone. Only top-level sessions can be cloned, and a source
+  another Ylva process holds open fails cleanly without creating anything.
+  See the [clone contract](persistence.md#clone-contract).
 - `--conversation-id <uuid>` re-attaches an existing session, replays its
   prior transcript into the next headless request and the TUI chat view, and
   appends the new turn; an unknown id is an error rather than a silent fresh
@@ -135,11 +145,137 @@ intact.
 - On exit, Ylva prints the session id and a ready-to-paste
   `ylva --conversation-id <uuid>` command to stderr, so resuming never
   requires hunting through the chats directory.
+- The root agent type is part of the session's metadata: a resume continues
+  with the type the session last stored unless `--agent <type>` says
+  otherwise, and an explicit override is persisted as the session's latest
+  selection so the next resume keeps it.
 
 See [persistence](./persistence.md) for the on-disk format and the full resume
 contract.
 
-## TUI Runtime
+## Context management and compaction
+
+A long conversation must keep fitting the active model's context window
+without losing anything the user can still read.
+
+- **Summarizer capacity warnings.** CLI and TUI check the selected root and all
+  configured agent types at startup, even before any user prompt or subagent
+  spawn. Equivalent startup warnings are consolidated into one notice listing
+  all affected agent types; different capacity conditions remain separate.
+  They warn when a root or subagent's
+  soft compaction trigger, including prompt and request overhead, can exceed
+  its selected compaction engine's effective context window. `/models` switches
+  recheck capacity immediately, even while idle, without repeating an unchanged
+  warning on the next prompt. They also warn
+  before an actual oversized summary request. Warnings are advisory: attempts
+  still run and existing failure recovery is unchanged. Each agent type can
+  select its own compaction engine. When neither the profile nor agent type
+  explicitly selects one, the summarizer follows that agent's active
+  conversation engine. An explicit summarizer stays bound to its named engine;
+  if it shares the conversation engine, changes to that engine affect future
+  summaries too. See
+  [per-agent configuration](./configuration.md#per-agent-configuration).
+- **Transcript vs. model view.** The transcript is the durable, ordered
+  record of every message and never loses one. The *model view* is what a
+  request actually carries: the leading system block, an optional compaction
+  summary/recovery handoff, latest task anchor, and retained tail with bounded
+  model-only result overrides. Original tool bodies, metadata, and display
+  sections remain canonical. The outer
+  agent loop is the only writer of both; background summarization only ever
+  receives an immutable snapshot of the prefix it summarizes.
+- **Token estimates.** The compaction budget estimates the model view and
+  active tool definitions using `tiktoken-rs` `cl100k_base`. The footer instead
+  applies `cl100k_base` to the serialized JSON Chat Completions request body
+  sent by OpenAI-compatible providers, including its roles, JSON structure,
+  tools, and provider-specific fields. It counts the JSON body as text. It does
+  not reproduce provider-side request processing or the selected model's
+  tokenizer, so it is not the serving model's actual input-token count. It
+  updates when each request starts and remains the last request's estimate
+  until another request is sent. `/clear` (alias `/reset`) removes the previous
+  session's readout; it stays hidden until the new session reports an estimate.
+  After compaction applies a summary or drops
+  context, the footer switches to the refreshed model-view estimate (including
+  active tool definitions) until another request starts. The footer shows the
+  token count and percentage without an estimate-source label. With
+  `YLVA_TOKEN_USAGE_DUMP_PATH` set, Ylva appends a metadata-only JSONL record
+  with the same local estimate, a UTC
+  timestamp, its session ID when available, and any provider-reported
+  prompt/input count received for that request. The provider count reflects
+  serving-side accounting when available. Neither estimate is billed usage.
+  The compaction estimate and serialized-body estimate can differ because they
+  count different representations.
+  Providers may omit usage, and interrupted streams retain an unavailable value
+  rather than reporting zero. See [CLI options — Debug](./cli-options.md#debug).
+  A `/models` switch changes the window used for the next request.
+- **Automatic compaction.** A completed turn or tool outcome at the soft
+  threshold (default `0.7`) schedules one useful completed-prefix summary,
+  including the prior summary/handoff as source. An open tool-call group is
+  excluded; later admitted tools continue without soft-pressure cancellation.
+  Results apply only at a safe boundary. Empty or task-only prefixes do not
+  repeatedly schedule futile summaries. Generation/request IDs reject late
+  outcomes. The root/child-scoped `· Compacting…` indicator remains active
+  until application on success and clears on failure, timeout, stop, or clear.
+- **Bounded continuation.** Every request is checked against the local safe
+  ceiling: window minus 10% reply reserve, 5% safety margin, and 512 estimated
+  tokens of overhead. At hard pressure (default `0.9`) or above that ceiling,
+  an already-running summary gets only its remaining original timeout; commands
+  remain responsive. Empty, failed, growing, or inadequate summaries lead to
+  measured lossy recovery, not unbounded waits/retries. Recovery first clips
+  older outcomes, removes older complete groups with a real-content handoff,
+  clips retained outcomes, then shortens summary/handoff. The latest explicit
+  request remains verbatim unless shortening is necessary to fit the ceiling.
+  The target (default `0.5`) is best-effort, not permission to erase the task.
+  Omission markers count toward the budget; tool IDs and matching outcomes remain
+  paired. If immutable instructions/schemas plus a valid task cannot fit, the
+  turn stops with an actionable error. A recognized provider context rejection
+  can retry once with 25% extra request-local margin, only before any response
+  text/tool-call deltas; completed or partial operations are never replayed.
+- **Tool batches and results.** Only the first six requested positions are
+  eligible, in their original order, across all tools and root/child runs.
+  Unknown, invalid, denied, or budget-skipped positions are not backfilled.
+  Remaining result allowance is shared across unresolved calls after reserved
+  error framing; a call needs at least 256 estimated tokens to start, and approval
+  rechecks the current allowance. Insufficient allowance can pause only for an
+  existing summary within its remaining deadline, otherwise each call closes
+  with one explicit not-executed error. The model must resubmit only skipped
+  operations in smaller batches; the harness never retries them automatically.
+  Skipped rounds still consume the tool-use iteration limit. All large tool
+  results, partial errors, and child reports receive bounded model projections;
+  source/network safety caps remain separate. Binary payloads and descriptors
+  stay whole or are omitted together with an explicit textual notice.
+- **Notices and diagnostics.** Scheduling, waiting, summary application, budget
+  pauses, skipped calls, lossy reduction, and irreducible failure are distinguished
+  without implying that clipping was successful summarization. Original content
+  remains browsable. Applied summaries/recovery refresh the model-view estimate.
+  Metadata-only reduction logs record trigger, request identity, safe boundary,
+  stage, before/after estimates, projected/clipped counts, admitted/skipped calls,
+  batch cap, remaining allowance, and terminal reason. Local estimates remain
+  advisory, not provider-reported usage or billed tokens.
+- **Summary generation.** Compaction summarizes earlier conversation to reduce
+  model context while retaining the information needed to continue the work.
+  Summary guidelines can be customized through
+  [`COMPACTION.md`](./configuration.md#compaction-summary-prompt-compactionmd).
+  See [engine configuration](./configuration.md#engine-configuration) for
+  engine and timeout settings.
+- **Scope.** Root and child agent contexts compact independently using the
+  settings resolved for their agent type. Children wait for pending summaries
+  before reporting completion and resume work after compaction changes their
+  model view. There is no manual `/compact` command ( for now ).
+- **Persistence and resume.** Each applied snapshot appends a `compaction`
+  event (never a rewrite); bounded overrides/handoffs append `model_projection`
+  events, selected by revision even at the same boundary. Resume and clone
+  restore the model view across rebuilt system blocks without duplicating
+  synthetic transcript messages. See the
+  [persistence format](./persistence.md#compaction).
+- **In the TUI.** The transcript keeps every message and shows a
+  `── compaction · N messages summarized ──` divider at the boundary (both
+  on replay and when a summary is applied live), and the footer's
+  key-hints row right-aligns the latest usage readout (`64.2K (45%)`).
+  Compaction refreshes it immediately from the compacted
+  model view; the next request replaces it with that serialized request's
+  estimate.
+
+## TUI mode
 
 Interactive terminal UI launched automatically when stdout is a terminal
 (see [TUI Architecture](#tui-architecture)). When stdout is not a terminal
@@ -161,9 +297,22 @@ Named provider connections are constructed independently, so multiple
 connections can use the same implementation (for example, local Ollama and
 Ollama Cloud). The conversation footer shows the active named engine and model
 when a profile engine name is available; direct unnamed engines show only the
-model. `/models` queries each connection once and lists
-`provider_connection/model` entries so a selection can change both connection
-and model.
+model. `/models` queries each connection once and lists configured named
+engine shortcuts before raw `provider_connection/model` catalog entries.
+Selecting a shortcut activates that exact engine's current Engine runtime settings,
+even when another engine uses the same connection and model. A raw catalog
+entry keeps provider-based routing: it changes the active engine for its
+connection, or the deterministic representative engine for another connection.
+The picker detail previews the provider-connection/model and effective context
+window compaction will use for the highlighted selection, without repeating
+the active conversation engine and model already shown in the TUI footer. It
+uses the form `Compaction uses <provider_connection>/<model>, context: <window>`.
+The detail turns orange when a fixed compaction engine would remain on a
+different provider-connection/model or effective context window than the
+highlighted choice. Compaction that follows the conversation selection, or a
+choice that itself changes the compaction engine, shows the resulting pair
+without a mismatch warning. Switch notices describe the resulting
+compaction-engine selection.
 
 Model discovery also advertises optional reasoning-effort support. Ylva keeps
 three provider-neutral states:
@@ -189,8 +338,11 @@ model. Each picker row labels reasoning as `unavailable`, `default`, or the
 current value followed by `⚙` when it can be adjusted, so models that do not
 respond to `←`/`→` are distinguishable. While an overlay is open, the footer
 replaces the normal send hint with the controls for that overlay.
-`Enter` applies both the model and the selected effort to subsequent requests.
-The selected effort is runtime state and is not added to the session's
+`Enter` activates the exact named-engine shortcut or applies the raw catalog
+model and selected effort to subsequent requests. On a named shortcut, the
+engine keeps its current Engine runtime model/settings; only a reasoning-effort edit
+in the picker is reapplied. The choice preview does not mutate an engine.
+The selected effort is live Engine runtime state and is not added to the session's
 provider/model metadata. A profile's `reasoning` value is validated against
 the catalog once, lazily before the first chat: a value the model does not
 advertise is dropped to the provider default and surfaced as a notice above
@@ -201,6 +353,15 @@ marker in headless output — alongside a `tracing` warning in the log (see
 - Every outbound HTTP request (model listing, chat/SSE, and Ollama metadata
   calls) carries a dedicated `User-Agent: ylva/<version>` header so remote
   servers can identify the client.
+- Outbound requests are capped at
+  `MAX_CONCURRENT_PROVIDER_REQUESTS` concurrent requests per provider
+  connection, shared across model discovery, metadata lookups, and chat. JSON
+  catalog/detail GET and POST requests retry HTTP `429` and `5xx` responses
+  with bounded exponential backoff and honor `Retry-After` delta-seconds or
+  HTTP-date values when provided.
+  Chat requests use the same retry policy before streaming begins; a provider
+  error frame or a stream that closes without `[DONE]` is surfaced as a
+  conversation error instead of a successful empty reply.
 
 ## Tools to be used by models
 
@@ -211,6 +372,28 @@ Each tool call succeeds or fails with a structured result (`ok`/`result`/
 descriptions sent to the model include their argument schema. See
 [implementation notes](./implementation-notes.md#tool-result-wire-protocol)
 for the wire format.
+
+The initial tool protocol prompt and every model-facing tool description state
+that Ylva accepts at most `MAX_TOOL_CALLS_PER_RESPONSE` (12) distinct tool calls
+across all tools in one assistant response. If a response exceeds that limit,
+Ylva discards the whole batch before any call executes, adds a concise hidden
+harness notice to the next model request, and counts the rejection against the
+per-turn `max_tool_iterations` budget. This bounds stream-side accumulation and
+the UI work caused by a pathological tool-call batch. The iteration budget is
+separate: it limits tool-use rounds over a turn, not calls within one response.
+The 12-call accumulation backstop tolerates modest overshoot of the six-position
+execution cap without accumulating dozens of skipped outcomes.
+
+Independently, Ylva executes at most `MAX_EXECUTED_TOOL_CALLS_PER_BATCH` (6)
+calls of one response, for root and subagent runs alike. Calls at later
+requested positions — unknown or invalid calls count too — are not executed;
+each gets one explicit not-executed error asking the model to resubmit only
+those calls in smaller batches. A skipped round still consumes an iteration.
+All tools except `agent_finish` share the remaining request allowance: a call whose share
+falls below 256 estimated tokens is skipped with the same kind of error
+instead of being started. Its committed output stays intact; a bounded textual
+model projection uses its share, and whole binary descriptors/payloads can be
+omitted together. Running tools are not cancelled for context pressure.
 
 Path arguments given as absolute paths inside the current working directory
 are displayed/executed in cwd-relative form for consistency; this does not
@@ -263,6 +446,16 @@ attachments) are exempt, because a truncated image or PDF is unusable and
 `media_type` is only recognized for complete files. An exempt whole file is
 still limited to 8388608 bytes (8 MiB): a larger complete media file fails
 with an explicit size error instead of being truncated or loaded unbounded.
+Per-call `limit` and byte caps bound the returned source output. The common
+agent path separately bounds its model-only projection using advisory
+`cl100k_base` accounting; canonical media stays complete even when its payload
+and descriptors are omitted from the model view together.
+The `read file` debug event records full-source `source_size_bytes` and
+`source_lines` alongside `raw_selected_bytes`/`raw_selected_lines` after the
+tool's byte cap. The later `read result size` event records
+`returned_bytes`/`returned_lines` after tool-local caps, plus the
+truncation flag. Source line counts are unavailable for binary reads and
+partial byte ranges.
 Continue a capped read with `offset`/`limit`. Reads auto-approve when the sandbox abstains; a path
 outside the workspace or with a dot-prefixed component requires user
 approval instead. Any explicit verdict from a configured `[tools.read]`
@@ -346,6 +539,9 @@ sum of the other two fields, plus a boolean `truncated`. `truncated` is `false` 
 matching paths are returned and `true` when `limit` omits additional paths; it does not report
 an omission count. Optional `only_count` returns no paths and exposes the same counts; the result
 text retains the matching total.
+Returned paths obey the call's `limit`; source truncation is reported in metadata.
+The common agent path separately bounds the model-only body without reducing
+canonical paths or structured counts, using advisory `cl100k_base` estimates.
 CLI/TUI summaries use a tool-provided display projection: `glob` omits zero-valued `files` and
 `directories` and `truncated=false`. It omits `total` when either type count is zero, because
 the total is then inferable, except that an empty result displays `total=0`; the complete
@@ -357,7 +553,7 @@ pattern's root directory, not against each match.
 ### `bash`
 
 Execute a shell command or multi-line script via `bash -c` from the
-current working directory, which is the workspace root in normal runtime.
+current working directory, which is the workspace root during normal operation.
 Use relative paths directly; do not prefix commands with a redundant `cd` to
 the workspace root. Requires explicit human approval before execution. An
 optional `label` (3–6 word purpose of the command) describes what the
@@ -398,7 +594,10 @@ entry per occurrence, ignoring context lines, like `grep -o`. `files_with_matche
 `only_matches` are mutually exclusive. Result paths mirror the form of the input: a
 relative `path` argument produces relative result paths; an absolute argument produces
 absolute result paths. Output is capped at 1000 whole output lines (`truncated` field
-present in result metadata when capped). Paths inside the
+present in result metadata when capped). Existing line/byte caps bound source
+output; context pressure separately reduces its model-only body without changing
+canonical output or metadata, using advisory `cl100k_base` estimates.
+Paths inside the
 workspace are auto-approved; paths outside require user approval.
 
 ### `web_search`
@@ -482,6 +681,11 @@ implementation constraint rather than part of the model-facing contract. Its
 description lists every configured agent type and its optional
 model-facing `description`, so the parent can choose a suitable type instead
 of guessing names.
+The description tells the parent to continue only genuinely independent work;
+when none remains, it must end its response immediately without waiting
+narration, timing speculation, or continued thinking about pending results.
+Ending the response neither cancels subagents nor completes the user's task:
+the harness resumes the parent after all outstanding subagents finish.
 See
 [Child-agent delegation](#child-agent-delegation).
 
@@ -496,8 +700,9 @@ rather than the call being auto-denied for a schema violation. The parent
 receives this through the `spawn_subagent` lifecycle event — it never sees
 the child's own conversation, only the `result`/`error` string, so a child
 should make its `result` self-contained rather than referencing
-"earlier"/"above" content the parent cannot see, and must not fold in
-meta-commentary or self-review narration about its own process (e.g.
+"earlier"/"above" content the parent cannot see. The handoff should be
+concise and non-redundant, proportional to the task. It must not include
+meta-commentary or self-review narration about the child's process (e.g.
 "Self-Correction/Review:") — only the finished deliverable belongs there.
 If a child goes idle
 without calling `agent_finish`, the parent instead receives a synthesized
@@ -553,11 +758,18 @@ streaming/running tools in the background:
   specific child's transcript. `Esc` (with an empty draft) navigates back to
   the root conversation.
 - Spawning a child never switches your view automatically — you stay on
-  whatever you were looking at. The view only auto-switches to a child when
-  that specific child pauses for its own tool approval or clarify question,
-  so you don't miss an interactive prompt from a backgrounded child; it
-  auto-returns afterward only if the switch itself was automatic (a manual
-  drill-in is never yanked away).
+  whatever you were looking at. The view only auto-switches when a tool
+  approval or clarify question actually pauses for input, and it always
+  switches to wherever that pause lives — the root conversation, the
+  pausing subagent's own transcript, or a *different* subagent's transcript
+  than the one you're currently drilled into — so an approval is never
+  stranded behind an unrelated conversation; it auto-returns afterward only
+  if the switch itself was automatic (a manual drill-in is never yanked
+  away).
+- Overlapping root and subagent tool approvals remain actionable: approving
+  or denying one restores the controls and conversation view for another
+  outstanding approval. The original input draft stays parked until all
+  outstanding approvals are resolved.
 - While viewing a child's transcript, a header above it shows the original
   `spawn_subagent` bubble (task/label/agent type) so context isn't lost.
   Completed child bubbles highlight `status=failure` in red in both the root
@@ -601,6 +813,33 @@ module structure (model/presenter/view/driver split).
   <queued> queued` label; finished subagents are excluded, zero-valued
   categories are omitted, and the counts are hidden while viewing a child
   transcript. No sidebar.
+- **Compaction marker:** when a conversation compacts, the transcript keeps
+  every message and a non-message divider (`── compaction · N messages
+  summarized ──`) marks where the verbatim tail begins. It is inserted from
+  the persisted snapshot on replay — so it survives resume in the same
+  position — and added live when a summary is applied mid-session. It is a
+  view-only entry: it is never sent to the model and never seeds input
+  history. Live markers belong only to the compacted root or subagent
+  transcript, regardless of which conversation is currently displayed;
+  subagent compaction never adds a marker to the root transcript.
+  After resume, a subagent's persisted marker is restored with its transcript
+  on first drill-in and cached for subsequent drill-ins.
+  See the [resume contract](persistence.md#resume-contract) for how
+  the model view and the transcript stay separate.
+- **Context-usage readout:** the key-hints row (or tool-approval button row)
+  right-aligns the local estimate
+  of the latest serialized model request against the active context window —
+  e.g. `64.2K (45%)`. It updates as each request starts, before the provider
+  responds. A resumed session has no latest request estimate until it sends
+  one. While drilled into a child transcript, it shows that child's latest
+  request estimate and context window; child updates remain isolated from the
+  root and other child readouts. A finished child's last readout remains
+  available while its transcript is browsed. The estimate is not billed usage
+  and can differ from the compaction budget's model-view estimate; the
+  percentage is its fill of the window rounded to a whole percent and clamped
+  at `100%`. On a row too narrow to hold the readout next to the hints, the
+  readout is dropped rather than overwriting them. Headless output has no
+  footer and ignores the update.
 - **Input always active:** the input box is never disabled. `Enter` sends
   unconditionally — while the model is streaming, the message is queued as a
   pending steer (shown dimmed, then committed once the model has seen it),
@@ -621,7 +860,7 @@ module structure (model/presenter/view/driver split).
   update before applying the selected quit-or-stay-open behavior. OS SIGINT
   stops immediately (no double-press).
 - **Help popup (`F1`):** toggles a centered popup with the full keybinding
-  table, the selected runtime profile and its config path, the resolved Ylva
+  table, the selected profile and its config path, the resolved Ylva
   home, the discovered workspace root, and build-info values. An unavailable
   path is shown explicitly. Paths beneath the operating-system home directory
   use `~` notation when applicable; other paths remain absolute. Mouse-dragging
@@ -636,7 +875,7 @@ module structure (model/presenter/view/driver split).
   the bottom.
 - **Wordmark:** while the conversation is empty, a centered ASCII-art "Ylva"
   wordmark is displayed with the version and git commit on one line and the
-  selected runtime profile on the next line. Mouse-dragging across those lines
+  selected profile on the next line. Mouse-dragging across those lines
   copies the selected text to the clipboard. Once the first message is sent,
   the wordmark disappears.
 - **Input history:** `↑` on the first line loads the previous sent message
@@ -702,7 +941,10 @@ module structure (model/presenter/view/driver split).
   (expanded, `▼`) or hidden (collapsed, `▶`). Collapsed bubbles display only
   the title line, useful for decluttering long conversations.
 - **Tool duration:** when a tool finishes, its execution time is shown in the
-  bubble title.
+  bubble title. Running `spawn_subagent` bubbles also show a live elapsed timer
+  in the root conversation and drill-in header, starting when the subagent
+  actually begins execution (not while queued). The timer continues while the
+  subagent waits for approval and is replaced by the final duration on completion.
 - **Toast notifications:** transient messages appear in the bottom-right
   corner (e.g., `"Copied to clipboard"`) and auto-dismiss after ~1.5 seconds.
 - **Scrollbar:** the chat scrollbar's thumb reaches the very bottom of the
@@ -721,7 +963,7 @@ module structure (model/presenter/view/driver split).
   Markdown and syntax highlighting are applied live while a response streams.
 - **Selectable syntax theme:** code blocks and file previews highlight with
   either the `dark` or the `light` theme, chosen with the `theme` key of the
-  runtime profile (see [configuration](./configuration.md#profile-file)).
+  selected profile (see [configuration](./configuration.md#profile-file)).
 - **Thinking bubble:** extended-thinking/reasoning output gets its own
   bubble: dim-blue border, Markdown rendering, shown before the assistant's
   reply. Starts expanded; title shows a live elapsed timer while streaming,
@@ -749,7 +991,7 @@ leave provider discovery to the environment variables as before.
 
 See [configuration](./configuration.md) for all available fields.
 
-### Runtime profiles
+### Profile selection and resolution
 
 A profile groups a default engine with optional per-agent overrides. Each agent
 type may also define a model-facing `description`; root agents that can spawn
@@ -802,7 +1044,7 @@ code.
 
 The agent-type `persona` — one section, extending the baseline rather than
 replacing it — is then appended, followed by the tool protocol; a child
-additionally receives its task briefing and runtime-budget constraints. See
+additionally receives its task briefing and execution-budget constraints. See
 [configuration](./configuration.md#global-persona-soulmd) for the complete
 initial system-prompt contract.
 
@@ -841,11 +1083,14 @@ identities without another provider round-trip. A multi-word filter (e.g.
 identity, case-insensitively and in any order — not the joined phrase as one
 substring. A filter that matches nothing keeps the panel open with a
 "Nothing matched your model filter." message rather than vanishing, so the
-user can keep editing it. `Enter` confirms the highlighted model and clears
-the input; `Esc` cancels and clears it too.
+user can keep editing it. The detail area previews the compaction engine used
+by the highlighted choice without duplicating the conversation engine/model
+shown in the TUI footer. It shrinks away when the terminal cannot fit it,
+leaving the picker controls usable. `Enter` confirms the highlighted choice
+and clears the input; `Esc` cancels and clears it too.
 
 | Command | Effect | Result bubble |
 | --- | --- | --- |
-| `/models [filter]` | Queries every configured provider connection once, lists them as `provider_connection/model`, and switches the engine to the picked connection/model. `filter` (typed after the command, and refined live afterwards) narrows the displayed/selectable choices to those matching every filter word, case-insensitively and in any order, without re-querying. `↑`/`↓`, the mouse wheel, and left-click select, with left-click only highlighting and preserving the current popup window when the row is already visible; `page-up`/`fn-up` and `page-down`/`fn-down` move by a page, `←`/`→` cycle reasoning effort when available, `Enter` confirms, `Esc` cancels. | Persisted — the switch changes which provider connection/model later turns use; the reasoning effort applies to the current runtime |
+| `/models [filter]` | Queries every configured provider connection once, lists named-engine shortcuts before raw `provider_connection/model` catalog entries, and previews summarizer effects. A shortcut activates that exact engine's existing Engine runtime settings; a raw catalog row retains provider-based routing. `filter` narrows choices live without re-querying. `↑`/`↓`, the mouse wheel, and left-click select (left-click only highlights); page keys move by a page; `←`/`→` cycle reasoning effort when available; `Enter` confirms; `Esc` cancels. | Persisted — the provider connection/model is recorded; engine identity and reasoning effort remain live-only |
 | `/tools` | Lists the tools the running agent may call, as resolved for its agent type. | Transient |
 | `/clear` (alias `/reset`) | Drops the conversation and continues in a brand-new session file; earlier prompts stay recallable with `↑`. | Transient |

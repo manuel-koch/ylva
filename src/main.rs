@@ -196,9 +196,31 @@ fn main() {
     };
     apply_provider_env_to_profile(&mut profile, &provider_env);
 
-    let runtime = tokio::runtime::Runtime::new().expect("failed to start Tokio runtime");
+    let tokio_runtime = tokio::runtime::Runtime::new().expect("failed to start Tokio runtime");
 
     let conversation_id = cli.conversation_id;
+    // `--clone` turns `--conversation-id` into the copy source: the run then
+    // starts a brand-new session replaying that source's event stream.
+    let clone_session = cli.clone;
+
+    // Resolved before the initial engine is chosen and before any session
+    // metadata is written: an explicit `--agent` always wins, a resume
+    // otherwise continues with the type the session last stored, and a fresh
+    // session starts as `default`.
+    let root_agent_type =
+        match resolve_root_agent_type(cli.agent.as_deref(), conversation_id, &profile) {
+            Ok(selection) => selection,
+            Err(message) => {
+                exit_with_error(&mut log_guard, message);
+            }
+        };
+    tracing::info!(
+        agent_type = %root_agent_type.agent_type,
+        explicit = cli.agent.is_some(),
+        resumed = conversation_id.is_some() && !clone_session,
+        cloned = clone_session,
+        "root agent type resolved"
+    );
 
     let factory_without_store = {
         // Engines come from the profile's `[engines.*]` tables when it defines
@@ -260,14 +282,22 @@ fn main() {
         .unwrap_or_else(|| ylva::DEFAULT_PROFILE_NAME.to_string());
     let prompt_from_flag = cli.prompt.clone();
 
-    let (result, session_hint) = runtime.block_on(async {
+    let (result, session_hint) = tokio_runtime.block_on(async {
         // Resolved once, up front, so both a fresh session's `meta` header
         // and the `model_changed` record below (written on every start,
         // fresh or resumed) use the exact same provider-connection/model.
-        let initial_engine_config = factory_without_store.engine_config(&profile.default_engine);
-        // The store is opened inside the runtime: it spawns the writer task
+        // The engine follows the selected root agent type, not the profile
+        // default, so `--agent` and a restored type run on their own engine.
+        let initial_engine_name = profile.engine_name_for(&root_agent_type.agent_type);
+        let initial_engine_config = factory_without_store.engine_config(initial_engine_name);
+        // The store is opened inside the Tokio runtime: it spawns the writer task
         // that owns the session file.
-        let store = match open_store(conversation_id, initial_engine_config.as_ref()) {
+        let store = match open_store(
+            conversation_id,
+            clone_session,
+            initial_engine_config.as_ref(),
+            &root_agent_type.agent_type,
+        ) {
             Ok(store) => store,
             Err(message) => {
                 exit_with_error(&mut log_guard, message);
@@ -275,11 +305,23 @@ fn main() {
         };
         // Recorded on every start — fresh session and resume alike — not
         // only on a fresh session: resuming under a different `--profile` or
-        // an edited config can resolve `profile.default_engine` to a
+        // an edited config can resolve the selected agent type's engine to a
         // different provider/model than the session's history last showed,
         // and that must be visible without re-deriving it from config.
         if let Some(config) = &initial_engine_config {
             store.record_model_changed(&config.provider_connection, &config.model);
+        }
+        // An explicit `--agent` that changed the type a *resumed* session was
+        // already using becomes the latest stored selection, so later resumes
+        // without the flag continue under it. A fresh session already carries
+        // its type in `meta`, so it needs no extra record.
+        // A clone already carries its effective type in `meta` (the copy
+        // writes it at creation), so it needs no selection record of its own.
+        if conversation_id.is_some()
+            && !clone_session
+            && root_agent_type.override_changes_active_type
+        {
+            store.record_agent_type_changed(&root_agent_type.agent_type);
         }
         // Captured before `store` moves into the factory, so it survives to
         // print the resume hint after the app returns.
@@ -293,7 +335,7 @@ fn main() {
             TuiApp::new(
                 Arc::clone(&factory),
                 profile,
-                "default".to_string(),
+                root_agent_type.agent_type.clone(),
                 explicit_prompt,
             )
             .with_display_metadata(ylva::TuiDisplayMetadata {
@@ -309,7 +351,7 @@ fn main() {
             ConsoleApp::new(
                 Arc::clone(&factory),
                 profile,
-                "default".to_string(),
+                root_agent_type.agent_type.clone(),
                 prompt,
                 Box::new(std::io::stdout()),
             )
@@ -373,7 +415,103 @@ fn resume_hint_text(session_id: uuid::Uuid, explicit_profile_name: Option<&str>)
     hint
 }
 
-/// Load the runtime profile, or exit-worthy error text.
+/// The root agent type this run executes as, plus whether an explicit
+/// `--agent` flag changed the type the session was already using.
+#[derive(Debug)]
+struct RootAgentTypeSelection {
+    agent_type: String,
+    /// `true` only for a resumed session whose stored type an explicit
+    /// `--agent` flag replaced: that is the case that must be appended as an
+    /// `agent_type_changed` record so later resumes keep the selection.
+    override_changes_active_type: bool,
+}
+
+/// Resolve the root agent type for this run: `--agent` first, else the type
+/// stored on the resumed session, else `default`. Every candidate is checked
+/// against the loaded profile, so a typo'd flag and a stale stored name are
+/// both startup errors instead of a silent fallback to `default`.
+fn resolve_root_agent_type(
+    explicit_agent_type: Option<&str>,
+    conversation_id: Option<uuid::Uuid>,
+    profile: &ProfileConfig,
+) -> Result<RootAgentTypeSelection, String> {
+    let stored_agent_type = match conversation_id {
+        Some(conversation_id) => read_stored_agent_type(conversation_id)?,
+        None => None,
+    };
+    select_root_agent_type(
+        explicit_agent_type,
+        stored_agent_type.as_deref(),
+        conversation_id.is_some(),
+        profile,
+    )
+}
+
+/// Pure core of [`resolve_root_agent_type`], separated so the selection rules
+/// are unit-testable without touching the session store.
+fn select_root_agent_type(
+    explicit_agent_type: Option<&str>,
+    stored_agent_type: Option<&str>,
+    resumed: bool,
+    profile: &ProfileConfig,
+) -> Result<RootAgentTypeSelection, String> {
+    let available = available_agent_types(profile);
+    match explicit_agent_type {
+        Some(explicit) => {
+            if !profile.agents.contains_key(explicit) {
+                return Err(format!(
+                    "unknown agent type '{explicit}' selected by --agent; \
+                     available types: {available}"
+                ));
+            }
+            let previous = stored_agent_type.unwrap_or(ylva::DEFAULT_PROFILE_NAME);
+            Ok(RootAgentTypeSelection {
+                agent_type: explicit.to_string(),
+                override_changes_active_type: resumed && explicit != previous,
+            })
+        }
+        None => {
+            let agent_type = stored_agent_type.unwrap_or(ylva::DEFAULT_PROFILE_NAME);
+            if !profile.agents.contains_key(agent_type) {
+                return Err(format!(
+                    "session stored agent type '{agent_type}' is not configured in the \
+                     selected profile; pass --agent <type> to choose one of: {available}"
+                ));
+            }
+            Ok(RootAgentTypeSelection {
+                agent_type: agent_type.to_string(),
+                override_changes_active_type: false,
+            })
+        }
+    }
+}
+
+/// Every configured agent type, sorted, for error messages.
+fn available_agent_types(profile: &ProfileConfig) -> String {
+    let mut names: Vec<&str> = profile.agents.keys().map(String::as_str).collect();
+    names.sort_unstable();
+    names.join(", ")
+}
+
+/// The root agent type a session last stored — the last
+/// `agent_type_changed` record wins over the `meta` header, and `None` means
+/// the session predates both (callers fall back to `default`).
+///
+/// A session id with no file is `None` here rather than an error:
+/// [`ylva::Store::resume`] reports the missing session with its own
+/// dedicated message later.
+fn read_stored_agent_type(session_id: uuid::Uuid) -> Result<Option<String>, String> {
+    let chats_root =
+        ylva::default_chats_root().map_err(|error| format!("cannot resolve Ylva home: {error}"))?;
+    let cwd = std::env::current_dir().map_err(|error| format!("cannot resolve cwd: {error}"))?;
+    let path = ylva::session_path(&chats_root, &ylva::project_key(&cwd), session_id);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    ylva::Store::read_latest_agent_type(&path).map_err(|error| error.to_string())
+}
+
+/// Load the selected profile, or return exit-worthy error text.
 ///
 /// An explicitly named profile (`--profile <name>`) with no config file is a
 /// hard error: the user asked for that specific profile, so silently
@@ -504,7 +642,7 @@ fn apply_provider_env_to_profile(profile: &mut ProfileConfig, provider_env: &Pro
 ///
 /// The first provider retains the profile's default engine name and therefore
 /// remains the initial active engine. Additional providers use their provider
-/// names as engine names so the runtime router can switch to them.
+/// names as engine names so the engine router can switch to them.
 fn engines_from_environment(
     environment: &ProviderEnv,
     default_engine_name: &str,
@@ -538,23 +676,36 @@ fn engines_from_environment(
 ///
 /// With `--conversation-id <uuid>`, the existing session is re-attached for
 /// append; an unknown id is a hard error, never a silent fresh-session
-/// fallback. Without the flag, a brand-new session is started — Ylva never
-/// auto-resumes and never shows a startup picker.
+/// fallback. With `--clone` as well, that same id is the copy *source*: the
+/// run gets a brand-new session replaying the source's event stream, and the
+/// source file is left untouched. Without the flag, a brand-new session is
+/// started — Ylva never auto-resumes and never shows a startup picker.
 ///
 /// Fails when the Ylva home cannot be resolved or the session file cannot be
-/// created or resumed. Persistence is mandatory for runtime sessions; there
-/// is no transient, non-persisted mode.
+/// created, resumed, or cloned. Persistence is mandatory for Ylva
+/// sessions; there is no transient, non-persisted mode.
 fn open_store(
     conversation_id: Option<uuid::Uuid>,
+    clone_session: bool,
     initial_engine_config: Option<&ylva::EngineConfig>,
+    agent_type: &str,
 ) -> Result<ylva::Store, String> {
     let chats_root =
         ylva::default_chats_root().map_err(|error| format!("cannot resolve Ylva home: {error}"))?;
     let cwd = std::env::current_dir().map_err(|error| format!("cannot resolve cwd: {error}"))?;
-    let store = match conversation_id {
-        Some(conversation_id) => ylva::Store::resume(&chats_root, &cwd, conversation_id)
+    let store = match (conversation_id, clone_session) {
+        (Some(source_id), true) => {
+            ylva::Store::clone_session(&chats_root, &cwd, source_id, Some(agent_type))
+                .map_err(|error| error.to_string())?
+        }
+        (Some(conversation_id), false) => ylva::Store::resume(&chats_root, &cwd, conversation_id)
             .map_err(|error| error.to_string())?,
-        None => {
+        (None, true) => {
+            // Clap rejects `--clone` without `--conversation-id`; keep the
+            // invariant visible here rather than silently starting fresh.
+            return Err("--clone requires --conversation-id <uuid>".to_string());
+        }
+        (None, false) => {
             let (provider_connection, model) = initial_engine_config
                 .map(|config| (config.provider_connection.as_str(), config.model.as_str()))
                 .unwrap_or(("", ""));
@@ -564,6 +715,7 @@ fn open_store(
                 uuid::Uuid::new_v4(),
                 provider_connection,
                 model,
+                Some(agent_type),
             )
             .map_err(|error| error.to_string())?
         }
@@ -571,7 +723,8 @@ fn open_store(
     tracing::info!(
         session_id = %store.session_id(),
         path = %store.path().display(),
-        resumed = conversation_id.is_some(),
+        resumed = conversation_id.is_some() && !clone_session,
+        cloned_from = ?conversation_id.filter(|_| clone_session),
         "session store opened"
     );
     Ok(store)
@@ -662,6 +815,10 @@ mod tests {
                 api_base_url: Some("http://localhost:11434".to_string()),
                 api_key: None,
                 reasoning: None,
+
+                compact_target_ratio: 0.5,
+                soft_compaction_threshold: 0.7,
+                hard_compaction_threshold: 0.9,
             },
         );
         profile.engines.insert(
@@ -674,6 +831,10 @@ mod tests {
                 api_base_url: Some("https://openrouter.ai".to_string()),
                 api_key: Some("explicit-key".to_string()),
                 reasoning: None,
+
+                compact_target_ratio: 0.5,
+                soft_compaction_threshold: 0.7,
+                hard_compaction_threshold: 0.9,
             },
         );
         let provider_env = ProviderEnv {
@@ -754,6 +915,128 @@ mod tests {
         assert_eq!(
             explicit_prompt(Some("  hi  ".to_string())),
             Some("hi".to_string())
+        );
+    }
+
+    /// A profile exposing the given agent types on top of the in-code
+    /// default (`default` is always present).
+    fn profile_with_agent_types(names: &[&str]) -> ProfileConfig {
+        let mut profile = ProfileConfig::default();
+        for name in names {
+            if *name == ylva::DEFAULT_PROFILE_NAME {
+                continue;
+            }
+            profile.agents.insert(
+                name.to_string(),
+                ylva::AgentConfig {
+                    engine: None,
+                    compaction: None,
+                    description: None,
+                    allowed_tools: None,
+                    tools: HashMap::new(),
+                    timeout_secs: None,
+                    max_tool_iterations: None,
+                    persona: None,
+                    can_spawn: true,
+                },
+            );
+        }
+        profile
+    }
+
+    #[test]
+    fn a_fresh_session_without_flags_selects_the_default_agent_type() {
+        let profile = profile_with_agent_types(&["researcher"]);
+
+        let selection =
+            select_root_agent_type(None, None, false, &profile).expect("default resolves");
+
+        assert_eq!(selection.agent_type, "default");
+        assert!(!selection.override_changes_active_type);
+    }
+
+    #[test]
+    fn an_explicit_agent_type_wins_over_the_stored_type_on_a_resume() {
+        let profile = profile_with_agent_types(&["researcher"]);
+
+        let selection = select_root_agent_type(Some("researcher"), Some("default"), true, &profile)
+            .expect("the configured type resolves");
+
+        assert_eq!(selection.agent_type, "researcher");
+        assert!(
+            selection.override_changes_active_type,
+            "an explicit flag replacing the stored type must be recorded"
+        );
+    }
+
+    #[test]
+    fn an_explicit_agent_type_matching_the_stored_type_is_not_an_override() {
+        let profile = profile_with_agent_types(&["researcher"]);
+
+        let selection =
+            select_root_agent_type(Some("researcher"), Some("researcher"), true, &profile)
+                .expect("the configured type resolves");
+
+        assert_eq!(selection.agent_type, "researcher");
+        assert!(!selection.override_changes_active_type);
+    }
+
+    #[test]
+    fn an_explicit_agent_type_on_a_fresh_session_is_never_an_override_record() {
+        let profile = profile_with_agent_types(&["researcher"]);
+
+        let selection = select_root_agent_type(Some("researcher"), None, false, &profile)
+            .expect("the configured type resolves");
+
+        assert_eq!(selection.agent_type, "researcher");
+        assert!(
+            !selection.override_changes_active_type,
+            "a fresh session already carries its type in `meta`"
+        );
+    }
+
+    #[test]
+    fn a_resume_without_an_explicit_flag_restores_the_stored_type_without_a_record() {
+        let profile = profile_with_agent_types(&["researcher"]);
+
+        let selection = select_root_agent_type(None, Some("researcher"), true, &profile)
+            .expect("the stored type resolves");
+
+        assert_eq!(selection.agent_type, "researcher");
+        assert!(!selection.override_changes_active_type);
+    }
+
+    #[test]
+    fn an_unknown_explicit_agent_type_is_an_error_listing_the_available_types() {
+        let profile = profile_with_agent_types(&["researcher"]);
+
+        let error = select_root_agent_type(Some("nope"), None, false, &profile)
+            .expect_err("an unconfigured type must not start");
+
+        assert!(
+            error.contains("unknown agent type 'nope'"),
+            "the error names the flag's value: {error}"
+        );
+        assert!(
+            error.contains("default") && error.contains("researcher"),
+            "the error lists the configured types: {error}"
+        );
+    }
+
+    #[test]
+    fn a_stale_stored_agent_type_is_an_error_pointing_at_the_flag() {
+        let profile = profile_with_agent_types(&["researcher"]);
+
+        let error = select_root_agent_type(None, Some("retired"), true, &profile)
+            .expect_err("a stored type no longer in the profile must not start");
+
+        assert!(
+            error.contains("'retired'"),
+            "the error names the stale stored type: {error}"
+        );
+        assert!(
+            error.contains("--agent"),
+            "the error tells the user how to resolve it: {error}"
         );
     }
 

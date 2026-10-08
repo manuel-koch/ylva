@@ -29,9 +29,7 @@
 //! `[env!]` is used so a missing value is a compile error rather than a silent
 //! `""`; only the git-commit fallback is legitimate.
 //!
-//! **TUI contract (Phase 4):** when the TUI lands (blueprint §7 Phase 4), a
-//! dedicated keybinding will render [`BUILD_INFO`] in an "About" popup. The
-//! contract here is final; the TUI keybinding itself is Phase 4 work.
+//! The TUI's F1 Help popup renders the same [`BUILD_INFO`] values.
 
 /// Provenance of the compiled binary. All fields are compile-time constants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

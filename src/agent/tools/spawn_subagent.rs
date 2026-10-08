@@ -118,10 +118,17 @@ impl SpawnSubagentTool {
          as a hidden harness notice, not as a second tool result; it contains the child's \
          run_id, tool_call_id, label, status, result/error/sources, outstanding_count, and \
          all_done. Completion order is not a reliable ordering signal. Do not acknowledge an \
-         intermediate completion or tell the user to wait. Use a result only when it helps with \
-         genuinely useful work; when all_done is true, combine the terminal results and answer \
-         the user. The harness handles the continuation, so never claim a child completed from \
-         the admission result alone."
+         intermediate completion or tell the user to wait. Continue only genuinely independent \
+         work. If no independent work remains, end this response immediately, without waiting \
+         narration or timing speculation. Do not keep thinking while waiting for results. \
+         Ending this response does not cancel the subagents or complete the user's task: the \
+         harness will resume you after all outstanding subagents finish. Use a result only \
+         when it helps with genuinely useful work; when all_done is true, combine the terminal \
+         results into a self-contained answer with the relevant findings, sources, and limitations. \
+         Preserve the user's requested format, including tables. Do not assume tool results or \
+         subagent responses are visible to the user; present the findings instead of merely announcing \
+         completion or referring to results 'above'. Report failures or missing findings explicitly \
+         without inventing details. Never claim a child completed from the admission result alone."
     }
 }
 
@@ -307,6 +314,31 @@ mod tests {
             "agent types should be listed deterministically: {description}"
         );
         assert!(description.contains("Choose `agent_type` from this list"));
+    }
+
+    #[test]
+    fn description_tells_parent_to_end_response_when_no_independent_work_remains() {
+        for tool in [
+            SpawnSubagentTool::new(false),
+            SpawnSubagentTool::new(true).with_agent_types(vec![AgentTypeInfo {
+                name: "default".to_string(),
+                description: None,
+            }]),
+        ] {
+            let description = tool.description();
+            assert!(description.contains("Continue only genuinely independent work"));
+            assert!(description.contains("end this response immediately"));
+            assert!(description.contains("without waiting narration or timing speculation"));
+            assert!(description.contains("Do not keep thinking while waiting"));
+            assert!(description.contains("Ending this response does not cancel the subagents"));
+            assert!(description.contains("resume you after all outstanding subagents finish"));
+            assert!(description.contains("self-contained answer"));
+            assert!(description.contains("Preserve the user's requested format"));
+            assert!(description.contains(
+                "Do not assume tool results or subagent responses are visible to the user"
+            ));
+            assert!(!description.contains("bubbles"));
+        }
     }
 
     #[test]

@@ -19,6 +19,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -35,7 +36,65 @@ pub(crate) const MAX_RETRIES: usize = 3;
 pub(crate) const RETRY_BASE_SECONDS: u64 = 1;
 /// Upper bound on a single backoff delay, in seconds.
 pub(crate) const RETRY_MAX_SECONDS: u64 = 30;
+/// A caller-visible handle that the provider binds to the response dump paired
+/// with a request. It lets caller-side timeouts append their failure reason to
+/// the right response artifact even after stream processing has been dropped.
+#[derive(Clone)]
+pub struct RequestDumpFailureHandler {
+    callback: std::sync::Arc<std::sync::Mutex<Option<ResponseDumpFailureCallback>>>,
+}
 
+type ResponseDumpFailureCallback = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+
+impl Default for RequestDumpFailureHandler {
+    fn default() -> Self {
+        Self {
+            callback: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+}
+
+impl RequestDumpFailureHandler {
+    pub(crate) fn register(&self, callback: impl Fn(&str) + Send + Sync + 'static) {
+        *self
+            .callback
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(std::sync::Arc::new(callback));
+    }
+
+    pub(crate) fn report(&self, failure: &str) {
+        let callback = self
+            .callback
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(callback) = callback {
+            callback(failure);
+        }
+    }
+}
+/// Generic concurrency budget for a class of HTTP requests.
+#[derive(Debug, Clone)]
+pub(crate) struct RequestConcurrencyLimiter {
+    semaphore: std::sync::Arc<Semaphore>,
+}
+
+impl RequestConcurrencyLimiter {
+    pub(crate) fn new(max_concurrent_requests: usize) -> Self {
+        Self {
+            semaphore: std::sync::Arc::new(Semaphore::new(max_concurrent_requests.max(1))),
+        }
+    }
+
+    pub(crate) async fn acquire(&self) -> anyhow::Result<OwnedSemaphorePermit> {
+        self.semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow::anyhow!("HTTP request concurrency limiter is closed"))
+    }
+}
 /// Source for a request-dump path template.
 #[derive(Debug, Clone, Default)]
 pub(crate) enum RequestDumpSource {
@@ -103,6 +162,15 @@ impl RequestDumpContext {
         )
     }
 
+    /// Append a terminal failure to this request's response dump when request
+    /// dumps are enabled. The generic JSONL path is used because a timeout may
+    /// happen before response headers reveal a content type.
+    pub(crate) fn dump_failure_response(&self, failure: &(impl std::fmt::Display + ?Sized)) {
+        if let Some(path) = self.response_path_for_content_type(None, "jsonl") {
+            append_response_dump_line(&format!("[failure] {failure}"), &path);
+        }
+    }
+
     fn path(&self, kind: &str, extension: &str) -> Option<PathBuf> {
         build_dump_path_from_template(
             self.template.as_deref()?,
@@ -149,17 +217,11 @@ pub(crate) async fn get_json_with_dump_source(
             path,
         );
     }
-    let response = match client.get(url).headers(headers).send().await {
-        Ok(response) => response,
-        Err(error) => {
-            let response_dump_path = dump_context.response_path_for_content_type(None, "jsonl");
-            dump_response_transport_error(&response_dump_path, &error);
-            return Err(error.into());
-        }
-    };
-    let status = response.status();
+    let response = send_with_retry(url, operation, &CancellationToken::new(), || {
+        client.get(url).headers(headers.clone())
+    })
+    .await?;
     let body = read_buffered_response(response, &dump_context).await?;
-    anyhow::ensure!(status.is_success(), "{operation} failed with HTTP {status}");
     Ok(serde_json::from_slice(&body)?)
 }
 
@@ -196,17 +258,11 @@ pub(crate) async fn post_json_with_dump_source(
     if let Some(path) = &request_dump_path {
         dump_request(url, &redacted_headers_json(&headers), body, path);
     }
-    let response = match client.post(url).headers(headers).json(body).send().await {
-        Ok(response) => response,
-        Err(error) => {
-            let response_dump_path = dump_context.response_path_for_content_type(None, "jsonl");
-            dump_response_transport_error(&response_dump_path, &error);
-            return Err(error.into());
-        }
-    };
-    let status = response.status();
+    let response = send_with_retry(url, operation, &CancellationToken::new(), || {
+        client.post(url).headers(headers.clone()).json(body)
+    })
+    .await?;
     let response_body = read_buffered_response(response, &dump_context).await?;
-    anyhow::ensure!(status.is_success(), "{operation} failed with HTTP {status}");
     Ok(serde_json::from_slice(&response_body)?)
 }
 
@@ -224,8 +280,7 @@ fn bearer_headers(api_key: Option<&str>) -> anyhow::Result<reqwest::header::Head
     Ok(headers)
 }
 
-/// Read and dump a complete non-streaming response body before the caller
-/// checks its status or parses its content.
+/// Read and dump a complete successful response body before parsing its content.
 async fn read_buffered_response(
     response: reqwest::Response,
     dump_context: &RequestDumpContext,
@@ -327,9 +382,41 @@ pub(crate) async fn post_with_retry(
     body: &serde_json::Value,
     cancel: &CancellationToken,
 ) -> anyhow::Result<reqwest::Response> {
+    send_with_retry(url, "chat completion", cancel, || {
+        client.post(url).headers(headers.clone()).json(body)
+    })
+    .await
+}
+
+pub(crate) async fn post_with_retry_and_limiter(
+    client: &reqwest::Client,
+    url: &str,
+    headers: &reqwest::header::HeaderMap,
+    body: &serde_json::Value,
+    cancel: &CancellationToken,
+    limiter: &RequestConcurrencyLimiter,
+) -> anyhow::Result<(reqwest::Response, OwnedSemaphorePermit)> {
+    let permit = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err(anyhow::anyhow!("cancelled")),
+        permit = limiter.acquire() => permit?,
+    };
+    let response = post_with_retry(client, url, headers, body, cancel).await?;
+    Ok((response, permit))
+}
+
+async fn send_with_retry<RequestBuilderFactory>(
+    url: &str,
+    operation: &str,
+    cancel: &CancellationToken,
+    mut build_request: RequestBuilderFactory,
+) -> anyhow::Result<reqwest::Response>
+where
+    RequestBuilderFactory: FnMut() -> reqwest::RequestBuilder,
+{
     let mut retries = 0usize;
     loop {
-        let request = client.post(url).headers(headers.clone()).json(body);
+        let request = build_request();
 
         // Honour the cancel token during the initial HTTP round-trip.  The
         // remote server may take tens of seconds before sending back 200 +
@@ -353,7 +440,7 @@ pub(crate) async fn post_with_retry(
                     ));
                 }
                 retries += 1;
-                tracing::warn!(url, retry = retries, error = %error, "request failed; retrying");
+                tracing::warn!(url, operation, retry = retries, error = %error, "request failed; retrying");
                 if sleep_cancel_aware(cancel, retry_delay(retries, None))
                     .await
                     .is_none()
@@ -371,29 +458,36 @@ pub(crate) async fn post_with_retry(
 
         if !should_retry(status) {
             let detail = response_body_detail(response).await;
-            tracing::error!(url, status = status.as_u16(), "non-retryable status");
-            return Err(status_error(status, url, &detail, retries));
+            tracing::error!(
+                url,
+                operation,
+                status = status.as_u16(),
+                "non-retryable status"
+            );
+            return Err(status_error(status, url, operation, &detail, retries));
         }
 
         if retries >= MAX_RETRIES {
             let detail = response_body_detail(response).await;
             tracing::error!(
                 url,
+                operation,
                 status = status.as_u16(),
                 retry = retries,
                 "retryable status but retries exhausted"
             );
-            return Err(status_error(status, url, &detail, retries));
+            return Err(status_error(status, url, operation, &detail, retries));
         }
 
         let retry_after = response
             .headers()
             .get("retry-after")
             .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<u64>().ok());
+            .and_then(|value| parse_retry_after(value, SystemTime::now()));
         retries += 1;
         tracing::warn!(
             url,
+            operation,
             status = status.as_u16(),
             retry = retries,
             "retryable status; retrying"
@@ -405,6 +499,14 @@ pub(crate) async fn post_with_retry(
             return Err(anyhow::anyhow!("cancelled while waiting to retry"));
         }
     }
+}
+
+fn parse_retry_after(value: &str, now: SystemTime) -> Option<u64> {
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(seconds);
+    }
+    let retry_at = httpdate::parse_http_date(value).ok()?;
+    Some(retry_at.duration_since(now).unwrap_or_default().as_secs())
 }
 
 /// Header names whose value is redacted before ever reaching the request
@@ -664,6 +766,7 @@ fn snippet_from_body(body: &[u8]) -> String {
 fn status_error(
     status: reqwest::StatusCode,
     url: &str,
+    operation: &str,
     body_snippet: &str,
     retries: usize,
 ) -> anyhow::Error {
@@ -678,7 +781,7 @@ fn status_error(
     } else {
         String::new()
     };
-    anyhow::anyhow!["server returned HTTP {status_number}{body} for {url}{retry_note}"]
+    anyhow::anyhow!["{operation} failed with HTTP {status_number}{body} for {url}{retry_note}"]
 }
 
 /// Compute the next backoff delay. `Retry-After` (in seconds) wins
@@ -789,6 +892,17 @@ mod tests {
     }
 
     #[test]
+    fn parse_retry_after_accepts_seconds_and_http_dates() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        assert_eq!(parse_retry_after("3", now), Some(3));
+        assert_eq!(
+            parse_retry_after("Tue, 14 Nov 2023 22:13:23 GMT", now),
+            Some(3)
+        );
+        assert_eq!(parse_retry_after("invalid", now), None);
+    }
+
+    #[test]
     fn retry_delay_backs_off_bounded_by_max() {
         // Deterministic bounds against injected jitter: the wall-clock
         // wrapper samples full jitter from `[0, 1)` and may legally land on
@@ -841,22 +955,30 @@ mod tests {
         let message = status_error(
             reqwest::StatusCode::NOT_FOUND,
             "http://example/api",
+            "request",
             "not found on server",
             0,
         )
         .to_string();
         assert_eq!(
             message,
-            "server returned HTTP 404: not found on server for http://example/api"
+            "request failed with HTTP 404: not found on server for http://example/api"
         );
 
-        let blank =
-            status_error(reqwest::StatusCode::NOT_FOUND, "http://example/api", "", 0).to_string();
-        assert_eq!(blank, "server returned HTTP 404 for http://example/api");
+        let blank = status_error(
+            reqwest::StatusCode::NOT_FOUND,
+            "http://example/api",
+            "request",
+            "",
+            0,
+        )
+        .to_string();
+        assert_eq!(blank, "request failed with HTTP 404 for http://example/api");
 
         let exhausted = status_error(
             reqwest::StatusCode::SERVICE_UNAVAILABLE,
             "http://example/api",
+            "request",
             "down",
             MAX_RETRIES,
         )
@@ -864,7 +986,7 @@ mod tests {
         assert_eq!(
             exhausted,
             format!(
-                "server returned HTTP 503: down for http://example/api after {MAX_RETRIES} retries"
+                "request failed with HTTP 503: down for http://example/api after {MAX_RETRIES} retries"
             )
         );
     }
@@ -876,14 +998,135 @@ mod tests {
         let message = status_error(
             reqwest::StatusCode::BAD_REQUEST,
             "http://example/api",
+            "request",
             "bad",
             2,
         )
         .to_string();
         assert_eq!(
             message,
-            "server returned HTTP 400: bad for http://example/api after 2 retries"
+            "request failed with HTTP 400: bad for http://example/api after 2 retries"
         );
+    }
+
+    #[test]
+    fn generic_request_limiter_bounds_concurrent_work() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build Tokio runtime");
+        runtime.block_on(async {
+            let limiter = RequestConcurrencyLimiter::new(3);
+            let active_requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let maximum_active_requests =
+                std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let requests = (0..12)
+                .map(|_| {
+                    let limiter = limiter.clone();
+                    let active_requests = std::sync::Arc::clone(&active_requests);
+                    let maximum_active_requests = std::sync::Arc::clone(&maximum_active_requests);
+                    tokio::spawn(async move {
+                        let _permit = limiter.acquire().await.expect("request permit");
+                        let active =
+                            active_requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                        maximum_active_requests
+                            .fetch_max(active, std::sync::atomic::Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                        active_requests.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    })
+                })
+                .collect::<Vec<_>>();
+            for request in requests {
+                request.await.expect("request task");
+            }
+            assert_eq!(
+                maximum_active_requests.load(std::sync::atomic::Ordering::SeqCst),
+                3
+            );
+        });
+    }
+
+    #[test]
+    fn get_json_retries_rate_limit_and_honors_zero_retry_after() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build Tokio runtime");
+        runtime.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let address = listener.local_addr().expect("server address");
+            let server = tokio::spawn(async move {
+                for (status, headers, body) in [
+                    ("429 Too Many Requests", "Retry-After: 0\r\n", "rate limited"),
+                    ("200 OK", "", r#"{"ok":true}"#),
+                ] {
+                    let (mut stream, _) = listener.accept().await.expect("accept request");
+                    let mut request = [0_u8; 1024];
+                    let _ = stream.read(&mut request).await.expect("read request");
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\n{headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    stream.write_all(response.as_bytes()).await.expect("write response");
+                }
+            });
+            let client = reqwest::Client::new();
+            let body = get_json(
+                &client,
+                &format!("http://{address}/catalog"),
+                None,
+                "model listing",
+            )
+            .await
+            .expect("second response succeeds");
+            assert_eq!(body, serde_json::json!({"ok": true}));
+            server.await.expect("server task");
+        });
+    }
+
+    #[test]
+    fn post_json_retries_server_errors() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build Tokio runtime");
+        runtime.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let address = listener.local_addr().expect("server address");
+            let server = tokio::spawn(async move {
+                for (status, body) in [
+                    ("503 Service Unavailable", "try again"),
+                    ("200 OK", r#"{"ok":true}"#),
+                ] {
+                    let (mut stream, _) = listener.accept().await.expect("accept request");
+                    let mut request = [0_u8; 4096];
+                    let _ = stream.read(&mut request).await.expect("read request");
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    stream.write_all(response.as_bytes()).await.expect("write response");
+                }
+            });
+            let client = reqwest::Client::new();
+            let response_body = post_json(
+                &client,
+                &format!("http://{address}/details"),
+                &serde_json::json!({"model":"test"}),
+                None,
+                "model details",
+            )
+            .await
+            .expect("retry response succeeds");
+            assert_eq!(response_body, serde_json::json!({"ok": true}));
+            server.await.expect("server task");
+        });
     }
 
     #[test]
@@ -967,7 +1210,7 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("runtime");
+            .expect("build Tokio runtime");
 
         let (base_url, server) = runtime.block_on(start_json_response_server());
         let (get_body, post_body) = runtime.block_on(async {
@@ -1089,6 +1332,22 @@ mod tests {
         assert_eq!(meta["query"], "stream=true");
         assert_eq!(meta["headers"]["x-custom"], "value");
         assert_eq!(written_body, body);
+    }
+
+    #[test]
+    fn request_dump_context_appends_failure_to_its_matching_response_dump() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let context = RequestDumpContext::new(&RequestDumpSource::from_template(
+            temp_dir.path().join("compaction.jsonl"),
+        ));
+
+        context.dump_failure_response(&anyhow::anyhow!("summary timed out after 60 seconds"));
+
+        let response_path = context
+            .response_path_for_content_type(None, "jsonl")
+            .expect("response dump path");
+        let contents = std::fs::read_to_string(response_path).expect("failure response dump");
+        assert_eq!(contents, "[failure] summary timed out after 60 seconds\n");
     }
 
     #[test]

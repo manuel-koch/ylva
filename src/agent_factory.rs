@@ -136,7 +136,7 @@ impl AgentFactory {
         }
         for required in [
             profile.default_engine.as_str(),
-            profile.compact_engine_name(),
+            profile.compaction_engine_name(),
             profile.utility_engine_name(),
         ] {
             anyhow::ensure!(
@@ -145,6 +145,14 @@ impl AgentFactory {
             );
         }
         validate_profile_agent_engines(&engines, profile)?;
+        for agent_type in profile.agents.keys() {
+            let compaction_engine_name = profile.compaction_engine_name_for(agent_type);
+            anyhow::ensure!(
+                engines.contains_key(compaction_engine_name),
+                "agent type '{agent_type}' references compaction engine '{compaction_engine_name}', but no such engine is configured"
+            );
+        }
+        validate_profile_agent_compaction_timeouts(&engines, profile)?;
         validate_profile_agent_tool_names(profile)?;
         Ok(AgentFactory::new(engines))
     }
@@ -173,7 +181,7 @@ impl AgentFactory {
     ///
     /// Unlike an [`EngineRouter`], this does not participate in active model
     /// or provider-connection selection. Utility requests use this accessor
-    /// so they cannot mutate the conversation engine's runtime selection.
+    /// so they cannot mutate the conversation engine's Engine runtime selection.
     pub fn engine(&self, name: &str) -> Option<Arc<dyn Engine>> {
         self.engines.get(name).cloned()
     }
@@ -264,6 +272,7 @@ impl AgentFactory {
         inherited_engine: Option<Arc<dyn Engine>>,
     ) -> anyhow::Result<(AgentLoop, mpsc::Receiver<UiUpdate>)> {
         let engine_name = resolve_engine_name(profile, agent_type);
+        let inherits_parent_runtime = inherited_engine.is_some();
 
         let configured_engine = engines
             .get(engine_name)
@@ -351,7 +360,11 @@ impl AgentFactory {
             },
         ));
         let (agent_loop, ui_rx) = AgentLoop::new(Arc::clone(&engine), registry);
-        let mut agent_loop = agent_loop.with_configured_engine_name(engine_name);
+        let mut agent_loop = agent_loop
+            .with_configured_engine_name(engine_name)
+            .with_inherited_parent_runtime(inherits_parent_runtime)
+            .with_agent_type(agent_type)
+            .with_max_tool_iterations(profile.max_tool_iterations_for(agent_type));
         if let Some(system_prompt) =
             compose_agent_system_prompt(system_prompt.as_deref(), profile.agents.get(agent_type))
         {
@@ -379,6 +392,75 @@ impl AgentFactory {
                 manager.finish_rx,
                 manager.subagent_ui_rx,
             );
+        }
+
+        let explicit_compaction_engine_name = profile
+            .explicit_compaction_engine_name_for(agent_type)
+            .map(str::to_string);
+        let compaction_engine = match explicit_compaction_engine_name.as_deref() {
+            Some(compaction_engine_name) => {
+                engines.get(compaction_engine_name).cloned().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "agent type '{agent_type}' references compaction engine '{compaction_engine_name}', but no such engine is configured"
+                    )
+                })?
+            }
+            None => engine.clone(),
+        };
+        let compaction_engine_name = explicit_compaction_engine_name
+            .clone()
+            .unwrap_or_else(|| engine_name.to_string());
+        {
+            let summary_prompt = crate::config::compaction_prompt::load_compaction_prompt(
+                crate::config::layered::current_workspace_root().as_deref(),
+            )?;
+            agent_loop = agent_loop
+                .with_compaction_engine_selection(
+                    compaction_engine,
+                    Some(compaction_engine_name),
+                    explicit_compaction_engine_name.is_none(),
+                )
+                .with_compaction_timeout_secs(profile.compaction_timeout_secs_for(agent_type))
+                .with_compaction_summary_prompt(summary_prompt);
+            if !is_child {
+                let mut agent_types: Vec<_> = profile
+                    .agents
+                    .keys()
+                    .filter(|configured_type| configured_type.as_str() != agent_type)
+                    .collect();
+                agent_types.sort();
+                let checks = agent_types
+                    .into_iter()
+                    .map(|configured_type| {
+                        let conversation_engine_name =
+                            resolve_engine_name(profile, configured_type);
+                        let conversation_engine = engines
+                            .get(conversation_engine_name)
+                            .cloned()
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("unknown engine: {conversation_engine_name}")
+                            })?;
+                        let explicit_summary_engine =
+                            profile.explicit_compaction_engine_name_for(configured_type);
+                        let summary_engine = match explicit_summary_engine {
+                            Some(summary_engine_name) => {
+                                engines.get(summary_engine_name).cloned().ok_or_else(|| {
+                                    anyhow::anyhow!(
+                                        "unknown compaction engine: {summary_engine_name}"
+                                    )
+                                })?
+                            }
+                            None => conversation_engine.clone(),
+                        };
+                        Ok(crate::agent::compaction::AgentCompactionCapacityCheck {
+                            agent_type: configured_type.clone(),
+                            conversation_engine,
+                            summary_engine,
+                        })
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                agent_loop = agent_loop.with_startup_compaction_checks(checks);
+            }
         }
 
         // Only the root agent streams into the session file; a child's
@@ -435,12 +517,14 @@ impl AgentFactory {
                     resolve_engine_name(&profile, &request.agent_type).to_string();
                 let run_id = request.run_id;
                 let call_id = request.call_id;
+                let session_id = parent_store.as_ref().map(Store::session_id);
                 let inherited_engine =
                     (child_engine_name == parent_engine_name).then_some(parent_engine);
 
                 let child_role_config = ChildRoleConfig {
                     run_id,
                     call_id,
+                    session_id,
                     briefing: request.briefing.clone(),
                     parent_cancel: cancel.clone(),
                     subagent_ui_tx: forward_ui_tx.clone(),
@@ -628,12 +712,34 @@ fn validate_profile_agent_engines(
     profile: &ProfileConfig,
 ) -> anyhow::Result<()> {
     for (agent_type, agent_config) in &profile.agents {
-        let Some(engine_name) = agent_config.engine.as_deref() else {
+        if let Some(engine_name) = agent_config.engine.as_deref() {
+            anyhow::ensure!(
+                engines.contains_key(engine_name),
+                "agent type '{agent_type}' references engine '{engine_name}', but no such engine is configured"
+            );
+        }
+    }
+    for agent_type in profile.agents.keys() {
+        let compaction_engine_name = profile.compaction_engine_name_for(agent_type);
+        anyhow::ensure!(
+            engines.contains_key(compaction_engine_name),
+            "agent type '{agent_type}' references compaction engine '{compaction_engine_name}', but no such engine is configured"
+        );
+    }
+    Ok(())
+}
+
+fn validate_profile_agent_compaction_timeouts(
+    _engines: &HashMap<String, Arc<dyn Engine>>,
+    profile: &ProfileConfig,
+) -> anyhow::Result<()> {
+    for (agent_type, agent_config) in &profile.agents {
+        let Some(compaction_config) = &agent_config.compaction else {
             continue;
         };
         anyhow::ensure!(
-            engines.contains_key(engine_name),
-            "agent type '{agent_type}' references engine '{engine_name}', but no such engine is configured"
+            compaction_config.timeout_sec != Some(0),
+            "agent type '{agent_type}' compaction timeout_sec must be greater than 0"
         );
     }
     Ok(())
@@ -677,6 +783,10 @@ fn implicit_engine_config(
         api_base_url: None,
         api_key: None,
         reasoning: None,
+
+        compact_target_ratio: 0.5,
+        soft_compaction_threshold: 0.7,
+        hard_compaction_threshold: 0.9,
     }
 }
 
@@ -737,11 +847,7 @@ fn resolve_engine_name<'profile>(
     profile: &'profile ProfileConfig,
     agent_type: &str,
 ) -> &'profile str {
-    profile
-        .agents
-        .get(agent_type)
-        .and_then(|agent_config| agent_config.engine.as_deref())
-        .unwrap_or(profile.default_engine.as_str())
+    profile.engine_name_for(agent_type)
 }
 
 /// Return the deterministic catalog shown to a root model when it can spawn
@@ -899,6 +1005,8 @@ fn extract_last_assistant_text(context: &Context) -> String {
 #[cfg(test)]
 mod tests {
     use futures::future::BoxFuture;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
@@ -939,6 +1047,134 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct ChildCompactionProvider {
+        requests: AtomicUsize,
+    }
+
+    impl Provider for ChildCompactionProvider {
+        fn name(&self) -> &str {
+            "child-compaction"
+        }
+
+        fn chat<'a>(
+            &'a self,
+            _messages: Vec<Message>,
+            _tools: Vec<ToolSchema>,
+            _cancel: CancellationToken,
+        ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+            let request_number = self.requests.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                let (sender, receiver) = mpsc::channel(4);
+                tokio::spawn(async move {
+                    if request_number == 0 {
+                        let _ = sender
+                            .send(StreamEvent::Text("work completed ".repeat(500)))
+                            .await;
+                    } else if request_number >= 2 {
+                        let _ = sender
+                            .send(StreamEvent::Delta(crate::agent::DeltaChunk {
+                                tool_call_index: 0,
+                                tool_call_id: Some("finish-child".to_string()),
+                                function_name: Some("agent_finish".to_string()),
+                                arguments_fragment: Some(
+                                    r#"{"status":"success","result":"finished"}"#.to_string(),
+                                ),
+                            }))
+                            .await;
+                    } else {
+                        let _ = sender
+                            .send(StreamEvent::Text("work completed ".repeat(500)))
+                            .await;
+                    }
+                    let _ = sender.send(StreamEvent::Done).await;
+                });
+                Ok(receiver)
+            })
+        }
+
+        fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+    }
+
+    #[derive(Default)]
+    struct ChildSummaryProvider {
+        summary_requests: AtomicUsize,
+    }
+
+    impl Provider for ChildSummaryProvider {
+        fn name(&self) -> &str {
+            "child-summary"
+        }
+
+        fn chat<'a>(
+            &'a self,
+            _messages: Vec<Message>,
+            _tools: Vec<ToolSchema>,
+            _cancel: CancellationToken,
+        ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+            self.summary_requests.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async {
+                let (sender, receiver) = mpsc::channel(2);
+                tokio::spawn(async move {
+                    let _ = sender
+                        .send(StreamEvent::Text("summarized the child work".to_string()))
+                        .await;
+                    let _ = sender.send(StreamEvent::Done).await;
+                });
+                Ok(receiver)
+            })
+        }
+
+        fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+    }
+
+    struct SelectableMockProvider {
+        inner: MockProvider,
+    }
+
+    impl Provider for SelectableMockProvider {
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn chat<'a>(
+            &'a self,
+            messages: Vec<Message>,
+            tools: Vec<ToolSchema>,
+            cancel: CancellationToken,
+        ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+            self.inner.chat(messages, tools, cancel)
+        }
+
+        fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
+            Box::pin(async {
+                Ok([
+                    "main-model",
+                    "fast-model",
+                    "main-catalog-model",
+                    "fast-catalog-model",
+                ]
+                .into_iter()
+                .map(|id| ModelInfo {
+                    id: id.to_string(),
+                    context_length: Some(32_000),
+                    reasoning_efforts: None,
+                    reasoning_default: None,
+                    input_modalities: None,
+                })
+                .collect())
+            })
+        }
+
+        fn set_model(&self, _model: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
     fn test_engine_config() -> EngineConfig {
         EngineConfig {
             provider_connection: "mock".to_string(),
@@ -948,6 +1184,10 @@ mod tests {
             api_base_url: None,
             api_key: None,
             reasoning: None,
+
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
         }
     }
 
@@ -957,14 +1197,16 @@ mod tests {
         let factory = AgentFactory::new(HashMap::from([("default".to_string(), engine)]));
         let profile = ProfileConfig {
             default_engine: "default".to_string(),
-            compact_engine: None,
+            compaction: crate::config::CompactionConfig::default(),
             agents: HashMap::from([(
                 "default".to_string(),
                 AgentConfig {
                     engine: None,
+                    compaction: None,
                     description: None,
                     allowed_tools: None,
                     timeout_secs: None,
+                    max_tool_iterations: None,
                     persona: None,
                     can_spawn: true,
                     tools: HashMap::new(),
@@ -989,17 +1231,58 @@ mod tests {
     }
 
     #[test]
+    fn running_agent_preserves_compaction_engine_display_metadata() {
+        crate::test_support::run_locked(async {
+            let (factory, profile) = make_factory();
+            let (mut agent, _ui_rx) = factory
+                .create(&profile, "default", Role::Root)
+                .expect("factory creates the root agent");
+            let before_run = agent.engine_display_info();
+            assert!(
+                before_run
+                    .compaction_engine
+                    .as_ref()
+                    .is_some_and(|compaction| compaction.follows_conversation),
+                "factory-created agents use their selected engine for compaction"
+            );
+            assert_eq!(
+                before_run
+                    .compaction_engine
+                    .as_ref()
+                    .expect("compaction engine display")
+                    .context_length,
+                agent.engine().effective_context_length()
+            );
+
+            let handle = agent.run();
+            let after_run = agent.engine_display_info();
+            assert!(
+                after_run
+                    .compaction_engine
+                    .as_ref()
+                    .is_some_and(|compaction| compaction.follows_conversation),
+                "starting the agent must not drop its compaction display metadata"
+            );
+
+            handle.abort();
+            let _ = handle.await;
+        });
+    }
+
+    #[test]
     fn root_spawn_tool_advertises_configured_agent_type_descriptions() {
         let (factory, mut profile) = make_factory();
         profile.agents.insert(
             "local-discovery".to_string(),
             AgentConfig {
                 engine: None,
+                compaction: None,
                 description: Some(
                     "Read-only repository exploration without file modifications.".to_string(),
                 ),
                 allowed_tools: None,
                 timeout_secs: None,
+                max_tool_iterations: None,
                 persona: None,
                 can_spawn: false,
                 tools: HashMap::new(),
@@ -1034,6 +1317,10 @@ mod tests {
             api_base_url: None,
             api_key: None,
             reasoning: None,
+
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
         };
         ProfileConfig {
             default_engine: "main".to_string(),
@@ -1046,9 +1333,11 @@ mod tests {
                     "default".to_string(),
                     AgentConfig {
                         engine: None,
+                        compaction: None,
                         description: None,
                         allowed_tools: None,
                         timeout_secs: None,
+                        max_tool_iterations: None,
                         persona: None,
                         can_spawn: false,
                         tools: HashMap::new(),
@@ -1058,9 +1347,11 @@ mod tests {
                     "quick".to_string(),
                     AgentConfig {
                         engine: Some("fast".to_string()),
+                        compaction: None,
                         description: None,
                         allowed_tools: None,
                         timeout_secs: None,
+                        max_tool_iterations: None,
                         persona: None,
                         can_spawn: false,
                         tools: HashMap::new(),
@@ -1069,6 +1360,23 @@ mod tests {
             ]),
             ..ProfileConfig::default()
         }
+    }
+
+    fn factory_for_two_engine_profile(profile: &ProfileConfig) -> AgentFactory {
+        let provider = Arc::new(SelectableMockProvider {
+            inner: MockProvider::new(vec![], Duration::ZERO),
+        });
+        let engines = profile
+            .engines
+            .iter()
+            .map(|(name, config)| {
+                (
+                    name.clone(),
+                    Arc::new(EngineImpl::new(provider.clone(), config.clone())) as Arc<dyn Engine>,
+                )
+            })
+            .collect();
+        AgentFactory::new(engines)
     }
 
     #[test]
@@ -1085,6 +1393,575 @@ mod tests {
             .create(&profile, "quick", Role::Root)
             .expect("the overriding agent type resolves to its own engine");
         assert_eq!(quick.engine().config().model, "fast-model");
+    }
+
+    #[test]
+    fn implicit_summarizer_follows_root_named_engine_activation() {
+        let profile = two_engine_profile();
+        let factory = factory_for_two_engine_profile(&profile);
+        let (root, _ui_rx) = factory
+            .create(&profile, "default", Role::Root)
+            .expect("root agent builds");
+        let engine = root.engine();
+
+        assert!(
+            root.engine_display_info()
+                .compaction_engine
+                .expect("implicit summarizer display")
+                .follows_conversation
+        );
+        let named_engine = engine
+            .named_engine_info()
+            .into_iter()
+            .find(|named_engine| named_engine.name == "fast")
+            .expect("fast shortcut");
+        engine
+            .select_model(&crate::llm::engine::ModelSelection::NamedEngine {
+                engine_name: named_engine.name,
+                option: crate::llm::ProviderModelOption {
+                    provider_connection: named_engine.config.provider_connection,
+                    model: crate::llm::ModelInfo {
+                        id: named_engine.config.model,
+                        context_length: None,
+                        reasoning_efforts: None,
+                        reasoning_default: None,
+                        input_modalities: None,
+                    },
+                    reasoning_effort: named_engine.reasoning_effort,
+                },
+                reasoning_effort: crate::llm::engine::ReasoningEffortChange::Unchanged,
+            })
+            .expect("activate named engine");
+
+        assert_eq!(engine.config().model, "fast-model");
+        assert_eq!(
+            root.compaction_engine_config()
+                .expect("implicit summarizer remains enabled")
+                .model,
+            "fast-model",
+            "an implicit summarizer must share the conversation router"
+        );
+        let display = root.engine_display_info();
+        assert_eq!(
+            display.compaction_engine.as_ref().unwrap().engine_name,
+            "fast"
+        );
+        assert!(
+            display
+                .compaction_engine
+                .as_ref()
+                .unwrap()
+                .follows_conversation
+        );
+        assert!(
+            display
+                .compaction_engine
+                .as_ref()
+                .unwrap()
+                .shares_conversation
+        );
+        engine
+            .switch_model_option(&crate::llm::ProviderModelOption {
+                provider_connection: "mock".to_string(),
+                model: crate::llm::ModelInfo {
+                    id: "fast-catalog-model".to_string(),
+                    context_length: Some(24_000),
+                    reasoning_efforts: None,
+                    reasoning_default: None,
+                    input_modalities: None,
+                },
+                reasoning_effort: None,
+            })
+            .expect("raw model selection on the active connection");
+        assert_eq!(
+            root.compaction_engine_config()
+                .expect("implicit summarizer remains enabled")
+                .model,
+            "fast-catalog-model",
+            "implicit summaries must follow raw model changes too"
+        );
+    }
+
+    #[test]
+    fn explicit_summarizer_stays_bound_when_conversation_engine_changes() {
+        let mut profile = two_engine_profile();
+        profile.compaction.engine = Some("main".to_string());
+        let factory = factory_for_two_engine_profile(&profile);
+        let (root, _ui_rx) = factory
+            .create(&profile, "default", Role::Root)
+            .expect("root agent builds");
+        let engine = root.engine();
+        assert!(
+            root.engine_display_info()
+                .compaction_engine
+                .as_ref()
+                .expect("explicit summarizer display")
+                .shares_conversation
+        );
+        let named_engine = engine
+            .named_engine_info()
+            .into_iter()
+            .find(|named_engine| named_engine.name == "fast")
+            .expect("fast shortcut");
+        engine
+            .select_model(&crate::llm::engine::ModelSelection::NamedEngine {
+                engine_name: named_engine.name,
+                option: crate::llm::ProviderModelOption {
+                    provider_connection: named_engine.config.provider_connection,
+                    model: crate::llm::ModelInfo {
+                        id: named_engine.config.model,
+                        context_length: None,
+                        reasoning_efforts: None,
+                        reasoning_default: None,
+                        input_modalities: None,
+                    },
+                    reasoning_effort: named_engine.reasoning_effort,
+                },
+                reasoning_effort: crate::llm::engine::ReasoningEffortChange::Unchanged,
+            })
+            .expect("activate named engine");
+
+        assert_eq!(engine.config().model, "fast-model");
+        assert_eq!(
+            root.compaction_engine_config()
+                .expect("explicit summarizer remains enabled")
+                .model,
+            "main-model"
+        );
+        let display = root.engine_display_info();
+        let compaction = display
+            .compaction_engine
+            .as_ref()
+            .expect("explicit summarizer display");
+        assert_eq!(compaction.engine_name, "main");
+        assert!(!compaction.follows_conversation);
+        assert!(!compaction.shares_conversation);
+
+        let main_engine = engine
+            .named_engine_info()
+            .into_iter()
+            .find(|named_engine| named_engine.name == "main")
+            .expect("main shortcut");
+        engine
+            .select_model(&crate::llm::engine::ModelSelection::NamedEngine {
+                engine_name: main_engine.name,
+                option: crate::llm::ProviderModelOption {
+                    provider_connection: main_engine.config.provider_connection,
+                    model: crate::llm::ModelInfo {
+                        id: main_engine.config.model,
+                        context_length: None,
+                        reasoning_efforts: None,
+                        reasoning_default: None,
+                        input_modalities: None,
+                    },
+                    reasoning_effort: main_engine.reasoning_effort,
+                },
+                reasoning_effort: crate::llm::engine::ReasoningEffortChange::Unchanged,
+            })
+            .expect("reactivate the explicit summarizer engine");
+        engine
+            .switch_model_option(&crate::llm::ProviderModelOption {
+                provider_connection: "mock".to_string(),
+                model: crate::llm::ModelInfo {
+                    id: "main-catalog-model".to_string(),
+                    context_length: Some(32_000),
+                    reasoning_efforts: None,
+                    reasoning_default: None,
+                    input_modalities: None,
+                },
+                reasoning_effort: None,
+            })
+            .expect("mutate the named explicit summarizer");
+        assert_eq!(
+            root.compaction_engine_config()
+                .expect("explicit summarizer remains enabled")
+                .model,
+            "main-catalog-model",
+            "an explicit summarizer follows mutations to its own named engine"
+        );
+        assert!(
+            root.engine_display_info()
+                .compaction_engine
+                .expect("summarizer display")
+                .shares_conversation
+        );
+    }
+
+    #[test]
+    fn per_agent_compaction_engine_and_timeout_are_applied_to_child_loops() {
+        let mut profile = two_engine_profile();
+        profile.engines.insert(
+            "summary".to_string(),
+            EngineConfig {
+                model: "summary-model".to_string(),
+                ..test_engine_config()
+            },
+        );
+        profile.compaction.engine = Some("main".to_string());
+        profile.compaction.timeout_sec = 90;
+        profile
+            .agents
+            .get_mut("quick")
+            .expect("quick agent")
+            .compaction = Some(crate::config::AgentCompactionConfig {
+            engine: Some("summary".to_string()),
+            timeout_sec: Some(240),
+        });
+        let factory = AgentFactory::from_profile(&profile).expect("profile engines validate");
+        let child_role = Role::Child(ChildRoleConfig {
+            run_id: Uuid::new_v4(),
+            call_id: Uuid::new_v4(),
+            session_id: None,
+            briefing: None,
+            parent_cancel: CancellationToken::new(),
+            subagent_ui_tx: mpsc::channel(4).0,
+            finish_tx: mpsc::channel(4).0,
+        });
+
+        let (child, _ui_rx) = factory
+            .create(&profile, "quick", child_role)
+            .expect("child agent builds with its compaction overrides");
+
+        assert_eq!(child.engine().config().model, "fast-model");
+        assert_eq!(
+            child
+                .compaction_engine_config()
+                .expect("child compactor")
+                .model,
+            "summary-model"
+        );
+        assert_eq!(child.compaction_timeout(), Duration::from_secs(240));
+    }
+
+    #[test]
+    fn startup_checks_unused_agent_types_with_their_independent_compaction_engines() {
+        crate::test_support::run_locked(async {
+            for dedicated_summarizer in [false, true] {
+                let mut profile = two_engine_profile();
+                profile.compaction.engine = Some("main".to_string());
+                profile.engines.get_mut("main").unwrap().context_length = Some(32_768);
+                profile.engines.get_mut("fast").unwrap().context_length = Some(98_304);
+                if dedicated_summarizer {
+                    profile.agents.get_mut("quick").unwrap().compaction =
+                        Some(crate::config::AgentCompactionConfig {
+                            engine: Some("fast".to_string()),
+                            timeout_sec: None,
+                        });
+                }
+                let factory =
+                    AgentFactory::from_profile(&profile).expect("profile engines validate");
+                let (mut root, mut updates) = factory
+                    .create(&profile, "default", Role::Root)
+                    .expect("root builds");
+                let handle = root.run();
+                if dedicated_summarizer {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    assert!(
+                        updates.try_recv().is_err(),
+                        "a dedicated sufficiently large agent summarizer must not warn",
+                    );
+                } else {
+                    let update = tokio::time::timeout(Duration::from_secs(1), updates.recv())
+                        .await
+                        .expect("an unused agent must be checked without any prompt")
+                        .expect("startup notice");
+                    assert!(matches!(update, UiUpdate::Notice { text, run_id: None }
+                            if text.contains("Agent type 'quick'")
+                                && text.contains("68812 tokens")
+                                && text.contains("32768 tokens")),);
+                }
+                drop(root);
+                handle.await.expect("loop joins").expect("loop shuts down");
+            }
+        });
+    }
+
+    #[test]
+    fn startup_groups_equivalent_capacity_warnings_without_merging_different_budgets() {
+        crate::test_support::run_locked(async {
+            for (
+                root_shares_engine,
+                different_window,
+                different_threshold,
+                different_summary_window,
+            ) in [
+                (false, false, false, false),
+                (true, false, false, false),
+                (true, true, false, false),
+                (true, false, true, false),
+                (true, false, false, true),
+            ] {
+                let mut profile = two_engine_profile();
+                profile.compaction.engine = Some("main".to_string());
+                for (engine_name, context_length) in [("main", 32_768), ("fast", 131_072)] {
+                    let config = profile.engines.get_mut(engine_name).unwrap();
+                    config.model = "shared-model".to_string();
+                    config.context_length = Some(context_length);
+                }
+                let mut research_agent = profile.agents["quick"].clone();
+                if root_shares_engine {
+                    profile.agents.get_mut("default").unwrap().engine = Some("fast".to_string());
+                }
+                if different_window || different_threshold {
+                    let mut different_engine = profile.engines["fast"].clone();
+                    if different_window {
+                        different_engine.context_length = Some(65_536);
+                    }
+                    if different_threshold {
+                        different_engine.soft_compaction_threshold = 0.6;
+                    }
+                    profile
+                        .engines
+                        .insert("different".to_string(), different_engine);
+                    research_agent.engine = Some("different".to_string());
+                }
+                if different_summary_window {
+                    let mut smaller_summary_engine = profile.engines["main"].clone();
+                    smaller_summary_engine.context_length = Some(16_384);
+                    profile
+                        .engines
+                        .insert("smaller-summary".to_string(), smaller_summary_engine);
+                    research_agent.compaction = Some(crate::config::AgentCompactionConfig {
+                        engine: Some("smaller-summary".to_string()),
+                        timeout_sec: None,
+                    });
+                }
+                profile
+                    .agents
+                    .insert("research-and-discover".to_string(), research_agent);
+                let factory = AgentFactory::from_profile(&profile).expect("profile validates");
+                let (mut root, mut updates) = factory
+                    .create(&profile, "default", Role::Root)
+                    .expect("root builds");
+                let handle = root.run();
+                let first_update = tokio::time::timeout(Duration::from_secs(1), updates.recv())
+                    .await
+                    .expect("startup warning arrives before any prompt")
+                    .expect("startup notice");
+                let mut notices = Vec::new();
+                if let UiUpdate::Notice { text, run_id: None } = first_update {
+                    notices.push(text);
+                } else {
+                    panic!("expected a root startup notice, got {first_update:?}");
+                }
+                root.send_command(crate::agent::AgentCommand::Prompt("hello".to_string()))
+                    .await;
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while let Some(update) = updates.recv().await {
+                        match update {
+                            UiUpdate::Notice { text, run_id: None } => notices.push(text),
+                            UiUpdate::StreamDone => return,
+                            _ => {}
+                        }
+                    }
+                    panic!("UI channel closed before the first turn completed");
+                })
+                .await
+                .expect("first turn completes after all startup checks");
+                drop(root);
+                handle.await.expect("loop joins").expect("loop shuts down");
+                let different_budget =
+                    different_window || different_threshold || different_summary_window;
+                assert_eq!(
+                    notices.len(),
+                    if different_budget { 2 } else { 1 },
+                    "equivalent startup warnings must share one notice: {notices:?}",
+                );
+                assert!(notices[0].contains("Agent type 'quick'"), "{notices:?}");
+                assert_eq!(
+                    notices[0].contains("Agent type 'default'"),
+                    root_shares_engine,
+                    "{notices:?}",
+                );
+                if different_budget {
+                    assert!(!notices[0].contains("research-and-discover"), "{notices:?}");
+                    assert!(notices[1].contains("research-and-discover"), "{notices:?}");
+                    if different_window {
+                        assert!(notices[1].contains("65536"), "{notices:?}");
+                    }
+                    if different_threshold {
+                        assert!(notices[1].contains("0.6"), "{notices:?}");
+                    }
+                    if different_summary_window {
+                        assert!(notices[1].contains("16384"), "{notices:?}");
+                    }
+                } else {
+                    assert!(notices[0].contains("research-and-discover"), "{notices:?}");
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn unknown_agent_compaction_engine_is_rejected_at_factory_creation() {
+        let mut profile = two_engine_profile();
+        profile
+            .agents
+            .get_mut("quick")
+            .expect("quick agent")
+            .compaction = Some(crate::config::AgentCompactionConfig {
+            engine: Some("missing-summary".to_string()),
+            timeout_sec: None,
+        });
+
+        let error = match AgentFactory::from_profile(&profile) {
+            Ok(_) => panic!("per-agent compaction engine must exist"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("missing-summary"), "{error}");
+        assert!(error.to_string().contains("quick"), "{error}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn child_with_over_context_task_compacts_and_finishes() {
+        let mut profile = two_engine_profile();
+        profile.compaction.engine = Some("main".to_string());
+        profile.compaction.timeout_sec = 30;
+        profile
+            .agents
+            .get_mut("quick")
+            .expect("quick agent")
+            .allowed_tools = Some(vec!["agent_finish".to_string()]);
+
+        let provider = Arc::new(ChildCompactionProvider::default());
+        let compact_provider = Arc::new(ChildSummaryProvider::default());
+        let mut child_engine_config = test_engine_config();
+        child_engine_config.model = "child-model".to_string();
+        child_engine_config.context_length = Some(3000);
+        child_engine_config.compact_target_ratio = 0.2;
+        child_engine_config.soft_compaction_threshold = 0.3;
+        child_engine_config.hard_compaction_threshold = 0.9;
+        let summary_engine_config = EngineConfig {
+            model: "summary-model".to_string(),
+            context_length: Some(3000),
+            ..test_engine_config()
+        };
+        let factory = AgentFactory::new(HashMap::from([
+            (
+                "main".to_string(),
+                Arc::new(EngineImpl::new(
+                    compact_provider.clone(),
+                    summary_engine_config,
+                )) as Arc<dyn Engine>,
+            ),
+            (
+                "fast".to_string(),
+                Arc::new(EngineImpl::new(provider.clone(), child_engine_config)) as Arc<dyn Engine>,
+            ),
+        ]));
+        let (finish_tx, mut finish_rx) = mpsc::channel(4);
+        let (forward_ui_tx, mut forwarded_updates) = mpsc::channel(100);
+        let run_id = Uuid::new_v4();
+        let call_id = Uuid::new_v4();
+        let child_role = Role::Child(ChildRoleConfig {
+            run_id,
+            call_id,
+            session_id: None,
+            briefing: None,
+            parent_cancel: CancellationToken::new(),
+            subagent_ui_tx: forward_ui_tx,
+            finish_tx: finish_tx.clone(),
+        });
+
+        let (child_loop, child_ui_rx) = factory
+            .create(&profile, "quick", child_role)
+            .expect("child factory builds");
+        let transcript_target = ChildTranscriptTarget {
+            parent_store: None,
+            engine_config: Some(child_loop.engine().config()),
+            utility_engine: None,
+        };
+        let task = format!(
+            "Inspect this material and finish: {}",
+            "detail ".repeat(700)
+        );
+        let drive_task = tokio::spawn(drive_child_to_completion(
+            child_loop,
+            child_ui_rx,
+            task,
+            run_id,
+            call_id,
+            CancellationToken::new(),
+            finish_tx,
+            mpsc::channel(1).0,
+            transcript_target,
+        ));
+
+        let finish = tokio::time::timeout(Duration::from_secs(5), finish_rx.recv())
+            .await
+            .expect("child finishes after compaction")
+            .expect("finish event is sent");
+        assert_eq!(
+            finish.status,
+            "success",
+            "finish={finish:?}, summary_requests={}, child_requests={}",
+            compact_provider.summary_requests.load(Ordering::SeqCst),
+            provider.requests.load(Ordering::SeqCst)
+        );
+        assert!(
+            compact_provider.summary_requests.load(Ordering::SeqCst) >= 2,
+            "child can compact more than once while continuing its task"
+        );
+        assert!(
+            provider.requests.load(Ordering::SeqCst) >= 3,
+            "child continues after repeated compaction and sends a finishing request"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while let Some(update) = forwarded_updates.recv().await {
+                    if matches!(update, UiUpdate::Notice { text, run_id: Some(id) }
+                        if id == run_id && text.contains("compaction"))
+                    {
+                        return;
+                    }
+                }
+            })
+            .await
+            .is_ok(),
+            "child compaction notices are forwarded with the child run id"
+        );
+        drive_task.await.expect("child driver task joins");
+    }
+
+    #[test]
+    fn profile_compaction_settings_apply_to_child_without_agent_override() {
+        let mut profile = two_engine_profile();
+        profile.compaction.engine = Some("fast".to_string());
+        profile.compaction.timeout_sec = 180;
+        let factory = AgentFactory::new(HashMap::from([
+            (
+                "main".to_string(),
+                Arc::new(EngineImpl::new(
+                    Arc::new(MockProvider::new(vec![], Duration::ZERO)),
+                    test_engine_config(),
+                )) as Arc<dyn Engine>,
+            ),
+            (
+                "fast".to_string(),
+                Arc::new(EngineImpl::new(
+                    Arc::new(MockProvider::new(vec![], Duration::ZERO)),
+                    test_engine_config(),
+                )) as Arc<dyn Engine>,
+            ),
+        ]));
+        let child_role = Role::Child(ChildRoleConfig {
+            run_id: Uuid::new_v4(),
+            call_id: Uuid::new_v4(),
+            session_id: None,
+            briefing: None,
+            parent_cancel: CancellationToken::new(),
+            subagent_ui_tx: mpsc::channel(4).0,
+            finish_tx: mpsc::channel(4).0,
+        });
+
+        let (child, _ui_rx) = factory
+            .create(&profile, "quick", child_role)
+            .expect("child inherits profile compaction configuration");
+        assert_eq!(
+            child.compaction_engine_config().unwrap().model,
+            "test-model"
+        );
+        assert_eq!(child.compaction_timeout(), Duration::from_secs(180));
     }
 
     #[test]
@@ -1120,6 +1997,10 @@ mod tests {
                         api_base_url: None,
                         api_key: None,
                         reasoning: None,
+
+                        compact_target_ratio: 0.5,
+                        soft_compaction_threshold: 0.7,
+                        hard_compaction_threshold: 0.9,
                     },
                 ),
                 (
@@ -1132,6 +2013,10 @@ mod tests {
                         api_base_url: None,
                         api_key: None,
                         reasoning: None,
+
+                        compact_target_ratio: 0.5,
+                        soft_compaction_threshold: 0.7,
+                        hard_compaction_threshold: 0.9,
                     },
                 ),
             ]),
@@ -1189,6 +2074,10 @@ mod tests {
                     api_base_url: None,
                     api_key: None,
                     reasoning: None,
+
+                    compact_target_ratio: 0.5,
+                    soft_compaction_threshold: 0.7,
+                    hard_compaction_threshold: 0.9,
                 },
             )]),
             ..ProfileConfig::default()
@@ -1241,9 +2130,11 @@ mod tests {
             "custom".to_string(),
             AgentConfig {
                 engine: None,
+                compaction: None,
                 description: None,
                 allowed_tools: None,
                 timeout_secs: None,
+                max_tool_iterations: None,
                 persona: None,
                 can_spawn: false,
                 tools: HashMap::from([(
@@ -1268,6 +2159,7 @@ mod tests {
         let child_role_config = ChildRoleConfig {
             run_id: uuid::Uuid::new_v4(),
             call_id: uuid::Uuid::new_v4(),
+            session_id: None,
             briefing: Some("briefing text".to_string()),
             parent_cancel: CancellationToken::new(),
             subagent_ui_tx,
@@ -1298,9 +2190,11 @@ mod tests {
                     "specialist".to_string(),
                     AgentConfig {
                         engine: None,
+                        compaction: None,
                         description: None,
                         allowed_tools: None,
                         timeout_secs: None,
+                        max_tool_iterations: None,
                         persona: Some("specialist persona".to_string()),
                         can_spawn: false,
                         tools: HashMap::new(),
@@ -1350,6 +2244,7 @@ mod tests {
                     Role::Child(ChildRoleConfig {
                         run_id: Uuid::new_v4(),
                         call_id: Uuid::new_v4(),
+                        session_id: None,
                         briefing: Some("child briefing".to_string()),
                         parent_cancel: CancellationToken::new(),
                         subagent_ui_tx,
@@ -1399,14 +2294,19 @@ mod tests {
         let factory = AgentFactory::new(HashMap::from([("custom".to_string(), engine)]));
         let profile = ProfileConfig {
             default_engine: "nonexistent".to_string(),
-            compact_engine: None,
+            compaction: crate::config::CompactionConfig::default(),
             agents: HashMap::from([(
                 "myagent".to_string(),
                 AgentConfig {
                     engine: Some("custom".to_string()),
+                    compaction: Some(crate::config::AgentCompactionConfig {
+                        engine: None,
+                        timeout_sec: Some(123),
+                    }),
                     description: None,
                     allowed_tools: None,
                     timeout_secs: None,
+                    max_tool_iterations: None,
                     persona: None,
                     can_spawn: false,
                     tools: HashMap::new(),
@@ -1414,10 +2314,31 @@ mod tests {
             )]),
             ..ProfileConfig::default()
         };
-        let result = factory.create(&profile, "myagent", Role::Root);
+        let (agent, _ui_rx) = factory
+            .create(&profile, "myagent", Role::Root)
+            .expect("should resolve engine from AgentConfig.engine override");
+        let display = agent.engine_display_info();
+        assert_eq!(display.engine_name, "custom");
+        assert_eq!(
+            display
+                .compaction_engine
+                .as_ref()
+                .expect("implicit summarizer display")
+                .engine_name,
+            "custom",
+            "an implicit summarizer follows a root agent's engine override"
+        );
         assert!(
-            result.is_ok(),
-            "should resolve engine from AgentConfig.engine override"
+            display
+                .compaction_engine
+                .as_ref()
+                .expect("implicit summarizer display")
+                .follows_conversation
+        );
+        assert_eq!(
+            agent.compaction_timeout(),
+            Duration::from_secs(123),
+            "an independent timeout override applies without binding a summarizer engine"
         );
     }
 
@@ -1446,9 +2367,11 @@ mod tests {
             "restricted".to_string(),
             AgentConfig {
                 engine: None,
+                compaction: None,
                 description: None,
                 allowed_tools: Some(vec!["read".to_string()]),
                 timeout_secs: None,
+                max_tool_iterations: None,
                 persona: None,
                 can_spawn: false,
                 tools: HashMap::new(),
@@ -1503,9 +2426,11 @@ mod tests {
             "scratch-writer".to_string(),
             AgentConfig {
                 engine: None,
+                compaction: None,
                 description: None,
                 allowed_tools: None,
                 timeout_secs: None,
+                max_tool_iterations: None,
                 persona: None,
                 can_spawn: false,
                 tools: HashMap::from([(
@@ -1620,6 +2545,7 @@ mod tests {
             Uuid::new_v4(),
             "openrouter",
             "gpt-4o",
+            None,
         )
         .expect("parent store created");
         let mut child_context = Context::new();
@@ -1707,14 +2633,16 @@ mod tests {
         let engines = HashMap::from([("default".to_string(), engine)]);
         let profile = ProfileConfig {
             default_engine: "default".to_string(),
-            compact_engine: None,
+            compaction: crate::config::CompactionConfig::default(),
             agents: HashMap::from([(
                 "default".to_string(),
                 AgentConfig {
                     engine: None,
+                    compaction: None,
                     description: None,
                     allowed_tools: None,
                     timeout_secs: None,
+                    max_tool_iterations: None,
                     persona: None,
                     can_spawn: false,
                     tools: HashMap::new(),
@@ -1740,6 +2668,7 @@ mod tests {
         let child_role_config = ChildRoleConfig {
             run_id,
             call_id,
+            session_id: None,
             briefing: request.briefing.clone(),
             parent_cancel: cancel.clone(),
             subagent_ui_tx: forward_ui_tx.clone(),
@@ -1798,14 +2727,16 @@ mod tests {
         let engines = HashMap::from([("default".to_string(), engine)]);
         let profile = ProfileConfig {
             default_engine: "default".to_string(),
-            compact_engine: None,
+            compaction: crate::config::CompactionConfig::default(),
             agents: HashMap::from([(
                 "default".to_string(),
                 AgentConfig {
                     engine: None,
+                    compaction: None,
                     description: None,
                     allowed_tools: None,
                     timeout_secs: None,
+                    max_tool_iterations: None,
                     persona: None,
                     can_spawn: false,
                     tools: HashMap::new(),
@@ -1822,6 +2753,7 @@ mod tests {
         let child_role_config = ChildRoleConfig {
             run_id,
             call_id,
+            session_id: None,
             briefing: None,
             parent_cancel: cancel.clone(),
             subagent_ui_tx: forward_ui_tx.clone(),

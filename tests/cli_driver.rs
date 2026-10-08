@@ -175,6 +175,10 @@ impl SwitchableTestEngine {
                 api_base_url: None,
                 api_key: None,
                 reasoning: None,
+
+                compact_target_ratio: 0.5,
+                soft_compaction_threshold: 0.7,
+                hard_compaction_threshold: 0.9,
             }),
             calls: AtomicUsize::new(0),
             child_calls: AtomicUsize::new(0),
@@ -430,6 +434,133 @@ async fn run_cli_prints_engine_notices_ahead_of_the_response() {
 }
 
 #[tokio::test]
+async fn run_cli_warns_about_compaction_capacity_before_the_response() {
+    let provider = Arc::new(MockProviderWithScript {
+        phase_one: vec![MockEvent::Text("the answer".into())],
+        phase_two: Vec::new(),
+        interval: Duration::ZERO,
+        calls: Arc::new(AtomicUsize::new(0)),
+    });
+    let mut conversation_config = common::test_engine_config();
+    conversation_config.context_length = Some(40_000);
+    let mut summary_config = common::test_engine_config();
+    summary_config.model = "small-summarizer".to_string();
+    summary_config.context_length = Some(8_000);
+    let conversation_engine = Arc::new(EngineImpl::new(provider.clone(), conversation_config));
+    let summary_engine = Arc::new(EngineImpl::new(provider, summary_config));
+    let registry = Arc::new(ToolRegistry::new());
+    let (agent, ui_rx) = AgentLoop::new(conversation_engine, registry.clone());
+    let agent = agent.with_compaction_engine(summary_engine);
+    let mut output = Vec::new();
+    run_cli_to(agent, ui_rx, registry, "question".to_string(), &mut output)
+        .await
+        .expect("capacity warnings do not block the conversation");
+    let output = String::from_utf8(output).expect("utf8 output");
+    let warning_position = output
+        .find("Warning: conversation engine")
+        .expect("capacity warning");
+    let response_position = output.find("the answer").expect("assistant response");
+    assert!(warning_position < response_position, "{output}");
+    assert!(output.contains("small-summarizer"), "{output}");
+    assert!(output.contains("8000 tokens"), "{output}");
+    assert!(output.contains("28000 tokens"), "{output}");
+    assert!(
+        output.contains("compaction prompt and request overhead"),
+        "{output}"
+    );
+}
+
+#[tokio::test]
+async fn catalog_context_length_rebudgets_the_first_request_before_dispatch() {
+    struct CatalogCapacityProvider {
+        inner: MockProviderWithScript,
+        requests: Arc<Mutex<Vec<Vec<Message>>>>,
+    }
+
+    impl Provider for CatalogCapacityProvider {
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
+            Box::pin(async {
+                Ok(vec![ModelInfo {
+                    id: common::test_engine_config().model,
+                    context_length: Some(4_096),
+                    reasoning_efforts: None,
+                    reasoning_default: None,
+                    input_modalities: None,
+                }])
+            })
+        }
+
+        fn chat<'a>(
+            &'a self,
+            messages: Vec<Message>,
+            tools: Vec<ToolSchema>,
+            cancel: CancellationToken,
+        ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+            self.requests
+                .lock()
+                .expect("request lock")
+                .push(messages.clone());
+            self.inner.chat(messages, tools, cancel)
+        }
+    }
+
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let provider = Arc::new(CatalogCapacityProvider {
+        inner: MockProviderWithScript {
+            phase_one: vec![MockEvent::Text("the answer".into())],
+            phase_two: Vec::new(),
+            interval: Duration::ZERO,
+            calls: Arc::new(AtomicUsize::new(0)),
+        },
+        requests: requests.clone(),
+    });
+    let mut config = common::test_engine_config();
+    config.context_length = None;
+    let engine = Arc::new(EngineImpl::new(provider, config));
+    let registry = Arc::new(ToolRegistry::new());
+    let (agent, ui_rx) = AgentLoop::new(engine.clone(), registry.clone());
+    let agent = agent.with_compaction_engine(engine);
+    let mut output = Vec::new();
+    run_cli_to(
+        agent,
+        ui_rx,
+        registry,
+        "payload ".repeat(10_000),
+        &mut output,
+    )
+    .await
+    .expect("the request is recovered against the discovered catalog window");
+    let requests = requests.lock().expect("request lock");
+    assert_eq!(
+        requests.len(),
+        1,
+        "no oversized request should reach the provider"
+    );
+    let estimated_tokens: usize = requests[0]
+        .iter()
+        .map(|message| {
+            let content = match message {
+                Message::System { content }
+                | Message::User { content, .. }
+                | Message::Assistant { content, .. } => content,
+                other => panic!("unexpected message: {other:?}"),
+            };
+            ylva::llm::TokenEstimator::Tiktoken.estimate_tokens(content) + 8
+        })
+        .sum();
+    let ceiling = 4_096 - 4_096 / 10 - 4_096 / 20 - 512;
+    assert!(
+        estimated_tokens <= ceiling,
+        "{estimated_tokens} > {ceiling}"
+    );
+    assert!(String::from_utf8(output).unwrap().contains("the answer"));
+}
+
+#[tokio::test]
 async fn child_spawn_after_root_model_switch_uses_the_root_active_engine() {
     let default_engine = SwitchableTestEngine::new("default-provider", "default-model");
     let alternate_engine = SwitchableTestEngine::new("alternate-provider", "alternate-model");
@@ -444,9 +575,11 @@ async fn child_spawn_after_root_model_switch_uses_the_root_active_engine() {
             "default".to_string(),
             AgentConfig {
                 engine: None,
+                compaction: None,
                 description: None,
                 allowed_tools: None,
                 timeout_secs: None,
+                max_tool_iterations: None,
                 persona: None,
                 can_spawn: true,
                 tools: std::collections::HashMap::new(),
@@ -459,16 +592,20 @@ async fn child_spawn_after_root_model_switch_uses_the_root_active_engine() {
         .expect("factory creates the root agent");
 
     root.engine()
-        .switch_model_option(&ProviderModelOption {
-            provider_connection: "alternate-provider".to_string(),
-            model: ModelInfo {
-                id: "alternate-model".to_string(),
-                context_length: None,
-                reasoning_efforts: None,
-                reasoning_default: None,
-                input_modalities: None,
+        .select_model(&ylva::engine::ModelSelection::NamedEngine {
+            engine_name: "alternate".to_string(),
+            option: ProviderModelOption {
+                provider_connection: "alternate-provider".to_string(),
+                model: ModelInfo {
+                    id: "alternate-model".to_string(),
+                    context_length: None,
+                    reasoning_efforts: None,
+                    reasoning_default: None,
+                    input_modalities: None,
+                },
+                reasoning_effort: None,
             },
-            reasoning_effort: None,
+            reasoning_effort: ylva::engine::ReasoningEffortChange::Unchanged,
         })
         .expect("root model switch succeeds");
     assert_eq!(
@@ -538,9 +675,11 @@ async fn running_child_uses_a_shared_engine_switch_on_its_next_request() {
             "default".to_string(),
             AgentConfig {
                 engine: None,
+                compaction: None,
                 description: None,
                 allowed_tools: None,
                 timeout_secs: None,
+                max_tool_iterations: None,
                 persona: None,
                 can_spawn: true,
                 tools: std::collections::HashMap::new(),
@@ -647,9 +786,11 @@ async fn child_with_explicit_engine_override_keeps_its_named_engine() {
                 "default".to_string(),
                 AgentConfig {
                     engine: None,
+                    compaction: None,
                     description: None,
                     allowed_tools: None,
                     timeout_secs: None,
+                    max_tool_iterations: None,
                     persona: None,
                     can_spawn: true,
                     tools: std::collections::HashMap::new(),
@@ -659,9 +800,11 @@ async fn child_with_explicit_engine_override_keeps_its_named_engine() {
                 "research".to_string(),
                 AgentConfig {
                     engine: Some("specialized".to_string()),
+                    compaction: None,
                     description: Some("Handles specialized tasks.".to_string()),
                     allowed_tools: None,
                     timeout_secs: None,
+                    max_tool_iterations: None,
                     persona: None,
                     can_spawn: false,
                     tools: std::collections::HashMap::new(),
@@ -1115,14 +1258,16 @@ async fn console_app_reacts_to_child_finish_through_real_agent_factory_and_run_c
 
     let profile = ylva::ProfileConfig {
         default_engine: "default".to_string(),
-        compact_engine: None,
+        compaction: ylva::CompactionConfig::default(),
         agents: std::collections::HashMap::from([(
             "default".to_string(),
             ylva::AgentConfig {
                 engine: None,
+                compaction: None,
                 description: None,
                 allowed_tools: None,
                 timeout_secs: None,
+                max_tool_iterations: None,
                 persona: None,
                 can_spawn: true,
                 tools: std::collections::HashMap::new(),
@@ -1282,14 +1427,16 @@ async fn spawned_child_bash_approval_is_routed_to_the_child_not_the_root() {
 
     let profile = ylva::ProfileConfig {
         default_engine: "default".to_string(),
-        compact_engine: None,
+        compaction: ylva::CompactionConfig::default(),
         agents: std::collections::HashMap::from([(
             "default".to_string(),
             ylva::AgentConfig {
                 engine: None,
+                compaction: None,
                 description: None,
                 allowed_tools: None,
                 timeout_secs: None,
+                max_tool_iterations: None,
                 persona: None,
                 can_spawn: true,
                 tools: std::collections::HashMap::new(),

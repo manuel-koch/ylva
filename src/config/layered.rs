@@ -39,7 +39,7 @@ pub struct ResolvedFile {
 /// Resolve one relative file from workspace, Ylva home, and built-in layers.
 ///
 /// The workspace root is the directory containing `.ylva`; the Ylva home is
-/// the directory containing the runtime `~/.ylva/` layout. Resolution is
+/// the directory containing Ylva's `~/.ylva/` home layout. Resolution is
 /// whole-file replacement: the first existing file wins and lower layers are
 /// not consulted for that file. The built-in contents are supplied by code,
 /// not read from a repository file.

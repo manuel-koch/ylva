@@ -1,6 +1,6 @@
 +++
 description = "An agent that can perform read-only discovery tasks in workspace using a local LLM."
-engine = "local-discovery"
+engine = "local"
 allowed_tools = ["bash", "read", "search"]
 [tools.bash]
 rules = [

@@ -46,7 +46,8 @@ impl OpenRouterProvider {
                 api_key,
                 Self::customize_request_body,
                 super::openai_compatible_provider::redact_chat_completion_request_body,
-            ),
+            )
+            .with_provider_kind("openrouter"),
         }
     }
 
@@ -91,6 +92,57 @@ impl Provider for OpenRouterProvider {
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
         self.inner.chat(messages, tools, cancel)
     }
+
+    fn chat_with_session_id<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        session_id: Option<uuid::Uuid>,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        self.inner
+            .chat_with_session_id(messages, tools, cancel, session_id)
+    }
+
+    fn chat_with_session_id_and_estimate<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        session_id: Option<uuid::Uuid>,
+        on_estimate: Box<
+            dyn FnOnce(usize, usize) -> futures::future::BoxFuture<'static, ()> + Send,
+        >,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        self.inner.chat_with_session_id_and_estimate(
+            messages,
+            tools,
+            cancel,
+            session_id,
+            on_estimate,
+        )
+    }
+
+    fn chat_with_session_id_and_diagnostics<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        session_id: Option<uuid::Uuid>,
+        on_estimate: Box<
+            dyn FnOnce(usize, usize) -> futures::future::BoxFuture<'static, ()> + Send,
+        >,
+        on_failure: Option<crate::http::RequestDumpFailureHandler>,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        self.inner.chat_with_session_id_and_diagnostics(
+            messages,
+            tools,
+            cancel,
+            session_id,
+            on_estimate,
+            on_failure,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -109,14 +161,14 @@ mod tests {
         assert_eq!(provider.name(), "openrouter");
         let runtime_config = provider
             .runtime_config_handle()
-            .expect("OpenRouter exposes runtime settings");
+            .expect("OpenRouter exposes Engine runtime settings");
         provider
             .set_model("other/model")
             .expect("OpenRouter supports model switching");
         assert_eq!(
             runtime_config
                 .read()
-                .expect("runtime configuration lock")
+                .expect("Engine runtime configuration lock")
                 .model,
             "other/model"
         );

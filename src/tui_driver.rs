@@ -39,14 +39,12 @@ use ratatui_textarea::{Scrolling, TextArea};
 use tokio::select;
 use tokio::sync::mpsc;
 
-use crate::agent::tools::DEFAULT_TUI_TOOLS;
 use crate::agent::{AgentCommand, AgentLoop, AgentMode, Role, UiUpdate};
 use crate::agent_factory::AgentFactory;
 use crate::app::App;
 use crate::config::ProfileConfig;
 use crate::events::{spawn_crossterm_bridge, AppAction};
-use crate::llm::engine::{Engine, EngineConfig, EngineImpl};
-use crate::llm::Provider;
+use crate::llm::engine::{Engine, ModelSelection};
 use crate::presenter::{self, TextareaContext, TuiEvent};
 use crate::render;
 use crate::session_title::{SessionTitleUpdate, TitleAttempt};
@@ -56,7 +54,6 @@ use crate::tui_reducer_state::{
     ModelChoice, SlashOverlay, TuiDisplayMetadata, TuiMode, UserMessageState, CONFIRM_TIMEOUT,
 };
 use crate::tui_render_state::TuiState;
-use crate::ToolRegistry;
 
 /// Abstracts writing text to the OS clipboard so the Driver can be tested
 /// without side-effects on the host machine.
@@ -175,6 +172,44 @@ fn ui_update_to_domain_event(update: &UiUpdate) -> Option<DomainEvent> {
         UiUpdate::StreamDone => Some(DomainEvent::StreamDone),
         UiUpdate::StreamCancelled => Some(DomainEvent::StreamCancelled),
         UiUpdate::AgentIdle => Some(DomainEvent::AgentIdle),
+        UiUpdate::ContextUsage {
+            estimated_tokens,
+            context_length,
+            source,
+        } => Some(DomainEvent::ContextUsage {
+            estimated_tokens: *estimated_tokens,
+            context_length: *context_length,
+            source: *source,
+        }),
+        UiUpdate::ChildContextUsage {
+            run_id,
+            estimated_tokens,
+            context_length,
+            source,
+        } => Some(DomainEvent::ChildContextUsage {
+            run_id: *run_id,
+            estimated_tokens: *estimated_tokens,
+            context_length: *context_length,
+            source: *source,
+        }),
+        UiUpdate::CompactionApplied {
+            run_id,
+            entry_index,
+            summarized_messages,
+        } => Some(DomainEvent::CompactionApplied {
+            run_id: *run_id,
+            entry_index: *entry_index,
+            summarized_messages: *summarized_messages,
+        }),
+        UiUpdate::CompactionActivity {
+            run_id,
+            request_id,
+            active,
+        } => Some(DomainEvent::CompactionActivity {
+            run_id: *run_id,
+            request_id: *request_id,
+            active: *active,
+        }),
         UiUpdate::SteerQueued { run_id } => Some(DomainEvent::SteerQueued { run_id: *run_id }),
         UiUpdate::SteerApplied { run_id } => Some(DomainEvent::SteerApplied { run_id: *run_id }),
         UiUpdate::ToolPending {
@@ -335,13 +370,18 @@ async fn execute_effects(
                 // the rows the overlay draws on are taken over by the
                 // approval footer / clarify banner for the pause's duration.
                 let slash_overlay = state.slash_overlay.clone();
-                state.pending_input_snapshot = Some(InputSnapshot {
+                state.pending_input_snapshot.get_or_insert(InputSnapshot {
                     input_lines,
                     slash_overlay,
                 });
                 state.slash_overlay = SlashOverlay::Hidden;
             }
             Effect::RestoreInputState => {
+                if state.is_approval_pending() {
+                    *textarea = TextArea::default();
+                    configure_textarea(textarea);
+                    continue;
+                }
                 let snapshot = state.pending_input_snapshot.take();
                 *textarea = if let Some(InputSnapshot {
                     input_lines: Some(lines),
@@ -389,6 +429,7 @@ async fn execute_effects(
                 }
             }
             Effect::ApproveTool { id } => {
+                state.apply_tool_approved(id);
                 let run_id = pending_run_ids.tool_run_ids.remove(&id);
                 let _ = cmd_tx.try_send(route_command(run_id, AgentCommand::ApproveTool { id }));
             }
@@ -421,14 +462,14 @@ async fn execute_effects(
                 state.exit_input_history_browsing(&textarea.lines().join("\n"));
             }
             Effect::PlaceCursorAtMousePos { column, row } => {
-                if let Some((cursor_row, cursor_col)) =
-                    cursor_for_click(textarea, state.layout.input_area.rect, column, row)
-                {
+                if move_input_cursor_to_mouse(
+                    textarea,
+                    state.layout.input_area.rect,
+                    state.input_scroll_top,
+                    column,
+                    row,
+                ) {
                     state.exit_input_history_browsing(&textarea.lines().join("\n"));
-                    textarea.move_cursor(ratatui_textarea::CursorMove::Jump(
-                        cursor_row as u16,
-                        cursor_col as u16,
-                    ));
                     textarea.cancel_selection();
                     *mouse_drag = MouseDrag { moved: false };
                 }
@@ -438,17 +479,21 @@ async fn execute_effects(
                 mouse_drag.moved = true;
             }
             Effect::ExtendInputSelection { column, row } => {
-                if let Some((cursor_row, cursor_col)) =
-                    cursor_for_click(textarea, state.layout.input_area.rect, column, row)
+                let input_area = state.layout.input_area.rect;
+                if input_area.contains(ratatui::layout::Position::new(column, row))
+                    && column > input_area.x
                 {
                     if !mouse_drag.moved {
                         textarea.start_selection();
                         mouse_drag.moved = true;
                     }
-                    textarea.move_cursor(ratatui_textarea::CursorMove::Jump(
-                        cursor_row as u16,
-                        cursor_col as u16,
-                    ));
+                    move_input_cursor_to_mouse(
+                        textarea,
+                        input_area,
+                        state.input_scroll_top,
+                        column,
+                        row,
+                    );
                 }
             }
             Effect::FinalizeInputSelection => {
@@ -493,15 +538,18 @@ fn prepare_child_replay_effects(
         match effect {
             Effect::LoadChildTranscript { run_id } => {
                 if state.child_needs_lazy_load(run_id) {
-                    let messages = match store {
+                    let (messages, compaction_boundary) = match store {
                         Some(store) => {
                             let path = crate::store::session_path(
                                 store.chats_root(),
                                 store.project_key(),
                                 run_id,
                             );
-                            match crate::store::Store::read_messages(&path) {
-                                Ok(messages) => messages,
+                            match crate::store::Store::read_session_state(&path) {
+                                Ok(session_state) => (
+                                    session_state.messages,
+                                    session_state.compaction_transcript_boundary,
+                                ),
                                 Err(error) => {
                                     tracing::warn!(
                                         %error,
@@ -509,13 +557,13 @@ fn prepare_child_replay_effects(
                                         %run_id,
                                         "could not replay child transcript"
                                     );
-                                    Vec::new()
+                                    (Vec::new(), None)
                                 }
                             }
                         }
-                        None => Vec::new(),
+                        None => (Vec::new(), None),
                     };
-                    state.load_child_messages(run_id, &messages);
+                    state.load_child_messages(run_id, &messages, compaction_boundary);
                 }
                 state.switch_to_child_view(run_id);
             }
@@ -632,6 +680,7 @@ fn apply_model_list_result(
         ModelListResult::Models(models) => {
             let active_config = engine.config();
             let active_reasoning_effort = engine.reasoning_effort();
+            let active_engine_name = engine.active_engine_name();
             let is_active_option = |provider_connection: &str, model_id: &str| {
                 provider_connection == active_config.provider_connection
                     && model_id == active_config.model
@@ -657,25 +706,22 @@ fn apply_model_list_result(
             // shortcuts to the provider/model/config they name, ahead of the
             // raw catalog below.
             let engine_choices: Vec<ModelChoice> = engine
-                .named_engines()
+                .named_engine_info()
                 .into_iter()
-                .map(|(engine_name, engine_config)| {
-                    let is_active =
-                        is_active_option(&engine_config.provider_connection, &engine_config.model);
+                .map(|named_engine| {
+                    let engine_name = named_engine.name;
+                    let engine_config = named_engine.config;
+                    let initial_reasoning_effort = named_engine.reasoning_effort;
+                    let is_active = active_engine_name.as_deref() == Some(&engine_name);
                     let catalog_model = catalog_by_identity.get(&(
                         engine_config.provider_connection.clone(),
                         engine_config.model.clone(),
                     ));
-                    // The engine's own configured budget wins if TOML set
-                    // one; otherwise fall back to the provider's advertised
-                    // context length for this model, and finally to the
-                    // built-in default.
-                    let effective_context_length = engine_config.effective_context_length(
-                        catalog_model.and_then(|model| model.context_length),
-                    );
                     let model = crate::llm::ModelInfo {
-                        id: engine_config.model,
-                        context_length: Some(effective_context_length),
+                        id: engine_config.model.clone(),
+                        context_length: engine_config
+                            .context_length
+                            .or_else(|| catalog_model.and_then(|model| model.context_length)),
                         reasoning_efforts: catalog_model
                             .and_then(|model| model.reasoning_efforts.clone()),
                         reasoning_default: catalog_model
@@ -683,21 +729,19 @@ fn apply_model_list_result(
                         input_modalities: catalog_model
                             .and_then(|model| model.input_modalities.clone()),
                     };
-                    let reasoning_effort = if is_active {
-                        active_reasoning_effort.clone()
-                    } else {
-                        engine_config.reasoning
-                    };
                     let selection = crate::llm::ProviderModelOption {
                         provider_connection: engine_config.provider_connection,
                         model,
-                        reasoning_effort,
+                        reasoning_effort: initial_reasoning_effort.clone(),
                     };
                     ModelChoice {
                         label: engine_choice_label(&engine_name, &selection, is_active),
+                        initial_reasoning_effort,
                         selection,
                         is_active,
                         engine_name: Some(engine_name),
+                        selection_target: None,
+                        selection_preview_error: None,
                     }
                 })
                 .collect();
@@ -710,21 +754,36 @@ fn apply_model_list_result(
                     }
                     ModelChoice {
                         label: model_choice_label(&option, is_active),
+                        initial_reasoning_effort: option.reasoning_effort.clone(),
                         selection: option,
                         is_active,
                         engine_name: None,
+                        selection_target: None,
+                        selection_preview_error: None,
                     }
                 })
                 .collect();
-            let choices: Vec<ModelChoice> =
+            let mut choices: Vec<ModelChoice> =
                 engine_choices.into_iter().chain(model_choices).collect();
+            for choice in &mut choices {
+                match engine.preview_model_selection(&choice.to_model_selection()) {
+                    Ok(target) => choice.selection_target = Some(target),
+                    Err(error) => choice.selection_preview_error = Some(error.to_string()),
+                }
+            }
             let filter = filter.unwrap_or_default();
             let selected = matching_model_indices(&choices, &filter)
                 .into_iter()
                 .position(|index| {
-                    choices[index].selection.provider_connection
-                        == active_config.provider_connection
-                        && choices[index].selection.model.id == active_config.model
+                    let choice = &choices[index];
+                    match choice.engine_name.as_deref() {
+                        Some(engine_name) => active_engine_name.as_deref() == Some(engine_name),
+                        None => {
+                            choice.selection.provider_connection
+                                == active_config.provider_connection
+                                && choice.selection.model.id == active_config.model
+                        }
+                    }
                 })
                 .unwrap_or(0);
             state.slash_overlay = SlashOverlay::ModelPicker {
@@ -791,45 +850,193 @@ async fn execute_slash_effects(
                 let result = fetch_model_list(Arc::clone(engine)).await;
                 apply_model_list_result(state, filter, result, engine);
             }
-            Effect::SwitchModel(selection) => match engine.switch_model_option(&selection) {
-                Ok(()) => {
-                    let config = engine.config();
-                    let confirmation = match selection.model.reasoning_efforts.as_ref() {
-                        Some(_) => format!(
-                            "Switched to {}/{} (reasoning: {}).",
-                            config.provider_connection,
-                            config.model,
-                            selection.reasoning_effort.as_deref().unwrap_or("default")
-                        ),
-                        None => format!(
-                            "Switched to {}/{}.",
-                            config.provider_connection, config.model
-                        ),
-                    };
-                    // TUI-only: never injected into the conversation, since a
-                    // mid-conversation `role:"system"` message is rejected by
-                    // some providers/chat templates and the switch is already
-                    // durably recorded below via `RecordModelChanged`.
-                    state.push_notice(confirmation);
-                    // Read both values from the live engine because a
-                    // selection may have changed the active provider as well
-                    // as its model.
-                    let _ = cmd_tx
-                        .send(AgentCommand::RecordModelChanged {
-                            provider_connection: config.provider_connection,
-                            model: config.model,
-                        })
-                        .await;
+            Effect::SwitchModel(selection) => {
+                let preview = engine.preview_model_selection(&selection);
+                match engine.select_model(&selection) {
+                    Ok(()) => {
+                        let config = engine.config();
+                        let mut confirmation = match &selection {
+                            ModelSelection::NamedEngine { engine_name, .. } => format!(
+                                "Switched to engine '{engine_name}' ({}/{}).",
+                                config.provider_connection, config.model
+                            ),
+                            ModelSelection::ProviderModel(option) => {
+                                match option.model.reasoning_efforts.as_ref() {
+                                    Some(_) => format!(
+                                        "Switched to {}/{} (reasoning: {}).",
+                                        config.provider_connection,
+                                        config.model,
+                                        option.reasoning_effort.as_deref().unwrap_or("default")
+                                    ),
+                                    None => format!(
+                                        "Switched to {}/{}.",
+                                        config.provider_connection, config.model
+                                    ),
+                                }
+                            }
+                        };
+                        match preview {
+                            Ok(target) => {
+                                if let Some(effect) =
+                                    compaction_switch_notice(&state.engine_display, &target)
+                                {
+                                    confirmation.push(' ');
+                                    confirmation.push_str(&effect);
+                                }
+                                refresh_engine_display_after_selection(state, engine, &target);
+                            }
+                            Err(error) => {
+                                confirmation.push_str(&format!(
+                                    " Could not resolve compaction effect: {error}."
+                                ));
+                            }
+                        }
+                        // TUI-only: never injected into the conversation, since a
+                        // mid-conversation `role:"system"` message is rejected by
+                        // some providers/chat templates and the switch is already
+                        // durably recorded below via `RecordModelChanged`.
+                        state.push_notice(confirmation);
+                        // Read both values from the live engine because a
+                        // selection may have changed the active provider as well
+                        // as its model.
+                        let _ = cmd_tx
+                            .send(AgentCommand::RecordModelChanged {
+                                provider_connection: config.provider_connection,
+                                model: config.model,
+                            })
+                            .await;
+                    }
+                    Err(error) => {
+                        state.push_notice(format!(
+                            "Could not switch to {}/{}: {error}",
+                            selection.provider_connection(),
+                            selection.model_id()
+                        ));
+                    }
                 }
-                Err(error) => {
-                    state.push_notice(format!(
-                        "Could not switch to {}/{}: {error}",
-                        selection.provider_connection, selection.model.id
-                    ));
-                }
-            },
+            }
             _ => {}
         }
+    }
+}
+
+fn refresh_engine_display_after_selection(
+    state: &mut AppState,
+    engine: &Arc<dyn Engine>,
+    target: &crate::llm::engine::ModelSelectionTarget,
+) {
+    let runtime_display = crate::llm::engine::EngineDisplayInfo::from_engine(engine.as_ref());
+    let mut conversation_display = state.engine_display.clone();
+    if !runtime_display.engine_name.is_empty() {
+        conversation_display.engine_name = runtime_display.engine_name;
+    }
+    conversation_display.provider_connection = runtime_display.provider_connection;
+    conversation_display.model = runtime_display.model;
+    conversation_display.reasoning_effort = runtime_display.reasoning_effort;
+    let conversation_engine_name = conversation_display.engine_name.clone();
+    let conversation_provider_connection = conversation_display.provider_connection.clone();
+    let conversation_model = conversation_display.model.clone();
+    refresh_compaction_display(
+        &mut conversation_display,
+        target,
+        &conversation_engine_name,
+        &conversation_provider_connection,
+        &conversation_model,
+    );
+    state.engine_display = conversation_display.clone();
+
+    for child_display in state.child_engine_displays.values_mut() {
+        if child_display.inherits_parent_runtime {
+            child_display.engine_name = conversation_display.engine_name.clone();
+            child_display.provider_connection = conversation_display.provider_connection.clone();
+            child_display.model = conversation_display.model.clone();
+            child_display.reasoning_effort = conversation_display.reasoning_effort.clone();
+        }
+        let child_engine_name = child_display.engine_name.clone();
+        let child_provider_connection = child_display.provider_connection.clone();
+        let child_model = child_display.model.clone();
+        refresh_compaction_display(
+            child_display,
+            target,
+            &child_engine_name,
+            &child_provider_connection,
+            &child_model,
+        );
+    }
+}
+
+fn refresh_compaction_display(
+    display: &mut crate::llm::engine::EngineDisplayInfo,
+    target: &crate::llm::engine::ModelSelectionTarget,
+    conversation_engine_name: &str,
+    conversation_provider_connection: &str,
+    conversation_model: &str,
+) {
+    let Some(compaction) = &mut display.compaction_engine else {
+        return;
+    };
+    let selected_summarizer = target.engine_name.as_deref()
+        == Some(compaction.engine_name.as_str())
+        || (target.engine_name.is_none()
+            && compaction.engine_name.is_empty()
+            && compaction.shares_conversation);
+    if compaction.follows_conversation {
+        compaction.engine_name = conversation_engine_name.to_string();
+        compaction.provider_connection = conversation_provider_connection.to_string();
+        compaction.model = conversation_model.to_string();
+        compaction.context_length = target.context_length;
+    } else if selected_summarizer {
+        compaction.provider_connection = target.provider_connection.clone();
+        compaction.model = target.model.clone();
+        compaction.context_length = target.context_length;
+    }
+    compaction.shares_conversation = compaction.follows_conversation
+        || (!compaction.engine_name.is_empty()
+            && compaction.engine_name == conversation_engine_name)
+        || (compaction.engine_name.is_empty()
+            && conversation_engine_name.is_empty()
+            && compaction.shares_conversation);
+}
+
+fn compaction_switch_notice(
+    engine_display: &crate::llm::engine::EngineDisplayInfo,
+    target: &crate::llm::engine::ModelSelectionTarget,
+) -> Option<String> {
+    let compaction = engine_display.compaction_engine.as_ref()?;
+    if compaction.follows_conversation {
+        let target_name = target
+            .engine_name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&target.provider_connection);
+        return Some(format!(
+            "Compaction now uses selected engine '{target_name}'."
+        ));
+    }
+
+    let target_is_compaction_engine = match target.engine_name.as_deref() {
+        Some(target_name) if !compaction.engine_name.is_empty() => {
+            target_name == compaction.engine_name
+        }
+        None => compaction.engine_name.is_empty() && compaction.shares_conversation,
+        _ => false,
+    };
+    if target_is_compaction_engine {
+        let target_name = target
+            .engine_name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&target.provider_connection);
+        Some(format!(
+            "Compaction uses '{target_name}', shared with the conversation."
+        ))
+    } else {
+        let compaction_engine_name = if compaction.engine_name.is_empty() {
+            format!("{}/{}", compaction.provider_connection, compaction.model)
+        } else {
+            compaction.engine_name.clone()
+        };
+        Some(format!("Compaction remains on '{compaction_engine_name}'."))
     }
 }
 
@@ -951,12 +1158,18 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
     let chat_area_rect = app.layout.chat_area.rect;
     let slash_overlay_drag = app.slash_overlay_drag_selection();
     let active_subagent_counts = app.active_subagent_counts();
+    let subagent_started_at = app.subagent_started_at();
+    let context_usage_text = app
+        .active_context_usage()
+        .map(crate::tui_reducer_state::format_context_usage_readout);
     TuiState {
+        compacting: false,
         display_metadata: app.display_metadata,
         parent_agent_mode: agent_mode,
         agent_mode,
         active_subagent_counts,
         chat_entries: app.chat_entries,
+        subagent_started_at,
         partial_assistant_text: app.turn_buffer.partial_assistant_text,
         partial_thinking_text: app.turn_buffer.partial_thinking_text,
         thinking_started_at: app.turn_buffer.thinking_started_at,
@@ -964,6 +1177,7 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
         engine_display: app.engine_display,
         queued_steer_texts: app.queued_steer_texts,
         steer_indicator: app.steer_indicator,
+        context_usage_text,
         pending_approval: None,
         pending_approval_is_subagent: false,
         input_history: app.input_history,
@@ -1207,8 +1421,14 @@ where
     configure_textarea(&mut textarea);
     let replay_store = agent.store();
     if let Some(store) = replay_store.as_ref() {
-        let messages = match crate::store::Store::read_messages(store.path()) {
-            Ok(messages) => messages,
+        // One read rebuilds both the transcript and the compaction marker's
+        // position; a snapshot written before the transcript-relative
+        // boundary existed simply replays without a marker.
+        let messages = match crate::store::Store::read_session_state(store.path()) {
+            Ok(session_state) => {
+                state.replay_compaction_boundary = session_state.compaction_transcript_boundary;
+                session_state.messages
+            }
             Err(error) => {
                 tracing::warn!(
                     %error,
@@ -1229,7 +1449,7 @@ where
                 Vec::new()
             }
         };
-        state.replay_messages(&messages, &child_runs);
+        state.replay_messages(&messages, &child_runs, state.replay_compaction_boundary);
         match store.read_past_explicit_user_messages(input_history_limit) {
             Ok(prior_messages) => state.prepend_input_history(prior_messages),
             Err(error) => {
@@ -1330,7 +1550,7 @@ where
 
                 // Input-area scroll wheel is not handled by the Presenter
                 // (it returns vec![] for that case); the Driver applies it
-                // directly to the textarea and syncs input_scroll_top.
+                // directly to the textarea; rendering syncs its viewport.
                 if let AppAction::MouseInput(mouse) = action {
                     let mouse_kind = mouse.kind;
                     let mouse_col = mouse.column;
@@ -1350,11 +1570,6 @@ where
                                 1i16
                             };
                         textarea.scroll(Scrolling::Delta { rows: delta, cols: 0 });
-                        if delta < 0 {
-                            state.input_scroll_top = state.input_scroll_top.saturating_sub(1);
-                        } else {
-                            state.input_scroll_top = state.input_scroll_top.saturating_add(1);
-                        }
                         continue;
                     }
 
@@ -1566,47 +1781,54 @@ fn dedent(text: &str) -> String {
     lines[start..end].join("\n")
 }
 
-/// Translate a mouse `(column, row)` inside the input box `area` into a
-/// (line, column) cursor position in `textarea`. Returns `None` when the point
-/// is outside the input box (e.g. on its border).
-fn cursor_for_click(
-    textarea: &TextArea<'_>,
+/// Place the cursor using the textarea's own wrapped screen map.
+/// Returns `false` for points outside the content area.
+fn move_input_cursor_to_mouse(
+    textarea: &mut TextArea<'_>,
     area: ratatui::layout::Rect,
+    scroll_top: usize,
     column: u16,
     row: u16,
-) -> Option<(usize, usize)> {
-    if column < area.x.saturating_add(1) || row < area.y {
-        return None;
+) -> bool {
+    use ratatui_textarea::CursorMove;
+
+    if !area.contains(ratatui::layout::Position::new(column, row)) || column <= area.x {
+        return false;
     }
-    let width = area.width.saturating_sub(1).max(1) as usize;
-    let screen_row = (row - area.y) as usize;
-    let screen_col = (column - area.x - 1) as usize;
-    let lines = textarea.lines();
-    let mut row_start = 0usize;
-    for (line_index, line) in lines.iter().enumerate() {
-        let segments = textwrap::wrap(line, width);
-        let row_count = segments.len().max(1);
-        let row_end = row_start + row_count;
-        if screen_row < row_end {
-            let segment = screen_row.saturating_sub(row_start).min(row_count - 1);
-            let mut search_from = 0usize;
-            let mut start_col = 0usize;
-            for (index, part) in segments.iter().take(segment + 1).enumerate() {
-                let offset = line[search_from..].find(part.as_ref()).unwrap_or(0) + search_from;
-                start_col += line[search_from..offset].chars().count();
-                if index == segment {
-                    break;
-                }
-                start_col += part.chars().count();
-                search_from = offset + part.len();
-            }
-            let col = (start_col + screen_col).min(line.chars().count());
-            return Some((line_index, col));
+    let target_row = scroll_top.saturating_add((row - area.y) as usize);
+    let target_column = (column - area.x - 1) as usize;
+
+    // The dependency exposes screen positions but not screen-to-data conversion.
+    // Its native movements preserve wrapping, tabs, and Unicode display widths.
+    textarea.move_cursor(CursorMove::Head);
+    loop {
+        let current_row = textarea.screen_cursor().row;
+        if current_row == target_row {
+            break;
         }
-        row_start = row_end;
+        textarea.move_cursor(if current_row < target_row {
+            CursorMove::Down
+        } else {
+            CursorMove::Up
+        });
+        if textarea.screen_cursor().row == current_row {
+            textarea.move_cursor(CursorMove::End);
+            return true;
+        }
     }
-    let last = lines.len().saturating_sub(1);
-    Some((last, lines.get(last).map_or(0, |line| line.chars().count())))
+    loop {
+        let previous_cursor = textarea.cursor();
+        textarea.move_cursor(CursorMove::Forward);
+        let screen_cursor = textarea.screen_cursor();
+        if screen_cursor.row != target_row || screen_cursor.col > target_column {
+            textarea.move_cursor(CursorMove::Back);
+            break;
+        }
+        if textarea.cursor() == previous_cursor {
+            break;
+        }
+    }
+    true
 }
 
 /// Loads a history entry into the textarea. Returns `true` when a history
@@ -1725,7 +1947,7 @@ impl TuiApp {
         }
     }
 
-    /// Set the runtime identity and paths shown by the TUI.
+    /// Set the active profile and workspace paths shown by the TUI.
     pub fn with_display_metadata(mut self, display_metadata: TuiDisplayMetadata) -> Self {
         self.display_metadata = display_metadata;
         self
@@ -1787,40 +2009,6 @@ impl App for TuiApp {
     }
 }
 
-/// Compatibility shim for `main.rs` until Phase 5 Step 9 migrates the binary
-/// to construct `TuiApp` directly.
-///
-/// TODO Phase 5 Step 9: remove this function.
-pub async fn run_tui_on_stdout(
-    provider: Arc<dyn Provider>,
-    registry: Arc<ToolRegistry>,
-    initial_prompt: Option<String>,
-) -> anyhow::Result<()> {
-    let engine_config = EngineConfig {
-        provider_connection: provider.name().to_string(),
-        model: String::new(),
-        temperature: None,
-        context_length: None,
-        api_base_url: None,
-        api_key: None,
-        reasoning: None,
-    };
-    let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(provider, engine_config));
-    let factory = Arc::new(
-        AgentFactory::new(std::collections::HashMap::from([(
-            "default".to_string(),
-            engine,
-        )]))
-        .with_allowed_tools(DEFAULT_TUI_TOOLS),
-    );
-    let profile = ProfileConfig::default();
-    let _ = registry; // registry is created internally by AgentFactory; parameter kept for API compat
-    TuiApp::new(factory, profile, "default".to_string(), initial_prompt)
-        .run()
-        .await
-        .map(|_| ())
-}
-
 /// RAII guard restoring the terminal to its pre-TUI state.
 struct TerminalGuard;
 
@@ -1865,8 +2053,8 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    use crate::llm::engine::DEFAULT_CONTEXT_LENGTH;
-    use crate::tui_reducer_state::{ChatEntry, ToolCallState};
+    use crate::llm::engine::{EngineConfig, EngineImpl};
+    use crate::tui_reducer_state::{ChatEntry, ConversationView, ToolCallState};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tokio::sync::mpsc;
     use uuid::Uuid;
@@ -1882,6 +2070,59 @@ mod tests {
             cursor_row: textarea.cursor().0,
             cursor_row_is_last: textarea.cursor().0 + 1 >= textarea.lines().len().max(1),
         }
+    }
+
+    #[test]
+    fn compaction_switch_notices_explain_engine_selection_effects() {
+        use crate::llm::engine::{CompactionEngineDisplayInfo, EngineDisplayInfo};
+
+        let target = crate::llm::engine::ModelSelectionTarget {
+            engine_name: Some("engine-b".to_string()),
+            provider_connection: "mock".to_string(),
+            model: "model-b".to_string(),
+            context_length: 65_536,
+        };
+        let mut display = EngineDisplayInfo {
+            engine_name: "engine-a".to_string(),
+            provider_connection: "mock".to_string(),
+            model: "model-a".to_string(),
+            reasoning_effort: None,
+            compaction_engine: Some(CompactionEngineDisplayInfo {
+                engine_name: "engine-a".to_string(),
+                provider_connection: "mock".to_string(),
+                model: "model-a".to_string(),
+                context_length: 131_072,
+                follows_conversation: true,
+                shares_conversation: true,
+            }),
+            inherits_parent_runtime: false,
+        };
+        assert_eq!(
+            compaction_switch_notice(&display, &target).as_deref(),
+            Some("Compaction now uses selected engine 'engine-b'.")
+        );
+
+        let compaction = display
+            .compaction_engine
+            .as_mut()
+            .expect("summarizer details");
+        compaction.follows_conversation = false;
+        compaction.engine_name = "engine-a".to_string();
+        assert_eq!(
+            compaction_switch_notice(&display, &target).as_deref(),
+            Some("Compaction remains on 'engine-a'.")
+        );
+
+        let shared_target = crate::llm::engine::ModelSelectionTarget {
+            engine_name: Some("engine-a".to_string()),
+            provider_connection: "mock".to_string(),
+            model: "model-a".to_string(),
+            context_length: 131_072,
+        };
+        assert_eq!(
+            compaction_switch_notice(&display, &shared_target).as_deref(),
+            Some("Compaction uses 'engine-a', shared with the conversation.")
+        );
     }
 
     #[test]
@@ -1902,6 +2143,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replayed_child_restores_its_compaction_marker_on_first_drill_in() {
+        use crate::agent::{AssistantStatus, Message, UserMessageKind};
+        use crate::tui_reducer_state::{ChildConversation, ChildRunInfo};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = crate::store::Store::create(
+            &temp.path().join("chats"),
+            temp.path(),
+            Uuid::new_v4(),
+            "mock",
+            "conversation",
+            None,
+        )
+        .expect("parent store created");
+        let run_id = Uuid::new_v4();
+        let messages = vec![
+            Message::User {
+                content: "inspect the patch".to_string(),
+                kind: UserMessageKind::Explicit,
+            },
+            Message::User {
+                content: "hidden harness note".to_string(),
+                kind: UserMessageKind::ImplicitToolNote,
+            },
+            Message::Assistant {
+                content: "retained reply".to_string(),
+                status: AssistantStatus::Complete,
+                tool_calls: vec![],
+            },
+        ];
+        let child_store = store
+            .write_child_transcript_for_run_store(run_id, None, &messages)
+            .await
+            .expect("child transcript written");
+        child_store.record_compaction(2, 1, "old summary");
+        child_store.record_compaction(3, 1, "latest summary");
+        child_store.flush().await;
+
+        let mut state = AppState::new();
+        state.chat_entries.push(ChatEntry::UserMessage {
+            text: "root request".to_string(),
+            state: UserMessageState::Sent,
+        });
+        let root_entries = state.chat_entries.clone();
+        state.child_conversations.insert(
+            run_id,
+            ChildConversation::new_replay(ChildRunInfo {
+                run_id,
+                bubble_id: Uuid::new_v4(),
+                agent_type: "research".to_string(),
+                task: "inspect the patch".to_string(),
+                label: "Inspect".to_string(),
+            }),
+        );
+        assert!(state.child_conversations[&run_id].messages.is_empty());
+
+        assert!(prepare_child_replay_effects(
+            &mut state,
+            vec![Effect::LoadChildTranscript { run_id }],
+            Some(&store),
+        )
+        .is_empty());
+        assert_eq!(
+            state.child_conversations[&run_id].messages,
+            vec![
+                ChatEntry::UserMessage {
+                    text: "inspect the patch".to_string(),
+                    state: UserMessageState::Sent,
+                },
+                ChatEntry::CompactionMarker {
+                    summarized_messages: 2,
+                },
+                ChatEntry::AssistantMessage {
+                    text: "retained reply".to_string(),
+                    interrupted: false,
+                },
+            ],
+            "the latest persisted cut uses transcript indices, not rendered entry indices"
+        );
+        assert_eq!(state.chat_entries, root_entries);
+        assert!(!state.child_needs_lazy_load(run_id));
+        let loaded_entries = state.child_conversations[&run_id].messages.clone();
+        prepare_child_replay_effects(
+            &mut state,
+            vec![Effect::LoadChildTranscript { run_id }],
+            Some(&store),
+        );
+        assert_eq!(state.child_conversations[&run_id].messages, loaded_entries);
+    }
+
+    #[tokio::test]
     async fn tui_triggers_title_generation_when_stream_done_is_drained() {
         use ratatui::backend::TestBackend;
 
@@ -1913,6 +2245,7 @@ mod tests {
             Uuid::new_v4(),
             "mock",
             "conversation",
+            None,
         )
         .expect("store created");
         let provider = Arc::new(crate::llm::MockProvider::new(
@@ -1929,6 +2262,10 @@ mod tests {
                 api_base_url: None,
                 api_key: None,
                 reasoning: None,
+
+                compact_target_ratio: 0.5,
+                soft_compaction_threshold: 0.7,
+                hard_compaction_threshold: 0.9,
             },
         ));
         let factory = Arc::new(
@@ -2017,6 +2354,7 @@ mod tests {
             Uuid::new_v4(),
             "mock",
             "conversation",
+            None,
         )
         .expect("previous store created");
         previous_store.record_message(&crate::agent::Message::User {
@@ -2035,6 +2373,7 @@ mod tests {
             Uuid::new_v4(),
             "mock",
             "conversation",
+            None,
         )
         .expect("current store created");
         current_store.record_message(&crate::agent::Message::User {
@@ -2054,6 +2393,10 @@ mod tests {
                 api_base_url: None,
                 api_key: None,
                 reasoning: None,
+
+                compact_target_ratio: 0.5,
+                soft_compaction_threshold: 0.7,
+                hard_compaction_threshold: 0.9,
             },
         ));
         let factory = AgentFactory::new(HashMap::from([("default".to_string(), engine)]))
@@ -2103,6 +2446,537 @@ mod tests {
         let mut textarea = TextArea::default();
         configure_textarea(&mut textarea);
         (AppState::new(), textarea, cmd_tx, cmd_rx)
+    }
+
+    #[tokio::test]
+    async fn input_mouse_targets_the_visible_last_line() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::backend::TestBackend;
+
+        for line_count in [3usize, 12] {
+            let (mut state, mut textarea, cmd_tx, _cmd_rx) = setup();
+            state.input_history = vec![(0..line_count)
+                .map(|line| format!("line {line:02}"))
+                .collect::<Vec<_>>()
+                .join("\n")];
+            assert!(load_history_into_textarea(
+                HistoryDirection::Up,
+                &mut state,
+                &mut textarea,
+            ));
+            textarea.move_cursor(ratatui_textarea::CursorMove::Top);
+            textarea.move_cursor(ratatui_textarea::CursorMove::Head);
+            let mut terminal =
+                Terminal::new(TestBackend::new(40, 24)).expect("test terminal created");
+            let registry = crate::ToolRegistry::default();
+            let mut mouse_drag = MouseDrag::default();
+            let mut pending_run_ids = PendingRunIds::default();
+
+            terminal
+                .draw(|frame| {
+                    render::render(frame, &mut state, &mut textarea, None, None, &registry);
+                })
+                .expect("initial input frame");
+            for _ in 0..line_count.saturating_sub(state.layout.input_area.rect.height as usize) {
+                textarea.scroll(Scrolling::Delta { rows: 1, cols: 0 });
+                terminal
+                    .draw(|frame| {
+                        render::render(frame, &mut state, &mut textarea, None, None, &registry);
+                    })
+                    .expect("scrolled input frame");
+            }
+            let input_area = state.layout.input_area.rect;
+            let last_row = input_area.bottom() - 1;
+            let expected_scroll_top = line_count.saturating_sub(input_area.height as usize);
+            assert_eq!(state.input_scroll_top, expected_scroll_top);
+            let last_line = format!("line {:02}", line_count - 1);
+            assert_eq!(
+                (0..last_line.len())
+                    .map(|column| terminal.backend().buffer()
+                        [(input_area.x + 1 + column as u16, last_row)]
+                        .symbol())
+                    .collect::<String>(),
+                last_line,
+                "the actual rendered last line must be visible"
+            );
+            for (kind, column, expected_column) in [
+                (MouseEventKind::Down(MouseButton::Left), input_area.x + 1, 0),
+                (MouseEventKind::Drag(MouseButton::Left), input_area.x + 8, 7),
+                (MouseEventKind::Up(MouseButton::Left), input_area.x + 8, 7),
+            ] {
+                let effects = presenter::update(
+                    &mut state,
+                    TuiEvent::Mouse(MouseEvent {
+                        kind,
+                        column,
+                        row: last_row,
+                        modifiers: KeyModifiers::NONE,
+                    }),
+                    &textarea_ctx_from(&textarea),
+                );
+                execute_effects(
+                    &mut state,
+                    &mut textarea,
+                    &cmd_tx,
+                    effects,
+                    &mut mouse_drag,
+                    &mut NoopClipboard,
+                    &mut pending_run_ids,
+                )
+                .await;
+                assert_eq!(
+                    textarea.cursor(),
+                    (line_count - 1, expected_column),
+                    "{kind:?} must target the rendered last line ({line_count} lines)"
+                );
+                terminal
+                    .draw(|frame| {
+                        render::render(frame, &mut state, &mut textarea, None, None, &registry);
+                    })
+                    .expect("input frame after mouse event");
+                assert_eq!(
+                    state.input_scroll_top, expected_scroll_top,
+                    "mouse interaction must not jump the viewport upward"
+                );
+            }
+            assert_eq!(textarea.yank_text(), last_line);
+            assert_eq!(state.history_index, None);
+            execute_effects(
+                &mut state,
+                &mut textarea,
+                &cmd_tx,
+                vec![Effect::PlaceCursorAtMousePos {
+                    column: input_area.x + 4,
+                    row: last_row,
+                }],
+                &mut mouse_drag,
+                &mut NoopClipboard,
+                &mut pending_run_ids,
+            )
+            .await;
+            assert_eq!(textarea.cursor(), (line_count - 1, 3));
+            assert_eq!(textarea.selection_range(), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn input_mouse_uses_rendered_wrap_and_character_widths() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::backend::TestBackend;
+
+        for (text, width, target_column) in [
+            ("aaaaa-bbbbb-ccccc-ddddd", 12, 12),
+            ("a\tbc", 20, 2),
+            ("a\u{754c}bc", 20, 2),
+            ("abcdefghijklmnopqrst", 12, 15),
+            ("first          last", 12, 16),
+        ] {
+            let (mut state, _initial_textarea, cmd_tx, _cmd_rx) = setup();
+            let mut textarea = TextArea::from([text]);
+            configure_textarea(&mut textarea);
+            let mut terminal =
+                Terminal::new(TestBackend::new(width, 30)).expect("test terminal created");
+            let registry = crate::ToolRegistry::default();
+            terminal
+                .draw(|frame| {
+                    render::render(frame, &mut state, &mut textarea, None, None, &registry);
+                })
+                .expect("wrapped input frame");
+            textarea.move_cursor(ratatui_textarea::CursorMove::Bottom);
+            textarea.move_cursor(ratatui_textarea::CursorMove::End);
+            assert_eq!(
+                state.layout.input_area.rect.height as usize,
+                (textarea.screen_cursor().row + 1).min(10),
+                "input height must match the renderer for {text:?}"
+            );
+            textarea.move_cursor(ratatui_textarea::CursorMove::Jump(0, target_column));
+            let target = textarea.screen_cursor();
+            assert!(target.row < state.layout.input_area.rect.height as usize);
+            textarea.move_cursor(ratatui_textarea::CursorMove::Jump(0, 0));
+            let input_area = state.layout.input_area.rect;
+            let effects = presenter::update(
+                &mut state,
+                TuiEvent::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: input_area.x + 1 + target.col as u16,
+                    row: input_area.y + target.row as u16,
+                    modifiers: KeyModifiers::NONE,
+                }),
+                &textarea_ctx_from(&textarea),
+            );
+            execute_effects(
+                &mut state,
+                &mut textarea,
+                &cmd_tx,
+                effects,
+                &mut MouseDrag::default(),
+                &mut NoopClipboard,
+                &mut PendingRunIds::default(),
+            )
+            .await;
+            assert_eq!(
+                textarea.cursor(),
+                (0, target_column as usize),
+                "mouse placement must match the renderer for {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn input_viewport_tracks_replacement_and_resizing() {
+        use ratatui::backend::TestBackend;
+
+        let (mut state, _initial_textarea, _cmd_tx, _cmd_rx) = setup();
+        let registry = crate::ToolRegistry::default();
+        let mut terminal = Terminal::new(TestBackend::new(40, 24)).expect("test terminal created");
+        for line_count in [14usize, 10, 3] {
+            let mut textarea = TextArea::from((0..line_count).map(|line| format!("line {line}")));
+            configure_textarea(&mut textarea);
+            textarea.move_cursor(ratatui_textarea::CursorMove::Bottom);
+            textarea.move_cursor(ratatui_textarea::CursorMove::End);
+            terminal
+                .draw(|frame| {
+                    render::render(frame, &mut state, &mut textarea, None, None, &registry);
+                })
+                .expect("replacement draft frame");
+            assert_eq!(
+                state.input_scroll_top,
+                line_count.saturating_sub(state.layout.input_area.rect.height as usize),
+                "a replacement textarea must not inherit the previous viewport"
+            );
+        }
+
+        let mut textarea = TextArea::from(["abcdefghijklmnopqrstuvwxyz"]);
+        configure_textarea(&mut textarea);
+        terminal
+            .draw(|frame| {
+                render::render(frame, &mut state, &mut textarea, None, None, &registry);
+            })
+            .expect("wide terminal frame");
+        assert_eq!(state.layout.input_area.rect.height, 1);
+        terminal.backend_mut().resize(10, 24);
+        terminal
+            .draw(|frame| {
+                render::render(frame, &mut state, &mut textarea, None, None, &registry);
+            })
+            .expect("narrow terminal frame");
+        assert_eq!(state.layout.input_area.rect.height, 3);
+        assert_eq!(state.input_scroll_top, 0);
+    }
+
+    #[tokio::test]
+    async fn compaction_applied_update_inserts_the_transcript_marker() {
+        let (mut state, mut textarea, cmd_tx, _cmd_rx) = setup();
+        state.chat_entries.push(ChatEntry::UserMessage {
+            text: "old turn".to_string(),
+            state: UserMessageState::Sent,
+        });
+        state.chat_entries.push(ChatEntry::AssistantMessage {
+            text: "old reply".to_string(),
+            interrupted: false,
+        });
+        state.chat_entries.push(ChatEntry::UserMessage {
+            text: "new turn".to_string(),
+            state: UserMessageState::Sent,
+        });
+
+        let textarea_context = textarea_ctx_from(&textarea);
+        let outcome = process_one_update(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            &textarea_context,
+            &UiUpdate::CompactionApplied {
+                run_id: None,
+                entry_index: 2,
+                summarized_messages: 2,
+            },
+            &mut MouseDrag::default(),
+            &mut NoopClipboard,
+            &mut PendingRunIds::default(),
+        )
+        .await;
+
+        assert_eq!(outcome, ActionOutcome::Continue);
+        assert_eq!(
+            state.chat_entries[2],
+            crate::tui_reducer_state::ChatEntry::CompactionMarker {
+                summarized_messages: 2
+            },
+            "the marker lands where the tail begins: {:?}",
+            state.chat_entries
+        );
+        assert!(matches!(
+            &state.chat_entries[3],
+            ChatEntry::UserMessage { text, .. } if text == "new turn"
+        ));
+
+        // A repeated emission of the same boundary must not stack markers.
+        let repeat_context = textarea_ctx_from(&textarea);
+        process_one_update(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            &repeat_context,
+            &UiUpdate::CompactionApplied {
+                run_id: None,
+                entry_index: 2,
+                summarized_messages: 2,
+            },
+            &mut MouseDrag::default(),
+            &mut NoopClipboard,
+            &mut PendingRunIds::default(),
+        )
+        .await;
+        assert_eq!(
+            state
+                .chat_entries
+                .iter()
+                .filter(|entry| matches!(entry, ChatEntry::CompactionMarker { .. }))
+                .count(),
+            1,
+            "the same boundary is marked once"
+        );
+    }
+
+    #[tokio::test]
+    async fn child_compaction_marker_does_not_enter_the_root_transcript() {
+        let (mut state, mut textarea, cmd_tx, _cmd_rx) = setup();
+        let run_ids = [Uuid::new_v4(), Uuid::new_v4()];
+        for run_id in run_ids {
+            let mut conversation = crate::tui_reducer_state::ChildConversation::new(
+                crate::tui_reducer_state::ChildRunInfo {
+                    run_id,
+                    bubble_id: Uuid::new_v4(),
+                    agent_type: "default".to_string(),
+                    task: "Inspect material".to_string(),
+                    label: "Inspect".to_string(),
+                },
+            );
+            conversation.messages.push(ChatEntry::AssistantMessage {
+                text: "retained reply".to_string(),
+                interrupted: false,
+            });
+            state.child_conversations.insert(run_id, conversation);
+        }
+        let root_entries = state.chat_entries.clone();
+        let textarea_context = textarea_ctx_from(&textarea);
+        for active_view in [
+            ConversationView::Root,
+            ConversationView::Child {
+                run_id: run_ids[0],
+                agent_type: "default".to_string(),
+                task: "Inspect material".to_string(),
+                label: "Inspect".to_string(),
+            },
+        ] {
+            state.active_view = active_view.clone();
+            for run_id in run_ids {
+                process_one_update(
+                    &mut state,
+                    &mut textarea,
+                    &cmd_tx,
+                    &textarea_context,
+                    &UiUpdate::CompactionApplied {
+                        run_id: Some(run_id),
+                        entry_index: 0,
+                        summarized_messages: 15,
+                    },
+                    &mut MouseDrag::default(),
+                    &mut NoopClipboard,
+                    &mut PendingRunIds::default(),
+                )
+                .await;
+            }
+            assert_eq!(state.active_view, active_view);
+        }
+
+        assert_eq!(
+            state.chat_entries, root_entries,
+            "a forwarded child compaction must not add a root marker"
+        );
+        for run_id in run_ids {
+            assert_eq!(
+                state.child_conversations[&run_id].messages,
+                vec![
+                    ChatEntry::CompactionMarker {
+                        summarized_messages: 15,
+                    },
+                    ChatEntry::AssistantMessage {
+                        text: "retained reply".to_string(),
+                        interrupted: false,
+                    },
+                ],
+                "duplicate suppression is scoped to each child"
+            );
+        }
+
+        process_one_update(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            &textarea_context,
+            &UiUpdate::CompactionApplied {
+                run_id: None,
+                entry_index: 0,
+                summarized_messages: 15,
+            },
+            &mut MouseDrag::default(),
+            &mut NoopClipboard,
+            &mut PendingRunIds::default(),
+        )
+        .await;
+        assert_eq!(
+            state.chat_entries,
+            vec![ChatEntry::CompactionMarker {
+                summarized_messages: 15,
+            }],
+            "root compaction still routes to root while viewing a child"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_child_compaction_marker_does_not_enter_the_root_transcript() {
+        let (mut state, mut textarea, cmd_tx, _cmd_rx) = setup();
+        let textarea_context = textarea_ctx_from(&textarea);
+        process_one_update(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            &textarea_context,
+            &UiUpdate::CompactionApplied {
+                run_id: Some(Uuid::new_v4()),
+                entry_index: 0,
+                summarized_messages: 15,
+            },
+            &mut MouseDrag::default(),
+            &mut NoopClipboard,
+            &mut PendingRunIds::default(),
+        )
+        .await;
+        assert!(state.chat_entries.is_empty());
+        assert!(state.child_conversations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn context_usage_update_stores_the_footer_readout() {
+        let (mut state, mut textarea, cmd_tx, _cmd_rx) = setup();
+        assert_eq!(state.context_usage, None, "no report before the first turn");
+
+        let textarea_context = textarea_ctx_from(&textarea);
+        let outcome = process_one_update(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            &textarea_context,
+            &UiUpdate::ContextUsage {
+                estimated_tokens: 64_200,
+                context_length: 128_000,
+                source: crate::tui_reducer_state::ContextUsageSource::SerializedRequest,
+            },
+            &mut MouseDrag::default(),
+            &mut NoopClipboard,
+            &mut PendingRunIds::default(),
+        )
+        .await;
+
+        assert_eq!(outcome, ActionOutcome::Continue);
+        assert_eq!(
+            state.context_usage,
+            Some(crate::tui_reducer_state::ContextUsage {
+                estimated_tokens: 64_200,
+                context_length: 128_000,
+                source: crate::tui_reducer_state::ContextUsageSource::SerializedRequest,
+            }),
+            "the readout is stored as reported, not pre-formatted"
+        );
+        assert_eq!(
+            crate::tui_reducer_state::format_context_usage(64_200, 128_000),
+            "64.2K (50%)"
+        );
+
+        // A later report replaces the earlier one, in any mode.
+        state.mode = TuiMode::Streaming;
+        let streaming_context = textarea_ctx_from(&textarea);
+        process_one_update(
+            &mut state,
+            &mut textarea,
+            &cmd_tx,
+            &streaming_context,
+            &UiUpdate::ContextUsage {
+                estimated_tokens: 1_000,
+                context_length: 128_000,
+                source: crate::tui_reducer_state::ContextUsageSource::SerializedRequest,
+            },
+            &mut MouseDrag::default(),
+            &mut NoopClipboard,
+            &mut PendingRunIds::default(),
+        )
+        .await;
+        assert_eq!(
+            state.context_usage,
+            Some(crate::tui_reducer_state::ContextUsage {
+                estimated_tokens: 1_000,
+                context_length: 128_000,
+                source: crate::tui_reducer_state::ContextUsageSource::SerializedRequest,
+            })
+        );
+        assert_eq!(state.mode, TuiMode::Streaming, "the mode is untouched");
+    }
+
+    #[test]
+    fn child_context_usage_update_projects_for_active_child_without_replacing_root() {
+        let (mut state, _textarea, _cmd_tx, _cmd_rx) = setup();
+        let run_id = uuid::Uuid::new_v4();
+        state.start_child_run(crate::tui_reducer_state::ChildRunInfo {
+            run_id,
+            bubble_id: uuid::Uuid::new_v4(),
+            agent_type: "reviewer".to_string(),
+            task: "Review the change".to_string(),
+            label: "Review change".to_string(),
+        });
+        state.context_usage = Some(crate::tui_reducer_state::ContextUsage {
+            estimated_tokens: 12_000,
+            context_length: 128_000,
+            source: crate::tui_reducer_state::ContextUsageSource::SerializedRequest,
+        });
+        state.switch_to_child_view(run_id);
+
+        let event = ui_update_to_domain_event(&UiUpdate::ChildContextUsage {
+            run_id,
+            estimated_tokens: 4_000,
+            context_length: 32_000,
+            source: crate::tui_reducer_state::ContextUsageSource::ModelView,
+        })
+        .expect("child usage update maps to a domain event");
+        presenter::update(
+            &mut state,
+            TuiEvent::Domain(event),
+            &textarea_ctx_from(&TextArea::default()),
+        );
+
+        assert_eq!(
+            state.context_usage,
+            Some(crate::tui_reducer_state::ContextUsage {
+                estimated_tokens: 12_000,
+                context_length: 128_000,
+                source: crate::tui_reducer_state::ContextUsageSource::SerializedRequest,
+            }),
+            "child usage must not replace the root readout"
+        );
+        assert_eq!(
+            state.active_context_usage(),
+            Some(crate::tui_reducer_state::ContextUsage {
+                estimated_tokens: 4_000,
+                context_length: 32_000,
+                source: crate::tui_reducer_state::ContextUsageSource::ModelView,
+            }),
+            "the active child view selects its own readout"
+        );
+        assert_eq!(
+            crate::tui_reducer_state::format_context_usage(4_000, 32_000),
+            "4.0K (13%)"
+        );
     }
 
     #[tokio::test]
@@ -2603,6 +3477,111 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn overlapping_approvals_resume_root_and_preserve_input() {
+        for approve_child in [true, false] {
+            let (mut state, _, cmd_tx, mut cmd_rx) = setup();
+            state.mode = TuiMode::Streaming;
+            let mut textarea = TextArea::from(vec!["unfinished draft".to_string()]);
+            let root_tool_id = uuid::Uuid::new_v4();
+            let child_tool_id = uuid::Uuid::new_v4();
+            let child_run_id = uuid::Uuid::new_v4();
+            state.start_child_run(crate::tui_reducer_state::ChildRunInfo {
+                run_id: child_run_id,
+                bubble_id: uuid::Uuid::new_v4(),
+                agent_type: "reviewer".to_string(),
+                task: "review".to_string(),
+                label: "Review".to_string(),
+            });
+            let mut pending_run_ids = PendingRunIds::default();
+            for (id, run_id) in [(root_tool_id, None), (child_tool_id, Some(child_run_id))] {
+                let context = textarea_ctx_from(&textarea);
+                process_one_update(
+                    &mut state,
+                    &mut textarea,
+                    &cmd_tx,
+                    &context,
+                    &UiUpdate::ToolPending {
+                        id,
+                        name: "bash".to_string(),
+                        arguments: serde_json::json!({"command": "echo ready"}),
+                        content_sections: vec![],
+                        title_arguments: vec![],
+                        run_id,
+                    },
+                    &mut MouseDrag::default(),
+                    &mut NoopClipboard,
+                    &mut pending_run_ids,
+                )
+                .await;
+            }
+            let context = textarea_ctx_from(&textarea);
+            let effects = presenter::update(
+                &mut state,
+                TuiEvent::Input(if approve_child {
+                    InputEvent::KeyInput(key_event(KeyCode::Enter))
+                } else {
+                    InputEvent::Escape
+                }),
+                &context,
+            );
+            execute_effects(
+                &mut state,
+                &mut textarea,
+                &cmd_tx,
+                effects,
+                &mut MouseDrag::default(),
+                &mut NoopClipboard,
+                &mut pending_run_ids,
+            )
+            .await;
+            assert!(matches!(
+                cmd_rx.try_recv(),
+                Ok(AgentCommand::ForChild { run_id, command })
+                    if run_id == child_run_id
+                        && if approve_child {
+                            matches!(*command, AgentCommand::ApproveTool { id } if id == child_tool_id)
+                        } else {
+                            matches!(*command, AgentCommand::DenyTool { id, .. } if id == child_tool_id)
+                        }
+            ));
+            assert!(
+                matches!(state.focus, Focus::ToolApproval { tool_id, .. } if tool_id == root_tool_id),
+                "root approval must remain actionable after approving the child: {:?}",
+                state.focus
+            );
+            assert_eq!(
+                state.active_view,
+                crate::tui_reducer_state::ConversationView::Root
+            );
+            assert_eq!(state.agent_mode(), crate::AgentMode::ToolPending);
+            assert_eq!(textarea.lines(), &[""]);
+
+            let context = textarea_ctx_from(&textarea);
+            let effects = presenter::update(
+                &mut state,
+                TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+                &context,
+            );
+            execute_effects(
+                &mut state,
+                &mut textarea,
+                &cmd_tx,
+                effects,
+                &mut MouseDrag::default(),
+                &mut NoopClipboard,
+                &mut pending_run_ids,
+            )
+            .await;
+            assert_eq!(
+                cmd_rx.try_recv(),
+                Ok(AgentCommand::ApproveTool { id: root_tool_id })
+            );
+            assert_eq!(state.focus, Focus::MainInput);
+            assert_eq!(textarea.lines(), &["unfinished draft"]);
+        }
+    }
+
+    #[tokio::test]
     async fn approval_enter_sends_approve_tool() {
         let (mut state, mut textarea, cmd_tx, mut cmd_rx) = setup();
         let tool_id = uuid::Uuid::new_v4();
@@ -2745,12 +3724,17 @@ mod tests {
         );
         assert_eq!(textarea.lines(), &[""]);
 
-        // Restore
+        let context = textarea_ctx_from(&textarea);
+        let effects = presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+            &context,
+        );
         execute_effects(
             &mut state,
             &mut textarea,
             &cmd_tx,
-            vec![Effect::RestoreInputState],
+            effects,
             &mut MouseDrag::default(),
             &mut NoopClipboard,
             &mut PendingRunIds::default(),
@@ -2968,6 +3952,7 @@ mod tests {
         state.slash_overlay = SlashOverlay::ModelPicker {
             choices: vec![ModelChoice {
                 label: "stub/deepseek-v3".to_string(),
+                initial_reasoning_effort: None,
                 selection: crate::llm::ProviderModelOption {
                     provider_connection: "stub".to_string(),
                     model: crate::llm::ModelInfo {
@@ -2981,6 +3966,8 @@ mod tests {
                 },
                 is_active: true,
                 engine_name: None,
+                selection_target: None,
+                selection_preview_error: None,
             }],
             filter: "deep".to_string(),
             selected: 0,
@@ -3241,7 +4228,7 @@ mod tests {
         let _ = tool_id; // used in setup
     }
 
-    // ── slash commands (Phase 7, blueprint §6) ──────────────────────────────
+    // ── slash commands ────────────────────────────────────────────────────
 
     /// Engine double whose model list and switch outcome are scripted, so the
     /// `/models` flow can be exercised without a provider.
@@ -3274,6 +4261,10 @@ mod tests {
                     api_base_url: None,
                     api_key: None,
                     reasoning: None,
+
+                    compact_target_ratio: 0.5,
+                    soft_compaction_threshold: 0.7,
+                    hard_compaction_threshold: 0.9,
                 }),
                 named_engines: Vec::new(),
             })
@@ -3330,6 +4321,10 @@ mod tests {
                     api_base_url: None,
                     api_key: None,
                     reasoning: None,
+
+                    compact_target_ratio: 0.5,
+                    soft_compaction_threshold: 0.7,
+                    hard_compaction_threshold: 0.9,
                 }),
                 named_engines: vec![(
                     engine_name.to_string(),
@@ -3341,6 +4336,10 @@ mod tests {
                         api_base_url: None,
                         api_key: None,
                         reasoning: engine_reasoning.map(str::to_string),
+
+                        compact_target_ratio: 0.5,
+                        soft_compaction_threshold: 0.7,
+                        hard_compaction_threshold: 0.9,
                     },
                 )],
             })
@@ -3919,9 +4918,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn models_lists_an_engine_shortcut_falling_back_to_the_built_in_default_context_length() {
+    async fn models_lists_an_engine_shortcut_without_inventing_context_metadata() {
         // When neither TOML nor the catalog advertise a context length, the
-        // shortcut must show the built-in default rather than nothing.
+        // picker must not present the engine's context fallback as catalog metadata.
         let (mut state, _textarea, cmd_tx, _cmd_rx) = setup();
         let engine: Arc<dyn Engine> = StubEngine::with_named_engine(
             &["small", "thinking"],
@@ -3950,9 +4949,8 @@ mod tests {
             .find(|choice| choice.engine_name.is_some())
             .expect("the named engine must appear as a shortcut");
         assert_eq!(
-            shortcut.selection.model.context_length,
-            Some(DEFAULT_CONTEXT_LENGTH),
-            "an unconfigured, unadvertised context_length must fall back to the built-in default"
+            shortcut.selection.model.context_length, None,
+            "an unconfigured, unadvertised context_length must remain unknown in the picker"
         );
     }
 
@@ -4134,9 +5132,12 @@ mod tests {
         state.slash_overlay = SlashOverlay::ModelPicker {
             choices: vec![ModelChoice {
                 label: "stub/thinking  reasoning: default".to_string(),
+                initial_reasoning_effort: selection.reasoning_effort.clone(),
                 selection,
                 is_active: false,
                 engine_name: None,
+                selection_target: None,
+                selection_preview_error: None,
             }],
             filter: String::new(),
             selected: 0,
@@ -4233,7 +5234,10 @@ mod tests {
         );
         assert_eq!(
             effects,
-            vec![Effect::ClearTextarea, Effect::SwitchModel(picked)]
+            vec![
+                Effect::ClearTextarea,
+                Effect::SwitchModel(ModelSelection::ProviderModel(picked))
+            ]
         );
         assert_eq!(state.slash_overlay, SlashOverlay::Hidden);
 
@@ -4257,6 +5261,131 @@ mod tests {
             AgentCommand::RecordModelChanged { model, .. } if model == "small"
         ));
         assert!(cmd_rx.try_recv().is_err(), "no further commands are sent");
+    }
+
+    #[tokio::test]
+    async fn selecting_a_named_engine_shortcut_activates_that_exact_engine() {
+        use crate::llm::EngineRouter;
+
+        let (mut state, textarea, cmd_tx, _cmd_rx) = setup();
+        let engine_a = StubEngine::with_models(&["shared-model"], "shared-model");
+        let engine_b = StubEngine::with_models(&["shared-model"], "shared-model");
+        {
+            let engine_config = &mut *engine_a.config.lock().expect("engine A config lock");
+            engine_config.temperature = Some(0.1);
+            engine_config.context_length = Some(8_192);
+            engine_config.soft_compaction_threshold = 0.6;
+        }
+        {
+            let engine_config = &mut *engine_b.config.lock().expect("engine B config lock");
+            engine_config.temperature = Some(0.8);
+            engine_config.context_length = Some(32_768);
+            engine_config.soft_compaction_threshold = 0.8;
+        }
+        let router = EngineRouter::new(
+            HashMap::from([
+                (
+                    "engine-a".to_string(),
+                    Arc::clone(&engine_a) as Arc<dyn Engine>,
+                ),
+                (
+                    "engine-b".to_string(),
+                    Arc::clone(&engine_b) as Arc<dyn Engine>,
+                ),
+            ]),
+            "engine-a",
+        )
+        .expect("router");
+        let engine: Arc<dyn Engine> = Arc::new(router);
+
+        execute_slash_effects(
+            &mut state,
+            vec![Effect::ListModels { filter: None }],
+            &engine,
+            &cmd_tx,
+        )
+        .await;
+
+        let SlashOverlay::ModelPicker {
+            choices, selected, ..
+        } = &state.slash_overlay
+        else {
+            panic!("expected the model picker, got {:?}", state.slash_overlay);
+        };
+        assert_eq!(
+            choices
+                .iter()
+                .filter(|choice| choice.is_active)
+                .filter_map(|choice| choice.engine_name.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["engine-a"],
+            "only the active named engine is marked active when sibling shortcuts share a model"
+        );
+        assert_eq!(*selected, 0, "the active engine shortcut is preselected");
+
+        state.move_slash_selection(1);
+        assert_eq!(
+            state
+                .selected_model()
+                .and_then(|choice| choice.engine_name.as_deref()),
+            Some("engine-b"),
+            "the test must select engine B's named shortcut"
+        );
+        let effects = presenter::update(
+            &mut state,
+            TuiEvent::Input(InputEvent::KeyInput(key_event(KeyCode::Enter))),
+            &textarea_ctx_from(&textarea),
+        );
+        execute_slash_effects(&mut state, effects, &engine, &cmd_tx).await;
+
+        assert_eq!(
+            engine.active_engine_name().as_deref(),
+            Some("engine-b"),
+            "the exact named shortcut, not a provider representative, must become active"
+        );
+        assert_eq!(
+            engine_a.config().model,
+            "shared-model",
+            "activating engine B must not mutate engine A"
+        );
+        assert_eq!(engine_b.config().model, "shared-model");
+        assert_eq!(engine.config().temperature, Some(0.8));
+        assert_eq!(engine.config().context_length, Some(32_768));
+        assert_eq!(engine.config().soft_compaction_threshold, 0.8);
+        assert_eq!(engine_a.config().temperature, Some(0.1));
+        assert_eq!(engine_a.config().context_length, Some(8_192));
+        assert_eq!(engine_a.config().soft_compaction_threshold, 0.6);
+
+        execute_slash_effects(
+            &mut state,
+            vec![Effect::ListModels { filter: None }],
+            &engine,
+            &cmd_tx,
+        )
+        .await;
+        let SlashOverlay::ModelPicker {
+            choices, selected, ..
+        } = &state.slash_overlay
+        else {
+            panic!(
+                "expected the reopened model picker, got {:?}",
+                state.slash_overlay
+            );
+        };
+        assert!(
+            choices.iter().any(|choice| {
+                choice.engine_name.as_deref() == Some("engine-b") && choice.is_active
+            }),
+            "reopening the picker must mark the active same-model engine by name"
+        );
+        assert_eq!(
+            state
+                .selected_model()
+                .and_then(|choice| choice.engine_name.as_deref()),
+            Some("engine-b"),
+            "reopening the picker must preselect the exact active engine"
+        );
+        assert_eq!(*selected, 1);
     }
 
     #[tokio::test]
@@ -4285,28 +5414,64 @@ mod tests {
 
     #[tokio::test]
     async fn clear_resets_the_transcript_and_tells_the_agent_to_start_a_new_session() {
-        let (mut state, _textarea, cmd_tx, mut cmd_rx) = setup();
-        let engine: Arc<dyn Engine> = StubEngine::with_models(&[], "large");
-        state.push_user_bubble("earlier question".to_string(), UserMessageState::Sent);
+        for command in ["/clear", "/reset"] {
+            let (mut state, mut textarea, cmd_tx, mut cmd_rx) = setup();
+            let engine: Arc<dyn Engine> = StubEngine::with_models(&[], "large");
+            state.push_user_bubble("earlier question".to_string(), UserMessageState::Sent);
+            let textarea_context = textarea_ctx_from(&textarea);
+            presenter::update(
+                &mut state,
+                TuiEvent::Domain(DomainEvent::ContextUsage {
+                    estimated_tokens: 38_000,
+                    context_length: 98_000,
+                    source: crate::tui_reducer_state::ContextUsageSource::SerializedRequest,
+                }),
+                &textarea_context,
+            );
+            assert_eq!(
+                state
+                    .active_context_usage()
+                    .map(crate::tui_reducer_state::format_context_usage_readout),
+                Some("38.0K (39%)".to_string())
+            );
+            let (slash_effects, _) =
+                split_slash_effects(submit(&mut state, &mut textarea, command));
 
-        execute_slash_effects(
-            &mut state,
-            vec![Effect::ClearConversation],
-            &engine,
-            &cmd_tx,
-        )
-        .await;
+            execute_slash_effects(&mut state, slash_effects, &engine, &cmd_tx).await;
 
-        assert!(matches!(
-            state.chat_entries.as_slice(),
-            [crate::tui_reducer_state::ChatEntry::Notice { .. }]
-        ));
-        // The prompt stays recallable with ↑ even though the transcript is gone.
-        assert_eq!(state.input_history, vec!["earlier question".to_string()]);
-        assert!(matches!(
-            cmd_rx.try_recv().expect("a clear command"),
-            AgentCommand::ClearContext
-        ));
+            assert_eq!(
+                state.active_context_usage(),
+                None,
+                "{command} must discard the previous session's footer readout"
+            );
+            assert!(matches!(
+                state.chat_entries.as_slice(),
+                [crate::tui_reducer_state::ChatEntry::Notice { .. }]
+            ));
+            // The prompt stays recallable with ↑ even though the transcript is gone.
+            assert_eq!(state.input_history, vec!["earlier question".to_string()]);
+            assert!(matches!(
+                cmd_rx.try_recv().expect("a clear command"),
+                AgentCommand::ClearContext
+            ));
+            let textarea_context = textarea_ctx_from(&textarea);
+            presenter::update(
+                &mut state,
+                TuiEvent::Domain(DomainEvent::ContextUsage {
+                    estimated_tokens: 1_000,
+                    context_length: 98_000,
+                    source: crate::tui_reducer_state::ContextUsageSource::SerializedRequest,
+                }),
+                &textarea_context,
+            );
+            assert_eq!(
+                state
+                    .active_context_usage()
+                    .map(crate::tui_reducer_state::format_context_usage_readout),
+                Some("1.0K (1%)".to_string()),
+                "the new session must still show its own estimate"
+            );
+        }
     }
 
     #[tokio::test]

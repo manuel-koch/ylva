@@ -140,5 +140,9 @@ pub fn test_engine_config() -> EngineConfig {
         api_base_url: None,
         api_key: None,
         reasoning: None,
+
+        compact_target_ratio: 0.5,
+        soft_compaction_threshold: 0.7,
+        hard_compaction_threshold: 0.9,
     }
 }

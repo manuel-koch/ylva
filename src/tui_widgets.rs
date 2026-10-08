@@ -33,15 +33,15 @@ use crate::theme::{
     APPROVE_BACKGROUND_COLOR, APPROVE_HOVER_BACKGROUND_COLOR, ASSISTANT_STREAM_BORDER_COLOR,
     BUILD_INFO_COLOR, BUTTON_TEXT_COLOR, CHAT_SCROLLBAR_COLOR, CHAT_SELECTION_BG,
     CHILD_VIEW_SEPARATOR_COLOR, CLARIFY_BANNER_FG_COLOR, CLARIFY_BANNER_SCROLL_INDICATOR_COLOR,
-    CLARIFY_BANNER_SELECTION_FG_COLOR, CONTENT_COLOR, DENY_BACKGROUND_COLOR,
-    DENY_HOVER_BACKGROUND_COLOR, DIFF_ADDED_COLOR, DIFF_CONTEXT_COLOR, DIFF_REMOVED_COLOR,
-    ERROR_COLOR, FOOTER_STATUS_COLOR, HELP_POPUP_BORDER_COLOR, HELP_POPUP_HEADING_COLOR,
-    INPUT_BORDER_COLOR, INTERRUPTED_COLOR, LIST_BORDER_COLOR, LIST_SELECTION_BACKGROUND_COLOR,
-    LIST_SELECTION_FOREGROUND_COLOR, LIST_TEXT_COLOR, LOGO_COLOR, MUTED_TEXT_COLOR, NOTICE_COLOR,
-    OVERLAY_SELECTION_COLOR, SEPARATOR_LINE_COLOR, THINKING_BORDER_COLOR, TOAST_BG_COLOR,
-    TOAST_FG_COLOR, TOOL_BUBBLE_BORDER_COLOR, USER_MESSAGE_BG_COLOR, USER_MESSAGE_BORDER_COLOR,
-    USER_MESSAGE_CANCELLED_BORDER_COLOR, USER_MESSAGE_QUEUED_BORDER_COLOR,
-    USER_MESSAGE_STEERED_BORDER_COLOR,
+    CLARIFY_BANNER_SELECTION_FG_COLOR, COMPACTION_MISMATCH_COLOR, CONTENT_COLOR,
+    DENY_BACKGROUND_COLOR, DENY_HOVER_BACKGROUND_COLOR, DIFF_ADDED_COLOR, DIFF_CONTEXT_COLOR,
+    DIFF_REMOVED_COLOR, ERROR_COLOR, FOOTER_STATUS_COLOR, HELP_POPUP_BORDER_COLOR,
+    HELP_POPUP_HEADING_COLOR, INPUT_BORDER_COLOR, INTERRUPTED_COLOR, LIST_BORDER_COLOR,
+    LIST_SELECTION_BACKGROUND_COLOR, LIST_SELECTION_FOREGROUND_COLOR, LIST_TEXT_COLOR, LOGO_COLOR,
+    MUTED_TEXT_COLOR, NOTICE_COLOR, OVERLAY_SELECTION_COLOR, SEPARATOR_LINE_COLOR,
+    THINKING_BORDER_COLOR, TOAST_BG_COLOR, TOAST_FG_COLOR, TOOL_BUBBLE_BORDER_COLOR,
+    USER_MESSAGE_BG_COLOR, USER_MESSAGE_BORDER_COLOR, USER_MESSAGE_CANCELLED_BORDER_COLOR,
+    USER_MESSAGE_QUEUED_BORDER_COLOR, USER_MESSAGE_STEERED_BORDER_COLOR,
 };
 
 use crate::agent::tools::ToolRegistry;
@@ -231,6 +231,7 @@ pub fn draw(
                 state: bubble_state,
                 collapsed: *collapsed,
                 spinner_frame: state.spinner_frame,
+                started_at: state.subagent_started_at.get(bubble_id).copied(),
                 display_title_override: display_title_override.as_deref(),
                 subtype_argument,
             },
@@ -260,13 +261,22 @@ pub fn draw(
     // the terminal height. Wrapped row count, not logical line count, drives
     // the height so long lines grow the box instead of scrolling it.
     let max_input = (area.height / USER_MESSAGE_INPUT_HEIGHT_TERMINAL_FRACTION).max(3);
-    let input_width = area.width.saturating_sub(1).max(1) as usize;
-    let wrapped_rows = textarea
-        .lines()
-        .iter()
-        .map(|line| textwrap::wrap(line, input_width).len().max(1))
-        .sum::<usize>();
-    let input_height = (wrapped_rows as u16).clamp(1, max_input);
+    let input_width = area.width.saturating_sub(1).max(1);
+    let wrapped_rows = {
+        let mut measurement = TextArea::from(textarea.lines().to_vec());
+        measurement.set_wrap_mode(textarea.wrap_mode());
+        measurement.set_tab_length(textarea.tab_length());
+        let measurement_area = Rect::new(0, 0, input_width, 1);
+        ratatui::widgets::Widget::render(
+            &measurement,
+            measurement_area,
+            &mut ratatui::buffer::Buffer::empty(measurement_area),
+        );
+        measurement.move_cursor(ratatui_textarea::CursorMove::Bottom);
+        measurement.move_cursor(ratatui_textarea::CursorMove::End);
+        measurement.screen_cursor().row + 1
+    };
+    let input_height = wrapped_rows.min(max_input as usize).max(1) as u16;
 
     // When a tool approval is pending the approval title and buttons appear
     // ABOVE the input field so the approve/deny controls sit immediately
@@ -495,23 +505,12 @@ pub fn draw(
     );
     frame.render_widget(&*textarea, input_area);
 
-    // Mirror ratatui-textarea's next_scroll_top algorithm using the public
-    // screen_cursor().row (wrapped screen row) to track which viewport window
-    // the textarea is currently showing. This persists in TuiState across
-    // frames so the state is correct regardless of cursor movement.
-    if wrapped_rows > input_height as usize {
-        let screen_row = textarea.screen_cursor().row;
-        let height = input_height as usize;
-        state.input_scroll_top = if screen_row < state.input_scroll_top {
-            screen_row
-        } else if state.input_scroll_top + height <= screen_row {
-            screen_row + 1 - height
-        } else {
-            state.input_scroll_top
-        };
-    } else {
-        state.input_scroll_top = 0;
-    }
+    // InViewport clamps an origin cursor to the actual rendered viewport top.
+    // Probe a clone so cursor movement and draft replacement cannot desync it.
+    let mut viewport_probe = textarea.clone();
+    viewport_probe.move_cursor(ratatui_textarea::CursorMove::Jump(0, 0));
+    viewport_probe.move_cursor(ratatui_textarea::CursorMove::InViewport);
+    state.input_scroll_top = viewport_probe.screen_cursor().row;
 
     // Show ↑/↓ based on the tracked viewport position, not the cursor row.
     if wrapped_rows > input_height as usize && input_area.height >= 1 && input_area.width >= 1 {
@@ -565,6 +564,7 @@ pub fn draw(
         input_area,
         &state.slash_overlay,
         state.slash_overlay_drag,
+        &state.engine_display,
         &mut state.slash_overlay_layout,
     );
 
@@ -788,6 +788,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState, registry: &Too
                         state: bubble_state.as_ref(),
                         collapsed: *collapsed,
                         spinner_frame: state.spinner_frame,
+                        started_at: state.subagent_started_at.get(id).copied(),
                         display_title_override: display_title_override.as_deref(),
                         subtype_argument,
                     },
@@ -807,6 +808,20 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState, registry: &Too
                     };
                     lines.push(Line::styled(display, Style::default().fg(ERROR_COLOR)));
                 }
+            }
+            ChatEntry::CompactionMarker {
+                summarized_messages,
+            } => {
+                let label = format!(
+                    "  ── compaction · {summarized_messages} {} summarized ──",
+                    plural_noun(*summarized_messages, "message", "messages")
+                );
+                lines.push(Line::styled(
+                    label,
+                    Style::default()
+                        .fg(MUTED_TEXT_COLOR)
+                        .add_modifier(Modifier::DIM),
+                ));
             }
             ChatEntry::Notice { text } => {
                 for (index, source_line) in text.lines().enumerate() {
@@ -901,6 +916,7 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState, registry: &Too
                 state: bubble_state,
                 collapsed: *collapsed,
                 spinner_frame: state.spinner_frame,
+                started_at: state.subagent_started_at.get(bubble_id).copied(),
                 display_title_override: display_title_override.as_deref(),
                 subtype_argument,
             },
@@ -1512,6 +1528,7 @@ struct ToolBubbleArgs<'a> {
     state: &'a ToolCallState,
     collapsed: bool,
     spinner_frame: u8,
+    started_at: Option<std::time::Instant>,
     /// The bubble's display title: the tool's own `Tool::title()` label for
     /// `name`, looked up by the caller in the `ToolRegistry` at render time
     /// (e.g. `Web Search (Brave)`, which names the configured backend).
@@ -1623,6 +1640,7 @@ fn append_tool_bubble_lines(
         state,
         collapsed,
         spinner_frame,
+        started_at,
         display_title_override,
         subtype_argument,
     } = bubble;
@@ -1845,11 +1863,22 @@ fn append_tool_bubble_lines(
         .fg(ERROR_COLOR)
         .add_modifier(Modifier::BOLD);
 
-    // Duration and summary segments shown in the title for Done and Error
-    // states. The caller assigns each segment's style explicitly so summary
+    // The caller assigns each segment's style explicitly so summary
     // rendering does not need to infer special text from the final string.
     let mut summary_segments: Vec<SummarySegment> = vec![];
     let summary_text: String = match state {
+        ToolCallState::Running { .. } if is_subagent && !is_queued_subagent => {
+            if let Some(started_at) = started_at {
+                let duration_formatted = format!("{:.1}s", started_at.elapsed().as_secs_f64());
+                summary_segments.push(SummarySegment {
+                    text: duration_formatted.clone(),
+                    style: dim_white,
+                });
+                duration_formatted
+            } else {
+                String::new()
+            }
+        }
         ToolCallState::Done {
             summary, duration, ..
         } => {
@@ -2708,6 +2737,9 @@ fn draw_normal_footer(
         hint.to_string()
     } else {
         let mut row_1_text = format!(" {spinner_prefix}{mode_word}");
+        if state.compacting {
+            row_1_text.push_str(" · Compacting…");
+        }
         if let Some(active_subagent_label) =
             active_subagent_footer_label(state.active_subagent_counts)
         {
@@ -2729,7 +2761,12 @@ fn draw_normal_footer(
         row_1_text
     };
     draw_footer_row(frame, row_1, &row_1_text, FOOTER_STATUS_COLOR, state);
-    draw_footer_hints(frame, row_2, footer_hints);
+    draw_footer_hints(
+        frame,
+        row_2,
+        footer_hints,
+        state.context_usage_text.as_deref(),
+    );
 }
 
 fn active_subagent_footer_label(counts: ActiveSubagentCounts) -> Option<String> {
@@ -2752,7 +2789,18 @@ fn plural_noun<'a>(count: usize, singular_noun: &'a str, plural_noun: &'a str) -
     }
 }
 
-fn draw_footer_hints(frame: &mut Frame, area: Rect, hints: &[FooterHint]) {
+/// Draw the keybinding hints on the footer's second row, with the model-view
+/// readout (`64.2K (45%)`) pinned to the right end of the same row when one
+/// has been reported. On a row too narrow to hold both without colliding,
+/// the readout is dropped rather than allowed to overwrite the hints.
+fn draw_footer_hints(
+    frame: &mut Frame,
+    area: Rect,
+    hints: &[FooterHint],
+    context_usage_text: Option<&str>,
+) {
+    let hints_area = draw_footer_context_usage(frame, area, context_usage_text, 9);
+
     let normal_style = Style::default().fg(MUTED_TEXT_COLOR);
     let key_style = normal_style.add_modifier(Modifier::BOLD);
     let mut spans = Vec::with_capacity(hints.len() * 4 + 1);
@@ -2771,7 +2819,33 @@ fn draw_footer_hints(frame: &mut Frame, area: Rect, hints: &[FooterHint]) {
         spans.push(Span::styled(hint.description, normal_style));
     }
 
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    frame.render_widget(Paragraph::new(Line::from(spans)), hints_area);
+}
+
+fn draw_footer_context_usage(
+    frame: &mut Frame,
+    area: Rect,
+    context_usage_text: Option<&str>,
+    minimum_controls_width: u16,
+) -> Rect {
+    if let Some(usage) = context_usage_text {
+        let usage_width = usage.chars().count() as u16 + 1;
+        if area.width < usage_width.saturating_add(minimum_controls_width) {
+            return area;
+        }
+        let [controls_area, usage_area] =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(usage_width)]).areas(area);
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                format!(" {usage}"),
+                Style::default().fg(MUTED_TEXT_COLOR),
+            ))
+            .alignment(Alignment::Right),
+            usage_area,
+        );
+        return controls_area;
+    }
+    area
 }
 
 /// Draw the slash-command overlay as a floating panel whose bottom edge sits
@@ -2782,6 +2856,7 @@ fn draw_slash_overlay(
     input_area: Rect,
     overlay: &SlashOverlay,
     drag: Option<BannerDragSelection>,
+    engine_display: &crate::llm::engine::EngineDisplayInfo,
     overlay_layout: &mut SlashOverlayLayout,
 ) {
     let previous_first_visible = overlay_layout.first_visible_row;
@@ -2825,8 +2900,19 @@ fn draw_slash_overlay(
     // Cap the panel at half the space above the input so a provider with
     // hundreds of models cannot hide the conversation entirely.
     let max_content_height = (input_area.y.saturating_sub(1) / 2).max(1);
-    let content_height = (rows.len() as u16).min(max_content_height);
-    let panel_height = content_height + 2;
+    let detail_lines = model_picker_detail_lines(
+        overlay,
+        engine_display,
+        input_area.width.saturating_sub(4) as usize,
+        max_content_height,
+    );
+    let detail_height = detail_lines.len() as u16;
+    let detail_separator_height = u16::from(detail_height > 0);
+    let list_max_height = max_content_height
+        .saturating_sub(detail_height + detail_separator_height)
+        .max(1);
+    let content_height = (rows.len() as u16).min(list_max_height);
+    let panel_height = content_height + detail_height + detail_separator_height + 2;
     let panel_area = Rect {
         x: input_area.x,
         y: input_area.y.saturating_sub(panel_height),
@@ -2895,10 +2981,17 @@ fn draw_slash_overlay(
     let inner_area = block.inner(panel_area);
     frame.render_widget(block, panel_area);
 
+    let [list_area, detail_area] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(content_height),
+            Constraint::Length(detail_height + detail_separator_height),
+        ])
+        .areas(inner_area);
     let [content_area, scrollbar_area] = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Fill(1), Constraint::Length(1)])
-        .areas(inner_area);
+        .areas(list_area);
     overlay_layout.content_area = content_area;
     overlay_layout.first_visible_row = first_visible;
     if let Some(selection) = drag {
@@ -2927,6 +3020,27 @@ fn draw_slash_overlay(
     }
     frame.render_widget(Paragraph::new(lines), content_area);
 
+    if detail_height > 0 {
+        let [separator_area, details_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(detail_separator_height),
+                Constraint::Length(detail_height),
+            ])
+            .areas(detail_area);
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                "─".repeat(inner_area.width.saturating_sub(1) as usize),
+                Style::default().fg(MUTED_TEXT_COLOR),
+            )),
+            separator_area,
+        );
+        frame.render_widget(
+            Paragraph::new(detail_lines).style(Style::default().fg(MUTED_TEXT_COLOR)),
+            details_area,
+        );
+    }
+
     if rows.len() > content_height as usize {
         render_chat_scrollbar(
             frame,
@@ -2938,6 +3052,84 @@ fn draw_slash_overlay(
             CHAT_SCROLLBAR_COLOR,
         );
     }
+}
+
+fn model_picker_detail_lines(
+    overlay: &SlashOverlay,
+    engine_display: &crate::llm::engine::EngineDisplayInfo,
+    width: usize,
+    available_height: u16,
+) -> Vec<Line<'static>> {
+    let SlashOverlay::ModelPicker {
+        choices,
+        filter,
+        selected,
+    } = overlay
+    else {
+        return Vec::new();
+    };
+    if width < 40 || available_height < 3 || matching_model_indices(choices, filter).is_empty() {
+        return Vec::new();
+    }
+
+    let selected_choice = matching_model_indices(choices, filter)
+        .get(*selected)
+        .and_then(|choice_index| choices.get(*choice_index));
+    let compaction_effect = selected_choice.map_or_else(
+        || Line::from("Select an engine or model to preview compaction."),
+        |choice| {
+            if let Some(error) = &choice.selection_preview_error {
+                return Line::from(format!("Compaction effect unavailable: {error}"));
+            }
+            let Some(target) = &choice.selection_target else {
+                return Line::from("Compaction effect preview unavailable.");
+            };
+            let Some(compaction) = &engine_display.compaction_engine else {
+                return Line::from("Compaction is disabled.");
+            };
+            let target_is_compaction_engine = target.engine_name.as_deref()
+                == Some(compaction.engine_name.as_str())
+                || (target.engine_name.is_none()
+                    && compaction.engine_name.is_empty()
+                    && compaction.shares_conversation);
+            let selection_becomes_compaction_engine =
+                compaction.follows_conversation || target_is_compaction_engine;
+            let mismatch = !selection_becomes_compaction_engine
+                && (target.provider_connection != compaction.provider_connection
+                    || target.model != compaction.model
+                    || target.context_length != compaction.context_length);
+            let (provider_connection, model, context_length) =
+                if selection_becomes_compaction_engine {
+                    (
+                        target.provider_connection.as_str(),
+                        target.model.as_str(),
+                        target.context_length,
+                    )
+                } else {
+                    (
+                        compaction.provider_connection.as_str(),
+                        compaction.model.as_str(),
+                        compaction.context_length,
+                    )
+                };
+            let color = if mismatch {
+                COMPACTION_MISMATCH_COLOR
+            } else {
+                MUTED_TEXT_COLOR
+            };
+            Line::styled(
+                format!(
+                    "Compaction uses {provider_connection}/{model}, context: {}",
+                    crate::tui_reducer_state::format_context_length(context_length)
+                ),
+                Style::default().fg(color),
+            )
+        },
+    );
+    if compaction_effect.width() > width {
+        return Vec::new();
+    }
+    vec![compaction_effect]
 }
 
 #[expect(clippy::too_many_arguments)]
@@ -3182,13 +3374,19 @@ fn draw_approval_footer(
     };
     let approve_width = approve_label.chars().count() as u16;
     let deny_width = deny_label.chars().count() as u16;
+    let controls_area = draw_footer_context_usage(
+        frame,
+        row_2,
+        state.context_usage_text.as_deref(),
+        1 + approve_width + 2 + deny_width,
+    );
 
     // Indent buttons by 1 char so they align with the leading space of the
     // approval title above.
     let [_, buttons_area] = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(1), Constraint::Fill(1)])
-        .areas(row_2);
+        .areas(controls_area);
     let [approve_area, _, deny_area] = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -3346,7 +3544,7 @@ fn help_sections() -> Vec<HelpSection> {
             ],
         },
         HelpSection {
-            heading: "Runtime",
+            heading: "Environment",
             entries: vec![],
         },
         HelpSection {
@@ -3394,21 +3592,21 @@ fn draw_help_popup(frame: &mut Frame, state: &mut TuiState) {
         }
         all_lines.push(Line::styled(section.heading, heading_style));
         match section.heading {
-            "Runtime" => {
+            "Environment" => {
                 let home_directory = dirs::home_dir();
-                let runtime_entries = [
+                let environment_entries = [
+                    (
+                        "Ylva home:",
+                        state.display_metadata.ylva_home.as_deref().map_or_else(
+                            || "not resolved".to_string(),
+                            |path| format_home_relative_path(path, home_directory.as_deref()),
+                        ),
+                    ),
                     ("Profile:", state.display_metadata.profile_name.clone()),
                     (
                         "Profile path:",
                         state.display_metadata.profile_path.as_deref().map_or_else(
                             || "built-in default".to_string(),
-                            |path| format_home_relative_path(path, home_directory.as_deref()),
-                        ),
-                    ),
-                    (
-                        "Ylva home:",
-                        state.display_metadata.ylva_home.as_deref().map_or_else(
-                            || "not resolved".to_string(),
                             |path| format_home_relative_path(path, home_directory.as_deref()),
                         ),
                     ),
@@ -3424,12 +3622,12 @@ fn draw_help_popup(frame: &mut Frame, state: &mut TuiState) {
                             ),
                     ),
                 ];
-                let label_width = runtime_entries
+                let label_width = environment_entries
                     .iter()
                     .map(|(label, _)| label.chars().count())
                     .max()
                     .unwrap_or(0);
-                for (label, value) in runtime_entries {
+                for (label, value) in environment_entries {
                     all_lines.push(Line::from(format!("  {label:<label_width$} {value}")));
                 }
             }
@@ -3800,6 +3998,7 @@ mod tests {
                 state: &state,
                 collapsed: false,
                 spinner_frame: 0,
+                started_at: None,
                 display_title_override: None,
                 subtype_argument: None,
             },
@@ -3833,7 +4032,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_bubble_renders_runtime_error_content_literally() {
+    fn tool_bubble_renders_execution_error_content_literally() {
         use super::{append_tool_bubble_lines, ToolBubbleArgs};
         use crate::agent::tools::{ContentSection, Section};
         use crate::tui_reducer_state::{ResultSection, ToolCallState};
@@ -3861,6 +4060,7 @@ mod tests {
                 state: &state,
                 collapsed: false,
                 spinner_frame: 0,
+                started_at: None,
                 display_title_override: None,
                 subtype_argument: None,
             },
@@ -3875,11 +4075,11 @@ mod tests {
             .collect();
         assert!(
             rendered.contains("unknown engine: local-discovery_"),
-            "runtime diagnostic should remain literal, got: {rendered:?}"
+            "execution diagnostic should remain literal, got: {rendered:?}"
         );
         assert!(
             !rendered.contains("local-discovery _"),
-            "runtime diagnostic should not be reformatted as Markdown, got: {rendered:?}"
+            "execution diagnostic should not be reformatted as Markdown, got: {rendered:?}"
         );
     }
 
@@ -3910,6 +4110,7 @@ mod tests {
                         state: &state,
                         collapsed,
                         spinner_frame: 0,
+                        started_at: None,
                         display_title_override,
                         subtype_argument: None,
                     },
@@ -3994,6 +4195,7 @@ mod tests {
                 state: &state,
                 collapsed: false,
                 spinner_frame: 3,
+                started_at: None,
                 display_title_override: None,
                 subtype_argument: None,
             },
@@ -4043,6 +4245,7 @@ mod tests {
                 state: &state,
                 collapsed: false,
                 spinner_frame: 0,
+                started_at: None,
                 display_title_override: None,
                 subtype_argument: None,
             },
@@ -4090,6 +4293,7 @@ mod tests {
                 state: &state,
                 collapsed: true,
                 spinner_frame: 0,
+                started_at: None,
                 display_title_override: None,
                 subtype_argument: None,
             },
@@ -4143,6 +4347,7 @@ mod tests {
                 state: &state,
                 collapsed: false,
                 spinner_frame: 0,
+                started_at: None,
                 display_title_override: Some("Subagent"),
                 subtype_argument: None,
             },

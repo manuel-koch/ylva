@@ -20,6 +20,7 @@ PREFIX_TIMESTAMPED="${LOG_DIR}/${PREFIX}_$(date +%Y%m%d%H%M%S)"
 LOG_PATH="${PREFIX_TIMESTAMPED}.log"
 OUT_PATH="${PREFIX_TIMESTAMPED}.txt"
 export YLVA_REQUEST_DUMP_PATH=${PREFIX_TIMESTAMPED}.json
+export YLVA_TOKEN_USAGE_DUMP_PATH=${LOG_DIR}/token_stats.jsonl
 ${YLVA} --log-file ${LOG_PATH} \
-        --log-level TRACE --log-format ${LOG_FORMAT} \
+        --log-level DEBUG --log-format ${LOG_FORMAT} \
         --auto-approve-spawn "$@"

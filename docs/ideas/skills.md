@@ -1,6 +1,6 @@
 # Skills
 
-Deferred from blueprint finalization. Skill discovery/loading is not currently
+Skill discovery/loading is not currently
 implemented; the design questions below still need resolution.
 
 Discover standard agent skills in standard directories and advertise them

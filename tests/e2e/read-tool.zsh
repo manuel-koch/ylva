@@ -17,9 +17,10 @@ function ylva() {
     LOG_PATH="${PREFIX_TIMESTAMPED}.log"
     OUT_PATH="${PREFIX_TIMESTAMPED}.txt"
     export YLVA_REQUEST_DUMP_PATH=${PREFIX_TIMESTAMPED}.json
+    export YLVA_TOKEN_USAGE_DUMP_PATH=${LOG_DIR}/token_stats.jsonl
     ${YLVA} --no-tui --color=yes \
             --log-file ${LOG_PATH} \
-            --log-level TRACE --log-format ${LOG_FORMAT} \
+            --log-level DEBUG --log-format ${LOG_FORMAT} \
             | tee ${OUT_PATH}
 }
 
@@ -30,7 +31,7 @@ function seperator() {
 }
 
 ylva << '__EOT__'
-Read lines 33 to 34 of (big file!) tests/e2e/read-tool.zsh and do a spell check.
+Read lines 34 to 35 of (big file!) tests/e2e/read-tool.zsh and do a spell check.
 Repoort only the findiings. Do not chaange anything!
 __EOT__
 

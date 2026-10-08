@@ -6,32 +6,38 @@ bounded `glob`; aggregate context compaction is covered separately by
 
 ## Problem
 
-Every tool result is serialized into each request verbatim
-(`serialize_tool_result`, `src/llm/openai_compatible_messages.rs`), and only
-some tools cap what they return:
+The harness already admits tools against the remaining context budget and
+bounds their model-facing results and recovery projections; see
+[context management](../features.md#context-management-and-compaction).
+`glob` also applies a runtime output-token allowance. These protections do
+not provide an independent fixed-byte serialization guard or a default
+hard path-count/byte ceiling for `glob`.
+
+Tool-specific source bounds are separate from the model-view budget:
 
 | tool | output bound |
 |---|---|
 | `read` | 256 KiB raw selected bytes; 8 MiB whole-media ceiling (errors above) |
 | `bash` | 1000 lines / 64 KiB |
 | `search` | 1000 lines / 64 KiB |
-| `glob` | **none** — `limit` is optional, omitted means unlimited |
+| `glob` | no default hard path-count/byte ceiling; optional `limit` and runtime token allowance |
 | `edit` diffs, child `finish`, future tools | none |
 
 Consequences:
 
-- **`glob` without `limit`** can return a megabyte of paths (`**` over a large
-  tree), and its `truncated` metadata only appears when `limit` was set — an
-  oversized result is silently complete, with no signal to the model.
-- A too-large request is rejected by the provider (400/413): the whole turn
-  dies on an opaque error the model cannot act on, instead of a tool failure
-  it could recover from by narrowing the call.
-- Tool results are re-sent on **every** later request, so one oversized
-  result inflates the rest of the session.
-- `read` on a model without the media modality keeps the complete Base64 in
-  the tool message (see the `read` bullet in `docs/features.md`): the 8 MiB
-  ceiling still lands inline as ~10.7 MB ≈ 700k tokens. On a capable model
-  the same read projects to an `[image attached]` marker and stays small.
+- **`glob` without `limit`** can collect a large tree before the runtime
+  allowance truncates its returned text. A default source ceiling would
+  bound this independently of the active context window.
+- Token-budget admission is advisory, not an exact provider-token or
+  serialized-byte guarantee. A fixed wire backstop would turn an oversized
+  envelope into a clear per-call error before dispatch.
+- Canonical tool results remain intact in the transcript. Their model
+  projections may be reduced or omitted from later context, but the serializer
+  has no independent byte ceiling for whichever projection reaches it.
+- Complete Base64 media can be much larger than ordinary text. Existing
+  context projections keep binary payloads whole or omit them with an explicit
+  notice; the proposed envelope guard must remain compatible with that policy
+  and measure after modality-marker substitution.
 
 ## Options considered
 
@@ -52,8 +58,8 @@ that sees the final size after modality projection and marker substitution.
 - Measure the serialized envelope after marker substitution; exclude
   attachment parts, which are separate messages bounded by provider limits
   and `READ_MEDIA_MAX_BYTES`.
-- The threshold is a byte/char `const`: there is no tokenizer, and
-  `ModelInfo` carries no context-window size. **512 KiB** of serialized
+- The threshold is a byte `const`, independent of the tokenizer and model
+  context window. **512 KiB** of serialized
   envelope content — a backstop below which results are assumed fine, not a
   budget: 512 KiB is still far more than most LLMs can usefully absorb, so a
   tool that routinely reaches it is itself a bug.
@@ -73,10 +79,10 @@ unbounded or future tools, and it leaves the inline-Base64 case unfixed.
 
 ### 4. Total request size guard — out of scope here
 
-Sums the whole history. Dropping or rewriting old messages breaks the
-transcript, so this belongs to **conversation compaction**, to be written up
-as a separate idea; this guard deliberately covers one tool result at a
-time.
+Aggregate request budgeting already belongs to
+[conversation compaction](./conversation-compaction.md), which changes the
+model view without rewriting the transcript. This guard deliberately covers
+one serialized tool envelope at a time.
 
 ## Related: bound `glob` output
 
@@ -99,20 +105,20 @@ Give `glob` the treatment `search` and `bash` already have:
 
 - Report the substitution as an **`ok: false` failure** (option 1) — never an
   `ok: true` marker swap, never an omission.
-- Threshold: **512 KiB** of serialized envelope content, as a byte/char
+- Threshold: **512 KiB** of serialized envelope content, as a byte
   `const` measured after marker substitution. It bounds the wire, not the
   context: most LLMs would drown well below it, so a result reaching it means
   the producing tool is misconfigured and should be capped at the source.
 - **`glob` clamp**: an explicit `limit` above the ceiling is clamped to the
   ceiling; `truncated: true` reports the cut.
-- **Request total is out of scope** — that is conversation compaction, to be
-  written up as a separate idea.
+- **Request total is out of scope** — existing conversation compaction and
+  result allowances cover aggregate model-view budgeting.
 
-## Relationship to the blueprint's insertion cap
+## Preserve the canonical transcript
 
-The blueprint also proposed truncating every tool result to roughly 8–16 KiB
-when inserting it into history. That behavior is not selected for this idea:
-it would change the persisted result as well as the model-facing result. The
+Truncating every tool result to roughly 8–16 KiB when inserting it into history
+is not selected for this idea: it would change the persisted result as well
+as the model-facing result. The
 later implementation should keep the 512 KiB serialization-time failure guard
 and bound `glob` output, while context compaction handles the aggregate model
 view without rewriting the transcript. The exact `glob` ceiling remains to be

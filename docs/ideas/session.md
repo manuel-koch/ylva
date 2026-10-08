@@ -12,14 +12,9 @@ Resume with: ylva --conversation-id <session_id>
 
 ## Clone and continue a session
 
-Selected for the blueprint finalization plan. Add `--clone` to
-`--conversation-id <uuid>` in both TUI and headless modes. Clone only a
-top-level session. The clone receives a new session ID, keeps the source title,
-and records the source ID as `cloned_from`. Copy the logical session events,
-including messages, compaction snapshots, model/agent changes, and child-run
-lifecycle records. Child transcript files remain shared read-only references.
-A clone fails if the source is locked by another Ylva process. All new
-conversation writes go to the clone; the original session remains unchanged.
+Implemented with `--conversation-id <uuid> --clone` in TUI and headless modes.
+See the
+[clone contract](../persistence.md#clone-contract).
 
 ## List sessions
 
@@ -29,8 +24,7 @@ Would print timestamp sorted ( ascending ) session entries: `<timestamp> <sessio
 
 ## Session maintenance
 
-These features are not implemented and are deferred from the blueprint
-finalization work.
+These features are not implemented.
 
 ### Delete sessions
 
@@ -42,10 +36,43 @@ writer.
 
 ### Compress and decompress history
 
-Keep new sessions as raw JSONL. A later storage-maintenance feature may
-compress older unlocked sessions, selected by a configurable age or size
-threshold, and provide manual `ylva session compress` and `ylva session decompress`
+Keep new sessions as raw JSONL. Add automatic compression of older unlocked
+sessions after configurable age or size thresholds, alongside manual
+`ylva session compress` and `ylva session decompress`
 commands for a session ID, `--before <date>`, or `--all`. For archived sessions, write a
 `.meta.json` sidecar before the `.jsonl.gz` archive so the session remains
 discoverable. Remove the raw file only after the sidecar and archive are
-complete. Compression never deletes history.
+complete. Decompression restores raw JSONL and removes the redundant sidecar
+only after restoration succeeds. Never compress a session held by an active
+writer. Compression never deletes history.
+
+Decide when the automatic sweep runs and how thresholds are configured.
+Keep archive discovery and explicit resume consistent with raw sessions,
+and make interrupted compression/decompression recoverable without data loss.
+
+## Session-wide logging correlation
+
+Some diagnostics already include session IDs, but logging does not provide
+session-wide correlation through a root `tracing` span. Add structured session
+identity to the full log span chain, following
+[the logging conventions](../development-workflow.md#logging).
+
+After `/clear` starts a new session, new work must use the new session ID;
+in-flight work from the old session must retain its original identity.
+Distinguish subagent runs with their run ID and parent session ID, including
+their outcome and transcript-persistence diagnostics. Cover TUI and headless
+runs without logging prompts, credentials, or conversation bodies.
+
+## Whole-file schema migrations
+
+Conditional future infrastructure, not a migration currently required:
+the store uses schema version `1` and tolerant event reading. Keep additive
+changes on the existing [per-event evolution path](../persistence.md#schema-tolerance).
+
+If a genuine whole-file semantic break requires a new schema version, add
+a chain of small, idempotent upgraders. Acquire the writer lock before
+migrating; write a complete temporary file and atomically replace the original
+only after conversion succeeds. A failed or interrupted migration must leave
+the original readable, and read-only discovery must never rewrite sessions.
+Test repeated upgrades, interrupted writes, unsupported versions, and
+preservation of messages and root/subagent linkage.

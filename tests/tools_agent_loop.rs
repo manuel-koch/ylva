@@ -16,7 +16,7 @@ mod common;
 
 use base64::Engine as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
@@ -32,7 +32,7 @@ use ylva::{
     default_registry, AgentCommand, AgentLoop, ApprovalCheck, AssistantStatus, AutoApproveTool,
     DeltaChunk, EngineImpl, Message, MockEvent, MockProvider, Provider, Sandbox, StreamEvent, Tool,
     ToolAttachment, ToolCall, ToolCallResult, ToolError, ToolRegistry, ToolRegistryConfig,
-    ToolSchema, UiUpdate, UserMessageKind, MAX_TOOL_USE_ITERATIONS,
+    ToolSchema, UiUpdate, UserMessageKind, DEFAULT_MAX_TOOL_USE_ITERATIONS,
 };
 
 /// Build a `MockEvent::Delta` carrying a complete tool call for `index`.
@@ -146,6 +146,7 @@ struct SequencedMockProvider {
     phases: Vec<Vec<MockEvent>>,
     interval: Duration,
     calls: AtomicUsize,
+    recorded: Mutex<Vec<Vec<Message>>>,
 }
 
 impl SequencedMockProvider {
@@ -154,6 +155,7 @@ impl SequencedMockProvider {
             phases,
             interval,
             calls: AtomicUsize::new(0),
+            recorded: Mutex::new(Vec::new()),
         }
     }
 }
@@ -161,11 +163,15 @@ impl SequencedMockProvider {
 impl Provider for SequencedMockProvider {
     fn chat<'a>(
         &'a self,
-        _messages: Vec<Message>,
+        messages: Vec<Message>,
         _tools: Vec<ToolSchema>,
         cancel: CancellationToken,
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
         let phase_index = self.calls.fetch_add(1, Ordering::SeqCst);
+        self.recorded
+            .lock()
+            .expect("recorded requests")
+            .push(messages);
         let script = self
             .phases
             .get(phase_index)
@@ -910,6 +916,231 @@ impl ToolCallResult for SimpleStringOutput {
     }
 }
 
+struct GatedOutputTool {
+    execution_order: Arc<Mutex<Vec<usize>>>,
+    release: Arc<tokio::sync::Semaphore>,
+}
+
+struct GatedOutputCall {
+    id: uuid::Uuid,
+    arguments: Value,
+    execution_order: Arc<Mutex<Vec<usize>>>,
+    release: Arc<tokio::sync::Semaphore>,
+}
+
+impl ToolCall for GatedOutputCall {
+    fn id(&self) -> uuid::Uuid {
+        self.id
+    }
+    fn name(&self) -> &str {
+        "web_fetch"
+    }
+    fn arguments(&self) -> &Value {
+        &self.arguments
+    }
+    fn timeout_secs(&self) -> u64 {
+        30
+    }
+    fn non_default_redacted_arguments(&self) -> Vec<(String, Value)> {
+        Vec::new()
+    }
+    fn argument_order(&self, _key: &str) -> usize {
+        usize::MAX
+    }
+    fn run(self: Box<Self>) -> BoxFuture<'static, Result<Box<dyn ToolCallResult>, ToolError>> {
+        Box::pin(async move {
+            let index = self.arguments["index"].as_u64().expect("test index") as usize;
+            self.execution_order
+                .lock()
+                .expect("execution order")
+                .push(index);
+            self.release.acquire().await.expect("release gate").forget();
+            let result: Box<dyn ToolCallResult> =
+                Box::new(SimpleStringOutput(format!("page {index} ").repeat(3_000)));
+            Ok(result)
+        })
+    }
+}
+
+impl Tool for GatedOutputTool {
+    fn name(&self) -> &str {
+        "web_fetch"
+    }
+    fn description(&self) -> &str {
+        "Fetch one test page, recording its exactly-once side effect."
+    }
+    fn input_schema(&self) -> RootSchema {
+        schema_for!(SleepArgs)
+    }
+    fn needs_approval(&self, _arguments: &Value) -> ApprovalCheck {
+        ApprovalCheck::AutoApproved
+    }
+    fn timeout_secs(&self) -> u64 {
+        30
+    }
+    fn non_default_redacted_arguments(&self, _arguments: &Value) -> Vec<(String, Value)> {
+        Vec::new()
+    }
+    fn create_call(&self, id: uuid::Uuid, arguments: Value) -> Box<dyn ToolCall> {
+        Box::new(GatedOutputCall {
+            id,
+            arguments,
+            execution_order: self.execution_order.clone(),
+            release: self.release.clone(),
+        })
+    }
+}
+
+async fn assert_ten_page_batch_continues(summary_succeeds: bool) {
+    let interval = Duration::from_millis(1);
+    let provider = Arc::new(SequencedMockProvider::new(
+        vec![
+            vec![MockEvent::Text("older recorded findings ".repeat(300))],
+            (0..10)
+                .map(|index| call("web_fetch", index, serde_json::json!({"index": index})))
+                .collect(),
+            vec![MockEvent::Text("The task continues.".to_string())],
+        ],
+        interval,
+    ));
+    let summary_provider = Arc::new(SequencedMockProvider::new(
+        vec![vec![MockEvent::Text(
+            if summary_succeeds {
+                "Earlier findings are retained."
+            } else {
+                ""
+            }
+            .to_string(),
+        )]],
+        interval,
+    ));
+    let mut config = common::test_engine_config();
+    config.context_length = Some(6_000);
+    config.soft_compaction_threshold = 0.4;
+    config.compact_target_ratio = 0.25;
+    let engine = Arc::new(EngineImpl::new(provider.clone(), config.clone()));
+    let summary_engine = Arc::new(EngineImpl::new(summary_provider.clone(), config));
+    let execution_order = Arc::new(Mutex::new(Vec::new()));
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(GatedOutputTool {
+        execution_order: execution_order.clone(),
+        release: release.clone(),
+    }));
+    let schemas = registry.schemas();
+    let (mut agent, mut updates) = AgentLoop::new(engine.clone(), Arc::new(registry));
+    agent = agent.with_compaction_engine(summary_engine);
+    let handle = agent.run();
+    agent
+        .send_command(AgentCommand::Prompt("Prepare prior context.".to_string()))
+        .await;
+    collect_until_advancing(&mut updates, interval, |update| {
+        matches!(update, UiUpdate::StreamDone)
+    })
+    .await;
+    let task = "Summarize these ten pages and keep the evidence.";
+    agent
+        .send_command(AgentCommand::Prompt(task.to_string()))
+        .await;
+    let mut starts = 0;
+    let mut skipped = 0;
+    let mut summary_started_before_last_call = false;
+    let mut finished = false;
+    for _ in 0..20_000 {
+        if let Ok(update) = updates.try_recv() {
+            match update {
+                UiUpdate::ToolStart { .. } => {
+                    starts += 1;
+                    release.add_permits(1);
+                }
+                UiUpdate::ToolAutoDenied { reason, .. } => {
+                    assert!(reason.contains("not executed"));
+                    skipped += 1;
+                }
+                UiUpdate::Notice { text, .. } if text.contains("Started background") => {
+                    summary_started_before_last_call |= starts < 6;
+                }
+                UiUpdate::Error { message, .. } => panic!("unexpected failure: {message}"),
+                UiUpdate::AppendText(text) if text == "The task continues." => {
+                    finished = true;
+                    break;
+                }
+                _ => {}
+            }
+        } else {
+            tokio::time::advance(interval).await;
+            tokio::task::yield_now().await;
+        }
+    }
+    assert!(finished, "batch continuation must complete");
+    assert_eq!(starts, ylva::agent::MAX_EXECUTED_TOOL_CALLS_PER_BATCH);
+    assert_eq!(skipped, 10 - starts);
+    assert_eq!(
+        *execution_order.lock().expect("execution order"),
+        (0..starts).collect::<Vec<_>>()
+    );
+    assert!(
+        summary_started_before_last_call,
+        "soft pressure schedules an immutable prefix before the queue drains"
+    );
+    let request = provider
+        .recorded
+        .lock()
+        .expect("requests")
+        .last()
+        .expect("continuation")
+        .clone();
+    assert!(request.iter().any(|message| matches!(message,
+            Message::User { content, kind: UserMessageKind::Explicit } if content == task)));
+    let mut open = std::collections::HashSet::new();
+    for message in &request {
+        match message {
+            Message::Assistant { tool_calls, .. } => {
+                open.extend(tool_calls.iter().map(|call| call.id))
+            }
+            Message::ToolResult { value } => assert!(open.remove(&value.id), "orphaned result"),
+            Message::ToolError { id, .. } => assert!(open.remove(id), "orphaned error"),
+            _ => {}
+        }
+    }
+    assert!(open.is_empty(), "unanswered calls in continuation");
+    let mut projected = ylva::Context::default();
+    projected.hydrate(request);
+    let ceiling = 6_000 - 600 - 300 - 512;
+    assert!(projected.estimated_model_tokens(&schemas, engine.as_ref()) <= ceiling);
+    drop(agent);
+    let context = handle.await.expect("loop task").expect("loop result");
+    let canonical_results: Vec<_> = context
+        .messages()
+        .iter()
+        .filter_map(|message| match message {
+            Message::ToolResult { value } => Some(value),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(canonical_results.len(), starts);
+    assert!(
+        canonical_results
+            .iter()
+            .all(|value| value.result.len() >= 18_000),
+        "source output must not be shortened to the model allowance"
+    );
+    assert!(
+        context.approximate_token_count() > 6_000 * 9 / 10,
+        "canonical batch reproduces the below-soft to above-hard incident"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn ten_page_batch_preserves_continuity_after_a_successful_summary() {
+    assert_ten_page_batch_continues(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn ten_page_batch_preserves_continuity_after_a_failed_summary() {
+    assert_ten_page_batch_continues(false).await;
+}
+
 struct SleepToolCall {
     id: uuid::Uuid,
     arguments: serde_json::Value,
@@ -1067,7 +1298,7 @@ async fn iteration_guard_stops_after_max_reprompts() {
         .iter()
         .filter(|u| matches!(u, UiUpdate::StreamStarted))
         .count();
-    assert_eq!(starts, MAX_TOOL_USE_ITERATIONS);
+    assert_eq!(starts, DEFAULT_MAX_TOOL_USE_ITERATIONS);
 
     drop(agent);
     let context = handle.await.expect("loop ok").expect("context");
@@ -1075,6 +1306,146 @@ async fn iteration_guard_stops_after_max_reprompts() {
         .messages()
         .iter()
         .any(|m| matches!(m, Message::ToolError { name, .. } if name == "write")));
+}
+
+#[tokio::test(start_paused = true)]
+async fn iteration_guard_honors_a_custom_root_limit() {
+    let registry = Arc::new(default_registry(
+        make_sandbox(),
+        ToolRegistryConfig::default(),
+    ));
+    let interval = Duration::from_millis(5);
+    let provider = MockProvider::with_script(
+        vec![call(
+            "write",
+            0,
+            serde_json::json!({ "path": "x", "content": "y" }),
+        )],
+        interval,
+    );
+    let (agent, mut ui_rx) = AgentLoop::new(
+        Arc::new(EngineImpl::new(
+            Arc::new(provider),
+            common::test_engine_config(),
+        )),
+        Arc::clone(&registry),
+    );
+    let mut agent = agent.with_max_tool_iterations(3);
+
+    agent
+        .send_command(AgentCommand::Prompt("loop".into()))
+        .await;
+    let handle = agent.run();
+
+    let done = drive_until(&agent, &mut ui_rx, registry.as_ref(), interval, |u| {
+        matches!(u, UiUpdate::Error { .. })
+    })
+    .await;
+
+    assert!(
+        done.iter()
+            .any(|u| matches!(u, UiUpdate::Error { message, run_id: None } if message.contains("Max tool-use iterations (3)"))),
+        "the guard must report the configured limit, got: {done:?}"
+    );
+    let starts = done
+        .iter()
+        .filter(|u| matches!(u, UiUpdate::StreamStarted))
+        .count();
+    assert_eq!(
+        starts, 3,
+        "a custom root limit replaces the default {DEFAULT_MAX_TOOL_USE_ITERATIONS}"
+    );
+
+    drop(agent);
+    let context = handle.await.expect("loop ok").expect("context");
+    assert!(matches!(
+        context.messages().last(),
+        Some(Message::Assistant {
+            status: AssistantStatus::Interrupted,
+            ..
+        })
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn iteration_guard_honors_a_custom_child_limit() {
+    let registry = Arc::new(default_registry(
+        make_sandbox(),
+        ToolRegistryConfig::default(),
+    ));
+    let interval = Duration::from_millis(0);
+    let provider = MockProvider::with_script(
+        vec![call("read", 0, serde_json::json!({ "path": "Cargo.toml" }))],
+        interval,
+    );
+    let (finish_tx, _finish_rx) = mpsc::channel(1);
+    let (subagent_ui_tx, _subagent_ui_rx) = mpsc::channel(16);
+    let run_id = uuid::Uuid::new_v4();
+    let call_id = uuid::Uuid::new_v4();
+
+    let (agent, mut ui_rx) = AgentLoop::new(
+        Arc::new(EngineImpl::new(
+            Arc::new(provider),
+            common::test_engine_config(),
+        )),
+        Arc::clone(&registry),
+    );
+    let mut agent = agent
+        .with_child_role(ylva::ChildRoleConfig {
+            run_id,
+            call_id,
+            session_id: None,
+            briefing: None,
+            parent_cancel: CancellationToken::new(),
+            subagent_ui_tx,
+            finish_tx,
+        })
+        .with_max_tool_iterations(2);
+
+    agent
+        .send_command(AgentCommand::Prompt("child loop".into()))
+        .await;
+    let mut handle = agent.run();
+
+    // Drain `ui_rx` while `run()` is in flight, exactly like the drivers do:
+    // the bounded channel fills long before the cap trips otherwise and the
+    // loop parks on `send().await` (see docs/known-test-issues.md).
+    let mut collected_updates: Vec<UiUpdate> = Vec::new();
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            tokio::select! {
+                biased;
+                joined = &mut handle => break joined,
+                update = ui_rx.recv() => match update {
+                    Some(update) => collected_updates.push(update),
+                    None => std::future::pending::<()>().await,
+                },
+            }
+        }
+    })
+    .await
+    .expect("the child returns once the custom iteration cap trips")
+    .expect("run() task should not panic");
+
+    // Collect anything `run()` posted just before returning that the select
+    // loop above had not polled yet (both branches were ready, and `biased`
+    // preferred `handle`).
+    while let Ok(update) = ui_rx.try_recv() {
+        collected_updates.push(update);
+    }
+
+    let error = result.expect_err("a child hitting its cap must return Err");
+    assert!(
+        error.to_string().contains("Max tool-use iterations (2)"),
+        "the child error must report the configured limit; got: {error}"
+    );
+    assert!(
+        collected_updates.iter().any(
+            |u| matches!(u, UiUpdate::Error { message, run_id: Some(error_run_id) }
+                if error_run_id == &run_id && message.contains("Max tool-use iterations (2)"))
+        ),
+        "the guard error must be attributed to this child run"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -1302,7 +1673,7 @@ async fn iteration_guard_also_stops_a_runaway_spawn_subagent_finish_reprompt_loo
     // — so a model that just keeps calling `spawn_subagent` again on every
     // finish notice (rather than ever answering) could reprompt forever,
     // one HTTP request per "finish", completely bypassing
-    // `MAX_TOOL_USE_ITERATIONS`. The guard must trip here exactly like it
+    // `DEFAULT_MAX_TOOL_USE_ITERATIONS`. The guard must trip here exactly like it
     // does for the plain `write`-in-a-loop case above.
     use tokio_util::sync::CancellationToken;
     use ylva::child_agent_manager::{ChildAgentManager, FinishResult, SpawnFn};
@@ -1556,6 +1927,7 @@ async fn stop_while_spawn_subagent_is_running_resolves_it_to_cancelled_tool_done
     // lands — the mock provider script is deterministic and would keep
     // re-issuing the same call forever. Force termination here rather than
     // asserting quiescence.
+    drop(ui_rx);
     drop(agent);
     let context = handle.await.expect("loop ok").expect("context");
     let saw_cancelled_notice = context.messages().iter().any(|message| {

@@ -15,7 +15,7 @@
 mod common;
 
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
 use std::time::Duration;
@@ -116,6 +116,7 @@ fn model_picker_choices(choice_count: usize) -> Vec<ylva::tui_reducer_state::Mod
     (0..choice_count)
         .map(|index| ylva::tui_reducer_state::ModelChoice {
             label: format!("stub/model-{index}"),
+            initial_reasoning_effort: None,
             selection: ylva::ProviderModelOption {
                 provider_connection: "stub".to_string(),
                 model: ylva::ModelInfo {
@@ -129,6 +130,8 @@ fn model_picker_choices(choice_count: usize) -> Vec<ylva::tui_reducer_state::Mod
             },
             is_active: false,
             engine_name: None,
+            selection_target: None,
+            selection_preview_error: None,
         })
         .collect()
 }
@@ -148,6 +151,41 @@ struct DelayedCatalogEngine {
     release_catalog: Arc<Notify>,
     chat_started: Option<Arc<Notify>>,
     release_chat: Option<Arc<Notify>>,
+    hydrate_catalog: bool,
+    catalog_hydrated: AtomicBool,
+    chat_calls: AtomicUsize,
+}
+
+struct CatalogMockProvider {
+    provider: MockProvider,
+    models: Vec<ModelInfo>,
+}
+
+impl ylva::Provider for CatalogMockProvider {
+    fn name(&self) -> &str {
+        ylva::Provider::name(&self.provider)
+    }
+
+    fn list_models(&self) -> futures::future::BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
+        Box::pin(async { Ok(self.models.clone()) })
+    }
+
+    fn set_model(&self, model: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.models.iter().any(|candidate| candidate.id == model),
+            "test model '{model}' is not in the catalog",
+        );
+        Ok(())
+    }
+
+    fn chat<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+    ) -> futures::future::BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        ylva::Provider::chat(&self.provider, messages, tools, cancel)
+    }
 }
 
 impl DelayedCatalogEngine {
@@ -158,6 +196,9 @@ impl DelayedCatalogEngine {
             release_catalog,
             chat_started: None,
             release_chat: None,
+            hydrate_catalog: false,
+            catalog_hydrated: AtomicBool::new(false),
+            chat_calls: AtomicUsize::new(0),
         }
     }
 
@@ -173,7 +214,16 @@ impl DelayedCatalogEngine {
             release_catalog,
             chat_started: Some(chat_started),
             release_chat: Some(release_chat),
+            hydrate_catalog: false,
+            catalog_hydrated: AtomicBool::new(false),
+            chat_calls: AtomicUsize::new(0),
         }
+    }
+
+    fn with_catalog_hydration(mut self) -> Self {
+        self.config.context_length = None;
+        self.hydrate_catalog = true;
+        self
     }
 }
 
@@ -192,6 +242,7 @@ impl Engine for DelayedCatalogEngine {
             .clone()
             .expect("chat release notification configured with chat start");
         Box::pin(async move {
+            self.chat_calls.fetch_add(1, Ordering::SeqCst);
             chat_started.notify_one();
             release_chat.notified().await;
             let (stream_tx, stream_rx) = mpsc::channel(4);
@@ -230,6 +281,15 @@ impl Engine for DelayedCatalogEngine {
     fn switch_model(&self, _model: &str) -> anyhow::Result<()> {
         Ok(())
     }
+
+    fn hydrate_catalog_metadata(&self) -> futures::future::BoxFuture<'_, ()> {
+        Box::pin(async move {
+            if self.hydrate_catalog && !self.catalog_hydrated.load(Ordering::SeqCst) {
+                self.list_models().await.expect("catalog lookup succeeds");
+                self.catalog_hydrated.store(true, Ordering::SeqCst);
+            }
+        })
+    }
 }
 
 /// Type `text` into the (driver-owned) textarea and press Enter.
@@ -263,6 +323,394 @@ fn rendered_text(buffer: &Buffer) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[tokio::test]
+async fn compaction_capacity_warning_is_rendered_at_startup_before_any_prompt() {
+    let (backend, last_buffer, _) = InspectableTestBackend::new(120, 40);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let (action_tx, action_rx) = mpsc::channel(64);
+    let mut conversation_config = common::test_engine_config();
+    conversation_config.context_length = Some(98_304);
+    let mut summary_config = common::test_engine_config();
+    summary_config.context_length = Some(32_768);
+    summary_config.model = "small-summarizer".to_string();
+    let conversation_engine = Arc::new(EngineImpl::new(
+        Arc::new(MockProvider::new(
+            vec!["the answer".to_string()],
+            Duration::ZERO,
+        )),
+        conversation_config,
+    ));
+    let summary_engine = Arc::new(EngineImpl::new(
+        Arc::new(MockProvider::new(Vec::new(), Duration::ZERO)),
+        summary_config,
+    ));
+    let (agent, ui_rx) = AgentLoop::new(conversation_engine, Arc::new(ToolRegistry::new()));
+    let agent = agent.with_compaction_engine(summary_engine);
+    let run_handle = tokio::spawn(async move {
+        tui_driver::run_tui(
+            &mut terminal,
+            agent,
+            ui_rx,
+            None,
+            action_rx,
+            &mut NoopClipboard,
+        )
+        .await
+        .expect("run_tui completed")
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let rendered = rendered_text(&last_buffer.lock().expect("buffer snapshot lock"));
+            if rendered.contains("small-summarizer")
+                && rendered.contains("Warning: conversation engine")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("capacity warning must render at startup without a user prompt");
+    type_and_enter(&action_tx, "question").await;
+    let rendered = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let rendered = rendered_text(&last_buffer.lock().expect("buffer snapshot lock"));
+            if rendered.contains("the answer") {
+                break rendered;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("warning and response should render");
+    assert!(rendered.contains("small-summarizer"), "{rendered}");
+    assert!(rendered.contains("32768"), "{rendered}");
+    assert!(rendered.contains("68812"), "{rendered}");
+    assert_eq!(
+        rendered.matches("Warning: conversation engine").count(),
+        1,
+        "{rendered}"
+    );
+    assert!(
+        rendered
+            .find("Warning: conversation engine")
+            .expect("capacity warning")
+            < rendered.find("the answer").expect("response"),
+        "{rendered}",
+    );
+    drop(action_tx);
+    run_handle.await.expect("run task joined");
+}
+
+#[tokio::test]
+async fn switching_models_rechecks_compaction_capacity_before_any_prompt() {
+    for switch_provider_connection in [false, true] {
+        let (backend, last_buffer, _) = InspectableTestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let (action_tx, action_rx) = mpsc::channel(64);
+        let mut safe_config = common::test_engine_config();
+        safe_config.provider_connection = "safe-provider".to_string();
+        safe_config.model = "safe-conversation".to_string();
+        safe_config.context_length = None;
+        let mut large_config = safe_config.clone();
+        if switch_provider_connection {
+            large_config.provider_connection = "large-provider".to_string();
+        }
+        large_config.model = "large-conversation".to_string();
+        let mut summary_config = common::test_engine_config();
+        summary_config.model = "small-summarizer".to_string();
+        summary_config.context_length = Some(32_768);
+        let large_model = ModelInfo {
+            id: "large-conversation".to_string(),
+            context_length: Some(98_304),
+            reasoning_efforts: None,
+            reasoning_default: None,
+            input_modalities: None,
+        };
+        let safe_engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+            Arc::new(CatalogMockProvider {
+                provider: MockProvider::new(vec!["the answer".to_string()], Duration::ZERO),
+                models: vec![
+                    ModelInfo {
+                        id: "safe-conversation".to_string(),
+                        context_length: Some(32_768),
+                        ..large_model.clone()
+                    },
+                    large_model.clone(),
+                ],
+            }),
+            safe_config,
+        ));
+        let large_engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+            Arc::new(CatalogMockProvider {
+                provider: MockProvider::new(vec!["the answer".to_string()], Duration::ZERO),
+                models: vec![large_model],
+            }),
+            large_config,
+        ));
+        let conversation_engine = Arc::new(
+            ylva::EngineRouter::new(
+                std::collections::HashMap::from([
+                    ("safe".to_string(), safe_engine),
+                    ("large".to_string(), large_engine),
+                ]),
+                "safe",
+            )
+            .expect("test router"),
+        );
+        let summary_engine = Arc::new(EngineImpl::new(
+            Arc::new(MockProvider::new(Vec::new(), Duration::ZERO)),
+            summary_config,
+        ));
+        let (agent, ui_rx) = AgentLoop::new(conversation_engine, Arc::new(ToolRegistry::new()));
+        let agent = agent.with_compaction_engine(summary_engine);
+        let run_handle = tokio::spawn(async move {
+            tui_driver::run_tui(
+                &mut terminal,
+                agent,
+                ui_rx,
+                None,
+                action_rx,
+                &mut NoopClipboard,
+            )
+            .await
+            .expect("run_tui completed")
+        });
+        type_and_enter(&action_tx, "/models large").await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let rendered = rendered_text(&last_buffer.lock().expect("buffer snapshot lock"));
+                if rendered.contains("large-conversation") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the large model appears in the picker");
+        type_and_enter(&action_tx, "").await;
+        let rendered = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let rendered = rendered_text(&last_buffer.lock().expect("buffer snapshot lock"));
+                if rendered.contains("Warning: conversation engine")
+                    && rendered.contains("small-summarizer")
+                {
+                    break rendered;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "switching must warn while idle, without sending a conversation prompt:\n{}",
+                rendered_text(&last_buffer.lock().expect("buffer snapshot lock")),
+            )
+        });
+        assert!(rendered.contains("98304"), "{rendered}");
+        assert!(rendered.contains("32768"), "{rendered}");
+        assert!(rendered.contains("Idle"), "{rendered}");
+        assert!(!rendered.contains("the answer"), "{rendered}");
+        type_and_enter(&action_tx, "question").await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let rendered = rendered_text(&last_buffer.lock().expect("buffer snapshot lock"));
+                if rendered.contains("the answer") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the first prompt completes");
+        drop(action_tx);
+        let state = run_handle.await.expect("run task joined");
+        assert_eq!(
+            state
+                .chat_entries
+                .iter()
+                .filter(|entry| matches!(
+                    entry, ChatEntry::Notice { text } if text.contains("Warning: conversation engine")
+                ))
+                .count(),
+            1,
+            "the first request must not repeat the model-switch warning: {:?}",
+            state.chat_entries,
+        );
+    }
+}
+
+#[tokio::test]
+async fn model_switch_capacity_checks_keep_controls_responsive_and_replace_pending_checks() {
+    let catalog_started = Arc::new(Notify::new());
+    let release_catalog = Arc::new(Notify::new());
+    let mut engines: std::collections::HashMap<String, Arc<dyn Engine>> =
+        std::collections::HashMap::new();
+    for (engine_name, context_length) in [
+        ("safe", Some(32_768)),
+        ("delayed", None),
+        ("latest", Some(98_304)),
+    ] {
+        let mut engine =
+            DelayedCatalogEngine::new(catalog_started.clone(), release_catalog.clone());
+        engine.config.provider_connection = format!("{engine_name}-provider");
+        engine.config.model = format!("{engine_name}-model");
+        engine.config.context_length = context_length;
+        if context_length.is_none() {
+            engine = engine.with_catalog_hydration();
+        }
+        engines.insert(engine_name.to_string(), Arc::new(engine));
+    }
+    let summary_engine = engines["safe"].clone();
+    let conversation_engine =
+        Arc::new(ylva::EngineRouter::new(engines, "safe").expect("test router"));
+    let (mut agent, mut updates) =
+        AgentLoop::new(conversation_engine.clone(), Arc::new(ToolRegistry::new()));
+    agent = agent.with_compaction_engine(summary_engine);
+    let handle = agent.run();
+    agent
+        .send_command(ylva::AgentCommand::Stop {
+            reason: "startup barrier".to_string(),
+        })
+        .await;
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), updates.recv()).await,
+        Ok(Some(ylva::UiUpdate::AgentIdle)),
+    ));
+    for engine_name in ["delayed", "latest"] {
+        let provider_connection = format!("{engine_name}-provider");
+        let model = format!("{engine_name}-model");
+        conversation_engine
+            .switch_model_option(&ylva::ProviderModelOption {
+                provider_connection: provider_connection.clone(),
+                model: ModelInfo {
+                    id: model.clone(),
+                    context_length: None,
+                    reasoning_efforts: None,
+                    reasoning_default: None,
+                    input_modalities: None,
+                },
+                reasoning_effort: None,
+            })
+            .expect("switch to the requested provider");
+        agent
+            .send_command(ylva::AgentCommand::RecordModelChanged {
+                provider_connection,
+                model,
+            })
+            .await;
+        if engine_name == "delayed" {
+            tokio::time::timeout(Duration::from_secs(1), catalog_started.notified())
+                .await
+                .expect("model-switch capacity check resolves missing metadata");
+            agent
+                .send_command(ylva::AgentCommand::Stop {
+                    reason: "controls must remain responsive".to_string(),
+                })
+                .await;
+            assert!(matches!(
+                tokio::time::timeout(Duration::from_secs(1), updates.recv()).await,
+                Ok(Some(ylva::UiUpdate::AgentIdle)),
+            ));
+        }
+    }
+    let update = tokio::time::timeout(Duration::from_secs(1), updates.recv())
+        .await
+        .expect("the latest switch must replace the blocked check")
+        .expect("capacity warning");
+    assert!(matches!(
+        update,
+        ylva::UiUpdate::Notice { text, run_id: None }
+            if text.contains("latest-provider/latest-model")
+                && text.contains("98304")
+                && text.contains("32768")
+                && !text.contains("delayed-model")
+    ));
+    drop(agent);
+    handle.await.expect("loop joins").expect("loop shuts down");
+    release_catalog.notify_one();
+    assert!(
+        updates.try_recv().is_err(),
+        "no stale switch notice is emitted"
+    );
+}
+
+#[tokio::test]
+async fn startup_catalog_checks_keep_the_tui_responsive_and_cancel_a_waiting_prompt() {
+    let catalog_started = Arc::new(Notify::new());
+    let release_catalog = Arc::new(Notify::new());
+    let chat_started = Arc::new(Notify::new());
+    let release_chat = Arc::new(Notify::new());
+    let engine = Arc::new(
+        DelayedCatalogEngine::with_chat(
+            catalog_started.clone(),
+            release_catalog.clone(),
+            chat_started.clone(),
+            release_chat.clone(),
+        )
+        .with_catalog_hydration(),
+    );
+    let (backend, last_buffer, _) = InspectableTestBackend::new(120, 40);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let (action_tx, action_rx) = mpsc::channel(64);
+    let (agent, ui_rx) = AgentLoop::new(engine.clone(), Arc::new(ToolRegistry::new()));
+    let agent = agent.with_compaction_engine(engine.clone());
+    let run_handle = tokio::spawn(async move {
+        tui_driver::run_tui(
+            &mut terminal,
+            agent,
+            ui_rx,
+            None,
+            action_rx,
+            &mut NoopClipboard,
+        )
+        .await
+        .expect("run_tui completed")
+    });
+    tokio::time::timeout(Duration::from_secs(1), catalog_started.notified())
+        .await
+        .expect("startup resolves an unconfigured context window");
+    type_and_enter(&action_tx, "cancel this waiting prompt").await;
+    send(&action_tx, AppAction::Escape).await;
+    send(&action_tx, AppAction::Escape).await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let rendered = rendered_text(&last_buffer.lock().expect("buffer snapshot lock"));
+            if rendered.contains("cancel this waiting prompt") && rendered.contains("Idle") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("input and cancellation must work while startup metadata is pending");
+    release_catalog.notify_one();
+    type_and_enter(&action_tx, "new question").await;
+    tokio::time::timeout(Duration::from_secs(1), chat_started.notified())
+        .await
+        .expect("a new prompt starts normally after cancelling the waiting prompt");
+    release_chat.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let rendered = rendered_text(&last_buffer.lock().expect("buffer snapshot lock"));
+            if rendered.contains("conversation update") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the replacement prompt completes");
+    drop(action_tx);
+    let state = run_handle.await.expect("run task joined");
+    assert_eq!(state.agent_mode, ylva::AgentMode::Idle);
+    assert_eq!(
+        engine.chat_calls.load(Ordering::SeqCst),
+        1,
+        "the cancelled waiting prompt must never reach the provider",
+    );
 }
 
 #[tokio::test]
@@ -1078,6 +1526,8 @@ fn footer_shows_the_active_named_engine_and_model() {
             provider_connection: "ollama".to_string(),
             model: "llama3.2".to_string(),
             reasoning_effort: Some("max".to_string()),
+            compaction_engine: None,
+            inherits_parent_runtime: false,
         },
         ..TuiState::new()
     };
@@ -1137,6 +1587,283 @@ fn footer_shows_the_active_named_engine_and_model() {
         !rendered_without_reasoning.contains("ollama/local → llama3.2 ("),
         "footer must omit the default reasoning effort: {rendered_without_reasoning:?}"
     );
+}
+
+#[test]
+fn compaction_marker_renders_between_the_summarized_and_the_verbatim_turns() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_widgets;
+    use ylva::{ChatEntry, TuiState, UserMessageState};
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+    let mut state = TuiState {
+        chat_entries: vec![
+            ChatEntry::UserMessage {
+                text: "the old question".to_string(),
+                state: UserMessageState::Sent,
+            },
+            ChatEntry::AssistantMessage {
+                text: "the old answer".to_string(),
+                interrupted: false,
+            },
+            ChatEntry::CompactionMarker {
+                summarized_messages: 2,
+            },
+            ChatEntry::UserMessage {
+                text: "the tail question".to_string(),
+                state: UserMessageState::Sent,
+            },
+        ],
+        ..TuiState::new()
+    };
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
+        })
+        .expect("draw");
+
+    let buffer = terminal.backend().buffer().clone();
+    let rows: Vec<String> = (0..24u16)
+        .map(|row| {
+            (0..80u16)
+                .map(|column| buffer.cell((column, row)).unwrap().symbol().to_string())
+                .collect()
+        })
+        .collect();
+    let rendered = rows.join("\n");
+    assert!(
+        rendered.contains("compaction · 2 messages summarized"),
+        "the marker is rendered: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("the old question") && rendered.contains("the old answer"),
+        "the summarized prefix stays browsable: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("the tail question"),
+        "the verbatim tail stays browsable: {rendered:?}"
+    );
+    let marker_row = rows
+        .iter()
+        .position(|row| row.contains("compaction · 2 messages summarized"))
+        .expect("marker row");
+    let tail_row = rows
+        .iter()
+        .position(|row| row.contains("the tail question"))
+        .expect("tail row");
+    assert!(
+        marker_row < tail_row,
+        "the marker precedes the tail it opens: marker={marker_row} tail={tail_row}"
+    );
+}
+
+#[test]
+fn footer_shows_compacting_independently_of_agent_mode() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::{tui_widgets, AgentMode, TuiState};
+
+    for agent_mode in [AgentMode::Idle, AgentMode::Streaming] {
+        for compacting in [false, true] {
+            let mut terminal = Terminal::new(TestBackend::new(100, 20)).expect("terminal");
+            let mut state = TuiState {
+                agent_mode,
+                compacting,
+                ..TuiState::new()
+            };
+            terminal
+                .draw(|frame| {
+                    tui_widgets::draw(
+                        frame,
+                        &mut state,
+                        &mut TextArea::default(),
+                        None,
+                        None,
+                        &ylva::ToolRegistry::new(),
+                    );
+                })
+                .expect("draw");
+            let buffer = terminal.backend().buffer();
+            let rendered: String = (0..20u16)
+                .flat_map(|row| (0..100u16).map(move |column| (column, row)))
+                .map(|position| buffer.cell(position).unwrap().symbol())
+                .collect();
+            assert_eq!(rendered.contains("Compacting…"), compacting);
+            assert_eq!(state.agent_mode, agent_mode);
+        }
+    }
+}
+
+#[test]
+fn approval_footer_keeps_context_usage_beside_buttons() {
+    use ratatui_textarea::TextArea;
+    use ylva::tui_widgets;
+    use ylva::TuiState;
+
+    for is_subagent in [false, true] {
+        for denial_reason in ["", "Do not execute this"] {
+            let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
+            let mut state = TuiState {
+                context_usage_text: Some("64.2K (45%)".to_string()),
+                pending_approval: Some((
+                    uuid::Uuid::new_v4(),
+                    "bash".to_string(),
+                    serde_json::json!({"command": "echo hello"}),
+                )),
+                pending_approval_is_subagent: is_subagent,
+                ..TuiState::new()
+            };
+            let mut textarea = TextArea::default();
+            textarea.insert_str(denial_reason);
+            let mut buttons = None;
+            terminal
+                .draw(|frame| {
+                    buttons = tui_widgets::draw(
+                        frame,
+                        &mut state,
+                        &mut textarea,
+                        None,
+                        None,
+                        &ylva::ToolRegistry::new(),
+                    );
+                })
+                .expect("draw");
+            let buttons = buttons.expect("approval buttons");
+            let buffer = terminal.backend().buffer();
+            let line: String = (0..80)
+                .map(|column| buffer.cell((column, buttons.approve.y)).unwrap().symbol())
+                .collect();
+            assert!(
+                line.ends_with("64.2K (45%)"),
+                "approval row must retain the right-aligned readout: {line:?}"
+            );
+            assert!(line.contains("Approve") && line.contains("Deny"));
+            assert!(buttons.deny.right() <= 80 - "64.2K (45%)".len() as u16);
+        }
+    }
+}
+
+#[test]
+fn footer_shows_the_model_view_readout_right_aligned_on_the_hint_row() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_widgets;
+    use ylva::TuiState;
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
+    let mut state = TuiState {
+        context_usage_text: Some("64.2K (45%)".to_string()),
+        ..TuiState::new()
+    };
+    let mut textarea = TextArea::default();
+
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
+        })
+        .expect("draw");
+
+    let buffer = terminal.backend().buffer().clone();
+    let hint_row = (0..20u16)
+        .find(|row| {
+            let line: String = (0..80u16)
+                .map(|column| buffer.cell((column, *row)).unwrap().symbol().to_string())
+                .collect();
+            line.contains("F1 help")
+        })
+        .expect("keybinding footer row");
+    let line: String = (0..80u16)
+        .map(|column| {
+            buffer
+                .cell((column, hint_row))
+                .unwrap()
+                .symbol()
+                .to_string()
+        })
+        .collect();
+
+    assert!(
+        line.contains("64.2K (45%)"),
+        "the hint row carries the context readout: {line:?}"
+    );
+    assert!(
+        line.starts_with(' ') && line.contains("enter send"),
+        "the keybinding hints stay left-aligned: {line:?}"
+    );
+    let readout_end = line
+        .char_indices()
+        .rev()
+        .find(|(_, character)| !character.is_whitespace())
+        .map(|(index, _)| index)
+        .expect("non-blank readout");
+    assert_eq!(
+        readout_end,
+        line.trim_end().len() - 1,
+        "the readout sits at the right end of the row: {line:?}"
+    );
+    assert!(
+        !line.contains("enter send   64.2K"),
+        "hints and readout must not run together: {line:?}"
+    );
+}
+
+#[test]
+fn narrow_approval_footer_preserves_buttons_without_context_usage() {
+    use ratatui_textarea::TextArea;
+    use ylva::tui_widgets;
+    use ylva::TuiState;
+
+    let mut terminal = Terminal::new(TestBackend::new(50, 20)).expect("terminal");
+    let mut state = TuiState {
+        context_usage_text: Some("64.2K (45%)".to_string()),
+        pending_approval: Some((
+            uuid::Uuid::new_v4(),
+            "bash".to_string(),
+            serde_json::json!({"command": "echo hello"}),
+        )),
+        ..TuiState::new()
+    };
+    let mut textarea = TextArea::default();
+    terminal
+        .draw(|frame| {
+            let buttons = tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            )
+            .expect("approval buttons");
+            assert!(buttons.deny.right() <= 50);
+        })
+        .expect("draw");
+    let buffer = terminal.backend().buffer();
+    let rendered: String = (0..20)
+        .flat_map(|row| (0..50).map(move |column| buffer.cell((column, row)).unwrap().symbol()))
+        .collect();
+    assert!(!rendered.contains("64.2K (45%)"), "{rendered:?}");
+    assert!(rendered.contains("Approve (enter)") && rendered.contains("Deny (esc)"));
 }
 
 #[test]
@@ -1341,6 +2068,7 @@ fn model_picker_footer_shows_picker_controls_instead_of_send() {
         slash_overlay: SlashOverlay::ModelPicker {
             choices: vec![ModelChoice {
                 label: "stub/thinking  reasoning: default ⚙".to_string(),
+                initial_reasoning_effort: None,
                 selection: ProviderModelOption {
                     provider_connection: "stub".to_string(),
                     model: ModelInfo {
@@ -1354,6 +2082,8 @@ fn model_picker_footer_shows_picker_controls_instead_of_send() {
                 },
                 is_active: false,
                 engine_name: None,
+                selection_target: None,
+                selection_preview_error: None,
             }],
             filter: String::new(),
             selected: 0,
@@ -1403,6 +2133,263 @@ fn model_picker_footer_shows_picker_controls_instead_of_send() {
     assert!(
         !rendered.contains("enter send"),
         "model picker must not advertise sending: {rendered:?}"
+    );
+}
+
+#[test]
+fn model_picker_details_show_highlighted_compaction_effect() {
+    use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
+    use ratatui::Terminal;
+    use ratatui_textarea::TextArea;
+    use ylva::tui_reducer_state::{ModelChoice, SlashOverlay};
+    use ylva::tui_widgets;
+    use ylva::{
+        CompactionEngineDisplayInfo, EngineDisplayInfo, ModelInfo, ModelSelectionTarget,
+        ProviderModelOption, TuiState,
+    };
+
+    let make_choice = |name: &str, provider_connection: &str, model_id: &str| {
+        let context_length = if model_id == "model-a" {
+            131_072
+        } else {
+            65_536
+        };
+        ModelChoice {
+            label: format!(
+                "{name} → {provider_connection}/{model_id}  context: {}kb",
+                context_length / 1024
+            ),
+            selection: ProviderModelOption {
+                provider_connection: provider_connection.to_string(),
+                model: ModelInfo {
+                    id: model_id.to_string(),
+                    context_length: Some(context_length),
+                    reasoning_efforts: None,
+                    reasoning_default: None,
+                    input_modalities: None,
+                },
+                reasoning_effort: None,
+            },
+            initial_reasoning_effort: None,
+            is_active: name == "engine-a",
+            engine_name: Some(name.to_string()),
+            selection_target: Some(ModelSelectionTarget {
+                engine_name: Some(name.to_string()),
+                provider_connection: provider_connection.to_string(),
+                model: model_id.to_string(),
+                context_length,
+            }),
+            selection_preview_error: None,
+        }
+    };
+    let mut state = TuiState {
+        engine_display: EngineDisplayInfo {
+            engine_name: "engine-a".to_string(),
+            provider_connection: "mock".to_string(),
+            model: "model-a".to_string(),
+            reasoning_effort: None,
+            compaction_engine: Some(CompactionEngineDisplayInfo {
+                engine_name: "engine-a".to_string(),
+                provider_connection: "mock".to_string(),
+                model: "model-a".to_string(),
+                context_length: 32_768,
+                follows_conversation: false,
+                shares_conversation: true,
+            }),
+            inherits_parent_runtime: false,
+        },
+        slash_overlay: SlashOverlay::ModelPicker {
+            choices: vec![
+                make_choice("engine-a", "mock", "model-a"),
+                make_choice("engine-b", "mock", "model-b"),
+                make_choice("engine-c", "mock", "model-a"),
+                make_choice("engine-d", "mock-alt", "model-a"),
+            ],
+            filter: String::new(),
+            selected: 1,
+        },
+        ..TuiState::new()
+    };
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("terminal");
+    let mut textarea = TextArea::default();
+    let footer_foreground = |terminal: &Terminal<TestBackend>| {
+        let buffer = terminal.backend().buffer();
+        let row_width = buffer.area.width as usize;
+        buffer
+            .content()
+            .chunks(row_width)
+            .find(|row| {
+                row.iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+                    .contains("Compaction uses")
+            })
+            .and_then(|row| row.iter().find(|cell| cell.symbol() == "C"))
+            .map(|cell| cell.fg)
+            .expect("compaction detail foreground")
+    };
+
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
+        })
+        .expect("draw");
+    let rendered: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(!rendered.contains("Conversation:"));
+    assert!(rendered.contains("Compaction uses mock/model-a, context: 32kb"));
+    assert!(!rendered.contains("Compaction uses mock/model-a, context: 32kb."));
+    assert_eq!(footer_foreground(&terminal), Color::Rgb(255, 165, 0));
+
+    if let SlashOverlay::ModelPicker { selected, .. } = &mut state.slash_overlay {
+        *selected = 0;
+    }
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
+        })
+        .expect("redraw");
+    let rendered: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(rendered.contains("Compaction uses mock/model-a, context: 128kb"));
+    assert_eq!(footer_foreground(&terminal), Color::DarkGray);
+
+    if let SlashOverlay::ModelPicker { selected, .. } = &mut state.slash_overlay {
+        *selected = 2;
+    }
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
+        })
+        .expect("redraw with matching provider/model");
+    let rendered: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(rendered.contains("engine-c → mock/model-a  context: 128kb"));
+    assert!(rendered.contains("Compaction uses mock/model-a, context: 32kb"));
+    assert_eq!(footer_foreground(&terminal), Color::Rgb(255, 165, 0));
+
+    if let SlashOverlay::ModelPicker { selected, .. } = &mut state.slash_overlay {
+        *selected = 3;
+    }
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
+        })
+        .expect("redraw with a different provider connection");
+    let rendered: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(rendered.contains("Compaction uses mock/model-a, context: 32kb"));
+    assert_eq!(footer_foreground(&terminal), Color::Rgb(255, 165, 0));
+
+    state
+        .engine_display
+        .compaction_engine
+        .as_mut()
+        .expect("compaction engine display")
+        .follows_conversation = true;
+    if let SlashOverlay::ModelPicker { selected, .. } = &mut state.slash_overlay {
+        *selected = 1;
+    }
+    terminal
+        .draw(|frame| {
+            tui_widgets::draw(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
+        })
+        .expect("redraw with implicit compaction engine");
+    let rendered: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(rendered.contains("Compaction uses mock/model-b, context: 64kb"));
+    assert_eq!(footer_foreground(&terminal), Color::DarkGray);
+    assert!(!rendered.contains("No summarizer is configured."));
+
+    let mut narrow_state = state;
+    let mut narrow_terminal = Terminal::new(TestBackend::new(36, 20)).expect("narrow terminal");
+    narrow_terminal
+        .draw(|frame| {
+            tui_widgets::draw(
+                frame,
+                &mut narrow_state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
+        })
+        .expect("narrow draw");
+    assert!(
+        narrow_state.slash_overlay_layout.content_area.height > 0,
+        "the picker rows must remain usable when details do not fit"
+    );
+    let rendered: String = narrow_terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(
+        !rendered.contains("Conversation:"),
+        "the detail area should yield to picker controls on narrow terminals"
     );
 }
 
@@ -1621,8 +2608,13 @@ fn model_picker_moves_selection_up_inside_scrolled_window() {
     }
     let first_visible_row = state.layout.slash_overlay.first_visible_row;
     assert!(first_visible_row > 0);
-
-    for expected_model_index in [9, 8, 7, 6, 5, 4] {
+    let current_model_index = state
+        .selected_model()
+        .and_then(|choice| choice.selection.model.id.strip_prefix("model-"))
+        .and_then(|index| index.parse::<usize>().ok())
+        .expect("selected model index");
+    let moves_inside_window = current_model_index - first_visible_row;
+    for step in 1..=moves_inside_window {
         ylva::presenter::update(
             &mut state,
             TuiEvent::Input(InputEvent::KeyInput(KeyEvent::new(
@@ -1647,7 +2639,7 @@ fn model_picker_moves_selection_up_inside_scrolled_window() {
             state
                 .selected_model()
                 .map(|choice| choice.selection.model.id.as_str()),
-            Some(format!("model-{expected_model_index}").as_str())
+            Some(format!("model-{}", current_model_index - step).as_str())
         );
         assert_eq!(
             state.layout.slash_overlay.first_visible_row, first_visible_row,
@@ -1655,34 +2647,33 @@ fn model_picker_moves_selection_up_inside_scrolled_window() {
         );
     }
 
-    for expected_model_index in [3, 2] {
-        ylva::presenter::update(
-            &mut state,
-            TuiEvent::Input(InputEvent::KeyInput(KeyEvent::new(
-                KeyCode::Up,
-                KeyModifiers::NONE,
-            ))),
-            &textarea_context,
-        );
-        terminal
-            .draw(|frame| {
-                ylva::render::render(
-                    frame,
-                    &mut state,
-                    &mut textarea,
-                    None,
-                    None,
-                    &ylva::ToolRegistry::new(),
-                );
-            })
-            .expect("upper-bound navigation draw");
-        assert_eq!(
-            state
-                .selected_model()
-                .map(|choice| choice.selection.model.id.as_str()),
-            Some(format!("model-{expected_model_index}").as_str())
-        );
-    }
+    ylva::presenter::update(
+        &mut state,
+        TuiEvent::Input(InputEvent::KeyInput(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        ))),
+        &textarea_context,
+    );
+    terminal
+        .draw(|frame| {
+            ylva::render::render(
+                frame,
+                &mut state,
+                &mut textarea,
+                None,
+                None,
+                &ylva::ToolRegistry::new(),
+            );
+        })
+        .expect("upper-bound navigation draw");
+    assert_eq!(
+        state
+            .selected_model()
+            .and_then(|choice| choice.selection.model.id.strip_prefix("model-"))
+            .and_then(|index| index.parse::<usize>().ok()),
+        Some(first_visible_row - 1)
+    );
     assert_eq!(
         state.layout.slash_overlay.first_visible_row,
         first_visible_row - 1,
@@ -1758,6 +2749,7 @@ fn model_picker_shows_a_message_instead_of_vanishing_when_the_filter_matches_not
         slash_overlay: SlashOverlay::ModelPicker {
             choices: vec![ModelChoice {
                 label: "stub/thinking  reasoning: default".to_string(),
+                initial_reasoning_effort: None,
                 selection: ProviderModelOption {
                     provider_connection: "stub".to_string(),
                     model: ModelInfo {
@@ -1771,6 +2763,8 @@ fn model_picker_shows_a_message_instead_of_vanishing_when_the_filter_matches_not
                 },
                 is_active: false,
                 engine_name: None,
+                selection_target: None,
+                selection_preview_error: None,
             }],
             filter: "no-such-model".to_string(),
             selected: 0,
@@ -2018,12 +3012,149 @@ fn root_view_shows_live_thinking_progress_while_a_tool_bubble_is_running() {
     );
 }
 
-/// The child-view header re-renders the root `spawn_subagent` `ToolBubble`
-/// with a shortened `"Subagent"` title instead of the plain title-cased
-/// `"Spawn Subagent"` — the header sits directly above the subagent's own
-/// transcript, so "Spawn" only makes sense from the root conversation's
-/// point of view (regression test for the header always reading "Spawn
-/// Subagent ..." regardless of context).
+#[test]
+fn spawn_subagent_running_duration_is_visible_in_parent_and_child_views() {
+    use ratatui_textarea::TextArea;
+    use ylva::tui_reducer_state::ResultSection;
+    use ylva::{AppState, DomainEvent, TuiEvent};
+
+    for child_view in [false, true] {
+        for collapsed in [false, true] {
+            let bubble_id = uuid::Uuid::new_v4();
+            let run_id = uuid::Uuid::new_v4();
+            let mut state = AppState::new();
+            let apply_event = |state: &mut AppState, event| {
+                ylva::presenter::update(state, TuiEvent::Domain(event), &empty_textarea_context());
+            };
+            apply_event(
+                &mut state,
+                DomainEvent::ToolStart {
+                    id: bubble_id,
+                    name: "spawn_subagent".to_string(),
+                    arguments: serde_json::json!({"label": "Inspect"}),
+                    content_sections: vec![],
+                    title_arguments: vec![("label".to_string(), serde_json::json!("Inspect"))],
+                    run_id: None,
+                },
+            );
+            if let ChatEntry::ToolBubble {
+                collapsed: bubble_collapsed,
+                ..
+            } = &mut state.chat_entries[0]
+            {
+                *bubble_collapsed = collapsed;
+            }
+            let mut terminal = Terminal::new(TestBackend::new(80, 20)).expect("terminal");
+            let mut textarea = TextArea::default();
+            let mut draw_title = |state: &mut AppState| {
+                terminal
+                    .draw(|frame| {
+                        ylva::render::render(
+                            frame,
+                            state,
+                            &mut textarea,
+                            None,
+                            None,
+                            &ToolRegistry::new(),
+                        );
+                    })
+                    .expect("draw");
+                let lines = if child_view {
+                    &state.child_view.header_rendered_lines
+                } else {
+                    &state.conversation.chat_rendered_lines
+                };
+                lines
+                    .iter()
+                    .find(|line| line.contains("Subagent"))
+                    .expect("subagent title")
+                    .clone()
+            };
+            if !child_view {
+                let title = draw_title(&mut state);
+                assert!(
+                    !title.contains("0.0s"),
+                    "admission is not execution: {title}"
+                );
+            }
+            apply_event(
+                &mut state,
+                DomainEvent::ChildAgentStarted {
+                    run_id,
+                    call_id: bubble_id,
+                    agent_type: "default".to_string(),
+                    task: "Inspect".to_string(),
+                    label: "Inspect".to_string(),
+                },
+            );
+            if child_view {
+                state.switch_to_child_view(run_id);
+            }
+            for elapsed_seconds in [12, 22] {
+                state
+                    .child_conversations
+                    .get_mut(&run_id)
+                    .expect("child")
+                    .started_at =
+                    Some(std::time::Instant::now() - Duration::from_secs(elapsed_seconds));
+                let started_at = state.child_conversations[&run_id].started_at;
+                apply_event(
+                    &mut state,
+                    DomainEvent::ToolProgress {
+                        id: bubble_id,
+                        title_arguments: vec![("status".to_string(), serde_json::json!("running"))],
+                    },
+                );
+                assert_eq!(state.child_conversations[&run_id].started_at, started_at);
+                let title = draw_title(&mut state);
+                let elapsed = title
+                    .split_whitespace()
+                    .last()
+                    .expect("duration")
+                    .strip_suffix('s')
+                    .expect("seconds suffix")
+                    .parse::<f64>()
+                    .expect("numeric duration");
+                assert!(
+                    (elapsed_seconds as f64..elapsed_seconds as f64 + 1.0).contains(&elapsed),
+                    "live duration must advance in the {} view: {title}",
+                    if child_view { "child" } else { "parent" }
+                );
+            }
+            apply_event(
+                &mut state,
+                DomainEvent::ToolProgress {
+                    id: bubble_id,
+                    title_arguments: vec![("status".to_string(), serde_json::json!("queued"))],
+                },
+            );
+            let title = draw_title(&mut state);
+            assert!(
+                !title.ends_with('s'),
+                "queued calls must not show a running duration: {title}"
+            );
+            apply_event(
+                &mut state,
+                DomainEvent::ToolDone {
+                    id: bubble_id,
+                    name: "spawn_subagent".to_string(),
+                    result_section: ResultSection::plain("Finished"),
+                    summary: vec![],
+                    duration: Duration::from_millis(1234),
+                    content_sections: vec![],
+                    run_id: None,
+                },
+            );
+            let title = draw_title(&mut state);
+            assert!(
+                title.ends_with("1.234s"),
+                "completion must replace the live timer: {title}"
+            );
+        }
+    }
+}
+
+/// The drill-in header shortens the root-relative "Spawn Subagent" title.
 #[test]
 fn child_view_header_shortens_spawn_subagent_title() {
     use ratatui::backend::TestBackend;
@@ -3397,7 +4528,7 @@ fn dragging_across_logo_build_lines_copies_version_and_profile() {
 }
 
 #[test]
-fn startup_logo_shows_selected_runtime_profile() {
+fn startup_logo_shows_selected_profile() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use ratatui_textarea::TextArea;
@@ -3434,12 +4565,12 @@ fn startup_logo_shows_selected_runtime_profile() {
         .collect();
     assert!(
         rendered.contains("profile: work"),
-        "startup logo should show the selected runtime profile: {rendered:?}"
+        "startup logo should show the selected profile: {rendered:?}"
     );
 }
 
 #[test]
-fn help_popup_shows_runtime_paths() {
+fn help_popup_shows_profile_paths() {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use ratatui_textarea::TextArea;
@@ -3483,8 +4614,12 @@ fn help_popup_shows_runtime_paths() {
         "help popup should show the resolved profile path: {rendered:?}"
     );
     assert!(
+        rendered.contains("Environment"),
+        "help popup should label profile and workspace details as environment: {rendered:?}"
+    );
+    assert!(
         rendered.contains("  Profile:        work"),
-        "runtime values should align after their labels: {rendered:?}"
+        "profile values should align after their labels: {rendered:?}"
     );
     assert!(
         rendered.contains("  Ylva home:      /tmp/ylva-home"),
@@ -3493,6 +4628,26 @@ fn help_popup_shows_runtime_paths() {
     assert!(
         rendered.contains("  Workspace root: /workspace/example"),
         "help popup should show the discovered workspace root: {rendered:?}"
+    );
+    let environment_entry_lines = [
+        "  Ylva home:      /tmp/ylva-home",
+        "  Profile:        work",
+        "  Profile path:   /tmp/ylva-home/profiles/work/config.toml",
+        "  Workspace root: /workspace/example",
+    ];
+    let environment_entry_positions: Vec<usize> = environment_entry_lines
+        .iter()
+        .map(|entry| {
+            rendered
+                .find(entry)
+                .unwrap_or_else(|| panic!("missing environment entry {entry:?}: {rendered:?}"))
+        })
+        .collect();
+    assert!(
+        environment_entry_positions
+            .windows(2)
+            .all(|pair| pair[0] < pair[1]),
+        "help popup environment entries should appear in the requested order: {rendered:?}"
     );
     assert!(
         rendered.contains(&format!("  Version:  v{}", ylva::BUILD_INFO.version)),

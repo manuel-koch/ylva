@@ -35,9 +35,8 @@ Both the `tirith` CLI crate and its underlying engine crate,
 `tirith-core`, are published on crates.io as **AGPL-3.0-only**. Linking
 either into ylva (Apache-2.0) would require ylva to relicense — not
 viable. Integration must go through the **compiled `tirith` binary as an
-external subprocess** (mere aggregation, not linking), the same posture
-ylva already takes for other optional external tools (`which git`/`rg`
-checks in `docs/blueprint.md`).
+external subprocess** (mere aggregation, not linking). Do not add either
+crate as a linked dependency.
 
 `tirith` exposes exactly the one-shot, non-interactive API this needs —
 no shell-hook/`eval "$(tirith init ...)"` setup required for

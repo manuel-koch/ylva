@@ -33,8 +33,12 @@ use crossterm::event::KeyEvent;
 use ratatui::layout::Rect;
 use uuid::Uuid;
 
+pub use crate::agent::ContextUsageSource;
 use crate::agent::{AgentMode, AssistantStatus, Message, UserMessageKind};
-use crate::llm::engine::{EngineDisplayInfo, ProviderModelOption};
+use crate::llm::engine::{
+    EngineDisplayInfo, ModelSelection, ModelSelectionTarget, ProviderModelOption,
+    ReasoningEffortChange,
+};
 use crate::llm::InputModality;
 use crate::slash_command::{slash_command_suggestions, SlashCommandInfo};
 use crate::store::ChildRunRecord;
@@ -369,6 +373,17 @@ pub enum ChatEntry {
     Notice {
         text: String,
     },
+    /// Non-message divider marking where compaction cut the transcript: the
+    /// `summarized_messages` messages before it are represented in the model
+    /// view by the compaction summary, while the full transcript stays
+    /// browsable here. Never sent to the model and never part of the
+    /// transcript — it exists only in this view-model, built from the
+    /// persisted snapshot's boundary.
+    CompactionMarker {
+        /// How many transcript messages the summary replaces — the boundary's
+        /// index in persisted-transcript coordinates.
+        summarized_messages: usize,
+    },
 }
 
 /// A single in-flight turn's accumulated stream text, shared by the root
@@ -511,8 +526,14 @@ pub struct ChildRunInfo {
 #[derive(Debug, Clone)]
 pub struct ChildConversation {
     pub info: ChildRunInfo,
+    /// Monotonic start of live execution; replayed runs have no live timer.
+    pub started_at: Option<Instant>,
     pub messages: Vec<ChatEntry>,
     pub turn_buffer: TurnBuffer,
+    /// Latest context estimate reported by this child run. Kept with the
+    /// conversation so the footer can show the correct window while drilled
+    /// into this child, even after it finishes.
+    pub context_usage: Option<ContextUsage>,
     pub needs_lazy_load: bool,
 }
 
@@ -520,8 +541,10 @@ impl ChildConversation {
     pub(crate) fn new(info: ChildRunInfo) -> Self {
         ChildConversation {
             info,
+            started_at: Some(Instant::now()),
             messages: Vec::new(),
             turn_buffer: TurnBuffer::default(),
+            context_usage: None,
             needs_lazy_load: false,
         }
     }
@@ -529,8 +552,10 @@ impl ChildConversation {
     pub(crate) fn new_replay(info: ChildRunInfo) -> Self {
         ChildConversation {
             info,
+            started_at: None,
             messages: Vec::new(),
             turn_buffer: TurnBuffer::default(),
+            context_usage: None,
             needs_lazy_load: true,
         }
     }
@@ -539,12 +564,16 @@ impl ChildConversation {
 /// Project persisted domain messages into the same terminal-free chat model
 /// used by live presenter updates.
 pub fn project_messages(messages: &[Message]) -> Vec<ChatEntry> {
-    project_messages_with_child_runs(messages, &[])
+    project_messages_with_child_runs(messages, &[], None)
 }
 
+/// Project persisted messages into chat entries, inserting the compaction
+/// marker at `compaction_boundary` — the transcript index where the verbatim
+/// tail begins. `None` keeps the plain transcript view.
 fn project_messages_with_child_runs(
     messages: &[Message],
     child_runs: &[ChildRunRecord],
+    compaction_boundary: Option<usize>,
 ) -> Vec<ChatEntry> {
     let tool_calls = messages
         .iter()
@@ -566,7 +595,12 @@ fn project_messages_with_child_runs(
         .collect::<HashMap<_, _>>();
     let mut entries = Vec::new();
 
-    for message in messages {
+    for (message_index, message) in messages.iter().enumerate() {
+        if Some(message_index) == compaction_boundary {
+            entries.push(ChatEntry::CompactionMarker {
+                summarized_messages: message_index,
+            });
+        }
         match message {
             Message::User {
                 content,
@@ -677,6 +711,13 @@ fn project_messages_with_child_runs(
                 let _ = arguments;
             }
         }
+    }
+    // A boundary at the very end of the transcript still gets its marker:
+    // everything was summarized and the tail is empty.
+    if Some(messages.len()) == compaction_boundary {
+        entries.push(ChatEntry::CompactionMarker {
+            summarized_messages: messages.len(),
+        });
     }
 
     for child_run in child_runs {
@@ -931,6 +972,11 @@ pub enum InputEvent {
 /// calling `presenter::update()`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DomainEvent {
+    CompactionActivity {
+        run_id: Option<Uuid>,
+        request_id: Uuid,
+        active: bool,
+    },
     /// Provider started streaming (first token / acknowledgement).
     StreamStarted,
     /// A text chunk arrived from the provider.
@@ -1042,6 +1088,14 @@ pub enum DomainEvent {
         text: String,
         is_thinking: bool,
     },
+    /// The child run's estimate against its own active context window. See
+    /// `UiUpdate::ChildContextUsage` for the estimate source.
+    ChildContextUsage {
+        run_id: Uuid,
+        estimated_tokens: usize,
+        context_length: usize,
+        source: ContextUsageSource,
+    },
     /// The child agent run identified by `run_id` has finished.
     /// See `UiUpdate::ChildAgentDone`.
     ChildAgentDone {
@@ -1055,6 +1109,20 @@ pub enum DomainEvent {
     /// (see `AppState::last_bubble_click`). A no-op if a second click (or a
     /// click on a different bubble) already resolved/cleared it first.
     BubbleClickWindowExpired,
+    /// Estimated size against the active context window; see [`ContextUsage`]
+    /// and `UiUpdate::ContextUsage` for the estimate source.
+    ContextUsage {
+        estimated_tokens: usize,
+        context_length: usize,
+        source: ContextUsageSource,
+    },
+    /// A compaction snapshot was applied this run; see
+    /// `UiUpdate::CompactionApplied` and [`ChatEntry::CompactionMarker`].
+    CompactionApplied {
+        run_id: Option<Uuid>,
+        entry_index: usize,
+        summarized_messages: usize,
+    },
 }
 
 impl DomainEvent {
@@ -1063,6 +1131,7 @@ impl DomainEvent {
     /// logging stays cheap and never leaks tool output into the log.
     pub(crate) fn kind(&self) -> &'static str {
         match self {
+            DomainEvent::CompactionActivity { .. } => "CompactionActivity",
             DomainEvent::StreamStarted => "StreamStarted",
             DomainEvent::StreamChunk(_) => "StreamChunk",
             DomainEvent::StreamDone => "StreamDone",
@@ -1083,8 +1152,11 @@ impl DomainEvent {
             DomainEvent::ChildAgentStarted { .. } => "ChildAgentStarted",
             DomainEvent::ChildAgentEngineConfigured { .. } => "ChildAgentEngineConfigured",
             DomainEvent::ChildAgentToken { .. } => "ChildAgentToken",
+            DomainEvent::ChildContextUsage { .. } => "ChildContextUsage",
             DomainEvent::ChildAgentDone { .. } => "ChildAgentDone",
             DomainEvent::BubbleClickWindowExpired => "BubbleClickWindowExpired",
+            DomainEvent::ContextUsage { .. } => "ContextUsage",
+            DomainEvent::CompactionApplied { .. } => "CompactionApplied",
         }
     }
 
@@ -1111,9 +1183,11 @@ impl DomainEvent {
 /// One selectable entry of the `/models` picker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelChoice {
-    /// Named provider connection and model passed to
-    /// `Engine::switch_model_option`.
+    /// Provider connection and model represented by this picker row.
     pub selection: ProviderModelOption,
+    /// Engine runtime effort when the picker was populated. Used to distinguish an
+    /// untouched named-engine shortcut from an explicit user edit.
+    pub initial_reasoning_effort: Option<String>,
     /// Human-readable line shown in the picker.
     pub label: String,
     /// Whether this choice is the model currently serving the conversation.
@@ -1124,9 +1198,33 @@ pub struct ModelChoice {
     /// separated from it by a divider. `None` for a plain provider/model
     /// entry from the catalog itself.
     pub engine_name: Option<String>,
+    /// Resolved without mutation through the engine router when the picker
+    /// was populated, so the detail area previews the actual routing target.
+    pub selection_target: Option<ModelSelectionTarget>,
+    /// Reason a selection target could not be resolved for preview.
+    pub selection_preview_error: Option<String>,
 }
 
 impl ModelChoice {
+    /// Convert the highlighted row into an Engine runtime selection without losing
+    /// named-engine identity or treating an untouched effort as an override.
+    pub fn to_model_selection(&self) -> ModelSelection {
+        match &self.engine_name {
+            Some(engine_name) => ModelSelection::NamedEngine {
+                engine_name: engine_name.clone(),
+                option: self.selection.clone(),
+                reasoning_effort: if self.selection.reasoning_effort
+                    == self.initial_reasoning_effort
+                {
+                    ReasoningEffortChange::Unchanged
+                } else {
+                    ReasoningEffortChange::Set(self.selection.reasoning_effort.clone())
+                },
+            },
+            None => ModelSelection::ProviderModel(self.selection.clone()),
+        }
+    }
+
     /// Refresh the row text after changing its selected reasoning effort.
     pub fn refresh_label(&mut self) {
         self.label = match &self.engine_name {
@@ -1229,7 +1327,56 @@ fn format_input_modality_markers(input_modalities: Option<&[InputModality]>) -> 
     }
 }
 
-fn format_context_length(context_length: usize) -> String {
+/// Estimated context size against the active context window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextUsage {
+    /// Estimated token count.
+    pub estimated_tokens: usize,
+    /// The active window the estimate is measured against.
+    pub context_length: usize,
+    /// The representation this estimate covers.
+    pub source: ContextUsageSource,
+}
+
+/// Render the token count and fill percentage for a context-usage estimate.
+///
+/// The percentage is the estimate's fill of the active window, rounded to a
+/// whole percent and clamped to `100%` (an estimate can overshoot briefly
+/// before compaction runs).
+pub fn format_context_usage(estimated_tokens: usize, context_length: usize) -> String {
+    let percentage = if context_length == 0 {
+        0.0
+    } else {
+        (estimated_tokens as f64 / context_length as f64) * 100.0
+    }
+    .round()
+    .clamp(0.0, 100.0) as u64;
+    format!(
+        "{} ({percentage}%)",
+        format_token_estimate(estimated_tokens)
+    )
+}
+
+/// Format the footer value independently of the estimate source.
+pub fn format_context_usage_readout(context_usage: ContextUsage) -> String {
+    format_context_usage(context_usage.estimated_tokens, context_usage.context_length)
+}
+
+/// Abbreviate a token estimate: `950`, `64.2K`, `1.2M`.
+fn format_token_estimate(estimated_tokens: usize) -> String {
+    const THOUSAND: f64 = 1_000.0;
+    const MILLION: f64 = 1_000_000.0;
+    let tokens = estimated_tokens as f64;
+    if tokens >= MILLION {
+        format!("{:.1}M", tokens / MILLION)
+    } else if tokens >= THOUSAND {
+        format!("{:.1}K", tokens / THOUSAND)
+    } else {
+        estimated_tokens.to_string()
+    }
+}
+
+pub(crate) fn format_context_length(context_length: usize) -> String {
     const KILOBYTE: usize = 1024;
     const MEGABYTE: usize = KILOBYTE * 1024;
 
@@ -1243,7 +1390,7 @@ fn format_context_length(context_length: usize) -> String {
 }
 
 /// Overlay rendered above the input while a slash command is being composed
-/// or resolved (blueprint §6).
+/// or resolved.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum SlashOverlay {
     /// No slash command is in play.
@@ -1445,7 +1592,7 @@ pub enum Effect {
     /// optionally narrowed by a typed model filter.
     ListModels { filter: Option<String> },
     /// A provider-connection/model was picked: activate it and confirm in the transcript.
-    SwitchModel(ProviderModelOption),
+    SwitchModel(ModelSelection),
 }
 
 // ─── AppLayout ────────────────────────────────────────────────────────────────
@@ -1683,8 +1830,8 @@ fn move_selection(selected: &mut usize, choices_length: usize, delta: isize) {
 
 // ─── AppState ────────────────────────────────────────────────────────────────
 
-/// Runtime identity and paths displayed in the TUI's startup logo and help
-/// popup.
+/// Active profile and workspace paths displayed in the TUI's startup logo
+/// and help popup.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TuiDisplayMetadata {
     pub profile_name: String,
@@ -1720,11 +1867,11 @@ pub struct AppState {
     pub mode: TuiMode,
     pub focus: Focus,
     pub layout: AppLayout,
-    /// Runtime identity and paths shown by the TUI's startup logo and help
-    /// popup.
+    /// Active profile and workspace paths shown by the TUI's startup logo
+    /// and help popup.
     pub display_metadata: TuiDisplayMetadata,
     /// Provider/model identity for the root conversation. The Driver refreshes
-    /// this from the live root engine before each frame so runtime model
+    /// this from the live root engine before each frame so Engine runtime model
     /// switches are reflected immediately.
     pub engine_display: EngineDisplayInfo,
 
@@ -1760,6 +1907,19 @@ pub struct AppState {
     // ── steer indicator ─────────────────────────────────────────────────────
     /// `true` while ≥1 steer is queued.
     pub steer_indicator: bool,
+
+    // ── context readout ─────────────────────────────────────────────────────
+    /// Latest root model-view estimate reported by `UiUpdate::ContextUsage`;
+    /// rendered in the footer only while `active_view` is `Root`. Child values
+    /// are stored on their respective `ChildConversation`s.
+    pub context_usage: Option<ContextUsage>,
+    /// The persisted compaction snapshot's transcript-relative boundary,
+    /// read once at startup and handed to [`Self::replay_messages`] so the
+    /// marker lands where the model view was cut. `None` when the session
+    /// never compacted or its snapshot predates the field.
+    pub replay_compaction_boundary: Option<usize>,
+    /// In-flight summary request identity per conversation, not agent activity.
+    pub compaction_requests: std::collections::HashMap<Option<Uuid>, Uuid>,
 
     // ── transient UI ────────────────────────────────────────────────────────
     /// Floating notification, auto-dismissed after [`TOAST_DURATION`].
@@ -1820,19 +1980,19 @@ pub struct AppState {
     /// `child_conversations`). Populated on `ChildAgentStarted`, cleared on
     /// `ChildAgentDone`.
     pub running_child: Option<ChildRunInfo>,
-    /// `true` when `active_view` was switched to `Child` automatically (an
-    /// interactive pause), rather than by explicit user navigation (click).
-    /// Gates whether the view auto-returns to
-    /// `pre_pause_view`/`Root` once that pause resolves or the child
-    /// finishes.
+    /// `true` when `active_view` was switched automatically (an interactive
+    /// pause — `note_interactive_pause`), to `Child` *or* `Root`, rather than
+    /// by explicit user navigation (click/Esc). Gates whether the view
+    /// auto-returns to `pre_pause_view` once that pause resolves or the
+    /// owning child finishes.
     pub auto_switched_to_child: bool,
     /// Snapshot of `active_view` from immediately before an auto-switch
-    /// (`note_child_interactive_pause`), so `resolve_possible_child_pause`
+    /// (`note_interactive_pause`), so `resolve_possible_interactive_pause`
     /// can restore *that* view — which may be `Root` or a different,
     /// already-finished child's view the user had manually drilled into —
     /// instead of unconditionally landing back on `Root`. Populated only by
-    /// `note_child_interactive_pause`, consumed (taken) by
-    /// `resolve_possible_child_pause`.
+    /// `note_interactive_pause`, consumed (taken) by
+    /// `resolve_possible_interactive_pause`.
     pub pre_pause_view: Option<ConversationView>,
     /// `(bubble_id, clicked_at)` of the most recent plain click on a chat
     /// bubble's title row, used to detect a second click on the same
@@ -1886,6 +2046,9 @@ impl AppState {
             layout: AppLayout::default(),
             display_metadata: TuiDisplayMetadata::default(),
             engine_display: EngineDisplayInfo::default(),
+            context_usage: None,
+            replay_compaction_boundary: None,
+            compaction_requests: std::collections::HashMap::new(),
 
             chat_entries: Vec::new(),
             turn_buffer: TurnBuffer::default(),
@@ -1937,8 +2100,19 @@ impl AppState {
     /// Replace the root view-model with a projection of a hydrated session.
     /// Persisted user messages also seed input history, while implicit
     /// harness notes remain model-only and are omitted by the projection.
-    pub fn replay_messages(&mut self, messages: &[Message], child_runs: &[ChildRunRecord]) {
-        self.chat_entries = project_messages_with_child_runs(messages, child_runs);
+    ///
+    /// `compaction_boundary` is the persisted snapshot's
+    /// transcript-relative cut (`SessionState::compaction_transcript_boundary`):
+    /// it inserts [`ChatEntry::CompactionMarker`] at the position the model
+    /// view was compacted at. `None` replays the plain transcript.
+    pub fn replay_messages(
+        &mut self,
+        messages: &[Message],
+        child_runs: &[ChildRunRecord],
+        compaction_boundary: Option<usize>,
+    ) {
+        self.chat_entries =
+            project_messages_with_child_runs(messages, child_runs, compaction_boundary);
         self.input_history = messages
             .iter()
             .filter_map(|message| match message {
@@ -1979,11 +2153,18 @@ impl AppState {
     }
 
     /// Replace a replay-discovered child's empty transcript after its first
-    /// drill-in read. Repeated drill-ins keep the loaded transcript.
-    pub fn load_child_messages(&mut self, run_id: Uuid, messages: &[Message]) {
+    /// drill-in read, retaining its persisted compaction boundary.
+    /// Repeated drill-ins keep the loaded transcript.
+    pub fn load_child_messages(
+        &mut self,
+        run_id: Uuid,
+        messages: &[Message],
+        compaction_boundary: Option<usize>,
+    ) {
         if let Some(conversation) = self.child_conversations.get_mut(&run_id) {
             if conversation.needs_lazy_load {
-                conversation.messages = project_messages(messages);
+                conversation.messages =
+                    project_messages_with_child_runs(messages, &[], compaction_boundary);
                 conversation.needs_lazy_load = false;
             }
         }
@@ -1993,6 +2174,18 @@ impl AppState {
         self.child_conversations
             .get(&run_id)
             .is_some_and(|conversation| conversation.needs_lazy_load)
+    }
+
+    /// Latest context usage for the conversation currently shown in the main
+    /// chat area. Root usage remains independent from all child updates.
+    pub fn active_context_usage(&self) -> Option<ContextUsage> {
+        match &self.active_view {
+            ConversationView::Root => self.context_usage,
+            ConversationView::Child { run_id, .. } => self
+                .child_conversations
+                .get(run_id)
+                .and_then(|conversation| conversation.context_usage),
+        }
     }
 
     /// Returns `true` if a toast is active and has not yet expired.
@@ -2090,68 +2283,109 @@ impl AppState {
     }
 
     /// Called whenever a `ToolPending`/`ClarifyPending` bubble tagged with
-    /// `run_id` is created. When it belongs to the currently-*running*
-    /// child and the user isn't already looking at that exact child's view,
-    /// auto-switches `active_view` to it (armed for auto-return via
-    /// `auto_switched_to_child`), snapshotting whatever view was active
-    /// beforehand into `pre_pause_view` so `resolve_possible_child_pause`
-    /// can restore it — this may be `Root` *or* a different (e.g. already
-    /// finished) child's drill-in view the user had manually navigated to;
-    /// an approval belonging to a background child must never get stranded
-    /// behind whatever transcript happens to be on screen. If the user is
-    /// already viewing this exact running child (manually or via an earlier
-    /// auto-switch), no further switch/re-arm happens — if `active_view` is
-    /// already `Child`, `auto_switched_to_child` is set to `false` (the user
-    /// navigated manually; no auto-return).
-    pub(crate) fn note_child_interactive_pause(&mut self, run_id: Option<Uuid>) {
-        let Some(child) = self.running_child.clone() else {
-            return;
+    /// `run_id` is created. Auto-switches `active_view` to wherever this
+    /// bubble actually lives — the root conversation when `run_id` is `None`
+    /// or unrecognised, or that specific child's transcript when `run_id`
+    /// identifies a tracked child — regardless of which conversation (root
+    /// or any other subagent) is currently on screen, so an approval is
+    /// never stranded behind an unrelated transcript. Armed for auto-return
+    /// via `auto_switched_to_child`, snapshotting whatever view was active
+    /// beforehand into `pre_pause_view` so `resolve_possible_interactive_pause`
+    /// can restore it exactly. If the user is already looking at the view
+    /// this bubble belongs to (manually or via an earlier auto-switch), no
+    /// further switch/re-arm happens — `auto_switched_to_child` is reset to
+    /// `false` (the user is there on their own terms; no auto-return).
+    pub(crate) fn note_interactive_pause(&mut self, run_id: Option<Uuid>) {
+        let target_view = match run_id.and_then(|id| self.child_conversations.get(&id)) {
+            Some(conversation) => ConversationView::Child {
+                run_id: conversation.info.run_id,
+                agent_type: conversation.info.agent_type.clone(),
+                task: conversation.info.task.clone(),
+                label: conversation.info.label.clone(),
+            },
+            None => ConversationView::Root,
         };
-        if run_id != Some(child.run_id) {
-            return;
-        }
-        let already_viewing_this_child = matches!(
-            &self.active_view,
-            ConversationView::Child { run_id: r, .. } if *r == child.run_id
-        );
-        if already_viewing_this_child {
+        let already_viewing_target = match (&self.active_view, &target_view) {
+            (ConversationView::Root, ConversationView::Root) => true,
+            (
+                ConversationView::Child { run_id: a, .. },
+                ConversationView::Child { run_id: b, .. },
+            ) => a == b,
+            _ => false,
+        };
+        if already_viewing_target {
             self.auto_switched_to_child = false;
             return;
         }
         self.pre_pause_view = Some(self.active_view.clone());
-        self.active_view = ConversationView::Child {
-            run_id: child.run_id,
-            agent_type: child.agent_type,
-            task: child.task,
-            label: child.label,
-        };
+        self.active_view = target_view;
         self.auto_switched_to_child = true;
     }
 
     /// Called whenever a tool/clarify bubble identified by `id` reaches a
-    /// terminal state (or is denied). If `id` lives in the child transcript
-    /// currently being viewed and the drill-in view was auto-switched there
-    /// for it, auto-returns to whatever view was active before the
-    /// auto-switch (`pre_pause_view` — `Root` or a different child's view),
-    /// falling back to `Root` if none was recorded — matches Phase 6.10
-    /// step 74: "When child interactive pause resolves: auto-return to
-    /// `Root` only if `auto_switched_to_child` is `true`."
-    pub(crate) fn resolve_possible_child_pause(&mut self, id: Uuid) {
+    /// terminal state (or is denied). If `id` lives in whichever transcript
+    /// is currently being viewed (root or a child) and the drill-in view
+    /// was auto-switched there for it, auto-returns to whatever view was
+    /// active before the auto-switch (`pre_pause_view` — `Root` or a
+    /// different child's view), falling back to `Root` if none was
+    /// recorded — matches Phase 6.10 step 74: "When child interactive pause
+    /// resolves: auto-return to `Root` only if `auto_switched_to_child` is
+    /// `true`," generalized to cover an auto-switch into `Root` for a
+    /// root-owned approval as well.
+    pub(crate) fn resolve_possible_interactive_pause(&mut self, id: Uuid) {
         if !self.auto_switched_to_child {
+            self.resume_pending_tool_approval();
             return;
         }
-        let ConversationView::Child { run_id, .. } = &self.active_view else {
-            return;
-        };
-        let run_id = *run_id;
-        let was_child_pause = self.child_conversations.get(&run_id).is_some_and(|conversation| {
-            conversation.messages.iter().any(
+        let bubble_is_in_current_view = match &self.active_view {
+            ConversationView::Root => self.chat_entries.iter().any(
                 |entry| matches!(entry, ChatEntry::ToolBubble { id: entry_id, .. } if *entry_id == id),
-            )
-        });
-        if was_child_pause {
+            ),
+            ConversationView::Child { run_id, .. } => {
+                self.child_conversations.get(run_id).is_some_and(|conversation| {
+                    conversation.messages.iter().any(
+                        |entry| matches!(entry, ChatEntry::ToolBubble { id: entry_id, .. } if *entry_id == id),
+                    )
+                })
+            }
+        };
+        if bubble_is_in_current_view {
             self.active_view = self.pre_pause_view.take().unwrap_or(ConversationView::Root);
             self.auto_switched_to_child = false;
+        }
+        self.resume_pending_tool_approval();
+    }
+
+    fn resume_pending_tool_approval(&mut self) {
+        if matches!(self.focus, Focus::HelpPopup)
+            || matches!(
+                self.mode,
+                TuiMode::ClarifyPending { .. } | TuiMode::Aborting
+            )
+        {
+            return;
+        }
+        if let Focus::ToolApproval { tool_id, .. } = self.focus {
+            if matches!(
+                self.find_tool_bubble_mut(tool_id),
+                Some(ChatEntry::ToolBubble { state, .. })
+                    if matches!(state.as_ref(), ToolCallState::Pending { .. })
+            ) {
+                return;
+            }
+            self.focus = Focus::MainInput;
+        }
+        if let Some((tool_id, tool_name)) = self.pending_tool_approval() {
+            let run_id = self
+                .child_conversations
+                .iter()
+                .find_map(|(run_id, conversation)| {
+                    conversation.messages.iter().any(
+                    |entry| matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == tool_id),
+                ).then_some(*run_id)
+                });
+            self.focus = Focus::ToolApproval { tool_id, tool_name };
+            self.note_interactive_pause(run_id);
         }
     }
 
@@ -2205,6 +2439,17 @@ impl AppState {
         self.running_child = Some(info.clone());
         self.child_conversations
             .insert(info.run_id, ChildConversation::new(info));
+    }
+
+    pub(crate) fn subagent_started_at(&self) -> HashMap<Uuid, Instant> {
+        self.child_conversations
+            .values()
+            .filter_map(|conversation| {
+                conversation
+                    .started_at
+                    .map(|started_at| (conversation.info.bubble_id, started_at))
+            })
+            .collect()
     }
 
     pub fn switch_to_child_view(&mut self, run_id: Uuid) {
@@ -2315,7 +2560,7 @@ impl AppState {
     /// child — new messages/tool bubbles can shift row indices at or below
     /// the saved offset, landing it past the target bubble otherwise.
     /// `saved_root_scroll`/`saved_root_scroll_bubble` are `None` when the
-    /// child view was entered via auto-switch (`note_child_interactive_pause`)
+    /// child view was entered via auto-switch (`note_interactive_pause`)
     /// rather than manual navigation; in that case the shared scroll fields
     /// were never touched, so there is nothing to restore.
     pub fn switch_to_root_view(&mut self) {
@@ -2337,9 +2582,10 @@ impl AppState {
     /// earlier prompts) and the captured tool names.
     ///
     /// The in-memory `Context` and the session file are *not* touched here —
-    /// the agent loop owns those and resets them on `AgentCommand::ClearContext`
-    /// (blueprint §4C).
+    /// the agent loop owns those and resets them on `AgentCommand::ClearContext`.
     pub fn clear_conversation(&mut self) {
+        self.context_usage = None;
+        self.compaction_requests.clear();
         self.chat_entries.clear();
         self.turn_buffer = TurnBuffer::default();
         self.queued_steer_texts.clear();
@@ -2397,10 +2643,8 @@ impl AppState {
     /// while a tool still awaits its verdict (and hide the approval
     /// controls), so the approval focus is resumed instead.
     pub fn restore_focus_after_help(&mut self) {
-        self.focus = match self.pending_tool_approval() {
-            Some((tool_id, tool_name)) => Focus::ToolApproval { tool_id, tool_name },
-            None => Focus::MainInput,
-        };
+        self.focus = Focus::MainInput;
+        self.resume_pending_tool_approval();
     }
 
     /// Recompute the suggestion overlay from the live draft.
@@ -3113,7 +3357,7 @@ impl AppState {
             self.focus = Focus::MainInput;
             self.mode = TuiMode::Idle;
         }
-        self.resolve_possible_child_pause(id);
+        self.resolve_possible_interactive_pause(id);
     }
 
     /// Create a `Denied` bubble for a tool that was auto-denied by the sandbox
@@ -3182,7 +3426,27 @@ impl AppState {
                 title_arguments: preserved_title_arguments,
             };
         }
-        self.resolve_possible_child_pause(id);
+        self.resolve_possible_interactive_pause(id);
+    }
+
+    /// Commit an approval locally before the corresponding `ToolStart` arrives.
+    pub(crate) fn apply_tool_approved(&mut self, id: Uuid) {
+        if let Some(ChatEntry::ToolBubble { state, .. }) = self.find_tool_bubble_mut(id) {
+            if let ToolCallState::Pending {
+                arguments,
+                content_sections,
+                title_arguments,
+            } = state.as_mut()
+            {
+                **state = ToolCallState::Running {
+                    arguments: std::mem::take(arguments),
+                    content_sections: std::mem::take(content_sections),
+                    title_arguments: std::mem::take(title_arguments),
+                    progress_arguments: vec![],
+                };
+            }
+        }
+        self.resolve_possible_interactive_pause(id);
     }
 }
 
@@ -3198,6 +3462,120 @@ impl Default for AppState {
 mod tests {
     use super::*;
     use crate::agent::ToolCallRequest;
+
+    #[test]
+    fn replay_places_the_compaction_marker_at_the_boundary_and_keeps_the_transcript() {
+        let messages = vec![
+            crate::agent::Message::User {
+                content: "first question".to_string(),
+                kind: UserMessageKind::Explicit,
+            },
+            crate::agent::Message::Assistant {
+                content: "first answer".to_string(),
+                status: crate::agent::AssistantStatus::Complete,
+                tool_calls: Vec::new(),
+            },
+            crate::agent::Message::User {
+                content: "second question".to_string(),
+                kind: UserMessageKind::Explicit,
+            },
+            crate::agent::Message::Assistant {
+                content: "second answer".to_string(),
+                status: crate::agent::AssistantStatus::Complete,
+                tool_calls: Vec::new(),
+            },
+        ];
+
+        let mut state = AppState::new();
+        state.replay_messages(&messages, &[], Some(2));
+
+        assert_eq!(
+            state.chat_entries.len(),
+            5,
+            "four messages plus the marker: {:?}",
+            state.chat_entries
+        );
+        assert!(
+            matches!(
+                &state.chat_entries[0],
+                ChatEntry::UserMessage { text, .. } if text == "first question"
+            ),
+            "the summarized prefix stays browsable: {:?}",
+            state.chat_entries[0]
+        );
+        assert!(matches!(
+            &state.chat_entries[1],
+            ChatEntry::AssistantMessage { text, .. } if text == "first answer"
+        ));
+        assert_eq!(
+            state.chat_entries[2],
+            ChatEntry::CompactionMarker {
+                summarized_messages: 2
+            },
+            "the marker sits exactly where the verbatim tail begins"
+        );
+        assert!(
+            matches!(
+                &state.chat_entries[3],
+                ChatEntry::UserMessage { text, .. } if text == "second question"
+            ),
+            "the tail after the boundary keeps rendering in order: {:?}",
+            state.chat_entries[3]
+        );
+        assert!(matches!(
+            &state.chat_entries[4],
+            ChatEntry::AssistantMessage { text, .. } if text == "second answer"
+        ));
+        assert_eq!(
+            state.input_history,
+            vec!["first question".to_string(), "second question".to_string()],
+            "the marker is not a message and never seeds input history"
+        );
+
+        // A session without a snapshot replays exactly as before.
+        let mut plain = AppState::new();
+        plain.replay_messages(&messages, &[], None);
+        assert_eq!(plain.chat_entries.len(), 4);
+    }
+
+    #[test]
+    fn context_usage_formats_as_tokens_and_fill_percentage() {
+        assert_eq!(format_context_usage(64_200, 128_000), "64.2K (50%)");
+        assert_eq!(
+            format_context_usage_readout(ContextUsage {
+                estimated_tokens: 9_854,
+                context_length: 98_304,
+                source: ContextUsageSource::ModelView,
+            }),
+            "9.9K (10%)"
+        );
+        assert_eq!(
+            format_context_usage_readout(ContextUsage {
+                estimated_tokens: 64_200,
+                context_length: 128_000,
+                source: ContextUsageSource::SerializedRequest,
+            }),
+            "64.2K (50%)"
+        );
+        assert_eq!(format_context_usage(950, 128_000), "950 (1%)");
+        assert_eq!(format_context_usage(1_260_000, 2_000_000), "1.3M (63%)");
+        assert_eq!(format_context_usage(0, 128_000), "0 (0%)");
+        assert_eq!(
+            format_context_usage(128_000, 128_000),
+            "128.0K (100%)",
+            "a full window reads 100%"
+        );
+        assert_eq!(
+            format_context_usage(200_000, 128_000),
+            "200.0K (100%)",
+            "an estimate overshooting the window clamps the percentage"
+        );
+        assert_eq!(
+            format_context_usage(1_000, 0),
+            "1.0K (0%)",
+            "a degenerate window reports 0% instead of dividing by zero"
+        );
+    }
 
     #[test]
     fn replay_projection_restores_full_fidelity_tool_bubble() {
@@ -3369,7 +3747,7 @@ mod tests {
             },
         ];
 
-        let entries = project_messages_with_child_runs(&messages, &child_runs);
+        let entries = project_messages_with_child_runs(&messages, &child_runs, None);
         let finished_entry = entries
             .iter()
             .find(|entry| {
@@ -3455,7 +3833,7 @@ mod tests {
         ];
 
         let mut state = AppState::new();
-        state.replay_messages(&root_messages, &child_runs);
+        state.replay_messages(&root_messages, &child_runs, None);
         assert!(state.child_needs_lazy_load(run_id));
         assert!(state
             .child_conversations
@@ -3464,7 +3842,7 @@ mod tests {
             .messages
             .is_empty());
 
-        state.load_child_messages(run_id, &child_messages);
+        state.load_child_messages(run_id, &child_messages, None);
         let loaded_messages = state
             .child_conversations
             .get(&run_id)
@@ -3481,6 +3859,7 @@ mod tests {
                 status: AssistantStatus::Complete,
                 tool_calls: vec![],
             }],
+            Some(1),
         );
         assert_eq!(
             state
@@ -3496,6 +3875,7 @@ mod tests {
     fn matching_model_indices_requires_every_filter_word_in_any_order() {
         let choice = |provider_connection: &str, model_id: &str| ModelChoice {
             label: format!("{provider_connection}/{model_id}"),
+            initial_reasoning_effort: None,
             selection: ProviderModelOption {
                 provider_connection: provider_connection.to_string(),
                 model: crate::llm::ModelInfo {
@@ -3509,6 +3889,8 @@ mod tests {
             },
             is_active: false,
             engine_name: None,
+            selection_target: None,
+            selection_preview_error: None,
         };
         let choices = vec![
             choice("openrouter", "deepseek-v3"),
@@ -3687,6 +4069,7 @@ mod tests {
         let choice =
             |label: &str, provider_connection: &str, engine_name: Option<&str>| ModelChoice {
                 label: label.to_string(),
+                initial_reasoning_effort: None,
                 selection: ProviderModelOption {
                     provider_connection: provider_connection.to_string(),
                     model: crate::llm::ModelInfo {
@@ -3700,6 +4083,8 @@ mod tests {
                 },
                 is_active: false,
                 engine_name: engine_name.map(str::to_string),
+                selection_target: None,
+                selection_preview_error: None,
             };
         let choices = vec![
             choice("engine/model", "engine", Some("engine")),
@@ -3758,6 +4143,51 @@ mod tests {
         assert_eq!(
             model_choice_label(&model_option(Some(vec!["low".to_string()])), false),
             "stub/model  reasoning: default ⚙"
+        );
+    }
+
+    #[test]
+    fn named_engine_choice_preserves_untouched_effort_and_tracks_default_reset() {
+        let choice = ModelChoice {
+            label: "reasoning → stub/model".to_string(),
+            selection: ProviderModelOption {
+                provider_connection: "stub".to_string(),
+                model: crate::llm::ModelInfo {
+                    id: "model".to_string(),
+                    context_length: None,
+                    reasoning_efforts: Some(vec!["low".to_string(), "high".to_string()]),
+                    reasoning_default: None,
+                    input_modalities: None,
+                },
+                reasoning_effort: Some("high".to_string()),
+            },
+            initial_reasoning_effort: Some("high".to_string()),
+            is_active: false,
+            engine_name: Some("reasoning".to_string()),
+            selection_target: None,
+            selection_preview_error: None,
+        };
+
+        assert_eq!(
+            choice.to_model_selection(),
+            ModelSelection::NamedEngine {
+                engine_name: "reasoning".to_string(),
+                option: choice.selection.clone(),
+                reasoning_effort: ReasoningEffortChange::Unchanged,
+            },
+            "confirming an untouched named shortcut must retain its Engine runtime effort"
+        );
+
+        let mut reset_to_default = choice;
+        reset_to_default.selection.reasoning_effort = None;
+        assert_eq!(
+            reset_to_default.to_model_selection(),
+            ModelSelection::NamedEngine {
+                engine_name: "reasoning".to_string(),
+                option: reset_to_default.selection.clone(),
+                reasoning_effort: ReasoningEffortChange::Set(None),
+            },
+            "cycling an effort back to the provider default must be distinguishable from no edit"
         );
     }
 
@@ -4645,7 +5075,7 @@ mod tests {
 
     #[test]
     fn switch_to_root_view_is_a_no_op_on_scroll_when_child_was_auto_switched() {
-        // `note_child_interactive_pause` auto-switches into the child view
+        // `note_interactive_pause` auto-switches into the child view
         // without going through `switch_to_child_view`, so it never
         // populates `saved_root_scroll`. The scroll fields it leaves behind
         // belong to whatever was on screen while viewing `Root` and must be

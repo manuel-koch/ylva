@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Runtime profile configuration and layered configuration resolution.
+//! Profile configuration and layered resolution.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -21,6 +21,7 @@ use crate::ylva_home::{ylva_home, YLVA_DIR_NAME};
 
 mod agent;
 pub mod agent_type_file;
+pub mod compaction_prompt;
 pub mod instructions;
 pub mod layered;
 mod profile;
@@ -31,7 +32,10 @@ mod web_search;
 
 pub use agent::AgentConfig;
 pub use agent_type_file::AgentTypeDefinition;
-pub use profile::{profile_config_source_path, ProfileConfig, ToolSandboxConfig};
+pub use profile::{
+    profile_config_source_path, AgentCompactionConfig, CompactionConfig, ProfileConfig,
+    ToolSandboxConfig,
+};
 pub use provider::{ProviderConfig, ProviderConnectionConfig};
 pub use web_fetch::WebFetchConfig;
 pub use web_search::{
@@ -201,6 +205,21 @@ pub enum ConfigError {
         path: PathBuf,
         backend: String,
         expected: String,
+    },
+    #[error(
+        "profile config at {} has max_tool_iterations = 0 for agent type '{agent_type}'; \
+         expected at least 1",
+        path.display()
+    )]
+    InvalidMaxToolIterations { path: PathBuf, agent_type: String },
+    #[error(
+        "profile config at {} has an invalid compaction setting for '{engine}': {detail}",
+        path.display()
+    )]
+    InvalidCompactionSetting {
+        path: PathBuf,
+        engine: String,
+        detail: String,
     },
     #[error("cannot resolve the home directory for ~/.ylva")]
     HomeDirectoryNotFound,

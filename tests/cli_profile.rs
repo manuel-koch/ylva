@@ -19,9 +19,12 @@
 //! code), so it is exercised here rather than as a `src/config.rs` unit test.
 
 use std::fs;
+use std::path::Path;
 use std::process::Command;
 
 use tempfile::TempDir;
+use uuid::Uuid;
+use ylva::StoreEvent;
 
 /// An explicitly named profile with no config file on disk exits non-zero
 /// and names the profile in the error, instead of silently running with the
@@ -224,4 +227,284 @@ fn an_unusable_chats_root_is_a_hard_error() {
         stderr.contains("store I/O error"),
         "the error must identify the persistence failure: {stderr}"
     );
+}
+
+/// Write a profile config for the implicit `default` profile.
+fn write_default_profile_config(ylva_home: &TempDir, contents: &str) {
+    let profile_directory = ylva_home
+        .path()
+        .join(ylva::PROFILES_DIRECTORY_NAME)
+        .join(ylva::DEFAULT_PROFILE_NAME);
+    fs::create_dir_all(&profile_directory).expect("create profile directory");
+    fs::write(profile_directory.join("config.toml"), contents).expect("write profile config");
+}
+
+/// Spawn the compiled binary headlessly with `YLVA_HOME` and the working
+/// directory both set to `ylva_home`.
+fn spawn_ylva(ylva_home: &TempDir, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_ylva"))
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env(ylva::YLVA_HOME_ENVIRONMENT_VARIABLE, ylva_home.path())
+        .current_dir(ylva_home.path())
+        .args(["--no-tui", "--prompt", "hi"])
+        .args(args)
+        .output()
+        .expect("spawn the ylva binary")
+}
+
+/// The session id the binary printed on exit.
+fn session_id_from_stderr(output: &std::process::Output) -> Uuid {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let session_line = stderr
+        .lines()
+        .find(|line| line.starts_with("Session: "))
+        .unwrap_or_else(|| panic!("stderr must print the session id: {stderr}"));
+    session_line
+        .trim_start_matches("Session: ")
+        .parse::<Uuid>()
+        .expect("the printed session id is a uuid")
+}
+
+/// Every event of the session persisted under `ylva_home`, in write order.
+fn session_events(ylva_home: &TempDir, session_id: Uuid) -> Vec<StoreEvent> {
+    let chats_root = ylva_home.path().join("chats");
+    let path = ylva::session_path(
+        &chats_root,
+        &ylva::project_key(ylva_home.path()),
+        session_id,
+    );
+    ylva::Store::read_events(&path).expect("session file is readable")
+}
+
+/// `--agent` naming a type the selected profile does not configure exits
+/// non-zero before startup, naming the flag's value and the available types.
+#[test]
+fn an_unknown_agent_type_is_a_startup_error() {
+    let ylva_home = TempDir::new().expect("tempdir");
+
+    let output = spawn_ylva(&ylva_home, &["--agent", "nope"]);
+
+    assert!(
+        !output.status.success(),
+        "an unknown --agent type must not exit zero"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unknown agent type 'nope'"),
+        "the error must name the requested type: {stderr}"
+    );
+    assert!(
+        stderr.contains("available types: default"),
+        "the error must list the configured types: {stderr}"
+    );
+}
+
+/// A configured agent type is accepted by `--agent`, becomes the run's root
+/// type, and lands in the new session's metadata.
+#[test]
+fn a_configured_agent_type_is_selectable_and_persisted() {
+    let ylva_home = TempDir::new().expect("tempdir");
+    write_default_profile_config(
+        &ylva_home,
+        "[agents.researcher]\ndescription = \"Research things.\"\n",
+    );
+    let log_path = ylva_home.path().join("agent-type.log");
+
+    let output = spawn_ylva(
+        &ylva_home,
+        &[
+            "--agent",
+            "researcher",
+            "--log-file",
+            log_path.to_str().expect("log path is valid UTF-8"),
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "a configured agent type must start; stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let log = fs::read_to_string(&log_path).expect("read log");
+    assert!(
+        log.contains("agent_type=researcher"),
+        "the resolved root type must be logged: {log}"
+    );
+
+    let session_id = session_id_from_stderr(&output);
+    let events = session_events(&ylva_home, session_id);
+    let StoreEvent::Meta(meta) = &events[0] else {
+        panic!("first line must be the meta header, got {:?}", events[0])
+    };
+    assert_eq!(
+        meta.agent_type.as_deref(),
+        Some("researcher"),
+        "the selected type is persisted in the session metadata"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, StoreEvent::AgentTypeChanged { .. })),
+        "a fresh session records its type in `meta`, never as a change: {events:?}"
+    );
+}
+
+/// An explicit `--agent` on a resume replaces the stored type, is appended as
+/// an `agent_type_changed` record, and becomes the type later resumes restore
+/// without the flag.
+#[test]
+fn an_explicit_agent_override_is_recorded_on_resume() {
+    let ylva_home = TempDir::new().expect("tempdir");
+    write_default_profile_config(
+        &ylva_home,
+        "[agents.researcher]\ndescription = \"Research things.\"\n",
+    );
+
+    let first = spawn_ylva(&ylva_home, &["--agent", "researcher"]);
+    assert!(
+        first.status.success(),
+        "the first run must succeed; stderr:\n{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let session_id = session_id_from_stderr(&first);
+    assert!(
+        !session_events(&ylva_home, session_id)
+            .iter()
+            .any(|event| matches!(event, StoreEvent::AgentTypeChanged { .. })),
+        "the initial selection needs no change record"
+    );
+
+    // Resume with an explicit override: the record is appended, the header
+    // stays untouched.
+    let overriding_log = ylva_home.path().join("override.log");
+    let second = spawn_ylva(
+        &ylva_home,
+        &[
+            "--conversation-id",
+            session_id.to_string().as_str(),
+            "--agent",
+            "default",
+            "--log-file",
+            overriding_log.to_str().expect("log path is valid UTF-8"),
+        ],
+    );
+    assert!(
+        second.status.success(),
+        "the overriding resume must succeed; stderr:\n{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let events = session_events(&ylva_home, session_id);
+    let changes: Vec<String> = events
+        .iter()
+        .filter_map(|event| match event {
+            StoreEvent::AgentTypeChanged { agent_type, .. } => Some(agent_type.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        changes,
+        vec!["default".to_string()],
+        "the explicit override is appended as the latest selection: {events:?}"
+    );
+    let StoreEvent::Meta(meta) = &events[0] else {
+        panic!("first line must be the meta header, got {:?}", events[0])
+    };
+    assert_eq!(
+        meta.agent_type.as_deref(),
+        Some("researcher"),
+        "the creation header is never rewritten by an override"
+    );
+    let override_log = fs::read_to_string(&overriding_log).expect("read override log");
+    assert!(
+        override_log.contains("agent_type=default"),
+        "the override is the type this run executed as: {override_log}"
+    );
+
+    // Resuming without the flag restores the stored (overridden) type.
+    let restored_log = ylva_home.path().join("restored.log");
+    let third = spawn_ylva(
+        &ylva_home,
+        &[
+            "--conversation-id",
+            session_id.to_string().as_str(),
+            "--log-file",
+            restored_log.to_str().expect("log path is valid UTF-8"),
+        ],
+    );
+    assert!(
+        third.status.success(),
+        "the restoring resume must succeed; stderr:\n{}",
+        String::from_utf8_lossy(&third.stderr)
+    );
+    let restored_log = fs::read_to_string(&restored_log).expect("read restored log");
+    assert!(
+        restored_log.contains("agent_type=default"),
+        "the stored override is restored when no flag is given: {restored_log}"
+    );
+    let events = session_events(&ylva_home, session_id);
+    let changes = events
+        .iter()
+        .filter(|event| matches!(event, StoreEvent::AgentTypeChanged { .. }))
+        .count();
+    assert_eq!(
+        changes, 1,
+        "a restore never appends another change record: {events:?}"
+    );
+}
+
+/// A resume whose stored type no longer exists in the profile is a startup
+/// error that points at `--agent`, instead of silently falling back.
+#[test]
+fn a_stale_stored_agent_type_is_a_startup_error() {
+    let ylva_home = TempDir::new().expect("tempdir");
+    write_default_profile_config(
+        &ylva_home,
+        "[agents.researcher]\ndescription = \"Research things.\"\n",
+    );
+
+    let first = spawn_ylva(&ylva_home, &["--agent", "researcher"]);
+    assert!(
+        first.status.success(),
+        "the first run must succeed; stderr:\n{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let session_id = session_id_from_stderr(&first);
+    let path = ylva::session_path(
+        &ylva_home.path().join("chats"),
+        &ylva::project_key(ylva_home.path()),
+        session_id,
+    );
+    retire_stored_agent_type(&path, "researcher", "retired");
+
+    let output = spawn_ylva(
+        &ylva_home,
+        &["--conversation-id", session_id.to_string().as_str()],
+    );
+
+    assert!(
+        !output.status.success(),
+        "a stale stored type must not start"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("'retired'"),
+        "the error must name the stale type: {stderr}"
+    );
+    assert!(
+        stderr.contains("--agent"),
+        "the error must point at the flag that resolves it: {stderr}"
+    );
+}
+
+/// Rewrite the stored root agent type of a session file, simulating a type
+/// that was removed from the profile after the session was created.
+fn retire_stored_agent_type(path: &Path, from: &str, to: &str) {
+    let contents = fs::read_to_string(path).expect("read session file");
+    let mut lines: Vec<String> = contents.lines().map(str::to_string).collect();
+    let mut header: serde_json::Value = serde_json::from_str(&lines[0]).expect("meta line is JSON");
+    assert_eq!(header["agent_type"], serde_json::json!(from));
+    header["agent_type"] = serde_json::json!(to);
+    lines[0] = serde_json::to_string(&header).expect("serialize meta line");
+    fs::write(path, format!("{}\n", lines.join("\n"))).expect("write session file");
 }

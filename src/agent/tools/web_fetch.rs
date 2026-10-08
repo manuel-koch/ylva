@@ -172,6 +172,29 @@ impl WebFetchResult {
         }
     }
 
+    /// Fit the model-facing text to the per-request context allowance. Text is
+    /// cut and flagged as truncated; a complete media body cannot be cut
+    /// without corrupting the attachment, so it is rejected instead.
+    fn fit_to_token_budget(&mut self, max_output_tokens: usize) -> Result<(), String> {
+        let estimator = crate::llm::TokenEstimator::Tiktoken;
+        if self.media_type.is_some() {
+            if estimator.estimate_tokens(&self.text) > max_output_tokens {
+                return Err(
+                    "media result exceeds the available context token allowance; fetch fewer \
+                     resources per batch or a text-oriented resource"
+                        .to_string(),
+                );
+            }
+            return Ok(());
+        }
+        let (text, truncated) = estimator.truncate(&self.text, max_output_tokens);
+        if truncated {
+            self.text = text;
+            self.truncated = true;
+        }
+        Ok(())
+    }
+
     /// Response facts as `key=value` lines for the `Response` content-section.
     ///
     /// Equal duplicates are collapsed: `final_url` only appears when a
@@ -330,6 +353,7 @@ pub struct WebFetchCall {
     id: uuid::Uuid,
     raw_arguments: Value,
     tool: WebFetchTool,
+    runtime_output_token_limit: Option<usize>,
 }
 
 impl ToolCall for WebFetchCall {
@@ -353,6 +377,10 @@ impl ToolCall for WebFetchCall {
         self.tool.timeout_secs()
     }
 
+    fn set_runtime_output_token_limit(&mut self, max_output_tokens: Option<usize>) {
+        self.runtime_output_token_limit = max_output_tokens;
+    }
+
     fn non_default_redacted_arguments(&self) -> Vec<(String, Value)> {
         self.raw_arguments
             .as_object()
@@ -372,6 +400,7 @@ impl ToolCall for WebFetchCall {
                 let WebFetchCall {
                     raw_arguments,
                     tool,
+                    runtime_output_token_limit,
                     ..
                 } = *self;
                 let args = serde_json::from_value::<WebFetchInputArgs>(raw_arguments).map_err(
@@ -396,7 +425,13 @@ impl ToolCall for WebFetchCall {
                         )
                     })?
                     .map_err(|error| web_fetch_tool_error(&args.url, error))?;
-                Ok(Box::new(WebFetchResult::new(args.url, response)) as Box<dyn ToolCallResult>)
+                let mut result = WebFetchResult::new(args.url, response);
+                if let Some(max_output_tokens) = runtime_output_token_limit {
+                    result
+                        .fit_to_token_budget(max_output_tokens)
+                        .map_err(|message| ToolError::failed(WebFetchTool::NAME, message))?;
+                }
+                Ok(Box::new(result) as Box<dyn ToolCallResult>)
             }
             .instrument(span),
         )
@@ -517,6 +552,7 @@ impl Tool for WebFetchTool {
             id,
             raw_arguments: arguments,
             tool: self.clone(),
+            runtime_output_token_limit: None,
         })
     }
 }

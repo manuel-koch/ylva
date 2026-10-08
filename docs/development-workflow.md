@@ -117,7 +117,7 @@ Thos texts will drift when the constant value gets changed !
 
 Either rephrase the text without the constant value ( if that still makes
 sense ) or embed the constant value in the docstring ( by reference ) or
-format the string at runtime ( to include the constant value ).
+format the string when the code runs ( to include the constant value ).
 
 ## Logging
 

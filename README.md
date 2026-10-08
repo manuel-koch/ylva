@@ -37,12 +37,16 @@ Ylva is highly customizable to adapt to user needs.
 - [x] Per-tool configurable sandbox approval rules
 - [x] Persistent session storage
   - [x] Ability to resume an existing session
+  - [x] Cloning an existing session into a new one (`--clone`)
   - [x] User message history, to reuse a message/prompt from a recent session
   - [x] Automatic title generation for a session
+  - [x] Root agent type selection (`--agent`), restored on resume
+  - [x] Per-agent tool-use iteration limit (`max_tool_iterations`)
 - [x] TUI drill-in view to inspect a spawned child agent's own conversation
 - [x] Slash commands in TUI
-  - [x] `/models` to change current provider + model
+  - [x] `/models` to switch named engines or provider-catalog models
   - [x] `/clear` to clear/reset current session
-- [ ] Tracking token usage in current context
-- [ ] Session / context compaction
+- [ ] Tracking billed token usage and cost totals in current context (an
+      approximate context-size readout is already shown in the TUI footer)
+- [x] Session / context compaction
 - [ ] Support for skills

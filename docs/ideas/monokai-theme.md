@@ -1,7 +1,6 @@
 # Third built-in theme: Monokai
 
-`docs/blueprint.md` originally listed three built-in `syntect` themes for
-Phase 7: dark, light, and monokai. Phase 7 ships only dark
+Ylva ships two built-in `syntect` themes: dark
 (`base16-ocean.dark`) and light (`base16-ocean.light`), both already present
 in `syntect`'s bundled `ThemeSet::load_defaults()` set — no bundled default
 theme is named "monokai".
@@ -22,5 +21,5 @@ existing bundled name. Before implementing:
 - Wire it into `src/highlight.rs`'s theme selection and the `theme`
   config key.
 
-Not scheduled to a phase yet — pick this up when a third theme is actually
-wanted, or fold it into whichever future phase does further rendering polish.
+Not scheduled yet — pick this up when a third theme is actually wanted,
+or fold it into future rendering polish.

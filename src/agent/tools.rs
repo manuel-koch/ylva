@@ -15,7 +15,7 @@
 //! Tool trait, registry, and the built-in file-system tools.
 //!
 //! Schemas are derived from typed argument structs via `schemars`, never
-//! hand-written JSON. The registry keeps a runtime `allowed` seam so a future
+//! hand-written JSON. The registry keeps a per-run `allowed` seam so a future
 //! whitelist or headless filtering can restrict the `tools` array without
 //! changing the agent loop.
 
@@ -272,6 +272,10 @@ pub trait ToolCall: Send + Sync {
     fn name(&self) -> &str;
     fn arguments(&self) -> &serde_json::Value;
     fn timeout_secs(&self) -> u64;
+
+    /// Supply a per-request token ceiling for model-facing output. Tools that
+    /// collect potentially large output may combine this with argument limits.
+    fn set_runtime_output_token_limit(&mut self, _max_output_tokens: Option<usize>) {}
 
     /// Returns `true` when `key` names an argument whose value belongs in a
     /// content section rather than an inline invocation summary.
@@ -565,9 +569,8 @@ pub trait Tool: Send + Sync {
 
 /// Central store of every tool the agent may invoke.
 ///
-/// Dynamic filtering (§4D) is a seam: [`ToolRegistry::schemas`] returns every
-/// registered schema today; a future `allowed_tools` filter slots in without
-/// changing the agent loop.
+/// [`ToolRegistry::schemas`] returns every registered schema. Agent
+/// construction restricts the registry to the tools allowed by role and type.
 #[derive(Default)]
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
@@ -655,7 +658,11 @@ fn to_tool_schema(tool: &dyn Tool) -> ToolSchema {
         serde_json::to_value(tool.input_schema()).unwrap_or_else(|_| serde_json::json!({}));
     ToolSchema {
         name: tool.name().to_string(),
-        description: tool.description().to_string(),
+        description: format!(
+            "{}\n\nAcross all tools combined, a single assistant response may contain at most {} distinct tool calls. Keep each batch within this limit; if more work is needed, continue in a later response.",
+            tool.description(),
+            crate::agent::MAX_TOOL_CALLS_PER_RESPONSE,
+        ),
         parameters,
     }
 }
@@ -1058,7 +1065,11 @@ mod tests {
         let schemas = registry.schemas();
         assert_eq!(schemas.len(), 1);
         assert_eq!(schemas[0].name, "test");
-        assert_eq!(schemas[0].description, "a test tool");
+        assert!(schemas[0].description.starts_with("a test tool"));
+        assert!(schemas[0].description.contains(&format!(
+            "at most {} distinct tool calls",
+            crate::agent::MAX_TOOL_CALLS_PER_RESPONSE
+        )));
         assert_eq!(
             schemas[0].parameters["required"],
             serde_json::json!(["field"])

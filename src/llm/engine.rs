@@ -28,6 +28,10 @@ use crate::llm::{InputModality, ModelInfo, Provider, ToolSchema};
 /// Default context-length used when no explicit value is configured.
 pub const DEFAULT_CONTEXT_LENGTH: usize = 128_000;
 
+/// Default [`EngineConfig::compact_target_ratio`]: compaction shrinks the
+/// model view back to 50% of the engine's context window.
+pub const DEFAULT_COMPACT_TARGET_RATIO: f64 = 0.5;
+
 /// Configuration for an Engine.
 ///
 /// Phase 7 wires the provider-connection name, `model`, `temperature`, `context_length`,
@@ -44,9 +48,8 @@ pub const DEFAULT_CONTEXT_LENGTH: usize = 128_000;
 /// - **Phase 10 (Full Configuration & Persona System)** supplies the
 ///   project/home/built-in fallback chain and will add persona/`agents/*.md`
 ///   sourcing, which populate this same struct through additional layers.
-/// - **Phase 12 (Context Compaction & Token Budgeting)** reads
-///   `context_length` to drive `maybe_compact`'s budget; it adds no fields
-///   here.
+/// - **Context compaction** reads per-engine settings to budget the model view
+///   (see `crate::agent::compaction`).
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct EngineConfig {
     /// Named provider connection. Legacy flat profiles may use `provider`,
@@ -87,6 +90,34 @@ pub struct EngineConfig {
     /// advertised options before switching.
     #[serde(default)]
     pub reasoning: Option<String>,
+    /// Target fraction of the context window a compaction shrinks the model
+    /// view back to. Configured per `[engines.*]` table and
+    /// defaults to [`DEFAULT_COMPACT_TARGET_RATIO`].
+    #[serde(default = "default_compact_target_ratio")]
+    pub compact_target_ratio: f64,
+    /// Soft compaction trigger: the usage fraction at or above which a
+    /// completed turn starts a background summary. Defaults to
+    /// [`crate::agent::compaction::DEFAULT_SOFT_COMPACTION_THRESHOLD`];
+    /// profile validation requires `0 < target < soft < hard <= 1`.
+    #[serde(default = "default_soft_compaction_threshold")]
+    pub soft_compaction_threshold: f64,
+    /// Hard compaction trigger: the usage fraction above which the loop stops
+    /// waiting for a background summary and drops synchronously. Defaults to
+    /// [`crate::agent::compaction::DEFAULT_HARD_COMPACTION_THRESHOLD`].
+    #[serde(default = "default_hard_compaction_threshold")]
+    pub hard_compaction_threshold: f64,
+}
+
+fn default_compact_target_ratio() -> f64 {
+    DEFAULT_COMPACT_TARGET_RATIO
+}
+
+fn default_soft_compaction_threshold() -> f64 {
+    crate::agent::compaction::DEFAULT_SOFT_COMPACTION_THRESHOLD
+}
+
+fn default_hard_compaction_threshold() -> f64 {
+    crate::agent::compaction::DEFAULT_HARD_COMPACTION_THRESHOLD
 }
 
 impl EngineConfig {
@@ -131,13 +162,13 @@ where
 /// The named engine, provider connection, and model shown for the conversation
 /// currently on screen.
 ///
-/// This intentionally contains only display metadata. Runtime request
+/// This intentionally contains only display metadata. Engine runtime request
 /// settings remain owned by [`EngineRuntimeConfig`], while the immutable
 /// connection details stay in [`EngineConfig`]. The reasoning effort is
-/// copied from the runtime snapshot for display only.
+/// copied from the Engine runtime snapshot for display only.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EngineDisplayInfo {
-    /// The profile key under `[engines.*]`, when the runtime has one.
+    /// The profile key under `[engines.*]`, when the Engine runtime has one.
     ///
     /// Directly constructed engines used by compatibility callers may not have
     /// a named-engine key and leave this empty.
@@ -146,6 +177,23 @@ pub struct EngineDisplayInfo {
     pub model: String,
     /// Explicit reasoning effort, or `None` when the provider default is used.
     pub reasoning_effort: Option<String>,
+    /// Current summary-engine identity and whether it follows or shares the
+    /// conversation engine.
+    pub compaction_engine: Option<CompactionEngineDisplayInfo>,
+    /// Whether this conversation shares an Engine runtime with its parent agent.
+    pub inherits_parent_runtime: bool,
+}
+
+/// Display-only selection and context window of the engine used for summaries.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CompactionEngineDisplayInfo {
+    pub engine_name: String,
+    pub provider_connection: String,
+    pub model: String,
+    /// Effective context window in tokens.
+    pub context_length: usize,
+    pub follows_conversation: bool,
+    pub shares_conversation: bool,
 }
 
 impl EngineDisplayInfo {
@@ -157,6 +205,8 @@ impl EngineDisplayInfo {
             provider_connection: config.provider_connection,
             model: config.model,
             reasoning_effort: engine.reasoning_effort(),
+            compaction_engine: None,
+            inherits_parent_runtime: false,
         }
     }
 }
@@ -168,6 +218,8 @@ impl From<&EngineConfig> for EngineDisplayInfo {
             provider_connection: config.provider_connection.clone(),
             model: config.model.clone(),
             reasoning_effort: None,
+            compaction_engine: None,
+            inherits_parent_runtime: false,
         }
     }
 }
@@ -226,8 +278,9 @@ fn parse_context_length(text: &str) -> Result<usize, String> {
 /// Mutable engine settings shared by an [`Engine`] and its [`Provider`].
 ///
 /// A provider snapshots this value before starting a request, so all
-/// request-level settings come from one coherent state even when a runtime
-/// update happens concurrently. Connection settings remain in [`EngineConfig`]
+/// request-level settings come from one coherent state even when an Engine
+/// Engine runtime update happens concurrently. Connection settings remain in
+/// [`EngineConfig`]
 /// and are immutable for the lifetime of the engine.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EngineRuntimeConfig {
@@ -273,7 +326,64 @@ pub struct ProviderModelOption {
     pub reasoning_effort: Option<String>,
 }
 
-/// Runtime abstraction over a chat-completions-style streaming backend.
+/// How a named-engine shortcut should treat the engine's current reasoning
+/// setting.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReasoningEffortChange {
+    /// Keep the named engine's current Engine runtime effort.
+    Unchanged,
+    /// Apply the picker value, where `None` selects the provider default.
+    Set(Option<String>),
+}
+
+/// A model-picker selection that keeps named-engine identity separate from
+/// raw provider/model catalog choices.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ModelSelection {
+    NamedEngine {
+        engine_name: String,
+        option: ProviderModelOption,
+        reasoning_effort: ReasoningEffortChange,
+    },
+    ProviderModel(ProviderModelOption),
+}
+
+impl ModelSelection {
+    pub fn provider_connection(&self) -> &str {
+        match self {
+            Self::NamedEngine { option, .. } | Self::ProviderModel(option) => {
+                &option.provider_connection
+            }
+        }
+    }
+
+    pub fn model_id(&self) -> &str {
+        match self {
+            Self::NamedEngine { option, .. } | Self::ProviderModel(option) => &option.model.id,
+        }
+    }
+}
+
+/// Non-mutating routing result and effective context window for a model-picker
+/// selection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelSelectionTarget {
+    pub engine_name: Option<String>,
+    pub provider_connection: String,
+    pub model: String,
+    /// Effective context window after applying the selection, in tokens.
+    pub context_length: usize,
+}
+
+/// Engine runtime settings displayed for one named engine.
+#[derive(Clone, Debug)]
+pub struct NamedEngineInfo {
+    pub name: String,
+    pub config: EngineConfig,
+    pub reasoning_effort: Option<String>,
+}
+
+/// Execution interface over a chat-completions-style streaming backend.
 ///
 /// Keeps `AgentLoop` independent of concrete provider implementations while
 /// allowing the agent factory to construct root and child engines consistently.
@@ -285,6 +395,46 @@ pub trait Engine: Send + Sync {
         cancel: CancellationToken,
     ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>>;
 
+    /// Start a chat request associated with a persisted session when one is
+    /// available. Engines that do not propagate request metadata can use the
+    /// default implementation.
+    fn chat_with_session_id<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        _session_id: Option<uuid::Uuid>,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        self.chat(messages, tools, cancel)
+    }
+
+    /// Start a request and report its serialized token estimate before the
+    /// provider waits for response headers. Engines without request metadata
+    /// retain the normal chat behavior.
+    fn chat_with_session_id_and_estimate<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        session_id: Option<uuid::Uuid>,
+        _on_estimate: Box<dyn FnOnce(usize, usize) -> BoxFuture<'static, ()> + Send>,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        self.chat_with_session_id(messages, tools, cancel, session_id)
+    }
+
+    /// Start a request with optional diagnostics for caller-side failures.
+    fn chat_with_session_id_and_diagnostics<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        session_id: Option<uuid::Uuid>,
+        on_estimate: Box<dyn FnOnce(usize, usize) -> BoxFuture<'static, ()> + Send>,
+        _on_failure: Option<crate::http::RequestDumpFailureHandler>,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        self.chat_with_session_id_and_estimate(messages, tools, cancel, session_id, on_estimate)
+    }
+
     /// A snapshot of the engine's configuration.
     ///
     /// Returned by value rather than by reference because `/models` mutates
@@ -293,7 +443,7 @@ pub trait Engine: Send + Sync {
     /// caller code.
     fn config(&self) -> EngineConfig;
 
-    /// Return the active profile engine name when this runtime routes among
+    /// Return the active profile engine name when this Engine runtime routes among
     /// named engines. A directly constructed engine has no named key.
     fn active_engine_name(&self) -> Option<String> {
         None
@@ -303,7 +453,7 @@ pub trait Engine: Send + Sync {
     fn list_models(&self) -> BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>>;
 
     /// List models from every configured provider connection represented by
-    /// this runtime.
+    /// this engine or router.
     ///
     /// A regular engine exposes its own connection under its connection name.
     /// [`EngineRouter`] overrides this to query all configured provider
@@ -340,6 +490,22 @@ pub trait Engine: Send + Sync {
         Vec::new()
     }
 
+    /// Return named engines with their current Engine runtime reasoning selection.
+    ///
+    /// Non-routed engines may expose configured engine snapshots through
+    /// `named_engines`; their initial configured effort is the best available
+    /// fallback. Routers override this to report each engine's live value.
+    fn named_engine_info(&self) -> Vec<NamedEngineInfo> {
+        self.named_engines()
+            .into_iter()
+            .map(|(name, config)| NamedEngineInfo {
+                reasoning_effort: config.reasoning.clone(),
+                name,
+                config,
+            })
+            .collect()
+    }
+
     /// Point this engine — and therefore every agent sharing it — at
     /// `model` for all subsequent turns.
     fn switch_model(&self, model: &str) -> anyhow::Result<()>;
@@ -368,6 +534,25 @@ pub trait Engine: Send + Sync {
 
     /// Update the active model's provider-advertised input modalities.
     fn set_input_modalities(&self, _input_modalities: Option<Vec<InputModality>>) {}
+
+    /// The context window the active model serves, in tokens.
+    ///
+    /// [`EngineConfig::effective_context_length`] resolved for the *current*
+    /// model: the profile's `context_length` when set, otherwise the
+    /// provider-catalog length adopted by the last `/models` selection,
+    /// otherwise [`DEFAULT_CONTEXT_LENGTH`]. Compaction re-reads this on
+    /// every sweep, so switching to a model with a different window
+    /// re-evaluates the budget.
+    fn effective_context_length(&self) -> usize {
+        self.config().effective_context_length(None)
+    }
+
+    /// Adopt the provider-catalog context length of a newly selected model.
+    ///
+    /// Engines whose profile leaves `context_length` unset follow the
+    /// catalog; an explicit profile value always wins. The default is a
+    /// no-op for engines with no Engine runtime context length to update.
+    fn adopt_catalog_context_length(&self, _catalog_context_length: Option<usize>) {}
 
     /// Discover the active model's provider-advertised catalog metadata —
     /// input modalities and a reasoning-effort validation pass — from the
@@ -418,8 +603,116 @@ pub trait Engine: Send + Sync {
         self.set_reasoning_effort(option.reasoning_effort.as_deref())?;
         self.switch_model(&option.model.id)?;
         self.set_input_modalities(option.model.input_modalities.clone());
+        self.adopt_catalog_context_length(option.model.context_length);
         Ok(())
     }
+
+    /// Apply a picker selection. Named shortcuts activate the exact existing
+    /// engine; raw catalog options retain provider-based routing.
+    fn select_model(&self, selection: &ModelSelection) -> anyhow::Result<()> {
+        match selection {
+            ModelSelection::ProviderModel(option) => self.switch_model_option(option),
+            ModelSelection::NamedEngine {
+                engine_name,
+                option,
+                reasoning_effort,
+            } => {
+                anyhow::ensure!(
+                    self.active_engine_name().as_deref() == Some(engine_name),
+                    "engine '{engine_name}' is not available for named selection"
+                );
+                validate_named_engine_option(&self.config(), option, reasoning_effort)?;
+                if let ReasoningEffortChange::Set(reasoning_effort) = reasoning_effort {
+                    self.set_reasoning_effort(reasoning_effort.as_deref())?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Resolve the exact engine a picker selection would affect without
+    /// changing Engine runtime state. The router overrides this for cross-connection
+    /// catalog selections and inactive named-engine shortcuts.
+    fn preview_model_selection(
+        &self,
+        selection: &ModelSelection,
+    ) -> anyhow::Result<ModelSelectionTarget> {
+        let config = self.config();
+        let engine_name = match selection {
+            ModelSelection::NamedEngine {
+                engine_name,
+                option,
+                reasoning_effort,
+            } => {
+                anyhow::ensure!(
+                    self.active_engine_name().as_deref() == Some(engine_name),
+                    "engine '{engine_name}' is not available for named selection"
+                );
+                validate_named_engine_option(&config, option, reasoning_effort)?;
+                Some(engine_name.clone())
+            }
+            ModelSelection::ProviderModel(option) => {
+                anyhow::ensure!(
+                    config.provider_connection == option.provider_connection,
+                    "engine uses provider connection '{}', not '{}'",
+                    config.provider_connection,
+                    option.provider_connection
+                );
+                self.active_engine_name()
+            }
+        };
+        let context_length = match selection {
+            ModelSelection::NamedEngine { .. } => self.effective_context_length(),
+            ModelSelection::ProviderModel(option) => config
+                .context_length
+                .or(option.model.context_length)
+                .unwrap_or_else(|| self.effective_context_length()),
+        };
+        Ok(ModelSelectionTarget {
+            engine_name,
+            provider_connection: selection.provider_connection().to_string(),
+            model: selection.model_id().to_string(),
+            context_length,
+        })
+    }
+}
+
+fn validate_named_engine_option(
+    config: &EngineConfig,
+    option: &ProviderModelOption,
+    reasoning_effort: &ReasoningEffortChange,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        config.provider_connection == option.provider_connection,
+        "engine uses provider connection '{}', not '{}'",
+        config.provider_connection,
+        option.provider_connection
+    );
+    anyhow::ensure!(
+        config.model == option.model.id,
+        "engine uses model '{}', not '{}'",
+        config.model,
+        option.model.id
+    );
+    match reasoning_effort {
+        ReasoningEffortChange::Unchanged => {}
+        ReasoningEffortChange::Set(Some(effort)) => anyhow::ensure!(
+            option.model.advertises_reasoning_effort(effort),
+            "model '{}' does not advertise reasoning effort '{}'",
+            option.model.id,
+            effort
+        ),
+        ReasoningEffortChange::Set(None) => anyhow::ensure!(
+            option
+                .model
+                .reasoning_efforts
+                .as_ref()
+                .is_some_and(|efforts| !efforts.is_empty()),
+            "model '{}' does not advertise selectable reasoning efforts",
+            option.model.id
+        ),
+    }
+    Ok(())
 }
 
 /// Routes chat and model operations to one active engine from a configured
@@ -428,7 +721,7 @@ pub trait Engine: Send + Sync {
 /// The router keeps connection settings in the underlying engines. Switching
 /// provider connections only changes which already-constructed engine receives
 /// future requests, while model changes continue to use each connection's existing
-/// runtime configuration handle.
+/// Engine runtime configuration handle.
 pub struct EngineRouter {
     engines: HashMap<String, Arc<dyn Engine>>,
     active_engine: RwLock<String>,
@@ -511,6 +804,19 @@ impl EngineRouter {
         providers.sort_by(|left, right| left.0.cmp(&right.0));
         providers
     }
+
+    fn provider_engine_for(
+        &self,
+        provider_connection: &str,
+    ) -> anyhow::Result<(String, Arc<dyn Engine>)> {
+        self.provider_engines()
+            .into_iter()
+            .find(|(connection, _, _)| connection == provider_connection)
+            .map(|(_, engine_name, engine)| (engine_name, engine))
+            .ok_or_else(|| {
+                anyhow::anyhow!("provider connection '{provider_connection}' is not configured")
+            })
+    }
 }
 
 impl Engine for EngineRouter {
@@ -549,8 +855,87 @@ impl Engine for EngineRouter {
         })
     }
 
+    fn chat_with_session_id<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        session_id: Option<uuid::Uuid>,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        Box::pin(async move {
+            let (engine_name, engine) = self.active_engine_entry();
+            engine.hydrate_catalog_metadata().await;
+            let config = engine.config();
+            tracing::debug!(
+                engine = %engine_name,
+                provider_connection = %config.provider_connection,
+                model = %config.model,
+                reasoning_effort = %crate::llm::format_reasoning_effort_for_log(
+                    engine.reasoning_effort().as_deref()
+                ),
+                input_modalities = %crate::llm::format_input_modalities_for_log(
+                    engine.input_modalities().as_deref()
+                ),
+                "named engine selected for chat request"
+            );
+            let span = tracing::debug_span!(
+                "engine_request",
+                engine = %engine_name,
+                provider_connection = %config.provider_connection,
+            );
+            engine
+                .chat_with_session_id(messages, tools, cancel, session_id)
+                .instrument(span)
+                .await
+        })
+    }
+
+    fn chat_with_session_id_and_estimate<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        session_id: Option<uuid::Uuid>,
+        on_estimate: Box<dyn FnOnce(usize, usize) -> BoxFuture<'static, ()> + Send>,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        Box::pin(async move {
+            let (_engine_name, engine) = self.active_engine_entry();
+            engine
+                .chat_with_session_id_and_estimate(messages, tools, cancel, session_id, on_estimate)
+                .await
+        })
+    }
+
+    fn chat_with_session_id_and_diagnostics<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        session_id: Option<uuid::Uuid>,
+        on_estimate: Box<dyn FnOnce(usize, usize) -> BoxFuture<'static, ()> + Send>,
+        on_failure: Option<crate::http::RequestDumpFailureHandler>,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        Box::pin(async move {
+            let (_engine_name, engine) = self.active_engine_entry();
+            engine
+                .chat_with_session_id_and_diagnostics(
+                    messages,
+                    tools,
+                    cancel,
+                    session_id,
+                    on_estimate,
+                    on_failure,
+                )
+                .await
+        })
+    }
+
     fn config(&self) -> EngineConfig {
         self.active_engine().config()
+    }
+
+    fn effective_context_length(&self) -> usize {
+        self.active_engine().effective_context_length()
     }
 
     fn active_engine_name(&self) -> Option<String> {
@@ -563,6 +948,11 @@ impl Engine for EngineRouter {
 
     fn input_modalities(&self) -> Option<Vec<InputModality>> {
         self.active_engine().input_modalities()
+    }
+
+    fn hydrate_catalog_metadata(&self) -> BoxFuture<'_, ()> {
+        let engine = self.active_engine();
+        Box::pin(async move { engine.hydrate_catalog_metadata().await })
     }
 
     /// Drain pending notices from every configured engine, not just the
@@ -641,29 +1031,89 @@ impl Engine for EngineRouter {
         engines
     }
 
+    fn named_engine_info(&self) -> Vec<NamedEngineInfo> {
+        let mut engines: Vec<NamedEngineInfo> = self
+            .engines
+            .iter()
+            .map(|(name, engine)| NamedEngineInfo {
+                name: name.clone(),
+                config: engine.config(),
+                reasoning_effort: engine.reasoning_effort(),
+            })
+            .collect();
+        engines.sort_by(|left, right| left.name.cmp(&right.name));
+        engines
+    }
+
     fn switch_model_option(&self, option: &ProviderModelOption) -> anyhow::Result<()> {
-        let (provider_connection, engine_name, engine) = self
-            .provider_engines()
-            .into_iter()
-            .find(|(provider_connection, _, _)| provider_connection == &option.provider_connection)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "provider connection '{}' is not configured",
-                    option.provider_connection
-                )
-            })?;
-        anyhow::ensure!(
-            provider_connection == option.provider_connection,
-            "provider connection '{}' does not match '{}'",
-            provider_connection,
-            option.provider_connection
-        );
+        let (engine_name, engine) = self.provider_engine_for(&option.provider_connection)?;
         engine.switch_model_option(option)?;
         *self
             .active_engine
             .write()
             .map_err(|_| anyhow::anyhow!("the active engine lock is poisoned"))? = engine_name;
         Ok(())
+    }
+
+    fn preview_model_selection(
+        &self,
+        selection: &ModelSelection,
+    ) -> anyhow::Result<ModelSelectionTarget> {
+        let (engine_name, target_engine) = match selection {
+            ModelSelection::NamedEngine {
+                engine_name,
+                option,
+                reasoning_effort,
+            } => {
+                let target_engine = self.engines.get(engine_name).ok_or_else(|| {
+                    anyhow::anyhow!("named engine '{engine_name}' is not configured")
+                })?;
+                validate_named_engine_option(&target_engine.config(), option, reasoning_effort)?;
+                (engine_name.clone(), target_engine.clone())
+            }
+            ModelSelection::ProviderModel(option) => {
+                self.provider_engine_for(&option.provider_connection)?
+            }
+        };
+        let config = target_engine.config();
+        let context_length = match selection {
+            ModelSelection::NamedEngine { .. } => target_engine.effective_context_length(),
+            ModelSelection::ProviderModel(option) => config
+                .context_length
+                .or(option.model.context_length)
+                .unwrap_or_else(|| target_engine.effective_context_length()),
+        };
+        Ok(ModelSelectionTarget {
+            engine_name: Some(engine_name),
+            provider_connection: config.provider_connection,
+            model: selection.model_id().to_string(),
+            context_length,
+        })
+    }
+
+    fn select_model(&self, selection: &ModelSelection) -> anyhow::Result<()> {
+        match selection {
+            ModelSelection::ProviderModel(option) => self.switch_model_option(option),
+            ModelSelection::NamedEngine {
+                engine_name,
+                option,
+                reasoning_effort,
+            } => {
+                let engine = self.engines.get(engine_name).ok_or_else(|| {
+                    anyhow::anyhow!("named engine '{engine_name}' is not configured")
+                })?;
+                validate_named_engine_option(&engine.config(), option, reasoning_effort)?;
+                let mut active_engine = self
+                    .active_engine
+                    .write()
+                    .map_err(|_| anyhow::anyhow!("the active engine lock is poisoned"))?;
+                if let ReasoningEffortChange::Set(reasoning_effort) = reasoning_effort {
+                    engine.set_reasoning_effort(reasoning_effort.as_deref())?;
+                }
+                *active_engine = engine_name.clone();
+                Ok(())
+            }
+        }
     }
 }
 
@@ -672,7 +1122,7 @@ pub struct EngineImpl {
     provider: Arc<dyn Provider>,
     /// Connection settings are immutable after construction.
     config: EngineConfig,
-    /// Shared with providers that support runtime engine settings.
+    /// Shared with providers that support Engine runtime settings.
     runtime_config: EngineRuntimeConfigHandle,
     /// One-shot guard: the active model's catalog metadata — input
     /// modalities plus the profile reasoning-effort validation — is
@@ -779,6 +1229,61 @@ impl Engine for EngineImpl {
         })
     }
 
+    fn chat_with_session_id<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        session_id: Option<uuid::Uuid>,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        Box::pin(async move {
+            self.hydrate_catalog_metadata().await;
+            self.provider
+                .chat_with_session_id(messages, tools, cancel, session_id)
+                .await
+        })
+    }
+
+    fn chat_with_session_id_and_estimate<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        session_id: Option<uuid::Uuid>,
+        on_estimate: Box<dyn FnOnce(usize, usize) -> BoxFuture<'static, ()> + Send>,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        Box::pin(async move {
+            self.hydrate_catalog_metadata().await;
+            self.provider
+                .chat_with_session_id_and_estimate(messages, tools, cancel, session_id, on_estimate)
+                .await
+        })
+    }
+
+    fn chat_with_session_id_and_diagnostics<'a>(
+        &'a self,
+        messages: Vec<Message>,
+        tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+        session_id: Option<uuid::Uuid>,
+        on_estimate: Box<dyn FnOnce(usize, usize) -> BoxFuture<'static, ()> + Send>,
+        on_failure: Option<crate::http::RequestDumpFailureHandler>,
+    ) -> BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        Box::pin(async move {
+            self.hydrate_catalog_metadata().await;
+            self.provider
+                .chat_with_session_id_and_diagnostics(
+                    messages,
+                    tools,
+                    cancel,
+                    session_id,
+                    on_estimate,
+                    on_failure,
+                )
+                .await
+        })
+    }
+
     fn config(&self) -> EngineConfig {
         let runtime_config = self
             .runtime_config
@@ -835,6 +1340,43 @@ impl Engine for EngineImpl {
             .input_modalities = input_modalities;
     }
 
+    fn effective_context_length(&self) -> usize {
+        // The profile's own value always wins; otherwise the Engine runtime value
+        // (seeded from the built-in default, replaced by the catalog length
+        // a `/models` selection adopts).
+        let runtime_context_length = self
+            .runtime_config
+            .read()
+            .expect("the engine runtime configuration lock is poisoned")
+            .context_length;
+        self.config.context_length.unwrap_or(runtime_context_length)
+    }
+
+    fn adopt_catalog_context_length(&self, catalog_context_length: Option<usize>) {
+        if self.config.context_length.is_some() {
+            // An explicit profile `context_length` outranks the catalog.
+            return;
+        }
+        let Some(catalog_context_length) = catalog_context_length else {
+            return;
+        };
+        let mut runtime_config = self
+            .runtime_config
+            .write()
+            .expect("the engine runtime configuration lock is poisoned");
+        if runtime_config.context_length == catalog_context_length {
+            return;
+        }
+        tracing::info!(
+            provider_connection = %self.config.provider_connection,
+            model = %runtime_config.model,
+            previous_context_length = runtime_config.context_length,
+            context_length = catalog_context_length,
+            "adopted catalog context length for the selected model"
+        );
+        runtime_config.context_length = catalog_context_length;
+    }
+
     fn hydrate_catalog_metadata(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             if self.catalog_hydrated.load(Ordering::Acquire) {
@@ -850,6 +1392,9 @@ impl Engine for EngineImpl {
             match self.list_models().await {
                 Ok(models) => {
                     let active_model_info = models.iter().find(|model| model.id == active_model);
+                    self.adopt_catalog_context_length(
+                        active_model_info.and_then(|model| model.context_length),
+                    );
                     if let Some(input_modalities) =
                         active_model_info.and_then(|model| model.input_modalities.clone())
                     {
@@ -913,6 +1458,10 @@ mod tests {
             api_base_url: None,
             api_key: None,
             reasoning: None,
+
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
         }
     }
 
@@ -933,6 +1482,10 @@ mod tests {
                     api_base_url: Some(format!("https://{provider}.test/v1")),
                     api_key: None,
                     reasoning: None,
+
+                    compact_target_ratio: 0.5,
+                    soft_compaction_threshold: 0.7,
+                    hard_compaction_threshold: 0.9,
                 }),
                 models: models
                     .iter()
@@ -1081,6 +1634,10 @@ mod tests {
     fn engine_with_profile_reasoning(provider: Arc<dyn Provider>, reasoning: &str) -> EngineImpl {
         let config = EngineConfig {
             reasoning: Some(reasoning.to_string()),
+
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
             ..make_engine_config()
         };
         EngineImpl::new(provider, config)
@@ -1183,7 +1740,7 @@ reasoning = "xhigh"
         assert_eq!(
             runtime_config.reasoning_effort.as_deref(),
             Some("xhigh"),
-            "the initial runtime reasoning effort comes from the engine config"
+            "the initial Engine runtime reasoning effort comes from the engine config"
         );
     }
 
@@ -1203,6 +1760,10 @@ model = "local"
     fn effective_context_length_prefers_the_configured_toml_value() {
         let config = EngineConfig {
             context_length: Some(32_000),
+
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
             ..make_engine_config()
         };
         assert_eq!(config.effective_context_length(Some(999_999)), 32_000);
@@ -1212,6 +1773,10 @@ model = "local"
     fn effective_context_length_falls_back_to_the_catalogs_context_length() {
         let config = EngineConfig {
             context_length: None,
+
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
             ..make_engine_config()
         };
         assert_eq!(config.effective_context_length(Some(64_000)), 64_000);
@@ -1221,11 +1786,121 @@ model = "local"
     fn effective_context_length_falls_back_to_the_built_in_default() {
         let config = EngineConfig {
             context_length: None,
+
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
             ..make_engine_config()
         };
         assert_eq!(
             config.effective_context_length(None),
             DEFAULT_CONTEXT_LENGTH
+        );
+    }
+
+    #[test]
+    fn compact_target_ratio_defaults_to_half_the_window_and_is_configurable_per_engine() {
+        let default_config: EngineConfig =
+            toml::from_str("provider = \"mock\"\nmodel = \"test-model\"\n")
+                .expect("a config without compact_target_ratio parses");
+        assert_eq!(
+            default_config.compact_target_ratio,
+            DEFAULT_COMPACT_TARGET_RATIO
+        );
+        assert_eq!(default_config.compact_target_ratio, 0.5);
+
+        let configured: EngineConfig = toml::from_str(
+            "provider = \"mock\"\nmodel = \"test-model\"\ncompact_target_ratio = 0.25\n",
+        )
+        .expect("an explicit compact_target_ratio parses");
+        assert_eq!(configured.compact_target_ratio, 0.25);
+    }
+
+    #[test]
+    fn the_compaction_budget_is_read_off_the_active_engine() {
+        let engine = CatalogEngine::new("mock", "test-model", &[]);
+
+        let budget = crate::agent::compaction::CompactionBudget::from_engine(&engine)
+            .expect("a non-zero window always yields a budget");
+        assert_eq!(
+            budget.context_length, DEFAULT_CONTEXT_LENGTH,
+            "no profile context_length and no catalog selection fall back to \
+             the built-in window"
+        );
+        assert_eq!(budget.target_ratio, 0.5);
+        assert_eq!(
+            budget.soft_threshold,
+            crate::agent::compaction::DEFAULT_SOFT_COMPACTION_THRESHOLD
+        );
+        assert_eq!(
+            budget.hard_threshold,
+            crate::agent::compaction::DEFAULT_HARD_COMPACTION_THRESHOLD
+        );
+        assert_eq!(budget.target_tokens(), DEFAULT_CONTEXT_LENGTH / 2);
+    }
+
+    #[test]
+    fn a_models_switch_adopts_the_catalog_context_length_only_when_unconfigured() {
+        let catalog_model = ModelInfo {
+            id: "catalog-model".to_string(),
+            context_length: Some(8_192),
+            reasoning_efforts: None,
+            reasoning_default: None,
+            input_modalities: None,
+        };
+        let mut selection = ProviderModelOption {
+            provider_connection: "mock".to_string(),
+            model: catalog_model,
+            reasoning_effort: None,
+        };
+
+        let mut unconfigured = make_engine_config();
+        unconfigured.context_length = None;
+        let provider_connection = unconfigured.provider_connection.clone();
+        let engine = EngineImpl::new(
+            Arc::new(OpenAiCompatibleProvider::new(
+                "test".to_string(),
+                "http://localhost:1234/v1".to_string(),
+                "provider-model".to_string(),
+                None,
+            )),
+            unconfigured,
+        );
+        assert_eq!(
+            engine.effective_context_length(),
+            DEFAULT_CONTEXT_LENGTH,
+            "no profile value and no catalog value yet"
+        );
+
+        selection.provider_connection = provider_connection.clone();
+        engine
+            .switch_model_option(&selection)
+            .expect("model selection succeeds");
+        assert_eq!(
+            engine.effective_context_length(),
+            8_192,
+            "the catalog length adopted by the switch is what budgets measure"
+        );
+
+        let mut pinned = make_engine_config();
+        pinned.context_length = Some(4_096);
+        selection.provider_connection = pinned.provider_connection.clone();
+        let engine = EngineImpl::new(
+            Arc::new(OpenAiCompatibleProvider::new(
+                "test".to_string(),
+                "http://localhost:1234/v1".to_string(),
+                "provider-model".to_string(),
+                None,
+            )),
+            pinned,
+        );
+        engine
+            .switch_model_option(&selection)
+            .expect("model selection succeeds");
+        assert_eq!(
+            engine.effective_context_length(),
+            4_096,
+            "an explicit profile context_length outranks the catalog"
         );
     }
 
@@ -1245,6 +1920,10 @@ model = "local"
             api_base_url: Some("http://localhost:1234/v1".to_string()),
             api_key: None,
             reasoning: None,
+
+            compact_target_ratio: 0.5,
+            soft_compaction_threshold: 0.7,
+            hard_compaction_threshold: 0.9,
         };
         let engine = EngineImpl::new(Arc::clone(&provider) as Arc<dyn Provider>, config);
 
@@ -1417,6 +2096,25 @@ model = "local"
 
             assert_eq!(engine.input_modalities(), Some(vec![InputModality::Image]));
             assert_eq!(provider.list_models_calls(), 1);
+        });
+    }
+
+    #[test]
+    fn engine_impl_hydration_resolves_catalog_context_length_unless_profile_overrides_it() {
+        crate::test_support::run_locked(async {
+            for configured_context_length in [None, Some(32_000)] {
+                let mut model = model_info_with_modalities("test-model", None);
+                model.context_length = Some(8_000);
+                let provider = Arc::new(CatalogProvider::new(vec![model]));
+                let mut config = make_engine_config();
+                config.context_length = configured_context_length;
+                let engine = EngineImpl::new(provider, config);
+                engine.hydrate_catalog_metadata().await;
+                assert_eq!(
+                    engine.effective_context_length(),
+                    configured_context_length.unwrap_or(8_000),
+                );
+            }
         });
     }
 
@@ -1704,6 +2402,201 @@ model = "local"
             .expect("provider/model switch");
         assert_eq!(router.config().provider_connection, "openrouter");
         assert_eq!(router.config().model, "hosted");
+    }
+
+    #[test]
+    fn direct_engine_previews_the_selected_effective_context_length() {
+        let option = |context_length| {
+            ModelSelection::ProviderModel(ProviderModelOption {
+                provider_connection: "mock".to_string(),
+                model: ModelInfo {
+                    id: "candidate".to_string(),
+                    context_length,
+                    reasoning_efforts: None,
+                    reasoning_default: None,
+                    input_modalities: None,
+                },
+                reasoning_effort: None,
+            })
+        };
+
+        let pinned_engine = CatalogEngine::new("mock", "current", &[]);
+        pinned_engine
+            .config
+            .write()
+            .expect("engine config lock")
+            .context_length = Some(32_000);
+        assert_eq!(
+            pinned_engine
+                .preview_model_selection(&option(Some(64_000)))
+                .expect("pinned model preview")
+                .context_length,
+            32_000
+        );
+
+        let catalog_engine = CatalogEngine::new("mock", "current", &[]);
+        assert_eq!(
+            catalog_engine
+                .preview_model_selection(&option(Some(64_000)))
+                .expect("catalog model preview")
+                .context_length,
+            64_000
+        );
+        assert_eq!(
+            catalog_engine
+                .preview_model_selection(&option(None))
+                .expect("model without catalog metadata preview")
+                .context_length,
+            DEFAULT_CONTEXT_LENGTH
+        );
+    }
+
+    #[test]
+    fn engine_router_previews_the_same_target_used_for_named_and_catalog_selection() {
+        let engine_a = CatalogEngine::new("ollama", "shared", &[]);
+        engine_a
+            .config
+            .write()
+            .expect("engine config lock")
+            .context_length = Some(32_000);
+        let engine_a: Arc<dyn Engine> = Arc::new(engine_a);
+        let engine_b: Arc<dyn Engine> = Arc::new(CatalogEngine::new("ollama", "shared", &[]));
+        let engine_c: Arc<dyn Engine> = Arc::new(CatalogEngine::new("openrouter", "hosted", &[]));
+        let router = EngineRouter::new(
+            HashMap::from([
+                ("engine-a".to_string(), engine_a),
+                ("engine-b".to_string(), engine_b),
+                ("engine-c".to_string(), engine_c),
+            ]),
+            "engine-a",
+        )
+        .expect("router construction");
+        let option = |connection: &str, model: &str| ProviderModelOption {
+            provider_connection: connection.to_string(),
+            model: ModelInfo {
+                id: model.to_string(),
+                context_length: Some(64_000),
+                reasoning_efforts: None,
+                reasoning_default: None,
+                input_modalities: None,
+            },
+            reasoning_effort: None,
+        };
+
+        let named_target = router
+            .preview_model_selection(&ModelSelection::NamedEngine {
+                engine_name: "engine-b".to_string(),
+                option: option("ollama", "shared"),
+                reasoning_effort: ReasoningEffortChange::Unchanged,
+            })
+            .expect("named target preview");
+        assert_eq!(named_target.engine_name.as_deref(), Some("engine-b"));
+        assert_eq!(named_target.context_length, DEFAULT_CONTEXT_LENGTH);
+        assert_eq!(
+            router.active_engine_name().as_deref(),
+            Some("engine-a"),
+            "previewing a named shortcut must not change the active engine"
+        );
+
+        let active_connection_target = router
+            .preview_model_selection(&ModelSelection::ProviderModel(option(
+                "ollama",
+                "catalog-model",
+            )))
+            .expect("active connection target preview");
+        assert_eq!(
+            active_connection_target.engine_name.as_deref(),
+            Some("engine-a"),
+            "raw rows on the active connection must target the active named engine"
+        );
+        assert_eq!(
+            active_connection_target.context_length, 32_000,
+            "an explicit engine window takes precedence over catalog metadata"
+        );
+
+        let other_connection_target = router
+            .preview_model_selection(&ModelSelection::ProviderModel(option(
+                "openrouter",
+                "another-model",
+            )))
+            .expect("catalog target preview");
+        assert_eq!(
+            other_connection_target.engine_name.as_deref(),
+            Some("engine-c")
+        );
+        assert_eq!(
+            other_connection_target.model, "another-model",
+            "catalog preview carries the requested model on the routed engine"
+        );
+        assert_eq!(other_connection_target.context_length, 64_000);
+        assert_eq!(
+            router.active_engine_name().as_deref(),
+            Some("engine-a"),
+            "previewing a catalog row must not change the active engine"
+        );
+    }
+
+    #[test]
+    fn named_engine_selection_rejects_invalid_targets_without_switching() {
+        let engine_a: Arc<dyn Engine> = Arc::new(CatalogEngine::new("mock", "shared", &[]));
+        let engine_b: Arc<dyn Engine> = Arc::new(CatalogEngine::new("mock", "shared", &[]));
+        let router = EngineRouter::new(
+            HashMap::from([
+                ("engine-a".to_string(), engine_a),
+                ("engine-b".to_string(), engine_b),
+            ]),
+            "engine-a",
+        )
+        .expect("router construction");
+        let option = |provider_connection: &str, reasoning_efforts: Option<Vec<&str>>, id: &str| {
+            ProviderModelOption {
+                provider_connection: provider_connection.to_string(),
+                model: ModelInfo {
+                    id: id.to_string(),
+                    context_length: None,
+                    reasoning_efforts: reasoning_efforts
+                        .map(|efforts| efforts.into_iter().map(str::to_string).collect()),
+                    reasoning_default: None,
+                    input_modalities: None,
+                },
+                reasoning_effort: None,
+            }
+        };
+
+        let unknown_engine = ModelSelection::NamedEngine {
+            engine_name: "missing".to_string(),
+            option: option("mock", None, "shared"),
+            reasoning_effort: ReasoningEffortChange::Unchanged,
+        };
+        assert!(
+            router.select_model(&unknown_engine).is_err(),
+            "an unknown engine name must be rejected"
+        );
+
+        let wrong_connection = ModelSelection::NamedEngine {
+            engine_name: "engine-b".to_string(),
+            option: option("other", None, "shared"),
+            reasoning_effort: ReasoningEffortChange::Unchanged,
+        };
+        assert!(
+            router.select_model(&wrong_connection).is_err(),
+            "a named shortcut cannot target another provider connection"
+        );
+
+        let unsupported_effort = ModelSelection::NamedEngine {
+            engine_name: "engine-b".to_string(),
+            option: option("mock", Some(vec!["low"]), "shared"),
+            reasoning_effort: ReasoningEffortChange::Set(Some("max".to_string())),
+        };
+        assert!(
+            router.select_model(&unsupported_effort).is_err(),
+            "an edited effort must be advertised by the selected model"
+        );
+        assert_eq!(
+            router.active_engine_name().as_deref(),
+            Some("engine-a"),
+            "failed selection must not change the active engine"
+        );
     }
 
     #[tokio::test]

@@ -24,21 +24,65 @@ After building the selected profile's engines, `AgentFactory` validates every
 agent type's explicit engine reference before store or CLI/TUI startup.
 Environment-discovered engine sets use the same validation path.
 
-## Engine and provider runtime configuration
+`COMPACTION.md` resolves through the same layers as `SOUL.md` (workspace
+`.ylva/`, then the Ylva home, then the built-in default) via
+`load_compaction_prompt`. `AgentFactory` loads it where it wires each agent
+type's compact engine, and those summary guidelines reach every background
+summary request; loops built outside the factory keep the built-in prompt. The
+`build_summary_request` appends code-owned framing to the resolved guidelines
+in one system message, followed by the source messages and a final user trigger.
+Conversation compaction uses this builder; child report reduction is deterministic
+and does not start a separate blocking LLM request.
+The framing derives its trigger description from the same constant as the final
+user message and calls out message boundaries so source text is not mistaken for new
+summarizer instructions. Positive compaction guidelines prioritize the latest
+established state, merge repetition, and preserve actionable details and
+uncertainty. The prompt requests only facts grounded in the supplied prefix;
+the boundary of the unseen verbatim tail is managed by the conversation's
+Engine runtime.
+
+## Engine runtime and provider request configuration
 
 `EngineImpl` and `OpenAiCompatibleProvider` share one
 `EngineRuntimeConfigHandle`. The provider snapshots it before building a
 request and releases the lock before network I/O. Updates therefore affect
 later requests without changing settings in an in-flight request.
 
-Catalog hydration runs once per engine before its first chat. A `/models`
+Catalog hydration resolves the effective context length and runs once per engine
+before its first chat. A `/models`
 selection supplies that model's metadata, so hydration skips another fetch.
-The engine does not retry a failed lookup. If hydration rejects a profile
-reasoning value, the engine queues a notice; `EngineRouter` drains it and
-`AgentLoop` forwards `UiUpdate::Notice` before `StreamStarted`.
+The engine does not repeat a hydration lookup after its one attempt; transient
+HTTP `429`/`5xx` responses inside that attempt use the shared bounded retry
+policy below. If hydration rejects a profile reasoning value, the engine
+queues a notice; `EngineRouter` drains it and `AgentLoop` forwards
+`UiUpdate::Notice` before `StreamStarted`.
 
 Each provider wrapper supplies a request-body customization function. The
 shared transport leaves provider-specific wire fields to those wrappers.
+
+`ModelSelection` keeps named-engine shortcuts distinct from raw catalog
+options. `EngineRouter` resolves preview and confirmation through the same
+provider-to-engine target helper: named choices activate their exact map key,
+while raw catalog choices use the active engine for that connection or the
+sorted representative for another connection. The presenter carries this
+typed selection to the driver, so equal provider/model pairs do not erase
+engine identity. Picker display metadata is a snapshot only; the Engine runtime
+handles remain the source of request settings. While the agent is running, its
+display snapshot retains a shared compaction-engine reference alongside the
+background task, so frame refreshes continue to report the configured
+compaction selection. A model-selection target carries the resolved effective
+context window with its provider-connection/model identity. The picker uses
+that preview for a following compaction engine, and colors a fixed engine's
+detail orange only when its resulting provider/model differs from the
+highlighted pair.
+
+`llm::provider_request_limiter` owns one shared generic HTTP semaphore per
+provider connection name; provider connections use the default cap of four.
+Catalog and Ollama detail calls acquire a permit until the response body is
+read, while streamed chat calls retain it until the response stream closes.
+The generic `http` JSON helpers own retry behavior for `429`/`5xx` and honor
+`Retry-After` delta-seconds or HTTP-date values (bounded by the retry maximum),
+keeping each retry sequence under the caller's same permit.
 
 ## Tool-result wire protocol
 
@@ -67,6 +111,26 @@ metadata. `result_metadata_schema` is generated from the populated fields of
 the typed metadata result, so its shape follows the data. Tool descriptions
 also include their argument schemas. See [features](./features.md#tools-to-be-used-by-models)
 for tool behavior.
+
+The agent's streaming task owns a bounded map of tool-call accumulators. It
+rejects a new distinct index once `MAX_TOOL_CALLS_PER_RESPONSE` (12) is reached,
+cancels the provider stream, and sends a dedicated limit event to the outer
+loop. The outer loop discards the partial batch, records a hidden harness notice
+explaining the limit, charges the rejection as one tool-use iteration, and
+re-prompts when the per-turn iteration budget permits. No tool execution,
+approval bubble, or per-call failure bubble is created for the rejected batch.
+The per-response limit is separate from `max_tool_iterations`, which counts
+rounds after tool execution completes. It also differs from the six-position
+execution cap: up to 12 calls can be parsed with excess positions closed as
+not-executed, while a thirteenth distinct call rejects the whole response.
+
+Unknown tool names are resolved synchronously in the `ToolCall` handler, after
+the assistant's full batch has entered `Context` and before the serial queue
+starts. They must not enqueue `AgentEvent::ToolError`: that completion path clears
+the active tool's cancellation token and advances the queue, so an unrelated
+registry failure could start overlapping requests and let one stream's
+completion reset another stream's pending approval to idle. An all-unknown batch
+counts as one completed tool-use iteration.
 
 ## Binary result projection
 
@@ -130,7 +194,7 @@ the displayed backend can differ from the one the agent calls.
 With `--auto-approve-spawn`, `cli_driver` keeps the process alive after the
 root's `StreamDone` until every spawned call reaches a terminal outcome. The
 immediate `spawn_subagent` result reports admission, not completion. See
-[features](./features.md#cli-runtime) for the CLI behavior.
+[features](./features.md#cli-mode) for the CLI behavior.
 
 ## Store and persistence
 
@@ -139,6 +203,247 @@ without blocking; `flush` waits until the writer drains queued events. See
 [persistence](./persistence.md) for message-commit, replay, and on-disk
 contracts.
 
+## Context management and compaction
+
+`Context` in `src/agent.rs` holds both records at once: `messages` (the
+transcript, never pruned) and the parallel `entries` vector that carries a
+cached token count per message plus the current `view_start`/`compaction`
+state and transcript-indexed `model_overrides`. `model_messages()` builds the
+request from the leading system block, summary/recovery handoff, latest task
+anchor, and retained tail with bounded overrides. Compaction
+estimates this model view plus active tool definitions with `cl100k_base`.
+`Context` caches the tool-definition token count for one active schema snapshot,
+keyed by the exact name, description, and serialized parameter text (including
+JSON field order). Budget checks reuse it until those inputs change; message,
+window, and engine-dependent calculations remain live. The request-deferral gate
+skips estimation when no background summary is running.
+The OpenAI-compatible transport separately applies `cl100k_base` to the
+serialized JSON request body after provider-specific fields and tools have been
+added. This treats the JSON representation as text; it does not simulate
+provider-side request processing or the model's tokenizer. The transport calls
+the agent's estimate callback before waiting for the response, so the TUI footer
+follows the latest request even when the provider takes a long time to respond.
+When a compaction summary or synchronous drop changes the model view, the outer
+loop emits a fresh model-view estimate with the active tool definitions and
+context window until a later request estimate replaces it. `ContextUsageSource`
+retains the estimate source internally; the footer displays only the token
+count and percentage.
+The same local estimate is paired with usage-only SSE chunks
+(`usage.prompt_tokens` or `usage.input_tokens`) from that request. Each request
+gets a correlation ID; the optional
+`YLVA_TOKEN_USAGE_DUMP_PATH` writer appends a metadata-only record to one JSONL
+file, leaving estimate and reported usage distinct. Request timestamps are
+captured before send; the agent loop passes its persisted session ID through the
+engine/provider boundary, and child requests carry their parent's session ID.
+Records without a session association use `null`. The writer never serializes
+the request messages, credentials, or body. This is an accuracy-observation dump,
+not session data or billed usage. See
+[CLI options](./cli-options.md#debug) for the record contract.
+
+`src/agent/compaction.rs` owns the policy: `plan_compaction` maps one usage
+evaluation onto `StartSummary`/`DropFallback`, `safe_boundaries_from` keeps
+tool-call/result pairs intact, and the compaction coordinator's
+`CompactionRuntime::sweep` — called only
+from the outer loop at safe boundaries via `sweep_compaction_and_report`, after
+completed turns and before tool-loop follow-up requests —
+applies a finished summary, honors a forced fallback, then re-evaluates the
+thresholds read from the active engine (`CompactionBudget::from_engine`), so
+a `/models` switch re-prices the budget on the next turn. The three ratios
+are validated as `0 < target < soft < hard ≤ 1` when the profile loads
+(`validate_compaction_settings` in `src/config/profile.rs`), and
+`COMPACTION.md` resolves like `SOUL.md` where the factory wires each agent
+type's compact engine. An explicit profile/agent summarizer is bound to its
+named engine; without either engine field, the factory supplies that agent's
+conversation Engine runtime itself, so model/engine switches affect subsequent
+summaries. Per-agent engine and timeout precedence is independent. The summary
+deadline is read from `[compaction]` after
+resolving any agent-type override, not from the compact engine's own model settings. It
+defaults to 60 seconds and is validated as positive. Scheduling after every tool
+outcome uses only completed eligible prefixes and never applies snapshots inside
+an open batch. The source includes the previous summary/recovery handoff.
+`start_request` is the shared preflight for every root/child continuation: it
+applies ready state, defers oversized requests for an existing summary's remaining
+absolute deadline, then measures staged recovery. The outer select loop remains
+responsive to commands. Generation and request identity are checked before
+clearing in-flight state; each waiting continuation is consumed once.
+Preflight notices are generation-checked and acknowledged by the outer loop
+before provider dispatch, preventing stale notices and preserving notice order.
+
+The summary task emits a scoped `UiUpdate::CompactionActivity` start update with
+a unique request ID. The presenter retains in-flight IDs per root/child
+conversation and projects only the visible conversation's activity into the
+footer's `· Compacting` suffix. This does not change `AgentMode`, input
+routing, or idle behavior. A failure or timeout clears activity as soon as
+`CompactionRuntime::on_outcome` records it — there is nothing left to apply.
+A success instead leaves activity active until `CompactionRuntime::sweep`
+reaches a safe boundary and actually applies (or fails to apply) the pending
+snapshot, so the indicator never implies completion before the model view has
+changed. Stop and clear abort the task and clear activity immediately;
+request IDs prevent a late completion from clearing a newer request's
+indicator.
+
+`AgentFactory` supplies startup capacity checks for every configured agent type
+besides the selected root. `AgentLoop::run` polls these checks and the root's own
+check alongside commands. Once all startup checks finish,
+`group_capacity_warnings` combines identical warning bodies into one notice
+listing the affected agent types, in deterministic root-first check order.
+Warning bodies include both provider/model identities, effective windows,
+the soft threshold, and estimated prompt/request overhead, so different
+capacity conditions remain separate. Notices appear even in an idle TUI;
+dropping the loop cancels pending checks. The first conversation request waits for all startup
+checks so a fast CLI turn cannot exit before checking unused agent types; stop
+and clear discard that waiting request. Explicit context lengths avoid catalog requests.
+`RecordModelChanged` schedules an immediate capacity recheck, polled alongside
+commands and events rather than blocking controls on catalog metadata. A newer
+switch replaces a pending switch check; dropping the loop cancels it. The check
+uses the live conversation engine and the resolved summarizer engine, evaluating
+their Engine runtime settings without sending a conversation request.
+`EngineRouter` forwards catalog hydration
+to the active named engine so checks use its catalog-derived context window.
+`CompactionRuntime::capacity_warning` hydrates metadata for unconfigured context
+lengths at startup, after model switches, and before a request's
+generation-checked preflight notice. It compares
+the conversation engine's soft trigger plus the estimated token overhead of an
+empty summary request against the independent summarizer window, suppressing
+unchanged warnings per run. Startup and request checks share an asynchronous
+lock with switch checks so they neither duplicate the root warning nor race its catalog lookup.
+`generate_summary` separately estimates the actual immutable summary request
+after summarizer metadata hydration and within the summary timeout,
+including message framing and the shared fixed request-overhead allowance, and
+emits a root/child-scoped `UiUpdate::Notice` if it exceeds the summarizer window.
+Neither check clips source messages or changes summary/fallback policy.
+If catalog hydration changes the conversation window during preflight,
+`ContextWindowChanged` re-enters the outer loop's budget gate before dispatch.
+
+The TUI's `EngineDisplayInfo` snapshot includes both conversation and
+summarizer identities plus `follows_conversation`/`shares_conversation` flags.
+The `/models` detail area asks `Engine::preview_model_selection` for the actual
+router target and computes the highlighted choice's summarizer effect without
+mutating Engine runtime state. After activation, the driver refreshes root and stored
+child display snapshots; inherited child views project the parent's live
+Engine runtime identity. These fields are view-only and do not extend session
+provider/model records.
+
+Hard-limit recovery is `Context::recover_model_view`, using shared reducers in
+`src/agent/compaction/recovery.rs`. Its five measured stages clip older outcome
+bodies, drop older safe groups with a real-content handoff/anchor, clip retained
+outcomes, shorten summary/handoff, and finally shorten the request only when the
+safe ceiling still cannot fit. The ceiling subtracts 10% reply reserve, 5% safety
+margin and 512 estimated tokens of overhead. Marker costs are reserved before
+truncation; estimates include result envelopes and eight tokens of message
+framing plus schemas. The target is best-effort when protected continuity already
+fits the ceiling. An irreducible valid continuation fails explicitly before
+provider dispatch. Recognized provider context rejections can retry once with a
+75% request-local ceiling, only before response text or tool-call accumulation.
+No operations are replayed. `RecoveryProjection` contains an implicit-user
+handoff (`RECOVERY_HANDOFF_MARKER`, up to 24 actual removed tool outcomes with
+120-character excerpts, folded prior handoff) and an explicit-user anchor.
+A later summary reaching its boundary supersedes it.
+
+Tool batches: the `ToolCall` handler marks positions at or beyond
+`MAX_EXECUTED_TOOL_CALLS_PER_BATCH` as skipped (`resolve_skipped_tool_call`
+pushes one `ToolError` and a `ToolAutoDenied`). `tool_output_token_limit`
+divides the remaining allowance (less 192 estimated tokens of error framing per
+queued call) among unresolved budgeted calls, covering every tool except
+`agent_finish`. `advance_tool_queue` pauses only for an existing useful summary
+or skips a call whose share is below `MINIMUM_USEFUL_RESULT_TOKENS` (256).
+Approval recomputes the allowance before execution. A `BTreeMap` assembles calls
+in original index order; unknown/invalid/denied slots are never backfilled.
+The six-position cap is code-owned, with no user configuration or adaptation.
+Result/error commits preserve canonical source output, then add model-only
+overrides. Tool-local byte/line/network limits remain source limits; the harness
+does not call execution-time output hooks to destructively enforce context pressure.
+Binary payload/descriptors are kept whole or omitted together in the projection.
+Child event projection keeps valid structured lifecycle JSON and reduces only
+result/error text; immutable metadata can still force subsequent group recovery.
+
+`Context::summary_boundary_for_target` counts removable tokens from
+`model_view_start`, not from the retained transcript's oldest entry. Every
+new summary boundary therefore advances past the already summarized or
+synchronously dropped prefix. With no visible tail it returns `None`, avoiding
+repeated summary requests whose snapshots cannot advance the model view.
+
+`[agents.<type>.compaction]` overrides the profile engine and timeout
+independently. `AgentFactory::build` resolves these settings for both roots and
+children. A child that goes idle waits for its in-flight summary; after a
+summary or synchronous drop changes its model view, the loop resumes the task
+instead of returning an incomplete result.
+
+Each summary application/recovery has one compact INFO reduction diagnostic with
+trigger, safe boundary, request identity, stage, before/after estimates,
+projected/clipped counts, admitted/skipped calls, cap, remaining allowance and
+terminal reason. Summary effectiveness additionally includes signed savings and
+percentage change; negative savings are valid. Lower-level sweeps/effectiveness
+details remain DEBUG. These are advisory local estimates without message content,
+not provider-reported input usage.
+
+Each serialized-request estimate logs `estimated_input_tokens`,
+`context_length`, and `usage_ratio` with the root/child `run_id`. Each enabled
+compaction sweep logs its model-view estimate, active window, `target_tokens`,
+the configured thresholds, whether a summary is in flight, and the selected
+`CompactionAction` — including `None`. These separate DEBUG events show the
+footer request estimate and the compaction budget evaluation. The post-change
+model-view estimate is also sent to the footer after compaction.
+
+Persistence: `StoreEvent::Compaction` carries the live `boundary` the context
+restore uses plus the `transcript_boundary` the TUI positions its marker
+from (system prompts excluded, since they are never persisted). The marker
+and the footer readout travel the standard update path — `UiUpdate` →
+`DomainEvent` → `AppState` → `TuiState` → `tui_widgets` — with the marker
+inserted either at replay (`AppState::replay_messages`) or live
+(`DomainEvent::CompactionApplied`, deduplicated by boundary).
+Subagent replay reads messages and the latest transcript-relative compaction
+boundary together through `Store::read_session_state` on first drill-in.
+`AppState::load_child_messages` uses the same boundary-aware projection as root
+replay and caches the projected entries; snapshots without that boundary
+continue to load without a marker.
+`StoreEvent::ModelProjection` stores bounded overrides/handoff/anchor with
+`projection_revision` and transcript-relative coordinates. Replay picks the
+highest revision at unchanged or advancing boundaries, validates IDs/names and
+safe cuts, and rebases against rebuilt systems. Clone copies the events. Dirty
+projection state is recorded before dispatch and after sweeps; hydration never
+duplicates synthetic messages in the canonical transcript.
+The sweep reports background-summary starts, completion, summary failure, and
+synchronous prefix drops as `UiUpdate::Notice`; the TUI displays each notice in
+the transcript. Completion notices include conditional guidance for frequent
+compaction and its potential detail loss; synchronous-drop notices distinguish
+removed model context from the preserved transcript. A compaction update replaces the stale serialized-request
+estimate with a model-view estimate scoped to the root or child run. The
+OpenAI-compatible provider binds a request-scoped failure callback to that
+request's response dump, allowing caller-side compaction timeouts to append
+their reason even after the streaming future has been dropped.
+
+Before each budgeted tool executes, the outer loop calculates admission from the
+projected model view, schemas, window, and response/safety/error reserves. After
+execution, common result/error handlers enforce the recalculated model-only
+allowance without changing the canonical body. Tools retain their own call
+arguments and source byte/line caps while collecting output.
+The `read file` DEBUG event logs full-source byte/line counts separately from
+raw selected-content counts after the byte cap; the later `read result size`
+event reports returned-content counts after tool-local caps. Source
+line count is unavailable for binary reads and partial byte ranges.
+
+Child completion events are checked against the parent's current model view at
+delivery time, after applying any ready parent compaction when idle. An oversized
+child report gets a marked deterministic model-only reduction, not a blocking
+LLM summary. Canonical parent/child records and drill-in bubbles keep the complete
+report. The projected event sets `result_reduced=true` and
+`result_summarized=false`; canonical flags remain false. Normal parent prefix
+summarization remains independent of this report projection.
+
+## Session cloning
+
+`Store::clone_session` (`src/store.rs`) reads the source under a nonblocking
+exclusive lock held only for the read, rejects a child transcript or a
+missing header before creating anything, then writes a fresh header
+(`cloned_from`, `parent_session = None`, copied title/provider/model/agent
+type) followed by every event except the source header, rebasing
+`child_start`/`child_result` records onto the new id. The source file is
+never repaired, rewritten, or appended to; child transcript files stay where
+they are and are reused as read-only history. `Cli::clone` requires
+`--conversation-id` (clap `requires`), and `open_store` in `src/main.rs`
+routes the run to the clone instead of a resume.
+
 ## Child-agent delegation internals
 
 `spawn_subagent` returns the tool's single admission result. The terminal
@@ -146,6 +451,15 @@ outcome arrives later as a hidden harness notice because the tool protocol
 allows only one result per `tool_call_id`. The root receives one continuation
 after all spawned work finishes. `AgentCommand::Stop` cancels running and
 queued work without resuming the root.
+The tool description and intermediate completion notices tell the root to
+end its response when no independent work remains, rather than keep thinking
+while waiting. This is model guidance, not an agent suspension or a change
+to completion scheduling; ending a response leaves subagents running.
+Both the tool description and completion notices require a self-contained
+answer with relevant findings when `all_done` is true, without assuming tool
+results or subagent responses are visible to the user. Completion notices retain
+this guidance in both canonical and reduced model projections; omitted report
+details must not be invented. These are model instructions, not output validation.
 
 Pending tool-approval and clarify updates carry a `run_id`. Drivers wrap the
 response in `AgentCommand::ForChild`, and the root loop forwards it to the
@@ -157,6 +471,11 @@ matching subagent. `AgentLoop` logs and drops a stale or unknown `run_id`.
 `spawn_subagent` bubble id. Drill-in resolves that id rather than choosing the
 most recently started subagent.
 
+Live `ChildConversation::started_at` uses a monotonic clock initialized by
+`ChildAgentStarted`; replayed conversations have no live timer. Render projections
+key these start times by the originating bubble id, so the root bubble and drill-in
+header share one elapsed timer. Queued and terminal bubbles never render it.
+
 `AppState` keeps `active_view`, `running_child`, and
 `child_conversations` (keyed by `run_id`) separate. Finished conversations
 remain available while another subagent runs, and the view model does not
@@ -164,10 +483,26 @@ assume execution is sequential. `ChildAgentManager` forwards token updates but
 consumes subagent stream lifecycle events so they cannot change the root TUI
 mode.
 
-For a pending tool or clarify update tagged with the running subagent's
-`run_id`, the TUI saves the current view before switching and restores it when
-the pause resolves. It skips the switch if that subagent's view is already
-open, so a manual drill-in does not trigger an automatic return.
+`CompactionApplied` carries `run_id` from the agent sweep through the driver
+to the presenter. The presenter inserts and deduplicates the live marker in
+the owning root `chat_entries` or subagent `ChildConversation::messages`,
+independent of `active_view`. An unknown subagent ID is logged and discarded,
+never treated as root compaction.
+
+For a pending tool or clarify update tagged with `run_id`, `AppState::
+note_interactive_pause` always switches `active_view` to wherever that bubble
+actually lives — the root transcript when `run_id` is `None`/unrecognised, or
+that specific child's transcript otherwise — regardless of which conversation
+(root or a different, possibly already-finished, subagent) is currently on
+screen. It saves the current view into `pre_pause_view` before switching and
+`resolve_possible_interactive_pause` restores it once the pause resolves. It
+skips the switch if the owning view is already open, so a manual drill-in does
+not trigger an automatic return.
+Outstanding approvals are derived from pending bubbles across root and child
+transcripts. Committing a verdict locally transitions its bubble out of
+`Pending` and resumes another outstanding approval with its owning view.
+Overlapping pauses preserve the first `pending_input_snapshot`; restoration
+waits until no approval owns the input.
 See [features](./features.md#drill-in-tui-conversation-view) for the visible
 behavior.
 
@@ -180,8 +515,28 @@ The TUI renders the same headless `AgentLoop`; it does not own agent state.
   terminal or channel I/O.
 - `src/render.rs` and `src/tui_widgets.rs` render the view and record geometry
   for mouse routing.
-- `src/tui_driver.rs` owns the terminal loop, maps runtime updates to domain
+- `src/tui_driver.rs` owns the terminal loop, maps live UI updates to domain
   events, and executes effects. `src/cli_driver.rs` owns the headless loop.
+
+Input height and mouse hit-testing use ratatui-textarea's native wrapped screen
+map rather than a separate `textwrap` approximation. Hit-testing adds the rendered
+viewport offset and uses native cursor movements to resolve screen cells,
+including tabs and wide characters. After rendering, an origin cursor clamped
+with `CursorMove::InViewport` on a clone supplies the actual viewport top;
+recalled or replaced drafts cannot inherit a stale offset. Input mouse-wheel
+events scroll the textarea, and the next frame synchronizes the offset.
+
+The footer readout follows the request path end to end: the OpenAI-compatible
+provider calls the estimate callback before response headers arrive; the agent
+loop maps it to `UiUpdate::ContextUsage` or
+`UiUpdate::ChildContextUsage { run_id, .. }`. The driver maps these to
+root/child domain events; the presenter stores root usage on
+`AppState::context_usage` and child usage on the matching `ChildConversation`.
+`AppState::active_context_usage` selects the readout for the currently rendered
+root or child transcript, and
+`render`/`tui_widgets` format it as `64.2K (45%)` on the right end of the
+key-hints row. Finished child estimates stay with their transcripts for later
+drill-in. Headless runs drop both usage update variants.
 
 ## Slash commands
 

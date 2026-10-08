@@ -163,7 +163,7 @@ fn build_subscriber(
             // adds no information, so it is disabled to keep each JSONL line
             // free of duplicated span data. The full per-line `spans` chain is
             // what allows correlating log lines within one span scope.
-            // WIP: a session/trace id is a future concern (see docs/blueprint.md).
+            // Session-wide correlation is tracked in docs/ideas/session.md.
             .with_current_span(false)
             .with_filter(filter)
             .boxed(),

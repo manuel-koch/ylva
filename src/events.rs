@@ -16,7 +16,7 @@
 //!
 //! `crossterm::event::read()` blocks, so it is pushed onto a
 //! `spawn_blocking` thread and every event forwarded over a bounded `mpsc`
-//! channel. The async TUI loop never blocks on terminal I/O (blueprint §4B).
+//! channel. The async TUI loop never blocks on terminal I/O.
 //!
 //! This module only **maps** raw events to [`AppAction`]s. All context-dependent
 //! interpretation (what `Esc` means, double-press confirm state, tool-approval
@@ -102,7 +102,7 @@ fn normalize_modified_enter(mut key: KeyEvent) -> KeyEvent {
 /// bridge during shutdown.
 ///
 /// A plain blocking `read()` would hold the thread forever and hang the Tokio
-/// runtime on shutdown (blocking threads are not interrupted), so the loop
+/// Tokio runtime on shutdown (blocking threads are not interrupted), so the loop
 /// `poll`s with a short timeout and observes channel closure, exiting promptly
 /// once the consumer is gone.
 pub fn spawn_crossterm_bridge(action_tx: mpsc::Sender<AppAction>) -> JoinHandle<()> {

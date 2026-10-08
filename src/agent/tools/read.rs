@@ -395,6 +395,11 @@ pub struct ReadResult {
     pub encoding: FileEncoding,
     /// Number of raw bytes selected from the file.
     pub read_bytes: usize,
+    /// Complete source-file size, before range and output caps.
+    source_size_bytes: usize,
+    /// Complete source text's line count when the read scanned all text;
+    /// unavailable for binary reads and partial byte ranges.
+    source_lines: Option<usize>,
     /// UTF-8 text projection for user-facing previews when Base64 carries text.
     pub text_preview: Option<String>,
     /// Recognized supported media type when the selected Base64 range is the
@@ -403,6 +408,44 @@ pub struct ReadResult {
     /// `true` when [`READ_OUTPUT_LIMIT_BYTES`] cut `content`; reported as
     /// `truncated: true` metadata and the `Partial result` section label.
     pub truncated: bool,
+}
+
+#[derive(Default)]
+struct SourceLineCounter {
+    newline_count: usize,
+    last_character: Option<char>,
+}
+
+impl SourceLineCounter {
+    fn observe(&mut self, text: &str) {
+        self.newline_count += text.bytes().filter(|byte| *byte == b'\n').count();
+        self.last_character = text.chars().last().or(self.last_character);
+    }
+
+    fn count(&self) -> usize {
+        self.newline_count
+            + usize::from(
+                self.last_character
+                    .is_some_and(|character| character != '\n'),
+            )
+    }
+}
+
+impl ReadResult {
+    fn truncate_to_token_budget(&mut self, max_output_tokens: usize) {
+        if self.encoding == FileEncoding::Base64 {
+            // A binary attachment cannot be meaningfully token-truncated. Keep
+            // the existing raw-byte safety ceilings for these results.
+            return;
+        }
+        let (content, truncated) =
+            crate::llm::TokenEstimator::Tiktoken.truncate(&self.content, max_output_tokens);
+        if truncated {
+            self.content = content;
+            self.read_bytes = self.content.len();
+            self.truncated = true;
+        }
+    }
 }
 
 fn metadata_read_lines(result: &ReadResult) -> Option<usize> {
@@ -503,6 +546,7 @@ pub struct ReadCall {
     id: uuid::Uuid,
     raw_arguments: serde_json::Value,
     timeout_secs: u64,
+    runtime_output_token_limit: Option<usize>,
 }
 
 impl ToolCall for ReadCall {
@@ -518,6 +562,9 @@ impl ToolCall for ReadCall {
     fn timeout_secs(&self) -> u64 {
         self.timeout_secs
     }
+    fn set_runtime_output_token_limit(&mut self, max_output_tokens: Option<usize>) {
+        self.runtime_output_token_limit = max_output_tokens;
+    }
     fn argument_order(&self, key: &str) -> usize {
         ReadTool::default().argument_order(key)
     }
@@ -530,6 +577,7 @@ impl ToolCall for ReadCall {
         self: Box<Self>,
     ) -> futures::future::BoxFuture<'static, Result<Box<dyn ToolCallResult>, ToolError>> {
         let raw_arguments = self.raw_arguments;
+        let runtime_output_token_limit = self.runtime_output_token_limit;
         let serialized = serde_json::to_string(&raw_arguments).unwrap_or_default();
         let span = tracing::info_span!("tool_args", args = %serialized);
         Box::pin(
@@ -543,9 +591,29 @@ impl ToolCall for ReadCall {
                     serde_json::from_value::<ReadFileArgs>(raw_arguments).map_err(|error| {
                         ToolError::failed("read", format!("invalid arguments: {error}"))
                     })?;
-                read_file(args)
-                    .await
-                    .map(|o| -> Box<dyn ToolCallResult> { Box::new(o) })
+                let mut result = read_file(args).await?;
+                if let Some(max_output_tokens) = runtime_output_token_limit {
+                    if result.encoding == FileEncoding::Base64
+                        && crate::llm::TokenEstimator::Tiktoken
+                            .estimate_tokens(&result.content)
+                            > max_output_tokens
+                    {
+                        return Err(ToolError::failed(
+                            "read",
+                            "binary or media result exceeds the available context token allowance; retry with a smaller byte range or a text-oriented mode",
+                        ));
+                    }
+                    result.truncate_to_token_budget(max_output_tokens);
+                }
+                tracing::debug!(
+                    source_size_bytes = result.source_size_bytes,
+                    source_lines = ?result.source_lines,
+                    returned_bytes = result.read_bytes,
+                    returned_lines = ?metadata_read_lines(&result),
+                    truncated = result.truncated,
+                    "read result size"
+                );
+                Ok(Box::new(result) as Box<dyn ToolCallResult>)
             }
             .instrument(span),
         )
@@ -696,6 +764,7 @@ impl Tool for ReadTool {
             id,
             raw_arguments: arguments,
             timeout_secs: self.timeout_secs(),
+            runtime_output_token_limit: None,
         })
     }
 }
@@ -740,7 +809,7 @@ async fn read_file_streaming(
         .map_err(|error| read_io_error(&path, error))?
         .len();
     let file_length = usize::try_from(file_length).unwrap_or(usize::MAX);
-    match args.mode {
+    let result = match args.mode {
         Some(ReadMode::Bytes) => {
             bytes_read(
                 file,
@@ -752,10 +821,23 @@ async fn read_file_streaming(
             )
             .await
         }
-        Some(ReadMode::Lines) => lines_read(file, chunk_size, path, args.offset, args.limit).await,
-        Some(ReadMode::Chars) => chars_read(file, chunk_size, path, args.offset, args.limit).await,
+        Some(ReadMode::Lines) => {
+            lines_read(file, chunk_size, file_length, path, args.offset, args.limit).await
+        }
+        Some(ReadMode::Chars) => {
+            chars_read(file, chunk_size, file_length, path, args.offset, args.limit).await
+        }
         None => autodetect_read(file, chunk_size, file_length, path, args.offset, args.limit).await,
-    }
+    }?;
+    tracing::debug!(
+        source_size_bytes = result.source_size_bytes,
+        source_lines = ?result.source_lines,
+        raw_selected_bytes = result.read_bytes,
+        raw_selected_lines = ?metadata_read_lines(&result),
+        truncated = result.truncated,
+        "read file"
+    );
+    Ok(result)
 }
 
 /// Read at most `max_bytes` from the current position of `file`.
@@ -832,13 +914,12 @@ async fn bytes_read(
     match encoding {
         FileEncoding::Utf8 => {
             let content = String::from_utf8_lossy(&selected).to_string();
-            tracing::debug!(
-                size = content.len(),
-                lines = content.lines().count(),
-                "read file"
-            );
+            let source_lines =
+                (start == 0 && selected.len() == file_length).then(|| content.lines().count());
             Ok(ReadResult {
                 read_bytes: content.len(),
+                source_size_bytes: file_length,
+                source_lines,
                 content,
                 path,
                 starting_line: Some(0),
@@ -853,6 +934,8 @@ async fn bytes_read(
             is_complete_selection && !truncated,
             path,
             truncated,
+            file_length,
+            None,
         )),
     }
 }
@@ -995,7 +1078,7 @@ impl LineWindowScanner {
         }
     }
 
-    fn finish(self, path: String) -> ReadResult {
+    fn finish(self, path: String, source_size_bytes: usize, source_lines: usize) -> ReadResult {
         // Lines seen so far: completed lines plus a pending final line that
         // was not terminated by `'\n'`. At EOF this is the file's line count;
         // after the output cap stopped collection it is a lower bound that is
@@ -1004,13 +1087,10 @@ impl LineWindowScanner {
         let lines_seen = self.line_index + usize::from(!self.at_line_start);
         let starting_line = Some(self.window_start.min(lines_seen));
         let content = self.content;
-        tracing::debug!(
-            size = content.len(),
-            lines = content.lines().count(),
-            "read file"
-        );
         ReadResult {
             read_bytes: content.len(),
+            source_size_bytes,
+            source_lines: Some(source_lines),
             content,
             path,
             starting_line,
@@ -1077,15 +1157,12 @@ impl CharWindowScanner {
         }
     }
 
-    fn finish(self, path: String) -> ReadResult {
+    fn finish(self, path: String, source_size_bytes: usize, source_lines: usize) -> ReadResult {
         let content = self.content;
-        tracing::debug!(
-            size = content.len(),
-            lines = content.lines().count(),
-            "read file"
-        );
         ReadResult {
             read_bytes: content.len(),
+            source_size_bytes,
+            source_lines: Some(source_lines),
             content,
             path,
             starting_line: Some(0),
@@ -1103,21 +1180,26 @@ impl CharWindowScanner {
 async fn lines_read(
     file: tokio::fs::File,
     chunk_size: usize,
+    file_length: usize,
     path: String,
     offset: Option<usize>,
     limit: Option<usize>,
 ) -> Result<ReadResult, ToolError> {
     let mut reader = tokio::io::BufReader::with_capacity(chunk_size, file);
     let mut scanner = LineWindowScanner::new(offset, limit);
+    let mut source_lines = SourceLineCounter::default();
     stream_validated_utf8(
         &mut reader,
         chunk_size,
         |_| {},
-        |text| scanner.process(text),
+        |text| {
+            source_lines.observe(text);
+            scanner.process(text);
+        },
     )
     .await
     .map_err(|error| stream_error_to_tool_error(&path, "lines", error))?;
-    Ok(scanner.finish(path))
+    Ok(scanner.finish(path, file_length, source_lines.count()))
 }
 
 /// Streaming `chars` read: count code points from the start of the file and
@@ -1125,21 +1207,26 @@ async fn lines_read(
 async fn chars_read(
     file: tokio::fs::File,
     chunk_size: usize,
+    file_length: usize,
     path: String,
     offset: Option<usize>,
     limit: Option<usize>,
 ) -> Result<ReadResult, ToolError> {
     let mut reader = tokio::io::BufReader::with_capacity(chunk_size, file);
     let mut scanner = CharWindowScanner::new(offset, limit);
+    let mut source_lines = SourceLineCounter::default();
     stream_validated_utf8(
         &mut reader,
         chunk_size,
         |_| {},
-        |text| scanner.process(text),
+        |text| {
+            source_lines.observe(text);
+            scanner.process(text);
+        },
     )
     .await
     .map_err(|error| stream_error_to_tool_error(&path, "chars", error))?;
-    Ok(scanner.finish(path))
+    Ok(scanner.finish(path, file_length, source_lines.count()))
 }
 
 /// Resolve a read that was called without an explicit `mode`.
@@ -1166,6 +1253,7 @@ async fn autodetect_read(
 ) -> Result<ReadResult, ToolError> {
     let mut reader = tokio::io::BufReader::with_capacity(chunk_size, file);
     let mut scanner = LineWindowScanner::new(offset, limit);
+    let mut source_lines = SourceLineCounter::default();
     let mut first_chunk: Vec<u8> = Vec::new();
     let outcome = stream_validated_utf8(
         &mut reader,
@@ -1175,11 +1263,14 @@ async fn autodetect_read(
                 first_chunk.extend_from_slice(chunk);
             }
         },
-        |text| scanner.process(text),
+        |text| {
+            source_lines.observe(text);
+            scanner.process(text);
+        },
     )
     .await;
     match outcome {
-        Ok(()) => Ok(scanner.finish(path)),
+        Ok(()) => Ok(scanner.finish(path, file_length, source_lines.count())),
         Err(StreamError::Io(error)) => Err(read_io_error(&path, error)),
         Err(StreamError::Utf8(_)) => {
             let recognized_media_type = (offset.is_none() && limit.is_none())
@@ -1199,7 +1290,14 @@ async fn autodetect_read(
                         .read_to_end(&mut bytes)
                         .await
                         .map_err(|error| read_io_error(&path, error))?;
-                    Ok(base64_read_result(&bytes, true, path, false))
+                    Ok(base64_read_result(
+                        &bytes,
+                        true,
+                        path,
+                        false,
+                        file_length,
+                        None,
+                    ))
                 }
                 None => Err(ToolError::failed(
                     "read",
@@ -1224,6 +1322,8 @@ fn base64_read_result(
     is_complete_file: bool,
     path: String,
     truncated: bool,
+    source_size_bytes: usize,
+    source_lines: Option<usize>,
 ) -> ReadResult {
     let read_bytes = selected.len();
     let content = STANDARD_BASE64.encode(selected);
@@ -1231,9 +1331,10 @@ fn base64_read_result(
     let media_type = is_complete_file
         .then(|| supported_media_type(selected))
         .flatten();
-    tracing::debug!(read_bytes, "read file");
     ReadResult {
         read_bytes,
+        source_size_bytes,
+        source_lines,
         content,
         path,
         starting_line: text_preview.as_ref().map(|_| 0),
@@ -1435,6 +1536,48 @@ mod tests {
             .filter_map(|variant| variant["enum"][0].as_str())
             .collect::<Vec<_>>();
         assert_eq!(variants, vec!["utf8", "base64"]);
+    }
+
+    #[test]
+    fn runtime_token_budget_cannot_expand_the_model_supplied_read_limit() {
+        crate::test_support::run_locked(async {
+            let temporary_directory = tempfile::tempdir().expect("tempdir");
+            let path = temporary_directory.path().join("read.txt");
+            std::fs::write(&path, "alpha\nbeta\ngamma\ndelta\nepsilon\n").expect("write fixture");
+            let call = ReadTool::default().create_call(
+                uuid::Uuid::new_v4(),
+                serde_json::json!({
+                    "path": path.display().to_string(),
+                    "mode": "lines",
+                    "limit": 3
+                }),
+            );
+            let mut call = call;
+            call.set_runtime_output_token_limit(Some(100));
+
+            let result = call.run().await.expect("read result");
+
+            assert_eq!(result.text(), "alpha\nbeta\ngamma");
+        });
+    }
+
+    #[test]
+    fn runtime_token_budget_caps_read_content_and_marks_it_truncated() {
+        crate::test_support::run_locked(async {
+            let temporary_directory = tempfile::tempdir().expect("tempdir");
+            let path = temporary_directory.path().join("read.txt");
+            std::fs::write(&path, "alpha beta gamma delta epsilon").expect("write fixture");
+            let mut call = ReadTool::default().create_call(
+                uuid::Uuid::new_v4(),
+                serde_json::json!({"path": path.display().to_string()}),
+            );
+            call.set_runtime_output_token_limit(Some(2));
+
+            let result = call.run().await.expect("read result");
+
+            assert!(crate::llm::TokenEstimator::Tiktoken.estimate_tokens(&result.text()) <= 2);
+            assert_eq!(result.metadata().expect("metadata")["truncated"], true);
+        });
     }
 
     #[test]
@@ -1761,7 +1904,7 @@ mod tests {
             assert_eq!(result.text(), encoded);
         });
         assert!(
-            log.contains("read_bytes=23"),
+            log.contains("raw_selected_bytes=23"),
             "log must contain safe size: {log}"
         );
         assert!(
@@ -1889,6 +2032,8 @@ mod tests {
             starting_line: None,
             encoding: FileEncoding::Base64,
             read_bytes: 8,
+            source_size_bytes: 8,
+            source_lines: None,
             text_preview: None,
             media_type: Some(MEDIA_TYPE_APPLICATION_PDF.to_string()),
             truncated: false,
@@ -2003,14 +2148,11 @@ mod tests {
         let path = dir.path().join("a.txt");
         std::fs::write(&path, "hello world").expect("seed file");
         let log = capture_logs(async {
-            let result = read_file(ReadFileArgs {
-                path: path.display().to_string(),
-                mode: Some(ReadMode::Bytes),
-                encoding: FileEncoding::Utf8,
-                offset: None,
-                limit: None,
-            })
-            .await;
+            let call = ReadTool::default().create_call(
+                uuid::Uuid::nil(),
+                serde_json::json!({ "path": path.display().to_string() }),
+            );
+            let result = call.run().await;
             assert!(result.is_ok());
         });
         assert!(
@@ -2019,12 +2161,45 @@ mod tests {
         );
         assert!(log.contains("read file"), "read_file must log: {log}");
         assert!(
-            log.contains("size="),
-            "read_file must log the returned content size: {log}"
+            log.contains("source_size_bytes=11") && log.contains("raw_selected_bytes=11"),
+            "read_file must distinguish source and returned sizes: {log}"
         );
         assert!(
-            log.contains("lines="),
-            "read_file must log the returned content line count: {log}"
+            log.contains("source_lines=Some(1)") && log.contains("raw_selected_lines=Some(1)"),
+            "read_file must distinguish source and returned line counts: {log}"
+        );
+    }
+
+    #[test]
+    fn read_log_distinguishes_full_source_from_capped_returned_text() {
+        let directory = TempDir::new().expect("tempdir");
+        let path = directory.path().join("large.txt");
+        let source_text = format!("{}\n{}", "a".repeat(READ_OUTPUT_LIMIT_BYTES), "tail");
+        std::fs::write(&path, &source_text).expect("write fixture");
+        let log = capture_logs(async {
+            let call = ReadTool::default().create_call(
+                uuid::Uuid::nil(),
+                serde_json::json!({ "path": path.display().to_string() }),
+            );
+            let result = call.run().await.expect("read succeeds");
+            assert_eq!(result.metadata().expect("metadata")["truncated"], true);
+        });
+
+        assert!(
+            log.contains(&format!("source_size_bytes={}", source_text.len())),
+            "log includes the full source byte size: {log}"
+        );
+        assert!(
+            log.contains("source_lines=Some(2)"),
+            "log includes the full source line count: {log}"
+        );
+        assert!(
+            log.contains(&format!("raw_selected_bytes={READ_OUTPUT_LIMIT_BYTES}")),
+            "log includes the capped returned byte size: {log}"
+        );
+        assert!(
+            log.contains("raw_selected_lines=Some(1)") && log.contains("truncated=true"),
+            "log includes returned lines and the truncation flag: {log}"
         );
     }
 
@@ -2108,6 +2283,8 @@ mod tests {
             starting_line: None,
             encoding: FileEncoding::Utf8,
             read_bytes: 0,
+            source_size_bytes: 0,
+            source_lines: Some(0),
             text_preview: None,
             media_type: None,
             truncated: false,

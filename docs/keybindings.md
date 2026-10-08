@@ -6,9 +6,22 @@ Footer hints render each keybinding in bold and its action in normal text.
 Multiple hints are separated by ` · `, for example:
 `enter send · esc cancel · ctrl-c cancel & quit · F1 help`.
 
+The context-usage readout stays right-aligned on the second footer row,
+including beside tool-approval buttons. On narrow terminals it is omitted
+rather than overwriting the controls.
+
+While a bounded continuation waits for an existing context summary, normal
+interrupt controls and `/clear` remain responsive. `Compacting…` is scoped to
+the displayed root/child conversation; successful summaries keep it active until
+safe application, while failure, timeout, stop, and clear remove it.
+
 While the main conversation is shown, the footer also reports separate
 running and queued subagent counts in a compact label such as
 `Subagents: 1 running, 1 queued`; finished subagents are not included.
+
+When root and subagent tool approvals overlap, approving or denying one
+restores the controls for another outstanding approval in its owning
+conversation. The original draft returns after all approvals are resolved.
 
 ## TUI keybindings (Phase 4)
 
@@ -50,8 +63,8 @@ running and queued subagent counts in a compact label such as
 | `←` / `→` | Help popup open | Scroll help popup left / right by 4 columns |
 | `page-up` / `fn-up` | Any | Scroll chat up; when help popup is open, scroll popup up |
 | `page-down` / `fn-down` | Any | Scroll chat down; when help popup is open, scroll popup down |
-| Mouse wheel | Any | Scroll chat; when help popup is open, scroll popup (no focus needed) |
-| Left-click | Input focused | Move the cursor to the clicked character (word-wrapping honored) |
+| Mouse wheel | Any | Scroll input when over the input field, otherwise chat; when help popup is open, scroll popup (no focus needed) |
+| Left-click | Input focused | Move the cursor to the visible clicked character (input scrolling, word-wrapping, tabs, and Unicode display widths honored) |
 | Left-drag | Input focused | Select text; click (no drag) just places the cursor |
 | Left-click | Child-view header bubble | Toggle the header bubble expand/collapse state |
 | Left-drag | Chat or child-view header bubble | Select visible text; release copies a non-empty selection to the clipboard |
@@ -78,7 +91,7 @@ running and queued subagent counts in a compact label such as
 | `left-drag` | Slash-command overlay open | Select visible popup text; release copies it to the clipboard |
 | `←` / `→` | `/models` picker open | Cycle the highlighted model's reasoning effort when alternatives are available |
 | any character / backspace | `/models` picker open | Insert into the draft (`/models <filter>`) and live-narrow the picker's already-fetched choices; no re-query |
-| `enter` | `/models` picker open | Switch to the highlighted provider connection/model, apply its selected reasoning effort, and clear the input |
+| `enter` | `/models` picker open | Activate the highlighted named engine's current Engine runtime selection, or route a raw catalog model by provider connection; apply only an edited named-engine reasoning effort and clear the input |
 | `esc` | `/models` picker open | Cancel without switching and clear the input |
 
 Only a second press of the *same* key confirms a pending double-press action.

@@ -4,7 +4,7 @@ Reference for Ylva's configuration files.
 
 ## Profile file
 
-One TOML file describes a runtime profile. Ylva resolves that file through a
+One TOML file describes a Ylva profile. Ylva resolves that file through a
 three-layer, per-file fallback chain:
 
 ```text
@@ -97,7 +97,8 @@ engine = "ollama/local"
 | Key | Type | Description |
 |---|---|---|
 | `default_engine` | string | Name of the `[engines.*]` entry used when an agent type names none. Defaults to `default`. |
-| `compact_engine` | string (optional) | Engine used for summarisation tasks; resolves to `default_engine` when absent. Phase 10 wires this at runtime. |
+| `[compaction].engine` | string (optional) | Explicit profile-level summarizer engine, overridden by an explicit per-agent compaction engine. When absent at both levels, summaries follow that agent's active conversation engine, including later `/models` switches. |
+| `[compaction].timeout_sec` | number (optional) | Wall-clock seconds allowed for each summary request made by the selected compaction engine (default `60`; must be greater than `0`). This is separate from the active conversation engine's settings. |
 | `utility_engine` | string (optional) | Isolated engine used to generate session titles from the first user message and completed assistant reply; resolves to `default_engine` when absent. |
 | `default_model` | string (optional) | Model filled into every `[engines.*]` entry that names none of its own. |
 | `theme` | `dark` \| `light` | Syntax-highlighting theme. Defaults to `dark`. See [features — rendering](./features.md#tui-architecture). |
@@ -107,17 +108,20 @@ engine = "ollama/local"
 | `[engines.<name>]` | table | A named engine — see [Engine configuration](#engine-configuration) below. |
 | `[agents.<type>]` | table | Per-agent-type settings — see [Per-agent configuration](#per-agent-configuration) below. |
 
-When at least one `[engines.*]` table is present, those engines are what the
-agent runtime builds. Every named provider connection is also made available
+When at least one `[engines.*]` table is present, those engines are what Ylva
+uses to create agents. Every named provider connection is also made available
 to `/models`, including connections that are not referenced by an engine. A
 profile with provider connections but no engines gets one implicit engine per
 connection. Only a profile with neither explicit engines nor provider
-connections uses environment-based provider discovery. The first configured
-engine is initially active, and `/models` queries each named provider
-connection once before displaying `provider_connection/model` choices. The
-profile's `default_engine` is initially active.
+connections uses environment-based provider discovery. The selected root
+agent type's configured `engine` is initially active, falling back to the
+profile's `default_engine`. `/models` queries each named provider connection
+once and shows named-engine shortcuts before raw `provider_connection/model`
+catalog choices. A shortcut activates that exact engine's current Engine
+runtime selection, including when another named engine has the same provider and
+model.
 Referencing an engine name that no table defines (from `default_engine`,
-`compact_engine`, `utility_engine`, or an agent override) is a hard error rather
+`[compaction].engine`, `utility_engine`, or an agent override) is a hard error rather
 than a silent fallback.
 
 When the root agent changes its active provider connection or model through
@@ -148,7 +152,7 @@ it does not seed agent-type files. Use `ylva init --workspace` to seed the
 default profile config and `.env` starters plus `.gitignore` under the
 discovered workspace root. Both commands write only missing files unless
 `--force` is supplied. Global, profile-scoped, and project-scoped
-`agents/*.md` and `agents/*.toml` files are discovered at runtime; richer
+`agents/*.md` and `agents/*.toml` files are discovered while resolving profiles; richer
 examples are documented below rather than shipped as repository templates.
 
 ### Global persona (`SOUL.md`)
@@ -178,7 +182,7 @@ every part of a freshly created root or child context is composed, is:
    when at least one instruction file was found,
 3. the agent-type `persona`,
 4. the tool protocol,
-5. for a subagent, its briefing and runtime constraints.
+5. for a subagent, its briefing and execution constraints.
 
 #### Trusted instruction files
 
@@ -252,10 +256,36 @@ setup.
     "not found" are hard startup errors; a chain directory that does not
     exist is treated as empty.
 - **No prompt-level authority.** Instruction content cannot escape this
-  trust boundary and cannot override Ylva's runtime safety constraints: tool
+  trust boundary and cannot override Ylva's safety constraints: tool
   allowlists, approval floors, and the sandbox are enforced in code, never
   in prompt text. There is no configuration knob for any of the rules above —
   the allowlist and the limits are code-owned constants.
+
+### Compaction summary prompt (`COMPACTION.md`)
+
+`COMPACTION.md` controls what the compact engine preserves and how it writes
+the summary. Ylva resolves it with the same whole-file replacement order as
+`SOUL.md`:
+
+```text
+<workspace-root>/.ylva/COMPACTION.md
+    -> ~/.ylva/COMPACTION.md
+    -> code-owned built-in prompt
+```
+
+The loader trims trailing whitespace and loads the text when the agent loop
+is built. A workspace file replaces the default summary guidelines without
+changing the profile. Ylva includes a built-in prompt in
+[`src/config/compaction_prompt.rs`](../src/config/compaction_prompt.rs).
+
+Custom files only need summary guidelines. Ylva supplies the request framing
+and generation trigger automatically for conversation compaction; custom prompts
+do not need to include them. Oversized child reports use marked deterministic
+model-only reduction, not a separate blocking summary request.
+
+Conversation compaction supplies an immutable prefix snapshot. The compact
+engine stays tool-free and receives the prior summary/recovery handoff plus the
+newly eligible completed prefix, while Ylva retains the recent tail separately.
 
 ### Agent-type files
 
@@ -327,31 +357,58 @@ Each `[engines.<name>]` table describes the sampling and model parameters
 tied to a named provider connection: which connection it uses, which model,
 and request-level settings such as temperature and context length.
 
-Connection settings remain fixed for the lifetime of the engine; a runtime
-model switch (via `/models`) affects subsequent requests without rebuilding
-the provider.
+Connection settings remain fixed for the lifetime of the engine; an Engine
+runtime model switch (via `/models`) affects subsequent requests without
+rebuilding the provider.
 
 | Field | Type | Description |
 |---|---|---|
 | `provider_connection` | string | Name of the connection under `[provider_connections.*]`. The connection's `provider` field must be `"mock"`, `"ollama"`, or `"openrouter"`. Ollama uses the server origin as `api_base_url` and derives both `/v1` chat and `/api` catalog endpoints; OpenRouter uses its origin as `api_base_url` and derives `/api/v1` for chat and model discovery. |
 | `model` | string | Model identifier passed to the provider. May be omitted, in which case the profile's `default_model` fills it in. |
 | `temperature` | number (optional) | Sampling temperature. Omit to use the model's own default. |
-| `context_length` | number (optional) | Maximum token context window. Omitted means the profile doesn't limit it explicitly. Accepts either a plain integer or a string with a `kb`/`mb` suffix (e.g. `"265kb"` = `265 * 1024`, `"2mb"` = `2 * 1024 * 1024`) — the same 1024-based units `/models` uses to display context lengths. The value actually used is resolved in priority order: this configured value, then the provider's advertised context length for the active model (from its `/models` catalog), then the built-in default of `128 000`. Phase 12 reads the resolved value to drive compaction budgeting. |
+| `context_length` | number (optional) | Maximum token context window. Omitted means the profile doesn't limit it explicitly. Accepts either a plain integer or a string with a `kb`/`mb` suffix (e.g. `"265kb"` = `265 * 1024`, `"2mb"` = `2 * 1024 * 1024`) — the same 1024-based units `/models` uses to display context lengths. The value actually used is resolved in priority order: this configured value, then the provider's advertised context length for the active model (from its `/models` catalog), then the built-in default of `128 000`. Compaction budgeting uses this resolved value as the window it measures the model view against. |
 | `api_base_url` | string (optional) | Optional engine-level override for the connection's base URL. |
 | `api_key` | string (optional) | Optional engine-level override for the connection's API key. |
 | `reasoning` | string (optional) | Initial explicit reasoning effort applied when the engine is constructed. Omitted uses the provider's own default. Validated once, lazily before the first chat, against the model catalog: an advertised value is kept; a value the model does not advertise (including models that expose no selectable alternatives at all) is dropped to the provider default with a warning naming the model and effort; when the model is absent from the catalog or the catalog fetch fails, the value is kept unvalidated. Later changes go through `/models`, which validates the effort against the model's advertised options before switching. |
+| `compact_target_ratio` | number (optional) | Best-effort model-view target as a fraction of the effective window (default `0.5`). Task continuity takes priority when the separate safe request ceiling already fits. Must be `> 0` and `≤ 1`, and strictly below `soft_compaction_threshold`. |
+| `soft_compaction_threshold` | number (optional) | Fraction of the effective window at or above which a completed turn or tool outcome schedules a useful completed-prefix summary (default `0.7`). Soft pressure alone does not cancel running tools. Must be `> 0` and `≤ 1`, and strictly below `hard_compaction_threshold`. |
+| `hard_compaction_threshold` | number (optional) | Fraction above which a continuation waits for an existing summary within its remaining original deadline, then recovers lossily if necessary (default `0.9`). Every request also fits the separate local safe ceiling. Must be `> 0` and `≤ 1`. |
+
+For example, select a local summarizer and allow more time for its requests:
+
+```toml
+default_engine = "local-chat"
+
+[compaction]
+engine = "local-summarizer"
+timeout_sec = 240
+
+[engines.local-chat]
+provider_connection = "ollama-local"
+model = "chat-model"
+
+[engines.local-summarizer]
+provider_connection = "ollama-local"
+model = "summary-model"
+```
+
+The three compaction ratios are validated when the profile loads: a ratio
+outside `(0, 1]` or a pair that is out of order (`compact_target_ratio` at or
+above `soft_compaction_threshold`, or `soft_compaction_threshold` at or above
+`hard_compaction_threshold`) is a startup error naming the engine and the
+violated rule.
 
 ## Profile configuration
 
-A profile groups engine selection and per-agent settings for a runtime session.
+A profile groups engine selection and per-agent settings for an agent session.
 
 | Field | Type | Description |
 |---|---|---|
 | `default_engine` | string | Name of the engine used when no agent-level override is present (required). |
-| `compact_engine` | string (optional) | Engine used for summarisation tasks. Resolves to `default_engine` when absent. Phase 10 wires this at runtime. |
-| `utility_engine` | string (optional) | Isolated engine used for utility tasks such as session-title generation. Resolves to `default_engine` when absent and does not follow `/models` runtime switching. |
+| `[compaction].engine` | string (optional) | Explicit profile-level summarizer engine, overridden by an explicit per-agent compaction engine. When absent at both levels, summaries follow that agent's active conversation engine, including later `/models` switches. Session-title generation uses `utility_engine`. |
+| `utility_engine` | string (optional) | Isolated engine used for utility tasks such as session-title generation. Resolves to `default_engine` when absent and does not follow Engine runtime changes through `/models`. |
 | `provider_connections` | table | Named provider connections, keyed by connection name. |
-| `engines` | table | Named model/runtime configurations, keyed by engine name. |
+| `engines` | table | Named model configurations, keyed by engine name. |
 | `agents` | table | Per-agent-type settings, keyed by agent-type name. |
 
 ### Per-agent configuration
@@ -362,9 +419,69 @@ A profile groups engine selection and per-agent settings for a runtime session.
 | `description` | string (optional) | Model-facing summary of the tasks this agent type is suited for. The root agent receives it in the `spawn_subagent` tool description. |
 | `allowed_tools` | list of strings (optional) | Restrict which tool names this agent may invoke. When absent, the caller's flat default tool list applies (the CLI's or TUI's standard tool set, whichever is unset). When set, a distinct agent type — including one used only for spawned children — can be restricted to a genuinely different tool set than the root or any other agent type. |
 | `timeout_secs` | number (optional) | Maximum wall-clock seconds before the agent is cancelled. Omitted means no timeout. |
+| `max_tool_iterations` | number (optional) | Cap on consecutive tool-use rounds one turn may spend, for this agent type's root and child loops alike. Defaults to `50` when omitted; `0` is rejected at profile load because it would trip the guard on the very first tool-use round. |
 | `persona` | string (optional) | The agent type's own persona: the single model-facing text this type contributes, composed after the global baseline (global SOUL plus trusted instruction sections) and before the tool protocol — it extends that baseline, never replaces it. Write it as `persona = "…"` in a `.toml` agent-type file, as the body of a `.md` agent-type file (the body *is* the persona), or as `persona = "…"` in an inline table, where it replaces a file-sourced persona. Applies when the type runs as root or child. |
 | `can_spawn` | boolean | When `true` (for a root agent), registers the `spawn_subagent` tool so this agent may delegate self-contained tasks to a concurrently-running child agent (one level deep; children cannot spawn further children). Use `--auto-approve-spawn` to skip the human-approval prompt for `spawn_subagent` calls. See "Child-agent delegation" in `docs/features.md`. |
+| `[agents.<type>.compaction].engine` | string (optional) | Explicit summarizer engine for this agent type's context. Overrides `[compaction].engine`; if neither is set, summaries follow the agent type's active conversation engine. Applies to root and child runs of this agent type. |
+| `[agents.<type>.compaction].timeout_sec` | number (optional) | Summary request timeout for this agent type, in seconds. Overrides `[compaction].timeout_sec` (default `60`); must be greater than `0`. |
 | `tools` | table | Per-tool sandbox rule lists scoped to this agent type only, keyed by tool name (`[agents.<type>.tools.<name>]` inline tables, or a file-authored agent-type's own top-level `[tools.<name>]`/`tools: { <name>: ... }` table). Same shape as the profile-level `[tools.<name>]` table (see "Sandbox" below), resolved with higher precedence than it for this agent type. |
+
+An agent can use a dedicated summarizer and timeout when its conversation
+engine has a different context capacity:
+
+```toml
+[compaction]
+engine = "default-summarizer"
+timeout_sec = 120
+
+[agents.deep-review]
+engine = "long-context-chat"
+
+[agents.deep-review.compaction]
+engine = "long-context-summarizer"
+timeout_sec = 240
+```
+
+Per-agent engine and timeout values override independently. If one is omitted,
+it inherits the matching profile-level compaction setting. A timeout-only
+override does not make the engine explicit: without either engine field, the
+summarizer shares and follows the conversation Engine runtime for that agent type.
+To keep a fixed summarizer, configure its engine explicitly. An explicit
+summarizer remains attached to that named engine even when the conversation
+switches elsewhere; if both use the same named engine, mutations to that
+engine affect subsequent summary requests. In-flight summary requests keep
+their original request settings and deadline.
+
+CLI and TUI warn when an agent's conversation engine's effective
+`context_length × soft_compaction_threshold`, plus the compaction prompt and
+request overhead, exceeds its selected summarizer's effective context length.
+The comparison uses the active conversation Engine runtime when summarization follows
+implicitly, otherwise the explicitly selected per-agent summarizer; both use
+catalog-derived context lengths when no explicit window is configured.
+Startup checks the selected root and every
+configured agent type, including types that have not been spawned. Equivalent
+startup warnings share one notice listing all affected agent types, including
+the selected root when applicable. Different provider/model combinations,
+effective context lengths, soft thresholds, or estimated prompt/request
+overheads remain separate warnings. In the TUI these warnings appear without
+entering a prompt. Explicit context lengths need
+no catalog lookup; missing lengths are resolved in the background so the idle
+TUI remains responsive. A `/models` switch immediately triggers another capacity
+check without requiring a conversation prompt. Pending metadata lookups do not
+block controls, and a newer switch replaces the pending switch check. Each
+running root or subagent also checks before requests, without repeating an
+unchanged warning from startup or a model switch. The summarized
+prefix can be smaller than the soft threshold, so this is an advisory
+configuration warning, not a startup
+error. An explicitly selected compaction engine's capacity is independent of the
+conversation engine unless both are the same named engine. Use a larger summarizer, lower the conversation
+engine's soft threshold, or select a per-agent compaction engine.
+
+Each actual summary request is also estimated with its source prefix, resolved
+`COMPACTION.md`, code-owned framing, final trigger, and request overhead.
+Requests estimated to exceed the summarizer's context window produce a warning
+before dispatch, without changing the prefix or preventing the attempt.
+These local estimates remain advisory, not provider-token guarantees.
 
 Every loaded profile has a `default` agent type. If `[agents.default]` is
 absent, Ylva supplies the built-in default configuration: it uses
@@ -380,7 +497,7 @@ temperature, context length, reasoning settings, or provider connection
 independently. If an agent needs specialized engine settings, define another
 `[engines.<name>]` entry and select that engine for the agent type.
 
-Agents that resolve the same named engine share its runtime selection. A
+Agents that resolve the same named engine share its Engine runtime selection. A
 provider/model or reasoning-effort change made through `/models` therefore
 applies to every agent using that engine, including already-running children.
 The change does not alter an in-flight LLM request; it is observed by the
