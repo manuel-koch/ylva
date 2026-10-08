@@ -232,7 +232,7 @@ pub struct InputSnapshot {
     pub slash_overlay: SlashOverlay,
 }
 
-/// Indices into `choices` whose `provider_connection/model` identity
+/// Indices into `choices` whose engine name and `provider_connection/model` identity
 /// contains every whitespace-separated word of `filter`, case-insensitively
 /// (in any order — e.g. `"deepseek v3"` matches `stub/deepseek-v3` and
 /// `"v3 deepseek"` matches it too). An empty (or all-whitespace) filter
@@ -244,8 +244,10 @@ pub(crate) fn matching_model_indices(choices: &[ModelChoice], filter: &str) -> V
         .enumerate()
         .filter(|(_, choice)| {
             let identity = format!(
-                "{}/{}",
-                choice.selection.provider_connection, choice.selection.model.id
+                "{} {}/{}",
+                choice.engine_name.as_deref().unwrap_or_default(),
+                choice.selection.provider_connection,
+                choice.selection.model.id
             )
             .to_lowercase();
             filter_words.iter().all(|word| identity.contains(word))

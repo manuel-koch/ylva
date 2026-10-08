@@ -1096,11 +1096,15 @@ Submitting `/models` (with or without an initial argument, e.g.
 `/models deepseek`) fetches the full catalog once and does *not* clear the
 input — the draft stays as `/models <filter>` so the picker can be
 narrowed by continuing to type. Every keystroke re-derives the filter from
-the draft and re-applies it to the already-fetched `provider_connection/model`
-identities without another provider round-trip. A multi-word filter (e.g.
+the draft and re-applies it to the already-fetched engine names and
+`provider_connection/model` identities without another provider round-trip.
+A multi-word filter (e.g.
 `/models deepseek v3`) matches when every word appears somewhere in the
-identity, case-insensitively and in any order — not the joined phrase as one
-substring. A filter that matches nothing keeps the panel open with a
+engine name, provider connection, or model ID, case-insensitively and in any
+order — not the joined phrase as one substring. Engine names match only their
+named-engine shortcuts, not raw catalog rows for the same model. Display
+metadata such as reasoning effort and context length is not searched.
+A filter that matches nothing keeps the panel open with a
 "Nothing matched your model filter." message rather than vanishing, so the
 user can keep editing it. The detail area previews the compaction engine used
 by the highlighted choice without duplicating the conversation engine/model

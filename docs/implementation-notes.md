@@ -75,7 +75,10 @@ while raw catalog choices use the active engine for that connection or the
 sorted representative for another connection. The presenter carries this
 typed selection to the driver, so equal provider/model pairs do not erase
 engine identity. Picker display metadata is a snapshot only; the Engine runtime
-handles remain the source of request settings. While the agent is running, its
+handles remain the source of request settings. `matching_model_indices` shares
+engine-name, provider-connection and model-ID filtering across picker rendering,
+initial selection, live narrowing, navigation and confirmation; it does not
+search formatted display metadata. While the agent is running, its
 display snapshot retains a shared compaction-engine reference alongside the
 background task, so frame refreshes continue to report the configured
 compaction selection. A model-selection target carries the resolved effective

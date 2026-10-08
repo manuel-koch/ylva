@@ -1,8 +1,8 @@
 # Backlog of issues discovered while testing
 
-- [ ] Slash-command "/models" doesn't search for the engine name
-      when filtering matching provider/model from catalog and known engines,
-      it just filters on provider/model name.
+- [x] Slash-command "/models" searches engine names as well as provider
+      connections and model IDs. Multi-word filters match case-insensitively
+      across those fields; engine names match only named-engine shortcuts.
 
 - [ ] Why is "openrouter-dense → openrouter/openai/gpt-6-luna context: 96kb
       reasoning: max ⚙ [IF]" incompatible with compaction engine

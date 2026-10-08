@@ -18,47 +18,53 @@ use crate::llm::InputModality;
 
 #[test]
 fn matching_model_indices_requires_every_filter_word_in_any_order() {
-    let choice = |provider_connection: &str, model_id: &str| ModelChoice {
-        label: format!("{provider_connection}/{model_id}"),
-        initial_reasoning_effort: None,
-        selection: ProviderModelOption {
-            provider_connection: provider_connection.to_string(),
-            model: crate::llm::ModelInfo {
-                id: model_id.to_string(),
-                context_length: None,
-                reasoning_efforts: None,
-                reasoning_default: None,
-                input_modalities: None,
+    let choice =
+        |provider_connection: &str, model_id: &str, engine_name: Option<&str>| ModelChoice {
+            label: format!("{provider_connection}/{model_id}"),
+            initial_reasoning_effort: None,
+            selection: ProviderModelOption {
+                provider_connection: provider_connection.to_string(),
+                model: crate::llm::ModelInfo {
+                    id: model_id.to_string(),
+                    context_length: None,
+                    reasoning_efforts: None,
+                    reasoning_default: None,
+                    input_modalities: None,
+                },
+                reasoning_effort: None,
             },
-            reasoning_effort: None,
-        },
-        is_active: false,
-        engine_name: None,
-        selection_target: None,
-        selection_preview_error: None,
-    };
-    let choices = vec![
-        choice("openrouter", "deepseek-v3"),
-        choice("ollama", "llama3.2"),
-        choice("stub", "small"),
+            is_active: false,
+            engine_name: engine_name.map(str::to_string),
+            selection_target: None,
+            selection_preview_error: None,
+        };
+    let mut choices = vec![
+        choice("openrouter", "deepseek-v3", Some("Remote-Dense")),
+        choice("openrouter", "deepseek-v3", Some("remote-fast")),
+        choice("openrouter", "deepseek-v3", None),
+        choice("ollama", "llama3.2", None),
+        choice("stub", "small", None),
     ];
+    for choice in &mut choices {
+        choice.refresh_label();
+    }
 
     // A multi-word filter must narrow by every word, not the joined
     // phrase as a single substring — each word can match anywhere
     // (provider or model) and in any order.
     assert_eq!(
         matching_model_indices(&choices, "deepseek v3"),
-        vec![0],
+        vec![0, 1, 2],
         "every word of the filter must match, regardless of order"
     );
     assert_eq!(
         matching_model_indices(&choices, "v3 deepseek"),
-        vec![0],
+        vec![0, 1, 2],
         "word order must not matter"
     );
     assert_eq!(
         matching_model_indices(&choices, "openrouter deepseek"),
-        vec![0],
+        vec![0, 1, 2],
         "words may match across the provider and the model id"
     );
     assert_eq!(
@@ -68,8 +74,51 @@ fn matching_model_indices_requires_every_filter_word_in_any_order() {
     );
     assert_eq!(
         matching_model_indices(&choices, "   "),
-        vec![0, 1, 2],
+        vec![0, 1, 2, 3, 4],
         "an all-whitespace filter matches everything"
+    );
+    assert_eq!(
+        matching_model_indices(&choices, "DENSE"),
+        vec![0],
+        "engine names must match case-insensitively without including other engines or catalog rows"
+    );
+    assert_eq!(
+        matching_model_indices(&choices, "v3 REMOTE openrouter"),
+        vec![0, 1],
+        "words may match across the engine name, provider connection, and model id"
+    );
+    assert_eq!(
+        matching_model_indices(&choices, "dense missing-word"),
+        Vec::<usize>::new()
+    );
+    assert_eq!(
+        matching_model_indices(&choices, "unavailable"),
+        Vec::<usize>::new(),
+        "display metadata must not be searchable"
+    );
+
+    let mut state = AppState::new();
+    state.slash_overlay = SlashOverlay::ModelPicker {
+        choices,
+        filter: String::new(),
+        selected: 4,
+    };
+    state.refresh_slash_overlay("/models DENSE");
+    let selected_choice = state.selected_model().expect("matching engine shortcut");
+    assert_eq!(selected_choice.engine_name.as_deref(), Some("Remote-Dense"));
+    assert!(matches!(
+        selected_choice.to_model_selection(),
+        ModelSelection::NamedEngine { engine_name, .. } if engine_name == "Remote-Dense"
+    ));
+    assert_eq!(
+        slash_overlay_text_rows(&state.slash_overlay),
+        vec![selected_choice.label.clone()]
+    );
+    state.refresh_slash_overlay("/models remote");
+    state.move_slash_selection(1);
+    assert_eq!(
+        state.selected_model().unwrap().engine_name.as_deref(),
+        Some("remote-fast")
     );
 }
 

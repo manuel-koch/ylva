@@ -91,7 +91,7 @@ conversation. The original draft returns after all approvals are resolved.
 | `left-click` on an entry | `/models` picker open | Highlight the provider-connection/model; does not switch until `enter` |
 | `left-drag` | Slash-command overlay open | Select visible popup text; release copies it to the clipboard |
 | `←` / `→` | `/models` picker open | Cycle the highlighted model's reasoning effort when alternatives are available |
-| any character / backspace | `/models` picker open | Insert into the draft (`/models <filter>`) and live-narrow the picker's already-fetched choices; no re-query |
+| any character / backspace | `/models` picker open | Insert into the draft (`/models <filter>`) and live-narrow the picker's already-fetched choices by engine name, provider connection, or model ID; no re-query |
 | `enter` | `/models` picker open | Activate the highlighted named engine's current Engine runtime selection, or route a raw catalog model by provider connection; apply only an edited named-engine reasoning effort and clear the input |
 | `esc` | `/models` picker open | Cancel without switching and clear the input |
 
