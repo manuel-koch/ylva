@@ -16,6 +16,8 @@ don't postpone fixing (pre-existing) flaky tests!
 Coverage threshold: **≥80% line coverage** is enforced on testable files
 by `make test-coverage` (below the threshold the command fails).
 `tui_widgets.rs`, `render.rs`, and `main.rs` are excluded because they require a live terminal.
+The matcher uses whole filenames and directory boundaries so testable files
+such as `presenter/domain.rs` remain included.
 
 The following `make` targets are available:
 
@@ -239,7 +241,11 @@ the real binary instead:
 Large owner-local suites use `#[cfg(test)] mod tests;` with
 `<owner>/tests.rs`; responsibility-specific descendants live under
 `<owner>/tests/`, sharing fixtures from that local parent (see
-`src/llm/engine/tests.rs`). Small boundary suites can remain beside the
+`src/llm/engine/tests.rs`, `src/tui_reducer_state/tests.rs` and
+`src/presenter/tests.rs`). Presenter live/replay buffer comparisons and
+cross-input effect-order assertions remain at the facade, alongside shared
+local fixtures; its keyboard, mouse, domain and bubble suites live in
+`presenter/tests/`. Small boundary suites can remain beside the
 extracted implementation (see `src/agent/tools/read/stream.rs` and
 `src/agent/tools/read/windows.rs`). Cross-owner assertions stay at the facade.
 

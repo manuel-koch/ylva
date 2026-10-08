@@ -99,7 +99,7 @@ test-e2e-persistence:
 test-coverage:
 	cargo llvm-cov \
 	    $(if $(filter true,$(strip $(VERBOSE))),,--quiet) \
-	    --ignore-filename-regex "(tui_widgets|render|main)\.rs" \
+	    --ignore-filename-regex "(^|/)(tui_widgets|render|main)\.rs$$" \
 	    --fail-under-lines $(COVERAGE_THRESHOLD)
 
 # Same as test-coverage but also prints uncovered line numbers per file.
@@ -109,7 +109,7 @@ test-coverage:
 test-coverage-missing:
 	cargo llvm-cov \
 	    $(if $(filter true,$(strip $(VERBOSE))),,--quiet) \
-	    --ignore-filename-regex "(tui_widgets|render|main)\.rs" \
+	    --ignore-filename-regex "(^|/)(tui_widgets|render|main)\.rs$$" \
 	    --fail-under-lines $(COVERAGE_THRESHOLD) \
 	    --show-missing-lines
 

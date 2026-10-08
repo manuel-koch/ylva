@@ -540,9 +540,24 @@ behavior.
 
 The TUI renders the same headless `AgentLoop`; it does not own agent state.
 
-- `src/tui_reducer_state.rs` holds the view state, events, and effects.
-- `src/presenter.rs` reduces input and domain events into effects without
-  terminal or channel I/O.
+- `src/tui_reducer_state.rs` retains `AppState`, construction, render revisions
+  and cross-cutting coordination, with explicit compatibility re-exports.
+  Its private `conversation.rs` child owns entries, tool states and shared
+  turn buffers; `conversation/replay.rs`, `conversation/navigation.rs` and
+  `conversation/tools.rs` separate transcript projection, root/child navigation
+  and bubble mutations. `selection.rs` owns terminal-column selection,
+  `model_picker.rs` owns slash/model choices and filtering,
+  `input_history.rs` owns history browsing, `layout.rs` owns hit-test geometry,
+  and `events.rs` owns input/domain events, modes, focus and effects.
+  Descendant impl blocks operate on the same parent-owned `AppState`; its
+  public fields and original type/function paths are unchanged.
+- `src/presenter.rs` retains `update`, `TuiEvent` and `TextareaContext`.
+  Its private `keyboard.rs` and `mouse.rs` children own focus-prioritized input
+  routing; `domain.rs` owns mode and subagent lifecycle transitions; and
+  `tool_bubbles.rs` owns shared pending/clarify/progress/completion transitions.
+  The reducer still emits ordered effects without terminal or channel I/O.
+  Both state and presenter retain facade-level cross-owner tests, with
+  responsibility-specific suites under their local `tests/` directories.
 - `src/render.rs` and `src/tui_widgets.rs` render the view and record geometry
   for mouse routing.
 - `src/tui_driver.rs` owns the terminal loop, maps live UI updates to domain

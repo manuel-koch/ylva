@@ -132,7 +132,7 @@ No staging, branch creation, or commits are authorized by this plan.
    `cargo test --test http_provider --test cli_driver`.
    Update `docs/implementation-notes.md`.
 
-4. [ ] Split reducer state without changing `AppState`'s public field shape.
+4. [x] Split reducer state without changing `AppState`'s public field shape.
    Keep `AppState`, its constructor, and cross-cutting coordination in
    `src/tui_reducer_state.rs`. Add `tui_reducer_state/conversation.rs`
    for entries, tool state, turn buffers, subagent conversation types, replay
@@ -150,7 +150,7 @@ No staging, branch creation, or commits are authorized by this plan.
    `cargo test --test tui_render_state`. Update
    `docs/implementation-notes.md` with state ownership and replay paths.
 
-5. [ ] Split the pure presenter into `presenter/keyboard.rs`,
+5. [x] Split the pure presenter into `presenter/keyboard.rs`,
    `presenter/mouse.rs`, `presenter/domain.rs`, and
    `presenter/tool_bubbles.rs`. Retain `update`, `TuiEvent`, and
    `TextareaContext` as the public entry surface in `src/presenter.rs`.
@@ -172,6 +172,9 @@ No staging, branch creation, or commits are authorized by this plan.
    widget files and included similarly named files. Update
    `docs/development-workflow.md` and the relevant module coverage comments.
    The later full coverage report must confirm the intended file set.
+   The exact-parent boundary correction was brought forward into step 5:
+   the old suffix matcher also excluded the new `presenter/domain.rs` as
+   `main.rs`. Renderer-only descendant matching still awaits the rendering moves.
 
 7. [ ] Split `src/tui_widgets.rs` by rendering responsibility. Retain
    `draw`, `draw_borrowed`, frame composition and `ButtonAreas` at the facade.
@@ -359,9 +362,10 @@ they do not block completing the nine selected parents.
   The nine-parent scope and extraction map above remain unchanged.
   All 57 read baseline tests passed. The complete registered-case inventory
   is retained in the executing Copilot session's `files/` directory, outside
-  the tracked tree. A stale `tree-sitter` artifact prevented the first check
-  in the shared Cargo target directory; checks use the repository-local
-  `target/` directory instead.
+  the tracked tree. The earlier stale `tree-sitter` artifact issue in the
+  shared Cargo target directory is resolved. No `CARGO_TARGET_DIR` override
+  is required; Cargo and Make commands use their normal target-directory
+  configuration.
 - The read pilot now has private `stream`, `windows` and `media` children,
   with whole-tool tests in `read/tests.rs`. Its existing 57 cases remain
   registered; five new stream/scanner boundary cases exercise the extracted
@@ -376,6 +380,24 @@ they do not block completing the nine selected parents.
   default-feature all-target Clippy passed. Ownership and local test-suite
   layout are documented in `docs/implementation-notes.md` and
   `docs/development-workflow.md`.
+- Reducer state now retains one `AppState` at its original facade, with private
+  conversation, selection, model-picker, input-history, layout and event owners
+  and explicit compatibility re-exports. Conversation replay, navigation and
+  bubble mutation have focused descendants to keep each production file below
+  the review trigger. All 69 original reducer cases remain, with three new
+  history/terminal-column boundary assertions. Reducer, presenter and
+  `tui_render_state` targeted checks and default-feature all-target Clippy passed.
+  State ownership and replay paths are updated in `docs/implementation-notes.md`.
+- Presenter routing now has private keyboard, mouse, domain and tool-bubble
+  owners behind the unchanged `update`/event/textarea facade. Subagent lifecycle
+  handling stays in domain, common bubble transitions stay in the bubble owner,
+  and each production file is below the review trigger. All 96 original cases
+  remain, with two new cross-mode/effect-order boundary assertions. Presenter,
+  `tui_render_state` and default-feature all-target Clippy checks passed.
+  Ownership and local test layout are updated in `docs/implementation-notes.md`.
+  Coverage verification found the old exclusion regex also matched `domain.rs`.
+  Both coverage targets now match exact parent filenames at directory boundaries;
+  renderer-descendant handling remains pending in step 6.
 - The user confirmed this refined plan on 2026-10-08. Confirmation applies
   to the saved plan only; source implementation and Git operations are not
   authorized.
@@ -396,7 +418,8 @@ they do not block completing the nine selected parents.
 
 ### Execution checkpoint: read and engine pilots
 
-Steps 1-3 are complete; steps 4-15 remain pending. The first execution batch
+At this earlier checkpoint, steps 1-3 were complete and steps 4-15 remained
+pending. The first execution batch
 stops at this verified subsystem boundary, before reducer-state extraction.
 No staging, branch creation or commits were performed.
 
@@ -429,6 +452,59 @@ cohesive size exception is needed for either pilot.
 | `llm/engine/tests/router.rs` | 0 | 391 |
 | `llm/engine/tests/runtime.rs` | 0 | 306 |
 | `llm/engine/tests/selection.rs` | 0 | 85 |
+
+### Execution checkpoint: reducer state and presenter
+
+Steps 1-5 are complete; steps 6-15 remain pending, apart from the coverage
+matcher boundary correction brought forward from step 6. This continuation
+completed the user-selected reducer/presenter scope. No staging, branch
+creation or commits were performed.
+
+All 1,625 cases registered at the start of this continuation remain registered;
+five boundary regressions bring the total to 1,630. `AppState` field declarations
+and all original reducer/presenter production function identities are preserved.
+The reducer suite passed 72 cases, the presenter suite passed 98, and the
+unchanged `tui_render_state` integration target passed 68.
+
+`make format lint`, default-feature all-target Clippy and `make test-coverage`
+passed. Final aggregate line coverage was **91.78%**, above the unchanged 80%
+gate. The report includes all thirteen extracted production children, including
+`presenter/domain.rs`; both coverage matchers passed ten exact-filename boundary
+examples. The optional rustdoc build succeeded with existing unrelated
+broken/private-link warnings; no unresolved links were introduced by these
+splits. Changed Markdown files passed `rumdl check`.
+
+Physical-line counts use the convention below. Each production owner is below
+the responsibility-review trigger; no cohesive size exception is needed.
+
+| Module | Production | Tests |
+| --- | ---: | ---: |
+| `tui_reducer_state.rs` | 684 | 2 |
+| `tui_reducer_state/conversation.rs` | 741 | 0 |
+| `tui_reducer_state/conversation/navigation.rs` | 292 | 0 |
+| `tui_reducer_state/conversation/replay.rs` | 378 | 0 |
+| `tui_reducer_state/conversation/tools.rs` | 344 | 0 |
+| `tui_reducer_state/events.rs` | 407 | 0 |
+| `tui_reducer_state/input_history.rs` | 79 | 0 |
+| `tui_reducer_state/layout.rs` | 165 | 0 |
+| `tui_reducer_state/model_picker.rs` | 520 | 0 |
+| `tui_reducer_state/selection.rs` | 219 | 0 |
+| `tui_reducer_state/tests.rs` | 0 | 272 |
+| `tui_reducer_state/tests/conversation.rs` | 0 | 1142 |
+| `tui_reducer_state/tests/input_history.rs` | 0 | 45 |
+| `tui_reducer_state/tests/layout.rs` | 0 | 113 |
+| `tui_reducer_state/tests/model_picker.rs` | 0 | 441 |
+| `tui_reducer_state/tests/selection.rs` | 0 | 28 |
+| `presenter.rs` | 67 | 2 |
+| `presenter/domain.rs` | 892 | 0 |
+| `presenter/keyboard.rs` | 592 | 0 |
+| `presenter/mouse.rs` | 623 | 0 |
+| `presenter/tool_bubbles.rs` | 358 | 0 |
+| `presenter/tests.rs` | 0 | 998 |
+| `presenter/tests/domain.rs` | 0 | 854 |
+| `presenter/tests/keyboard.rs` | 0 | 738 |
+| `presenter/tests/mouse.rs` | 0 | 1090 |
+| `presenter/tests/tool_bubbles.rs` | 0 | 450 |
 
 ### Inventory interpretation
 
