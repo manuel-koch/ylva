@@ -14,6 +14,581 @@
 
 mod common;
 
+#[test]
+fn large_completed_result_warm_render_reuses_selection_storage() {
+    use ratatui_textarea::TextArea;
+    use ylva::tui_reducer_state::{AppState, ResultSection, ToolCallState};
+    let mut state = AppState::new();
+    state.enable_render_cache();
+    state.chat_entries.push(ChatEntry::ToolBubble {
+        id: uuid::Uuid::new_v4(),
+        name: "read".into(),
+        state: Box::new(ToolCallState::Done {
+            arguments: serde_json::json!({}),
+            content_sections: vec![ylva::agent::tools::Section::Content(
+                ylva::agent::tools::ContentSection {
+                    label: Some("src/tui_widgets.rs".into()),
+                    content: include_str!("../src/tui_widgets.rs").into(),
+                    file_extension: Some("rs".into()),
+                    line_number_offset: Some(0),
+                },
+            )],
+            title_arguments: vec![],
+            result_section: ResultSection::plain(""),
+            summary: vec![],
+            duration: Duration::from_secs(1),
+        }),
+        collapsed: false,
+    });
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    let mut textarea = TextArea::default();
+    let registry = ToolRegistry::new();
+    terminal
+        .draw(|frame| {
+            ylva::render::render(frame, &mut state, &mut textarea, None, None, &registry);
+        })
+        .unwrap();
+    let selection_storage = state.conversation.chat_rendered_lines.as_ptr();
+    let body_builds = state.render_cache.body_layout_builds;
+    let first_buffer = terminal.backend().buffer().clone();
+    terminal
+        .draw(|frame| {
+            ylva::render::render(frame, &mut state, &mut textarea, None, None, &registry);
+        })
+        .unwrap();
+    assert_eq!(
+        selection_storage,
+        state.conversation.chat_rendered_lines.as_ptr()
+    );
+    assert_eq!(body_builds, state.render_cache.body_layout_builds);
+    assert_eq!(&first_buffer, terminal.backend().buffer());
+    assert!(state.render_cache.painted_rows <= 40);
+    assert!(state
+        .conversation
+        .chat_rendered_lines
+        .iter()
+        .any(|line| line.contains("fn draw_chat")));
+}
+
+fn render_offline(state: &mut ylva::AppState, width: u16, height: u16) -> Buffer {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    let mut textarea = ratatui_textarea::TextArea::default();
+    terminal
+        .draw(|frame| {
+            ylva::render::render(
+                frame,
+                state,
+                &mut textarea,
+                None,
+                None,
+                &ToolRegistry::new(),
+            );
+        })
+        .unwrap();
+    terminal.backend().buffer().clone()
+}
+
+fn completed_render_fixture(content: String) -> ChatEntry {
+    ChatEntry::ToolBubble {
+        id: uuid::Uuid::new_v4(),
+        name: "read".into(),
+        collapsed: false,
+        state: Box::new(ylva::ToolCallState::Done {
+            arguments: serde_json::json!({}),
+            title_arguments: vec![(
+                "path".into(),
+                serde_json::json!("資料/a long wrapped file name with Unicode.rs"),
+            )],
+            content_sections: vec![],
+            result_section: ylva::tui_reducer_state::ResultSection::plain(content),
+            summary: vec![],
+            duration: Duration::from_secs(1),
+        }),
+    }
+}
+
+#[test]
+fn large_plain_and_markdown_buffers_match_legacy_at_every_scroll_position() {
+    let markdown = [
+        "| Name | Value |",
+        "| --- | --- |",
+        "| 日本語 | **bold** |",
+        "",
+        "- list item",
+        "  - nested item",
+        "",
+        "```rust",
+        "fn main() { println!(\"hello\"); }",
+        "```",
+        "",
+    ];
+    for count in [3_000, 30_000] {
+        for markdown_content in [false, true] {
+            let content = (0..count)
+                .map(|index| {
+                    if markdown_content {
+                        markdown[index % markdown.len()].to_owned()
+                    } else {
+                        format!("plain result row {index}\n")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let entries = vec![
+                completed_render_fixture(content),
+                ChatEntry::Notice {
+                    text: "end of transcript".into(),
+                },
+            ];
+            let mut state = ylva::AppState::new();
+            state.enable_render_cache();
+            state.chat_entries = entries.clone();
+            for width in [50, 120] {
+                for offset in [0, 1_500, usize::MAX] {
+                    state.conversation.scroll_locked = false;
+                    state.conversation.scroll_offset = offset;
+                    let actual = render_offline(&mut state, width, 40);
+                    let mut legacy = ylva::TuiState::new();
+                    legacy.chat_entries = entries.clone();
+                    legacy.conversation.scroll_locked = false;
+                    legacy.conversation.scroll_offset = offset;
+                    let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();
+                    let mut textarea = ratatui_textarea::TextArea::default();
+                    terminal
+                        .draw(|frame| {
+                            ylva::tui_widgets::draw(
+                                frame,
+                                &mut legacy,
+                                &mut textarea,
+                                None,
+                                None,
+                                &ToolRegistry::new(),
+                            );
+                        })
+                        .unwrap();
+                    assert_eq!(&actual, terminal.backend().buffer(), "count={count}, markdown={markdown_content}, width={width}, offset={offset}");
+                    assert_eq!(
+                        state.conversation.chat_rendered_lines,
+                        legacy.conversation.chat_rendered_lines
+                    );
+                    assert_eq!(
+                        state.conversation.chat_rendered_line_prefix_widths,
+                        legacy.conversation.chat_rendered_line_prefix_widths
+                    );
+                    assert_eq!(
+                        state.conversation.bubble_title_rows,
+                        legacy.conversation.bubble_title_rows
+                    );
+                    assert_eq!(
+                        state.conversation.scroll_offset,
+                        legacy.conversation.scroll_offset
+                    );
+                    let builds = state.render_cache.body_layout_builds;
+                    let _ = render_offline(&mut state, width, 40);
+                    assert_eq!(builds, state.render_cache.body_layout_builds);
+                    assert!(state.render_cache.painted_rows <= 40);
+                }
+            }
+        }
+    }
+}
+
+fn present_render_event(state: &mut ylva::AppState, event: ylva::DomainEvent) {
+    ylva::presenter::update(
+        state,
+        ylva::TuiEvent::Domain(event),
+        &empty_textarea_context(),
+    );
+}
+
+#[test]
+fn stream_updates_append_and_compaction_preserve_or_invalidate_the_correct_slots() {
+    use ylva::DomainEvent;
+    let mut state = ylva::AppState::new();
+    state.enable_render_cache();
+    state
+        .chat_entries
+        .push(completed_render_fixture("completed\n\n".repeat(3_000)));
+    present_render_event(&mut state, DomainEvent::StreamStarted);
+    present_render_event(&mut state, DomainEvent::StreamChunk("first".into()));
+    render_offline(&mut state, 120, 40);
+    let body_builds = state.render_cache.body_layout_builds;
+    present_render_event(&mut state, DomainEvent::StreamChunk(" second".into()));
+    render_offline(&mut state, 120, 40);
+    assert_eq!(state.render_cache.body_layout_builds, body_builds + 1);
+    let completed = Arc::clone(&state.render_cache.conversation.layouts[2]);
+    state.spinner_frame += 1;
+    state.conversation.scroll_locked = false;
+    state.conversation.scroll_offset = 10;
+    render_offline(&mut state, 120, 30);
+    assert!(Arc::ptr_eq(
+        &completed,
+        &state.render_cache.conversation.layouts[2]
+    ));
+    present_render_event(
+        &mut state,
+        DomainEvent::StreamThinkingChunk("reasoning".into()),
+    );
+    render_offline(&mut state, 120, 40);
+    assert!(Arc::ptr_eq(
+        &completed,
+        &state.render_cache.conversation.layouts[2]
+    ));
+    present_render_event(&mut state, DomainEvent::StreamDone);
+    state.push_notice("notice".into());
+    state.queue_steer_message("queued".into());
+    render_offline(&mut state, 120, 40);
+    assert!(Arc::ptr_eq(
+        &completed,
+        &state.render_cache.conversation.layouts[2]
+    ));
+    state.commit_queued_steer_messages(UserMessageState::Cancelled);
+    render_offline(&mut state, 120, 40);
+    assert!(Arc::ptr_eq(
+        &completed,
+        &state.render_cache.conversation.layouts[2]
+    ));
+    present_render_event(
+        &mut state,
+        DomainEvent::CompactionApplied {
+            run_id: None,
+            entry_index: 0,
+            summarized_messages: 1,
+        },
+    );
+    render_offline(&mut state, 120, 40);
+    assert!(matches!(
+        state.chat_entries[0],
+        ChatEntry::CompactionMarker { .. }
+    ));
+    assert!(state.conversation.chat_rendered_lines[1].contains("compaction"));
+    assert!(!Arc::ptr_eq(
+        &completed,
+        &state.render_cache.conversation.layouts[3]
+    ));
+}
+
+#[test]
+fn borrowed_projection_preserves_streaming_and_queued_footer_labels() {
+    let mut state = ylva::AppState::new();
+    state.enable_render_cache();
+    present_render_event(&mut state, ylva::DomainEvent::StreamStarted);
+    present_render_event(
+        &mut state,
+        ylva::DomainEvent::StreamThinkingChunk("reasoning".into()),
+    );
+    state.queue_steer_message("queued text".into());
+    present_render_event(&mut state, ylva::DomainEvent::SteerQueued { run_id: None });
+    let buffer = render_offline(&mut state, 120, 40);
+    let text: String = buffer.content().iter().map(Cell::symbol).collect();
+    assert!(text.contains("Thinking…"));
+    assert!(text.contains("1 message queued"));
+    present_render_event(&mut state, ylva::DomainEvent::StreamChunk("answer".into()));
+    let buffer = render_offline(&mut state, 120, 40);
+    let text: String = buffer.content().iter().map(Cell::symbol).collect();
+    assert!(text.contains("Streaming…"));
+    assert!(text.contains("1 message queued"));
+}
+
+#[test]
+fn cached_selection_uses_terminal_columns_for_wide_unicode_and_graphemes() {
+    let mut state = ylva::AppState::new();
+    state.enable_render_cache();
+    state
+        .chat_entries
+        .push(completed_render_fixture("日本語 e\u{301} ABC".into()));
+    render_offline(&mut state, 80, 20);
+    let row = state
+        .conversation
+        .chat_rendered_lines
+        .iter()
+        .position(|line| line == "日本語 e\u{301} ABC")
+        .unwrap();
+    let prefix = state.conversation.chat_rendered_line_prefix_widths[row];
+    state.conversation.chat_selection = Some(ylva::ChatSelection {
+        anchor_line: row,
+        anchor_col: prefix,
+        cursor_line: row,
+        cursor_col: prefix + 6,
+    });
+    let buffer = render_offline(&mut state, 80, 20);
+    assert_eq!(
+        state.extract_chat_selection_text().as_deref(),
+        Some("日本語")
+    );
+    assert_ne!(
+        buffer[(prefix as u16, row as u16)].bg,
+        buffer[((prefix + 6) as u16, row as u16)].bg
+    );
+    state.conversation.chat_selection = Some(ylva::ChatSelection {
+        anchor_line: row,
+        anchor_col: prefix + 7,
+        cursor_line: row,
+        cursor_col: prefix + 8,
+    });
+    assert_eq!(
+        state.extract_chat_selection_text().as_deref(),
+        Some("e\u{301}")
+    );
+}
+
+#[test]
+fn same_length_tool_replacement_collapse_retention_and_public_compatibility() {
+    let mut state = ylva::AppState::new();
+    state.enable_render_cache();
+    state
+        .chat_entries
+        .push(completed_render_fixture("old".into()));
+    let ChatEntry::ToolBubble { id, .. } = state.chat_entries[0] else {
+        unreachable!()
+    };
+    render_offline(&mut state, 80, 40);
+    let original = Arc::clone(&state.render_cache.conversation.layouts[2]);
+    state.toggle_tool_bubble_collapsed(id);
+    render_offline(&mut state, 80, 40);
+    assert!(state.render_cache.retained_bytes() > 0);
+    state.toggle_tool_bubble_collapsed(id);
+    render_offline(&mut state, 80, 40);
+    assert!(Arc::ptr_eq(
+        &original,
+        &state.render_cache.conversation.layouts[2]
+    ));
+    let Some(ChatEntry::ToolBubble { state: bubble, .. }) = state.find_tool_bubble_mut(id) else {
+        unreachable!()
+    };
+    let ylva::ToolCallState::Done { result_section, .. } = bubble.as_mut() else {
+        unreachable!()
+    };
+    result_section.content = "new".into();
+    render_offline(&mut state, 80, 40);
+    assert!(state
+        .conversation
+        .chat_rendered_lines
+        .iter()
+        .any(|line| line == "new"));
+    assert!(!Arc::ptr_eq(
+        &original,
+        &state.render_cache.conversation.layouts[2]
+    ));
+    let mut direct = ylva::AppState::new();
+    direct.chat_entries = vec![ChatEntry::Notice { text: "old".into() }];
+    render_offline(&mut direct, 80, 40);
+    direct.chat_entries[0] = ChatEntry::Notice { text: "new".into() };
+    render_offline(&mut direct, 80, 40);
+    assert!(direct
+        .conversation
+        .chat_rendered_lines
+        .iter()
+        .any(|line| line.contains("new")));
+    state.clear_conversation();
+    assert!(state.render_cache.conversation.layouts.is_empty());
+    assert!(state.conversation.chat_rendered_lines.is_empty());
+    assert_eq!(state.render_cache.retained_bytes(), 0);
+}
+
+#[test]
+fn wrapped_document_bottom_scroll_does_not_narrow_absolute_offsets() {
+    let mut state = ylva::AppState::new();
+    state.enable_render_cache();
+    state.chat_entries.push(ChatEntry::Notice {
+        text: (0..35_000)
+            .map(|row| format!("row {row:05} long content wrapping\n"))
+            .collect(),
+    });
+    let buffer = render_offline(&mut state, 24, 12);
+    assert!(state.conversation.scroll_offset > u16::MAX as usize);
+    assert_eq!(
+        state.conversation.scroll_offset,
+        state.render_cache.conversation.height - state.layout.chat_area.rect.height as usize
+    );
+    assert!(buffer.content().iter().any(|cell| cell.symbol() == "9"));
+    let visible = state.render_cache.conversation.visible_rows(
+        state.conversation.scroll_offset,
+        state.layout.chat_area.rect.height as usize,
+    );
+    assert!(visible
+        .iter()
+        .flat_map(|line| &line.spans)
+        .any(|span| span.content.contains("34999")));
+    let builds = state.render_cache.body_layout_builds;
+    state.conversation.chat_selection = Some(ylva::ChatSelection {
+        anchor_line: 1,
+        anchor_col: 5,
+        cursor_line: state.render_cache.conversation.height - 1,
+        cursor_col: 10,
+    });
+    render_offline(&mut state, 24, 12);
+    assert_eq!(builds, state.render_cache.body_layout_builds);
+    assert!(state.render_cache.painted_rows <= 12);
+    let text = state.extract_chat_selection_text().unwrap();
+    assert!(text.starts_with("row 00000"));
+    assert!(text.contains("34999"));
+    state.conversation.chat_drag_active = true;
+    let effects = ylva::presenter::update(
+        &mut state,
+        ylva::TuiEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 10,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }),
+        &empty_textarea_context(),
+    );
+    assert!(effects
+        .iter()
+        .any(|effect| matches!(effect, ylva::Effect::CopyToClipboard(_))));
+    state.conversation.chat_selection = None;
+    assert_eq!(buffer, render_offline(&mut state, 24, 12));
+}
+
+#[test]
+fn subagent_header_live_chrome_and_background_updates_reuse_large_bodies() {
+    use ylva::DomainEvent;
+    let mut state = ylva::AppState::new();
+    state.enable_render_cache();
+    let bubble_id = uuid::Uuid::new_v4();
+    let run_id = uuid::Uuid::new_v4();
+    let sections = vec![ylva::agent::tools::Section::Content(
+        ylva::agent::tools::ContentSection {
+            label: Some("Task".into()),
+            content: "large task 日本語\n\n".repeat(3_000),
+            file_extension: Some("md".into()),
+            line_number_offset: None,
+        },
+    )];
+    present_render_event(
+        &mut state,
+        DomainEvent::ToolStart {
+            id: bubble_id,
+            name: "spawn_subagent".into(),
+            arguments: serde_json::json!({}),
+            content_sections: sections,
+            title_arguments: vec![("task".into(), serde_json::json!("Inspect the workspace"))],
+            run_id: None,
+        },
+    );
+    present_render_event(
+        &mut state,
+        DomainEvent::ChildAgentStarted {
+            run_id,
+            call_id: bubble_id,
+            agent_type: "reviewer".into(),
+            task: "Inspect".into(),
+            label: "Inspect".into(),
+        },
+    );
+    present_render_event(
+        &mut state,
+        DomainEvent::ChildAgentToken {
+            run_id,
+            text: "child transcript\n\n".repeat(3_000),
+            is_thinking: false,
+        },
+    );
+    present_render_event(
+        &mut state,
+        DomainEvent::ChildAgentDone {
+            run_id,
+            status: "success".into(),
+            result: None,
+        },
+    );
+    if matches!(
+        state.chat_entries[0],
+        ChatEntry::ToolBubble {
+            collapsed: true,
+            ..
+        }
+    ) {
+        state.toggle_tool_bubble_collapsed(bubble_id);
+    }
+    state.switch_to_child_view(run_id);
+    render_offline(&mut state, 120, 40);
+    let header_body = Arc::clone(&state.render_cache.header.layouts[1]);
+    let child_body = Arc::clone(&state.render_cache.conversation.layouts[1]);
+    let builds = state.render_cache.body_layout_builds;
+    assert!(state.render_cache.header.height > 3_000);
+    assert_eq!(state.layout.header_bubble.height, 16);
+    state.spinner_frame += 1;
+    state.child_view.header_bubble_scroll_offset = 1_500;
+    render_offline(&mut state, 120, 40);
+    assert_eq!(builds, state.render_cache.body_layout_builds);
+    assert!(Arc::ptr_eq(
+        &header_body,
+        &state.render_cache.header.layouts[1]
+    ));
+    assert!(Arc::ptr_eq(
+        &child_body,
+        &state.render_cache.conversation.layouts[1]
+    ));
+    present_render_event(
+        &mut state,
+        DomainEvent::ToolProgress {
+            id: bubble_id,
+            title_arguments: vec![(
+                "details".into(),
+                serde_json::json!("wrapping title ".repeat(30)),
+            )],
+        },
+    );
+    render_offline(&mut state, 120, 40);
+    assert_eq!(builds, state.render_cache.body_layout_builds);
+    assert!(Arc::ptr_eq(
+        &header_body,
+        &state.render_cache.header.layouts[1]
+    ));
+    assert!(state
+        .child_view
+        .header_rendered_lines
+        .iter()
+        .any(|line| line.contains("details=")));
+    let second_run = uuid::Uuid::new_v4();
+    present_render_event(
+        &mut state,
+        DomainEvent::ChildAgentStarted {
+            run_id: second_run,
+            call_id: uuid::Uuid::new_v4(),
+            agent_type: "reviewer".into(),
+            task: "other".into(),
+            label: "other".into(),
+        },
+    );
+    present_render_event(
+        &mut state,
+        DomainEvent::ChildAgentToken {
+            run_id: second_run,
+            text: "background text".into(),
+            is_thinking: false,
+        },
+    );
+    state.push_notice("root background notice".into());
+    state.queue_steer_message("root background queued".into());
+    state.steer_indicator = true;
+    render_offline(&mut state, 120, 40);
+    assert_eq!(builds, state.render_cache.body_layout_builds);
+    assert!(state.render_cache.painted_rows <= 40);
+    assert!(!state
+        .conversation
+        .chat_rendered_lines
+        .iter()
+        .any(|line| line.contains("background")));
+    state.toggle_header_bubble_collapsed();
+    render_offline(&mut state, 120, 40);
+    state.toggle_header_bubble_collapsed();
+    render_offline(&mut state, 120, 40);
+    assert!(Arc::ptr_eq(
+        &header_body,
+        &state.render_cache.header.layouts[1]
+    ));
+    state.switch_to_root_view();
+    assert!(state.render_cache.header.layouts.is_empty());
+    assert!(state.render_cache.conversation.layouts.is_empty());
+    assert!(state.child_view.header_rendered_lines.is_empty());
+    render_offline(&mut state, 120, 40);
+    assert!(state.render_cache.header.layouts.is_empty());
+    assert!(state.pending_scroll_to_bubble.is_none());
+}
+
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,

@@ -19,6 +19,7 @@ pub mod build_info;
 pub mod cli;
 pub mod cli_driver;
 pub mod config;
+pub mod conversation_render_cache;
 pub mod events;
 pub mod highlight;
 pub mod http;

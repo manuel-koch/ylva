@@ -967,10 +967,7 @@ mod tests {
                 elapsed >= WEB_SEARCH_THROTTLE_INTERVAL,
                 "a back-to-back request waits out the interval: {elapsed:?}"
             );
-            assert!(
-                elapsed < WEB_SEARCH_THROTTLE_INTERVAL + Duration::from_millis(500),
-                "jitter stays within 10% of the interval: {elapsed:?}"
-            );
+            assert_throttle_wait_within_timer_precision(elapsed);
         });
     }
 
@@ -1013,10 +1010,20 @@ mod tests {
                 elapsed >= WEB_SEARCH_THROTTLE_INTERVAL,
                 "the failure timestamp must still throttle the next start: {elapsed:?}"
             );
-            assert!(
-                elapsed < WEB_SEARCH_THROTTLE_INTERVAL + Duration::from_millis(500),
-                "jitter stays within 10% of the interval: {elapsed:?}"
-            );
+            assert_throttle_wait_within_timer_precision(elapsed);
         });
+    }
+
+    fn assert_throttle_wait_within_timer_precision(elapsed: Duration) {
+        let maximum_jitter = Duration::from_secs_f64(
+            WEB_SEARCH_THROTTLE_INTERVAL.as_secs_f64() * WEB_SEARCH_THROTTLE_JITTER_FRACTION,
+        );
+        // Tokio rounds sleep deadlines to its millisecond timer granularity,
+        // including with a paused clock. Pure jitter tests enforce the band.
+        let timer_precision = Duration::from_millis(1);
+        assert!(
+            elapsed <= WEB_SEARCH_THROTTLE_INTERVAL + maximum_jitter + timer_precision,
+            "throttled wait exceeds jitter plus timer precision: {elapsed:?}"
+        );
     }
 }

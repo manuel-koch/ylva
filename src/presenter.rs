@@ -1213,6 +1213,19 @@ fn route_mouse(
 // ─── Domain routing ───────────────────────────────────────────────────────────
 
 fn route_domain(state: &mut AppState, event: DomainEvent) -> Vec<Effect> {
+    match &event {
+        DomainEvent::ChildAgentToken { run_id, .. }
+        | DomainEvent::ChildAgentDone { run_id, .. } => state.revise_stream(Some(*run_id)),
+        DomainEvent::StreamStarted
+        | DomainEvent::StreamChunk(_)
+        | DomainEvent::StreamThinkingChunk(_)
+        | DomainEvent::StreamDone
+        | DomainEvent::StreamCancelled => state.revise_stream(None),
+        DomainEvent::CompactionApplied { run_id, .. } => {
+            state.invalidate_transcript_layout(*run_id)
+        }
+        _ => {}
+    }
     if matches!(event, DomainEvent::StreamCancelled) {
         state.compaction_requests.remove(&None);
     }
@@ -2231,17 +2244,28 @@ fn update_tool_bubble_progress(
     id: Uuid,
     title_arguments: Vec<(String, serde_json::Value)>,
 ) {
+    let new_multiline_content = title_arguments
+        .iter()
+        .any(|(_, value)| value.as_str().is_some_and(|value| value.contains('\n')));
+    let mut body_changed = new_multiline_content;
     if let Some(ChatEntry::ToolBubble {
         state: bubble_state,
         ..
-    }) = state.find_tool_bubble_mut(id)
+    }) = state.find_tool_bubble_title_mut(id)
     {
         if let ToolCallState::Running {
             progress_arguments, ..
         } = bubble_state.as_mut()
         {
+            body_changed |= progress_arguments
+                .iter()
+                .any(|(_, value)| value.as_str().is_some_and(|value| value.contains('\n')));
             *progress_arguments = title_arguments;
         }
+    }
+    if body_changed {
+        // Multiline title values also supply expandable content sections.
+        let _ = state.find_tool_bubble_mut(id);
     }
 }
 
@@ -2659,9 +2683,21 @@ mod tests {
         );
     }
 
+    fn prime_domain_logging() {
+        update(
+            &mut AppState::new(),
+            TuiEvent::Domain(DomainEvent::AgentIdle),
+            &empty_textarea(),
+        );
+        // Other presenter tests can first-register this callsite without a
+        // subscriber. Refresh only after that registration has completed.
+        tracing::callsite::rebuild_interest_cache();
+    }
+
     #[test]
     fn route_domain_logs_event_kind_and_mode_transition_without_chunk_text() {
         let log = crate::test_support::capture_logs(async {
+            prime_domain_logging();
             let mut state = AppState::new();
             state.mode = TuiMode::Streaming;
             update(
@@ -2694,6 +2730,7 @@ mod tests {
     fn route_domain_logs_correlation_id_for_tool_events() {
         let id = Uuid::new_v4();
         let log = crate::test_support::capture_logs(async {
+            prime_domain_logging();
             let mut state = AppState::new();
             state.mode = TuiMode::Streaming;
             update(

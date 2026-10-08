@@ -389,7 +389,7 @@ Persistence: `StoreEvent::Compaction` carries the live `boundary` the context
 restore uses plus the `transcript_boundary` the TUI positions its marker
 from (system prompts excluded, since they are never persisted). The marker
 and the footer readout travel the standard update path — `UiUpdate` →
-`DomainEvent` → `AppState` → `TuiState` → `tui_widgets` — with the marker
+`DomainEvent` → `AppState` → `render`/`tui_widgets` — with the marker
 inserted either at replay (`AppState::replay_messages`) or live
 (`DomainEvent::CompactionApplied`, deduplicated by boundary).
 Subagent replay reads messages and the latest transcript-relative compaction
@@ -537,6 +537,69 @@ root or child transcript, and
 `render`/`tui_widgets` format it as `64.2K (45%)` on the right end of the
 key-hints row. Finished child estimates stay with their transcripts for later
 drill-in. Headless runs drop both usage update variants.
+
+### Conversation layout cache
+
+`AppState::render_cache` owns one active-view `ConversationRenderCache`, with
+separate list/header row indexes and one current width per surface. Each
+`EntryLayout` shares immutable styled rows through `Arc`, together with cached
+selection text, chrome-prefix widths, and entry-relative hit ranges. Keys
+include entry slot/revision, width, theme, collapse state, and rendering/title
+variant. Tool title/argument/error rows are separate from expensive section/
+result rows; streaming thinking separates its elapsed title from its body.
+Spinner/elapsed chrome updates patch only their selection rows. Changed chrome
+height repairs offsets without parsing the unchanged body.
+
+Production `render::render` uses `ConversationSource` to borrow the active
+transcript, turn buffer, queued steers, and root header bubble. The legacy
+`TuiState` shell omits these payloads. Selection vectors move into that shell
+and back, rather than being cloned per frame. Existing owned widget callers
+and the driver's returned snapshots remain supported.
+
+The driver opts into revision tracking through `AppState::enable_render_cache`.
+Tool mutation helpers advance slot revisions; ordinary progress metadata
+advances title revisions only (multiline progress also invalidates the body).
+Presenter stream events advance the owning conversation's stream revision.
+Appends leave preceding slots valid; compaction insertion invalidates the
+owning transcript's slots. Replay, lazy load, clear, and navigation release or
+invalidate derived rows. Background subagent updates leave an unrelated active
+transcript valid; its displayed root header has independent keys. Collapse is
+a layout dependency, not a content revision.
+Root queued steers and their footer indicator are omitted from a subagent's
+view, just like the root transcript and stream.
+
+Public `AppState::new` callers use a conservative rebuild path because their
+public vectors and strings can be edited arbitrarily. A caller explicitly
+enabling tracking must use mutation helpers or call
+`AppState::invalidate_render_cache` after direct field changes. No warm lookup
+hashes or compares source payloads.
+
+`RowIndex` stores cumulative exact heights and resolves visible rows with
+indexed lookups. Only these rows are cloned/highlighted, then painted at local
+offset zero; absolute offsets stay `usize`. Ordered selection text is retained
+for off-screen copying. Index updates splice changed selection segments;
+structural changes rebuild ordering from already-derived entry data. Cached
+base styles never receive selection overlays.
+Selection extraction and overlays use terminal-width graphemes, rather than
+mistaking a wide glyph's cells for separate character indices.
+
+Optional expanded layouts retained after collapse share
+`COLLAPSED_BODY_BUDGET_BYTE_SIZE` across the list/header. Accounting sums each
+retained layout's struct size, row/span/vector allocation capacities, owned
+span-string capacities, selection-string capacities, prefix widths, and hit
+ranges once per shared allocation. Static borrowed span text is not charged.
+This is a derived-layout allocation estimate, excluding allocator/cache
+bookkeeping overhead, not resident memory or a total-process limit. Optional
+layouts exceeding the allowance are not retained; others use least-recently-
+retained eviction. Re-expanding refreshes recency. Required current layouts
+remain resident even when oversized. Revision/width/theme changes prune
+obsolete optional layouts; clear/view switches drop previous-view storage.
+
+Deterministic coverage includes warm body-build counts, visible-row copy
+counts, real Rust file highlighting, large Markdown/plain fixtures, full
+selection/copy data, and absolute bottom offsets beyond `u16::MAX`. Manual
+release-terminal performance evidence is tracked in
+[the implementation plan](./plans/improved-rendering-plan.md).
 
 ## Slash commands
 

@@ -1,13 +1,31 @@
 # Improved rendering (large expanded bubbles)
 
+## Implementation status
+
+The implementation in [the execution plan](../plans/improved-rendering-plan.md)
+delivers per-entry layout reuse, separation of body layout from live chrome,
+borrowed production projection, cached full-document selection data, and exact
+visible-row painting for root/subagent transcripts and their header. Warm
+frames do not hash unchanged source content. Optional collapsed layouts share
+a bounded retention allowance; required active layouts are exempt.
+
+Suggestion 1 below was implemented with mutation revisions instead of content
+hashes. Suggestion 2 was implemented with reusable entry layouts and an ordered
+row index. Suggestion 3 was deliberately narrowed to viewport **painting** of
+an exactly laid-out document: cold layout still parses the whole changed entry.
+Suggestions 4 and 5 (a global Markdown cache and content caps) remain deferred.
+Full content, Markdown semantics, configuration, and controls are unchanged.
+Automated regressions cover the large-result paths; the plan separately records
+the outstanding manual release-terminal responsiveness check.
+
 Expanding a tool bubble with very large content (e.g. a `read` of a
 >3000-line file) causes visible lag in scrolling and key/mouse
 responsiveness, with the process pinned at ~100% CPU while the bubble is
 expanded.
 
-## Root cause
+## Original root cause
 
-The chat view is fully re-flowed on every frame, not just on content
+Before the change, the chat view was fully re-flowed on every frame, not just on content
 changes:
 
 - The event loop (`tui_driver.rs`) calls `draw_frame` once per loop

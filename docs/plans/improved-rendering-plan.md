@@ -85,7 +85,7 @@ completed checkbox states if steps are revised or renumbered. Keep affected
 documentation current as each logical change is completed; the documentation
 step below is the final cross-check, not permission to leave earlier work stale.
 
-1. [ ] Establish regression fixtures and current behavior in
+1. [x] Establish regression fixtures and current behavior in
    `tests/tui_render_state.rs`. Use offline `TestBackend` rendering of expanded
    completed tool results with 3,000 and 30,000 lines; include plain content,
    Markdown tables/lists, fenced code, and Unicode/wrapped titles. Exercise the
@@ -97,7 +97,7 @@ step below is the final cross-check, not permission to leave earlier work stale.
    to establish the failure before fixing it. Synthetic view data may exceed
    the real `read` output cap.
 
-2. [ ] Introduce a cohesive derived-layout cache in
+2. [x] Introduce a cohesive derived-layout cache in
    `src/conversation_render_cache.rs`, wired through `src/lib.rs` and the relevant
    view state in `src/tui_reducer_state.rs`. Store immutable base
    `Line<'static>` rows, row counts, selection text/prefix data, and entry-local
@@ -110,7 +110,7 @@ step below is the final cross-check, not permission to leave earlier work stale.
    sharing, and replacement of obsolete revisions/widths. Keep this pure
    cache/layout logic inside the coverage gate.
 
-3. [ ] Wire mutation-driven invalidation through `src/presenter.rs` and the
+3. [x] Wire mutation-driven invalidation through `src/presenter.rs` and the
    state helpers in `src/tui_reducer_state.rs`. Centralize production transcript
    mutations sufficiently that append, replacement, status/content updates,
    queued-steer changes, stream segmentation/flush/cancellation, notices/errors,
@@ -127,7 +127,7 @@ step below is the final cross-check, not permission to leave earlier work stale.
    use an explicitly conservative compatibility path when revision tracking
    cannot be guaranteed, rather than silently serving stale data.
 
-4. [ ] Remove full-content snapshot work from the production frame path in
+4. [x] Remove full-content snapshot work from the production frame path in
    `src/render.rs` and `src/tui_widgets.rs`. Introduce a borrowed internal view
    of the active transcript, stream, queued steers, and root header bubble,
    alongside mutable derived layout/geometry. Reuse existing rendering helpers
@@ -140,7 +140,7 @@ step below is the final cross-check, not permission to leave earlier work stale.
    adapter/cache lookup. Verify the production path through `TestBackend`,
    while existing direct widget calls still reflect arbitrary state edits.
 
-5. [ ] Integrate cached entry/body layout into `draw_chat` and the header
+5. [x] Integrate cached entry/body layout into `draw_chat` and the header
    preparation in `src/tui_widgets.rs`. Reuse unaffected entries and cached
    selection data; rebuild the conversation's ordered row index and translated
    hit-test ranges only when layout dependencies change. Preserve the initial
@@ -153,7 +153,7 @@ step below is the final cross-check, not permission to leave earlier work stale.
    layout, changed stream text rebuilds only the stream entry, and terminal
    tool transitions update chrome and content correctly.
 
-6. [ ] Paint only exact visible row slices in conversation and header widgets.
+6. [x] Paint only exact visible row slices in conversation and header widgets.
    Use cached total heights and an indexed row lookup to resolve the viewport;
    create mutable copies only for displayed rows and apply selection overlays
    to those copies. Avoid `Paragraph::new(lines.clone())` over the entire
@@ -167,7 +167,7 @@ step below is the final cross-check, not permission to leave earlier work stale.
    synthetic wrapped document exceeding 65,535 rows to verify bottom scrolling
    does not wrap its offset.
 
-7. [ ] Implement active-view cache release and optional collapsed-body retention.
+7. [x] Implement active-view cache release and optional collapsed-body retention.
    Use one code-owned 32 MiB budget shared by the list and its header; conservatively
    account retained row/span/string/vector allocation capacities without
    double-counting shared allocations. Document the accounting definition,
@@ -180,7 +180,7 @@ step below is the final cross-check, not permission to leave earlier work stale.
    copies. Unit-test the exact budget boundary, oversized bodies, eviction
    order, header/list sharing, revision pruning, and clear/view-switch release.
 
-8. [ ] Update affected existing documentation:
+8. [x] Update affected existing documentation:
    `docs/features.md` (large-result responsiveness and unchanged full-content
    behavior), `docs/implementation-notes.md` (cache ownership, keys/invalidation,
    borrowed projection, exact viewport painting, dynamic chrome, selection
@@ -188,6 +188,8 @@ step below is the final cross-check, not permission to leave earlier work stale.
    suggestions were delivered versus deliberately deferred). Keep this plan's
    checklist and manual evidence current. Existing configuration and
    keybindings stay unchanged, so their documents need no behavioral edits.
+   `docs/known-test-issues.md` also records the presenter callsite-priming
+   workaround for a tracing-capture race reproduced during execution.
    Do not create an ADR or another documentation file without separate consent.
    Check the ADR directory again before implementation; if a new decision
    conflicts, resolve it before proceeding. Run `rumdl fmt` and
@@ -283,3 +285,47 @@ step below is the final cross-check, not permission to leave earlier work stale.
 - At planning time, `docs/architecture-design-records/` and `docs/plans/` had no
   files. The worktree had an unrelated modification to `Cargo.toml`; it is not
   part of this plan and must not be overwritten, staged, or committed.
+
+## Execution evidence
+
+- Baseline `cargo test --test tui_render_state`: all 58 original tests passed.
+  The new deterministic warm-selection-storage regression failed before the
+  rendering change: successive frames replaced the selection allocation.
+  Its final fixture uses the real `src/tui_widgets.rs` via `include_str!`,
+  a Rust syntax hint, and numbered file-preview rows, so warm reuse covers
+  actual syntax highlighting rather than only synthetic Markdown.
+- Offline `TestBackend` comparisons cover 3,000-/30,000-line plain and mixed
+  Markdown (tables, nested lists, fenced Rust, Unicode) results at 50-by-40
+  and 120-by-40 cells, top/middle/bottom scroll positions, selection/prefix
+  data, hit ranges, and exact visible buffers against the owned widget path.
+- Per-cache counters establish warm body reuse, isolated changed-stream
+  layout, live header/chrome and title-height changes without body parsing,
+  viewport-bounded row copying, and stable completed entries across appends.
+  A wrapped document at 24-by-12 cells verifies absolute offsets exceeding
+  65,535 rows, full cross-scroll selection, clipboard effects without OS
+  side effects, and restoration of unselected base styling.
+- Pure-cache tests cover key changes, shared immutable storage, exact
+  retention-budget boundaries, oversized required layouts, list/header
+  eviction ordering, obsolete revision/width pruning, and clear/view release.
+- A targeted presenter run reproduced the documented tracing
+  first-registration race. Its capture tests now prime the domain-event
+  callsite before rebuilding subscriber interest.
+- Targeted verification: all 66 render-state tests, five pure-cache tests,
+  and 65 reducer-state tests passed. The 95 presenter tests passed in five
+  successive concurrent runs after the tracing fix. `make format lint` and
+  `rumdl check` passed for all five affected Markdown documents.
+- The first full coverage run exposed a separate web-search throttle test
+  flake: a paused Tokio timer rounded a valid sampled jitter up to the strict
+  elapsed-time bound, then poisoned the subscriber lock. Its two elapsed-time
+  assertions now account for one millisecond timer tick; pure jitter tests
+  retain their strict bound. No production web-search behavior changed.
+- Final automated gates passed: `make format lint` and `make test-coverage`.
+  Total line coverage is 92.53%; the new conversation render cache module has
+  98.40% line coverage. All non-ignored tests passed, including 1,398 library
+  tests and all 66 render-state integration tests.
+- Optimized verification passed: `cargo build --release` and
+  `cargo test --release --test tui_render_state` (all 66 tests).
+- Manual release-terminal verification is not yet performed. Offline rendering
+  is not evidence of human-observed wheel/drag/input responsiveness or process
+  CPU behavior. Cold expansion, resize, view-switch, and growing-stream pauses
+  remain unmeasured. Step 9 stays unchecked until that evidence is recorded.

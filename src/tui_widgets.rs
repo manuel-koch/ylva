@@ -47,6 +47,9 @@ use crate::theme::{
 use crate::agent::tools::ToolRegistry;
 use crate::agent::AgentMode;
 use crate::build_info::BUILD_INFO;
+use crate::conversation_render_cache::{
+    ConversationRenderCache, EntryLayout, EntrySlot, LayoutKey, RowIndex,
+};
 use crate::markdown::render_markdown;
 use crate::tui_reducer_state::{
     matching_model_indices, model_picker_row_entries, slash_overlay_text_rows,
@@ -54,6 +57,49 @@ use crate::tui_reducer_state::{
     ToolCallState, UserMessageState, CONFIRM_TIMEOUT, HELP_HORIZONTAL_SCROLL_COLUMNS,
 };
 use crate::tui_render_state::TuiState;
+use std::sync::Arc;
+
+pub(crate) struct ConversationSource<'a> {
+    pub run_id: Option<uuid::Uuid>,
+    entries: &'a [ChatEntry],
+    turn: &'a crate::tui_reducer_state::TurnBuffer,
+    queued: &'a [String],
+    header: Option<(usize, &'a ChatEntry)>,
+    revisions: &'a std::collections::HashMap<(Option<uuid::Uuid>, usize), u64>,
+    title_revisions: &'a std::collections::HashMap<uuid::Uuid, u64>,
+    stream_revision: u64,
+    queued_revision: u64,
+}
+
+impl<'a> ConversationSource<'a> {
+    pub fn from_app(state: &'a crate::tui_reducer_state::AppState) -> Self {
+        let run_id = match state.active_view {
+            crate::tui_reducer_state::ConversationView::Root => None,
+            crate::tui_reducer_state::ConversationView::Child { run_id, .. } => Some(run_id),
+        };
+        let child = run_id.and_then(|run_id| state.child_conversations.get(&run_id));
+        Self {
+            run_id,
+            entries: child.map_or(state.chat_entries.as_slice(), |child| child.messages.as_slice()),
+            turn: child.map_or(&state.turn_buffer, |child| &child.turn_buffer),
+            queued: if run_id.is_none() { &state.queued_steer_texts } else { &[] },
+            header: state.header_bubble_id().and_then(|bubble_id| {
+                state.chat_entries.iter().enumerate().find(
+                    |(_, entry)| matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == bubble_id),
+                )
+            }),
+            revisions: &state.render_revisions,
+            title_revisions: &state.render_title_revisions,
+            stream_revision: state.render_stream_revisions.get(&run_id).copied().unwrap_or_default(),
+            queued_revision: state.queued_render_revision,
+        }
+    }
+}
+
+pub(crate) struct BorrowedConversation<'a> {
+    pub source: &'a ConversationSource<'a>,
+    pub cache: &'a mut ConversationRenderCache,
+}
 
 /// The user-message input field grows with content but is capped at this
 /// fraction of the terminal height. Adjust here to change the maximum visible
@@ -193,6 +239,38 @@ pub fn draw(
     mouse_pos: Option<(u16, u16)>,
     registry: &ToolRegistry,
 ) -> Option<ButtonAreas> {
+    draw_internal(frame, state, textarea, hint, mouse_pos, registry, None)
+}
+
+pub(crate) fn draw_borrowed(
+    frame: &mut Frame,
+    state: &mut TuiState,
+    textarea: &mut TextArea<'_>,
+    hint: Option<&str>,
+    mouse_pos: Option<(u16, u16)>,
+    registry: &ToolRegistry,
+    conversation: &mut BorrowedConversation<'_>,
+) -> Option<ButtonAreas> {
+    draw_internal(
+        frame,
+        state,
+        textarea,
+        hint,
+        mouse_pos,
+        registry,
+        Some(conversation),
+    )
+}
+
+fn draw_internal(
+    frame: &mut Frame,
+    state: &mut TuiState,
+    textarea: &mut TextArea<'_>,
+    hint: Option<&str>,
+    mouse_pos: Option<(u16, u16)>,
+    registry: &ToolRegistry,
+    mut conversation: Option<&mut BorrowedConversation<'_>>,
+) -> Option<ButtonAreas> {
     let full_area = frame.area();
     // Drill-in conversation model (Phase 6.10): while viewing a child
     // conversation, reserve a header above the chat area that re-renders the
@@ -206,47 +284,62 @@ pub fn draw(
     // the chat area and the input/footer panel — the header must not be
     // visually mistaken for part of the scrollable conversation-list below.
     let mut header_lines: Vec<Line<'static>> = Vec::new();
-    if let Some((bubble_id, name, bubble_state, collapsed)) = &state.child_view.child_view_bubble {
-        let header_row_width = full_area.width.saturating_sub(1) as usize;
-        let mut discarded_title_rows = Vec::new();
-        // The header sits directly above the subagent's own transcript, so
-        // "Spawn" (relevant only from the root conversation's point of view)
-        // is dropped in favor of the shorter "Subagent". Every other tool
-        // bubble asks its own tool for the label, like the CLI status line.
-        let header_tool = registry.get(name);
-        let display_title_override =
-            if name == crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME {
-                Some("Subagent".to_string())
-            } else {
-                header_tool.as_ref().map(|tool| tool.title())
-            };
-        let subtype_argument = header_tool
-            .as_ref()
-            .and_then(|tool| tool.subtype_argument());
-        append_tool_bubble_lines(
-            &mut header_lines,
-            ToolBubbleArgs {
-                id: *bubble_id,
-                name,
-                state: bubble_state,
-                collapsed: *collapsed,
-                spinner_frame: state.spinner_frame,
-                started_at: state.subagent_started_at.get(bubble_id).copied(),
-                display_title_override: display_title_override.as_deref(),
-                subtype_argument,
-            },
-            &mut discarded_title_rows,
-            header_row_width.saturating_sub(4).max(1),
-        );
+    if conversation.is_none() {
+        if let Some((bubble_id, name, bubble_state, collapsed)) =
+            &state.child_view.child_view_bubble
+        {
+            let header_row_width = full_area.width.saturating_sub(1) as usize;
+            let mut discarded_title_rows = Vec::new();
+            // The header sits directly above the subagent's own transcript, so
+            // "Spawn" (relevant only from the root conversation's point of view)
+            // is dropped in favor of the shorter "Subagent". Every other tool
+            // bubble asks its own tool for the label, like the CLI status line.
+            let header_tool = registry.get(name);
+            let display_title_override =
+                if name == crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME {
+                    Some("Subagent".to_string())
+                } else {
+                    header_tool.as_ref().map(|tool| tool.title())
+                };
+            let subtype_argument = header_tool
+                .as_ref()
+                .and_then(|tool| tool.subtype_argument());
+            append_tool_bubble_lines(
+                &mut header_lines,
+                ToolBubbleArgs {
+                    id: *bubble_id,
+                    name,
+                    state: bubble_state,
+                    collapsed: *collapsed,
+                    spinner_frame: state.spinner_frame,
+                    started_at: state.subagent_started_at.get(bubble_id).copied(),
+                    display_title_override: display_title_override.as_deref(),
+                    subtype_argument,
+                },
+                &mut discarded_title_rows,
+                header_row_width.saturating_sub(4).max(1),
+            );
+        }
     }
-    let (header_area, area) = if header_lines.is_empty() {
+    let header_total = if let Some(conversation) = conversation.as_mut() {
+        prepare_cached_header(
+            conversation,
+            state,
+            registry,
+            full_area.width.saturating_sub(1),
+        );
+        conversation.cache.header.height
+    } else {
+        header_lines.len()
+    };
+    let (header_area, area) = if header_total == 0 {
         (None, full_area)
     } else {
         // Cap the header at 40 % of the terminal, matching the clarify-banner
         // convention, so an expanded bubble with a long result never crowds
         // out the chat area entirely.
-        let max_header_height = (full_area.height * 40 / 100).max(1);
-        let header_height = (header_lines.len() as u16).min(max_header_height);
+        let max_header_height = (full_area.height as usize * 40 / 100).max(1) as u16;
+        let header_height = header_total.min(max_header_height as usize) as u16;
         let [header_area, header_separator_area, rest] = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -378,7 +471,7 @@ pub fn draw(
             .areas(header_area);
         state.child_view.header_bubble_area = header_content_area;
 
-        let total_lines = header_lines.len();
+        let total_lines = header_total;
         let visible = header_content_area.height as usize;
         let max_offset = total_lines.saturating_sub(visible);
         // Clamp (rather than trust) the stored offset: the bubble's content
@@ -388,15 +481,26 @@ pub fn draw(
         let row_offset = state.child_view.header_bubble_scroll_offset.min(max_offset);
         state.child_view.header_bubble_scroll_offset = row_offset;
 
-        let (rendered_lines, prefix_widths) =
-            rendered_line_selection_data(&header_lines, header_content_area.width);
-        state.child_view.header_rendered_lines = rendered_lines;
-        state.child_view.header_rendered_line_prefix_widths = prefix_widths;
+        if let Some(conversation) = conversation.as_mut() {
+            header_lines = conversation.cache.header.visible_rows(row_offset, visible);
+            conversation.cache.painted_rows += header_lines.len();
+        } else {
+            let (rendered_lines, prefix_widths) =
+                rendered_line_selection_data(&header_lines, header_content_area.width);
+            state.child_view.header_rendered_lines = rendered_lines;
+            state.child_view.header_rendered_line_prefix_widths = prefix_widths;
+            header_lines = header_lines
+                .into_iter()
+                .skip(row_offset)
+                .take(visible)
+                .collect();
+        }
 
         if let Some(selection) = state.child_view.header_selection {
             if !selection.is_empty() {
                 let (start_line, start_col, end_line, end_col) = selection.normalized();
                 for (index, line) in header_lines.iter_mut().enumerate() {
+                    let index = index + row_offset;
                     if index < start_line || index > end_line {
                         continue;
                     }
@@ -417,7 +521,7 @@ pub fn draw(
             }
         }
 
-        let paragraph = Paragraph::new(header_lines).scroll((row_offset as u16, 0));
+        let paragraph = Paragraph::new(header_lines);
         frame.render_widget(paragraph, header_content_area);
 
         // Show the scroll indicators/scrollbar only when the bubble's full
@@ -458,7 +562,11 @@ pub fn draw(
         state.child_view.header_rendered_line_prefix_widths.clear();
     }
 
-    draw_chat(frame, chat_area, state, registry);
+    if let Some(conversation) = conversation.as_mut() {
+        draw_cached_chat(frame, chat_area, state, registry, conversation);
+    } else {
+        draw_chat(frame, chat_area, state, registry);
+    }
 
     // Thin solid line separating the conversation area from the lower panel.
     // Tinted the same pinkish/magenta as the header separator while viewing a
@@ -589,6 +697,9 @@ pub fn draw(
         );
     }
 
+    let footer_source = conversation
+        .as_ref()
+        .map(|conversation| conversation.source);
     let button_areas = if state.help_popup.show_help {
         draw_normal_footer(
             frame,
@@ -597,6 +708,7 @@ pub fn draw(
             state,
             help_popup_footer_hints(state),
             hint,
+            footer_source,
         );
         None
     } else if let Some((_, name, _)) = &state.pending_approval.clone() {
@@ -613,7 +725,15 @@ pub fn draw(
         )
     } else {
         let footer_hints = footer_keybinding_hints(state, input_is_empty);
-        draw_normal_footer(frame, footer_row_1, footer_row_2, state, footer_hints, hint);
+        draw_normal_footer(
+            frame,
+            footer_row_1,
+            footer_row_2,
+            state,
+            footer_hints,
+            hint,
+            footer_source,
+        );
         None
     };
 
@@ -678,6 +798,554 @@ fn help_popup_footer_hints(state: &TuiState) -> &'static [FooterHint] {
     }
 }
 
+fn finish_layout(mut layout: EntryLayout, width: u16) -> EntryLayout {
+    (layout.selection, layout.prefixes) = rendered_line_selection_data(&layout.rows, width);
+    layout
+}
+
+fn layout_key(slot: EntrySlot, revision: u64, width: u16, collapsed: bool) -> LayoutKey {
+    LayoutKey {
+        slot,
+        revision,
+        width,
+        collapsed,
+        theme: active_theme().syntect_key().to_owned(),
+        title: None,
+        animation: None,
+    }
+}
+
+fn cached_tool(
+    cache: &mut ConversationRenderCache,
+    key: LayoutKey,
+    bubble: ToolBubbleArgs<'_>,
+    header: bool,
+) -> Vec<Arc<EntryLayout>> {
+    let width = key.width;
+    let wrap_width = (width as usize)
+        .saturating_sub(if header { 4 } else { 5 })
+        .max(1);
+    let mut body_key = key.clone();
+    body_key.title = bubble.subtype_argument.map(str::to_owned);
+    let body = cache.get_or_build(body_key, || {
+        let mut layout = EntryLayout::default();
+        let body_start = append_tool_layout(
+            &mut layout.rows,
+            ToolBubbleArgs { ..bubble },
+            &mut layout.tools,
+            wrap_width,
+            false,
+        );
+        layout.rows.drain(..body_start);
+        layout.tools.clear();
+        if !header {
+            layout.rows.push(Line::default());
+        }
+        finish_layout(layout, width)
+    });
+    let mut chrome_key = key;
+    chrome_key.slot = match chrome_key.slot {
+        EntrySlot::Header => EntrySlot::HeaderChrome,
+        EntrySlot::Entry(index) => EntrySlot::Chrome(index),
+        _ => unreachable!("tool slot"),
+    };
+    if matches!(bubble.state, ToolCallState::Running { .. }) {
+        chrome_key.animation = Some((
+            bubble.spinner_frame,
+            bubble.started_at.map_or(0, |started| {
+                (started.elapsed().as_secs_f64() * 10.0).round() as u64
+            }),
+        ));
+    }
+    let chrome = cache.get_or_build(chrome_key, || {
+        let mut layout = EntryLayout::default();
+        append_tool_layout(&mut layout.rows, bubble, &mut Vec::new(), wrap_width, true);
+        layout.tools.push((
+            0,
+            (layout.rows.len() + body.rows.len()).saturating_sub(1 + usize::from(!header)),
+            bubble.id,
+        ));
+        finish_layout(layout, width)
+    });
+    vec![chrome, body]
+}
+
+fn prepare_cached_header(
+    conversation: &mut BorrowedConversation<'_>,
+    state: &mut TuiState,
+    registry: &ToolRegistry,
+    width: u16,
+) {
+    let mut layouts = Vec::new();
+    if let Some((
+        index,
+        ChatEntry::ToolBubble {
+            id,
+            name,
+            state: bubble_state,
+            collapsed,
+        },
+    )) = conversation.source.header
+    {
+        let tool = registry.get(name);
+        let title = if name == crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME {
+            Some("Subagent".to_owned())
+        } else {
+            tool.as_ref().map(|tool| tool.title())
+        };
+        let subtype = tool.as_ref().and_then(|tool| tool.subtype_argument());
+        let mut key = layout_key(
+            EntrySlot::Header,
+            conversation
+                .source
+                .revisions
+                .get(&(None, index))
+                .copied()
+                .unwrap_or_default(),
+            width,
+            *collapsed,
+        );
+        key.title = Some(format!(
+            "{title:?}/{subtype:?}/{}",
+            conversation
+                .source
+                .title_revisions
+                .get(id)
+                .copied()
+                .unwrap_or_default()
+        ));
+        layouts = cached_tool(
+            conversation.cache,
+            key,
+            ToolBubbleArgs {
+                id: *id,
+                name,
+                state: bubble_state,
+                collapsed: *collapsed,
+                spinner_frame: state.spinner_frame,
+                started_at: state.subagent_started_at.get(id).copied(),
+                display_title_override: title.as_deref(),
+                subtype_argument: subtype,
+            },
+            true,
+        );
+    }
+    update_selection_index(
+        &mut conversation.cache.header,
+        layouts,
+        &mut state.child_view.header_rendered_lines,
+        &mut state.child_view.header_rendered_line_prefix_widths,
+        false,
+    );
+}
+
+fn update_selection_index(
+    index: &mut RowIndex,
+    layouts: Vec<Arc<EntryLayout>>,
+    selection: &mut Vec<String>,
+    prefixes: &mut Vec<usize>,
+    trim_blank: bool,
+) -> bool {
+    if index.layouts.is_empty() {
+        selection.clear();
+        prefixes.clear();
+    }
+    if index.layouts.len() == layouts.len() {
+        let mut offset = 0;
+        for (old, new) in index.layouts.iter().zip(&layouts) {
+            if !Arc::ptr_eq(old, new) {
+                selection.splice(
+                    offset..offset + old.selection.len(),
+                    new.selection.iter().cloned(),
+                );
+                prefixes.splice(
+                    offset..offset + old.prefixes.len(),
+                    new.prefixes.iter().copied(),
+                );
+            }
+            offset += new.selection.len();
+        }
+    } else {
+        selection.clear();
+        prefixes.clear();
+        for layout in &layouts {
+            selection.extend(layout.selection.iter().cloned());
+            prefixes.extend_from_slice(&layout.prefixes);
+        }
+    }
+    index.replace(layouts, trim_blank)
+}
+
+fn build_entry(entry: &ChatEntry, index: usize, width: u16) -> EntryLayout {
+    let mut layout = EntryLayout::default();
+    let body_width = (width as usize).saturating_sub(5).max(1);
+    let wrap_width = (width as usize).saturating_sub(2).max(1);
+    match entry {
+        ChatEntry::UserMessage { text, state } => {
+            append_user_lines(&mut layout.rows, text, *state, body_width)
+        }
+        ChatEntry::AssistantMessage { text, interrupted } => {
+            append_assistant_lines(&mut layout.rows, text, *interrupted, body_width)
+        }
+        ChatEntry::ThinkingMessage {
+            text,
+            collapsed,
+            duration,
+        } => append_thinking_lines(
+            &mut layout.rows,
+            text,
+            *collapsed,
+            *duration,
+            index,
+            &mut layout.thinking,
+            body_width,
+        ),
+        ChatEntry::ErrorLine { message } => {
+            for (index, wrapped) in textwrap::wrap(message, wrap_width.saturating_sub(6).max(1))
+                .into_iter()
+                .enumerate()
+            {
+                layout.rows.push(Line::styled(
+                    if index == 0 {
+                        format!("  ⚠️  {wrapped}")
+                    } else {
+                        format!("      {wrapped}")
+                    },
+                    Style::default().fg(ERROR_COLOR),
+                ));
+            }
+        }
+        ChatEntry::CompactionMarker {
+            summarized_messages,
+        } => {
+            layout.rows.push(Line::styled(
+                format!(
+                    "  ── compaction · {summarized_messages} {} summarized ──",
+                    plural_noun(*summarized_messages, "message", "messages")
+                ),
+                Style::default()
+                    .fg(MUTED_TEXT_COLOR)
+                    .add_modifier(Modifier::DIM),
+            ));
+        }
+        ChatEntry::Notice { text } => {
+            for (index, line) in text.lines().enumerate() {
+                let wrapped = textwrap::wrap(line, wrap_width.saturating_sub(6).max(1));
+                if wrapped.is_empty() {
+                    layout.rows.push(Line::default());
+                }
+                for (wrap_index, wrapped) in wrapped.into_iter().enumerate() {
+                    layout.rows.push(Line::styled(
+                        if index == 0 && wrap_index == 0 {
+                            format!("  ⓘ  {wrapped}")
+                        } else {
+                            format!("     {wrapped}")
+                        },
+                        Style::default().fg(NOTICE_COLOR),
+                    ));
+                }
+            }
+        }
+        ChatEntry::ToolBubble { .. } => unreachable!("tools have independently animated chrome"),
+    }
+    layout.rows.push(Line::default());
+    layout
+}
+
+fn draw_cached_chat(
+    frame: &mut Frame,
+    area: Rect,
+    state: &mut TuiState,
+    registry: &ToolRegistry,
+    conversation: &mut BorrowedConversation<'_>,
+) {
+    let [content_area, scrollbar_area] = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Fill(1), Constraint::Length(1)])
+        .areas(area);
+    state.conversation.chat_area = content_area;
+    let width = content_area.width;
+    let source = conversation.source;
+    let cache = &mut conversation.cache;
+    let intro = cache.get_or_build(
+        {
+            let mut key = layout_key(
+                EntrySlot::Intro,
+                u64::from(source.entries.is_empty()),
+                width,
+                false,
+            );
+            key.title = Some(state.display_metadata.profile_name.clone());
+            key
+        },
+        || {
+            let mut layout = EntryLayout::default();
+            if source.entries.is_empty() && source.header.is_none() {
+                append_logo(&mut layout.rows, &state.display_metadata.profile_name);
+            } else {
+                layout.rows.push(Line::default());
+            }
+            finish_layout(layout, width)
+        },
+    );
+    let mut layouts = vec![intro];
+    let mut deferred = Vec::new();
+    for (index, entry) in source.entries.iter().enumerate() {
+        let revision = source
+            .revisions
+            .get(&(source.run_id, index))
+            .copied()
+            .unwrap_or_default();
+        let collapsed = matches!(
+            entry,
+            ChatEntry::ToolBubble {
+                collapsed: true,
+                ..
+            } | ChatEntry::ThinkingMessage {
+                collapsed: true,
+                ..
+            }
+        );
+        let key = layout_key(EntrySlot::Entry(index), revision, width, collapsed);
+        if let ChatEntry::ToolBubble {
+            id,
+            name,
+            state: bubble_state,
+            collapsed,
+        } = entry
+        {
+            let tool = registry.get(name);
+            let title = tool.as_ref().map(|tool| tool.title());
+            let subtype = tool.as_ref().and_then(|tool| tool.subtype_argument());
+            let mut key = key;
+            key.title = Some(format!(
+                "{title:?}/{subtype:?}/{}",
+                source.title_revisions.get(id).copied().unwrap_or_default()
+            ));
+            let rows = cached_tool(
+                cache,
+                key,
+                ToolBubbleArgs {
+                    id: *id,
+                    name,
+                    state: bubble_state,
+                    collapsed: *collapsed,
+                    spinner_frame: state.spinner_frame,
+                    started_at: state.subagent_started_at.get(id).copied(),
+                    display_title_override: title.as_deref(),
+                    subtype_argument: subtype,
+                },
+                false,
+            );
+            if matches!(bubble_state.as_ref(), ToolCallState::Pending { .. }) {
+                deferred.extend(rows);
+            } else {
+                layouts.extend(rows);
+            }
+        } else {
+            layouts.push(cache.get_or_build(key, || {
+                finish_layout(build_entry(entry, index, width), width)
+            }));
+        }
+    }
+    let body_width = (width as usize).saturating_sub(5).max(1);
+    if !source.turn.partial_thinking_text.is_empty() {
+        let body = cache.get_or_build(
+            layout_key(
+                EntrySlot::Thinking,
+                source.stream_revision,
+                width,
+                source.turn.partial_thinking_collapsed,
+            ),
+            || {
+                let mut layout = EntryLayout::default();
+                append_streaming_thinking_lines(
+                    &mut layout.rows,
+                    &source.turn.partial_thinking_text,
+                    source.turn.thinking_started_at,
+                    source.turn.partial_thinking_collapsed,
+                    &mut Vec::new(),
+                    body_width,
+                );
+                layout.rows.remove(0);
+                layout.rows.push(Line::default());
+                finish_layout(layout, width)
+            },
+        );
+        let mut key = layout_key(
+            EntrySlot::ThinkingChrome,
+            source.stream_revision,
+            width,
+            source.turn.partial_thinking_collapsed,
+        );
+        let elapsed = source
+            .turn
+            .thinking_started_at
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
+        key.animation = Some((0, (elapsed.as_secs_f64() * 10.0).round() as u64));
+        let chrome = cache.get_or_build(key, || {
+            let mut layout = EntryLayout::default();
+            let indicator = if source.turn.partial_thinking_collapsed {
+                "▶"
+            } else {
+                "▼"
+            };
+            let dim = Style::default().add_modifier(Modifier::DIM);
+            layout
+                .rows
+                .push(BubbleStyle::new(THINKING_BORDER_COLOR).content_line(
+                    vec![Span::styled(
+                        format!("{indicator} Thinking… ({:.1}s)", elapsed.as_secs_f64()),
+                        dim,
+                    )],
+                    dim,
+                ));
+            layout.thinking.push((
+                0,
+                body.rows.len().saturating_sub(1),
+                crate::tui_reducer_state::STREAMING_THINKING_ENTRY_INDEX,
+            ));
+            finish_layout(layout, width)
+        });
+        layouts.extend([chrome, body]);
+    }
+    if !source.turn.partial_assistant_text.is_empty() {
+        layouts.push(cache.get_or_build(
+            layout_key(EntrySlot::Response, source.stream_revision, width, false),
+            || {
+                let mut layout = EntryLayout::default();
+                append_streaming_lines(
+                    &mut layout.rows,
+                    &source.turn.partial_assistant_text,
+                    body_width,
+                );
+                layout.rows.push(Line::default());
+                finish_layout(layout, width)
+            },
+        ));
+    }
+    for (index, text) in source.queued.iter().enumerate() {
+        layouts.push(cache.get_or_build(
+            layout_key(
+                EntrySlot::Queued(index),
+                source.queued_revision,
+                width,
+                false,
+            ),
+            || {
+                let mut layout = EntryLayout::default();
+                append_user_lines(&mut layout.rows, text, UserMessageState::Queued, body_width);
+                layout.rows.push(Line::default());
+                finish_layout(layout, width)
+            },
+        ));
+    }
+    layouts.extend(deferred);
+    let changed = update_selection_index(
+        &mut cache.conversation,
+        layouts,
+        &mut state.conversation.chat_rendered_lines,
+        &mut state.conversation.chat_rendered_line_prefix_widths,
+        true,
+    );
+    if changed {
+        state.conversation.bubble_title_rows.clear();
+        state.conversation.thinking_title_rows.clear();
+        let mut offset = 0;
+        for layout in &cache.conversation.layouts {
+            state.conversation.bubble_title_rows.extend(
+                layout
+                    .tools
+                    .iter()
+                    .map(|(start, end, id)| (start + offset, end + offset, *id)),
+            );
+            state.conversation.thinking_title_rows.extend(
+                layout
+                    .thinking
+                    .iter()
+                    .map(|(start, end, index)| (start + offset, end + offset, *index)),
+            );
+            offset += layout.rows.len();
+        }
+    }
+    let mut slots: Vec<_> = (0..source.entries.len())
+        .flat_map(|index| [EntrySlot::Entry(index), EntrySlot::Chrome(index)])
+        .collect();
+    slots.push(EntrySlot::Intro);
+    if source.header.is_some() {
+        slots.extend([EntrySlot::Header, EntrySlot::HeaderChrome]);
+    }
+    if !source.turn.partial_assistant_text.is_empty() {
+        slots.push(EntrySlot::Response);
+    }
+    if !source.turn.partial_thinking_text.is_empty() {
+        slots.extend([EntrySlot::Thinking, EntrySlot::ThinkingChrome]);
+    }
+    slots.extend((0..source.queued.len()).map(EntrySlot::Queued));
+    cache.retain_slots(&slots);
+    let total = cache.conversation.height;
+    let visible = content_area.height as usize;
+    let maximum = total.saturating_sub(visible);
+    let offset = if state.conversation.scroll_locked {
+        maximum
+    } else {
+        state.conversation.scroll_offset.min(maximum)
+    };
+    state.conversation.scroll_offset = offset;
+    state.conversation.scroll_locked |= offset == maximum;
+    let mut rows = cache.conversation.visible_rows(offset, visible);
+    cache.painted_rows += rows.len();
+    highlight_visible_rows(&mut rows, offset, state.conversation.chat_selection, width);
+    frame.render_widget(Paragraph::new(rows), content_area);
+    if total > visible {
+        render_chat_scrollbar(
+            frame,
+            scrollbar_area,
+            offset,
+            maximum,
+            total,
+            visible,
+            if source.header.is_some() {
+                CHILD_VIEW_SEPARATOR_COLOR
+            } else {
+                CHAT_SCROLLBAR_COLOR
+            },
+        );
+    }
+}
+
+fn highlight_visible_rows(
+    rows: &mut [Line<'static>],
+    offset: usize,
+    selection: Option<crate::tui_reducer_state::ChatSelection>,
+    width: u16,
+) {
+    if let Some(selection) = selection.filter(|selection| !selection.is_empty()) {
+        let (start, start_col, end, end_col) = selection.normalized();
+        for (index, row) in rows.iter_mut().enumerate() {
+            let index = index + offset;
+            if index >= start && index <= end {
+                let alignment = line_alignment_offset(row, width);
+                apply_selection_highlight_to_line(
+                    row,
+                    if index == start {
+                        start_col.saturating_sub(alignment)
+                    } else {
+                        0
+                    },
+                    if index == end {
+                        end_col.saturating_sub(alignment)
+                    } else {
+                        usize::MAX
+                    },
+                    CHAT_SELECTION_BG,
+                );
+            }
+        }
+    }
+}
+
 fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState, registry: &ToolRegistry) {
     // Split horizontally first so all widths are derived from content_area —
     // this ensures trailing-pad spans reach the right edge of content_area
@@ -707,9 +1375,6 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState, registry: &Too
     // bubble_row_width is 1 char narrower than row_width to leave a 1-char
     // margin between the right edge of each bubble and the scrollbar column.
     let bubble_row_width = row_width.saturating_sub(1);
-    // wrap_width for plain (non-bubble) content — 1 char narrower to avoid
-    // running flush against the right edge.
-    let wrap_width = bubble_row_width.saturating_sub(1).max(1);
 
     let mut lines: Vec<Line> = Vec::new();
     // Pending tool bubbles (awaiting approval) are deferred to the very end
@@ -732,32 +1397,6 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState, registry: &Too
     }
     for (entry_index, entry) in state.chat_entries.iter().enumerate() {
         match entry {
-            ChatEntry::UserMessage { text, state } => {
-                // User bubbles carry a 1-char left border bar plus a 2-char
-                // margin, so wrap to a narrower width to keep lines on-screen.
-                let user_width = bubble_row_width.saturating_sub(4).max(1);
-                append_user_lines(&mut lines, text, *state, user_width);
-            }
-            ChatEntry::AssistantMessage { text, interrupted } => {
-                let msg_width = bubble_row_width.saturating_sub(4).max(1);
-                append_assistant_lines(&mut lines, text, *interrupted, msg_width);
-            }
-            ChatEntry::ThinkingMessage {
-                text,
-                collapsed,
-                duration,
-            } => {
-                let msg_width = bubble_row_width.saturating_sub(4).max(1);
-                append_thinking_lines(
-                    &mut lines,
-                    text,
-                    *collapsed,
-                    *duration,
-                    entry_index,
-                    &mut thinking_title_rows_out,
-                    msg_width,
-                );
-            }
             ChatEntry::ToolBubble {
                 name,
                 state: bubble_state,
@@ -796,50 +1435,17 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState, registry: &Too
                     bubble_row_width.saturating_sub(4).max(1),
                 );
             }
-            ChatEntry::ErrorLine { message } => {
-                for (index, wrapped) in textwrap::wrap(message, wrap_width.saturating_sub(6).max(1))
-                    .into_iter()
-                    .enumerate()
-                {
-                    let display = if index == 0 {
-                        format!("  ⚠️  {}", wrapped)
-                    } else {
-                        format!("      {}", wrapped)
-                    };
-                    lines.push(Line::styled(display, Style::default().fg(ERROR_COLOR)));
-                }
-            }
-            ChatEntry::CompactionMarker {
-                summarized_messages,
-            } => {
-                let label = format!(
-                    "  ── compaction · {summarized_messages} {} summarized ──",
-                    plural_noun(*summarized_messages, "message", "messages")
+            _ => {
+                let offset = lines.len();
+                let layout = build_entry(entry, entry_index, content_area.width);
+                thinking_title_rows_out.extend(
+                    layout
+                        .thinking
+                        .into_iter()
+                        .map(|(start, end, index)| (start + offset, end + offset, index)),
                 );
-                lines.push(Line::styled(
-                    label,
-                    Style::default()
-                        .fg(MUTED_TEXT_COLOR)
-                        .add_modifier(Modifier::DIM),
-                ));
-            }
-            ChatEntry::Notice { text } => {
-                for (index, source_line) in text.lines().enumerate() {
-                    let wrapped_lines =
-                        textwrap::wrap(source_line, wrap_width.saturating_sub(6).max(1));
-                    if wrapped_lines.is_empty() {
-                        lines.push(Line::default());
-                        continue;
-                    }
-                    for (wrap_index, wrapped) in wrapped_lines.into_iter().enumerate() {
-                        let display = if index == 0 && wrap_index == 0 {
-                            format!("  ⓘ  {}", wrapped)
-                        } else {
-                            format!("     {}", wrapped)
-                        };
-                        lines.push(Line::styled(display, Style::default().fg(NOTICE_COLOR)));
-                    }
-                }
+                lines.extend(layout.rows);
+                continue;
             }
         }
         // Blank separator between entries so the conversation breathes.
@@ -934,34 +1540,6 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState, registry: &Too
     state.conversation.chat_rendered_lines = rendered_lines;
     state.conversation.chat_rendered_line_prefix_widths = prefix_widths;
 
-    // Apply selection highlight to lines in the selected range.
-    if let Some(sel) = state.conversation.chat_selection {
-        if !sel.is_empty() {
-            let (start_line, start_col, end_line, end_col) = sel.normalized();
-            for (index, line) in lines.iter_mut().enumerate() {
-                if index < start_line || index > end_line {
-                    continue;
-                }
-                // Determine which column range to highlight on this line.
-                // Middle lines are fully highlighted (0..MAX); the start and
-                // end lines are highlighted only within the selection columns.
-                let col_start = if index == start_line { start_col } else { 0 };
-                let col_end = if index == end_line {
-                    end_col
-                } else {
-                    usize::MAX
-                };
-                let alignment_offset = line_alignment_offset(line, content_area.width);
-                apply_selection_highlight_to_line(
-                    line,
-                    col_start.saturating_sub(alignment_offset),
-                    col_end.saturating_sub(alignment_offset),
-                    CHAT_SELECTION_BG,
-                );
-            }
-        }
-    }
-
     // Strip any trailing blank line: the static layout spacer (Constraint::Length(1)
     // between chat_area and input_area) owns the visual gap, so keeping a
     // blank inside the scrollable content would create a double gap when
@@ -992,7 +1570,14 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState, registry: &Too
         state.conversation.scroll_offset
     };
 
-    let paragraph = Paragraph::new(lines.clone()).scroll((row_offset as u16, 0));
+    let mut lines: Vec<_> = lines.into_iter().skip(row_offset).take(visible).collect();
+    highlight_visible_rows(
+        &mut lines,
+        row_offset,
+        state.conversation.chat_selection,
+        content_area.width,
+    );
+    let paragraph = Paragraph::new(lines);
 
     frame.render_widget(paragraph, content_area);
 
@@ -1105,7 +1690,7 @@ fn render_chat_scrollbar(
     }
 }
 
-/// Apply `background` color to character columns `[col_start, col_end)` on
+/// Apply `background` color to terminal columns `[col_start, col_end)` on
 /// `line`, splitting existing spans at the selection boundaries as needed.
 /// Pass `col_end = usize::MAX` to highlight through to the end of the line.
 fn apply_selection_highlight_to_line(
@@ -1119,47 +1704,46 @@ fn apply_selection_highlight_to_line(
     }
     let original_spans: Vec<_> = std::mem::take(&mut line.spans);
     let mut new_spans: Vec<Span<'static>> = Vec::new();
-    let mut char_pos = 0usize;
+    let mut column = 0usize;
 
     for span in original_spans {
         let style = span.style;
         let text: String = span.content.into_owned();
-        let span_char_len = text.chars().count();
-        let span_end = char_pos + span_char_len;
-        let effective_end = col_end.min(span_end);
-
-        if span_end <= col_start || char_pos >= col_end {
+        let text_span = Span::raw(text.as_str());
+        let span_end = column + text_span.width();
+        if span_end <= col_start || column >= col_end {
             new_spans.push(Span::styled(text, style));
         } else {
-            let overlap_start = col_start.saturating_sub(char_pos);
-            let overlap_end = effective_end.saturating_sub(char_pos).min(span_char_len);
-
-            if overlap_start > 0 {
-                let before: String = text.chars().take(overlap_start).collect();
+            let mut before = String::new();
+            let mut selected = String::new();
+            let mut after = String::new();
+            for grapheme in text_span.styled_graphemes(Style::default()) {
+                let width = Span::raw(grapheme.symbol).width();
+                if column < col_end && column + width > col_start {
+                    selected.push_str(grapheme.symbol);
+                } else if column < col_start {
+                    before.push_str(grapheme.symbol);
+                } else {
+                    after.push_str(grapheme.symbol);
+                }
+                column += width;
+            }
+            if !before.is_empty() {
                 new_spans.push(Span::styled(before, style));
             }
-            let selected: String = text
-                .chars()
-                .skip(overlap_start)
-                .take(overlap_end - overlap_start)
-                .collect();
             if !selected.is_empty() {
                 new_spans.push(Span::styled(
                     selected,
                     style.patch(Style::default().bg(background)),
                 ));
             }
-            if overlap_end < span_char_len {
-                let after: String = text.chars().skip(overlap_end).collect();
+            if !after.is_empty() {
                 new_spans.push(Span::styled(after, style));
             }
         }
-        char_pos = span_end;
+        column = span_end;
     }
-    line.spans = new_spans
-        .into_iter()
-        .map(|s| Span::styled(s.content, s.style))
-        .collect();
+    line.spans = new_spans;
 }
 
 /// Render the Ylva wordmark, horizontally centered. Only shown when the
@@ -1522,6 +2106,7 @@ fn append_user_lines(
 }
 
 /// Per-bubble inputs for [`append_tool_bubble_lines`].
+#[derive(Clone, Copy)]
 struct ToolBubbleArgs<'a> {
     id: uuid::Uuid,
     name: &'a str,
@@ -1634,6 +2219,16 @@ fn append_tool_bubble_lines(
     bubble_title_rows: &mut Vec<(usize, usize, uuid::Uuid)>,
     wrap_width: usize,
 ) {
+    append_tool_layout(lines, bubble, bubble_title_rows, wrap_width, false);
+}
+
+fn append_tool_layout(
+    lines: &mut Vec<Line<'static>>,
+    bubble: ToolBubbleArgs<'_>,
+    bubble_title_rows: &mut Vec<(usize, usize, uuid::Uuid)>,
+    wrap_width: usize,
+    chrome_only: bool,
+) -> usize {
     let ToolBubbleArgs {
         id: bubble_id,
         name,
@@ -1779,7 +2374,7 @@ fn append_tool_bubble_lines(
         .join(" ");
 
     // Compute body sections for the collapsible bubble body.
-    let mut content_sections: Vec<crate::agent::tools::Section> = match state {
+    let mut content_sections: Vec<&crate::agent::tools::Section> = match state {
         ToolCallState::Pending {
             content_sections, ..
         }
@@ -1791,10 +2386,10 @@ fn append_tool_bubble_lines(
         }
         | ToolCallState::Error {
             content_sections, ..
-        } => content_sections.clone(),
+        } => content_sections.iter().collect(),
         ToolCallState::Done {
             content_sections, ..
-        } => content_sections.clone(),
+        } => content_sections.iter().collect(),
         _ => vec![],
     };
     // A state section that already carries a label (e.g. bash's `Command`)
@@ -1810,7 +2405,7 @@ fn append_tool_bubble_lines(
             _ => None,
         })
         .collect();
-    content_sections.extend(extra_content_sections.into_iter().filter(|extra| {
+    content_sections.extend(extra_content_sections.iter().filter(|extra| {
         match extra {
             crate::agent::tools::Section::Content(content) => !content
                 .label
@@ -2195,6 +2790,10 @@ fn append_tool_bubble_lines(
         }
     }
 
+    let body_start = lines.len();
+    if chrome_only {
+        return body_start;
+    }
     // Body (body sections + result) — hidden when collapsed.
     if !collapsed {
         if !content_sections.is_empty() {
@@ -2550,6 +3149,7 @@ fn append_tool_bubble_lines(
     let bubble_end_row = lines.len() - 1;
     bubble_title_rows.push((bubble_start_row, bubble_end_row, bubble_id));
     let _ = title_row_index; // retained for documentation; hit-testing uses the range
+    body_start
 }
 
 /// Parse a unified-diff hunk header of the form `@@ -a[,b] +c[,d] @@`.
@@ -2645,12 +3245,34 @@ fn draw_normal_footer(
     state: &TuiState,
     footer_hints: &[FooterHint],
     hint: Option<&str>,
+    source: Option<&ConversationSource<'_>>,
 ) {
+    let thinking = source.map_or(!state.partial_thinking_text.is_empty(), |source| {
+        !source.turn.partial_thinking_text.is_empty()
+    });
+    let responding = source.map_or(!state.partial_assistant_text.is_empty(), |source| {
+        !source.turn.partial_assistant_text.is_empty()
+    });
+    let header_state = if let Some(source) = source {
+        source.header.and_then(|(_, entry)| {
+            if let ChatEntry::ToolBubble { state, .. } = entry {
+                Some(state.as_ref())
+            } else {
+                None
+            }
+        })
+    } else {
+        state
+            .child_view
+            .child_view_bubble
+            .as_ref()
+            .map(|(_, _, state, _)| state)
+    };
     let mode_word = match state.agent_mode {
         AgentMode::Idle => "Idle",
         AgentMode::Pending => "Sending…",
         AgentMode::Streaming => {
-            if !state.partial_thinking_text.is_empty() && state.partial_assistant_text.is_empty() {
+            if thinking && !responding {
                 "Thinking…"
             } else {
                 "Streaming…"
@@ -2669,8 +3291,8 @@ fn draw_normal_footer(
     // "Idle" or "Streaming…" without saying which agent is active. Override
     // with an explicit "done, but parent busy" message in that case; once the
     // root also goes `Idle`, the plain `mode_word` above is unambiguous.
-    let mode_word = match &state.child_view.child_view_bubble {
-        Some((_, _, bubble_state, _))
+    let mode_word = match header_state {
+        Some(bubble_state)
             if state.parent_agent_mode != AgentMode::Idle
                 && matches!(
                     bubble_state,
@@ -2698,8 +3320,9 @@ fn draw_normal_footer(
         // `state.partial_assistant_text` are the *child's own* accumulators
         // here (see `render::project_for_draw`'s child projection), not the
         // root's.
-        Some((_, _, ToolCallState::Running { .. }, _)) => {
-            let child_running_own_tool = state.chat_entries.iter().any(|entry| {
+        Some(ToolCallState::Running { .. }) => {
+            let entries = source.map_or(state.chat_entries.as_slice(), |source| source.entries);
+            let child_running_own_tool = entries.iter().any(|entry| {
                 matches!(
                     entry,
                     ChatEntry::ToolBubble { state, .. } if matches!(state.as_ref(), ToolCallState::Running { .. })
@@ -2707,11 +3330,9 @@ fn draw_normal_footer(
             });
             if child_running_own_tool {
                 "Running tool…"
-            } else if !state.partial_thinking_text.is_empty()
-                && state.partial_assistant_text.is_empty()
-            {
+            } else if thinking && !responding {
                 "Subagent thinking…"
-            } else if !state.partial_assistant_text.is_empty() {
+            } else if responding {
                 "Subagent streaming…"
             } else {
                 "Subagent working…"
@@ -2747,7 +3368,8 @@ fn draw_normal_footer(
             row_1_text.push_str(&active_subagent_label);
         }
         if state.steer_indicator {
-            let queued_count = state.queued_steer_texts.len();
+            let queued_count =
+                source.map_or(state.queued_steer_texts.len(), |source| source.queued.len());
             // "Queued" is the state the user actually cares about (not yet seen
             // by the LLM); "steer" is internal jargon for how such a message
             // reaches the model, so it's kept out of user-facing text.

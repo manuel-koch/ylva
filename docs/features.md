@@ -949,6 +949,18 @@ module structure (model/presenter/view/driver split).
   corner (e.g., `"Copied to clipboard"`) and auto-dismiss after ~1.5 seconds.
 - **Scrollbar:** the chat scrollbar's thumb reaches the very bottom of the
   track at the end of the list (and the top at the start).
+- **Large expanded results:** root/subagent transcripts and the subagent header
+  reuse unchanged entry layouts and paint only visible rows. Scrolling and
+  selection do not repeatedly parse completed results; spinners and elapsed
+  titles stay live. Full content, exact Markdown, selection/copy, collapse
+  controls, and scroll heights are preserved, including documents exceeding
+  the terminal library's narrow scroll-offset range. Cold expansion, changed
+  stream content, resize, and view switches still require synchronous layout.
+  Optional collapsed layouts share a code-owned memory allowance; active
+  layouts are not evicted to satisfy it. No new configuration or keybinding
+  is required.
+  Selection/copy uses terminal columns and keeps wide Unicode and combining
+  graphemes intact.
 - **Markdown rendering:** assistant messages, user messages, the clarify
   banner's question/context text, and a user's clarify answer render Markdown
   instead of plain wrapped text. Supported: **bold**/*italic*, `inline code`

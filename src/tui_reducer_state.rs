@@ -114,12 +114,19 @@ impl ChatSelection {
     }
 }
 
-/// Extract `chars[start..end]` from a UTF-8 string, clamped to bounds.
-fn char_range(s: &str, start: usize, end: usize) -> String {
-    s.chars()
-        .skip(start)
-        .take(end.saturating_sub(start))
-        .collect()
+/// Keep complete graphemes intersecting the selected terminal columns.
+fn display_column_range(text: &str, start: usize, end: usize) -> String {
+    let span = ratatui::text::Span::raw(text);
+    let mut column = 0;
+    let mut selected = String::new();
+    for grapheme in span.styled_graphemes(ratatui::style::Style::default()) {
+        let width = ratatui::text::Span::raw(grapheme.symbol).width();
+        if column < end && column + width > start {
+            selected.push_str(grapheme.symbol);
+        }
+        column += width;
+    }
+    selected
 }
 
 fn extract_selection_text(
@@ -141,7 +148,7 @@ fn extract_selection_text(
     if start_line == end_line {
         let line = &lines[start_line];
         let prefix = prefix_width(start_line);
-        Some(char_range(
+        Some(display_column_range(
             line,
             start_col.saturating_sub(prefix),
             end_col.saturating_sub(prefix),
@@ -156,9 +163,9 @@ fn extract_selection_text(
         {
             let prefix = prefix_width(absolute_index);
             let fragment = if absolute_index == start_line {
-                char_range(line, start_col.saturating_sub(prefix), line.chars().count())
+                display_column_range(line, start_col.saturating_sub(prefix), usize::MAX)
             } else if absolute_index == end_line {
-                char_range(line, 0, end_col.saturating_sub(prefix))
+                display_column_range(line, 0, end_col.saturating_sub(prefix))
             } else {
                 line.clone()
             };
@@ -1854,9 +1861,9 @@ impl Default for TuiDisplayMetadata {
 /// The authoritative TUI view-model owned by the Driver.
 ///
 /// This is the single source of truth: `presenter::update` mutates it in
-/// response to [`DomainEvent`]s, and every frame `render::project_for_draw`
-/// derives a fresh [`crate::tui_render_state::TuiState`] snapshot from it for
-/// `tui_widgets::draw` to render. `TuiState` is never the source of truth and is not fed back into
+/// response to [`DomainEvent`]s. Production frames borrow transcript content
+/// alongside a [`crate::tui_render_state::TuiState`] metadata/geometry shell.
+/// `TuiState` is never the source of truth and is not fed back into
 /// `AppState` except for the handful of view-geometry fields `tui_widgets::draw`
 /// itself writes (see `render::sync_from_draw`).
 ///
@@ -1864,6 +1871,12 @@ impl Default for TuiDisplayMetadata {
 /// `cursor_for_click`) or that exist purely to pass rendering artifacts between
 /// draw calls (e.g. `button_areas`) are kept in the Driver and excluded here.
 pub struct AppState {
+    pub render_cache: crate::conversation_render_cache::ConversationRenderCache,
+    pub(crate) render_revisions: HashMap<(Option<Uuid>, usize), u64>,
+    pub(crate) render_title_revisions: HashMap<Uuid, u64>,
+    pub(crate) render_stream_revisions: HashMap<Option<Uuid>, u64>,
+    pub(crate) render_cache_tracking: bool,
+    pub(crate) queued_render_revision: u64,
     pub mode: TuiMode,
     pub focus: Focus,
     pub layout: AppLayout,
@@ -2039,8 +2052,54 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Opt into mutation-tracked rendering. Direct field edits thereafter must
+    /// call `invalidate_render_cache`; ordinary public states stay conservative.
+    pub fn enable_render_cache(&mut self) {
+        self.invalidate_render_cache();
+        self.render_cache_tracking = true;
+    }
+
+    pub fn invalidate_render_cache(&mut self) {
+        self.render_cache.clear();
+        self.render_revisions.clear();
+        self.render_title_revisions.clear();
+        self.render_stream_revisions.clear();
+    }
+
+    pub(crate) fn invalidate_transcript_layout(&mut self, run_id: Option<Uuid>) {
+        let length = run_id
+            .and_then(|run_id| self.child_conversations.get(&run_id))
+            .map_or(self.chat_entries.len(), |conversation| {
+                conversation.messages.len()
+            });
+        for index in 0..length {
+            *self.render_revisions.entry((run_id, index)).or_default() += 1;
+        }
+    }
+
+    fn release_active_render_layout(&mut self) {
+        self.render_cache.clear();
+        self.conversation.chat_rendered_lines = Vec::new();
+        self.conversation.chat_rendered_line_prefix_widths = Vec::new();
+        self.conversation.bubble_title_rows = Vec::new();
+        self.conversation.thinking_title_rows = Vec::new();
+        self.conversation.chat_selection = None;
+        self.child_view.header_rendered_lines = Vec::new();
+        self.child_view.header_rendered_line_prefix_widths = Vec::new();
+    }
+
+    pub(crate) fn revise_stream(&mut self, run_id: Option<Uuid>) {
+        *self.render_stream_revisions.entry(run_id).or_default() += 1;
+    }
+
     pub fn new() -> Self {
         AppState {
+            render_cache: Default::default(),
+            render_revisions: HashMap::new(),
+            render_title_revisions: HashMap::new(),
+            render_stream_revisions: HashMap::new(),
+            render_cache_tracking: false,
+            queued_render_revision: 0,
             mode: TuiMode::Idle,
             focus: Focus::MainInput,
             layout: AppLayout::default(),
@@ -2111,6 +2170,7 @@ impl AppState {
         child_runs: &[ChildRunRecord],
         compaction_boundary: Option<usize>,
     ) {
+        self.invalidate_render_cache();
         self.chat_entries =
             project_messages_with_child_runs(messages, child_runs, compaction_boundary);
         self.input_history = messages
@@ -2161,6 +2221,7 @@ impl AppState {
         messages: &[Message],
         compaction_boundary: Option<usize>,
     ) {
+        self.invalidate_transcript_layout(Some(run_id));
         if let Some(conversation) = self.child_conversations.get_mut(&run_id) {
             if conversation.needs_lazy_load {
                 conversation.messages =
@@ -2243,6 +2304,7 @@ impl AppState {
     /// everything that happened while they were staged, rather than at the
     /// stale position where the user happened to press `Enter`.
     pub fn commit_queued_steer_messages(&mut self, state: UserMessageState) {
+        self.queued_render_revision += 1;
         for text in std::mem::take(&mut self.queued_steer_texts) {
             self.chat_entries
                 .push(ChatEntry::UserMessage { text, state });
@@ -2255,17 +2317,39 @@ impl AppState {
     /// which transcript it was created in (see `target_messages_mut`), so
     /// updaters (`apply_tool_*`) can stay agnostic of which one it lives in.
     pub fn find_tool_bubble_mut(&mut self, target_id: Uuid) -> Option<&mut ChatEntry> {
-        for conversation in self.child_conversations.values_mut() {
+        self.find_tool_bubble_for_render_mutation(target_id, true)
+    }
+
+    pub(crate) fn find_tool_bubble_title_mut(&mut self, target_id: Uuid) -> Option<&mut ChatEntry> {
+        *self.render_title_revisions.entry(target_id).or_default() += 1;
+        self.find_tool_bubble_for_render_mutation(target_id, false)
+    }
+
+    fn find_tool_bubble_for_render_mutation(
+        &mut self,
+        target_id: Uuid,
+        content_changed: bool,
+    ) -> Option<&mut ChatEntry> {
+        for (run_id, conversation) in &mut self.child_conversations {
             if let Some(pos) = conversation.messages.iter().rposition(
                 |entry| matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == target_id),
             ) {
+                if content_changed {
+                    *self
+                        .render_revisions
+                        .entry((Some(*run_id), pos))
+                        .or_default() += 1;
+                }
                 return conversation.messages.get_mut(pos);
             }
         }
-        self.chat_entries
-            .iter_mut()
-            .rev()
-            .find(|entry| matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == target_id))
+        let position = self.chat_entries.iter().rposition(
+            |entry| matches!(entry, ChatEntry::ToolBubble { id, .. } if *id == target_id),
+        )?;
+        if content_changed {
+            *self.render_revisions.entry((None, position)).or_default() += 1;
+        }
+        self.chat_entries.get_mut(position)
     }
 
     /// Target transcript for a *new* tool/clarify bubble tagged with
@@ -2318,6 +2402,7 @@ impl AppState {
             return;
         }
         self.pre_pause_view = Some(self.active_view.clone());
+        self.release_active_render_layout();
         self.active_view = target_view;
         self.auto_switched_to_child = true;
     }
@@ -2350,6 +2435,7 @@ impl AppState {
             }
         };
         if bubble_is_in_current_view {
+            self.release_active_render_layout();
             self.active_view = self.pre_pause_view.take().unwrap_or(ConversationView::Root);
             self.auto_switched_to_child = false;
         }
@@ -2436,6 +2522,7 @@ impl AppState {
     /// simulate a child run's existence without driving the full event
     /// pipeline.
     pub(crate) fn start_child_run(&mut self, info: ChildRunInfo) {
+        self.invalidate_transcript_layout(Some(info.run_id));
         self.running_child = Some(info.clone());
         self.child_conversations
             .insert(info.run_id, ChildConversation::new(info));
@@ -2460,6 +2547,7 @@ impl AppState {
         else {
             return;
         };
+        self.release_active_render_layout();
         self.active_view = ConversationView::Child {
             run_id: info.run_id,
             agent_type: info.agent_type,
@@ -2564,6 +2652,7 @@ impl AppState {
     /// rather than manual navigation; in that case the shared scroll fields
     /// were never touched, so there is nothing to restore.
     pub fn switch_to_root_view(&mut self) {
+        self.release_active_render_layout();
         self.active_view = ConversationView::Root;
         self.auto_switched_to_child = false;
         if let Some((scroll_offset, scroll_locked)) = self.saved_root_scroll.take() {
@@ -2584,6 +2673,8 @@ impl AppState {
     /// The in-memory `Context` and the session file are *not* touched here —
     /// the agent loop owns those and resets them on `AgentCommand::ClearContext`.
     pub fn clear_conversation(&mut self) {
+        self.invalidate_render_cache();
+        self.release_active_render_layout();
         self.context_usage = None;
         self.compaction_requests.clear();
         self.chat_entries.clear();
@@ -3019,7 +3110,7 @@ impl AppState {
     /// target a bubble in any of them, depending on `active_view`.
     pub fn toggle_tool_bubble_collapsed(&mut self, target_id: Uuid) {
         let found = if let Some(ChatEntry::ToolBubble { collapsed, .. }) =
-            self.find_tool_bubble_mut(target_id)
+            self.find_tool_bubble_for_render_mutation(target_id, false)
         {
             *collapsed = !*collapsed;
             true
@@ -3043,9 +3134,16 @@ impl AppState {
     /// `target_index` in `chat_entries`. Mirrors `toggle_tool_bubble_collapsed`
     /// but is index-keyed since thinking bubbles carry no `Uuid`.
     pub fn toggle_thinking_collapsed(&mut self, target_index: usize) {
-        if let Some(ChatEntry::ThinkingMessage { collapsed, .. }) =
-            self.chat_entries.get_mut(target_index)
-        {
+        let entries = match self.active_view {
+            ConversationView::Root => &mut self.chat_entries,
+            ConversationView::Child { run_id, .. } => {
+                let Some(conversation) = self.child_conversations.get_mut(&run_id) else {
+                    return;
+                };
+                &mut conversation.messages
+            }
+        };
+        if let Some(ChatEntry::ThinkingMessage { collapsed, .. }) = entries.get_mut(target_index) {
             *collapsed = !*collapsed;
             self.conversation.scroll_locked = false;
             if let Some((start_row, _, _)) = self
@@ -3066,7 +3164,16 @@ impl AppState {
     /// unchanged into the flushed `ChatEntry::ThinkingMessage` once the
     /// stream ends (see `flush_partial_thinking_message`).
     pub fn toggle_partial_thinking_collapsed(&mut self) {
-        self.turn_buffer.partial_thinking_collapsed = !self.turn_buffer.partial_thinking_collapsed;
+        let turn = match self.active_view {
+            ConversationView::Root => &mut self.turn_buffer,
+            ConversationView::Child { run_id, .. } => {
+                let Some(conversation) = self.child_conversations.get_mut(&run_id) else {
+                    return;
+                };
+                &mut conversation.turn_buffer
+            }
+        };
+        turn.partial_thinking_collapsed = !turn.partial_thinking_collapsed;
         self.conversation.scroll_locked = false;
         if let Some((start_row, _, _)) = self
             .conversation

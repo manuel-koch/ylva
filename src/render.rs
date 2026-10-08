@@ -17,9 +17,8 @@
 //! This module is excluded from the coverage gate (it needs a live terminal);
 //! visual correctness is verified manually.
 //!
-//! `render` owns the projection from [`AppState`] to the legacy [`TuiState`]
-//! snapshot consumed by [`crate::tui_widgets::draw`], and syncs the view-geometry
-//! fields written back by `tui_widgets::draw` into `AppState` after each frame.
+//! Production frames borrow conversation content and move derived selection
+//! buffers through a small legacy widget shell, then sync geometry to `AppState`.
 
 use ratatui::Frame;
 use ratatui_textarea::TextArea;
@@ -33,9 +32,8 @@ use crate::tui_widgets::{self, ButtonAreas};
 
 /// Draw one TUI frame.
 ///
-/// Projects `state` into a [`TuiState`] snapshot, delegates all rendering to
-/// [`crate::tui_widgets::draw`], then syncs the view-geometry fields written by
-/// `tui_widgets::draw` back into `state.layout` and the scroll/render-cache fields.
+/// Borrows the active transcript, delegates rendering to the shared widgets,
+/// and syncs view geometry and moved selection buffers back to `state`.
 /// The `registry` carries no rendering state of its own: tool bubbles look up
 /// their display label in it while drawing (`Tool::title()`, e.g.
 /// `Web Search (Brave)`) — the same on-demand lookup the CLI status line
@@ -50,24 +48,47 @@ pub fn render(
     mouse_pos: Option<(u16, u16)>,
     registry: &ToolRegistry,
 ) {
-    let mut render_state = project_for_draw(state);
-    let button_areas = tui_widgets::draw(
+    if !state.render_cache_tracking {
+        state.render_cache.clear();
+    }
+    let mut render_state = project_snapshot(state, false);
+    render_state.conversation.chat_rendered_lines =
+        std::mem::take(&mut state.conversation.chat_rendered_lines);
+    render_state.conversation.chat_rendered_line_prefix_widths =
+        std::mem::take(&mut state.conversation.chat_rendered_line_prefix_widths);
+    render_state.child_view.header_rendered_lines =
+        std::mem::take(&mut state.child_view.header_rendered_lines);
+    render_state.child_view.header_rendered_line_prefix_widths =
+        std::mem::take(&mut state.child_view.header_rendered_line_prefix_widths);
+    let mut cache = std::mem::take(&mut state.render_cache);
+    let source = tui_widgets::ConversationSource::from_app(state);
+    cache.activate(source.run_id);
+    let button_areas = tui_widgets::draw_borrowed(
         frame,
         &mut render_state,
         textarea,
         hint,
         mouse_pos,
         registry,
+        &mut tui_widgets::BorrowedConversation {
+            source: &source,
+            cache: &mut cache,
+        },
     );
+    state.render_cache = cache;
     sync_from_draw(state, render_state, button_areas);
 }
 
 /// Project the canonical [`AppState`] to the legacy [`TuiState`] snapshot
 /// required by [`crate::tui_widgets::draw`].
 ///
-/// The projection is a shallow clone of all view-model fields. Driver-owned
-/// types (`TextArea`, channel handles) are not part of this snapshot.
+/// Owned compatibility projection used by snapshot tests, not production frames.
+#[cfg(test)]
 fn project_for_draw(state: &AppState) -> TuiState {
+    project_snapshot(state, true)
+}
+
+fn project_snapshot(state: &AppState, include_content: bool) -> TuiState {
     let pending_approval = if let Focus::ToolApproval {
         tool_id,
         ref tool_name,
@@ -114,17 +135,41 @@ fn project_for_draw(state: &AppState) -> TuiState {
         showing_child_run_id.and_then(|run_id| state.child_conversations.get(&run_id))
     {
         (
-            conversation.messages.clone(),
-            conversation.turn_buffer.partial_assistant_text.clone(),
-            conversation.turn_buffer.partial_thinking_text.clone(),
+            if include_content {
+                conversation.messages.clone()
+            } else {
+                Vec::new()
+            },
+            if include_content {
+                conversation.turn_buffer.partial_assistant_text.clone()
+            } else {
+                String::new()
+            },
+            if include_content {
+                conversation.turn_buffer.partial_thinking_text.clone()
+            } else {
+                String::new()
+            },
             conversation.turn_buffer.thinking_started_at,
             conversation.turn_buffer.partial_thinking_collapsed,
         )
     } else {
         (
-            state.chat_entries.clone(),
-            state.turn_buffer.partial_assistant_text.clone(),
-            state.turn_buffer.partial_thinking_text.clone(),
+            if include_content {
+                state.chat_entries.clone()
+            } else {
+                Vec::new()
+            },
+            if include_content {
+                state.turn_buffer.partial_assistant_text.clone()
+            } else {
+                String::new()
+            },
+            if include_content {
+                state.turn_buffer.partial_thinking_text.clone()
+            } else {
+                String::new()
+            },
             state.turn_buffer.thinking_started_at,
             state.turn_buffer.partial_thinking_collapsed,
         )
@@ -143,9 +188,16 @@ fn project_for_draw(state: &AppState) -> TuiState {
                 name,
                 state: bubble_state,
                 collapsed,
-            } if *id == bubble_id => {
-                Some((*id, name.clone(), (**bubble_state).clone(), *collapsed))
-            }
+            } if *id == bubble_id => Some((
+                *id,
+                name.clone(),
+                if include_content {
+                    (**bubble_state).clone()
+                } else {
+                    crate::tui_reducer_state::ToolCallState::Killed
+                },
+                *collapsed,
+            )),
             _ => None,
         })
     });
@@ -204,11 +256,19 @@ fn project_for_draw(state: &AppState) -> TuiState {
         partial_thinking_text,
         thinking_started_at,
         partial_thinking_collapsed,
-        queued_steer_texts: state.queued_steer_texts.clone(),
-        steer_indicator: state.steer_indicator,
+        queued_steer_texts: if include_content && showing_child_run_id.is_none() {
+            state.queued_steer_texts.clone()
+        } else {
+            Vec::new()
+        },
+        steer_indicator: state.steer_indicator && showing_child_run_id.is_none(),
         pending_approval,
         pending_approval_is_subagent,
-        input_history: state.input_history.clone(),
+        input_history: if include_content {
+            state.input_history.clone()
+        } else {
+            Vec::new()
+        },
         history_index: state.history_index,
         context_usage_text: state
             .active_context_usage()
@@ -269,11 +329,16 @@ fn project_for_draw(state: &AppState) -> TuiState {
             child_view_bubble,
             header_bubble_scroll_offset: state.child_view.header_bubble_scroll_offset,
             header_bubble_area: ratatui::layout::Rect::default(),
-            header_rendered_lines: state.child_view.header_rendered_lines.clone(),
-            header_rendered_line_prefix_widths: state
-                .child_view
-                .header_rendered_line_prefix_widths
-                .clone(),
+            header_rendered_lines: if include_content {
+                state.child_view.header_rendered_lines.clone()
+            } else {
+                Vec::new()
+            },
+            header_rendered_line_prefix_widths: if include_content {
+                state.child_view.header_rendered_line_prefix_widths.clone()
+            } else {
+                Vec::new()
+            },
             header_selection: state.child_view.header_selection,
             header_drag_active: state.child_view.header_drag_active,
         },
@@ -282,11 +347,16 @@ fn project_for_draw(state: &AppState) -> TuiState {
             scroll_locked: state.conversation.scroll_locked,
             chat_area_height: state.conversation.chat_area_height,
             chat_area: state.layout.chat_area.rect,
-            chat_rendered_lines: state.conversation.chat_rendered_lines.clone(),
-            chat_rendered_line_prefix_widths: state
-                .conversation
-                .chat_rendered_line_prefix_widths
-                .clone(),
+            chat_rendered_lines: if include_content {
+                state.conversation.chat_rendered_lines.clone()
+            } else {
+                Vec::new()
+            },
+            chat_rendered_line_prefix_widths: if include_content {
+                state.conversation.chat_rendered_line_prefix_widths.clone()
+            } else {
+                Vec::new()
+            },
             chat_selection: state.conversation.chat_selection,
             chat_drag_active: state.conversation.chat_drag_active,
             bubble_title_rows: state.conversation.bubble_title_rows.clone(),

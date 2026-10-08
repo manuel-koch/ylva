@@ -57,6 +57,13 @@ Holding `SUBSCRIBER_LOCK` for the full duration of the `with_default` closure
 (and the surrounding `Dispatch` lifetime) serialises subscriber registration
 across tests and prevents this class of flaky failure.
 
+Presenter log-capture tests also prime their shared domain-event callsite
+inside `capture_logs`, then rebuild interest before the assertion's event.
+Other presenter tests can concurrently first-register that same callsite
+without a subscriber; refreshing after the priming call completes avoids
+the first-registration race. Priming supplements the capture helper's lock;
+it does not replace subscriber isolation.
+
 ## Process-global cwd mutation in tests
 
 ### Issue
@@ -78,6 +85,17 @@ let _lock = crate::test_support::SUBSCRIBER_LOCK
     .expect("subscriber mutex poisoned");
 let cwd = std::env::current_dir().expect("cwd");
 ```
+
+## Paused Tokio sleep rounds fractional deadlines
+
+Tokio's millisecond timer granularity also applies with a paused clock. A
+sampled throttle jitter strictly below its maximum can produce an observed
+sleep equal to that maximum after deadline rounding. Web-search throttle tests
+therefore allow one timer tick above the calculated interval-plus-jitter bound.
+Separate pure tests still enforce the strict random-jitter band. Testing the
+observed sleep against the strict jitter bound caused intermittent failures
+and poisoned the subscriber lock held by `run_locked_paused`, cascading into
+otherwise unrelated tests.
 
 ## Session writer releases its file lock asynchronously
 

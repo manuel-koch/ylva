@@ -1417,6 +1417,7 @@ where
     } = tui_runtime;
     let mut state = AppState::new();
     state.display_metadata = display_metadata;
+    state.enable_render_cache();
     let mut textarea = TextArea::default();
     configure_textarea(&mut textarea);
     let replay_store = agent.store();
