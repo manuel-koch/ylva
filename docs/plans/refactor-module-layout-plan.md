@@ -196,7 +196,7 @@ No staging, branch creation, or commits are authorized by this plan.
    ownership in `docs/implementation-notes.md`; keep implementation details
    out of the user-facing `docs/features.md`.
 
-8. [ ] Split TUI driver integrations into `tui_driver/effects.rs`,
+8. [x] Split TUI driver integrations into `tui_driver/effects.rs`,
    `tui_driver/models.rs`, `tui_driver/input.rs`,
    `tui_driver/terminal.rs`, and `tui_driver/updates.rs`.
    Retain `TuiApp`, `run_tui`, the main select loop, and frame orchestration
@@ -590,6 +590,60 @@ omit custom exclusion flags, and `test-coverage-missing` retains
 `--show-missing-lines`. Workflow documentation, implementation notes and
 renderer module comments now reflect the policy; changed Markdown passed
 `rumdl check`. Plan steps 8-15 remain pending.
+
+### Execution checkpoint: TUI driver
+
+Steps 1-8 are complete; steps 9-15 remain pending. This continuation reaches
+the driver subsystem boundary, before persistence extraction.
+No staging, branch creation or commits were performed.
+
+The driver facade retains `TuiApp`, `run_tui`, `ActionOutcome`, the select
+coordinator, frame orchestration and session-title task coordination.
+Private effects, models, input, terminal and update owners separate command
+routing, catalog/selection/display integration, textarea operations, OS
+resources and UI/replay mapping. Clipboard types retain their public facade
+paths and `src/lib.rs` exports are unchanged. Pending approval destinations
+and mouse-drag fields remain private to their owners; no additional state,
+tasks, channels or locks were introduced.
+All 34 original standalone production functions remain; 29 retain identical
+bodies after visibility and formatting normalization. The five changed
+functions delegate to their new responsibility owners, preserving loop
+control and effect order.
+
+All 1,633 cases registered at the start remain registered after normalizing
+driver test-module paths; three new boundary regressions bring the total to
+1,636. The driver suite passed 70 cases and the unchanged `tui_render_state`
+integration target passed 68. New assertions cover child/root clarify
+destinations after reducer transitions, ordered textarea/command effects and
+quit short-circuiting, and disabled catalog polling after cancellation.
+The existing scrolled-input mouse fixture now exercises the extracted
+wheel handler and checks the actual rendered viewport and selection.
+Default-feature all-target Clippy passed without warnings.
+
+`make format lint`, default-feature all-target Clippy and `make test-coverage`
+passed. Aggregate line coverage was **90.52%**, above the unchanged 80% gate.
+The report includes the driver facade and all five new production children,
+alongside the renderer and binary; no exclusion or threshold was changed.
+Changed Markdown files passed `rumdl check`.
+
+Physical-line counts follow the inventory convention below. Every driver
+production owner is below the responsibility-review trigger; no cohesive
+size exception is needed.
+
+| Module | Production | Tests |
+| --- | ---: | ---: |
+| `tui_driver.rs` | 704 | 2 |
+| `tui_driver/effects.rs` | 249 | 0 |
+| `tui_driver/input.rs` | 291 | 0 |
+| `tui_driver/models.rs` | 444 | 0 |
+| `tui_driver/terminal.rs` | 167 | 0 |
+| `tui_driver/updates.rs` | 407 | 0 |
+| `tui_driver/tests.rs` | 0 | 600 |
+| `tui_driver/tests/effects.rs` | 0 | 1006 |
+| `tui_driver/tests/input.rs` | 0 | 784 |
+| `tui_driver/tests/models.rs` | 0 | 853 |
+| `tui_driver/tests/terminal.rs` | 0 | 32 |
+| `tui_driver/tests/updates.rs` | 0 | 452 |
 
 ### Inventory interpretation
 

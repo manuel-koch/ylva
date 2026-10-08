@@ -575,8 +575,20 @@ The TUI renders the same headless `AgentLoop`; it does not own agent state.
   integration fixture reads the large `chat/cache.rs` implementation rather
   than the facade, preserving highlighting, selection-storage and row-bound
   assertions.
-- `src/tui_driver.rs` owns the terminal loop, maps live UI updates to domain
-  events, and executes effects. `src/cli_driver.rs` owns the headless loop.
+- `src/tui_driver.rs` retains `TuiApp`, `run_tui`, the select loop, frame
+  orchestration and session-title task coordination. Its private
+  `tui_driver/effects.rs` child owns command routing and `PendingRunIds`;
+  `models.rs` owns cancellable catalog tasks, restart after approval pauses,
+  typed selection and runtime display refresh; `input.rs` owns textarea,
+  draft/overlay snapshots, mouse selection and history operations;
+  `updates.rs` owns live UI-to-domain mapping, lazy child replay and the
+  compatibility snapshot; and `terminal.rs` owns clipboard implementations,
+  terminal/title guards and SIGINT relay. Clipboard types retain their
+  public facade paths. Pending destinations stay driver-local and are
+  recorded before reducer transitions, then consumed by approval/clarify
+  commands. Catalog cancellation, agent shutdown, terminal teardown and
+  title restoration keep their existing order. `src/cli_driver.rs` owns
+  the headless loop.
 
 Both conversation render paths publish `ChatScrollbarLayout` with the visible
 scrollbar rect and the exact maximum offset after layout. The presenter maps

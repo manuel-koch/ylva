@@ -242,7 +242,10 @@ Large owner-local suites use `#[cfg(test)] mod tests;` with
 `src/presenter/tests.rs`). Presenter live/replay buffer comparisons and
 cross-input effect-order assertions remain at the facade, alongside shared
 local fixtures; its keyboard, mouse, domain and bubble suites live in
-`presenter/tests/`. Widget rendering suites follow the bubble, chat, footer,
+`presenter/tests/`. Driver frame/title/history orchestration and cross-owner
+clarify routing assertions remain in `tui_driver/tests.rs`, alongside shared
+fixtures; effects, input, models, terminal and update suites live in
+`tui_driver/tests/`. Widget rendering suites follow the bubble, chat, footer,
 help and tool-bubble owners under `tui_widgets/`; small pure selection,
 diff and path-label suites remain beside their implementations.
 `tests/tui_render_state.rs` retains its integration target and uses
