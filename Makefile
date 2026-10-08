@@ -5,14 +5,14 @@ ifeq ($(CARGO_TARGET_DIR),)
 export CARGO_TARGET_DIR := $(REPO_ROOT)/target
 endif
 
-# Minimum line coverage for testable files; enforced by `make test-coverage`
-# and `make test-coverage-missing`. `tui_widgets.rs`, `render.rs`, and `main.rs` are
-# excluded because they require a live terminal and cannot be unit-tested
-# without a full terminal emulator harness.
+# Minimum aggregate line coverage; enforced by `make test-coverage`
+# and `make test-coverage-missing` without project-specific file exclusions.
 COVERAGE_THRESHOLD := 80
 
 .PHONY: lint format format-rust format-markdown \
 	create-logs-dir \
+	graphify-update graphify-watch \
+    clean \
 	build-debug build-debug-and-run \
 	build-release build-release-and-run build-debug-and-run-with-logs \
 	test test-e2e-persistence test-coverage test-coverage-missing \
@@ -39,6 +39,14 @@ format-rust:
 # Enforce consistent formatting
 format: format-rust format-markdown
 
+graphify-update:
+	graphify update .
+	graphify export html
+	graphify export callflow-html
+
+graphify-watch:
+	graphify watch
+
 logs:
 	mkdir logs
 
@@ -46,6 +54,9 @@ logs/.gitignore: logs
 	echo "**" > logs/.gitignore
 
 create-logs-dir: logs/.gitignore
+
+clean:
+	cargo clean -p ylva --target-dir "$(CARGO_TARGET_DIR)"
 
 # Build debug binary (output: target/debug/ylva)
 build-debug:
@@ -87,15 +98,13 @@ test-e2e-persistence:
 	    cargo test --test store_persistence_e2e persistence_e2e_openrouter -- --ignored --no-capture
 
 # Run all tests and print a per-file coverage summary.
-# Fails if total line coverage of testable files drops below $(COVERAGE_THRESHOLD).
-# tui_widgets.rs, render.rs and main.rs are excluded: they require a live terminal (ratatui/crossterm)
-# and cannot be unit-tested without a full terminal emulator harness.
+# Fails if aggregate line coverage drops below $(COVERAGE_THRESHOLD).
+# Includes renderer and binary source; cargo-llvm-cov's default filters still apply.
 # Requires: cargo install cargo-llvm-cov
 #           rustup component add llvm-tools-preview
 test-coverage:
 	cargo llvm-cov \
 	    $(if $(filter true,$(strip $(VERBOSE))),,--quiet) \
-	    --ignore-filename-regex "(tui_widgets|render|main)\.rs" \
 	    --fail-under-lines $(COVERAGE_THRESHOLD)
 
 # Same as test-coverage but also prints uncovered line numbers per file.
@@ -105,7 +114,6 @@ test-coverage:
 test-coverage-missing:
 	cargo llvm-cov \
 	    $(if $(filter true,$(strip $(VERBOSE))),,--quiet) \
-	    --ignore-filename-regex "(tui_widgets|render|main)\.rs" \
 	    --fail-under-lines $(COVERAGE_THRESHOLD) \
 	    --show-missing-lines
 

@@ -13,9 +13,8 @@ Bugfixes MUST add or strengthen a test that fails before the fix and passes afte
 If test runs exhibit flaky results/errors, the tests must fixed immediately,
 don't postpone fixing (pre-existing) flaky tests!
 
-Coverage threshold: **≥80% line coverage** is enforced on testable files
-by `make test-coverage` (below the threshold the command fails).
-`tui_widgets.rs`, `render.rs`, and `main.rs` are excluded because they require a live terminal.
+Coverage threshold: **≥80% aggregate line coverage** is enforced by
+`make test-coverage` (below the threshold the command fails).
 
 The following `make` targets are available:
 
@@ -235,6 +234,44 @@ the real binary instead:
   with no duplicated wiring or assertions.
 
 ## Unit-test shared helpers (`src/test_support.rs`)
+
+Large owner-local suites use `#[cfg(test)] mod tests;` with
+`<owner>/tests.rs`; responsibility-specific descendants live under
+`<owner>/tests/`, sharing fixtures from that local parent (see
+`src/llm/engine/tests.rs`, `src/tui_reducer_state/tests.rs` and
+`src/presenter/tests.rs`). Presenter live/replay buffer comparisons and
+cross-input effect-order assertions remain at the facade, alongside shared
+local fixtures; its keyboard, mouse, domain and bubble suites live in
+`presenter/tests/`. Driver frame/title/history orchestration and cross-owner
+clarify routing assertions remain in `tui_driver/tests.rs`, alongside shared
+fixtures; effects, input, models, terminal and update suites live in
+`tui_driver/tests/`. Widget rendering suites follow the bubble, chat, footer,
+help and tool-bubble owners under `tui_widgets/`; small pure selection,
+diff and path-label suites remain beside their implementations.
+`tests/tui_render_state.rs` retains its integration target and uses
+`tui_widgets/chat/cache.rs` as its large source-backed highlighting fixture.
+Its explicitly declared descendants under `tests/tui_render_state/` cover
+cache, bubbles, selection, overlays and subagent views; the target parent
+retains shared fixtures. `tests/tools_agent_loop.rs` follows the same pattern,
+with queue/approval, cancellation and subagent suites under
+`tests/tools_agent_loop/`. Descendants are not separate Cargo test targets.
+Use `#[path = "<target>/<suite>.rs"] mod <suite>;` in the target parent:
+integration-test roots resolve a plain `mod <suite>;` beside the root file,
+not under its same-named directory.
+Persistence event, session-file, writer and replay suites live under
+`store/tests/`, with shared fixtures and cross-owner lifecycle assertions in
+`store/tests.rs`. Sandbox suites live beside their private rule, path, command
+and network owners under `sandbox/<owner>/tests.rs`, keeping private helpers
+private; they share the sandbox fixture from `sandbox/tests.rs`, which also
+holds cross-owner assertions.
+Small boundary suites can remain beside the
+extracted implementation (see `src/agent/tools/read/stream.rs` and
+`src/agent/tools/read/windows.rs`). Cross-owner assertions stay at the facade.
+Agent unit fixtures and cross-owner assertions live in `agent/tests.rs`,
+with request, compaction-update, queue, execution, subagent and runtime suites
+under `agent/tests/`. Message and protocol tests follow their owners; Context
+retains transcript tests with projection, recovery and token descendants.
+`agent/runtime/tests.rs` checks handler control-flow outcomes directly.
 
 Helpers shared only by unit tests (`#[cfg(test)]` modules inside `src/*.rs`)
 live in `src/test_support.rs`, wired from `src/lib.rs` via

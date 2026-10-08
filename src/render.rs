@@ -14,8 +14,8 @@
 
 //! View layer — `render()` entry point for the Ylva TUI.
 //!
-//! This module is excluded from the coverage gate (it needs a live terminal);
-//! visual correctness is verified manually.
+//! Test-backend fixtures verify rendering and state synchronization; this module
+//! participates in the aggregate coverage gate.
 //!
 //! Production frames borrow conversation content and move derived selection
 //! buffers through a small legacy widget shell, then sync geometry to `AppState`.

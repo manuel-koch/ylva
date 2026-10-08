@@ -50,9 +50,11 @@ An implementation is done when:
 - Existing test cases remain registered and meaningful, including expensive
   rendering fixtures and concurrency cases. New regression assertions cover
   any newly exposed boundary not already exercised.
-- Moved renderer files retain the existing coverage treatment, but no newly
-  extracted testable production logic is hidden by an expanded exclusion.
-  The existing aggregate line-coverage threshold remains at least 80%.
+- All project source, including moved renderers and the binary, participates
+  in coverage without custom filename exclusions; cargo-llvm-cov's default
+  filters remain in effect. This policy supersedes the original renderer
+  exclusions with user approval. The aggregate line-coverage threshold
+  remains at least 80%.
 - Directly affected documentation and this checklist reflect the final
   layout. `make format lint` and `make test-coverage` pass.
 
@@ -89,7 +91,7 @@ Obtain explicit implementation consent before source edits. Execute one
 subsystem at a time; do not combine all moves into an unverified repository-wide change.
 No staging, branch creation, or commits are authorized by this plan.
 
-1. [ ] Establish the baseline and final extraction map. Open
+1. [x] Establish the baseline and final extraction map. Open
    `src/agent/tools/read.rs` first, especially its streaming dispatch,
    window scanners, media recognition and inline tests.
    Read `docs/development-workflow.md` and `docs/known-test-issues.md`.
@@ -99,7 +101,7 @@ No staging, branch creation, or commits are authorized by this plan.
    module inventory, and `docs/architecture-design-records/` for changes
    since this scan. Confirm the selected scope in this file.
 
-2. [ ] Pilot the layout pattern by splitting read internals without
+2. [x] Pilot the layout pattern by splitting read internals without
    generalizing every tool. Keep `ReadTool`, typed arguments, call adapter,
    results, metadata, public constants and schema contract in
    `src/agent/tools/read.rs`.
@@ -118,7 +120,7 @@ No staging, branch creation, or commits are authorized by this plan.
    complete-media exceptions and attachment fidelity.
    Update the relevant read mechanics paths in `docs/implementation-notes.md`.
 
-3. [ ] Split engines into `llm/engine/config.rs`,
+3. [x] Split engines into `llm/engine/config.rs`,
    `llm/engine/selection.rs`, `llm/engine/router.rs` and
    `llm/engine/runtime.rs`. Retain the `Engine` trait and compatibility
    re-exports in `src/llm/engine.rs`; config owns immutable and runtime
@@ -132,7 +134,7 @@ No staging, branch creation, or commits are authorized by this plan.
    `cargo test --test http_provider --test cli_driver`.
    Update `docs/implementation-notes.md`.
 
-4. [ ] Split reducer state without changing `AppState`'s public field shape.
+4. [x] Split reducer state without changing `AppState`'s public field shape.
    Keep `AppState`, its constructor, and cross-cutting coordination in
    `src/tui_reducer_state.rs`. Add `tui_reducer_state/conversation.rs`
    for entries, tool state, turn buffers, subagent conversation types, replay
@@ -150,7 +152,7 @@ No staging, branch creation, or commits are authorized by this plan.
    `cargo test --test tui_render_state`. Update
    `docs/implementation-notes.md` with state ownership and replay paths.
 
-5. [ ] Split the pure presenter into `presenter/keyboard.rs`,
+5. [x] Split the pure presenter into `presenter/keyboard.rs`,
    `presenter/mouse.rs`, `presenter/domain.rs`, and
    `presenter/tool_bubbles.rs`. Retain `update`, `TuiEvent`, and
    `TextareaContext` as the public entry surface in `src/presenter.rs`.
@@ -163,17 +165,18 @@ No staging, branch creation, or commits are authorized by this plan.
    press semantics, pending approvals, partial-text flushes, and effect order.
    Update `docs/implementation-notes.md`.
 
-6. [ ] Make coverage accounting relocation-safe immediately before the
-   rendering moves. Update both `test-coverage` and `test-coverage-missing`
-   in `Makefile` to match the existing excluded parents plus their actual
-   renderer-only descendants, with directory boundaries. Do not exclude
-   `markdown`, `conversation_render_cache`, reducer/presenter logic, or
-   other testable helpers. Verify the matcher against examples of excluded
-   widget files and included similarly named files. Update
-   `docs/development-workflow.md` and the relevant module coverage comments.
-   The later full coverage report must confirm the intended file set.
+6. [x] Make coverage accounting relocation-safe. Both `test-coverage` and
+   `test-coverage-missing` in `Makefile` now omit custom filename exclusions,
+   including the former renderer/binary exclusions. Keep cargo-llvm-cov's
+   default filters and the unchanged aggregate threshold. Confirm renderer,
+   binary and other production owners appear in the final report, and update
+   `docs/development-workflow.md` and module coverage comments.
+   Initially, steps 5-6 corrected filename boundaries and enumerated renderer
+   descendants, verified against 24 examples. The user subsequently approved
+   removing that brittle enumeration entirely after an unfiltered report
+   demonstrated aggregate coverage above the existing gate.
 
-7. [ ] Split `src/tui_widgets.rs` by rendering responsibility. Retain
+7. [x] Split `src/tui_widgets.rs` by rendering responsibility. Retain
    `draw`, `draw_borrowed`, frame composition and `ButtonAreas` at the facade.
    Add `tui_widgets/chat.rs` for cached/legacy conversation drawing and
    scrolling, `tui_widgets/bubbles.rs` for shared message bubble chrome,
@@ -189,11 +192,11 @@ No staging, branch creation, or commits are authorized by this plan.
    body and checks text actually present in its new location.
    Run `cargo test --test tui_render_state` and widget library tests.
    Compare full buffers, cache-build counters, painted-row bounds, and
-   selection-storage reuse using the existing assertions. Update
-   `docs/features.md`'s TUI architecture section and
-   `docs/implementation-notes.md`.
+   selection-storage reuse using the existing assertions. Update module
+   ownership in `docs/implementation-notes.md`; keep implementation details
+   out of the user-facing `docs/features.md`.
 
-8. [ ] Split TUI driver integrations into `tui_driver/effects.rs`,
+8. [x] Split TUI driver integrations into `tui_driver/effects.rs`,
    `tui_driver/models.rs`, `tui_driver/input.rs`,
    `tui_driver/terminal.rs`, and `tui_driver/updates.rs`.
    Retain `TuiApp`, `run_tui`, the main select loop, and frame orchestration
@@ -207,7 +210,7 @@ No staging, branch creation, or commits are authorized by this plan.
    Run driver library tests and `cargo test --test tui_render_state`.
    Update `docs/implementation-notes.md`.
 
-9. [ ] Split persistence into `store/event.rs`, `store/session_file.rs`,
+9. [x] Split persistence into `store/event.rs`, `store/session_file.rs`,
    `store/writer.rs`, and `store/replay.rs`. Keep `Store`, `StoreInner`,
    its public API, and session lifecycle coordination in `src/store.rs`.
    Event owns persisted types/constants; session-file owns lock/open/header
@@ -224,7 +227,7 @@ No staging, branch creation, or commits are authorized by this plan.
    Check `docs/persistence.md` for path references without rewriting its
    unchanged external contract.
 
-10. [ ] Split sandbox policy into `sandbox/rules.rs`,
+10. [x] Split sandbox policy into `sandbox/rules.rs`,
     `sandbox/path.rs`, `sandbox/command.rs`, and `sandbox/network.rs`.
     Retain `Sandbox` and `SandboxContext` ownership and public methods in
     `src/sandbox.rs`; descendant impl blocks can operate on their private
@@ -242,7 +245,7 @@ No staging, branch creation, or commits are authorized by this plan.
     `docs/implementation-notes.md`; review unchanged configuration contracts
     against `docs/configuration.md`.
 
-11. [ ] Extract the agent's conversation and protocol model. Add
+11. [x] Extract the agent's conversation and protocol model. Add
     `src/agent/message.rs` for `Message`, `ToolResult`, `ToolAttachment`,
     `ToolCallRequest`, assistant/user status types and their existing methods.
     Add `src/agent/protocol.rs` for commands, events, UI updates, modes,
@@ -257,7 +260,7 @@ No staging, branch creation, or commits are authorized by this plan.
     `cargo test --test tools_binary_data --test system_prompt_instructions`.
     Update the Context paths in `docs/implementation-notes.md`.
 
-12. [ ] Decompose agent execution while keeping one event-loop owner.
+12. [x] Decompose agent execution while keeping one event-loop owner.
     Add `src/agent/runtime.rs` for the `AgentLoop::run` implementation and
     its owned run state; `src/agent/request.rs` for `start_request`,
     stream accumulation, preflight notices and context-rejection handling;
@@ -284,7 +287,7 @@ No staging, branch creation, or commits are authorized by this plan.
     Update `docs/implementation-notes.md` and moved-test references in
     `docs/known-test-issues.md`.
 
-13. [ ] Finish test layout consistently across the selected splits.
+13. [x] Finish test layout consistently across the selected splits.
     Use a parent `#[cfg(test)] mod tests;` and
     `<owner>/tests.rs` with responsibility-named descendants for large
     unit suites, or keep small tests directly beside their extracted owner.
@@ -304,11 +307,12 @@ No staging, branch creation, or commits are authorized by this plan.
     Update test-layout references in `docs/development-workflow.md`,
     `docs/known-test-issues.md`, and any moved module-level comments.
 
-14. [ ] Complete the documentation reconciliation. Update
+14. [x] Complete the documentation reconciliation. Update
     `docs/implementation-notes.md` with the final module ownership map,
     single-writer constraints, replay paths and engine/driver interfaces;
-    `docs/features.md` with the unchanged TUI layer architecture's new
-    paths; `docs/development-workflow.md` with coverage descendants and
+    keep `docs/features.md` focused on user-visible behavior, not module paths
+    or architecture internals; update `docs/development-workflow.md` with
+    all-source coverage policy and
     unit/integration-test layout; and `docs/known-test-issues.md` with
     relocated examples. Inspect `docs/configuration.md`,
     `docs/keybindings.md`, `docs/persistence.md`, `README.md`, `CONTEXT.md`
@@ -318,12 +322,12 @@ No staging, branch creation, or commits are authorized by this plan.
     Run `rumdl check` on the changed Markdown files. New documentation
     files other than this requested plan require separate permission.
 
-15. [ ] Verify the completed scope and record the resulting layout here.
+15. [x] Verify the completed scope and record the resulting layout here.
     Review every facade and `src/lib.rs` export, relative fixture path,
-    feature-gated item, test registration and coverage match.
+    feature-gated item, test registration and coverage file set.
     Run default-feature `cargo clippy --all-targets --quiet` as well as
     the required `make format lint` and `make test-coverage`.
-    Inspect coverage output for the new included/excluded files and confirm
+    Inspect coverage output for all new production files and confirm
     aggregate line coverage is at least 80%; do not weaken the threshold
     or add exclusions to make the refactor pass. Do not run `make test`
     as a duplicate mandatory gate. Record production/test-region counts
@@ -353,6 +357,64 @@ they do not block completing the nine selected parents.
 
 ### Refinement decisions
 
+- Execution started on 2026-10-08 with explicit source-edit consent. The
+  worktree was clean, the inventory still contained 73 source and 20 test
+  Rust files, and the ADR directory still contained only `.gitkeep`.
+  The nine-parent scope and extraction map above remain unchanged.
+  All 57 read baseline tests passed. The complete registered-case inventory
+  is retained in the executing Copilot session's `files/` directory, outside
+  the tracked tree. The earlier stale `tree-sitter` artifact issue in the
+  shared Cargo target directory is resolved. No `CARGO_TARGET_DIR` override
+  is required; Cargo and Make commands use their normal target-directory
+  configuration.
+- The read pilot now has private `stream`, `windows` and `media` children,
+  with whole-tool tests in `read/tests.rs`. Its existing 57 cases remain
+  registered; five new stream/scanner boundary cases exercise the extracted
+  owners. Read library tests, `tools_binary_data`, `tools_agent_loop` and
+  default-feature all-target Clippy passed. Read ownership and unchanged
+  streaming/media constraints are recorded in `docs/implementation-notes.md`.
+- Engines now have private `config`, `selection`, `router` and `runtime`
+  owners, with explicit re-exports at the unchanged `llm::engine` facade.
+  All 38 original engine cases remain; a display-snapshot regression was
+  added, and preview/activation target identity assertions were strengthened.
+  Engine/factory library tests, `http_provider`, `cli_driver` and
+  default-feature all-target Clippy passed. Ownership and local test-suite
+  layout are documented in `docs/implementation-notes.md` and
+  `docs/development-workflow.md`.
+- Reducer state now retains one `AppState` at its original facade, with private
+  conversation, selection, model-picker, input-history, layout and event owners
+  and explicit compatibility re-exports. Conversation replay, navigation and
+  bubble mutation have focused descendants to keep each production file below
+  the review trigger. All 69 original reducer cases remain, with three new
+  history/terminal-column boundary assertions. Reducer, presenter and
+  `tui_render_state` targeted checks and default-feature all-target Clippy passed.
+  State ownership and replay paths are updated in `docs/implementation-notes.md`.
+- Presenter routing now has private keyboard, mouse, domain and tool-bubble
+  owners behind the unchanged `update`/event/textarea facade. Subagent lifecycle
+  handling stays in domain, common bubble transitions stay in the bubble owner,
+  and each production file is below the review trigger. All 96 original cases
+  remain, with two new cross-mode/effect-order boundary assertions. Presenter,
+  `tui_render_state` and default-feature all-target Clippy checks passed.
+  Ownership and local test layout are updated in `docs/implementation-notes.md`.
+  Coverage verification found the old exclusion regex also matched `domain.rs`.
+  At that checkpoint, both coverage targets matched exact parent filenames at
+  directory boundaries; renderer-descendant handling remained pending in step 6.
+- Widgets now retain frame composition, borrowed inputs and approval geometry
+  at `tui_widgets.rs`, with private chat, bubble, tool-bubble, footer, overlay
+  and help owners. Cached conversation layout lives in `chat/cache.rs`; tool
+  layout coordinates shared title/chrome and section/body helpers rather than
+  relocating the old monolith. Pure selection, diff and path-label children
+  stay covered. All 25 original widget cases remain, with three new boundary
+  regressions. Widget library tests, all 68 `tui_render_state` cases and
+  default-feature all-target Clippy pass. The source-backed fixture now reads
+  `chat/cache.rs`, asserts more than 500 source and selection rows, and checks
+  a real function in that implementation. Updated ownership, test layout and
+  coverage are documented in the affected contributor docs.
+- The user approved removing all custom coverage exclusions on 2026-10-08.
+  This supersedes the renderer-exclusion constraint and the explicit matcher
+  introduced in step 6. Both coverage targets now rely only on cargo-llvm-cov's
+  default filters, so new source files require no exclusion-list maintenance.
+  Renderer and binary coverage are included without lowering the 80% gate.
 - The user confirmed this refined plan on 2026-10-08. Confirmation applies
   to the saved plan only; source implementation and Git operations are not
   authorized.
@@ -370,6 +432,410 @@ they do not block completing the nine selected parents.
 - Execution proceeds through read and engine pilots, the TUI layers,
   persistence/sandbox, then agent execution. Each subsystem receives
   targeted verification before the next starts.
+
+### Execution checkpoint: read and engine pilots
+
+At this earlier checkpoint, steps 1-3 were complete and steps 4-15 remained
+pending. The first execution batch
+stops at this verified subsystem boundary, before reducer-state extraction.
+No staging, branch creation or commits were performed.
+
+The normalized registered-case comparison retained all 1,618 baseline cases
+and found six added cases (1,624 total). `make format lint`, default-feature
+all-target Clippy, the targeted checks named above and `make test-coverage`
+passed. Aggregate line coverage was **92.29%**, above the unchanged 80% gate.
+The report included all seven extracted production children; no coverage
+exclusion was changed. Changed Markdown files passed `rumdl check`.
+
+Physical-line counts follow the inventory convention below. The two facade
+test regions contain only their external test-module declarations. None of
+these production regions exceeds the responsibility-review trigger, so no
+cohesive size exception is needed for either pilot.
+
+| Module | Production | Tests |
+| --- | ---: | ---: |
+| `agent/tools/read.rs` | 875 | 2 |
+| `agent/tools/read/media.rs` | 89 | 0 |
+| `agent/tools/read/stream.rs` | 197 | 114 |
+| `agent/tools/read/windows.rs` | 283 | 86 |
+| `agent/tools/read/tests.rs` | 0 | 1667 |
+| `llm/engine.rs` | 331 | 2 |
+| `llm/engine/config.rs` | 240 | 0 |
+| `llm/engine/router.rs` | 431 | 0 |
+| `llm/engine/runtime.rs` | 349 | 0 |
+| `llm/engine/selection.rs` | 193 | 0 |
+| `llm/engine/tests.rs` | 0 | 400 |
+| `llm/engine/tests/config.rs` | 0 | 174 |
+| `llm/engine/tests/router.rs` | 0 | 391 |
+| `llm/engine/tests/runtime.rs` | 0 | 306 |
+| `llm/engine/tests/selection.rs` | 0 | 85 |
+
+### Execution checkpoint: reducer state and presenter
+
+Steps 1-5 are complete; steps 6-15 remain pending, apart from the coverage
+matcher boundary correction brought forward from step 6. This continuation
+completed the user-selected reducer/presenter scope. No staging, branch
+creation or commits were performed.
+
+All 1,625 cases registered at the start of this continuation remain registered;
+five boundary regressions bring the total to 1,630. `AppState` field declarations
+and all original reducer/presenter production function identities are preserved.
+The reducer suite passed 72 cases, the presenter suite passed 98, and the
+unchanged `tui_render_state` integration target passed 68.
+
+`make format lint`, default-feature all-target Clippy and `make test-coverage`
+passed. Final aggregate line coverage was **91.78%**, above the unchanged 80%
+gate. The report includes all thirteen extracted production children, including
+`presenter/domain.rs`; both coverage matchers passed ten exact-filename boundary
+examples. The optional rustdoc build succeeded with existing unrelated
+broken/private-link warnings; no unresolved links were introduced by these
+splits. Changed Markdown files passed `rumdl check`.
+
+Physical-line counts use the convention below. Each production owner is below
+the responsibility-review trigger; no cohesive size exception is needed.
+
+| Module | Production | Tests |
+| --- | ---: | ---: |
+| `tui_reducer_state.rs` | 684 | 2 |
+| `tui_reducer_state/conversation.rs` | 741 | 0 |
+| `tui_reducer_state/conversation/navigation.rs` | 292 | 0 |
+| `tui_reducer_state/conversation/replay.rs` | 378 | 0 |
+| `tui_reducer_state/conversation/tools.rs` | 344 | 0 |
+| `tui_reducer_state/events.rs` | 407 | 0 |
+| `tui_reducer_state/input_history.rs` | 79 | 0 |
+| `tui_reducer_state/layout.rs` | 165 | 0 |
+| `tui_reducer_state/model_picker.rs` | 520 | 0 |
+| `tui_reducer_state/selection.rs` | 219 | 0 |
+| `tui_reducer_state/tests.rs` | 0 | 272 |
+| `tui_reducer_state/tests/conversation.rs` | 0 | 1142 |
+| `tui_reducer_state/tests/input_history.rs` | 0 | 45 |
+| `tui_reducer_state/tests/layout.rs` | 0 | 113 |
+| `tui_reducer_state/tests/model_picker.rs` | 0 | 441 |
+| `tui_reducer_state/tests/selection.rs` | 0 | 28 |
+| `presenter.rs` | 67 | 2 |
+| `presenter/domain.rs` | 892 | 0 |
+| `presenter/keyboard.rs` | 592 | 0 |
+| `presenter/mouse.rs` | 623 | 0 |
+| `presenter/tool_bubbles.rs` | 358 | 0 |
+| `presenter/tests.rs` | 0 | 998 |
+| `presenter/tests/domain.rs` | 0 | 854 |
+| `presenter/tests/keyboard.rs` | 0 | 738 |
+| `presenter/tests/mouse.rs` | 0 | 1090 |
+| `presenter/tests/tool_bubbles.rs` | 0 | 450 |
+
+### Execution checkpoint: coverage accounting and widgets
+
+Steps 1-7 are complete; steps 8-15 remain pending. The user selected steps 6-7
+for this continuation. No staging, branch creation or commits were performed.
+
+The widget facade retains its public draw functions, borrowed-input shapes
+and `ButtonAreas`; `src/lib.rs` exports are unchanged. All original production
+function identities remain. The old tool-layout monolith is now a small
+coordinator over shared chrome and body helpers, with one section-merging rule
+used by both. Cache revisions, scroll geometry, selection storage and state
+ownership are unchanged.
+
+All 1,630 cases registered at the start remain registered; three new tool-layout
+and terminal-column selection regressions bring the total to 1,633.
+The widget suite passed 28 cases and the unchanged `tui_render_state` integration
+target passed 68, including full-buffer comparisons, warm build counters,
+painted-row bounds and source-backed selection-storage reuse.
+
+`make format lint`, default-feature all-target Clippy and `make test-coverage`
+passed. Aggregate line coverage was **91.81%**, above the unchanged 80% gate.
+The final report includes `chat/selection.rs`, `help/paths.rs` and
+`tool_bubble/diff.rs`, while omitting the explicitly named renderer-only
+children. Presenter/reducer logic, `markdown.rs` and
+`conversation_render_cache.rs` remain included. Both coverage targets share
+the same matcher; all 24 boundary examples and every actual production child
+match the intended treatment. Changed Markdown files passed `rumdl check`.
+
+Physical-line counts follow the inventory convention below. Every widget
+production owner is below the responsibility-review trigger, so no cohesive
+size exception is needed.
+
+| Module | Production | Tests |
+| --- | ---: | ---: |
+| `tui_widgets.rs` | 639 | 0 |
+| `tui_widgets/bubbles.rs` | 323 | 2 |
+| `tui_widgets/bubbles/tests.rs` | 0 | 52 |
+| `tui_widgets/chat.rs` | 450 | 2 |
+| `tui_widgets/chat/cache.rs` | 616 | 0 |
+| `tui_widgets/chat/selection.rs` | 123 | 84 |
+| `tui_widgets/chat/tests.rs` | 0 | 57 |
+| `tui_widgets/footer.rs` | 589 | 2 |
+| `tui_widgets/footer/tests.rs` | 0 | 22 |
+| `tui_widgets/help.rs` | 325 | 2 |
+| `tui_widgets/help/paths.rs` | 30 | 33 |
+| `tui_widgets/help/tests.rs` | 0 | 32 |
+| `tui_widgets/overlays.rs` | 552 | 0 |
+| `tui_widgets/tool_bubble.rs` | 137 | 2 |
+| `tui_widgets/tool_bubble/body.rs` | 462 | 0 |
+| `tui_widgets/tool_bubble/diff.rs` | 38 | 41 |
+| `tui_widgets/tool_bubble/title.rs` | 560 | 0 |
+| `tui_widgets/tool_bubble/tests.rs` | 0 | 508 |
+
+### Coverage policy follow-up: no custom exclusions
+
+After the widget checkpoint, the user approved removing the filename matcher
+from both coverage targets. Coverage now includes `main.rs`, `render.rs`,
+`tui_widgets.rs` and every production widget child; cargo-llvm-cov's default
+filters still apply. The earlier checkpoint percentages describe their
+historical file sets, not the current policy.
+
+`make format lint` and a fresh `make test-coverage` passed under this policy.
+Aggregate line coverage was **90.91%**, above the unchanged 80% gate.
+The report confirms the formerly excluded files are included. Both targets
+omit custom exclusion flags, and `test-coverage-missing` retains
+`--show-missing-lines`. Workflow documentation, implementation notes and
+renderer module comments now reflect the policy; changed Markdown passed
+`rumdl check`. Plan steps 8-15 remain pending.
+
+### Execution checkpoint: TUI driver
+
+Steps 1-8 are complete; steps 9-15 remain pending. This continuation reaches
+the driver subsystem boundary, before persistence extraction.
+No staging, branch creation or commits were performed.
+
+The driver facade retains `TuiApp`, `run_tui`, `ActionOutcome`, the select
+coordinator, frame orchestration and session-title task coordination.
+Private effects, models, input, terminal and update owners separate command
+routing, catalog/selection/display integration, textarea operations, OS
+resources and UI/replay mapping. Clipboard types retain their public facade
+paths and `src/lib.rs` exports are unchanged. Pending approval destinations
+and mouse-drag fields remain private to their owners; no additional state,
+tasks, channels or locks were introduced.
+All 34 original standalone production functions remain; 29 retain identical
+bodies after visibility and formatting normalization. The five changed
+functions delegate to their new responsibility owners, preserving loop
+control and effect order.
+
+All 1,633 cases registered at the start remain registered after normalizing
+driver test-module paths; three new boundary regressions bring the total to
+1,636. The driver suite passed 70 cases and the unchanged `tui_render_state`
+integration target passed 68. New assertions cover child/root clarify
+destinations after reducer transitions, ordered textarea/command effects and
+quit short-circuiting, and disabled catalog polling after cancellation.
+The existing scrolled-input mouse fixture now exercises the extracted
+wheel handler and checks the actual rendered viewport and selection.
+Default-feature all-target Clippy passed without warnings.
+
+`make format lint`, default-feature all-target Clippy and `make test-coverage`
+passed. Aggregate line coverage was **90.52%**, above the unchanged 80% gate.
+The report includes the driver facade and all five new production children,
+alongside the renderer and binary; no exclusion or threshold was changed.
+Changed Markdown files passed `rumdl check`.
+
+Physical-line counts follow the inventory convention below. Every driver
+production owner is below the responsibility-review trigger; no cohesive
+size exception is needed.
+
+| Module | Production | Tests |
+| --- | ---: | ---: |
+| `tui_driver.rs` | 704 | 2 |
+| `tui_driver/effects.rs` | 249 | 0 |
+| `tui_driver/input.rs` | 291 | 0 |
+| `tui_driver/models.rs` | 444 | 0 |
+| `tui_driver/terminal.rs` | 167 | 0 |
+| `tui_driver/updates.rs` | 407 | 0 |
+| `tui_driver/tests.rs` | 0 | 600 |
+| `tui_driver/tests/effects.rs` | 0 | 1006 |
+| `tui_driver/tests/input.rs` | 0 | 784 |
+| `tui_driver/tests/models.rs` | 0 | 853 |
+| `tui_driver/tests/terminal.rs` | 0 | 32 |
+| `tui_driver/tests/updates.rs` | 0 | 452 |
+
+### Execution checkpoint: persistence and sandbox
+
+Steps 1-10 are complete; steps 11-15 remain pending. The user selected
+steps 9-10 for this continuation. No staging, branch creation or commits
+were performed. An unrelated `Makefile` change adding a graphify target
+appeared during execution and was left untouched.
+
+Persistence retains `Store`, `StoreInner`, session lifecycle coordination
+and the shared title snapshot at the facade. Private event, session-file,
+writer and replay owners separate wire types, locked file operations,
+writer lifetime/title replacement and read-only reconstruction. Existing
+public names, serialization, source-preserving cloning and title ownership
+are unchanged. Shared fixtures and cross-owner assertions live in
+`store/tests.rs`, with responsibility suites under `store/tests/`.
+
+Sandbox retains one shared workspace handle and the existing ordered rule
+storage at its facade. Private rule, path, command and network owners reuse
+that state, with the existing command extractor and target-pattern parser
+unchanged. Public rule/path-helper names retain their facade paths, and no
+fields were exposed for relocation. Owner-local tests keep private helpers
+private and share the fixture from `sandbox/tests.rs`.
+
+All 58 original store and 45 original sandbox production functions retain
+their signatures and bodies after visibility/formatting normalization.
+Public type, constant and standalone-function inventories are preserved;
+`src/lib.rs` is unchanged. All 1,636 cases registered at the start remain
+registered after normalizing moved test paths. Four new cross-owner
+regressions bring the total to 1,640: shared title rewrite/append lock
+lifetime, queued-event draining on last-handle drop, shared workspace updates,
+and configured/appended rule precedence across evaluators.
+
+The store suite passed 41 cases; the sandbox selector passed 118, including
+the unchanged specialist suites. `store_persistence_e2e` passed eight offline
+cases with its three live-provider cases still ignored; `tools_agent_loop`
+passed 20 and `web_fetch_backend` passed 12.
+`make format lint`, default-feature all-target Clippy and `make test-coverage`
+passed. Aggregate line coverage was **90.10%**, above the unchanged 80% gate.
+The report includes the two facades and all eight new production children,
+alongside the renderer and binary; no exclusion or threshold changed.
+Changed Markdown files passed `rumdl check`. The optional rustdoc build
+succeeded with existing broken/private-link warnings; the refactor introduced
+no unresolved links. Unchanged persistence/configuration contracts and
+recorded decisions were checked; the ADR directory still contains only
+`.gitkeep`.
+
+Physical-line counts follow the inventory convention below. Every selected
+production owner is below the responsibility-review trigger, so no cohesive
+size exception is needed.
+
+| Module | Production | Tests |
+| --- | ---: | ---: |
+| `store.rs` | 896 | 2 |
+| `store/event.rs` | 225 | 0 |
+| `store/replay.rs` | 391 | 0 |
+| `store/session_file.rs` | 201 | 0 |
+| `store/writer.rs` | 230 | 0 |
+| `store/tests.rs` | 0 | 655 |
+| `store/tests/event.rs` | 0 | 134 |
+| `store/tests/replay.rs` | 0 | 508 |
+| `store/tests/session_file.rs` | 0 | 152 |
+| `store/tests/writer.rs` | 0 | 382 |
+| `sandbox.rs` | 176 | 2 |
+| `sandbox/command.rs` | 233 | 2 |
+| `sandbox/network.rs` | 113 | 2 |
+| `sandbox/path.rs` | 530 | 2 |
+| `sandbox/rules.rs` | 519 | 2 |
+| `sandbox/tests.rs` | 0 | 157 |
+| `sandbox/command/tests.rs` | 0 | 310 |
+| `sandbox/network/tests.rs` | 0 | 412 |
+| `sandbox/path/tests.rs` | 0 | 854 |
+| `sandbox/rules/tests.rs` | 0 | 125 |
+
+### Execution checkpoint: agent execution and final layout
+
+Steps 1-15 are complete, including the final mandatory verification gates.
+No staging, branch creation or commits were performed.
+Concurrent changes to `Makefile`, `docs/backlog-issues.md` and the custom
+live-provider profile were left untouched.
+
+The agent facade retains construction/configuration APIs, constants and explicit
+compatibility re-exports. Private message and protocol owners preserve persisted
+field shapes, serialization and all public paths. Context owns transcript,
+token accounting and projection flags; projection and recovery descendants use
+its private state, while runtime and compaction callers use semantic methods.
+Summary requests receive an immutable source snapshot.
+
+One owned run state now coordinates request, queue and handler transitions.
+The biased select order and guards are unchanged. Command, agent-event and
+subagent handlers return explicit poll-again, completion-tail or finished
+outcomes, preserving outer-loop continuation and early-return behavior.
+Receivers remain in the coordinator and no new task, channel, lock or Context
+copy was introduced. Batch admission and serial advancement share the queue
+owner; request preflight/stream assembly and per-tool execution remain separate.
+
+All 20 original public type/field shapes and 57 public function signatures,
+constants and statics match the original agent facade; `src/lib.rs` exports
+are unchanged. All 1,640 cases registered at this continuation's start remain
+registered after normalizing module paths. Four new boundary regressions bring
+the total to 1,644: canonical-versus-projected harness notices, Context-owned
+retry/batch bookkeeping, ignored handler inputs bypassing child completion,
+and distinct normal/terminal handler outcomes.
+
+Large unit suites now follow their owners; shared fixtures and cross-owner
+assertions stay at their local parent. Both large integration targets retain
+their Cargo names and explicitly declare responsibility descendants.
+The large agent read fixture uses the unchanged compaction implementation and
+asserts its canonical result exceeds the output allowance, rather than accepting
+a successful read that never created pressure. Relocation exposed a pre-existing
+fixed-delay TUI shutdown race on a cold tokenizer; the assertion now waits for
+a completed rendered frame before closing the action channel.
+
+Affected contributor docs describe the final owners, single-writer constraints,
+test layout and all-source coverage policy. Configuration, keybindings,
+persistence, README, domain language and agent guidelines need no path updates;
+their external contracts are unchanged. User-facing features retain behavior
+descriptions rather than internal module maps. The ADR directory still contains
+only `.gitkeep`, so there is no recorded decision to migrate or override.
+The optional rustdoc build succeeds with the existing unresolved/private-link
+warnings, without new broken links from these moves.
+
+The agent selector passes 515 cases with one existing ignored case; the two
+relocated integration targets pass 68 rendering and 20 tool-loop cases.
+Steering, interrupt, concurrent-steer, binary-data and system-instruction
+selectors also pass. `make format lint`, default-feature all-target Clippy
+and the mandatory `make test-coverage` gate pass; aggregate line coverage is
+**89.71%**, above the unchanged 80% threshold. All selected production owners,
+the renderer descendants and the binary appear in the report, without custom
+exclusions. Changed Markdown passes `rumdl check`; the unrelated backlog file
+still reports its existing long-line warning during repository formatting.
+
+Physical counts use the inventory convention below. All selected production
+files are below the 1,000-line review trigger; no cohesive size exception is
+needed. Unchanged descendants retain the detailed counts in their earlier
+checkpoints; the largest production descendant and final facade are summarized
+here.
+
+| Selected facade | Production | Tests | Largest production owner |
+| --- | ---: | ---: | ---: |
+| `agent.rs` | 530 | 2 | 688 |
+| `agent/tools/read.rs` | 875 | 2 | 875 |
+| `llm/engine.rs` | 331 | 2 | 431 |
+| `tui_reducer_state.rs` | 684 | 2 | 741 |
+| `presenter.rs` | 67 | 2 | 892 |
+| `tui_widgets.rs` | 639 | 0 | 639 |
+| `tui_driver.rs` | 704 | 2 | 704 |
+| `store.rs` | 896 | 2 | 896 |
+| `sandbox.rs` | 176 | 2 | 530 |
+
+| New agent owner | Production | Tests |
+| --- | ---: | ---: |
+| `agent/message.rs` | 153 | 2 |
+| `agent/protocol.rs` | 479 | 2 |
+| `agent/context.rs` | 688 | 2 |
+| `agent/context/projection.rs` | 300 | 0 |
+| `agent/context/recovery.rs` | 368 | 0 |
+| `agent/runtime.rs` | 468 | 2 |
+| `agent/runtime/commands.rs` | 560 | 0 |
+| `agent/runtime/events.rs` | 357 | 0 |
+| `agent/runtime/subagents.rs` | 318 | 0 |
+| `agent/runtime/compaction_updates.rs` | 186 | 0 |
+| `agent/request.rs` | 399 | 0 |
+| `agent/tool_execution.rs` | 177 | 0 |
+| `agent/tool_queue.rs` | 622 | 0 |
+| `agent/tool_queue/spawn.rs` | 138 | 0 |
+| `agent/tests.rs` | 0 | 858 |
+| `agent/tests/request.rs` | 0 | 365 |
+| `agent/tests/compaction_updates.rs` | 0 | 676 |
+| `agent/tests/runtime.rs` | 0 | 232 |
+| `agent/tests/subagents.rs` | 0 | 591 |
+| `agent/tests/tool_execution.rs` | 0 | 134 |
+| `agent/tests/tool_queue.rs` | 0 | 795 |
+| `agent/context/tests.rs` | 0 | 301 |
+| `agent/context/tests/projection.rs` | 0 | 337 |
+| `agent/context/tests/recovery.rs` | 0 | 472 |
+| `agent/context/tests/tokens.rs` | 0 | 304 |
+| `agent/message/tests.rs` | 0 | 196 |
+| `agent/protocol/tests.rs` | 0 | 199 |
+| `agent/runtime/tests.rs` | 0 | 148 |
+
+| Integration-test owner | Test/support lines |
+| --- | ---: |
+| `tests/tui_render_state.rs` | 447 |
+| `tests/tui_render_state/cache.rs` | 419 |
+| `tests/tui_render_state/bubbles.rs` | 2,050 |
+| `tests/tui_render_state/selection.rs` | 416 |
+| `tests/tui_render_state/overlays.rs` | 1,563 |
+| `tests/tui_render_state/subagent_views.rs` | 814 |
+| `tests/tools_agent_loop.rs` | 532 |
+| `tests/tools_agent_loop/queue_approvals.rs` | 744 |
+| `tests/tools_agent_loop/cancellation.rs` | 200 |
+| `tests/tools_agent_loop/subagents.rs` | 595 |
 
 ### Inventory interpretation
 
@@ -538,10 +1004,11 @@ All paths in this table are relative to `tests/`.
   a separate cache owner. Neither is evidence of another missing layer.
 - `append_tool_layout` is roughly 930 lines. Existing cached and legacy
   conversation rendering share it; title/body extraction must not fork it.
-- `tests/tui_render_state.rs` includes `../src/tui_widgets.rs` as a large
-  source-backed read-result fixture and asserts that a rendered row
-  contains `fn draw_chat`. A thin facade would invalidate this assertion
-  and reduce the fixture's stress-test value.
+- At scan time, `tests/tui_render_state.rs` included `../src/tui_widgets.rs`
+  as a large source-backed read-result fixture and checked `fn draw_chat`.
+  Step 7 moved that fixture to `../src/tui_widgets/chat/cache.rs`, checks
+  `fn draw_cached_chat`, and explicitly enforces its large-source and
+  full-selection row counts.
 - Agent request tests also read `src/agent.rs` with fixed line limits;
   shrinking that facade changes fixture size even when the path remains.
   Those cases have context-pressure assertions dependent on result size.
@@ -564,9 +1031,12 @@ All paths in this table are relative to `tests/`.
   appended after them. Bash syntax extraction and network-target matching
   are already separated. `store::project_key` uses sandbox
   canonicalization rather than Git-root discovery.
-- Both coverage targets currently use
-  `--ignore-filename-regex "(tui_widgets|render|main)\.rs"`.
-  That matches excluded parent filenames, not newly created descendants.
+- At scan time, both coverage targets used an unbounded parent-filename
+  matcher. Steps 5-6 replaced it with the shared, directory-bounded
+  `COVERAGE_RENDERER_EXCLUSIONS` matcher, naming actual renderer descendants
+  while retaining pure extracted helpers and presenter/reducer logic.
+  The subsequent user-approved all-source policy removed that matcher;
+  both targets now use no project-specific filename exclusions.
   The configured gate is aggregate line coverage, not 80% per file.
 - Existing `tests/common.rs` submodules use explicit
   `#[path = "common/<name>.rs"]` declarations. Shared integration support
@@ -577,6 +1047,6 @@ All paths in this table are relative to `tests/`.
   that behavior or ownership invariants can be changed without review.
 - Useful directly affected documentation is
   `docs/implementation-notes.md` (module/ownership paths),
-  `docs/features.md` (TUI layer map),
+  `docs/features.md` (user-facing behavior only, not implementation paths),
   `docs/development-workflow.md` (coverage and test layout), and
   `docs/known-test-issues.md` (relocatable examples).

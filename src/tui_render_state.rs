@@ -16,7 +16,7 @@
 //!
 //! This module defines the owned compatibility [`TuiState`]. Production frames
 //! borrow conversation content alongside a metadata/geometry shell; the driver
-//! returns an owned snapshot through `tui_driver::app_state_to_tui_state`. It is *not*
+//! returns an owned snapshot through `tui_driver/updates.rs`. It is *not*
 //! itself authoritative and must never be mutated directly by the Driver or
 //! Presenter in production. It carries no reducer of its own — all state
 //! transitions live in [`crate::tui_reducer_state::AppState`] / `presenter::update`.

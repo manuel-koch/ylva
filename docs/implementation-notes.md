@@ -43,6 +43,14 @@ Engine runtime.
 
 ## Engine runtime and provider request configuration
 
+`llm/engine.rs` retains the `Engine` trait and explicit compatibility
+re-exports. Its private children separate configuration and deserializers
+(`engine/config.rs`), typed picker targets and display snapshots
+(`engine/selection.rs`), named-engine routing (`engine/router.rs`), and
+provider-backed execution with catalog hydration (`engine/runtime.rs`).
+`engine/tests.rs` retains shared fixtures and cross-owner assertions, with
+responsibility-specific suites under `engine/tests/`.
+
 `EngineImpl` and `OpenAiCompatibleProvider` share one
 `EngineRuntimeConfigHandle`. The provider snapshots it before building a
 request and releases the lock before network I/O. Updates therefore affect
@@ -124,7 +132,7 @@ rounds after tool execution completes. It also differs from the six-position
 execution cap: up to 12 calls can be parsed with excess positions closed as
 not-executed, while a thirteenth distinct call rejects the whole response.
 
-Unknown tool names are resolved synchronously in the `ToolCall` handler, after
+Unknown tool names are resolved synchronously during batch admission, after
 the assistant's full batch has entered `Context` and before the serial queue
 starts. They must not enqueue `AgentEvent::ToolError`: that completion path clears
 the active tool's cancellation token and advances the queue, so an unrelated
@@ -133,6 +141,21 @@ completion reset another stream's pending approval to idle. An all-unknown batch
 counts as one completed tool-use iteration.
 
 ## Binary result projection
+
+`agent/tools/read.rs` owns the tool/schema/result contract and explicit versus
+autodetected mode dispatch. Its private `read/stream.rs` child owns bounded
+I/O and incremental UTF-8 validation; `read/windows.rs` owns selected
+line/character windows and full-source line counting; `read/media.rs` owns
+recognition, Base64 construction and safe source filenames. Media helpers and
+constants retain their existing `agent::tools::read` paths for fetch backends
+and providers. Whole-tool tests live in `read/tests.rs`, with stream and scanner
+boundary tests beside their implementations.
+
+Text reads retain only the selected window but validate to EOF, including
+after window completion or truncation. Autodetection keeps UTF-8-first ordering
+and uses the first raw chunk to recognize media, then re-reads from the same
+open handle. Complete media results keep the existing separate size ceiling;
+range reads and text windows keep the output cap.
 
 `ToolCallResult::text()` remains the complete model-facing result.
 `display_text()` is an optional UI projection. For Base64 `read`, it returns
@@ -169,10 +192,24 @@ avoid process-environment mutation. `src/main.rs` exports the resolved
 See [features](./features.md#tools-to-be-used-by-models) for path-argument
 behavior.
 
-## Sandbox `cross_filesystem` rule
+## Sandbox policy ownership and `cross_filesystem` rule
 
-`resolve_device` reads Unix `st_dev` on each check and returns no device on
-other platforms. A nonexistent target uses its deepest existing canonicalized
+`sandbox.rs` retains `Sandbox`, `SandboxContext`, their shared workspace
+handle and ordered rule storage, with explicit re-exports for existing public
+rule and path-helper names. Private `sandbox/rules.rs` owns serialized and
+compiled rules, `sandbox/path.rs` owns expansion/canonicalization/device
+checks and path approval, `sandbox/command.rs` owns command evaluation and
+worst-case aggregation, and `sandbox/network.rs` owns target-aware network
+approval. The existing command extractor and network-target parser remain
+specialist children. Each evaluator uses the same parent-owned rule lists;
+configured rules replace the floor and appended rules still run last.
+
+Owner-local suites live under `sandbox/{rules,path,command,network}/tests.rs`,
+sharing the sandbox fixture from `sandbox/tests.rs`. The facade suite checks
+shared workspace updates and rule replacement/precedence across owners.
+
+`sandbox/path.rs`'s `resolve_device` reads Unix `st_dev` on each check and
+returns no device on other platforms. A nonexistent target uses its deepest existing canonicalized
 ancestor as the device anchor. No cache means remounts affect the next check.
 See
 [configuration](./configuration.md#sandbox-tool-approval-rules) for the rule's
@@ -205,13 +242,41 @@ contracts.
 
 ## Context management and compaction
 
-`Context` in `src/agent.rs` holds both records at once: `messages` (the
+`agent/runtime.rs` owns the single mutable run state and biased select
+coordinator. Its command, agent-event and subagent handlers live in
+`runtime/commands.rs`, `runtime/events.rs` and `runtime/subagents.rs`;
+`runtime/compaction_updates.rs` translates safe-boundary outcomes into UI
+updates. Handler outcomes distinguish polling again, evaluating the
+root/child completion tail and finishing immediately, preserving the original
+outer-loop `continue` and termination decisions. Receivers stay in the
+coordinator; generation, cancellation and queued work stay in its owned state.
+No new task, channel, lock or Context copy is introduced by this split.
+
+`agent/request.rs` owns preflight, immutable request snapshots and stream
+accumulation. `agent/tool_execution.rs` owns the existing per-tool task;
+`agent/tool_queue.rs` owns batch admission, result allowances, iteration
+checks and serial advancement, with spawn admission in `tool_queue/spawn.rs`.
+Cross-owner assertions and shared unit fixtures remain in `agent/tests.rs`,
+with responsibility suites under `agent/tests/`. Message and protocol suites
+live beside those owners; Context's transcript suite remains in
+`context/tests.rs`, with projection, recovery and token suites below it.
+
+`agent.rs` retains the construction API and explicit compatibility re-exports.
+Private `agent/message.rs` owns persisted messages and tool results;
+`agent/protocol.rs` owns commands, events, UI updates and stream deltas.
+`Context` in `agent/context.rs` holds both records at once: `messages` (the
 transcript, never pruned) and the parallel `entries` vector that carries a
 cached token count per message plus the current `view_start`/`compaction`
 state and transcript-indexed `model_overrides`. `model_messages()` builds the
 request from the leading system block, summary/recovery handoff, latest task
 anchor, and retained tail with bounded overrides. Compaction
 estimates this model view plus active tool definitions with `cl100k_base`.
+Private `context/projection.rs` owns model projection and persistence;
+`context/recovery.rs` owns safe-boundary selection and lossy recovery.
+Runtime callers use semantic Context methods for retry, batch accounting and
+notice projection; neither message vectors nor projection flags are exposed.
+Background summary requests receive an immutable prefix snapshot from Context.
+
 `Context` caches the tool-definition token count for one active schema snapshot,
 keyed by the exact name, description, and serialized parameter text (including
 JSON field order). Budget checks reuse it until those inputs change; message,
@@ -431,7 +496,21 @@ report. The projected event sets `result_reduced=true` and
 `result_summarized=false`; canonical flags remain false. Normal parent prefix
 summarization remains independent of this report projection.
 
-## Session cloning
+## Persistence ownership and session cloning
+
+`store.rs` retains `Store`, `StoreInner`, the session lifecycle API and the
+shared title snapshot. Private `store/event.rs` owns persisted event types,
+versions and timestamps; `store/session_file.rs` owns lock/open/header
+operations and append-open corruption repair; `store/writer.rs` owns the
+single writer task, locked-file lifetime, flush barriers and atomic title
+rewrite; `store/replay.rs` owns read-only queries and session/child-run
+reconstruction. Explicit facade re-exports preserve existing paths.
+Replay never owns or updates title-generation state. The writer retains its
+lock after replacing the metadata inode and drains queued events when the
+last shared handle is dropped.
+
+`store/tests.rs` holds shared fixtures and cross-owner lifecycle assertions;
+event, session-file, writer and replay suites live under `store/tests/`.
 
 `Store::clone_session` (`src/store.rs`) reads the source under a nonblocking
 exclusive lock held only for the read, rejects a child transcript or a
@@ -475,6 +554,13 @@ Live `ChildConversation::started_at` uses a monotonic clock initialized by
 `ChildAgentStarted`; replayed conversations have no live timer. Render projections
 key these start times by the originating bubble id, so the root bubble and drill-in
 header share one elapsed timer. Queued and terminal bubbles never render it.
+Each tool-bubble render samples elapsed whole seconds once for both its live
+title and cache key. Subsecond redraws reuse unchanged timer chrome; spinner
+frame changes still update independently. Completed durations retain their
+millisecond precision.
+Live Thinking timers also use truncated whole seconds in cached and legacy
+rendering, with the cached title and animation key sharing one sample.
+Completed `Thought for` titles retain millisecond precision.
 
 `AppState` keeps `active_view`, `running_child`, and
 `child_conversations` (keyed by `run_id`) separate. Finished conversations
@@ -510,13 +596,55 @@ behavior.
 
 The TUI renders the same headless `AgentLoop`; it does not own agent state.
 
-- `src/tui_reducer_state.rs` holds the view state, events, and effects.
-- `src/presenter.rs` reduces input and domain events into effects without
-  terminal or channel I/O.
-- `src/render.rs` and `src/tui_widgets.rs` render the view and record geometry
-  for mouse routing.
-- `src/tui_driver.rs` owns the terminal loop, maps live UI updates to domain
-  events, and executes effects. `src/cli_driver.rs` owns the headless loop.
+- `src/tui_reducer_state.rs` retains `AppState`, construction, render revisions
+  and cross-cutting coordination, with explicit compatibility re-exports.
+  Its private `conversation.rs` child owns entries, tool states and shared
+  turn buffers; `conversation/replay.rs`, `conversation/navigation.rs` and
+  `conversation/tools.rs` separate transcript projection, root/child navigation
+  and bubble mutations. `selection.rs` owns terminal-column selection,
+  `model_picker.rs` owns slash/model choices and filtering,
+  `input_history.rs` owns history browsing, `layout.rs` owns hit-test geometry,
+  and `events.rs` owns input/domain events, modes, focus and effects.
+  Descendant impl blocks operate on the same parent-owned `AppState`; its
+  public fields and original type/function paths are unchanged.
+- `src/presenter.rs` retains `update`, `TuiEvent` and `TextareaContext`.
+  Its private `keyboard.rs` and `mouse.rs` children own focus-prioritized input
+  routing; `domain.rs` owns mode and subagent lifecycle transitions; and
+  `tool_bubbles.rs` owns shared pending/clarify/progress/completion transitions.
+  The reducer still emits ordered effects without terminal or channel I/O.
+  Both state and presenter retain facade-level cross-owner tests, with
+  responsibility-specific suites under their local `tests/` directories.
+- `src/render.rs` adapts reducer state to the view and synchronizes draw geometry.
+  `src/tui_widgets.rs` retains `draw`, `draw_borrowed`, frame composition,
+  borrowed conversation inputs and `ButtonAreas`. Its private `chat.rs` child
+  owns legacy conversation painting and scrollbars; `chat/cache.rs` owns cached
+  entry/header layout and visible-row painting. `bubbles.rs` owns shared message
+  chrome and prose; `tool_bubble.rs` coordinates tool chrome and body rendering
+  through `tool_bubble/title.rs` and `tool_bubble/body.rs`. Cached, legacy and
+  child-header paths share this implementation. `footer.rs` owns status,
+  key hints and approval controls; `overlays.rs` owns slash/model panels,
+  clarify banners and toasts; `help.rs` owns the help popup.
+  Pure terminal-column selection (`chat/selection.rs`), hunk parsing
+  (`tool_bubble/diff.rs`) and home-relative labels (`help/paths.rs`) stay
+  covered alongside all rendering owners; there are no custom coverage exclusions.
+  Widget tests follow their responsibility owners; the source-backed
+  integration fixture reads the large `chat/cache.rs` implementation rather
+  than the facade, preserving highlighting, selection-storage and row-bound
+  assertions.
+- `src/tui_driver.rs` retains `TuiApp`, `run_tui`, the select loop, frame
+  orchestration and session-title task coordination. Its private
+  `tui_driver/effects.rs` child owns command routing and `PendingRunIds`;
+  `models.rs` owns cancellable catalog tasks, restart after approval pauses,
+  typed selection and runtime display refresh; `input.rs` owns textarea,
+  draft/overlay snapshots, mouse selection and history operations;
+  `updates.rs` owns live UI-to-domain mapping, lazy child replay and the
+  compatibility snapshot; and `terminal.rs` owns clipboard implementations,
+  terminal/title guards and SIGINT relay. Clipboard types retain their
+  public facade paths. Pending destinations stay driver-local and are
+  recorded before reducer transitions, then consumed by approval/clarify
+  commands. Catalog cancellation, agent shutdown, terminal teardown and
+  title restoration keep their existing order. `src/cli_driver.rs` owns
+  the headless loop.
 
 Both conversation render paths publish `ChatScrollbarLayout` with the visible
 scrollbar rect and the exact maximum offset after layout. The presenter maps

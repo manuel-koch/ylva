@@ -892,12 +892,14 @@ impl CompactionRuntime {
             return result;
         };
         let context_length = budget.context_length;
-        context.compaction_request_id = self.request_id.or(self.last_request_id);
-        context.compaction_trigger = if self.fallback_due {
-            "summary_failure"
-        } else {
-            "hard_threshold"
-        };
+        context.set_compaction_diagnostics(
+            self.request_id.or(self.last_request_id),
+            if self.fallback_due {
+                "summary_failure"
+            } else {
+                "hard_threshold"
+            },
+        );
         if let Some(snapshot) = self.pending.take() {
             let boundary = snapshot.boundary;
             let summary = snapshot.summary.clone();
@@ -921,12 +923,12 @@ impl CompactionRuntime {
                 }
                 tracing::info!(
                     trigger = "summary_applied",
-                    request_id = ?context.compaction_request_id,
+                    request_id = ?context.compaction_request_id(),
                     safe_boundary = boundary,
                     stage = 0,
                     clipped_results = 0,
-                    admitted_calls = context.batch_admitted_calls,
-                    skipped_calls = context.batch_skipped_calls,
+                    admitted_calls = context.batch_admitted_calls(),
+                    skipped_calls = context.batch_skipped_calls(),
                     batch_cap = super::MAX_EXECUTED_TOOL_CALLS_PER_BATCH,
                     remaining_result_allowance = context.available_result_token_budget(&[], context_length),
                     terminal_reason = "summary_applied",
@@ -1066,18 +1068,7 @@ impl CompactionRuntime {
         let Some(boundary) = summary_boundary(context, target_tokens) else {
             return;
         };
-        let leading_system_len = context.leading_system_len();
-        let mut prefix = Vec::new();
-        if let Some(snapshot) = context.compaction() {
-            prefix.push(snapshot.summary_message());
-        }
-        if let Some(recovery) = &context.recovery {
-            prefix.push(recovery.handoff.clone());
-            prefix.extend(recovery.anchor.clone());
-        }
-        prefix.extend_from_slice(
-            &context.messages()[context.model_view_start().max(leading_system_len)..boundary],
-        );
+        let prefix = context.summary_source(boundary);
         let request = build_summary_request(&prefix, &self.summary_prompt);
         let session_id = context.store().map(|store| store.session_id());
         let timeout = self.summary_timeout;

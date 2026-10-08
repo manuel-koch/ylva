@@ -796,11 +796,6 @@ for the full mechanics.
 
 ## TUI Architecture
 
-The TUI is a rendering layer on top of the headless agent loop; the agent
-architecture itself is unchanged. See
-[implementation notes](./implementation-notes.md#tui-module-layout) for the
-module structure (model/presenter/view/driver split).
-
 - **Layout:** a scrollable chat-history area, a variable-height input box
   (capped at 1/3 of the terminal height), a `─` separator line, and a 2-row
   footer (mode/hint row and key-hints row). Key names in the key-hints row are
@@ -948,8 +943,11 @@ module structure (model/presenter/view/driver split).
 - **Tool duration:** when a tool finishes, its execution time is shown in the
   bubble title. Running `spawn_subagent` bubbles also show a live elapsed timer
   in the root conversation and drill-in header, starting when the subagent
-  actually begins execution (not while queued). The timer continues while the
-  subagent waits for approval and is replaced by the final duration on completion.
+  actually begins execution (not while queued). Running timers display whole
+  seconds, truncated rather than rounded, so subsecond redraws do not change
+  the readout. Spinner and streamed-output updates keep their existing cadence.
+  The timer continues while the subagent waits for approval and is replaced
+  by the final duration with millisecond precision on completion.
 - **Toast notifications:** transient messages appear in the bottom-right
   corner (e.g., `"Copied to clipboard"`) and auto-dismiss after ~1.5 seconds.
 - **Scrollbar:** the chat scrollbar's thumb reaches the very bottom of the
@@ -987,7 +985,8 @@ module structure (model/presenter/view/driver split).
 - **Thinking bubble:** extended-thinking/reasoning output gets its own
   bubble: dim-blue border, Markdown rendering, shown before the assistant's
   reply. Starts expanded; title shows a live elapsed timer while streaming,
-  then the total duration once done. Click the title or left border to
+  truncated to whole seconds, then the total duration with millisecond
+  precision once done. Click the title or left border to
   expand/collapse, same as tool bubbles. Depends on the model having
   extended-thinking/reasoning enabled, not on the provider. Interleaved
   thinking, replies, and tool calls each flush into their own bubble in

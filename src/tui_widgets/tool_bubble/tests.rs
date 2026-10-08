@@ -1,0 +1,508 @@
+// Copyright © 2026 Manuel Koch
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use super::*;
+
+#[test]
+fn split_tool_layout_preserves_chrome_body_and_hit_ranges() {
+    use crate::agent::tools::{ContentSection, Section};
+    use crate::tui_reducer_state::ResultSection;
+
+    let content_sections = vec![Section::Content(ContentSection {
+        label: Some("Command".to_string()),
+        content: "first command\nsecond command".to_string(),
+        file_extension: None,
+        line_number_offset: None,
+    })];
+    let title_arguments = vec![
+        (
+            "command".to_string(),
+            serde_json::json!("first command\nsecond command"),
+        ),
+        (
+            "label".to_string(),
+            serde_json::json!("first label\nsecond label"),
+        ),
+    ];
+    let states = [
+        ToolCallState::Pending {
+            arguments: serde_json::json!({}),
+            content_sections: content_sections.clone(),
+            title_arguments: title_arguments.clone(),
+        },
+        ToolCallState::Running {
+            arguments: serde_json::json!({}),
+            content_sections: content_sections.clone(),
+            title_arguments: title_arguments.clone(),
+            progress_arguments: vec![],
+        },
+        ToolCallState::Done {
+            arguments: serde_json::json!({}),
+            content_sections: content_sections.clone(),
+            title_arguments: title_arguments.clone(),
+            result_section: ResultSection::plain("plain output"),
+            summary: vec![],
+            duration: std::time::Duration::from_millis(50),
+        },
+        ToolCallState::Error {
+            content_sections: content_sections.clone(),
+            title_arguments: title_arguments.clone(),
+            error: "tool execution failed".to_string(),
+            duration: std::time::Duration::from_millis(50),
+        },
+        ToolCallState::Denied {
+            arguments: serde_json::json!({}),
+            content_sections,
+            title_arguments,
+            error: "approval denied".to_string(),
+        },
+        ToolCallState::Killed,
+    ];
+    for state in &states {
+        for collapsed in [true, false] {
+            for width in [20, 80] {
+                let bubble = ToolBubbleArgs {
+                    id: uuid::Uuid::new_v4(),
+                    name: "bash",
+                    state,
+                    collapsed,
+                    spinner_frame: 0,
+                    elapsed_seconds: None,
+                    display_title_override: None,
+                    subtype_argument: None,
+                };
+                let mut complete = vec![Line::from("preceding entry")];
+                let mut hit_ranges = vec![];
+                let body_start =
+                    append_tool_layout(&mut complete, bubble, &mut hit_ranges, width, false);
+                assert_eq!(hit_ranges, vec![(1, complete.len() - 1, bubble.id)]);
+
+                let mut chrome = vec![Line::from("preceding entry")];
+                let mut chrome_hit_ranges = vec![];
+                let chrome_end =
+                    append_tool_layout(&mut chrome, bubble, &mut chrome_hit_ranges, width, true);
+                assert_eq!(body_start, chrome_end);
+                assert_eq!(&complete[..body_start], &chrome);
+                assert!(chrome_hit_ranges.is_empty());
+                if matches!(
+                    state,
+                    ToolCallState::Error { .. } | ToolCallState::Denied { .. }
+                ) {
+                    let diagnostic = if matches!(state, ToolCallState::Error { .. }) {
+                        "tool execution failed"
+                    } else {
+                        "approval denied"
+                    };
+                    let chrome_text = chrome
+                        .iter()
+                        .flat_map(|line| &line.spans)
+                        .filter(|span| span.style.fg == Some(crate::theme::ERROR_COLOR))
+                        .map(|span| span.content.trim())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    assert!(chrome_text.contains(diagnostic));
+                }
+
+                let style = BubbleStyle::new(TOOL_BUBBLE_BORDER_COLOR);
+                let mut parts = vec![Line::from("preceding entry")];
+                let extra_sections = title::append_tool_chrome(&mut parts, bubble, &style, width);
+                body::append_tool_body(&mut parts, bubble, &style, &extra_sections, width);
+                assert_eq!(complete, parts);
+                if collapsed || matches!(state, ToolCallState::Killed) {
+                    assert_eq!(complete.len(), body_start);
+                } else {
+                    let body_text = complete[body_start..]
+                        .iter()
+                        .flat_map(|line| &line.spans)
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>();
+                    assert_eq!(body_text.matches("first command").count(), 1);
+                    assert_eq!(body_text.matches("first label").count(), 1);
+                    let merged = bubble.content_sections(&extra_sections);
+                    let labels = merged
+                        .iter()
+                        .map(|section| match section {
+                            Section::Content(content) => content.label.as_deref().unwrap(),
+                            _ => panic!("expected content sections"),
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(labels, ["Command", "label"]);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn tool_bubble_renders_markdown_content_section_as_prose_not_code() {
+    use super::{append_tool_bubble_lines, ToolBubbleArgs};
+    use crate::agent::tools::{ContentSection, Section};
+    use crate::tui_reducer_state::{ResultSection, ToolCallState};
+
+    let state = ToolCallState::Done {
+        arguments: serde_json::json!({"task": "# Investigate the bug"}),
+        result_section: ResultSection::plain("ok"),
+        content_sections: vec![Section::Content(ContentSection {
+            label: Some("Task".to_string()),
+            content: "# Investigate the bug\n\n- check logs\n- reproduce it".to_string(),
+            file_extension: Some("md".to_string()),
+            line_number_offset: None,
+        })],
+        summary: vec![],
+        duration: std::time::Duration::ZERO,
+        title_arguments: vec![],
+    };
+    let mut lines: Vec<Line<'static>> = vec![];
+    let mut bubble_title_rows = vec![];
+    append_tool_bubble_lines(
+        &mut lines,
+        ToolBubbleArgs {
+            id: uuid::Uuid::new_v4(),
+            name: "spawn_subagent",
+            state: &state,
+            collapsed: false,
+            spinner_frame: 0,
+            elapsed_seconds: None,
+            display_title_override: None,
+            subtype_argument: None,
+        },
+        &mut bubble_title_rows,
+        80,
+    );
+
+    let rendered: String = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect();
+
+    // Markdown list rendering turns `- item` into a bullet-prefixed line
+    // (`• item`); the syntect code-highlighting path would never do
+    // this — it passes raw text through verbatim with a line-number-style
+    // gutter instead. Bullet rendering is therefore proof the markdown
+    // path (not the code path) handled this section.
+    assert!(
+        rendered.contains("Investigate the bug"),
+        "expected heading text in rendered bubble, got: {rendered:?}"
+    );
+    assert!(
+        rendered.contains('•'),
+        "expected markdown bullet rendering, got: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("check logs") && rendered.contains("reproduce it"),
+        "expected bullet items in rendered bubble, got: {rendered:?}"
+    );
+}
+
+#[test]
+fn tool_bubble_renders_execution_error_content_literally() {
+    use super::{append_tool_bubble_lines, ToolBubbleArgs};
+    use crate::agent::tools::{ContentSection, Section};
+    use crate::tui_reducer_state::{ResultSection, ToolCallState};
+
+    let state = ToolCallState::Done {
+        arguments: serde_json::json!({}),
+        result_section: ResultSection::plain(""),
+        content_sections: vec![Section::Content(ContentSection {
+            label: Some("Error".to_string()),
+            content: "unknown engine: local-discovery_".to_string(),
+            file_extension: None,
+            line_number_offset: None,
+        })],
+        summary: vec![],
+        duration: std::time::Duration::ZERO,
+        title_arguments: vec![],
+    };
+    let mut lines: Vec<Line<'static>> = vec![];
+    let mut bubble_title_rows = vec![];
+    append_tool_bubble_lines(
+        &mut lines,
+        ToolBubbleArgs {
+            id: uuid::Uuid::new_v4(),
+            name: "spawn_subagent",
+            state: &state,
+            collapsed: false,
+            spinner_frame: 0,
+            elapsed_seconds: None,
+            display_title_override: None,
+            subtype_argument: None,
+        },
+        &mut bubble_title_rows,
+        80,
+    );
+
+    let rendered: String = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert!(
+        rendered.contains("unknown engine: local-discovery_"),
+        "execution diagnostic should remain literal, got: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("local-discovery _"),
+        "execution diagnostic should not be reformatted as Markdown, got: {rendered:?}"
+    );
+}
+
+#[test]
+fn failed_subagent_status_is_red_in_root_and_header_bubble_titles() {
+    use super::{append_tool_bubble_lines, ToolBubbleArgs};
+    use crate::theme::ERROR_COLOR;
+    use crate::tui_reducer_state::{ResultSection, ToolCallState};
+    use ratatui::style::Modifier;
+
+    let state = ToolCallState::Done {
+        arguments: serde_json::json!({"label": "Inspect change"}),
+        result_section: ResultSection::plain(""),
+        content_sections: vec![],
+        summary: vec![("status".to_string(), "failure".to_string())],
+        duration: std::time::Duration::from_millis(123),
+        title_arguments: vec![("label".to_string(), serde_json::json!("Inspect change"))],
+    };
+
+    for display_title_override in [None, Some("Subagent")] {
+        for collapsed in [true, false] {
+            let mut lines: Vec<Line<'static>> = vec![];
+            let mut bubble_title_rows = vec![];
+            append_tool_bubble_lines(
+                &mut lines,
+                ToolBubbleArgs {
+                    id: uuid::Uuid::new_v4(),
+                    name: "spawn_subagent",
+                    state: &state,
+                    collapsed,
+                    spinner_frame: 0,
+                    elapsed_seconds: None,
+                    display_title_override,
+                    subtype_argument: None,
+                },
+                &mut bubble_title_rows,
+                80,
+            );
+
+            let failure_status_span = lines
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .find(|span| span.content.as_ref() == "status=failure")
+                .expect("failed subagent status should be rendered");
+            assert_eq!(failure_status_span.style.fg, Some(ERROR_COLOR));
+            assert!(
+                failure_status_span
+                    .style
+                    .add_modifier
+                    .contains(Modifier::BOLD),
+                "failed subagent status should be bold"
+            );
+        }
+    }
+}
+
+#[test]
+fn queued_subagent_bubble_shows_static_glyph_not_spinner() {
+    use super::{append_tool_bubble_lines, ToolBubbleArgs};
+    use crate::tui_reducer_state::ToolCallState;
+
+    let state = ToolCallState::Running {
+        arguments: serde_json::json!({"task": "investigate"}),
+        content_sections: vec![],
+        title_arguments: vec![],
+        progress_arguments: vec![("status".to_string(), serde_json::json!("queued"))],
+    };
+    let mut lines: Vec<Line<'static>> = vec![];
+    let mut bubble_title_rows = vec![];
+    append_tool_bubble_lines(
+        &mut lines,
+        ToolBubbleArgs {
+            id: uuid::Uuid::new_v4(),
+            name: "spawn_subagent",
+            state: &state,
+            collapsed: false,
+            spinner_frame: 3,
+            elapsed_seconds: None,
+            display_title_override: None,
+            subtype_argument: None,
+        },
+        &mut bubble_title_rows,
+        80,
+    );
+
+    let rendered: String = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert!(
+        rendered.contains('≡'),
+        "expected static queued glyph, got: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("status=queued"),
+        "queued state should be communicated by the glyph, not the title: {rendered:?}"
+    );
+    for spinner_char in crate::tui_widgets::SPINNER_FRAMES {
+        assert!(
+            !rendered.contains(*spinner_char),
+            "queued bubble must not show the animated spinner, got: {rendered:?}"
+        );
+    }
+}
+
+#[test]
+fn running_subagent_bubble_shows_spinner_not_queued_glyph() {
+    use super::{append_tool_bubble_lines, ToolBubbleArgs};
+    use crate::tui_reducer_state::ToolCallState;
+
+    let state = ToolCallState::Running {
+        arguments: serde_json::json!({"task": "investigate"}),
+        content_sections: vec![],
+        title_arguments: vec![],
+        progress_arguments: vec![("status".to_string(), serde_json::json!("running"))],
+    };
+    let mut lines: Vec<Line<'static>> = vec![];
+    let mut bubble_title_rows = vec![];
+    append_tool_bubble_lines(
+        &mut lines,
+        ToolBubbleArgs {
+            id: uuid::Uuid::new_v4(),
+            name: "spawn_subagent",
+            state: &state,
+            collapsed: false,
+            spinner_frame: 0,
+            elapsed_seconds: None,
+            display_title_override: None,
+            subtype_argument: None,
+        },
+        &mut bubble_title_rows,
+        80,
+    );
+
+    let rendered: String = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert!(
+        rendered.contains(crate::tui_widgets::SPINNER_FRAMES[0]),
+        "expected animated spinner glyph, got: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains('≡'),
+        "running bubble must not show the static queued glyph, got: {rendered:?}"
+    );
+}
+
+#[test]
+fn subagent_bubble_hides_run_id_from_title() {
+    use super::{append_tool_bubble_lines, ToolBubbleArgs};
+    use crate::tui_reducer_state::ToolCallState;
+
+    let run_id = uuid::Uuid::new_v4();
+    let state = ToolCallState::Running {
+        arguments: serde_json::json!({"label": "Inspect change"}),
+        content_sections: vec![],
+        title_arguments: vec![("label".to_string(), serde_json::json!("Inspect change"))],
+        progress_arguments: vec![
+            ("status".to_string(), serde_json::json!("running")),
+            ("run_id".to_string(), serde_json::json!(run_id.to_string())),
+        ],
+    };
+    let mut lines: Vec<Line<'static>> = vec![];
+    let mut bubble_title_rows = vec![];
+    append_tool_bubble_lines(
+        &mut lines,
+        ToolBubbleArgs {
+            id: uuid::Uuid::new_v4(),
+            name: "spawn_subagent",
+            state: &state,
+            collapsed: true,
+            spinner_frame: 0,
+            elapsed_seconds: None,
+            display_title_override: None,
+            subtype_argument: None,
+        },
+        &mut bubble_title_rows,
+        80,
+    );
+
+    let rendered: String = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert!(
+        rendered.contains("Inspect change"),
+        "the subagent label should remain visible: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("status=running"),
+        "the live subagent status should be communicated by the indicator, not the title: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("run_id") && !rendered.contains(&run_id.to_string()),
+        "the internal run identifier must not appear in the title: {rendered:?}"
+    );
+}
+
+/// The child-view header shortens the `spawn_subagent` bubble's title to
+/// `"Subagent"` via `ToolBubbleArgs::display_title_override`, dropping
+/// the "Spawn" prefix that's only meaningful from the root
+/// conversation's point of view (regression test for the header always
+/// reading "Spawn Subagent ..." even though it sits directly above the
+/// subagent's own transcript).
+#[test]
+fn display_title_override_replaces_title_cased_tool_name() {
+    use super::{append_tool_bubble_lines, ToolBubbleArgs};
+    use crate::tui_reducer_state::ToolCallState;
+
+    let state = ToolCallState::Running {
+        arguments: serde_json::json!({"task": "investigate"}),
+        content_sections: vec![],
+        title_arguments: vec![],
+        progress_arguments: vec![],
+    };
+    let mut lines: Vec<Line<'static>> = vec![];
+    let mut bubble_title_rows = vec![];
+    append_tool_bubble_lines(
+        &mut lines,
+        ToolBubbleArgs {
+            id: uuid::Uuid::new_v4(),
+            name: "spawn_subagent",
+            state: &state,
+            collapsed: false,
+            spinner_frame: 0,
+            elapsed_seconds: None,
+            display_title_override: Some("Subagent"),
+            subtype_argument: None,
+        },
+        &mut bubble_title_rows,
+        80,
+    );
+
+    let rendered: String = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert!(
+        rendered.contains("Subagent"),
+        "expected the overridden title, got: {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("Spawn Subagent"),
+        "the plain title-cased tool name must not also appear, got: {rendered:?}"
+    );
+}
