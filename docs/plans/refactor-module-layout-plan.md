@@ -210,7 +210,7 @@ No staging, branch creation, or commits are authorized by this plan.
    Run driver library tests and `cargo test --test tui_render_state`.
    Update `docs/implementation-notes.md`.
 
-9. [ ] Split persistence into `store/event.rs`, `store/session_file.rs`,
+9. [x] Split persistence into `store/event.rs`, `store/session_file.rs`,
    `store/writer.rs`, and `store/replay.rs`. Keep `Store`, `StoreInner`,
    its public API, and session lifecycle coordination in `src/store.rs`.
    Event owns persisted types/constants; session-file owns lock/open/header
@@ -227,7 +227,7 @@ No staging, branch creation, or commits are authorized by this plan.
    Check `docs/persistence.md` for path references without rewriting its
    unchanged external contract.
 
-10. [ ] Split sandbox policy into `sandbox/rules.rs`,
+10. [x] Split sandbox policy into `sandbox/rules.rs`,
     `sandbox/path.rs`, `sandbox/command.rs`, and `sandbox/network.rs`.
     Retain `Sandbox` and `SandboxContext` ownership and public methods in
     `src/sandbox.rs`; descendant impl blocks can operate on their private
@@ -644,6 +644,78 @@ size exception is needed.
 | `tui_driver/tests/models.rs` | 0 | 853 |
 | `tui_driver/tests/terminal.rs` | 0 | 32 |
 | `tui_driver/tests/updates.rs` | 0 | 452 |
+
+### Execution checkpoint: persistence and sandbox
+
+Steps 1-10 are complete; steps 11-15 remain pending. The user selected
+steps 9-10 for this continuation. No staging, branch creation or commits
+were performed. An unrelated `Makefile` change adding a graphify target
+appeared during execution and was left untouched.
+
+Persistence retains `Store`, `StoreInner`, session lifecycle coordination
+and the shared title snapshot at the facade. Private event, session-file,
+writer and replay owners separate wire types, locked file operations,
+writer lifetime/title replacement and read-only reconstruction. Existing
+public names, serialization, source-preserving cloning and title ownership
+are unchanged. Shared fixtures and cross-owner assertions live in
+`store/tests.rs`, with responsibility suites under `store/tests/`.
+
+Sandbox retains one shared workspace handle and the existing ordered rule
+storage at its facade. Private rule, path, command and network owners reuse
+that state, with the existing command extractor and target-pattern parser
+unchanged. Public rule/path-helper names retain their facade paths, and no
+fields were exposed for relocation. Owner-local tests keep private helpers
+private and share the fixture from `sandbox/tests.rs`.
+
+All 58 original store and 45 original sandbox production functions retain
+their signatures and bodies after visibility/formatting normalization.
+Public type, constant and standalone-function inventories are preserved;
+`src/lib.rs` is unchanged. All 1,636 cases registered at the start remain
+registered after normalizing moved test paths. Four new cross-owner
+regressions bring the total to 1,640: shared title rewrite/append lock
+lifetime, queued-event draining on last-handle drop, shared workspace updates,
+and configured/appended rule precedence across evaluators.
+
+The store suite passed 41 cases; the sandbox selector passed 118, including
+the unchanged specialist suites. `store_persistence_e2e` passed eight offline
+cases with its three live-provider cases still ignored; `tools_agent_loop`
+passed 20 and `web_fetch_backend` passed 12.
+`make format lint`, default-feature all-target Clippy and `make test-coverage`
+passed. Aggregate line coverage was **90.10%**, above the unchanged 80% gate.
+The report includes the two facades and all eight new production children,
+alongside the renderer and binary; no exclusion or threshold changed.
+Changed Markdown files passed `rumdl check`. The optional rustdoc build
+succeeded with existing broken/private-link warnings; the refactor introduced
+no unresolved links. Unchanged persistence/configuration contracts and
+recorded decisions were checked; the ADR directory still contains only
+`.gitkeep`.
+
+Physical-line counts follow the inventory convention below. Every selected
+production owner is below the responsibility-review trigger, so no cohesive
+size exception is needed.
+
+| Module | Production | Tests |
+| --- | ---: | ---: |
+| `store.rs` | 896 | 2 |
+| `store/event.rs` | 225 | 0 |
+| `store/replay.rs` | 391 | 0 |
+| `store/session_file.rs` | 201 | 0 |
+| `store/writer.rs` | 230 | 0 |
+| `store/tests.rs` | 0 | 655 |
+| `store/tests/event.rs` | 0 | 134 |
+| `store/tests/replay.rs` | 0 | 508 |
+| `store/tests/session_file.rs` | 0 | 152 |
+| `store/tests/writer.rs` | 0 | 382 |
+| `sandbox.rs` | 176 | 2 |
+| `sandbox/command.rs` | 233 | 2 |
+| `sandbox/network.rs` | 113 | 2 |
+| `sandbox/path.rs` | 530 | 2 |
+| `sandbox/rules.rs` | 519 | 2 |
+| `sandbox/tests.rs` | 0 | 157 |
+| `sandbox/command/tests.rs` | 0 | 310 |
+| `sandbox/network/tests.rs` | 0 | 412 |
+| `sandbox/path/tests.rs` | 0 | 854 |
+| `sandbox/rules/tests.rs` | 0 | 125 |
 
 ### Inventory interpretation
 

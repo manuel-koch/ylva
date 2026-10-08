@@ -122,7 +122,8 @@ tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
 The store tests follow this pattern (see
 `resume_appends_to_the_existing_file_without_overwriting_it` and the
-`cloning_*` tests in `src/store.rs`).
+`cloning_*` tests in `src/store/tests.rs`; append-resume coverage lives in
+`src/store/tests/session_file.rs`).
 
 ## `cfg(test)` does not reach library code from integration tests
 

@@ -250,6 +250,12 @@ help and tool-bubble owners under `tui_widgets/`; small pure selection,
 diff and path-label suites remain beside their implementations.
 `tests/tui_render_state.rs` retains its integration target and uses
 `tui_widgets/chat/cache.rs` as its large source-backed highlighting fixture.
+Persistence event, session-file, writer and replay suites live under
+`store/tests/`, with shared fixtures and cross-owner lifecycle assertions in
+`store/tests.rs`. Sandbox suites live beside their private rule, path, command
+and network owners under `sandbox/<owner>/tests.rs`, keeping private helpers
+private; they share the sandbox fixture from `sandbox/tests.rs`, which also
+holds cross-owner assertions.
 Small boundary suites can remain beside the
 extracted implementation (see `src/agent/tools/read/stream.rs` and
 `src/agent/tools/read/windows.rs`). Cross-owner assertions stay at the facade.

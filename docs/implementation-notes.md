@@ -192,10 +192,24 @@ avoid process-environment mutation. `src/main.rs` exports the resolved
 See [features](./features.md#tools-to-be-used-by-models) for path-argument
 behavior.
 
-## Sandbox `cross_filesystem` rule
+## Sandbox policy ownership and `cross_filesystem` rule
 
-`resolve_device` reads Unix `st_dev` on each check and returns no device on
-other platforms. A nonexistent target uses its deepest existing canonicalized
+`sandbox.rs` retains `Sandbox`, `SandboxContext`, their shared workspace
+handle and ordered rule storage, with explicit re-exports for existing public
+rule and path-helper names. Private `sandbox/rules.rs` owns serialized and
+compiled rules, `sandbox/path.rs` owns expansion/canonicalization/device
+checks and path approval, `sandbox/command.rs` owns command evaluation and
+worst-case aggregation, and `sandbox/network.rs` owns target-aware network
+approval. The existing command extractor and network-target parser remain
+specialist children. Each evaluator uses the same parent-owned rule lists;
+configured rules replace the floor and appended rules still run last.
+
+Owner-local suites live under `sandbox/{rules,path,command,network}/tests.rs`,
+sharing the sandbox fixture from `sandbox/tests.rs`. The facade suite checks
+shared workspace updates and rule replacement/precedence across owners.
+
+`sandbox/path.rs`'s `resolve_device` reads Unix `st_dev` on each check and
+returns no device on other platforms. A nonexistent target uses its deepest existing canonicalized
 ancestor as the device anchor. No cache means remounts affect the next check.
 See
 [configuration](./configuration.md#sandbox-tool-approval-rules) for the rule's
@@ -454,7 +468,21 @@ report. The projected event sets `result_reduced=true` and
 `result_summarized=false`; canonical flags remain false. Normal parent prefix
 summarization remains independent of this report projection.
 
-## Session cloning
+## Persistence ownership and session cloning
+
+`store.rs` retains `Store`, `StoreInner`, the session lifecycle API and the
+shared title snapshot. Private `store/event.rs` owns persisted event types,
+versions and timestamps; `store/session_file.rs` owns lock/open/header
+operations and append-open corruption repair; `store/writer.rs` owns the
+single writer task, locked-file lifetime, flush barriers and atomic title
+rewrite; `store/replay.rs` owns read-only queries and session/child-run
+reconstruction. Explicit facade re-exports preserve existing paths.
+Replay never owns or updates title-generation state. The writer retains its
+lock after replacing the metadata inode and drains queued events when the
+last shared handle is dropped.
+
+`store/tests.rs` holds shared fixtures and cross-owner lifecycle assertions;
+event, session-file, writer and replay suites live under `store/tests/`.
 
 `Store::clone_session` (`src/store.rs`) reads the source under a nonblocking
 exclusive lock held only for the read, rejects a child transcript or a
