@@ -245,7 +245,7 @@ No staging, branch creation, or commits are authorized by this plan.
     `docs/implementation-notes.md`; review unchanged configuration contracts
     against `docs/configuration.md`.
 
-11. [ ] Extract the agent's conversation and protocol model. Add
+11. [x] Extract the agent's conversation and protocol model. Add
     `src/agent/message.rs` for `Message`, `ToolResult`, `ToolAttachment`,
     `ToolCallRequest`, assistant/user status types and their existing methods.
     Add `src/agent/protocol.rs` for commands, events, UI updates, modes,
@@ -260,7 +260,7 @@ No staging, branch creation, or commits are authorized by this plan.
     `cargo test --test tools_binary_data --test system_prompt_instructions`.
     Update the Context paths in `docs/implementation-notes.md`.
 
-12. [ ] Decompose agent execution while keeping one event-loop owner.
+12. [x] Decompose agent execution while keeping one event-loop owner.
     Add `src/agent/runtime.rs` for the `AgentLoop::run` implementation and
     its owned run state; `src/agent/request.rs` for `start_request`,
     stream accumulation, preflight notices and context-rejection handling;
@@ -287,7 +287,7 @@ No staging, branch creation, or commits are authorized by this plan.
     Update `docs/implementation-notes.md` and moved-test references in
     `docs/known-test-issues.md`.
 
-13. [ ] Finish test layout consistently across the selected splits.
+13. [x] Finish test layout consistently across the selected splits.
     Use a parent `#[cfg(test)] mod tests;` and
     `<owner>/tests.rs` with responsibility-named descendants for large
     unit suites, or keep small tests directly beside their extracted owner.
@@ -307,7 +307,7 @@ No staging, branch creation, or commits are authorized by this plan.
     Update test-layout references in `docs/development-workflow.md`,
     `docs/known-test-issues.md`, and any moved module-level comments.
 
-14. [ ] Complete the documentation reconciliation. Update
+14. [x] Complete the documentation reconciliation. Update
     `docs/implementation-notes.md` with the final module ownership map,
     single-writer constraints, replay paths and engine/driver interfaces;
     keep `docs/features.md` focused on user-visible behavior, not module paths
@@ -322,7 +322,7 @@ No staging, branch creation, or commits are authorized by this plan.
     Run `rumdl check` on the changed Markdown files. New documentation
     files other than this requested plan require separate permission.
 
-15. [ ] Verify the completed scope and record the resulting layout here.
+15. [x] Verify the completed scope and record the resulting layout here.
     Review every facade and `src/lib.rs` export, relative fixture path,
     feature-gated item, test registration and coverage file set.
     Run default-feature `cargo clippy --all-targets --quiet` as well as
@@ -716,6 +716,126 @@ size exception is needed.
 | `sandbox/network/tests.rs` | 0 | 412 |
 | `sandbox/path/tests.rs` | 0 | 854 |
 | `sandbox/rules/tests.rs` | 0 | 125 |
+
+### Execution checkpoint: agent execution and final layout
+
+Steps 1-15 are complete, including the final mandatory verification gates.
+No staging, branch creation or commits were performed.
+Concurrent changes to `Makefile`, `docs/backlog-issues.md` and the custom
+live-provider profile were left untouched.
+
+The agent facade retains construction/configuration APIs, constants and explicit
+compatibility re-exports. Private message and protocol owners preserve persisted
+field shapes, serialization and all public paths. Context owns transcript,
+token accounting and projection flags; projection and recovery descendants use
+its private state, while runtime and compaction callers use semantic methods.
+Summary requests receive an immutable source snapshot.
+
+One owned run state now coordinates request, queue and handler transitions.
+The biased select order and guards are unchanged. Command, agent-event and
+subagent handlers return explicit poll-again, completion-tail or finished
+outcomes, preserving outer-loop continuation and early-return behavior.
+Receivers remain in the coordinator and no new task, channel, lock or Context
+copy was introduced. Batch admission and serial advancement share the queue
+owner; request preflight/stream assembly and per-tool execution remain separate.
+
+All 20 original public type/field shapes and 57 public function signatures,
+constants and statics match the original agent facade; `src/lib.rs` exports
+are unchanged. All 1,640 cases registered at this continuation's start remain
+registered after normalizing module paths. Four new boundary regressions bring
+the total to 1,644: canonical-versus-projected harness notices, Context-owned
+retry/batch bookkeeping, ignored handler inputs bypassing child completion,
+and distinct normal/terminal handler outcomes.
+
+Large unit suites now follow their owners; shared fixtures and cross-owner
+assertions stay at their local parent. Both large integration targets retain
+their Cargo names and explicitly declare responsibility descendants.
+The large agent read fixture uses the unchanged compaction implementation and
+asserts its canonical result exceeds the output allowance, rather than accepting
+a successful read that never created pressure. Relocation exposed a pre-existing
+fixed-delay TUI shutdown race on a cold tokenizer; the assertion now waits for
+a completed rendered frame before closing the action channel.
+
+Affected contributor docs describe the final owners, single-writer constraints,
+test layout and all-source coverage policy. Configuration, keybindings,
+persistence, README, domain language and agent guidelines need no path updates;
+their external contracts are unchanged. User-facing features retain behavior
+descriptions rather than internal module maps. The ADR directory still contains
+only `.gitkeep`, so there is no recorded decision to migrate or override.
+The optional rustdoc build succeeds with the existing unresolved/private-link
+warnings, without new broken links from these moves.
+
+The agent selector passes 515 cases with one existing ignored case; the two
+relocated integration targets pass 68 rendering and 20 tool-loop cases.
+Steering, interrupt, concurrent-steer, binary-data and system-instruction
+selectors also pass. `make format lint`, default-feature all-target Clippy
+and the mandatory `make test-coverage` gate pass; aggregate line coverage is
+**89.71%**, above the unchanged 80% threshold. All selected production owners,
+the renderer descendants and the binary appear in the report, without custom
+exclusions. Changed Markdown passes `rumdl check`; the unrelated backlog file
+still reports its existing long-line warning during repository formatting.
+
+Physical counts use the inventory convention below. All selected production
+files are below the 1,000-line review trigger; no cohesive size exception is
+needed. Unchanged descendants retain the detailed counts in their earlier
+checkpoints; the largest production descendant and final facade are summarized
+here.
+
+| Selected facade | Production | Tests | Largest production owner |
+| --- | ---: | ---: | ---: |
+| `agent.rs` | 530 | 2 | 688 |
+| `agent/tools/read.rs` | 875 | 2 | 875 |
+| `llm/engine.rs` | 331 | 2 | 431 |
+| `tui_reducer_state.rs` | 684 | 2 | 741 |
+| `presenter.rs` | 67 | 2 | 892 |
+| `tui_widgets.rs` | 639 | 0 | 639 |
+| `tui_driver.rs` | 704 | 2 | 704 |
+| `store.rs` | 896 | 2 | 896 |
+| `sandbox.rs` | 176 | 2 | 530 |
+
+| New agent owner | Production | Tests |
+| --- | ---: | ---: |
+| `agent/message.rs` | 153 | 2 |
+| `agent/protocol.rs` | 479 | 2 |
+| `agent/context.rs` | 688 | 2 |
+| `agent/context/projection.rs` | 300 | 0 |
+| `agent/context/recovery.rs` | 368 | 0 |
+| `agent/runtime.rs` | 468 | 2 |
+| `agent/runtime/commands.rs` | 560 | 0 |
+| `agent/runtime/events.rs` | 357 | 0 |
+| `agent/runtime/subagents.rs` | 318 | 0 |
+| `agent/runtime/compaction_updates.rs` | 186 | 0 |
+| `agent/request.rs` | 399 | 0 |
+| `agent/tool_execution.rs` | 177 | 0 |
+| `agent/tool_queue.rs` | 622 | 0 |
+| `agent/tool_queue/spawn.rs` | 138 | 0 |
+| `agent/tests.rs` | 0 | 858 |
+| `agent/tests/request.rs` | 0 | 365 |
+| `agent/tests/compaction_updates.rs` | 0 | 676 |
+| `agent/tests/runtime.rs` | 0 | 232 |
+| `agent/tests/subagents.rs` | 0 | 591 |
+| `agent/tests/tool_execution.rs` | 0 | 134 |
+| `agent/tests/tool_queue.rs` | 0 | 795 |
+| `agent/context/tests.rs` | 0 | 301 |
+| `agent/context/tests/projection.rs` | 0 | 337 |
+| `agent/context/tests/recovery.rs` | 0 | 472 |
+| `agent/context/tests/tokens.rs` | 0 | 304 |
+| `agent/message/tests.rs` | 0 | 196 |
+| `agent/protocol/tests.rs` | 0 | 199 |
+| `agent/runtime/tests.rs` | 0 | 148 |
+
+| Integration-test owner | Test/support lines |
+| --- | ---: |
+| `tests/tui_render_state.rs` | 447 |
+| `tests/tui_render_state/cache.rs` | 419 |
+| `tests/tui_render_state/bubbles.rs` | 2,050 |
+| `tests/tui_render_state/selection.rs` | 416 |
+| `tests/tui_render_state/overlays.rs` | 1,563 |
+| `tests/tui_render_state/subagent_views.rs` | 814 |
+| `tests/tools_agent_loop.rs` | 532 |
+| `tests/tools_agent_loop/queue_approvals.rs` | 744 |
+| `tests/tools_agent_loop/cancellation.rs` | 200 |
+| `tests/tools_agent_loop/subagents.rs` | 595 |
 
 ### Inventory interpretation
 

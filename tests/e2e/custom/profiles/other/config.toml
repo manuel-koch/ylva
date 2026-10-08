@@ -28,13 +28,13 @@ hard_compaction_threshold = 0.8
 [engines.openrouterA]
 provider_connection = "openrouter"
 model = "deepseek/deepseek-v4-flash-0731"
-context_length = "96kb"
+context_length = "256kb"
 reasoning = "max"
 
 [engines.openrouterB]
 provider_connection = "openrouter"
 model = "openai/gpt-6-luna"
-context_length = "96kb"
+context_length = "256kb"
 reasoning = "medium"
 
 [web_search]
@@ -49,4 +49,13 @@ api_key = "${BRAVE_API_KEY}"
 [tools.web_search]
 rules = [
     { rule = "network_request", verdict = "auto_approved" },
+]
+
+[tools.bash]
+rules = [
+    { command = ["true"],       verdict = "auto_approved" },
+    { command = ["false"],      verdict = "auto_approved" },
+    { command = ["ls", "**"], verdict = "auto_approved" },
+    { command = ["grep", "**"], verdict = "auto_approved" },
+    { command = ["wc", "**"],   verdict = "auto_approved" },
 ]

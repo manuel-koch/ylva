@@ -250,6 +250,14 @@ help and tool-bubble owners under `tui_widgets/`; small pure selection,
 diff and path-label suites remain beside their implementations.
 `tests/tui_render_state.rs` retains its integration target and uses
 `tui_widgets/chat/cache.rs` as its large source-backed highlighting fixture.
+Its explicitly declared descendants under `tests/tui_render_state/` cover
+cache, bubbles, selection, overlays and subagent views; the target parent
+retains shared fixtures. `tests/tools_agent_loop.rs` follows the same pattern,
+with queue/approval, cancellation and subagent suites under
+`tests/tools_agent_loop/`. Descendants are not separate Cargo test targets.
+Use `#[path = "<target>/<suite>.rs"] mod <suite>;` in the target parent:
+integration-test roots resolve a plain `mod <suite>;` beside the root file,
+not under its same-named directory.
 Persistence event, session-file, writer and replay suites live under
 `store/tests/`, with shared fixtures and cross-owner lifecycle assertions in
 `store/tests.rs`. Sandbox suites live beside their private rule, path, command
@@ -259,6 +267,11 @@ holds cross-owner assertions.
 Small boundary suites can remain beside the
 extracted implementation (see `src/agent/tools/read/stream.rs` and
 `src/agent/tools/read/windows.rs`). Cross-owner assertions stay at the facade.
+Agent unit fixtures and cross-owner assertions live in `agent/tests.rs`,
+with request, compaction-update, queue, execution, subagent and runtime suites
+under `agent/tests/`. Message and protocol tests follow their owners; Context
+retains transcript tests with projection, recovery and token descendants.
+`agent/runtime/tests.rs` checks handler control-flow outcomes directly.
 
 Helpers shared only by unit tests (`#[cfg(test)]` modules inside `src/*.rs`)
 live in `src/test_support.rs`, wired from `src/lib.rs` via

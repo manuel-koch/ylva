@@ -132,7 +132,7 @@ rounds after tool execution completes. It also differs from the six-position
 execution cap: up to 12 calls can be parsed with excess positions closed as
 not-executed, while a thirteenth distinct call rejects the whole response.
 
-Unknown tool names are resolved synchronously in the `ToolCall` handler, after
+Unknown tool names are resolved synchronously during batch admission, after
 the assistant's full batch has entered `Context` and before the serial queue
 starts. They must not enqueue `AgentEvent::ToolError`: that completion path clears
 the active tool's cancellation token and advances the queue, so an unrelated
@@ -242,13 +242,41 @@ contracts.
 
 ## Context management and compaction
 
-`Context` in `src/agent.rs` holds both records at once: `messages` (the
+`agent/runtime.rs` owns the single mutable run state and biased select
+coordinator. Its command, agent-event and subagent handlers live in
+`runtime/commands.rs`, `runtime/events.rs` and `runtime/subagents.rs`;
+`runtime/compaction_updates.rs` translates safe-boundary outcomes into UI
+updates. Handler outcomes distinguish polling again, evaluating the
+root/child completion tail and finishing immediately, preserving the original
+outer-loop `continue` and termination decisions. Receivers stay in the
+coordinator; generation, cancellation and queued work stay in its owned state.
+No new task, channel, lock or Context copy is introduced by this split.
+
+`agent/request.rs` owns preflight, immutable request snapshots and stream
+accumulation. `agent/tool_execution.rs` owns the existing per-tool task;
+`agent/tool_queue.rs` owns batch admission, result allowances, iteration
+checks and serial advancement, with spawn admission in `tool_queue/spawn.rs`.
+Cross-owner assertions and shared unit fixtures remain in `agent/tests.rs`,
+with responsibility suites under `agent/tests/`. Message and protocol suites
+live beside those owners; Context's transcript suite remains in
+`context/tests.rs`, with projection, recovery and token suites below it.
+
+`agent.rs` retains the construction API and explicit compatibility re-exports.
+Private `agent/message.rs` owns persisted messages and tool results;
+`agent/protocol.rs` owns commands, events, UI updates and stream deltas.
+`Context` in `agent/context.rs` holds both records at once: `messages` (the
 transcript, never pruned) and the parallel `entries` vector that carries a
 cached token count per message plus the current `view_start`/`compaction`
 state and transcript-indexed `model_overrides`. `model_messages()` builds the
 request from the leading system block, summary/recovery handoff, latest task
 anchor, and retained tail with bounded overrides. Compaction
 estimates this model view plus active tool definitions with `cl100k_base`.
+Private `context/projection.rs` owns model projection and persistence;
+`context/recovery.rs` owns safe-boundary selection and lossy recovery.
+Runtime callers use semantic Context methods for retry, batch accounting and
+notice projection; neither message vectors nor projection flags are exposed.
+Background summary requests receive an immutable prefix snapshot from Context.
+
 `Context` caches the tool-definition token count for one active schema snapshot,
 keyed by the exact name, description, and serialized parameter text (including
 JSON field order). Budget checks reuse it until those inputs change; message,

@@ -11,7 +11,8 @@ COVERAGE_THRESHOLD := 80
 
 .PHONY: lint format format-rust format-markdown \
 	create-logs-dir \
-	graphify clean \
+	graphify-update graphify-watch \
+    clean \
 	build-debug build-debug-and-run \
 	build-release build-release-and-run build-debug-and-run-with-logs \
 	test test-e2e-persistence test-coverage test-coverage-missing \
@@ -38,10 +39,13 @@ format-rust:
 # Enforce consistent formatting
 format: format-rust format-markdown
 
-graphify:
+graphify-update:
 	graphify update .
 	graphify export html
 	graphify export callflow-html
+
+graphify-watch:
+	graphify watch
 
 logs:
 	mkdir logs

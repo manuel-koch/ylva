@@ -173,4 +173,16 @@ Drain `ui_rx` **concurrently** with `run()`, mirroring the drivers: a
 `tokio::select!` loop over the run handle and `ui_rx.recv()`, followed by a
 non-blocking `try_recv` drain to pick up updates `run()` posted just before it
 returned. See `child_role_iteration_cap_exceeded_returns_err_not_unstructured_ok`
-in `src/agent.rs` for the pattern.
+in `src/agent/tests/subagents.rs` for the pattern. Queue/approval,
+cancellation and subagent integration cases retain the `tools_agent_loop`
+target, with their implementations under `tests/tools_agent_loop/`.
+
+## Fixed-delay shutdown can discard an unfinished TUI turn
+
+Closing the action channel tells `run_tui` to stop; it does not wait for an
+assistant turn to finish. A fixed delay before closure can expire during cold
+tokenizer initialization or a busy test run, leaving only the sent user bubble.
+Tests asserting completed output must wait for observable completion before
+closing the channel, not merely for elapsed time. See
+`typed_enter_creates_sent_user_bubble_and_assistant` in
+`tests/tui_render_state/bubbles.rs`, which observes the completed rendered frame.
