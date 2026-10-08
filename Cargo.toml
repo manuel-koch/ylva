@@ -1,6 +1,6 @@
 [package]
 name = "ylva"
-version = "0.12.2"
+version = "0.13.0"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["Manuel Koch"]
@@ -9,6 +9,12 @@ repository = "https://github.com/manuel-koch/ylva"
 [features]
 # whether tool execution will be randomly prolonged by 3-5s
 artificial-tool-delay = []
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
 
 [dependencies]
 base64 = "0.22"

@@ -315,7 +315,10 @@ fn draw_internal(
                     state: bubble_state,
                     collapsed: *collapsed,
                     spinner_frame: state.spinner_frame,
-                    started_at: state.subagent_started_at.get(bubble_id).copied(),
+                    elapsed_seconds: state
+                        .subagent_started_at
+                        .get(bubble_id)
+                        .map(|started| started.elapsed().as_secs()),
                     display_title_override: display_title_override.as_deref(),
                     subtype_argument,
                 },
@@ -853,12 +856,7 @@ fn cached_tool(
         _ => unreachable!("tool slot"),
     };
     if matches!(bubble.state, ToolCallState::Running { .. }) {
-        chrome_key.animation = Some((
-            bubble.spinner_frame,
-            bubble.started_at.map_or(0, |started| {
-                (started.elapsed().as_secs_f64() * 10.0).round() as u64
-            }),
-        ));
+        chrome_key.animation = Some((bubble.spinner_frame, bubble.elapsed_seconds.unwrap_or(0)));
     }
     let chrome = cache.get_or_build(chrome_key, || {
         let mut layout = EntryLayout::default();
@@ -928,7 +926,10 @@ fn prepare_cached_header(
                 state: bubble_state,
                 collapsed,
                 spinner_frame: state.spinner_frame,
-                started_at: state.subagent_started_at.get(id).copied(),
+                elapsed_seconds: state
+                    .subagent_started_at
+                    .get(id)
+                    .map(|started| started.elapsed().as_secs()),
                 display_title_override: title.as_deref(),
                 subtype_argument: subtype,
             },
@@ -1140,7 +1141,10 @@ fn draw_cached_chat(
                     state: bubble_state,
                     collapsed,
                     spinner_frame: state.spinner_frame,
-                    started_at: state.subagent_started_at.get(id).copied(),
+                    elapsed_seconds: state
+                        .subagent_started_at
+                        .get(id)
+                        .map(|started| started.elapsed().as_secs()),
                     display_title_override: title.as_deref(),
                     subtype_argument: subtype,
                 },
@@ -1192,12 +1196,12 @@ fn draw_cached_chat(
             width,
             collapsed,
         );
-        let elapsed = source
+        let elapsed_seconds = source
             .turn
             .thinking_started_at
-            .map(|started| started.elapsed())
+            .map(|started| started.elapsed().as_secs())
             .unwrap_or_default();
-        key.animation = Some((0, (elapsed.as_secs_f64() * 10.0).round() as u64));
+        key.animation = Some((0, elapsed_seconds));
         let chrome = cache.get_or_build(key, || {
             let mut layout = EntryLayout::default();
             let indicator = if collapsed { "▶" } else { "▼" };
@@ -1206,7 +1210,7 @@ fn draw_cached_chat(
                 .rows
                 .push(BubbleStyle::new(THINKING_BORDER_COLOR).content_line(
                     vec![Span::styled(
-                        format!("{indicator} Thinking… ({:.1}s)", elapsed.as_secs_f64()),
+                        format!("{indicator} Thinking… ({elapsed_seconds}s)"),
                         dim,
                     )],
                     dim,
@@ -1445,7 +1449,10 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState, registry: &Too
                         state: bubble_state.as_ref(),
                         collapsed: *collapsed,
                         spinner_frame: state.spinner_frame,
-                        started_at: state.subagent_started_at.get(id).copied(),
+                        elapsed_seconds: state
+                            .subagent_started_at
+                            .get(id)
+                            .map(|started| started.elapsed().as_secs()),
                         display_title_override: display_title_override.as_deref(),
                         subtype_argument,
                     },
@@ -1547,7 +1554,10 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState, registry: &Too
                 state: bubble_state,
                 collapsed: *collapsed,
                 spinner_frame: state.spinner_frame,
-                started_at: state.subagent_started_at.get(bubble_id).copied(),
+                elapsed_seconds: state
+                    .subagent_started_at
+                    .get(bubble_id)
+                    .map(|started| started.elapsed().as_secs()),
                 display_title_override: display_title_override.as_deref(),
                 subtype_argument,
             },
@@ -2038,9 +2048,8 @@ fn append_thinking_lines(
 /// before it is flushed into a `ChatEntry::ThinkingMessage` — clicking its
 /// title routes through `thinking_title_rows`, keyed by the
 /// `STREAMING_THINKING_ENTRY_INDEX` sentinel since there is no real
-/// `chat_entries` index yet. The title shows the live elapsed time
-/// (`Thinking… ({elapsed})`) computed from `thinking_started_at`, updating
-/// every redraw while the stream is active.
+/// `chat_entries` index yet. The title shows elapsed whole seconds computed
+/// from `thinking_started_at`; subsecond redraws leave the readout unchanged.
 fn append_streaming_thinking_lines(
     lines: &mut Vec<Line<'static>>,
     text: &str,
@@ -2051,10 +2060,10 @@ fn append_streaming_thinking_lines(
 ) {
     let style = BubbleStyle::new(THINKING_BORDER_COLOR);
     let dim = Style::default().add_modifier(Modifier::DIM);
-    let elapsed = thinking_started_at
-        .map(|started_at| started_at.elapsed())
+    let elapsed_seconds = thinking_started_at
+        .map(|started_at| started_at.elapsed().as_secs())
         .unwrap_or_default();
-    let title_text = format!("Thinking… ({:.1}s)", elapsed.as_secs_f64());
+    let title_text = format!("Thinking… ({elapsed_seconds}s)");
 
     let bubble_start_row = lines.len();
 
@@ -2146,7 +2155,8 @@ struct ToolBubbleArgs<'a> {
     state: &'a ToolCallState,
     collapsed: bool,
     spinner_frame: u8,
-    started_at: Option<std::time::Instant>,
+    /// Sampled once so the title and its cache key use the same whole seconds.
+    elapsed_seconds: Option<u64>,
     /// The bubble's display title: the tool's own `Tool::title()` label for
     /// `name`, looked up by the caller in the `ToolRegistry` at render time
     /// (e.g. `Web Search (Brave)`, which names the configured backend).
@@ -2268,7 +2278,7 @@ fn append_tool_layout(
         state,
         collapsed,
         spinner_frame,
-        started_at,
+        elapsed_seconds,
         display_title_override,
         subtype_argument,
     } = bubble;
@@ -2496,8 +2506,8 @@ fn append_tool_layout(
     let mut summary_segments: Vec<SummarySegment> = vec![];
     let summary_text: String = match state {
         ToolCallState::Running { .. } if is_subagent && !is_queued_subagent => {
-            if let Some(started_at) = started_at {
-                let duration_formatted = format!("{:.1}s", started_at.elapsed().as_secs_f64());
+            if let Some(elapsed_seconds) = elapsed_seconds {
+                let duration_formatted = format!("{elapsed_seconds}s");
                 summary_segments.push(SummarySegment {
                     text: duration_formatted.clone(),
                     style: dim_white,
@@ -4653,7 +4663,7 @@ mod tests {
                 state: &state,
                 collapsed: false,
                 spinner_frame: 0,
-                started_at: None,
+                elapsed_seconds: None,
                 display_title_override: None,
                 subtype_argument: None,
             },
@@ -4715,7 +4725,7 @@ mod tests {
                 state: &state,
                 collapsed: false,
                 spinner_frame: 0,
-                started_at: None,
+                elapsed_seconds: None,
                 display_title_override: None,
                 subtype_argument: None,
             },
@@ -4765,7 +4775,7 @@ mod tests {
                         state: &state,
                         collapsed,
                         spinner_frame: 0,
-                        started_at: None,
+                        elapsed_seconds: None,
                         display_title_override,
                         subtype_argument: None,
                     },
@@ -4850,7 +4860,7 @@ mod tests {
                 state: &state,
                 collapsed: false,
                 spinner_frame: 3,
-                started_at: None,
+                elapsed_seconds: None,
                 display_title_override: None,
                 subtype_argument: None,
             },
@@ -4900,7 +4910,7 @@ mod tests {
                 state: &state,
                 collapsed: false,
                 spinner_frame: 0,
-                started_at: None,
+                elapsed_seconds: None,
                 display_title_override: None,
                 subtype_argument: None,
             },
@@ -4948,7 +4958,7 @@ mod tests {
                 state: &state,
                 collapsed: true,
                 spinner_frame: 0,
-                started_at: None,
+                elapsed_seconds: None,
                 display_title_override: None,
                 subtype_argument: None,
             },
@@ -5002,7 +5012,7 @@ mod tests {
                 state: &state,
                 collapsed: false,
                 spinner_frame: 0,
-                started_at: None,
+                elapsed_seconds: None,
                 display_title_override: Some("Subagent"),
                 subtype_argument: None,
             },

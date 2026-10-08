@@ -269,6 +269,119 @@ fn stream_updates_append_and_compaction_preserve_or_invalidate_the_correct_slots
 }
 
 #[test]
+fn live_thinking_timers_use_whole_seconds_and_preserve_completed_precision() {
+    use ylva::DomainEvent;
+
+    for cached in [false, true] {
+        for child_view in [false, true] {
+            for collapsed in [false, true] {
+                let mut state = ylva::AppState::new();
+                if cached {
+                    state.enable_render_cache();
+                }
+                let run_id = uuid::Uuid::new_v4();
+                if child_view {
+                    let bubble_id = uuid::Uuid::new_v4();
+                    present_render_event(
+                        &mut state,
+                        DomainEvent::ToolStart {
+                            id: bubble_id,
+                            name: "spawn_subagent".into(),
+                            arguments: serde_json::json!({}),
+                            content_sections: vec![],
+                            title_arguments: vec![],
+                            run_id: None,
+                        },
+                    );
+                    present_render_event(
+                        &mut state,
+                        DomainEvent::ChildAgentStarted {
+                            run_id,
+                            call_id: bubble_id,
+                            agent_type: "default".into(),
+                            task: "Inspect".into(),
+                            label: "Inspect".into(),
+                        },
+                    );
+                    present_render_event(
+                        &mut state,
+                        DomainEvent::ChildAgentToken {
+                            run_id,
+                            text: "reasoning".into(),
+                            is_thinking: true,
+                        },
+                    );
+                    state.switch_to_child_view(run_id);
+                } else {
+                    present_render_event(&mut state, DomainEvent::StreamStarted);
+                    present_render_event(
+                        &mut state,
+                        DomainEvent::StreamThinkingChunk("reasoning".into()),
+                    );
+                }
+                let mut previous_layouts = Vec::new();
+                for elapsed_millis in [9_100, 9_600, 10_100] {
+                    let turn_buffer = if child_view {
+                        &mut state
+                            .child_conversations
+                            .get_mut(&run_id)
+                            .expect("child")
+                            .turn_buffer
+                    } else {
+                        &mut state.turn_buffer
+                    };
+                    turn_buffer.partial_thinking_collapsed = collapsed;
+                    turn_buffer.thinking_started_at =
+                        Some(std::time::Instant::now() - Duration::from_millis(elapsed_millis));
+                    render_offline(&mut state, 120, 40);
+                    let title = state
+                        .conversation
+                        .chat_rendered_lines
+                        .iter()
+                        .find(|line| line.contains("Thinking… ("))
+                        .expect("thinking title");
+                    assert!(
+                        title.ends_with(&format!("Thinking… ({}s)", elapsed_millis / 1000)),
+                        "live thinking duration must truncate to whole seconds: {title}"
+                    );
+                    if cached && elapsed_millis == 9_600 {
+                        let current_layouts = &state.render_cache.conversation.layouts;
+                        assert_eq!(previous_layouts.len(), current_layouts.len());
+                        assert!(
+                            previous_layouts
+                                .iter()
+                                .zip(current_layouts)
+                                .all(|(previous, current)| Arc::ptr_eq(previous, current)),
+                            "subsecond thinking redraws must reuse chrome and body"
+                        );
+                    }
+                    previous_layouts = state.render_cache.conversation.layouts.clone();
+                }
+                let completed = ChatEntry::ThinkingMessage {
+                    text: "reasoning".into(),
+                    collapsed,
+                    duration: Duration::from_millis(1234),
+                };
+                if child_view {
+                    let child = state.child_conversations.get_mut(&run_id).expect("child");
+                    child.turn_buffer = Default::default();
+                    child.messages.push(completed);
+                } else {
+                    state.turn_buffer = Default::default();
+                    state.chat_entries.push(completed);
+                }
+                render_offline(&mut state, 120, 40);
+                assert!(state
+                    .conversation
+                    .chat_rendered_lines
+                    .iter()
+                    .any(|line| line.ends_with("Thought for 1.234s")));
+            }
+        }
+    }
+}
+
+#[test]
 fn borrowed_projection_preserves_streaming_and_queued_footer_labels() {
     let mut state = ylva::AppState::new();
     state.enable_render_cache();
@@ -3722,11 +3835,14 @@ fn spawn_subagent_running_duration_is_visible_in_parent_and_child_views() {
     use ylva::tui_reducer_state::ResultSection;
     use ylva::{AppState, DomainEvent, TuiEvent};
 
-    for child_view in [false, true] {
+    for (child_view, cached) in [(false, false), (true, false), (false, true), (true, true)] {
         for collapsed in [false, true] {
             let bubble_id = uuid::Uuid::new_v4();
             let run_id = uuid::Uuid::new_v4();
             let mut state = AppState::new();
+            if cached {
+                state.enable_render_cache();
+            }
             let apply_event = |state: &mut AppState, event| {
                 ylva::presenter::update(state, TuiEvent::Domain(event), &empty_textarea_context());
             };
@@ -3776,10 +3892,7 @@ fn spawn_subagent_running_duration_is_visible_in_parent_and_child_views() {
             };
             if !child_view {
                 let title = draw_title(&mut state);
-                assert!(
-                    !title.contains("0.0s"),
-                    "admission is not execution: {title}"
-                );
+                assert!(!title.ends_with('s'), "admission is not execution: {title}");
             }
             apply_event(
                 &mut state,
@@ -3799,8 +3912,9 @@ fn spawn_subagent_running_duration_is_visible_in_parent_and_child_views() {
                     .child_conversations
                     .get_mut(&run_id)
                     .expect("child")
-                    .started_at =
-                    Some(std::time::Instant::now() - Duration::from_secs(elapsed_seconds));
+                    .started_at = Some(
+                    std::time::Instant::now() - Duration::from_millis(elapsed_seconds * 1000 + 100),
+                );
                 let started_at = state.child_conversations[&run_id].started_at;
                 apply_event(
                     &mut state,
@@ -3811,19 +3925,45 @@ fn spawn_subagent_running_duration_is_visible_in_parent_and_child_views() {
                 );
                 assert_eq!(state.child_conversations[&run_id].started_at, started_at);
                 let title = draw_title(&mut state);
-                let elapsed = title
-                    .split_whitespace()
-                    .last()
-                    .expect("duration")
-                    .strip_suffix('s')
-                    .expect("seconds suffix")
-                    .parse::<f64>()
-                    .expect("numeric duration");
-                assert!(
-                    (elapsed_seconds as f64..elapsed_seconds as f64 + 1.0).contains(&elapsed),
-                    "live duration must advance in the {} view: {title}",
-                    if child_view { "child" } else { "parent" }
+                let duration_label = title.split_whitespace().last().expect("duration");
+                assert_eq!(
+                    duration_label,
+                    format!("{elapsed_seconds}s"),
+                    "running duration uses whole seconds in the {} view",
+                    if child_view { "child" } else { "parent" },
                 );
+                let previous_layouts = if child_view {
+                    state.render_cache.header.layouts.clone()
+                } else {
+                    state.render_cache.conversation.layouts.clone()
+                };
+                state
+                    .child_conversations
+                    .get_mut(&run_id)
+                    .expect("child")
+                    .started_at = Some(
+                    std::time::Instant::now() - Duration::from_millis(elapsed_seconds * 1000 + 600),
+                );
+                let same_second_title = draw_title(&mut state);
+                assert_eq!(
+                    same_second_title, title,
+                    "subsecond redraws must keep the timer calm"
+                );
+                if cached {
+                    let current_layouts = if child_view {
+                        &state.render_cache.header.layouts
+                    } else {
+                        &state.render_cache.conversation.layouts
+                    };
+                    assert_eq!(previous_layouts.len(), current_layouts.len());
+                    assert!(
+                        previous_layouts
+                            .iter()
+                            .zip(current_layouts)
+                            .all(|(previous, current)| Arc::ptr_eq(previous, current)),
+                        "unchanged elapsed seconds and spinner must reuse cached chrome and bodies"
+                    );
+                }
             }
             apply_event(
                 &mut state,

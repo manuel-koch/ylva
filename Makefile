@@ -13,6 +13,7 @@ COVERAGE_THRESHOLD := 80
 
 .PHONY: lint format format-rust format-markdown \
 	create-logs-dir \
+	clean \
 	build-debug build-debug-and-run \
 	build-release build-release-and-run build-debug-and-run-with-logs \
 	test test-e2e-persistence test-coverage test-coverage-missing \
@@ -46,6 +47,9 @@ logs/.gitignore: logs
 	echo "**" > logs/.gitignore
 
 create-logs-dir: logs/.gitignore
+
+clean:
+	cargo clean -p ylva --target-dir "$(CARGO_TARGET_DIR)"
 
 # Build debug binary (output: target/debug/ylva)
 build-debug:

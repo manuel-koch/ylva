@@ -236,6 +236,13 @@ the real binary instead:
 
 ## Unit-test shared helpers (`src/test_support.rs`)
 
+Large owner-local suites use `#[cfg(test)] mod tests;` with
+`<owner>/tests.rs`; responsibility-specific descendants live under
+`<owner>/tests/`, sharing fixtures from that local parent (see
+`src/llm/engine/tests.rs`). Small boundary suites can remain beside the
+extracted implementation (see `src/agent/tools/read/stream.rs` and
+`src/agent/tools/read/windows.rs`). Cross-owner assertions stay at the facade.
+
 Helpers shared only by unit tests (`#[cfg(test)]` modules inside `src/*.rs`)
 live in `src/test_support.rs`, wired from `src/lib.rs` via
 `#[cfg(test)] mod test_support;` so the module is compiled into test builds

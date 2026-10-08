@@ -89,7 +89,7 @@ Obtain explicit implementation consent before source edits. Execute one
 subsystem at a time; do not combine all moves into an unverified repository-wide change.
 No staging, branch creation, or commits are authorized by this plan.
 
-1. [ ] Establish the baseline and final extraction map. Open
+1. [x] Establish the baseline and final extraction map. Open
    `src/agent/tools/read.rs` first, especially its streaming dispatch,
    window scanners, media recognition and inline tests.
    Read `docs/development-workflow.md` and `docs/known-test-issues.md`.
@@ -99,7 +99,7 @@ No staging, branch creation, or commits are authorized by this plan.
    module inventory, and `docs/architecture-design-records/` for changes
    since this scan. Confirm the selected scope in this file.
 
-2. [ ] Pilot the layout pattern by splitting read internals without
+2. [x] Pilot the layout pattern by splitting read internals without
    generalizing every tool. Keep `ReadTool`, typed arguments, call adapter,
    results, metadata, public constants and schema contract in
    `src/agent/tools/read.rs`.
@@ -118,7 +118,7 @@ No staging, branch creation, or commits are authorized by this plan.
    complete-media exceptions and attachment fidelity.
    Update the relevant read mechanics paths in `docs/implementation-notes.md`.
 
-3. [ ] Split engines into `llm/engine/config.rs`,
+3. [x] Split engines into `llm/engine/config.rs`,
    `llm/engine/selection.rs`, `llm/engine/router.rs` and
    `llm/engine/runtime.rs`. Retain the `Engine` trait and compatibility
    re-exports in `src/llm/engine.rs`; config owns immutable and runtime
@@ -353,6 +353,29 @@ they do not block completing the nine selected parents.
 
 ### Refinement decisions
 
+- Execution started on 2026-10-08 with explicit source-edit consent. The
+  worktree was clean, the inventory still contained 73 source and 20 test
+  Rust files, and the ADR directory still contained only `.gitkeep`.
+  The nine-parent scope and extraction map above remain unchanged.
+  All 57 read baseline tests passed. The complete registered-case inventory
+  is retained in the executing Copilot session's `files/` directory, outside
+  the tracked tree. A stale `tree-sitter` artifact prevented the first check
+  in the shared Cargo target directory; checks use the repository-local
+  `target/` directory instead.
+- The read pilot now has private `stream`, `windows` and `media` children,
+  with whole-tool tests in `read/tests.rs`. Its existing 57 cases remain
+  registered; five new stream/scanner boundary cases exercise the extracted
+  owners. Read library tests, `tools_binary_data`, `tools_agent_loop` and
+  default-feature all-target Clippy passed. Read ownership and unchanged
+  streaming/media constraints are recorded in `docs/implementation-notes.md`.
+- Engines now have private `config`, `selection`, `router` and `runtime`
+  owners, with explicit re-exports at the unchanged `llm::engine` facade.
+  All 38 original engine cases remain; a display-snapshot regression was
+  added, and preview/activation target identity assertions were strengthened.
+  Engine/factory library tests, `http_provider`, `cli_driver` and
+  default-feature all-target Clippy passed. Ownership and local test-suite
+  layout are documented in `docs/implementation-notes.md` and
+  `docs/development-workflow.md`.
 - The user confirmed this refined plan on 2026-10-08. Confirmation applies
   to the saved plan only; source implementation and Git operations are not
   authorized.
@@ -370,6 +393,42 @@ they do not block completing the nine selected parents.
 - Execution proceeds through read and engine pilots, the TUI layers,
   persistence/sandbox, then agent execution. Each subsystem receives
   targeted verification before the next starts.
+
+### Execution checkpoint: read and engine pilots
+
+Steps 1-3 are complete; steps 4-15 remain pending. The first execution batch
+stops at this verified subsystem boundary, before reducer-state extraction.
+No staging, branch creation or commits were performed.
+
+The normalized registered-case comparison retained all 1,618 baseline cases
+and found six added cases (1,624 total). `make format lint`, default-feature
+all-target Clippy, the targeted checks named above and `make test-coverage`
+passed. Aggregate line coverage was **92.29%**, above the unchanged 80% gate.
+The report included all seven extracted production children; no coverage
+exclusion was changed. Changed Markdown files passed `rumdl check`.
+
+Physical-line counts follow the inventory convention below. The two facade
+test regions contain only their external test-module declarations. None of
+these production regions exceeds the responsibility-review trigger, so no
+cohesive size exception is needed for either pilot.
+
+| Module | Production | Tests |
+| --- | ---: | ---: |
+| `agent/tools/read.rs` | 875 | 2 |
+| `agent/tools/read/media.rs` | 89 | 0 |
+| `agent/tools/read/stream.rs` | 197 | 114 |
+| `agent/tools/read/windows.rs` | 283 | 86 |
+| `agent/tools/read/tests.rs` | 0 | 1667 |
+| `llm/engine.rs` | 331 | 2 |
+| `llm/engine/config.rs` | 240 | 0 |
+| `llm/engine/router.rs` | 431 | 0 |
+| `llm/engine/runtime.rs` | 349 | 0 |
+| `llm/engine/selection.rs` | 193 | 0 |
+| `llm/engine/tests.rs` | 0 | 400 |
+| `llm/engine/tests/config.rs` | 0 | 174 |
+| `llm/engine/tests/router.rs` | 0 | 391 |
+| `llm/engine/tests/runtime.rs` | 0 | 306 |
+| `llm/engine/tests/selection.rs` | 0 | 85 |
 
 ### Inventory interpretation
 

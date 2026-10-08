@@ -43,6 +43,14 @@ Engine runtime.
 
 ## Engine runtime and provider request configuration
 
+`llm/engine.rs` retains the `Engine` trait and explicit compatibility
+re-exports. Its private children separate configuration and deserializers
+(`engine/config.rs`), typed picker targets and display snapshots
+(`engine/selection.rs`), named-engine routing (`engine/router.rs`), and
+provider-backed execution with catalog hydration (`engine/runtime.rs`).
+`engine/tests.rs` retains shared fixtures and cross-owner assertions, with
+responsibility-specific suites under `engine/tests/`.
+
 `EngineImpl` and `OpenAiCompatibleProvider` share one
 `EngineRuntimeConfigHandle`. The provider snapshots it before building a
 request and releases the lock before network I/O. Updates therefore affect
@@ -133,6 +141,21 @@ completion reset another stream's pending approval to idle. An all-unknown batch
 counts as one completed tool-use iteration.
 
 ## Binary result projection
+
+`agent/tools/read.rs` owns the tool/schema/result contract and explicit versus
+autodetected mode dispatch. Its private `read/stream.rs` child owns bounded
+I/O and incremental UTF-8 validation; `read/windows.rs` owns selected
+line/character windows and full-source line counting; `read/media.rs` owns
+recognition, Base64 construction and safe source filenames. Media helpers and
+constants retain their existing `agent::tools::read` paths for fetch backends
+and providers. Whole-tool tests live in `read/tests.rs`, with stream and scanner
+boundary tests beside their implementations.
+
+Text reads retain only the selected window but validate to EOF, including
+after window completion or truncation. Autodetection keeps UTF-8-first ordering
+and uses the first raw chunk to recognize media, then re-reads from the same
+open handle. Complete media results keep the existing separate size ceiling;
+range reads and text windows keep the output cap.
 
 `ToolCallResult::text()` remains the complete model-facing result.
 `display_text()` is an optional UI projection. For Base64 `read`, it returns
@@ -475,6 +498,13 @@ Live `ChildConversation::started_at` uses a monotonic clock initialized by
 `ChildAgentStarted`; replayed conversations have no live timer. Render projections
 key these start times by the originating bubble id, so the root bubble and drill-in
 header share one elapsed timer. Queued and terminal bubbles never render it.
+Each tool-bubble render samples elapsed whole seconds once for both its live
+title and cache key. Subsecond redraws reuse unchanged timer chrome; spinner
+frame changes still update independently. Completed durations retain their
+millisecond precision.
+Live Thinking timers also use truncated whole seconds in cached and legacy
+rendering, with the cached title and animation key sharing one sample.
+Completed `Thought for` titles retain millisecond precision.
 
 `AppState` keeps `active_view`, `running_child`, and
 `child_conversations` (keyed by `run_id`) separate. Finished conversations
