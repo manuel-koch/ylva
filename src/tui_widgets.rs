@@ -53,13 +53,15 @@ use crate::conversation_render_cache::{
 use crate::markdown::render_markdown;
 use crate::tui_reducer_state::{
     matching_model_indices, model_picker_row_entries, slash_overlay_text_rows,
-    ActiveSubagentCounts, BannerDragSelection, ChatEntry, SlashOverlay, SlashOverlayLayout,
-    ToolCallState, UserMessageState, CONFIRM_TIMEOUT, HELP_HORIZONTAL_SCROLL_COLUMNS,
+    ActiveSubagentCounts, BannerDragSelection, BubbleExpansionTarget, ChatEntry, SlashOverlay,
+    SlashOverlayLayout, ToolCallState, UserMessageState, CONFIRM_TIMEOUT,
+    HELP_HORIZONTAL_SCROLL_COLUMNS,
 };
 use crate::tui_render_state::TuiState;
 use std::sync::Arc;
 
 pub(crate) struct ConversationSource<'a> {
+    pub expansion_feedback: Option<BubbleExpansionTarget>,
     pub run_id: Option<uuid::Uuid>,
     entries: &'a [ChatEntry],
     turn: &'a crate::tui_reducer_state::TurnBuffer,
@@ -79,6 +81,7 @@ impl<'a> ConversationSource<'a> {
         };
         let child = run_id.and_then(|run_id| state.child_conversations.get(&run_id));
         Self {
+            expansion_feedback: None,
             run_id,
             entries: child.map_or(state.chat_entries.as_slice(), |child| child.messages.as_slice()),
             turn: child.map_or(&state.turn_buffer, |child| &child.turn_buffer),
@@ -887,6 +890,8 @@ fn prepare_cached_header(
         },
     )) = conversation.source.header
     {
+        let collapsed = *collapsed
+            || conversation.source.expansion_feedback == Some(BubbleExpansionTarget::Tool(*id));
         let tool = registry.get(name);
         let title = if name == crate::agent::tools::spawn_subagent::SpawnSubagentTool::NAME {
             Some("Subagent".to_owned())
@@ -903,7 +908,7 @@ fn prepare_cached_header(
                 .copied()
                 .unwrap_or_default(),
             width,
-            *collapsed,
+            collapsed,
         );
         key.title = Some(format!(
             "{title:?}/{subtype:?}/{}",
@@ -921,7 +926,7 @@ fn prepare_cached_header(
                 id: *id,
                 name,
                 state: bubble_state,
-                collapsed: *collapsed,
+                collapsed,
                 spinner_frame: state.spinner_frame,
                 started_at: state.subagent_started_at.get(id).copied(),
                 display_title_override: title.as_deref(),
@@ -976,7 +981,7 @@ fn update_selection_index(
     index.replace(layouts, trim_blank)
 }
 
-fn build_entry(entry: &ChatEntry, index: usize, width: u16) -> EntryLayout {
+fn build_entry(entry: &ChatEntry, index: usize, width: u16, collapsed: bool) -> EntryLayout {
     let mut layout = EntryLayout::default();
     let body_width = (width as usize).saturating_sub(5).max(1);
     let wrap_width = (width as usize).saturating_sub(2).max(1);
@@ -987,14 +992,10 @@ fn build_entry(entry: &ChatEntry, index: usize, width: u16) -> EntryLayout {
         ChatEntry::AssistantMessage { text, interrupted } => {
             append_assistant_lines(&mut layout.rows, text, *interrupted, body_width)
         }
-        ChatEntry::ThinkingMessage {
-            text,
-            collapsed,
-            duration,
-        } => append_thinking_lines(
+        ChatEntry::ThinkingMessage { text, duration, .. } => append_thinking_lines(
             &mut layout.rows,
             text,
-            *collapsed,
+            collapsed,
             *duration,
             index,
             &mut layout.thinking,
@@ -1105,13 +1106,21 @@ fn draw_cached_chat(
                 collapsed: true,
                 ..
             }
-        );
+        ) || match entry {
+            ChatEntry::ToolBubble { id, .. } => {
+                source.expansion_feedback == Some(BubbleExpansionTarget::Tool(*id))
+            }
+            ChatEntry::ThinkingMessage { .. } => {
+                source.expansion_feedback == Some(BubbleExpansionTarget::Thinking(index))
+            }
+            _ => false,
+        };
         let key = layout_key(EntrySlot::Entry(index), revision, width, collapsed);
         if let ChatEntry::ToolBubble {
             id,
             name,
             state: bubble_state,
-            collapsed,
+            ..
         } = entry
         {
             let tool = registry.get(name);
@@ -1129,7 +1138,7 @@ fn draw_cached_chat(
                     id: *id,
                     name,
                     state: bubble_state,
-                    collapsed: *collapsed,
+                    collapsed,
                     spinner_frame: state.spinner_frame,
                     started_at: state.subagent_started_at.get(id).copied(),
                     display_title_override: title.as_deref(),
@@ -1144,18 +1153,23 @@ fn draw_cached_chat(
             }
         } else {
             layouts.push(cache.get_or_build(key, || {
-                finish_layout(build_entry(entry, index, width), width)
+                finish_layout(build_entry(entry, index, width, collapsed), width)
             }));
         }
     }
     let body_width = (width as usize).saturating_sub(5).max(1);
     if !source.turn.partial_thinking_text.is_empty() {
+        let collapsed = source.turn.partial_thinking_collapsed
+            || source.expansion_feedback
+                == Some(BubbleExpansionTarget::Thinking(
+                    crate::tui_reducer_state::STREAMING_THINKING_ENTRY_INDEX,
+                ));
         let body = cache.get_or_build(
             layout_key(
                 EntrySlot::Thinking,
                 source.stream_revision,
                 width,
-                source.turn.partial_thinking_collapsed,
+                collapsed,
             ),
             || {
                 let mut layout = EntryLayout::default();
@@ -1163,7 +1177,7 @@ fn draw_cached_chat(
                     &mut layout.rows,
                     &source.turn.partial_thinking_text,
                     source.turn.thinking_started_at,
-                    source.turn.partial_thinking_collapsed,
+                    collapsed,
                     &mut Vec::new(),
                     body_width,
                 );
@@ -1176,7 +1190,7 @@ fn draw_cached_chat(
             EntrySlot::ThinkingChrome,
             source.stream_revision,
             width,
-            source.turn.partial_thinking_collapsed,
+            collapsed,
         );
         let elapsed = source
             .turn
@@ -1186,11 +1200,7 @@ fn draw_cached_chat(
         key.animation = Some((0, (elapsed.as_secs_f64() * 10.0).round() as u64));
         let chrome = cache.get_or_build(key, || {
             let mut layout = EntryLayout::default();
-            let indicator = if source.turn.partial_thinking_collapsed {
-                "▶"
-            } else {
-                "▼"
-            };
+            let indicator = if collapsed { "▶" } else { "▼" };
             let dim = Style::default().add_modifier(Modifier::DIM);
             layout
                 .rows
@@ -1287,6 +1297,14 @@ fn draw_cached_chat(
     let total = cache.conversation.height;
     let visible = content_area.height as usize;
     let maximum = total.saturating_sub(visible);
+    state.conversation.chat_scrollbar = crate::tui_reducer_state::ChatScrollbarLayout {
+        rect: if maximum > 0 {
+            scrollbar_area
+        } else {
+            Rect::default()
+        },
+        maximum_scroll_offset: maximum,
+    };
     let offset = if state.conversation.scroll_locked {
         maximum
     } else {
@@ -1437,7 +1455,14 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState, registry: &Too
             }
             _ => {
                 let offset = lines.len();
-                let layout = build_entry(entry, entry_index, content_area.width);
+                let collapsed = matches!(
+                    entry,
+                    ChatEntry::ThinkingMessage {
+                        collapsed: true,
+                        ..
+                    }
+                );
+                let layout = build_entry(entry, entry_index, content_area.width, collapsed);
                 thinking_title_rows_out.extend(
                     layout
                         .thinking
@@ -1552,6 +1577,14 @@ fn draw_chat(frame: &mut Frame, area: Rect, state: &mut TuiState, registry: &Too
     let visible = area.height as usize;
     // Upper scroll bound: how far the viewport can be offset from the top.
     let max_offset = total_lines.saturating_sub(visible);
+    state.conversation.chat_scrollbar = crate::tui_reducer_state::ChatScrollbarLayout {
+        rect: if max_offset > 0 {
+            scrollbar_area
+        } else {
+            Rect::default()
+        },
+        maximum_scroll_offset: max_offset,
+    };
     let row_offset = if state.conversation.scroll_locked {
         // Keep scroll_offset in sync with the rendered bottom so that the
         // first scroll_up(1) call starts from the actual bottom position

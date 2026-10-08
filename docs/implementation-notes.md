@@ -518,6 +518,13 @@ The TUI renders the same headless `AgentLoop`; it does not own agent state.
 - `src/tui_driver.rs` owns the terminal loop, maps live UI updates to domain
   events, and executes effects. `src/cli_driver.rs` owns the headless loop.
 
+Both conversation render paths publish `ChatScrollbarLayout` with the visible
+scrollbar rect and the exact maximum offset after layout. The presenter maps
+arrow/track clicks through that geometry rather than the selection-line count,
+which can include a trailing spacer omitted from the painted conversation.
+The rect is empty when content fits; help and slash-overlay hit-testing retain
+priority over scrollbar clicks.
+
 Input height and mouse hit-testing use ratatui-textarea's native wrapped screen
 map rather than a separate `textwrap` approximation. Hit-testing adds the rendered
 viewport offset and uses native cursor movements to resolve screen cells,
@@ -555,6 +562,15 @@ transcript, turn buffer, queued steers, and root header bubble. The legacy
 `TuiState` shell omits these payloads. Selection vectors move into that shell
 and back, rather than being cloned per frame. Existing owned widget callers
 and the driver's returned snapshots remain supported.
+
+Expansion toggles record `pending_bubble_expansion`. Before its normal frame,
+the driver flushes `render_expansion_feedback`, which borrows the same content
+but uses the target's collapsed layout and overlays `Expanding…` on its title.
+Only after that terminal draw succeeds does `BubbleExpansionFeedbackShown`
+clear the pending target and allow expanded layout. The feedback frame preserves
+the conversation's scroll state so a temporary collapsed bottom cannot
+re-enable auto-scroll. Collapse, clear, and view navigation discard pending
+feedback; the subagent single/double-click window remains unchanged.
 
 The driver opts into revision tracking through `AppState::enable_render_cache`.
 Tool mutation helpers advance slot revisions; ordinary progress metadata
@@ -597,9 +613,7 @@ obsolete optional layouts; clear/view switches drop previous-view storage.
 
 Deterministic coverage includes warm body-build counts, visible-row copy
 counts, real Rust file highlighting, large Markdown/plain fixtures, full
-selection/copy data, and absolute bottom offsets beyond `u16::MAX`. Manual
-release-terminal performance evidence is tracked in
-[the implementation plan](./plans/improved-rendering-plan.md).
+selection/copy data, and absolute bottom offsets beyond `u16::MAX`.
 
 ## Slash commands
 

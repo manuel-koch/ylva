@@ -135,6 +135,7 @@ pub struct ConversationListState {
     /// On-screen rect of the chat content area (not the scrollbar column),
     /// written each frame by `tui_widgets::draw_chat` for mouse hit-testing.
     pub chat_area: ratatui::layout::Rect,
+    pub chat_scrollbar: crate::tui_reducer_state::ChatScrollbarLayout,
     /// Plain text of every rendered line built by the most recent `draw_chat`
     /// call. Indexed by absolute line number (before scroll offset). Used for
     /// extracting selected text on mouse-up.
@@ -173,6 +174,7 @@ impl Default for ConversationListState {
             scroll_locked: true,
             chat_area_height: 0,
             chat_area: ratatui::layout::Rect::default(),
+            chat_scrollbar: crate::tui_reducer_state::ChatScrollbarLayout::default(),
             chat_rendered_lines: Vec::new(),
             chat_rendered_line_prefix_widths: Vec::new(),
             chat_selection: None,

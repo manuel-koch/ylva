@@ -1220,6 +1220,7 @@ fn app_state_to_tui_state(app: AppState) -> TuiState {
             scroll_locked: app.conversation.scroll_locked,
             chat_area_height: app.conversation.chat_area_height,
             chat_area: chat_area_rect,
+            chat_scrollbar: app.layout.chat_scrollbar,
             chat_rendered_lines: app.conversation.chat_rendered_lines,
             chat_rendered_line_prefix_widths: app.conversation.chat_rendered_line_prefix_widths,
             chat_selection: app.conversation.chat_selection,
@@ -1247,6 +1248,28 @@ where
 {
     state.engine_display = agent.engine_display_info();
     let hint = confirm_hint(state);
+    if state.pending_bubble_expansion.is_some() {
+        terminal.draw(|frame| {
+            render::render_expansion_feedback(
+                frame,
+                state,
+                textarea,
+                hint.as_deref(),
+                mouse_pos,
+                agent.registry().as_ref(),
+            );
+        })?;
+        presenter::update(
+            state,
+            TuiEvent::Domain(DomainEvent::BubbleExpansionFeedbackShown),
+            &TextareaContext {
+                is_empty: textarea.lines() == [""],
+                text: textarea.lines().join("\n"),
+                cursor_row: textarea.cursor().0,
+                cursor_row_is_last: textarea.cursor().0 + 1 >= textarea.lines().len().max(1),
+            },
+        );
+    }
     terminal.draw(|frame| {
         render::render(
             frame,

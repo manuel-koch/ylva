@@ -1116,6 +1116,8 @@ pub enum DomainEvent {
     /// (see `AppState::last_bubble_click`). A no-op if a second click (or a
     /// click on a different bubble) already resolved/cleared it first.
     BubbleClickWindowExpired,
+    /// The terminal flushed the lightweight frame acknowledging an expansion.
+    BubbleExpansionFeedbackShown,
     /// Estimated size against the active context window; see [`ContextUsage`]
     /// and `UiUpdate::ContextUsage` for the estimate source.
     ContextUsage {
@@ -1162,6 +1164,7 @@ impl DomainEvent {
             DomainEvent::ChildContextUsage { .. } => "ChildContextUsage",
             DomainEvent::ChildAgentDone { .. } => "ChildAgentDone",
             DomainEvent::BubbleClickWindowExpired => "BubbleClickWindowExpired",
+            DomainEvent::BubbleExpansionFeedbackShown => "BubbleExpansionFeedbackShown",
             DomainEvent::ContextUsage { .. } => "ContextUsage",
             DomainEvent::CompactionApplied { .. } => "CompactionApplied",
         }
@@ -1692,11 +1695,48 @@ impl SlashOverlayLayout {
     }
 }
 
-/// Aggregated screen-space geometry written by the View (`render.rs`) each
-/// frame and read by the Presenter for mouse hit-testing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BubbleExpansionTarget {
+    Tool(Uuid),
+    /// `STREAMING_THINKING_ENTRY_INDEX` denotes the in-flight thinking bubble.
+    Thinking(usize),
+}
+
+/// Rendered conversation scrollbar geometry and its current scroll range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ChatScrollbarLayout {
+    /// Empty when the conversation does not overflow its viewport.
+    pub rect: Rect,
+    pub maximum_scroll_offset: usize,
+}
+
+impl ChatScrollbarLayout {
+    pub fn offset_at(&self, column: u16, row: u16) -> Option<usize> {
+        if !self.rect.contains((column, row).into()) {
+            return None;
+        }
+        let height = usize::from(self.rect.height);
+        let relative_row = usize::from(row - self.rect.y);
+        let (track_row, track_height) = if height >= 4 {
+            (relative_row.saturating_sub(1).min(height - 3), height - 2)
+        } else {
+            (relative_row, height)
+        };
+        let offset = if track_height <= 1 {
+            0
+        } else {
+            (self.maximum_scroll_offset as u128 * track_row as u128 / (track_height - 1) as u128)
+                as usize
+        };
+        Some(offset)
+    }
+}
+
+/// Aggregated screen-space geometry written by the View each frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AppLayout {
     pub chat_area: ChatArea,
+    pub chat_scrollbar: ChatScrollbarLayout,
     pub input_area: InputAreaLayout,
     pub help_popup: HelpPopupLayout,
     pub slash_overlay: SlashOverlayLayout,
@@ -1939,6 +1979,8 @@ pub struct AppState {
     pub toast: Option<(String, Instant)>,
     /// Incremented each tick while agent is busy; drives the footer spinner.
     pub spinner_frame: u8,
+    /// Expansion whose collapsed title must be painted before building its body.
+    pub pending_bubble_expansion: Option<BubbleExpansionTarget>,
 
     // ── help popup ──────────────────────────────────────────────────────────
     pub help_popup: HelpPopupState,
@@ -2078,6 +2120,7 @@ impl AppState {
     }
 
     fn release_active_render_layout(&mut self) {
+        self.pending_bubble_expansion = None;
         self.render_cache.clear();
         self.conversation.chat_rendered_lines = Vec::new();
         self.conversation.chat_rendered_line_prefix_widths = Vec::new();
@@ -2125,6 +2168,7 @@ impl AppState {
 
             toast: None,
             spinner_frame: 0,
+            pending_bubble_expansion: None,
 
             help_popup: HelpPopupState::default(),
 
@@ -2630,6 +2674,8 @@ impl AppState {
             if let ChatEntry::ToolBubble { id, collapsed, .. } = entry {
                 if *id == target_id {
                     *collapsed = !*collapsed;
+                    self.pending_bubble_expansion =
+                        (!*collapsed).then_some(BubbleExpansionTarget::Tool(target_id));
                     return;
                 }
             }
@@ -3109,15 +3155,17 @@ impl AppState {
     /// transcript (`child_conversations`) — the click that triggers this can
     /// target a bubble in any of them, depending on `active_view`.
     pub fn toggle_tool_bubble_collapsed(&mut self, target_id: Uuid) {
-        let found = if let Some(ChatEntry::ToolBubble { collapsed, .. }) =
+        let expanded = if let Some(ChatEntry::ToolBubble { collapsed, .. }) =
             self.find_tool_bubble_for_render_mutation(target_id, false)
         {
             *collapsed = !*collapsed;
-            true
+            Some(!*collapsed)
         } else {
-            false
+            None
         };
-        if found {
+        if let Some(expanded) = expanded {
+            self.pending_bubble_expansion =
+                expanded.then_some(BubbleExpansionTarget::Tool(target_id));
             self.conversation.scroll_locked = false;
             if let Some((start_row, _, _)) = self
                 .conversation
@@ -3145,6 +3193,8 @@ impl AppState {
         };
         if let Some(ChatEntry::ThinkingMessage { collapsed, .. }) = entries.get_mut(target_index) {
             *collapsed = !*collapsed;
+            self.pending_bubble_expansion =
+                (!*collapsed).then_some(BubbleExpansionTarget::Thinking(target_index));
             self.conversation.scroll_locked = false;
             if let Some((start_row, _, _)) = self
                 .conversation
@@ -3174,6 +3224,9 @@ impl AppState {
             }
         };
         turn.partial_thinking_collapsed = !turn.partial_thinking_collapsed;
+        self.pending_bubble_expansion = (!turn.partial_thinking_collapsed).then_some(
+            BubbleExpansionTarget::Thinking(STREAMING_THINKING_ENTRY_INDEX),
+        );
         self.conversation.scroll_locked = false;
         if let Some((start_row, _, _)) = self
             .conversation
@@ -3569,6 +3622,49 @@ impl Default for AppState {
 mod tests {
     use super::*;
     use crate::agent::ToolCallRequest;
+
+    #[test]
+    fn collapse_and_clear_cancel_pending_expansion_feedback() {
+        let mut state = AppState::new();
+        state.chat_entries.push(ChatEntry::ThinkingMessage {
+            text: "Thought".to_string(),
+            collapsed: true,
+            duration: std::time::Duration::ZERO,
+        });
+        state.toggle_thinking_collapsed(0);
+        assert_eq!(
+            state.pending_bubble_expansion,
+            Some(BubbleExpansionTarget::Thinking(0))
+        );
+        state.toggle_thinking_collapsed(0);
+        assert_eq!(state.pending_bubble_expansion, None);
+        state.toggle_thinking_collapsed(0);
+        state.clear_conversation();
+        assert_eq!(state.pending_bubble_expansion, None);
+        state.toggle_thinking_collapsed(0);
+        state.toggle_tool_bubble_collapsed(Uuid::new_v4());
+        state.toggle_header_bubble_collapsed();
+        assert_eq!(state.pending_bubble_expansion, None);
+    }
+
+    #[test]
+    fn navigation_clears_expansion_feedback_from_the_previous_view() {
+        let mut state = AppState::new();
+        let run_id = Uuid::new_v4();
+        state.start_child_run(ChildRunInfo {
+            run_id,
+            bubble_id: Uuid::new_v4(),
+            agent_type: "reviewer".to_string(),
+            task: "Review".to_string(),
+            label: "Review".to_string(),
+        });
+        state.pending_bubble_expansion = Some(BubbleExpansionTarget::Thinking(0));
+        state.switch_to_child_view(run_id);
+        assert_eq!(state.pending_bubble_expansion, None);
+        state.pending_bubble_expansion = Some(BubbleExpansionTarget::Thinking(0));
+        state.switch_to_root_view();
+        assert_eq!(state.pending_bubble_expansion, None);
+    }
 
     #[test]
     fn replay_places_the_compaction_marker_at_the_boundary_and_keeps_the_transcript() {
@@ -4483,6 +4579,47 @@ mod tests {
             rect: Rect::new(0, 0, 80, 0),
         };
         assert_eq!(area.page_scroll_rows(), 0);
+    }
+
+    #[test]
+    fn scrollbar_maps_arrows_and_track_to_scroll_offsets() {
+        let scrollbar = ChatScrollbarLayout {
+            rect: Rect::new(79, 3, 1, 7),
+            maximum_scroll_offset: 100,
+        };
+        for (row, expected) in [
+            (3, 0),
+            (4, 0),
+            (5, 25),
+            (6, 50),
+            (7, 75),
+            (8, 100),
+            (9, 100),
+        ] {
+            assert_eq!(scrollbar.offset_at(79, row), Some(expected));
+        }
+        for (column, row) in [(78, 3), (80, 3), (79, 2), (79, 10)] {
+            assert_eq!(scrollbar.offset_at(column, row), None);
+        }
+        assert_eq!(ChatScrollbarLayout::default().offset_at(0, 0), None);
+    }
+
+    #[test]
+    fn scrollbar_handles_short_tracks_and_large_scroll_ranges() {
+        for (height, expected_offsets) in [
+            (1, vec![0]),
+            (2, vec![0, usize::MAX]),
+            (3, vec![0, usize::MAX / 2, usize::MAX]),
+            (4, vec![0, 0, usize::MAX, usize::MAX]),
+        ] {
+            let scrollbar = ChatScrollbarLayout {
+                rect: Rect::new(4, 5, 1, height),
+                maximum_scroll_offset: usize::MAX,
+            };
+            for (row, expected) in expected_offsets.into_iter().enumerate() {
+                assert_eq!(scrollbar.offset_at(4, 5 + row as u16), Some(expected));
+            }
+        }
     }
 
     // ── InputAreaLayout::contains geometry ───────────────────────────────────

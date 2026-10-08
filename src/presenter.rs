@@ -874,6 +874,13 @@ fn route_mouse(
                 }
             }
 
+            if let Some(offset) = state.layout.chat_scrollbar.offset_at(column, row) {
+                state.conversation.scroll_offset = offset;
+                state.conversation.scroll_locked =
+                    offset == state.layout.chat_scrollbar.maximum_scroll_offset;
+                return vec![];
+            }
+
             // A header click is held until mouse-up so a drag can select and
             // copy its rendered text instead of toggling the bubble.
             let hb = state.layout.header_bubble;
@@ -1103,6 +1110,12 @@ fn route_mouse(
                 }
                 state.child_view.header_selection = None;
                 state.toggle_header_bubble_collapsed();
+                return vec![];
+            }
+
+            if !state.conversation.chat_drag_active
+                && state.layout.chat_scrollbar.offset_at(column, row).is_some()
+            {
                 return vec![];
             }
 
@@ -1359,6 +1372,10 @@ fn domain_child_lifecycle(state: &mut AppState, event: DomainEvent) -> Vec<Effec
             if let Some((bubble_id, _)) = state.last_bubble_click.take() {
                 state.toggle_tool_bubble_collapsed(bubble_id);
             }
+            vec![]
+        }
+        DomainEvent::BubbleExpansionFeedbackShown => {
+            state.pending_bubble_expansion = None;
             vec![]
         }
         DomainEvent::CompactionApplied {
@@ -3913,6 +3930,48 @@ mod tests {
     }
 
     // ── Mouse scroll ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn mouse_click_on_scrollbar_respects_help_and_slash_overlay_priority() {
+        for help_popup in [false, true] {
+            let mut state = AppState::new();
+            state.conversation.scroll_offset = 50;
+            state.conversation.scroll_locked = false;
+            state.layout.chat_scrollbar = crate::tui_reducer_state::ChatScrollbarLayout {
+                rect: ratatui::layout::Rect::new(79, 3, 1, 7),
+                maximum_scroll_offset: 100,
+            };
+            if help_popup {
+                state.focus = Focus::HelpPopup;
+                state.layout.help_popup.rect = ratatui::layout::Rect::new(10, 2, 30, 8);
+            } else {
+                state.slash_overlay = SlashOverlay::Suggestions {
+                    choices: Vec::new(),
+                    selected: 0,
+                };
+                state.layout.slash_overlay.content_area = ratatui::layout::Rect::new(70, 2, 10, 8);
+            }
+            let effects = update(
+                &mut state,
+                TuiEvent::Mouse(crossterm::event::MouseEvent {
+                    kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                    column: 79,
+                    row: 3,
+                    modifiers: KeyModifiers::NONE,
+                }),
+                &empty_textarea(),
+            );
+            assert!(effects.is_empty());
+            assert_eq!(state.conversation.scroll_offset, 50);
+            assert!(!state.conversation.scroll_locked);
+            assert!(!state.conversation.chat_drag_active);
+            if help_popup {
+                assert_eq!(state.focus, Focus::MainInput);
+            } else {
+                assert_eq!(state.slash_overlay_drag_start, Some((79, 3)));
+            }
+        }
+    }
 
     #[test]
     fn mouse_scroll_up_in_chat_area_decrements_scroll_offset() {

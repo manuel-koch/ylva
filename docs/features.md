@@ -940,6 +940,11 @@ module structure (model/presenter/view/driver split).
   left-border bar toggles whether the bubble's arguments and result are shown
   (expanded, `▼`) or hidden (collapsed, `▶`). Collapsed bubbles display only
   the title line, useful for decluttering long conversations.
+- **Expansion feedback:** expanding a tool or thinking bubble first shows
+  `Expanding…` on its collapsed title, before rendering the body. This also
+  applies to subagent transcripts and their header bubble. The static indicator
+  disappears when the expanded content is displayed; cold layout still runs
+  synchronously, so the indicator does not animate during that work.
 - **Tool duration:** when a tool finishes, its execution time is shown in the
   bubble title. Running `spawn_subagent` bubbles also show a live elapsed timer
   in the root conversation and drill-in header, starting when the subagent
@@ -948,7 +953,10 @@ module structure (model/presenter/view/driver split).
 - **Toast notifications:** transient messages appear in the bottom-right
   corner (e.g., `"Copied to clipboard"`) and auto-dismiss after ~1.5 seconds.
 - **Scrollbar:** the chat scrollbar's thumb reaches the very bottom of the
-  track at the end of the list (and the top at the start).
+  track at the end of the list (and the top at the start). Left-clicking its
+  top/bottom arrow jumps to the start/end; clicking the track jumps to the
+  corresponding position in the root or subagent conversation. Jumping to the
+  end re-enables auto-scroll; other positions disable it.
 - **Large expanded results:** root/subagent transcripts and the subagent header
   reuse unchanged entry layouts and paint only visible rows. Scrolling and
   selection do not repeatedly parse completed results; spinners and elapsed

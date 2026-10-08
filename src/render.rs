@@ -25,7 +25,8 @@ use ratatui_textarea::TextArea;
 
 use crate::agent::tools::ToolRegistry;
 use crate::tui_reducer_state::{
-    ActiveSubagentCounts, AppState, BannerDragSelection, ChatEntry, ConversationView, Focus,
+    ActiveSubagentCounts, AppState, BannerDragSelection, BubbleExpansionTarget, ChatEntry,
+    ConversationView, Focus,
 };
 use crate::tui_render_state::TuiState;
 use crate::tui_widgets::{self, ButtonAreas};
@@ -48,6 +49,33 @@ pub fn render(
     mouse_pos: Option<(u16, u16)>,
     registry: &ToolRegistry,
 ) {
+    render_internal(frame, state, textarea, hint, mouse_pos, registry, false);
+}
+
+pub(crate) fn render_expansion_feedback(
+    frame: &mut Frame,
+    state: &mut AppState,
+    textarea: &mut TextArea<'_>,
+    hint: Option<&str>,
+    mouse_pos: Option<(u16, u16)>,
+    registry: &ToolRegistry,
+) {
+    render_internal(frame, state, textarea, hint, mouse_pos, registry, true);
+}
+
+fn render_internal(
+    frame: &mut Frame,
+    state: &mut AppState,
+    textarea: &mut TextArea<'_>,
+    hint: Option<&str>,
+    mouse_pos: Option<(u16, u16)>,
+    registry: &ToolRegistry,
+    expansion_feedback: bool,
+) {
+    let feedback_scroll = expansion_feedback.then_some((
+        state.conversation.scroll_offset,
+        state.conversation.scroll_locked,
+    ));
     if !state.render_cache_tracking {
         state.render_cache.clear();
     }
@@ -61,7 +89,10 @@ pub fn render(
     render_state.child_view.header_rendered_line_prefix_widths =
         std::mem::take(&mut state.child_view.header_rendered_line_prefix_widths);
     let mut cache = std::mem::take(&mut state.render_cache);
-    let source = tui_widgets::ConversationSource::from_app(state);
+    let mut source = tui_widgets::ConversationSource::from_app(state);
+    if expansion_feedback {
+        source.expansion_feedback = state.pending_bubble_expansion;
+    }
     cache.activate(source.run_id);
     let button_areas = tui_widgets::draw_borrowed(
         frame,
@@ -75,8 +106,73 @@ pub fn render(
             cache: &mut cache,
         },
     );
+    if let Some(target) = source.expansion_feedback {
+        draw_expansion_indicator(frame, &render_state, target);
+    }
     state.render_cache = cache;
     sync_from_draw(state, render_state, button_areas);
+    if let Some((offset, locked)) = feedback_scroll {
+        state.conversation.scroll_offset = offset;
+        state.conversation.scroll_locked = locked;
+    }
+}
+
+const EXPANSION_FEEDBACK_LABEL: &str = " Expanding… ";
+
+fn draw_expansion_indicator(frame: &mut Frame, state: &TuiState, target: BubbleExpansionTarget) {
+    use ratatui::{
+        layout::Rect,
+        style::{Modifier, Style},
+        widgets::Paragraph,
+    };
+
+    let (area, title_row) = match target {
+        BubbleExpansionTarget::Tool(id)
+            if state
+                .child_view
+                .child_view_bubble
+                .as_ref()
+                .is_some_and(|bubble| bubble.0 == id) =>
+        {
+            (state.child_view.header_bubble_area, Some(0))
+        }
+        _ => {
+            let absolute_row = match target {
+                BubbleExpansionTarget::Tool(id) => state
+                    .conversation
+                    .bubble_title_rows
+                    .iter()
+                    .find(|(_, _, bubble_id)| *bubble_id == id)
+                    .map(|(start, ..)| *start),
+                BubbleExpansionTarget::Thinking(index) => state
+                    .conversation
+                    .thinking_title_rows
+                    .iter()
+                    .find(|(_, _, entry_index)| *entry_index == index)
+                    .map(|(start, ..)| *start),
+            };
+            (
+                state.conversation.chat_area,
+                absolute_row.and_then(|row| row.checked_sub(state.conversation.scroll_offset)),
+            )
+        }
+    };
+    let Some(row) = title_row.filter(|row| *row < usize::from(area.height)) else {
+        return;
+    };
+    let width = (ratatui::text::Line::from(EXPANSION_FEEDBACK_LABEL).width() as u16)
+        .min(area.width.saturating_sub(3));
+    if width == 0 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(EXPANSION_FEEDBACK_LABEL).style(
+            Style::default()
+                .fg(crate::theme::NOTICE_COLOR)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Rect::new(area.right() - width, area.y + row as u16, width, 1),
+    );
 }
 
 /// Project the canonical [`AppState`] to the legacy [`TuiState`] snapshot
@@ -347,6 +443,7 @@ fn project_snapshot(state: &AppState, include_content: bool) -> TuiState {
             scroll_locked: state.conversation.scroll_locked,
             chat_area_height: state.conversation.chat_area_height,
             chat_area: state.layout.chat_area.rect,
+            chat_scrollbar: state.layout.chat_scrollbar,
             chat_rendered_lines: if include_content {
                 state.conversation.chat_rendered_lines.clone()
             } else {
@@ -370,6 +467,7 @@ fn project_snapshot(state: &AppState, include_content: bool) -> TuiState {
 fn sync_from_draw(state: &mut AppState, rendered: TuiState, button_areas: Option<ButtonAreas>) {
     state.layout.input_area.rect = rendered.input_area;
     state.layout.chat_area.rect = rendered.conversation.chat_area;
+    state.layout.chat_scrollbar = rendered.conversation.chat_scrollbar;
     state.layout.clarify_banner = rendered.clarify_banner_state.clarify_banner;
     state.layout.header_bubble = rendered.child_view.header_bubble_area;
     state.child_view.header_bubble_scroll_offset = rendered.child_view.header_bubble_scroll_offset;
@@ -433,6 +531,304 @@ mod tests {
 
     use super::*;
     use crate::tui_reducer_state::{ChatEntry, ChildRunInfo, ToolCallState};
+
+    #[test]
+    fn expansion_feedback_reuses_collapsed_layouts_before_building_large_bodies() {
+        use crate::tui_reducer_state::{ResultSection, STREAMING_THINKING_ENTRY_INDEX};
+        use ratatui::{backend::TestBackend, Terminal};
+        use std::time::Duration;
+
+        for surface in [
+            "root-tool",
+            "child-tool",
+            "header",
+            "thinking",
+            "child-thinking",
+            "streaming",
+        ] {
+            let mut state = AppState::new();
+            state.enable_render_cache();
+            let bubble_id = Uuid::new_v4();
+            let content = "Cold expansion body marker\n\n".repeat(2_000);
+            let entry = if surface.ends_with("thinking") {
+                ChatEntry::ThinkingMessage {
+                    text: content.clone(),
+                    collapsed: true,
+                    duration: Duration::from_secs(1),
+                }
+            } else {
+                ChatEntry::ToolBubble {
+                    id: bubble_id,
+                    name: if surface == "header" {
+                        "spawn_subagent"
+                    } else {
+                        "read"
+                    }
+                    .to_string(),
+                    state: Box::new(ToolCallState::Done {
+                        arguments: serde_json::json!({}),
+                        title_arguments: Vec::new(),
+                        content_sections: Vec::new(),
+                        result_section: ResultSection::plain(content.clone()),
+                        summary: Vec::new(),
+                        duration: Duration::from_secs(1),
+                    }),
+                    collapsed: true,
+                }
+            };
+            if surface.starts_with("child-") || surface == "header" {
+                let run_id = Uuid::new_v4();
+                let mut entry = Some(entry);
+                let header_bubble_id = if surface == "header" {
+                    bubble_id
+                } else {
+                    Uuid::new_v4()
+                };
+                if surface == "header" {
+                    state.chat_entries.push(entry.take().unwrap());
+                } else {
+                    push_spawn_bubble(&mut state, header_bubble_id, "reviewer", "Review");
+                }
+                state.start_child_run(ChildRunInfo {
+                    run_id,
+                    bubble_id: header_bubble_id,
+                    agent_type: "reviewer".to_string(),
+                    task: "Review".to_string(),
+                    label: "Review".to_string(),
+                });
+                if surface != "header" {
+                    state
+                        .child_conversations
+                        .get_mut(&run_id)
+                        .unwrap()
+                        .messages
+                        .push(entry.take().unwrap());
+                }
+                state.switch_to_child_view(run_id);
+            } else if surface == "streaming" {
+                state.turn_buffer.partial_thinking_text = content;
+                state.turn_buffer.partial_thinking_collapsed = true;
+            } else {
+                state.chat_entries.push(entry);
+            }
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            let mut textarea = TextArea::default();
+            let registry = ToolRegistry::new();
+            terminal
+                .draw(|frame| render(frame, &mut state, &mut textarea, None, None, &registry))
+                .unwrap();
+            let body_builds = state.render_cache.body_layout_builds;
+            match surface {
+                "header" => state.toggle_header_bubble_collapsed(),
+                "thinking" | "child-thinking" => state.toggle_thinking_collapsed(0),
+                "streaming" => state.toggle_partial_thinking_collapsed(),
+                _ => state.toggle_tool_bubble_collapsed(bubble_id),
+            }
+            let target = if surface.ends_with("thinking") {
+                BubbleExpansionTarget::Thinking(0)
+            } else if surface == "streaming" {
+                BubbleExpansionTarget::Thinking(STREAMING_THINKING_ENTRY_INDEX)
+            } else {
+                BubbleExpansionTarget::Tool(bubble_id)
+            };
+            assert_eq!(state.pending_bubble_expansion, Some(target), "{surface}");
+            let scroll_before_feedback = (
+                state.conversation.scroll_offset,
+                state.conversation.scroll_locked,
+            );
+            terminal
+                .draw(|frame| {
+                    render_expansion_feedback(
+                        frame,
+                        &mut state,
+                        &mut textarea,
+                        None,
+                        None,
+                        &registry,
+                    )
+                })
+                .unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(text.contains(EXPANSION_FEEDBACK_LABEL), "{surface}");
+            assert!(!text.contains("Cold expansion body marker"), "{surface}");
+            assert_eq!(
+                state.render_cache.body_layout_builds, body_builds,
+                "{surface}"
+            );
+            assert_eq!(
+                (
+                    state.conversation.scroll_offset,
+                    state.conversation.scroll_locked
+                ),
+                scroll_before_feedback,
+                "{surface}",
+            );
+            crate::presenter::update(
+                &mut state,
+                crate::presenter::TuiEvent::Domain(
+                    crate::tui_reducer_state::DomainEvent::BubbleExpansionFeedbackShown,
+                ),
+                &crate::presenter::TextareaContext {
+                    is_empty: true,
+                    text: String::new(),
+                    cursor_row: 0,
+                    cursor_row_is_last: true,
+                },
+            );
+            assert_eq!(state.pending_bubble_expansion, None);
+            terminal
+                .draw(|frame| render(frame, &mut state, &mut textarea, None, None, &registry))
+                .unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(text.contains("Cold expansion body marker"), "{surface}");
+            assert!(!text.contains(EXPANSION_FEEDBACK_LABEL), "{surface}");
+            assert!(
+                state.render_cache.body_layout_builds > body_builds,
+                "{surface}"
+            );
+        }
+    }
+
+    #[test]
+    fn scrollbar_clicks_move_the_rendered_conversation_to_the_requested_position() {
+        assert_scrollbar_click_positions(false, false);
+    }
+
+    #[test]
+    fn scrollbar_clicks_move_the_rendered_child_conversation() {
+        assert_scrollbar_click_positions(true, false);
+    }
+
+    #[test]
+    fn scrollbar_clicks_work_with_the_owned_render_projection() {
+        assert_scrollbar_click_positions(false, true);
+    }
+
+    fn assert_scrollbar_click_positions(child_view: bool, owned_projection: bool) {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let mut state = AppState::new();
+        let message = ChatEntry::AssistantMessage {
+            text: (0..200).map(|index| format!("Line {index}\n\n")).collect(),
+            interrupted: false,
+        };
+        if child_view {
+            let run_id = Uuid::new_v4();
+            let bubble_id = Uuid::new_v4();
+            push_spawn_bubble(&mut state, bubble_id, "reviewer", "Review");
+            state.start_child_run(ChildRunInfo {
+                run_id,
+                bubble_id,
+                agent_type: "reviewer".to_string(),
+                task: "Review".to_string(),
+                label: "Review".to_string(),
+            });
+            state
+                .child_conversations
+                .get_mut(&run_id)
+                .unwrap()
+                .messages
+                .push(message);
+            state.switch_to_child_view(run_id);
+        } else {
+            state.chat_entries.push(message);
+        }
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let mut textarea = TextArea::default();
+        let registry = ToolRegistry::new();
+        let draw = |frame: &mut Frame, state: &mut AppState, textarea: &mut TextArea<'_>| {
+            if owned_projection {
+                let mut projected = project_for_draw(state);
+                let buttons =
+                    tui_widgets::draw(frame, &mut projected, textarea, None, None, &registry);
+                sync_from_draw(state, projected, buttons);
+            } else {
+                render(frame, state, textarea, None, None, &registry);
+            }
+        };
+        terminal
+            .draw(|frame| draw(frame, &mut state, &mut textarea))
+            .unwrap();
+        let maximum = state.conversation.scroll_offset;
+        assert!(maximum > 0);
+        let area = state.layout.chat_area.rect;
+        let track_height = usize::from(area.height - 2);
+        for (row, expected) in [
+            (area.y, 0),
+            (area.y + 1, 0),
+            (
+                area.y + 1 + (track_height / 2) as u16,
+                maximum * (track_height / 2) / (track_height - 1),
+            ),
+            (area.bottom() - 2, maximum),
+            (area.bottom() - 1, maximum),
+        ] {
+            let effects = crate::presenter::update(
+                &mut state,
+                crate::presenter::TuiEvent::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: area.right(),
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                }),
+                &crate::presenter::TextareaContext {
+                    is_empty: true,
+                    text: String::new(),
+                    cursor_row: 0,
+                    cursor_row_is_last: true,
+                },
+            );
+            assert!(effects.is_empty());
+            assert_eq!(state.conversation.scroll_offset, expected, "row {row}");
+            assert_eq!(state.conversation.scroll_locked, expected == maximum);
+            assert!(!state.conversation.chat_drag_active);
+            let effects = crate::presenter::update(
+                &mut state,
+                crate::presenter::TuiEvent::Mouse(MouseEvent {
+                    kind: MouseEventKind::Up(MouseButton::Left),
+                    column: area.right(),
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                }),
+                &crate::presenter::TextareaContext {
+                    is_empty: true,
+                    text: String::new(),
+                    cursor_row: 0,
+                    cursor_row_is_last: true,
+                },
+            );
+            assert!(effects.is_empty());
+            terminal
+                .draw(|frame| draw(frame, &mut state, &mut textarea))
+                .unwrap();
+            assert_eq!(state.conversation.scroll_offset, expected);
+        }
+        state.chat_entries.clear();
+        if child_view {
+            state
+                .child_conversations
+                .values_mut()
+                .for_each(|conversation| conversation.messages.clear());
+        }
+        terminal
+            .draw(|frame| draw(frame, &mut state, &mut textarea))
+            .unwrap();
+        assert!(state.layout.chat_scrollbar.rect.is_empty());
+        assert_eq!(state.layout.chat_scrollbar.maximum_scroll_offset, 0);
+    }
 
     /// Pushes a `spawn_subagent` `ToolBubble` into `state.chat_entries` (the
     /// root transcript) whose title arguments mirror `run_id`'s

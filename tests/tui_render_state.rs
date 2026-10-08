@@ -614,6 +614,7 @@ struct InspectableTestBackend {
     backend: TestBackend,
     last_buffer: Arc<std::sync::Mutex<Buffer>>,
     frame_count: Arc<AtomicUsize>,
+    frame_history: Option<Arc<std::sync::Mutex<Vec<Buffer>>>>,
 }
 
 impl InspectableTestBackend {
@@ -626,6 +627,7 @@ impl InspectableTestBackend {
                 backend,
                 last_buffer: Arc::clone(&last_buffer),
                 frame_count: Arc::clone(&frame_count),
+                frame_history: None,
             },
             last_buffer,
             frame_count,
@@ -683,8 +685,135 @@ impl Backend for InspectableTestBackend {
     }
 
     fn flush(&mut self) -> Result<(), Self::Error> {
-        self.backend.flush()
+        self.backend.flush()?;
+        if let Some(history) = &self.frame_history {
+            history
+                .lock()
+                .expect("frame history lock")
+                .push(self.backend.buffer().clone());
+        }
+        Ok(())
     }
+}
+
+#[tokio::test]
+async fn bubble_expansion_flushes_feedback_before_rendering_the_body() {
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ylva::agent::UiUpdate;
+
+    let history = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (mut backend, last_buffer, _) = InspectableTestBackend::new(80, 24);
+    backend.frame_history = Some(Arc::clone(&history));
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    let (action_tx, action_rx) = mpsc::channel(64);
+    let (update_tx, update_rx) = mpsc::channel(64);
+    let engine = Arc::new(EngineImpl::new(
+        Arc::new(MockProvider::new(Vec::new(), Duration::ZERO)),
+        common::test_engine_config(),
+    ));
+    let (agent, _agent_updates) = AgentLoop::new(engine, Arc::new(ToolRegistry::new()));
+    let run_handle = tokio::spawn(async move {
+        tui_driver::run_tui(
+            &mut terminal,
+            agent,
+            update_rx,
+            None,
+            action_rx,
+            &mut NoopClipboard,
+        )
+        .await
+        .expect("run_tui completed")
+    });
+    update_tx.send(UiUpdate::StreamStarted).await.unwrap();
+    update_tx
+        .send(UiUpdate::AppendThinking(
+            "Expansion body marker".to_string(),
+        ))
+        .await
+        .unwrap();
+    update_tx.send(UiUpdate::StreamDone).await.unwrap();
+    let title_row = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let text = rendered_text(&last_buffer.lock().expect("buffer snapshot lock"));
+            if let Some(row) = text.lines().position(|line| line.contains("▼ Thought")) {
+                break row as u16;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("thinking title must render");
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        action_tx
+            .send(AppAction::MouseInput(MouseEvent {
+                kind,
+                column: 5,
+                row: title_row,
+                modifiers: KeyModifiers::NONE,
+            }))
+            .await
+            .unwrap();
+    }
+    let title_row = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let text = rendered_text(&last_buffer.lock().expect("buffer snapshot lock"));
+            if let Some(row) = text.lines().position(|line| line.contains("▶ Thought")) {
+                break row as u16;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("collapsed thinking title must render");
+    history.lock().expect("frame history lock").clear();
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        action_tx
+            .send(AppAction::MouseInput(MouseEvent {
+                kind,
+                column: 5,
+                row: title_row,
+                modifiers: KeyModifiers::NONE,
+            }))
+            .await
+            .unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if rendered_text(&last_buffer.lock().expect("buffer snapshot lock"))
+                .contains("Expansion body marker")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("expanded body must render");
+    drop(action_tx);
+    run_handle.await.expect("run task joined");
+    let frames: Vec<_> = history
+        .lock()
+        .expect("frame history lock")
+        .iter()
+        .map(rendered_text)
+        .collect();
+    let feedback = frames
+        .iter()
+        .position(|text| text.contains("Expanding…"))
+        .expect("expansion feedback must be flushed");
+    let expanded = frames
+        .iter()
+        .position(|text| text.contains("Expansion body marker"))
+        .expect("expanded body must be flushed");
+    assert!(feedback < expanded);
+    assert!(!frames[feedback].contains("Expansion body marker"));
+    assert!(!frames[expanded].contains("Expanding…"));
 }
 
 fn model_picker_choices(choice_count: usize) -> Vec<ylva::tui_reducer_state::ModelChoice> {
