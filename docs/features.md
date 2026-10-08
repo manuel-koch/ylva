@@ -796,11 +796,6 @@ for the full mechanics.
 
 ## TUI Architecture
 
-The TUI is a rendering layer on top of the headless agent loop; the agent
-architecture itself is unchanged. See
-[implementation notes](./implementation-notes.md#tui-module-layout) for the
-module structure (model/presenter/view/driver split).
-
 - **Layout:** a scrollable chat-history area, a variable-height input box
   (capped at 1/3 of the terminal height), a `─` separator line, and a 2-row
   footer (mode/hint row and key-hints row). Key names in the key-hints row are

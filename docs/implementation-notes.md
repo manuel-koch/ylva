@@ -558,8 +558,23 @@ The TUI renders the same headless `AgentLoop`; it does not own agent state.
   The reducer still emits ordered effects without terminal or channel I/O.
   Both state and presenter retain facade-level cross-owner tests, with
   responsibility-specific suites under their local `tests/` directories.
-- `src/render.rs` and `src/tui_widgets.rs` render the view and record geometry
-  for mouse routing.
+- `src/render.rs` adapts reducer state to the view and synchronizes draw geometry.
+  `src/tui_widgets.rs` retains `draw`, `draw_borrowed`, frame composition,
+  borrowed conversation inputs and `ButtonAreas`. Its private `chat.rs` child
+  owns legacy conversation painting and scrollbars; `chat/cache.rs` owns cached
+  entry/header layout and visible-row painting. `bubbles.rs` owns shared message
+  chrome and prose; `tool_bubble.rs` coordinates tool chrome and body rendering
+  through `tool_bubble/title.rs` and `tool_bubble/body.rs`. Cached, legacy and
+  child-header paths share this implementation. `footer.rs` owns status,
+  key hints and approval controls; `overlays.rs` owns slash/model panels,
+  clarify banners and toasts; `help.rs` owns the help popup.
+  Pure terminal-column selection (`chat/selection.rs`), hunk parsing
+  (`tool_bubble/diff.rs`) and home-relative labels (`help/paths.rs`) stay
+  covered alongside all rendering owners; there are no custom coverage exclusions.
+  Widget tests follow their responsibility owners; the source-backed
+  integration fixture reads the large `chat/cache.rs` implementation rather
+  than the facade, preserving highlighting, selection-storage and row-bound
+  assertions.
 - `src/tui_driver.rs` owns the terminal loop, maps live UI updates to domain
   events, and executes effects. `src/cli_driver.rs` owns the headless loop.
 

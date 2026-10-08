@@ -50,9 +50,11 @@ An implementation is done when:
 - Existing test cases remain registered and meaningful, including expensive
   rendering fixtures and concurrency cases. New regression assertions cover
   any newly exposed boundary not already exercised.
-- Moved renderer files retain the existing coverage treatment, but no newly
-  extracted testable production logic is hidden by an expanded exclusion.
-  The existing aggregate line-coverage threshold remains at least 80%.
+- All project source, including moved renderers and the binary, participates
+  in coverage without custom filename exclusions; cargo-llvm-cov's default
+  filters remain in effect. This policy supersedes the original renderer
+  exclusions with user approval. The aggregate line-coverage threshold
+  remains at least 80%.
 - Directly affected documentation and this checklist reflect the final
   layout. `make format lint` and `make test-coverage` pass.
 
@@ -163,20 +165,18 @@ No staging, branch creation, or commits are authorized by this plan.
    press semantics, pending approvals, partial-text flushes, and effect order.
    Update `docs/implementation-notes.md`.
 
-6. [ ] Make coverage accounting relocation-safe immediately before the
-   rendering moves. Update both `test-coverage` and `test-coverage-missing`
-   in `Makefile` to match the existing excluded parents plus their actual
-   renderer-only descendants, with directory boundaries. Do not exclude
-   `markdown`, `conversation_render_cache`, reducer/presenter logic, or
-   other testable helpers. Verify the matcher against examples of excluded
-   widget files and included similarly named files. Update
-   `docs/development-workflow.md` and the relevant module coverage comments.
-   The later full coverage report must confirm the intended file set.
-   The exact-parent boundary correction was brought forward into step 5:
-   the old suffix matcher also excluded the new `presenter/domain.rs` as
-   `main.rs`. Renderer-only descendant matching still awaits the rendering moves.
+6. [x] Make coverage accounting relocation-safe. Both `test-coverage` and
+   `test-coverage-missing` in `Makefile` now omit custom filename exclusions,
+   including the former renderer/binary exclusions. Keep cargo-llvm-cov's
+   default filters and the unchanged aggregate threshold. Confirm renderer,
+   binary and other production owners appear in the final report, and update
+   `docs/development-workflow.md` and module coverage comments.
+   Initially, steps 5-6 corrected filename boundaries and enumerated renderer
+   descendants, verified against 24 examples. The user subsequently approved
+   removing that brittle enumeration entirely after an unfiltered report
+   demonstrated aggregate coverage above the existing gate.
 
-7. [ ] Split `src/tui_widgets.rs` by rendering responsibility. Retain
+7. [x] Split `src/tui_widgets.rs` by rendering responsibility. Retain
    `draw`, `draw_borrowed`, frame composition and `ButtonAreas` at the facade.
    Add `tui_widgets/chat.rs` for cached/legacy conversation drawing and
    scrolling, `tui_widgets/bubbles.rs` for shared message bubble chrome,
@@ -192,9 +192,9 @@ No staging, branch creation, or commits are authorized by this plan.
    body and checks text actually present in its new location.
    Run `cargo test --test tui_render_state` and widget library tests.
    Compare full buffers, cache-build counters, painted-row bounds, and
-   selection-storage reuse using the existing assertions. Update
-   `docs/features.md`'s TUI architecture section and
-   `docs/implementation-notes.md`.
+   selection-storage reuse using the existing assertions. Update module
+   ownership in `docs/implementation-notes.md`; keep implementation details
+   out of the user-facing `docs/features.md`.
 
 8. [ ] Split TUI driver integrations into `tui_driver/effects.rs`,
    `tui_driver/models.rs`, `tui_driver/input.rs`,
@@ -310,8 +310,9 @@ No staging, branch creation, or commits are authorized by this plan.
 14. [ ] Complete the documentation reconciliation. Update
     `docs/implementation-notes.md` with the final module ownership map,
     single-writer constraints, replay paths and engine/driver interfaces;
-    `docs/features.md` with the unchanged TUI layer architecture's new
-    paths; `docs/development-workflow.md` with coverage descendants and
+    keep `docs/features.md` focused on user-visible behavior, not module paths
+    or architecture internals; update `docs/development-workflow.md` with
+    all-source coverage policy and
     unit/integration-test layout; and `docs/known-test-issues.md` with
     relocated examples. Inspect `docs/configuration.md`,
     `docs/keybindings.md`, `docs/persistence.md`, `README.md`, `CONTEXT.md`
@@ -323,10 +324,10 @@ No staging, branch creation, or commits are authorized by this plan.
 
 15. [ ] Verify the completed scope and record the resulting layout here.
     Review every facade and `src/lib.rs` export, relative fixture path,
-    feature-gated item, test registration and coverage match.
+    feature-gated item, test registration and coverage file set.
     Run default-feature `cargo clippy --all-targets --quiet` as well as
     the required `make format lint` and `make test-coverage`.
-    Inspect coverage output for the new included/excluded files and confirm
+    Inspect coverage output for all new production files and confirm
     aggregate line coverage is at least 80%; do not weaken the threshold
     or add exclusions to make the refactor pass. Do not run `make test`
     as a duplicate mandatory gate. Record production/test-region counts
@@ -396,8 +397,24 @@ they do not block completing the nine selected parents.
   `tui_render_state` and default-feature all-target Clippy checks passed.
   Ownership and local test layout are updated in `docs/implementation-notes.md`.
   Coverage verification found the old exclusion regex also matched `domain.rs`.
-  Both coverage targets now match exact parent filenames at directory boundaries;
-  renderer-descendant handling remains pending in step 6.
+  At that checkpoint, both coverage targets matched exact parent filenames at
+  directory boundaries; renderer-descendant handling remained pending in step 6.
+- Widgets now retain frame composition, borrowed inputs and approval geometry
+  at `tui_widgets.rs`, with private chat, bubble, tool-bubble, footer, overlay
+  and help owners. Cached conversation layout lives in `chat/cache.rs`; tool
+  layout coordinates shared title/chrome and section/body helpers rather than
+  relocating the old monolith. Pure selection, diff and path-label children
+  stay covered. All 25 original widget cases remain, with three new boundary
+  regressions. Widget library tests, all 68 `tui_render_state` cases and
+  default-feature all-target Clippy pass. The source-backed fixture now reads
+  `chat/cache.rs`, asserts more than 500 source and selection rows, and checks
+  a real function in that implementation. Updated ownership, test layout and
+  coverage are documented in the affected contributor docs.
+- The user approved removing all custom coverage exclusions on 2026-10-08.
+  This supersedes the renderer-exclusion constraint and the explicit matcher
+  introduced in step 6. Both coverage targets now rely only on cargo-llvm-cov's
+  default filters, so new source files require no exclusion-list maintenance.
+  Renderer and binary coverage are included without lowering the 80% gate.
 - The user confirmed this refined plan on 2026-10-08. Confirmation applies
   to the saved plan only; source implementation and Git operations are not
   authorized.
@@ -505,6 +522,74 @@ the responsibility-review trigger; no cohesive size exception is needed.
 | `presenter/tests/keyboard.rs` | 0 | 738 |
 | `presenter/tests/mouse.rs` | 0 | 1090 |
 | `presenter/tests/tool_bubbles.rs` | 0 | 450 |
+
+### Execution checkpoint: coverage accounting and widgets
+
+Steps 1-7 are complete; steps 8-15 remain pending. The user selected steps 6-7
+for this continuation. No staging, branch creation or commits were performed.
+
+The widget facade retains its public draw functions, borrowed-input shapes
+and `ButtonAreas`; `src/lib.rs` exports are unchanged. All original production
+function identities remain. The old tool-layout monolith is now a small
+coordinator over shared chrome and body helpers, with one section-merging rule
+used by both. Cache revisions, scroll geometry, selection storage and state
+ownership are unchanged.
+
+All 1,630 cases registered at the start remain registered; three new tool-layout
+and terminal-column selection regressions bring the total to 1,633.
+The widget suite passed 28 cases and the unchanged `tui_render_state` integration
+target passed 68, including full-buffer comparisons, warm build counters,
+painted-row bounds and source-backed selection-storage reuse.
+
+`make format lint`, default-feature all-target Clippy and `make test-coverage`
+passed. Aggregate line coverage was **91.81%**, above the unchanged 80% gate.
+The final report includes `chat/selection.rs`, `help/paths.rs` and
+`tool_bubble/diff.rs`, while omitting the explicitly named renderer-only
+children. Presenter/reducer logic, `markdown.rs` and
+`conversation_render_cache.rs` remain included. Both coverage targets share
+the same matcher; all 24 boundary examples and every actual production child
+match the intended treatment. Changed Markdown files passed `rumdl check`.
+
+Physical-line counts follow the inventory convention below. Every widget
+production owner is below the responsibility-review trigger, so no cohesive
+size exception is needed.
+
+| Module | Production | Tests |
+| --- | ---: | ---: |
+| `tui_widgets.rs` | 639 | 0 |
+| `tui_widgets/bubbles.rs` | 323 | 2 |
+| `tui_widgets/bubbles/tests.rs` | 0 | 52 |
+| `tui_widgets/chat.rs` | 450 | 2 |
+| `tui_widgets/chat/cache.rs` | 616 | 0 |
+| `tui_widgets/chat/selection.rs` | 123 | 84 |
+| `tui_widgets/chat/tests.rs` | 0 | 57 |
+| `tui_widgets/footer.rs` | 589 | 2 |
+| `tui_widgets/footer/tests.rs` | 0 | 22 |
+| `tui_widgets/help.rs` | 325 | 2 |
+| `tui_widgets/help/paths.rs` | 30 | 33 |
+| `tui_widgets/help/tests.rs` | 0 | 32 |
+| `tui_widgets/overlays.rs` | 552 | 0 |
+| `tui_widgets/tool_bubble.rs` | 137 | 2 |
+| `tui_widgets/tool_bubble/body.rs` | 462 | 0 |
+| `tui_widgets/tool_bubble/diff.rs` | 38 | 41 |
+| `tui_widgets/tool_bubble/title.rs` | 560 | 0 |
+| `tui_widgets/tool_bubble/tests.rs` | 0 | 508 |
+
+### Coverage policy follow-up: no custom exclusions
+
+After the widget checkpoint, the user approved removing the filename matcher
+from both coverage targets. Coverage now includes `main.rs`, `render.rs`,
+`tui_widgets.rs` and every production widget child; cargo-llvm-cov's default
+filters still apply. The earlier checkpoint percentages describe their
+historical file sets, not the current policy.
+
+`make format lint` and a fresh `make test-coverage` passed under this policy.
+Aggregate line coverage was **90.91%**, above the unchanged 80% gate.
+The report confirms the formerly excluded files are included. Both targets
+omit custom exclusion flags, and `test-coverage-missing` retains
+`--show-missing-lines`. Workflow documentation, implementation notes and
+renderer module comments now reflect the policy; changed Markdown passed
+`rumdl check`. Plan steps 8-15 remain pending.
 
 ### Inventory interpretation
 
@@ -673,10 +758,11 @@ All paths in this table are relative to `tests/`.
   a separate cache owner. Neither is evidence of another missing layer.
 - `append_tool_layout` is roughly 930 lines. Existing cached and legacy
   conversation rendering share it; title/body extraction must not fork it.
-- `tests/tui_render_state.rs` includes `../src/tui_widgets.rs` as a large
-  source-backed read-result fixture and asserts that a rendered row
-  contains `fn draw_chat`. A thin facade would invalidate this assertion
-  and reduce the fixture's stress-test value.
+- At scan time, `tests/tui_render_state.rs` included `../src/tui_widgets.rs`
+  as a large source-backed read-result fixture and checked `fn draw_chat`.
+  Step 7 moved that fixture to `../src/tui_widgets/chat/cache.rs`, checks
+  `fn draw_cached_chat`, and explicitly enforces its large-source and
+  full-selection row counts.
 - Agent request tests also read `src/agent.rs` with fixed line limits;
   shrinking that facade changes fixture size even when the path remains.
   Those cases have context-pressure assertions dependent on result size.
@@ -699,9 +785,12 @@ All paths in this table are relative to `tests/`.
   appended after them. Bash syntax extraction and network-target matching
   are already separated. `store::project_key` uses sandbox
   canonicalization rather than Git-root discovery.
-- Both coverage targets currently use
-  `--ignore-filename-regex "(tui_widgets|render|main)\.rs"`.
-  That matches excluded parent filenames, not newly created descendants.
+- At scan time, both coverage targets used an unbounded parent-filename
+  matcher. Steps 5-6 replaced it with the shared, directory-bounded
+  `COVERAGE_RENDERER_EXCLUSIONS` matcher, naming actual renderer descendants
+  while retaining pure extracted helpers and presenter/reducer logic.
+  The subsequent user-approved all-source policy removed that matcher;
+  both targets now use no project-specific filename exclusions.
   The configured gate is aggregate line coverage, not 80% per file.
 - Existing `tests/common.rs` submodules use explicit
   `#[path = "common/<name>.rs"]` declarations. Shared integration support
@@ -712,6 +801,6 @@ All paths in this table are relative to `tests/`.
   that behavior or ownership invariants can be changed without review.
 - Useful directly affected documentation is
   `docs/implementation-notes.md` (module/ownership paths),
-  `docs/features.md` (TUI layer map),
+  `docs/features.md` (user-facing behavior only, not implementation paths),
   `docs/development-workflow.md` (coverage and test layout), and
   `docs/known-test-issues.md` (relocatable examples).

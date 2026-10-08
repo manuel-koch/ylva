@@ -13,11 +13,8 @@ Bugfixes MUST add or strengthen a test that fails before the fix and passes afte
 If test runs exhibit flaky results/errors, the tests must fixed immediately,
 don't postpone fixing (pre-existing) flaky tests!
 
-Coverage threshold: **≥80% line coverage** is enforced on testable files
-by `make test-coverage` (below the threshold the command fails).
-`tui_widgets.rs`, `render.rs`, and `main.rs` are excluded because they require a live terminal.
-The matcher uses whole filenames and directory boundaries so testable files
-such as `presenter/domain.rs` remain included.
+Coverage threshold: **≥80% aggregate line coverage** is enforced by
+`make test-coverage` (below the threshold the command fails).
 
 The following `make` targets are available:
 
@@ -245,7 +242,12 @@ Large owner-local suites use `#[cfg(test)] mod tests;` with
 `src/presenter/tests.rs`). Presenter live/replay buffer comparisons and
 cross-input effect-order assertions remain at the facade, alongside shared
 local fixtures; its keyboard, mouse, domain and bubble suites live in
-`presenter/tests/`. Small boundary suites can remain beside the
+`presenter/tests/`. Widget rendering suites follow the bubble, chat, footer,
+help and tool-bubble owners under `tui_widgets/`; small pure selection,
+diff and path-label suites remain beside their implementations.
+`tests/tui_render_state.rs` retains its integration target and uses
+`tui_widgets/chat/cache.rs` as its large source-backed highlighting fixture.
+Small boundary suites can remain beside the
 extracted implementation (see `src/agent/tools/read/stream.rs` and
 `src/agent/tools/read/windows.rs`). Cross-owner assertions stay at the facade.
 

@@ -18,6 +18,11 @@ mod common;
 fn large_completed_result_warm_render_reuses_selection_storage() {
     use ratatui_textarea::TextArea;
     use ylva::tui_reducer_state::{AppState, ResultSection, ToolCallState};
+    let source_body = include_str!("../src/tui_widgets/chat/cache.rs");
+    assert!(
+        source_body.lines().count() > 500,
+        "highlighting fixture must retain a genuinely large Rust source body"
+    );
     let mut state = AppState::new();
     state.enable_render_cache();
     state.chat_entries.push(ChatEntry::ToolBubble {
@@ -27,8 +32,8 @@ fn large_completed_result_warm_render_reuses_selection_storage() {
             arguments: serde_json::json!({}),
             content_sections: vec![ylva::agent::tools::Section::Content(
                 ylva::agent::tools::ContentSection {
-                    label: Some("src/tui_widgets.rs".into()),
-                    content: include_str!("../src/tui_widgets.rs").into(),
+                    label: Some("src/tui_widgets/chat/cache.rs".into()),
+                    content: source_body.into(),
                     file_extension: Some("rs".into()),
                     line_number_offset: Some(0),
                 },
@@ -67,7 +72,11 @@ fn large_completed_result_warm_render_reuses_selection_storage() {
         .conversation
         .chat_rendered_lines
         .iter()
-        .any(|line| line.contains("fn draw_chat")));
+        .any(|line| line.contains("fn draw_cached_chat")));
+    assert!(
+        state.conversation.chat_rendered_lines.len() > 500,
+        "the full highlighted source must remain available for selection/copy"
+    );
 }
 
 fn render_offline(state: &mut ylva::AppState, width: u16, height: u16) -> Buffer {
