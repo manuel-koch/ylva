@@ -26,6 +26,26 @@ fn session_spans_roll_over_without_reparenting_inflight_work() {
         let captured_identities = identities.clone();
         let logs = crate::test_support::capture_logs_with_format(format, async move {
             let directory = tempfile::tempdir().unwrap();
+            // Prime shared Store callsites before refreshing interest and creating the real spans.
+            let priming_store = crate::Store::create(
+                &directory.path().join("prime"),
+                directory.path(),
+                Uuid::new_v4(),
+                "mock",
+                "mock",
+                None,
+            )
+            .unwrap();
+            priming_store.record_message(&Message::User {
+                content: "Prime callsite registration".into(),
+                kind: UserMessageKind::Explicit,
+            });
+            priming_store.flush().await;
+            priming_store
+                .set_title("Prime callsite registration".into())
+                .await
+                .unwrap();
+            tracing::callsite::rebuild_interest_cache();
             let store = crate::Store::create(
                 directory.path(),
                 directory.path(),
@@ -113,7 +133,10 @@ fn session_spans_roll_over_without_reparenting_inflight_work() {
                 );
                 let title_line = logs
                     .lines()
-                    .find(|line| line.contains("rewriting session metadata"))
+                    .find(|line| {
+                        line.contains("rewriting session metadata")
+                            && line.contains(&identities[1].to_string())
+                    })
                     .unwrap();
                 assert!(
                     title_line.contains(&identities[1].to_string()),
@@ -152,6 +175,7 @@ fn session_spans_roll_over_without_reparenting_inflight_work() {
                     .find(|event| {
                         event["fields"]["message"]
                             == "rewriting session metadata with generated title"
+                            && event["spans"][0]["session_id"] == identities[1].to_string()
                     })
                     .unwrap();
                 assert_eq!(title["spans"][0]["session_id"], identities[1].to_string());

@@ -1690,7 +1690,7 @@ fn model_picker_shows_a_message_instead_of_vanishing_when_the_filter_matches_not
 #[tokio::test]
 async fn click_inside_help_popup_keeps_it_open() {
     let provider = MockProvider::new(vec!["hello".to_string()], Duration::from_millis(200));
-    let backend = TestBackend::new(80, 24);
+    let (backend, last_buffer, _) = InspectableTestBackend::new(80, 24);
     let terminal = Terminal::new(backend).expect("test terminal");
     let (action_tx, action_rx) = mpsc::channel(64);
     let registry = Arc::new(ToolRegistry::new());
@@ -1717,7 +1717,10 @@ async fn click_inside_help_popup_keeps_it_open() {
     });
 
     send(&action_tx, AppAction::ShowHelp).await;
-    tokio::time::sleep(Duration::from_millis(50)).await; // let the popup render, setting its rect
+    wait_for_frame(&last_buffer, |buffer| {
+        rendered_text(buffer).contains("Help")
+    })
+    .await;
 
     // Click well inside the popup (80x24 terminal → popup spans x:10..70, y:4..20).
     send(
@@ -1730,10 +1733,12 @@ async fn click_inside_help_popup_keeps_it_open() {
         }),
     )
     .await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
     drop(action_tx);
 
-    let state = run_handle.await.expect("task joined");
+    let state = tokio::time::timeout(Duration::from_secs(5), run_handle)
+        .await
+        .expect("TUI shutdown completed")
+        .expect("task joined");
     assert!(
         state.help_popup.show_help,
         "click inside the help popup must not close it"
@@ -1743,7 +1748,7 @@ async fn click_inside_help_popup_keeps_it_open() {
 #[tokio::test]
 async fn click_outside_help_popup_closes_it() {
     let provider = MockProvider::new(vec!["hello".to_string()], Duration::from_millis(200));
-    let backend = TestBackend::new(80, 24);
+    let (backend, last_buffer, _) = InspectableTestBackend::new(80, 24);
     let terminal = Terminal::new(backend).expect("test terminal");
     let (action_tx, action_rx) = mpsc::channel(64);
     let registry = Arc::new(ToolRegistry::new());
@@ -1770,7 +1775,10 @@ async fn click_outside_help_popup_closes_it() {
     });
 
     send(&action_tx, AppAction::ShowHelp).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    wait_for_frame(&last_buffer, |buffer| {
+        rendered_text(buffer).contains("Help")
+    })
+    .await;
 
     // Click outside the popup (top-left corner is outside the centered popup).
     send(
@@ -1783,10 +1791,12 @@ async fn click_outside_help_popup_closes_it() {
         }),
     )
     .await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
     drop(action_tx);
 
-    let state = run_handle.await.expect("task joined");
+    let state = tokio::time::timeout(Duration::from_secs(5), run_handle)
+        .await
+        .expect("TUI shutdown completed")
+        .expect("task joined");
     assert!(
         !state.help_popup.show_help,
         "click outside the help popup must close it"

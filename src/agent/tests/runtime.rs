@@ -230,3 +230,82 @@ fn clear_context_records_the_root_agent_type_in_the_replacement_session() {
         while ui_rx.try_recv().is_ok() {}
     });
 }
+
+#[test]
+fn agent_command_dispatch_logs_every_command_variant() {
+    let log = capture_logs(async {
+        tracing::callsite::rebuild_interest_cache();
+        let registry = Arc::new(ToolRegistry::new());
+        let (mut agent_loop, _ui_rx) = AgentLoop::new(test_engine(), registry);
+        let handle = agent_loop.run();
+        let tool_call_id = Uuid::nil();
+        let child_run_id = Uuid::nil();
+
+        agent_loop
+            .send_command(AgentCommand::Prompt(String::new()))
+            .await;
+        agent_loop
+            .send_command(AgentCommand::ApproveTool { id: tool_call_id })
+            .await;
+        agent_loop
+            .send_command(AgentCommand::DenyTool {
+                id: tool_call_id,
+                reason: "private denial reason".to_string(),
+            })
+            .await;
+        agent_loop
+            .send_command(AgentCommand::AnswerClarify("private answer".to_string()))
+            .await;
+        agent_loop.send_command(AgentCommand::AbortClarify).await;
+        agent_loop
+            .send_command(AgentCommand::Stop {
+                reason: "private stop reason".to_string(),
+            })
+            .await;
+        agent_loop.send_command(AgentCommand::ClearContext).await;
+        agent_loop
+            .send_command(AgentCommand::RecordModelChanged {
+                provider_connection: "private connection".to_string(),
+                model: "private model".to_string(),
+            })
+            .await;
+        agent_loop
+            .send_command(AgentCommand::ForChild {
+                run_id: child_run_id,
+                command: Box::new(AgentCommand::AbortClarify),
+            })
+            .await;
+
+        drop(agent_loop);
+        handle
+            .await
+            .expect("agent command logging task should not panic")
+            .expect("agent command logging loop should shut down cleanly");
+    });
+
+    for command_name in [
+        "prompt",
+        "approve_tool",
+        "deny_tool",
+        "answer_clarify",
+        "abort_clarify",
+        "stop",
+        "clear_context",
+        "record_model_changed",
+        "for_child",
+    ] {
+        assert!(
+            log.contains(&format!("command=\"{command_name}\"")),
+            "missing receipt log for {command_name}: {log}"
+        );
+    }
+    assert_eq!(
+        log.matches("agent command received").count(),
+        9,
+        "each command should produce exactly one receipt event: {log}"
+    );
+    assert!(
+        !log.contains("private"),
+        "command receipt logs must not include private payloads: {log}"
+    );
+}

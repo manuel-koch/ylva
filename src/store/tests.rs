@@ -227,16 +227,6 @@ async fn every_committed_message_carries_a_millisecond_precision_timestamp() {
     }
 }
 
-#[tokio::test]
-async fn a_context_without_a_store_commits_messages_in_memory_only() {
-    let mut context = crate::agent::Context::new();
-    context.push_user("no persistence configured".to_string());
-    assert!(context.messages().iter().any(|message| matches!(
-        message,
-        Message::User { content, .. } if content == "no persistence configured"
-    )));
-}
-
 #[test]
 fn project_key_is_stable_for_one_directory_and_differs_across_directories() {
     let _lock = crate::test_support::SUBSCRIBER_LOCK

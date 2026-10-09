@@ -59,6 +59,168 @@ fn present_render_event(state: &mut ylva::AppState, event: ylva::DomainEvent) {
     );
 }
 
+async fn wait_for_frame(
+    last_buffer: &Arc<std::sync::Mutex<Buffer>>,
+    predicate: impl Fn(&Buffer) -> bool,
+) -> Buffer {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let buffer = last_buffer.lock().expect("buffer snapshot lock").clone();
+            if predicate(&buffer) {
+                return buffer;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "expected frame did not render:\n{}",
+            rendered_text(&last_buffer.lock().unwrap())
+        )
+    })
+}
+
+struct GatedProvider {
+    request_started: tokio::sync::Semaphore,
+    release_request: tokio::sync::Semaphore,
+    release_response: Arc<tokio::sync::Semaphore>,
+    requests: AtomicUsize,
+}
+
+impl ylva::Provider for GatedProvider {
+    fn name(&self) -> &str {
+        "gated"
+    }
+
+    fn list_models(&self) -> futures::future::BoxFuture<'_, anyhow::Result<Vec<ModelInfo>>> {
+        Box::pin(async { Ok(vec![]) })
+    }
+
+    fn chat<'a>(
+        &'a self,
+        _messages: Vec<Message>,
+        _tools: Vec<ToolSchema>,
+        cancel: CancellationToken,
+    ) -> futures::future::BoxFuture<'a, anyhow::Result<mpsc::Receiver<StreamEvent>>> {
+        Box::pin(async move {
+            let request = self.requests.fetch_add(1, Ordering::SeqCst) + 1;
+            self.request_started.add_permits(1);
+            self.release_request.acquire().await?.forget();
+            let (sender, receiver) = mpsc::channel(4);
+            sender
+                .send(StreamEvent::Text(format!("answer-{request}")))
+                .await?;
+            let release_response = Arc::clone(&self.release_response);
+            tokio::spawn(async move {
+                let event = tokio::select! {
+                    permit = release_response.acquire() => {
+                        permit.expect("response gate open").forget();
+                        StreamEvent::Done
+                    }
+                    _ = cancel.cancelled() => StreamEvent::Cancelled,
+                };
+                let _ = sender.send(event).await;
+            });
+            Ok(receiver)
+        })
+    }
+}
+
+struct GatedTuiRun {
+    actions: mpsc::Sender<AppAction>,
+    last_buffer: Arc<std::sync::Mutex<Buffer>>,
+    provider: Arc<GatedProvider>,
+    handle: tokio::task::JoinHandle<ylva::TuiState>,
+}
+
+impl GatedTuiRun {
+    fn new(initial_prompt: Option<String>) -> Self {
+        let provider = Arc::new(GatedProvider {
+            request_started: tokio::sync::Semaphore::new(0),
+            release_request: tokio::sync::Semaphore::new(0),
+            release_response: Arc::new(tokio::sync::Semaphore::new(0)),
+            requests: AtomicUsize::new(0),
+        });
+        let (backend, last_buffer, _) = InspectableTestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let (actions, action_receiver) = mpsc::channel(64);
+        let engine = Arc::new(EngineImpl::new(
+            Arc::clone(&provider) as Arc<dyn ylva::Provider>,
+            common::test_engine_config(),
+        ));
+        let (agent, updates) = AgentLoop::new(engine, Arc::new(ToolRegistry::new()));
+        let handle = tokio::spawn(async move {
+            tui_driver::run_tui(
+                &mut terminal,
+                agent,
+                updates,
+                initial_prompt,
+                action_receiver,
+                &mut NoopClipboard,
+            )
+            .await
+            .expect("run_tui completed")
+        });
+        Self {
+            actions,
+            last_buffer,
+            provider,
+            handle,
+        }
+    }
+
+    async fn wait_for_request(&self) {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            self.provider.request_started.acquire(),
+        )
+        .await
+        .expect("provider request started")
+        .expect("request gate open")
+        .forget();
+    }
+
+    async fn start_response(&self, request: usize) {
+        self.wait_for_request().await;
+        self.provider.release_request.add_permits(1);
+        self.wait_for_text(&format!("answer-{request}")).await;
+    }
+
+    async fn wait_for_text(&self, expected: &str) {
+        wait_for_frame(&self.last_buffer, |buffer| {
+            rendered_text(buffer).contains(expected)
+        })
+        .await;
+    }
+
+    async fn finish_response(&self, request: usize) {
+        self.provider.release_response.add_permits(1);
+        wait_for_frame(&self.last_buffer, |buffer| {
+            let text = rendered_text(buffer);
+            text.contains(&format!("answer-{request}")) && text.contains("Idle")
+        })
+        .await;
+    }
+
+    async fn close(self) -> ylva::TuiState {
+        drop(self.actions);
+        tokio::time::timeout(Duration::from_secs(5), self.handle)
+            .await
+            .expect("TUI shutdown completed")
+            .expect("TUI task joined")
+    }
+
+    async fn wait_for_exit(self) -> ylva::TuiState {
+        let state = tokio::time::timeout(Duration::from_secs(5), self.handle)
+            .await
+            .expect("TUI exited after cancellation")
+            .expect("TUI task joined");
+        drop(self.actions);
+        state
+    }
+}
+
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
@@ -441,6 +603,8 @@ mod bubbles;
 mod cache;
 #[path = "tui_render_state/overlays.rs"]
 mod overlays;
+#[path = "tui_render_state/roundtrip.rs"]
+mod roundtrip;
 #[path = "tui_render_state/selection.rs"]
 mod selection;
 #[path = "tui_render_state/subagent_views.rs"]

@@ -60,154 +60,6 @@ fn exact_and_suggested_child_compact_refuse_and_session_remains_available() {
     }
 }
 
-#[test]
-fn subagent_header_live_chrome_and_background_updates_reuse_large_bodies() {
-    use ylva::DomainEvent;
-    let mut state = ylva::AppState::new();
-    state.enable_render_cache();
-    let bubble_id = uuid::Uuid::new_v4();
-    let run_id = uuid::Uuid::new_v4();
-    let sections = vec![ylva::agent::tools::Section::Content(
-        ylva::agent::tools::ContentSection {
-            label: Some("Task".into()),
-            content: "large task 日本語\n\n".repeat(3_000),
-            file_extension: Some("md".into()),
-            line_number_offset: None,
-        },
-    )];
-    present_render_event(
-        &mut state,
-        DomainEvent::ToolStart {
-            id: bubble_id,
-            name: "spawn_subagent".into(),
-            arguments: serde_json::json!({}),
-            content_sections: sections,
-            title_arguments: vec![("task".into(), serde_json::json!("Inspect the workspace"))],
-            run_id: None,
-        },
-    );
-    present_render_event(
-        &mut state,
-        DomainEvent::ChildAgentStarted {
-            run_id,
-            call_id: bubble_id,
-            agent_type: "reviewer".into(),
-            task: "Inspect".into(),
-            label: "Inspect".into(),
-        },
-    );
-    present_render_event(
-        &mut state,
-        DomainEvent::ChildAgentToken {
-            run_id,
-            text: "child transcript\n\n".repeat(3_000),
-            is_thinking: false,
-        },
-    );
-    present_render_event(
-        &mut state,
-        DomainEvent::ChildAgentDone {
-            run_id,
-            status: "success".into(),
-            result: None,
-        },
-    );
-    if matches!(
-        state.chat_entries[0],
-        ChatEntry::ToolBubble {
-            collapsed: true,
-            ..
-        }
-    ) {
-        state.toggle_tool_bubble_collapsed(bubble_id);
-    }
-    state.switch_to_child_view(run_id);
-    render_offline(&mut state, 120, 40);
-    let header_body = Arc::clone(&state.render_cache.header.layouts[1]);
-    let child_body = Arc::clone(&state.render_cache.conversation.layouts[1]);
-    let builds = state.render_cache.body_layout_builds;
-    assert!(state.render_cache.header.height > 3_000);
-    assert_eq!(state.layout.header_bubble.height, 16);
-    state.spinner_frame += 1;
-    state.child_view.header_bubble_scroll_offset = 1_500;
-    render_offline(&mut state, 120, 40);
-    assert_eq!(builds, state.render_cache.body_layout_builds);
-    assert!(Arc::ptr_eq(
-        &header_body,
-        &state.render_cache.header.layouts[1]
-    ));
-    assert!(Arc::ptr_eq(
-        &child_body,
-        &state.render_cache.conversation.layouts[1]
-    ));
-    present_render_event(
-        &mut state,
-        DomainEvent::ToolProgress {
-            id: bubble_id,
-            title_arguments: vec![(
-                "details".into(),
-                serde_json::json!("wrapping title ".repeat(30)),
-            )],
-        },
-    );
-    render_offline(&mut state, 120, 40);
-    assert_eq!(builds, state.render_cache.body_layout_builds);
-    assert!(Arc::ptr_eq(
-        &header_body,
-        &state.render_cache.header.layouts[1]
-    ));
-    assert!(state
-        .child_view
-        .header_rendered_lines
-        .iter()
-        .any(|line| line.contains("details=")));
-    let second_run = uuid::Uuid::new_v4();
-    present_render_event(
-        &mut state,
-        DomainEvent::ChildAgentStarted {
-            run_id: second_run,
-            call_id: uuid::Uuid::new_v4(),
-            agent_type: "reviewer".into(),
-            task: "other".into(),
-            label: "other".into(),
-        },
-    );
-    present_render_event(
-        &mut state,
-        DomainEvent::ChildAgentToken {
-            run_id: second_run,
-            text: "background text".into(),
-            is_thinking: false,
-        },
-    );
-    state.push_notice("root background notice".into());
-    state.queue_steer_message("root background queued".into());
-    state.steer_indicator = true;
-    render_offline(&mut state, 120, 40);
-    assert_eq!(builds, state.render_cache.body_layout_builds);
-    assert!(state.render_cache.painted_rows <= 40);
-    assert!(!state
-        .conversation
-        .chat_rendered_lines
-        .iter()
-        .any(|line| line.contains("background")));
-    state.toggle_header_bubble_collapsed();
-    render_offline(&mut state, 120, 40);
-    state.toggle_header_bubble_collapsed();
-    render_offline(&mut state, 120, 40);
-    assert!(Arc::ptr_eq(
-        &header_body,
-        &state.render_cache.header.layouts[1]
-    ));
-    state.switch_to_root_view();
-    assert!(state.render_cache.header.layouts.is_empty());
-    assert!(state.render_cache.conversation.layouts.is_empty());
-    assert!(state.child_view.header_rendered_lines.is_empty());
-    render_offline(&mut state, 120, 40);
-    assert!(state.render_cache.header.layouts.is_empty());
-    assert!(state.pending_scroll_to_bubble.is_none());
-}
-
 /// While viewing an *active* subagent's own transcript, the footer must not
 /// parrot the root's "Running tool…" word unless the child's own transcript
 /// shows one of its own tool bubbles running — otherwise it misleadingly
@@ -580,11 +432,6 @@ fn spawn_subagent_running_duration_is_visible_in_parent_and_child_views() {
                     "running duration uses whole seconds in the {} view",
                     if child_view { "child" } else { "parent" },
                 );
-                let previous_layouts = if child_view {
-                    state.render_cache.header.layouts.clone()
-                } else {
-                    state.render_cache.conversation.layouts.clone()
-                };
                 state
                     .child_conversations
                     .get_mut(&run_id)
@@ -597,21 +444,6 @@ fn spawn_subagent_running_duration_is_visible_in_parent_and_child_views() {
                     same_second_title, title,
                     "subsecond redraws must keep the timer calm"
                 );
-                if cached {
-                    let current_layouts = if child_view {
-                        &state.render_cache.header.layouts
-                    } else {
-                        &state.render_cache.conversation.layouts
-                    };
-                    assert_eq!(previous_layouts.len(), current_layouts.len());
-                    assert!(
-                        previous_layouts
-                            .iter()
-                            .zip(current_layouts)
-                            .all(|(previous, current)| Arc::ptr_eq(previous, current)),
-                        "unchanged elapsed seconds and spinner must reuse cached chrome and bodies"
-                    );
-                }
             }
             apply_event(
                 &mut state,

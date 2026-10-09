@@ -691,7 +691,7 @@ mod tests {
             default_sandbox_context(),
         );
         let schema = tool.input_schema();
-        super::super::assert_all_properties_have_descriptions(&schema, "web_fetch");
+        crate::test_support::assert_all_properties_have_descriptions(&schema, "web_fetch");
     }
 
     #[test]

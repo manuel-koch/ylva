@@ -450,7 +450,7 @@ mod tests {
     #[test]
     fn input_schema_fields_have_descriptions() {
         let schema = SpawnSubagentTool::new(false).input_schema();
-        super::super::assert_all_properties_have_descriptions(&schema, "SpawnSubagentArgs");
+        crate::test_support::assert_all_properties_have_descriptions(&schema, "SpawnSubagentArgs");
     }
 
     #[tokio::test]

@@ -953,7 +953,7 @@ fn read_call_tool_call_methods() {
 #[test]
 fn read_input_args_all_properties_have_descriptions() {
     let schema = ReadTool::default().input_schema();
-    super::super::assert_all_properties_have_descriptions(&schema, "ReadFileArgs");
+    crate::test_support::assert_all_properties_have_descriptions(&schema, "ReadFileArgs");
 }
 
 // ── Range-boundary characterization tests ─────────────────────────────────

@@ -318,27 +318,6 @@ fn attachment_content_part(
 mod tests {
     use super::*;
     use crate::agent::UserMessageKind;
-    use crate::llm::ToolSchema;
-
-    #[test]
-    fn tool_schema_renders_function_envelope() {
-        let schema = ToolSchema {
-            name: "read".into(),
-            description: "read a file".into(),
-            parameters: serde_json::json!({ "type": "object" }),
-        };
-        assert_eq!(
-            schema.to_request_value(),
-            serde_json::json!({
-                "type": "function",
-                "function": {
-                    "name": "read",
-                    "description": "read a file",
-                    "parameters": { "type": "object" },
-                }
-            })
-        );
-    }
 
     #[test]
     fn serialize_messages_maps_system_user_assistant() {

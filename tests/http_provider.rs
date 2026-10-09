@@ -1221,10 +1221,9 @@ async fn drain_text_count(rx: &mut mpsc::Receiver<StreamEvent>, count: usize) ->
 
 /// Verifies that cancellation closes the underlying TCP socket, confirmed with
 /// the OS socket table (`lsof`/`netstat`) rather than only the mock server's
-/// live-connection counter. Absent tools report nothing and are tolerated. Runs
-/// as part of `make test` for now; re-gate behind `#[ignore]` once CI actually
-/// runs the suite on machines guaranteed to have those tools.
+/// live-connection counter. Opt in only on hosts with supported socket tools.
 #[tokio::test]
+#[ignore = "requires platform-specific lsof/netstat socket-table output"]
 async fn cancel_closes_socket_verified_via_os_tools() {
     let server = MockLlmServer::start(MockLlmConfig::default())
         .await

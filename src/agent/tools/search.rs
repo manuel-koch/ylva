@@ -1293,7 +1293,7 @@ mod tests {
     #[test]
     fn search_input_args_all_properties_have_descriptions() {
         let schema = SearchTool::default().input_schema();
-        super::super::assert_all_properties_have_descriptions(&schema, "SearchInputArgs");
+        crate::test_support::assert_all_properties_have_descriptions(&schema, "SearchInputArgs");
     }
 
     #[test]

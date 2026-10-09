@@ -713,10 +713,11 @@ The TUI renders the same headless `AgentLoop`; it does not own agent state.
   Pure terminal-column selection (`chat/selection.rs`), hunk parsing
   (`tool_bubble/diff.rs`) and home-relative labels (`help/paths.rs`) stay
   covered alongside all rendering owners; there are no custom coverage exclusions.
-  Widget tests follow their responsibility owners; the source-backed
-  integration fixture reads the large `chat/cache.rs` implementation rather
-  than the facade, preserving highlighting, selection-storage and row-bound
-  assertions.
+  Widget tests follow their responsibility owners. Rendering-owner tests check
+  cache invalidation, layout and selection-storage reuse, and painted-row
+  bounds; external TUI tests check visible rendering, selection and public
+  live/replayed buffer equivalence. Large highlighting inputs are generated
+  deterministically, without depending on implementation file size or contents.
 - `src/tui_driver.rs` retains `TuiApp`, `run_tui`, the select loop, frame
   orchestration and session-title task coordination. Its private
   `tui_driver/effects.rs` child owns command routing and `PendingRunIds`;

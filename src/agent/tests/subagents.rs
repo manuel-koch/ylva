@@ -442,19 +442,37 @@ fn child_role_iteration_cap_exceeded_returns_err_not_unstructured_ok() {
             "error should explain the iteration cap was hit; got: {error}"
         );
 
-        // No boilerplate assistant bubble should have been pushed to the
-        // child's own context (that message is reserved for a human reading
-        // the root's transcript directly).
-        for update in &collected_updates {
-            if let UiUpdate::Error {
-                message,
-                run_id: got_run_id,
-            } = update
-            {
-                assert_eq!(got_run_id, &Some(run_id));
-                assert!(message.contains("iterations"));
-            }
-        }
+        // Require the error itself, not just correct fields if one happens to appear.
+        let errors = collected_updates
+            .iter()
+            .filter_map(|update| match update {
+                UiUpdate::Error { message, run_id } => Some((message, run_id)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            errors.len(),
+            1,
+            "the child must emit its iteration-cap error"
+        );
+        assert_eq!(errors[0].1, &Some(run_id));
+        assert!(errors[0].0.contains("iterations"));
+        assert_eq!(
+            collected_updates
+                .iter()
+                .filter(|update| matches!(update, UiUpdate::StreamStarted))
+                .count(),
+            3,
+            "the configured limit must allow exactly three requests"
+        );
+        assert_eq!(
+            collected_updates
+                .iter()
+                .filter(|update| matches!(update, UiUpdate::ToolDone { .. }))
+                .count(),
+            3,
+            "the configured limit must execute exactly three tool rounds"
+        );
         // Drain the subagent ui channel too; just ensure nothing panics.
         while subagent_ui_rx.try_recv().is_ok() {}
     });

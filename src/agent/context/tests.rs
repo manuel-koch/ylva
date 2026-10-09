@@ -299,3 +299,13 @@ fn messages_returns_immutable_read_back_slice() {
 mod projection;
 mod recovery;
 mod tokens;
+
+#[test]
+fn a_context_without_a_store_commits_messages_in_memory_only() {
+    let mut context = crate::agent::Context::new();
+    context.push_user("no persistence configured".to_string());
+    assert!(context.messages().iter().any(|message| matches!(
+        message,
+        Message::User { content, .. } if content == "no persistence configured"
+    )));
+}

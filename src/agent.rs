@@ -37,8 +37,6 @@ mod tool_execution;
 mod tool_queue;
 use request::start_request;
 #[cfg(test)]
-use request::ToolCallAccumulator;
-#[cfg(test)]
 use runtime::compaction_updates::{
     report_compaction_failure, send_compaction_applied, send_context_usage_estimate,
     sweep_compaction_and_report,

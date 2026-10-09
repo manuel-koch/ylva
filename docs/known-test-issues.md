@@ -64,6 +64,13 @@ without a subscriber; refreshing after the priming call completes avoids
 the first-registration race. Priming supplements the capture helper's lock;
 it does not replace subscriber isolation.
 
+Factory child-lifecycle tests also hold the shared lock while exercising
+transcript-writing and child-driver callsites. Factory child-session and agent
+session-span capture tests prime shared Store callsites under the capture
+subscriber, then rebuild interest before the asserted operations. Store tests
+can first-register those callsites without a subscriber; the priming pass keeps
+both captured events and their session spans observable under concurrency.
+
 ## Process-global cwd mutation in tests
 
 ### Issue

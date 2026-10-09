@@ -820,7 +820,7 @@ mod tests {
     #[test]
     fn write_input_args_all_properties_have_descriptions() {
         let schema = WriteTool::default().input_schema();
-        super::super::assert_all_properties_have_descriptions(&schema, "WriteFileArgs");
+        crate::test_support::assert_all_properties_have_descriptions(&schema, "WriteFileArgs");
         let schema = serde_json::to_value(schema).expect("schema serializes");
         assert_eq!(schema["properties"]["encoding"]["default"], "utf8");
         let description = schema["properties"]["encoding"]["description"]

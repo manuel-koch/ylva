@@ -265,7 +265,7 @@ mod tests {
     #[test]
     fn input_schema_fields_have_descriptions() {
         let schema = AgentFinishTool::new(test_config()).input_schema();
-        super::super::assert_all_properties_have_descriptions(&schema, "AgentFinishArgs");
+        crate::test_support::assert_all_properties_have_descriptions(&schema, "AgentFinishArgs");
     }
 
     #[test]

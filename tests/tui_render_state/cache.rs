@@ -1,17 +1,3 @@
-// Copyright © 2026 Manuel Koch
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 use super::*;
 
 #[test]
@@ -75,96 +61,13 @@ fn large_plain_and_markdown_buffers_match_legacy_at_every_scroll_position() {
                         .unwrap();
                     assert_eq!(&actual, terminal.backend().buffer(), "count={count}, markdown={markdown_content}, width={width}, offset={offset}");
                     assert_eq!(
-                        state.conversation.chat_rendered_lines,
-                        legacy.conversation.chat_rendered_lines
-                    );
-                    assert_eq!(
-                        state.conversation.chat_rendered_line_prefix_widths,
-                        legacy.conversation.chat_rendered_line_prefix_widths
-                    );
-                    assert_eq!(
-                        state.conversation.bubble_title_rows,
-                        legacy.conversation.bubble_title_rows
-                    );
-                    assert_eq!(
                         state.conversation.scroll_offset,
                         legacy.conversation.scroll_offset
                     );
-                    let builds = state.render_cache.body_layout_builds;
-                    let _ = render_offline(&mut state, width, 40);
-                    assert_eq!(builds, state.render_cache.body_layout_builds);
-                    assert!(state.render_cache.painted_rows <= 40);
                 }
             }
         }
     }
-}
-
-#[test]
-fn stream_updates_append_and_compaction_preserve_or_invalidate_the_correct_slots() {
-    use ylva::DomainEvent;
-    let mut state = ylva::AppState::new();
-    state.enable_render_cache();
-    state
-        .chat_entries
-        .push(completed_render_fixture("completed\n\n".repeat(3_000)));
-    present_render_event(&mut state, DomainEvent::StreamStarted);
-    present_render_event(&mut state, DomainEvent::StreamChunk("first".into()));
-    render_offline(&mut state, 120, 40);
-    let body_builds = state.render_cache.body_layout_builds;
-    present_render_event(&mut state, DomainEvent::StreamChunk(" second".into()));
-    render_offline(&mut state, 120, 40);
-    assert_eq!(state.render_cache.body_layout_builds, body_builds + 1);
-    let completed = Arc::clone(&state.render_cache.conversation.layouts[2]);
-    state.spinner_frame += 1;
-    state.conversation.scroll_locked = false;
-    state.conversation.scroll_offset = 10;
-    render_offline(&mut state, 120, 30);
-    assert!(Arc::ptr_eq(
-        &completed,
-        &state.render_cache.conversation.layouts[2]
-    ));
-    present_render_event(
-        &mut state,
-        DomainEvent::StreamThinkingChunk("reasoning".into()),
-    );
-    render_offline(&mut state, 120, 40);
-    assert!(Arc::ptr_eq(
-        &completed,
-        &state.render_cache.conversation.layouts[2]
-    ));
-    present_render_event(&mut state, DomainEvent::StreamDone);
-    state.push_notice("notice".into());
-    state.queue_steer_message("queued".into());
-    render_offline(&mut state, 120, 40);
-    assert!(Arc::ptr_eq(
-        &completed,
-        &state.render_cache.conversation.layouts[2]
-    ));
-    state.commit_queued_steer_messages(UserMessageState::Cancelled);
-    render_offline(&mut state, 120, 40);
-    assert!(Arc::ptr_eq(
-        &completed,
-        &state.render_cache.conversation.layouts[2]
-    ));
-    present_render_event(
-        &mut state,
-        DomainEvent::CompactionApplied {
-            run_id: None,
-            entry_index: 0,
-            summarized_messages: 1,
-        },
-    );
-    render_offline(&mut state, 120, 40);
-    assert!(matches!(
-        state.chat_entries[0],
-        ChatEntry::CompactionMarker { .. }
-    ));
-    assert!(state.conversation.chat_rendered_lines[1].contains("compaction"));
-    assert!(!Arc::ptr_eq(
-        &completed,
-        &state.render_cache.conversation.layouts[3]
-    ));
 }
 
 #[test]
@@ -178,19 +81,17 @@ fn borrowed_projection_preserves_streaming_and_queued_footer_labels() {
     );
     state.queue_steer_message("queued text".into());
     present_render_event(&mut state, ylva::DomainEvent::SteerQueued { run_id: None });
-    let buffer = render_offline(&mut state, 120, 40);
-    let text: String = buffer.content().iter().map(Cell::symbol).collect();
+    let text = rendered_text(&render_offline(&mut state, 120, 40));
     assert!(text.contains("Thinking…"));
     assert!(text.contains("1 message queued"));
     present_render_event(&mut state, ylva::DomainEvent::StreamChunk("answer".into()));
-    let buffer = render_offline(&mut state, 120, 40);
-    let text: String = buffer.content().iter().map(Cell::symbol).collect();
+    let text = rendered_text(&render_offline(&mut state, 120, 40));
     assert!(text.contains("Streaming…"));
     assert!(text.contains("1 message queued"));
 }
 
 #[test]
-fn same_length_tool_replacement_collapse_retention_and_public_compatibility() {
+fn same_length_tool_replacement_preserves_public_compatibility() {
     let mut state = ylva::AppState::new();
     state.enable_render_cache();
     state
@@ -200,16 +101,6 @@ fn same_length_tool_replacement_collapse_retention_and_public_compatibility() {
         unreachable!()
     };
     render_offline(&mut state, 80, 40);
-    let original = Arc::clone(&state.render_cache.conversation.layouts[2]);
-    state.toggle_tool_bubble_collapsed(id);
-    render_offline(&mut state, 80, 40);
-    assert!(state.render_cache.retained_bytes() > 0);
-    state.toggle_tool_bubble_collapsed(id);
-    render_offline(&mut state, 80, 40);
-    assert!(Arc::ptr_eq(
-        &original,
-        &state.render_cache.conversation.layouts[2]
-    ));
     let Some(ChatEntry::ToolBubble { state: bubble, .. }) = state.find_tool_bubble_mut(id) else {
         unreachable!()
     };
@@ -217,30 +108,12 @@ fn same_length_tool_replacement_collapse_retention_and_public_compatibility() {
         unreachable!()
     };
     result_section.content = "new".into();
-    render_offline(&mut state, 80, 40);
-    assert!(state
-        .conversation
-        .chat_rendered_lines
-        .iter()
-        .any(|line| line == "new"));
-    assert!(!Arc::ptr_eq(
-        &original,
-        &state.render_cache.conversation.layouts[2]
-    ));
+    assert!(rendered_text(&render_offline(&mut state, 80, 40)).contains("new"));
     let mut direct = ylva::AppState::new();
     direct.chat_entries = vec![ChatEntry::Notice { text: "old".into() }];
     render_offline(&mut direct, 80, 40);
     direct.chat_entries[0] = ChatEntry::Notice { text: "new".into() };
-    render_offline(&mut direct, 80, 40);
-    assert!(direct
-        .conversation
-        .chat_rendered_lines
-        .iter()
-        .any(|line| line.contains("new")));
-    state.clear_conversation();
-    assert!(state.render_cache.conversation.layouts.is_empty());
-    assert!(state.conversation.chat_rendered_lines.is_empty());
-    assert_eq!(state.render_cache.retained_bytes(), 0);
+    assert!(rendered_text(&render_offline(&mut direct, 80, 40)).contains("new"));
 }
 
 #[test]
@@ -254,29 +127,14 @@ fn wrapped_document_bottom_scroll_does_not_narrow_absolute_offsets() {
     });
     let buffer = render_offline(&mut state, 24, 12);
     assert!(state.conversation.scroll_offset > u16::MAX as usize);
-    assert_eq!(
-        state.conversation.scroll_offset,
-        state.render_cache.conversation.height - state.layout.chat_area.rect.height as usize
-    );
-    assert!(buffer.content().iter().any(|cell| cell.symbol() == "9"));
-    let visible = state.render_cache.conversation.visible_rows(
-        state.conversation.scroll_offset,
-        state.layout.chat_area.rect.height as usize,
-    );
-    assert!(visible
-        .iter()
-        .flat_map(|line| &line.spans)
-        .any(|span| span.content.contains("34999")));
-    let builds = state.render_cache.body_layout_builds;
+    assert!(rendered_text(&buffer).contains("34999"));
     state.conversation.chat_selection = Some(ylva::ChatSelection {
         anchor_line: 1,
         anchor_col: 5,
-        cursor_line: state.render_cache.conversation.height - 1,
+        cursor_line: state.conversation.chat_rendered_lines.len() - 1,
         cursor_col: 10,
     });
     render_offline(&mut state, 24, 12);
-    assert_eq!(builds, state.render_cache.body_layout_builds);
-    assert!(state.render_cache.painted_rows <= 12);
     let text = state.extract_chat_selection_text().unwrap();
     assert!(text.starts_with("row 00000"));
     assert!(text.contains("34999"));
@@ -300,9 +158,7 @@ fn wrapped_document_bottom_scroll_does_not_narrow_absolute_offsets() {
 
 #[tokio::test]
 async fn bubble_expansion_flushes_feedback_before_rendering_the_body() {
-    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ylva::agent::UiUpdate;
-
     let history = Arc::new(std::sync::Mutex::new(Vec::new()));
     let (mut backend, last_buffer, _) = InspectableTestBackend::new(80, 24);
     backend.frame_history = Some(Arc::clone(&history));
@@ -328,75 +184,40 @@ async fn bubble_expansion_flushes_feedback_before_rendering_the_body() {
     });
     update_tx.send(UiUpdate::StreamStarted).await.unwrap();
     update_tx
-        .send(UiUpdate::AppendThinking(
-            "Expansion body marker".to_string(),
-        ))
+        .send(UiUpdate::AppendThinking("Expansion body marker".into()))
         .await
         .unwrap();
     update_tx.send(UiUpdate::StreamDone).await.unwrap();
-    let title_row = tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let text = rendered_text(&last_buffer.lock().expect("buffer snapshot lock"));
-            if let Some(row) = text.lines().position(|line| line.contains("▼ Thought")) {
-                break row as u16;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+    for (title, expanded) in [("▼ Thought", false), ("▶ Thought", true)] {
+        let buffer =
+            wait_for_frame(&last_buffer, |buffer| rendered_text(buffer).contains(title)).await;
+        let title_row = rendered_text(&buffer)
+            .lines()
+            .position(|line| line.contains(title))
+            .unwrap() as u16;
+        if expanded {
+            history.lock().expect("frame history lock").clear();
         }
-    })
-    .await
-    .expect("thinking title must render");
-    for kind in [
-        MouseEventKind::Down(MouseButton::Left),
-        MouseEventKind::Up(MouseButton::Left),
-    ] {
-        action_tx
-            .send(AppAction::MouseInput(MouseEvent {
-                kind,
-                column: 5,
-                row: title_row,
-                modifiers: KeyModifiers::NONE,
-            }))
-            .await
-            .unwrap();
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            send(
+                &action_tx,
+                AppAction::MouseInput(MouseEvent {
+                    kind,
+                    column: 5,
+                    row: title_row,
+                    modifiers: KeyModifiers::NONE,
+                }),
+            )
+            .await;
+        }
     }
-    let title_row = tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let text = rendered_text(&last_buffer.lock().expect("buffer snapshot lock"));
-            if let Some(row) = text.lines().position(|line| line.contains("▶ Thought")) {
-                break row as u16;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+    wait_for_frame(&last_buffer, |buffer| {
+        rendered_text(buffer).contains("Expansion body marker")
     })
-    .await
-    .expect("collapsed thinking title must render");
-    history.lock().expect("frame history lock").clear();
-    for kind in [
-        MouseEventKind::Down(MouseButton::Left),
-        MouseEventKind::Up(MouseButton::Left),
-    ] {
-        action_tx
-            .send(AppAction::MouseInput(MouseEvent {
-                kind,
-                column: 5,
-                row: title_row,
-                modifiers: KeyModifiers::NONE,
-            }))
-            .await
-            .unwrap();
-    }
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            if rendered_text(&last_buffer.lock().expect("buffer snapshot lock"))
-                .contains("Expansion body marker")
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("expanded body must render");
+    .await;
     drop(action_tx);
     run_handle.await.expect("run task joined");
     let frames: Vec<_> = history
@@ -408,11 +229,11 @@ async fn bubble_expansion_flushes_feedback_before_rendering_the_body() {
     let feedback = frames
         .iter()
         .position(|text| text.contains("Expanding…"))
-        .expect("expansion feedback must be flushed");
+        .expect("feedback flushed");
     let expanded = frames
         .iter()
         .position(|text| text.contains("Expansion body marker"))
-        .expect("expanded body must be flushed");
+        .expect("body flushed");
     assert!(feedback < expanded);
     assert!(!frames[feedback].contains("Expansion body marker"));
     assert!(!frames[expanded].contains("Expanding…"));

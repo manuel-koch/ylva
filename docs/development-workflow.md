@@ -186,6 +186,89 @@ When executing a plan:
 A plan step is "done" only when its docs are updated too. Partial completion is
 not completion.
 
+## Testing strategy and module layout
+
+Choose test placement by the **boundary being verified**, not by test length,
+the number of components involved, or whether the test uses async code:
+
+| Boundary | Location | Access |
+|---|---|---|
+| Owner-local behavior, edge cases and internal invariants | `src/`, in an owner-local `#[cfg(test)] mod tests` | Private ancestor items and crate-internal APIs |
+| Public API contracts and assembled component workflows | Root `tests/` | The library's public API, as an external consumer |
+| Executable behavior, including startup and argument dispatch | Root `tests/`, spawning the compiled binary | The executable's inputs, outputs and persisted effects |
+| Executable examples of public API usage | Rust documentation examples | Public API through doctests |
+
+Keep both unit and integration coverage. Focus most edge-case checks at the
+smallest meaningful owner boundary; use integration scenarios to verify wiring
+and externally observable contracts rather than repeat every internal case.
+Cross-owner assertions can remain at an internal facade when they check
+crate-internal collaboration, not an external contract.
+
+Prefer observable behavior over implementation details. Private access is
+useful for internal invariants, but do not expose production internals solely
+to let integration tests reach them. Integration tests import library items
+through `ylva`; they cannot import items from `src/main.rs`. Keep reusable
+behavior in the library and executable assembly in a thin `main.rs`.
+
+### Organizing suites
+
+Small, cohesive suites may stay inline at the end of their implementation file.
+When a suite obscures its owner or has distinct responsibilities, extract it
+without changing its testing boundary:
+
+```text
+src/
+  engine.rs                 # implementation and #[cfg(test)] mod tests;
+  engine/
+    tests.rs                # owner-local fixtures and mod routing;
+    tests/
+      routing.rs            # responsibility-specific unit suite
+  test_support.rs           # helpers shared only by unit suites
+tests/
+  agent_workflow.rs         # integration-test target and shared local fixtures
+  agent_workflow/
+    cancellation.rs         # explicitly included child suite
+  cli_version.rs            # executable-level contract
+```
+
+A `tests/` directory under `src/` has no special Cargo meaning: it contains
+ordinary modules included by the owner. Gate the owner-local test module with
+`#[cfg(test)]`; its descendants and local fixtures inherit that gate.
+There is no mandatory line-count threshold for splitting suites.
+
+Cargo discovers root `tests/*.rs` files as separate test crates/executables.
+Group related scenarios into a target with explicitly declared child modules
+instead of creating a target for every scenario. Child files are not separate
+targets; see the existing `tests/tools_agent_loop.rs` and
+`tests/tui_render_state.rs` layouts below.
+
+Share fixtures at the narrowest useful scope: the local suite first,
+`src/test_support.rs` for multiple unit owners, and `tests/common` for multiple
+integration targets. Do not duplicate helpers across those suites.
+
+### Deterministic test dependencies
+
+Default tests must work offline and without developer-specific configuration.
+Use temporary directories, mock providers or loopback mock servers, and
+controlled time where timing is part of the behavior. Isolate spawned binaries
+with an environment allowlist and temporary working directory/Ylva home, as
+described below. Real-provider scenarios must be explicit opt-in tests.
+Generate representative large inputs instead of depending on an unrelated
+production file's size or contents. Coordinate asynchronous workflows through
+observable completion, events or explicit gates with bounded waits; a fixed
+sleep is not proof that a turn completed. Optional platform-tool corroboration
+must be explicit opt-in, not a default test that silently passes without tools.
+
+Tests in the same test executable share process-global state and can run
+concurrently. Follow the subscriber and cwd isolation rules in
+[known-test-issues.md](known-test-issues.md), and avoid changing the test runner's
+environment when a subprocess environment or injected dependency can express
+the same scenario.
+
+This layout follows the
+[Rust Book's test organization guidance](https://doc.rust-lang.org/book/ch11-03-test-organization.html),
+with the intentional shared-helper convention below.
+
 ## Integration-test shared helpers (`tests/common`)
 
 Shared test-support code lives in `tests/common.rs` and is pulled into each
@@ -196,6 +279,10 @@ integration test (`tests/*.rs`) via `mod common;`, with helpers reached as
   `tests/common.rs` + `tests/common/` directory pair is the established layout;
   adding `tests/common/mod.rs` collides and triggers `E0761]::file for module
   \`common\` found at both ...`.
+  Cargo also discovers `tests/common.rs` as a standalone zero-test target.
+  This is an accepted tradeoff of the project's file-per-module convention;
+  the Rust Book's `tests/common/mod.rs` alternative avoids that extra target,
+  but must not coexist with `tests/common.rs`.
 - **Submodules.** Larger helpers go in `tests/common/<name>.rs` and are wired
   from `tests/common.rs` with `#[path = "common/<name>.rs"] pub mod <name>;`
   (see `mock_llm_server`).
@@ -247,19 +334,23 @@ Large owner-local suites use `#[cfg(test)] mod tests;` with
 `<owner>/tests.rs`; responsibility-specific descendants live under
 `<owner>/tests/`, sharing fixtures from that local parent (see
 `src/llm/engine/tests.rs`, `src/tui_reducer_state/tests.rs` and
-`src/presenter/tests.rs`). Presenter live/replay buffer comparisons and
-cross-input effect-order assertions remain at the facade, alongside shared
-local fixtures; its keyboard, mouse, domain and bubble suites live in
-`presenter/tests/`. Driver frame/title/history orchestration and cross-owner
+`src/presenter/tests.rs`). Presenter cross-input effect-order assertions remain
+at the facade, alongside shared local fixtures; its keyboard, mouse, domain and
+bubble suites live in `presenter/tests/`. Public live/serialized/replayed
+tool-bubble buffer comparisons live in `tests/tui_render_state/roundtrip.rs`,
+alongside the external rendering contracts. Driver frame/title/history orchestration and cross-owner
 clarify routing assertions remain in `tui_driver/tests.rs`, alongside shared
 fixtures; effects, input, models, terminal and update suites live in
 `tui_driver/tests/`. Widget rendering suites follow the bubble, chat, footer,
 help and tool-bubble owners under `tui_widgets/`; small pure selection,
 diff and path-label suites remain beside their implementations.
-`tests/tui_render_state.rs` retains its integration target and uses
-`tui_widgets/chat/cache.rs` as its large source-backed highlighting fixture.
+`tests/tui_render_state.rs` retains its integration target. Large highlighting
+inputs are generated deterministically rather than read from implementation
+files. Internal cache invalidation, layout identity, build-count and
+selection-storage reuse assertions live in `src/render/cache_tests.rs`;
+integration suites retain visible rendering, selection and driver workflows.
 Its explicitly declared descendants under `tests/tui_render_state/` cover
-cache, bubbles, selection, overlays and subagent views; the target parent
+cache, bubbles, selection, overlays, subagent views and round trips; the target parent
 retains shared fixtures. `tests/tools_agent_loop.rs` follows the same pattern,
 with queue/approval, cancellation and subagent suites under
 `tests/tools_agent_loop/`. Descendants are not separate Cargo test targets.
@@ -280,11 +371,23 @@ with request, compaction-update, queue, execution, subagent and runtime suites
 under `agent/tests/`. Message and protocol tests follow their owners; Context
 retains transcript tests with projection, recovery and token descendants.
 `agent/runtime/tests.rs` checks handler control-flow outcomes directly.
+Request-fragment accumulator cases live directly under `agent/request.rs`;
+command-dispatch logging remains at the agent runtime facade, not the protocol
+type owner. Agent-type selection is tested at `agent_factory`, while compiled
+binary tests verify startup dispatch and controlled stdin behavior.
+
+Mixed configuration, lifecycle, protocol and rendering responsibilities use
+owner-local suites under `agent_factory/tests/`, `agent/compaction/tests/`,
+`config/profile/tests/`, `http/tests/`, `llm/openai_compatible_provider/tests/`
+and `agent/tools/tests/`. Keep fixtures and cross-responsibility assertions in
+each owner's `tests.rs`; responsibility-specific descendants do not become
+independent Cargo targets.
 
 Helpers shared only by unit tests (`#[cfg(test)]` modules inside `src/*.rs`)
 live in `src/test_support.rs`, wired from `src/lib.rs` via
 `#[cfg(test)] mod test_support;` so the module is compiled into test builds
-only. It currently provides `SharedLog` and `capture_logs`: `SharedLog` is a
+only. It also owns `assert_all_properties_have_descriptions`, shared across
+tool-schema suites. Its tracing helpers include `SharedLog` and `capture_logs`: `SharedLog` is a
 synchronous in-memory `tracing` writer, and `capture_logs` runs an async body
 under it and returns the captured text. The in-memory buffer is deliberate — a
 file-backed `tracing_appender::non_blocking` writer races its worker thread, so

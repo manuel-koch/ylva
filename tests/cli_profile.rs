@@ -19,8 +19,9 @@
 //! code), so it is exercised here rather than as a `src/config.rs` unit test.
 
 use std::fs;
+use std::io::Write;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -199,6 +200,63 @@ fn no_profile_flag_tolerates_a_missing_default_profile_config() {
         output.status.success(),
         "the implicit default profile must not fail just because no config file exists yet; stderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn empty_piped_stdin_uses_the_demo_prompt() {
+    assert_stdin_uses_demo_prompt(b"");
+}
+
+#[test]
+fn whitespace_only_piped_stdin_uses_the_demo_prompt() {
+    assert_stdin_uses_demo_prompt(b" \t\n\r\n ");
+}
+
+fn assert_stdin_uses_demo_prompt(input: &[u8]) {
+    let ylva_home = TempDir::new().expect("isolated Ylva home");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ylva"))
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env(ylva::YLVA_HOME_ENVIRONMENT_VARIABLE, ylva_home.path())
+        .current_dir(ylva_home.path())
+        .args(["--no-tui", "--color=no"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn compiled binary");
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(input)
+        .expect("write controlled stdin");
+    let output = child.wait_with_output().expect("headless completion");
+    assert!(
+        output.status.success(),
+        "empty stdin must not prevent startup: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let chat_directory = ylva_home.path().join("chats");
+    let session_path = fs::read_dir(&chat_directory)
+        .expect("chat projects")
+        .flat_map(|project| fs::read_dir(project.expect("project entry").path()).expect("sessions"))
+        .map(|session| session.expect("session entry").path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "jsonl")
+        })
+        .expect("persisted session");
+    let messages = ylva::Store::read_messages(&session_path).expect("persisted messages");
+    assert!(matches!(
+        messages.first(),
+        Some(ylva::Message::User { content, kind: ylva::UserMessageKind::Explicit })
+            if content == "What makes the sky look blue?"
+    ));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("What makes the sky look blue?"),
+        "headless output must show the selected fallback prompt"
     );
 }
 

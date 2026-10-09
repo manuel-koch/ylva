@@ -160,29 +160,88 @@ mod tests {
 
     #[test]
     fn delegates_identity_runtime_settings_and_chat() {
-        let provider = OpenRouterProvider::new(
-            "openrouter".to_string(),
-            "https://openrouter.ai".to_string(),
-            "some/model".to_string(),
-            Some("test-key".to_string()),
-        );
+        crate::test_support::run_locked(async {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            use tokio::net::TcpListener;
 
-        assert_eq!(provider.name(), "openrouter");
-        let runtime_config = provider
-            .runtime_config_handle()
-            .expect("OpenRouter exposes Engine runtime settings");
-        provider
-            .set_model("other/model")
-            .expect("OpenRouter supports model switching");
-        assert_eq!(
-            runtime_config
-                .read()
-                .expect("Engine runtime configuration lock")
-                .model,
-            "other/model"
-        );
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback server");
+                let address = listener.local_addr().expect("server address");
+                let server = tokio::spawn(async move {
+                    let (mut stream, _) = listener.accept().await.expect("provider request");
+                    let mut request = Vec::new();
+                    let mut buffer = [0_u8; 2048];
+                    let request_body = loop {
+                        let bytes_read = stream.read(&mut buffer).await.expect("read request");
+                        assert!(bytes_read > 0, "request must include its complete body");
+                        request.extend_from_slice(&buffer[..bytes_read]);
+                        let Some(header_end) = request
+                            .windows(4)
+                            .position(|window| window == b"\r\n\r\n")
+                            .map(|position| position + 4)
+                        else {
+                            continue;
+                        };
+                        let headers = String::from_utf8_lossy(&request[..header_end]);
+                        assert!(headers.starts_with("POST /api/v1/chat/completions HTTP/1.1"));
+                        let content_length = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().expect("content length"))
+                            })
+                            .expect("request content length");
+                        if request.len() >= header_end + content_length {
+                            break serde_json::from_slice::<serde_json::Value>(
+                                &request[header_end..header_end + content_length],
+                            )
+                            .expect("request JSON");
+                        }
+                    };
+                    let body = "data: {\"choices\":[{\"delta\":{\"content\":\"delegated reply\"}}]}\n\ndata: [DONE]\n\n";
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    stream.write_all(response.as_bytes()).await.expect("SSE response");
+                    request_body
+                });
 
-        let _chat_future = provider.chat(Vec::new(), Vec::new(), CancellationToken::new());
+                let provider = OpenRouterProvider::new(
+                    "openrouter".to_string(),
+                    format!("http://{address}"),
+                    "some/model".to_string(),
+                    Some("test-key".to_string()),
+                );
+                assert_eq!(provider.name(), "openrouter");
+                let runtime_config = provider
+                    .runtime_config_handle()
+                    .expect("OpenRouter exposes Engine runtime settings");
+                provider
+                    .set_model("other/model")
+                    .expect("OpenRouter supports model switching");
+                assert_eq!(
+                    runtime_config
+                        .read()
+                        .expect("Engine runtime configuration lock")
+                        .model,
+                    "other/model"
+                );
+                let mut events = provider
+                    .chat(Vec::new(), Vec::new(), CancellationToken::new())
+                    .await
+                    .expect("delegated chat");
+                assert!(matches!(
+                    events.recv().await,
+                    Some(StreamEvent::Text(text)) if text == "delegated reply"
+                ));
+                assert!(matches!(events.recv().await, Some(StreamEvent::Done)));
+                assert_eq!(server.await.expect("server completed")["model"], "other/model");
+            })
+            .await
+            .expect("delegated request must complete promptly");
+        });
     }
 
     #[test]

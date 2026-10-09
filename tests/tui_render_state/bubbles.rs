@@ -65,7 +65,6 @@ fn live_thinking_timers_use_whole_seconds_and_preserve_completed_precision() {
                         DomainEvent::StreamThinkingChunk("reasoning".into()),
                     );
                 }
-                let mut previous_layouts = Vec::new();
                 for elapsed_millis in [9_100, 9_600, 10_100] {
                     let turn_buffer = if child_view {
                         &mut state
@@ -90,18 +89,6 @@ fn live_thinking_timers_use_whole_seconds_and_preserve_completed_precision() {
                         title.ends_with(&format!("Thinking… ({}s)", elapsed_millis / 1000)),
                         "live thinking duration must truncate to whole seconds: {title}"
                     );
-                    if cached && elapsed_millis == 9_600 {
-                        let current_layouts = &state.render_cache.conversation.layouts;
-                        assert_eq!(previous_layouts.len(), current_layouts.len());
-                        assert!(
-                            previous_layouts
-                                .iter()
-                                .zip(current_layouts)
-                                .all(|(previous, current)| Arc::ptr_eq(previous, current)),
-                            "subsecond thinking redraws must reuse chrome and body"
-                        );
-                    }
-                    previous_layouts = state.render_cache.conversation.layouts.clone();
                 }
                 let completed = ChatEntry::ThinkingMessage {
                     text: "reasoning".into(),
@@ -188,50 +175,15 @@ async fn typed_enter_creates_sent_user_bubble_and_assistant() {
 
 #[tokio::test]
 async fn double_press_ctrl_c_mid_stream_cancels_pending_steer() {
-    let provider = MockProvider::new(
-        vec![
-            "a".to_string(),
-            "b".to_string(),
-            "c".to_string(),
-            "d".to_string(),
-        ],
-        Duration::from_millis(40),
-    );
-    let backend = TestBackend::new(80, 24);
-    let terminal = Terminal::new(backend).expect("test terminal");
-    let (action_tx, action_rx) = mpsc::channel(64);
-    let registry = Arc::new(ToolRegistry::new());
-
-    let run_handle = tokio::spawn({
-        let mut terminal = terminal;
-        async move {
-            let engine = Arc::new(EngineImpl::new(
-                Arc::new(provider),
-                common::test_engine_config(),
-            ));
-            let (agent, ui_rx) = AgentLoop::new(engine, registry);
-            tui_driver::run_tui(
-                &mut terminal,
-                agent,
-                ui_rx,
-                None,
-                action_rx,
-                &mut NoopClipboard,
-            )
-            .await
-            .expect("run_tui completed")
-        }
-    });
-
-    type_and_enter(&action_tx, "first").await;
-    tokio::time::sleep(Duration::from_millis(50)).await; // streaming
-    type_and_enter(&action_tx, "steer").await; // queued
-    send(&action_tx, AppAction::CtrlC).await; // first press
-    send(&action_tx, AppAction::CtrlC).await; // second press → Stop
-    tokio::time::sleep(Duration::from_millis(120)).await; // let StreamCancelled drain
-    drop(action_tx);
-
-    let state = run_handle.await.expect("task joined");
+    let run = GatedTuiRun::new(None);
+    type_and_enter(&run.actions, "first").await;
+    run.start_response(1).await;
+    type_and_enter(&run.actions, "steer").await;
+    run.wait_for_text("1 message queued").await;
+    send(&run.actions, AppAction::CtrlC).await;
+    run.wait_for_text("Press ctrl-c again").await;
+    send(&run.actions, AppAction::CtrlC).await;
+    let state = run.wait_for_exit().await;
 
     assert_eq!(state.agent_mode, ylva::AgentMode::Idle);
     let steer = state
@@ -254,51 +206,19 @@ async fn ctrl_c_then_mismatched_escape_does_not_stop_stream() {
     // (Esc) must not confirm it — it starts Esc's own fresh confirm window
     // instead, leaving the current turn (and any queued steer) to complete
     // normally.
-    let provider = MockProvider::new(
-        vec![
-            "a".to_string(),
-            "b".to_string(),
-            "c".to_string(),
-            "d".to_string(),
-        ],
-        Duration::from_millis(40),
-    );
-    let backend = TestBackend::new(80, 24);
-    let terminal = Terminal::new(backend).expect("test terminal");
-    let (action_tx, action_rx) = mpsc::channel(64);
-    let registry = Arc::new(ToolRegistry::new());
-
-    let run_handle = tokio::spawn({
-        let mut terminal = terminal;
-        async move {
-            let engine = Arc::new(EngineImpl::new(
-                Arc::new(provider),
-                common::test_engine_config(),
-            ));
-            let (agent, ui_rx) = AgentLoop::new(engine, registry);
-            tui_driver::run_tui(
-                &mut terminal,
-                agent,
-                ui_rx,
-                None,
-                action_rx,
-                &mut NoopClipboard,
-            )
-            .await
-            .expect("run_tui completed")
-        }
-    });
-
-    type_and_enter(&action_tx, "first").await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    type_and_enter(&action_tx, "steer").await;
-    send(&action_tx, AppAction::CtrlC).await; // arms ctrl-c's confirm
-    send(&action_tx, AppAction::Escape).await; // mismatched key: must not stop
-                                               // Wait for both turns to complete naturally.
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    drop(action_tx);
-
-    let state = run_handle.await.expect("task joined");
+    let run = GatedTuiRun::new(None);
+    type_and_enter(&run.actions, "first").await;
+    run.start_response(1).await;
+    type_and_enter(&run.actions, "steer").await;
+    run.wait_for_text("1 message queued").await;
+    send(&run.actions, AppAction::CtrlC).await;
+    run.wait_for_text("Press ctrl-c again").await;
+    send(&run.actions, AppAction::Escape).await;
+    run.wait_for_text("Press esc again").await;
+    run.provider.release_response.add_permits(1);
+    run.start_response(2).await;
+    run.finish_response(2).await;
+    let state = run.close().await;
     assert_eq!(state.agent_mode, ylva::AgentMode::Idle);
     assert!(
         !state.chat_entries.iter().any(|entry| matches!(
@@ -315,50 +235,15 @@ async fn ctrl_c_then_mismatched_escape_does_not_stop_stream() {
 
 #[tokio::test]
 async fn steer_cycle_leaves_no_queued_entries() {
-    let provider = MockProvider::new(
-        vec![
-            "a".to_string(),
-            "b".to_string(),
-            "c".to_string(),
-            "d".to_string(),
-        ],
-        Duration::from_millis(30),
-    );
-    let backend = TestBackend::new(80, 24);
-    let terminal = Terminal::new(backend).expect("test terminal");
-    let (action_tx, action_rx) = mpsc::channel(64);
-    let registry = Arc::new(ToolRegistry::new());
-
-    let run_handle = tokio::spawn({
-        let mut terminal = terminal;
-        async move {
-            let engine = Arc::new(EngineImpl::new(
-                Arc::new(provider),
-                common::test_engine_config(),
-            ));
-            let (agent, ui_rx) = AgentLoop::new(engine, registry);
-            tui_driver::run_tui(
-                &mut terminal,
-                agent,
-                ui_rx,
-                None,
-                action_rx,
-                &mut NoopClipboard,
-            )
-            .await
-            .expect("run_tui completed")
-        }
-    });
-
-    type_and_enter(&action_tx, "first").await;
-    tokio::time::sleep(Duration::from_millis(50)).await; // first stream in flight
-    type_and_enter(&action_tx, "steer").await; // queued
-                                               // Wait for: first stream done → steer injected (SteerApplied) → second
-                                               // stream completes → idle.
-    tokio::time::sleep(Duration::from_millis(400)).await;
-    drop(action_tx);
-
-    let state = run_handle.await.expect("task joined");
+    let run = GatedTuiRun::new(None);
+    type_and_enter(&run.actions, "first").await;
+    run.start_response(1).await;
+    type_and_enter(&run.actions, "steer").await;
+    run.wait_for_text("1 message queued").await;
+    run.provider.release_response.add_permits(1);
+    run.start_response(2).await;
+    run.finish_response(2).await;
+    let state = run.close().await;
     assert!(
         !state.chat_entries.iter().any(|entry| matches!(
             entry,
@@ -375,37 +260,10 @@ async fn steer_cycle_leaves_no_queued_entries() {
 
 #[tokio::test]
 async fn initial_prompt_produces_sent_bubble() {
-    let provider = MockProvider::new(vec!["ok".to_string()], Duration::from_millis(5));
-    let backend = TestBackend::new(80, 24);
-    let terminal = Terminal::new(backend).expect("test terminal");
-    let (action_tx, action_rx) = mpsc::channel(64);
-    let registry = Arc::new(ToolRegistry::new());
-
-    let run_handle = tokio::spawn({
-        let mut terminal = terminal;
-        async move {
-            let engine = Arc::new(EngineImpl::new(
-                Arc::new(provider),
-                common::test_engine_config(),
-            ));
-            let (agent, ui_rx) = AgentLoop::new(engine, registry);
-            tui_driver::run_tui(
-                &mut terminal,
-                agent,
-                ui_rx,
-                Some("init".to_string()),
-                action_rx,
-                &mut NoopClipboard,
-            )
-            .await
-            .expect("run_tui completed")
-        }
-    });
-
-    tokio::time::sleep(Duration::from_millis(80)).await;
-    drop(action_tx);
-
-    let state = run_handle.await.expect("task joined");
+    let run = GatedTuiRun::new(Some("init".into()));
+    run.start_response(1).await;
+    run.finish_response(1).await;
+    let state = run.close().await;
     assert_eq!(
         state.chat_entries[0],
         ChatEntry::UserMessage {
@@ -1234,52 +1092,18 @@ fn steer_render_order_across_full_steer_cycle() {
 /// deferral logic keeps it below the eventual streaming bubble.
 #[tokio::test]
 async fn message_sent_while_submitted_is_queued_not_sent() {
-    use std::time::Duration;
-    // Slow provider: first chunk arrives after 150 ms, giving us time to
-    // type the second message before StreamStarted fires.
-    let provider = ylva::MockProvider::new(
-        vec!["response-a".to_string(), "response-b".to_string()],
-        Duration::from_millis(150),
-    );
-    let backend = ratatui::backend::TestBackend::new(80, 24);
-    let terminal = ratatui::Terminal::new(backend).expect("terminal");
-    let (action_tx, action_rx) = tokio::sync::mpsc::channel(64);
-    let registry = std::sync::Arc::new(ylva::ToolRegistry::new());
-
-    let run_handle = tokio::spawn({
-        let mut terminal = terminal;
-        async move {
-            let engine = std::sync::Arc::new(ylva::EngineImpl::new(
-                std::sync::Arc::new(provider),
-                common::test_engine_config(),
-            ));
-            let (agent, ui_rx) = ylva::AgentLoop::new(engine, registry);
-            ylva::tui_driver::run_tui(
-                &mut terminal,
-                agent,
-                ui_rx,
-                None,
-                action_rx,
-                &mut NoopClipboard,
-            )
-            .await
-            .expect("run_tui")
-        }
-    });
-
-    // Send "message-a"; provider delays before streaming so agent_mode stays
-    // Idle / submitted for a moment.
-    type_and_enter(&action_tx, "message-a").await;
-    // Small pause — enough for the Prompt to reach the agent but not enough
-    // for StreamStarted to arrive.
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    // Send "message-b" while submitted==true, agent_mode==Idle.
-    type_and_enter(&action_tx, "message-b").await;
-    // Wait for both rounds to complete.
-    tokio::time::sleep(Duration::from_millis(800)).await;
-    drop(action_tx);
-
-    let state = run_handle.await.expect("join");
+    let run = GatedTuiRun::new(None);
+    type_and_enter(&run.actions, "message-a").await;
+    run.wait_for_request().await;
+    run.wait_for_text("message-a").await;
+    type_and_enter(&run.actions, "message-b").await;
+    run.wait_for_text("1 message queued").await;
+    run.provider.release_request.add_permits(1);
+    run.wait_for_text("answer-1").await;
+    run.provider.release_response.add_permits(1);
+    run.start_response(2).await;
+    run.finish_response(2).await;
+    let state = run.close().await;
 
     // "message-b" must have been seen as Queued at some point; after the full
     // cycle it transitions to Steered (applied) rather than staying Sent.
@@ -1960,50 +1784,20 @@ fn collapsed_bubble_title_cut_drops_a_space_before_the_marker() {
 #[tokio::test]
 async fn escape_twice_while_streaming_stops_stream_but_keeps_tui_open() {
     // Esc+Esc must stop the agent but NOT exit the TUI (unlike Ctrl+C+Ctrl+C).
-    let provider = MockProvider::new(
-        vec!["a".to_string(), "b".to_string(), "c".to_string()],
-        Duration::from_millis(40),
-    );
-    let backend = TestBackend::new(80, 24);
-    let terminal = Terminal::new(backend).expect("test terminal");
-    let (action_tx, action_rx) = mpsc::channel(64);
-    let registry = Arc::new(ToolRegistry::new());
-
-    let run_handle = tokio::spawn({
-        let mut terminal = terminal;
-        async move {
-            let engine = Arc::new(EngineImpl::new(
-                Arc::new(provider),
-                common::test_engine_config(),
-            ));
-            let (agent, ui_rx) = AgentLoop::new(engine, registry);
-            tui_driver::run_tui(
-                &mut terminal,
-                agent,
-                ui_rx,
-                None,
-                action_rx,
-                &mut NoopClipboard,
-            )
-            .await
-            .expect("run_tui completed")
-        }
-    });
-
-    type_and_enter(&action_tx, "hello").await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    send(&action_tx, AppAction::Escape).await; // first press: enter confirm
-    send(&action_tx, AppAction::Escape).await; // second press: send Stop, stay in TUI
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    let run = GatedTuiRun::new(None);
+    type_and_enter(&run.actions, "hello").await;
+    run.start_response(1).await;
+    send(&run.actions, AppAction::Escape).await;
+    run.wait_for_text("Press esc again").await;
+    send(&run.actions, AppAction::Escape).await;
+    run.wait_for_text("Idle").await;
 
     // TUI must still be running after Esc+Esc.
     assert!(
-        !run_handle.is_finished(),
+        !run.handle.is_finished(),
         "TUI must remain open after Esc+Esc"
     );
-    drop(action_tx);
-
-    let state = run_handle.await.expect("task joined");
+    let state = run.close().await;
     assert_eq!(state.agent_mode, ylva::AgentMode::Idle);
 }
 

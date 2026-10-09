@@ -218,3 +218,32 @@ pub(crate) fn capture_logs_with_format(
     });
     log.read()
 }
+
+/// Asserts that every property in the top-level `properties` object of `schema`
+/// carries a non-empty `description` string.
+///
+/// Call this from each tool's input-args schema test to guard against fields that
+/// the LLM would see without any explanation.
+pub(crate) fn assert_all_properties_have_descriptions(
+    schema: &schemars::schema::RootSchema,
+    context: &str,
+) {
+    let value = serde_json::to_value(schema).expect("schema serializes");
+    let properties = value["properties"]
+        .as_object()
+        .unwrap_or_else(|| panic!("{context}: schema has no properties object"));
+    for (field_name, property) in properties {
+        // $ref properties delegate to a definition — the description lives there.
+        if property.get("$ref").is_some() {
+            continue;
+        }
+        let description = property
+            .get("description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("");
+        assert!(
+            !description.is_empty(),
+            "{context}: field `{field_name}` is missing a doc-comment description in the schema"
+        );
+    }
+}

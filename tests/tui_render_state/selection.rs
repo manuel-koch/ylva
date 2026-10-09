@@ -15,71 +15,6 @@
 use super::*;
 
 #[test]
-fn large_completed_result_warm_render_reuses_selection_storage() {
-    use ratatui_textarea::TextArea;
-    use ylva::tui_reducer_state::{AppState, ResultSection, ToolCallState};
-    let source_body = include_str!("../../src/tui_widgets/chat/cache.rs");
-    assert!(
-        source_body.lines().count() > 500,
-        "highlighting fixture must retain a genuinely large Rust source body"
-    );
-    let mut state = AppState::new();
-    state.enable_render_cache();
-    state.chat_entries.push(ChatEntry::ToolBubble {
-        id: uuid::Uuid::new_v4(),
-        name: "read".into(),
-        state: Box::new(ToolCallState::Done {
-            arguments: serde_json::json!({}),
-            content_sections: vec![ylva::agent::tools::Section::Content(
-                ylva::agent::tools::ContentSection {
-                    label: Some("src/tui_widgets/chat/cache.rs".into()),
-                    content: source_body.into(),
-                    file_extension: Some("rs".into()),
-                    line_number_offset: Some(0),
-                },
-            )],
-            title_arguments: vec![],
-            result_section: ResultSection::plain(""),
-            summary: vec![],
-            duration: Duration::from_secs(1),
-        }),
-        collapsed: false,
-    });
-    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
-    let mut textarea = TextArea::default();
-    let registry = ToolRegistry::new();
-    terminal
-        .draw(|frame| {
-            ylva::render::render(frame, &mut state, &mut textarea, None, None, &registry);
-        })
-        .unwrap();
-    let selection_storage = state.conversation.chat_rendered_lines.as_ptr();
-    let body_builds = state.render_cache.body_layout_builds;
-    let first_buffer = terminal.backend().buffer().clone();
-    terminal
-        .draw(|frame| {
-            ylva::render::render(frame, &mut state, &mut textarea, None, None, &registry);
-        })
-        .unwrap();
-    assert_eq!(
-        selection_storage,
-        state.conversation.chat_rendered_lines.as_ptr()
-    );
-    assert_eq!(body_builds, state.render_cache.body_layout_builds);
-    assert_eq!(&first_buffer, terminal.backend().buffer());
-    assert!(state.render_cache.painted_rows <= 40);
-    assert!(state
-        .conversation
-        .chat_rendered_lines
-        .iter()
-        .any(|line| line.contains("fn draw_cached_chat")));
-    assert!(
-        state.conversation.chat_rendered_lines.len() > 500,
-        "the full highlighted source must remain available for selection/copy"
-    );
-}
-
-#[test]
 fn cached_selection_uses_terminal_columns_for_wide_unicode_and_graphemes() {
     let mut state = ylva::AppState::new();
     state.enable_render_cache();
@@ -127,7 +62,7 @@ async fn drag_in_chat_area_selects_text() {
 
     let provider =
         ylva::MockProvider::new(vec!["hello world".to_string()], Duration::from_millis(5));
-    let backend = TestBackend::new(80, 24);
+    let (backend, last_buffer, _) = InspectableTestBackend::new(80, 24);
     let terminal = Terminal::new(backend).expect("test terminal");
     let (action_tx, action_rx) = mpsc::channel(64);
     let registry = Arc::new(ToolRegistry::new());
@@ -153,8 +88,10 @@ async fn drag_in_chat_area_selects_text() {
         }
     });
 
-    // Let the TUI render at least one frame so chat_area is set.
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    wait_for_frame(&last_buffer, |buffer| {
+        rendered_text(buffer).contains("Idle")
+    })
+    .await;
 
     // Simulate a mouse-down over visible wordmark text (row 5).
     send(
@@ -192,10 +129,12 @@ async fn drag_in_chat_area_selects_text() {
     )
     .await;
 
-    tokio::time::sleep(Duration::from_millis(30)).await;
     drop(action_tx);
 
-    let state = run_handle.await.expect("task joined");
+    let state = tokio::time::timeout(Duration::from_secs(5), run_handle)
+        .await
+        .expect("TUI shutdown completed")
+        .expect("task joined");
     // The selection should be set and non-empty.
     let sel = state
         .conversation

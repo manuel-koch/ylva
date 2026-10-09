@@ -363,6 +363,29 @@ mod tests {
     }
 
     #[test]
+    fn subsequent_run_truncates_instead_of_appending() {
+        let _lock = crate::test_support::SUBSCRIBER_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let directory = tempfile::TempDir::new().expect("temporary log directory");
+        let path = directory.path().join("ylva.log");
+        for message in ["first run", "second run"] {
+            let file = open_truncate(&path).expect("open log file");
+            let (subscriber, guard) = build_subscriber(file, LogFormat::Text, tracing::Level::INFO);
+            tracing::subscriber::with_default(subscriber, || {
+                tracing::info!("{message}");
+            });
+            drop(guard);
+        }
+        let contents = std::fs::read_to_string(path).expect("read log");
+        assert!(contents.contains("second run"), "log was: {contents}");
+        assert!(
+            !contents.contains("first run"),
+            "log was not truncated: {contents}"
+        );
+    }
+
+    #[test]
     fn init_logging_with_json_creates_file_and_returns_guard() {
         // Holds SUBSCRIBER_LOCK: see init_logging_with_text_creates_file_and_returns_guard.
         let _lock = crate::test_support::SUBSCRIBER_LOCK
@@ -400,6 +423,7 @@ mod tests {
         let contents = std::fs::read_to_string(&path).expect("read log");
         let record: serde_json::Value =
             serde_json::from_str(contents.trim()).expect("log line is valid JSON: {contents}");
+        assert_eq!(record["fields"]["message"], "read file");
         assert!(
             record.get("span").is_none(),
             "redundant single-span field must not be emitted: {contents}"

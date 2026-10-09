@@ -99,64 +99,6 @@ fn engine_notices_are_forwarded_before_the_stream_starts() {
 }
 
 #[test]
-fn accumulator_assembles_single_fragment_call() {
-    let mut acc = ToolCallAccumulator {
-        id: Uuid::new_v4(),
-        name: None,
-        arguments: String::new(),
-    };
-    acc.name = Some("read".to_string());
-    acc.arguments.push_str(r#"{"path":"a.txt"}"#);
-    let call = acc.into_tool_call_checked().expect("valid arguments");
-    assert_eq!(call.name, "read");
-    assert_eq!(call.arguments, serde_json::json!({ "path": "a.txt" }));
-}
-
-#[test]
-fn accumulator_concatenates_fragmented_arguments_across_indices() {
-    let mut acc_0 = ToolCallAccumulator {
-        id: Uuid::new_v4(),
-        name: Some("read".into()),
-        arguments: String::new(),
-    };
-    let mut acc_1 = ToolCallAccumulator {
-        id: Uuid::new_v4(),
-        name: Some("glob".into()),
-        arguments: String::new(),
-    };
-    acc_0.arguments.push_str(r#"{"path""#);
-    acc_1.arguments.push_str(r#"{"pattern""#);
-    acc_0.arguments.push_str(r#":"a.txt"}"#);
-    acc_1.arguments.push_str(r#":"*.rs"}"#);
-    let call_0 = acc_0.into_tool_call_checked().expect("a.txt parses");
-    let call_1 = acc_1.into_tool_call_checked().expect("glob parses");
-    assert_eq!(call_0.arguments, serde_json::json!({ "path": "a.txt" }));
-    assert_eq!(call_1.arguments, serde_json::json!({ "pattern": "*.rs" }));
-}
-
-#[test]
-fn accumulator_reports_incomplete_json_error_with_fragment() {
-    let acc = ToolCallAccumulator {
-        id: Uuid::new_v4(),
-        name: Some("read".into()),
-        arguments: r#"{"path":"unterminated"#.to_string(),
-    };
-    let err = acc.into_tool_call_checked().expect_err("incomplete JSON");
-    assert_eq!(err, r#"{"path":"unterminated"#);
-}
-
-#[test]
-fn accumulator_empty_arguments_yields_null() {
-    let acc = ToolCallAccumulator {
-        id: Uuid::new_v4(),
-        name: Some("glob".into()),
-        arguments: String::new(),
-    };
-    let call = acc.into_tool_call_checked().expect("empty is valid");
-    assert_eq!(call.arguments, Value::Null);
-}
-
-#[test]
 fn context_rejections_retry_once_before_deltas_with_a_smaller_projection() {
     crate::test_support::run_locked(async {
         for (failures, context_rejection, emit_partial, expected_requests) in [

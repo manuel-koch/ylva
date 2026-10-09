@@ -1180,7 +1180,7 @@ mod tests {
     #[test]
     fn bash_input_args_all_properties_have_descriptions() {
         let schema = BashTool::default().input_schema();
-        super::super::assert_all_properties_have_descriptions(&schema, "BashInputArgs");
+        crate::test_support::assert_all_properties_have_descriptions(&schema, "BashInputArgs");
     }
 
     #[test]

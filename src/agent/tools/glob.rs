@@ -1391,7 +1391,7 @@ mod tests {
     #[test]
     fn glob_input_args_all_properties_have_descriptions() {
         let schema = GlobTool::default().input_schema();
-        super::super::assert_all_properties_have_descriptions(&schema, "GlobInputArgs");
+        crate::test_support::assert_all_properties_have_descriptions(&schema, "GlobInputArgs");
     }
 
     #[test]

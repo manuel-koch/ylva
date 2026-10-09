@@ -530,6 +530,10 @@ fn sync_from_draw(state: &mut AppState, rendered: TuiState, button_areas: Option
 }
 
 #[cfg(test)]
+#[path = "render/cache_tests.rs"]
+mod cache_tests;
+
+#[cfg(test)]
 mod tests {
     use uuid::Uuid;
 
