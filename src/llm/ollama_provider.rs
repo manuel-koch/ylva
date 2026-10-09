@@ -71,6 +71,16 @@ impl OllamaProvider {
 }
 
 impl Provider for OllamaProvider {
+    fn with_runtime_config(
+        &self,
+        runtime_config: EngineRuntimeConfigHandle,
+    ) -> anyhow::Result<std::sync::Arc<dyn Provider>> {
+        Ok(std::sync::Arc::new(Self {
+            inner: self.inner.clone_with_runtime_config(runtime_config),
+            native_base_url: self.native_base_url.clone(),
+        }))
+    }
+
     fn name(&self) -> &str {
         self.inner.name()
     }

@@ -30,11 +30,9 @@ pub struct EngineImpl {
     config: EngineConfig,
     /// Shared with providers that support Engine runtime settings.
     runtime_config: EngineRuntimeConfigHandle,
-    /// One-shot guard: the active model's catalog metadata — input
-    /// modalities plus the profile reasoning-effort validation — is
-    /// discovered at most once per engine instance, whether the attempt
-    /// succeeds or fails. A `/models` switch writes the state directly and
-    /// validates the effort itself, so it does not need this guard.
+    /// Catalog metadata is discovered at most once per model selection,
+    /// whether the attempt succeeds or fails. A direct model switch resets
+    /// the guard; a `/models` selection supplies metadata and marks it done.
     catalog_hydrated: AtomicBool,
     /// One-shot notices accumulated by the engine — currently only a
     /// profile reasoning effort dropped by the pre-chat validation — and
@@ -123,6 +121,27 @@ impl EngineImpl {
 }
 
 impl Engine for EngineImpl {
+    fn switch_model_option(&self, option: &super::ProviderModelOption) -> anyhow::Result<()> {
+        super::apply_model_option(self, option)?;
+        self.catalog_hydrated.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    fn configured_copy(&self) -> anyhow::Result<Arc<dyn Engine>> {
+        let runtime_config = Arc::new(RwLock::new(EngineRuntimeConfig::from(&self.config)));
+        let provider = self.provider.with_runtime_config(runtime_config)?;
+        Ok(Arc::new(Self::new(provider, self.config.clone())))
+    }
+
+    fn context_length_for_model(
+        &self,
+        model: &str,
+        catalog_context_length: Option<usize>,
+    ) -> usize {
+        self.config
+            .context_length_for_model(model, catalog_context_length)
+    }
+
     fn chat<'a>(
         &'a self,
         messages: Vec<Message>,
@@ -197,6 +216,9 @@ impl Engine for EngineImpl {
             .expect("the engine runtime configuration lock is poisoned")
             .clone();
         let mut config = self.config.clone();
+        if runtime_config.model != self.config.model {
+            config.context_length = None;
+        }
         config.model = runtime_config.model;
         config.temperature = runtime_config.temperature;
         config
@@ -214,11 +236,17 @@ impl Engine for EngineImpl {
     }
 
     fn switch_model(&self, model: &str) -> anyhow::Result<()> {
+        let model_changed = self.config().model != model;
         self.provider.set_model(model)?;
         let mut runtime_config = self
             .runtime_config
             .write()
             .map_err(|_| anyhow::anyhow!("the engine runtime configuration lock is poisoned"))?;
+        if model_changed {
+            runtime_config.context_length = self.context_length_for_model(model, None);
+            runtime_config.input_modalities = None;
+            self.catalog_hydrated.store(false, Ordering::Release);
+        }
         runtime_config.model = model.to_string();
         Ok(())
     }
@@ -247,40 +275,30 @@ impl Engine for EngineImpl {
     }
 
     fn effective_context_length(&self) -> usize {
-        // The profile's own value always wins; otherwise the Engine runtime value
-        // (seeded from the built-in default, replaced by the catalog length
-        // a `/models` selection adopts).
-        let runtime_context_length = self
-            .runtime_config
+        self.runtime_config
             .read()
             .expect("the engine runtime configuration lock is poisoned")
-            .context_length;
-        self.config.context_length.unwrap_or(runtime_context_length)
+            .context_length
     }
 
     fn adopt_catalog_context_length(&self, catalog_context_length: Option<usize>) {
-        if self.config.context_length.is_some() {
-            // An explicit profile `context_length` outranks the catalog.
-            return;
-        }
-        let Some(catalog_context_length) = catalog_context_length else {
-            return;
-        };
         let mut runtime_config = self
             .runtime_config
             .write()
             .expect("the engine runtime configuration lock is poisoned");
-        if runtime_config.context_length == catalog_context_length {
+        let context_length =
+            self.context_length_for_model(&runtime_config.model, catalog_context_length);
+        if runtime_config.context_length == context_length {
             return;
         }
         tracing::info!(
             provider_connection = %self.config.provider_connection,
             model = %runtime_config.model,
             previous_context_length = runtime_config.context_length,
-            context_length = catalog_context_length,
+            context_length,
             "adopted catalog context length for the selected model"
         );
-        runtime_config.context_length = catalog_context_length;
+        runtime_config.context_length = context_length;
     }
 
     fn hydrate_catalog_metadata(&self) -> BoxFuture<'_, ()> {
@@ -298,9 +316,11 @@ impl Engine for EngineImpl {
             match self.list_models().await {
                 Ok(models) => {
                     let active_model_info = models.iter().find(|model| model.id == active_model);
-                    self.adopt_catalog_context_length(
-                        active_model_info.and_then(|model| model.context_length),
-                    );
+                    if let Some(context_length) =
+                        active_model_info.and_then(|model| model.context_length)
+                    {
+                        self.adopt_catalog_context_length(Some(context_length));
+                    }
                     if let Some(input_modalities) =
                         active_model_info.and_then(|model| model.input_modalities.clone())
                     {

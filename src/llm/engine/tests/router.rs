@@ -190,8 +190,8 @@ fn engine_router_previews_the_same_target_used_for_named_and_catalog_selection()
         "raw rows on the active connection must target the active named engine"
     );
     assert_eq!(
-        active_connection_target.context_length, 32_000,
-        "an explicit engine window takes precedence over catalog metadata"
+        active_connection_target.context_length, 64_000,
+        "another model uses its catalog window instead of the configured override"
     );
 
     let other_connection_target = router

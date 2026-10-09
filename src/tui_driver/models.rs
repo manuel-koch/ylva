@@ -310,11 +310,9 @@ fn refresh_compaction_display(
     let Some(compaction) = &mut display.compaction_engine else {
         return;
     };
-    let selected_summarizer = target.engine_name.as_deref()
-        == Some(compaction.engine_name.as_str())
-        || (target.engine_name.is_none()
-            && compaction.engine_name.is_empty()
-            && compaction.shares_conversation);
+    let selected_summarizer = compaction.shares_conversation
+        && (target.engine_name.as_deref() == Some(compaction.engine_name.as_str())
+            || (target.engine_name.is_none() && compaction.engine_name.is_empty()));
     if compaction.follows_conversation {
         compaction.engine_name = conversation_engine_name.to_string();
         compaction.provider_connection = conversation_provider_connection.to_string();
@@ -326,11 +324,7 @@ fn refresh_compaction_display(
         compaction.context_length = target.context_length;
     }
     compaction.shares_conversation = compaction.follows_conversation
-        || (!compaction.engine_name.is_empty()
-            && compaction.engine_name == conversation_engine_name)
-        || (compaction.engine_name.is_empty()
-            && conversation_engine_name.is_empty()
-            && compaction.shares_conversation);
+        || (compaction.shares_conversation && compaction.engine_name == conversation_engine_name);
 }
 
 pub(super) fn compaction_switch_notice(
@@ -349,13 +343,14 @@ pub(super) fn compaction_switch_notice(
         ));
     }
 
-    let target_is_compaction_engine = match target.engine_name.as_deref() {
-        Some(target_name) if !compaction.engine_name.is_empty() => {
-            target_name == compaction.engine_name
-        }
-        None => compaction.engine_name.is_empty() && compaction.shares_conversation,
-        _ => false,
-    };
+    let target_is_compaction_engine = compaction.shares_conversation
+        && match target.engine_name.as_deref() {
+            Some(target_name) if !compaction.engine_name.is_empty() => {
+                target_name == compaction.engine_name
+            }
+            None => compaction.engine_name.is_empty() && compaction.shares_conversation,
+            _ => false,
+        };
     if target_is_compaction_engine {
         let target_name = target
             .engine_name

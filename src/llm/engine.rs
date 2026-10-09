@@ -32,6 +32,7 @@ use crate::agent::{Message, StreamEvent};
 use crate::llm::{InputModality, ModelInfo, ToolSchema};
 use futures::future::BoxFuture;
 use selection::validate_named_engine_option;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -40,6 +41,21 @@ use tokio_util::sync::CancellationToken;
 /// Keeps `AgentLoop` independent of concrete provider implementations while
 /// allowing the agent factory to construct root and child engines consistently.
 pub trait Engine: Send + Sync {
+    /// Create an independent runtime from the engine's original configuration.
+    fn configured_copy(&self) -> anyhow::Result<Arc<dyn Engine>> {
+        anyhow::bail!("engine does not support creating an independent configured runtime")
+    }
+
+    /// Resolve a selected model's window without retaining another model's metadata.
+    fn context_length_for_model(
+        &self,
+        model: &str,
+        catalog_context_length: Option<usize>,
+    ) -> usize {
+        self.config()
+            .context_length_for_model(model, catalog_context_length)
+    }
+
     fn chat<'a>(
         &'a self,
         messages: Vec<Message>,
@@ -237,26 +253,7 @@ pub trait Engine: Send + Sync {
     /// A regular engine can only select options for its own provider
     /// connection; [`EngineRouter`] also changes the active connection.
     fn switch_model_option(&self, option: &ProviderModelOption) -> anyhow::Result<()> {
-        let config = self.config();
-        anyhow::ensure!(
-            config.provider_connection == option.provider_connection,
-            "engine uses provider connection '{}', not '{}'",
-            config.provider_connection,
-            option.provider_connection
-        );
-        if let Some(reasoning_effort) = option.reasoning_effort.as_deref() {
-            anyhow::ensure!(
-                option.model.advertises_reasoning_effort(reasoning_effort),
-                "model '{}' does not advertise reasoning effort '{}'",
-                option.model.id,
-                reasoning_effort
-            );
-        }
-        self.set_reasoning_effort(option.reasoning_effort.as_deref())?;
-        self.switch_model(&option.model.id)?;
-        self.set_input_modalities(option.model.input_modalities.clone());
-        self.adopt_catalog_context_length(option.model.context_length);
-        Ok(())
+        apply_model_option(self, option)
     }
 
     /// Apply a picker selection. Named shortcuts activate the exact existing
@@ -315,10 +312,9 @@ pub trait Engine: Send + Sync {
         };
         let context_length = match selection {
             ModelSelection::NamedEngine { .. } => self.effective_context_length(),
-            ModelSelection::ProviderModel(option) => config
-                .context_length
-                .or(option.model.context_length)
-                .unwrap_or_else(|| self.effective_context_length()),
+            ModelSelection::ProviderModel(option) => {
+                self.context_length_for_model(&option.model.id, option.model.context_length)
+            }
         };
         Ok(ModelSelectionTarget {
             engine_name,
@@ -327,6 +323,32 @@ pub trait Engine: Send + Sync {
             context_length,
         })
     }
+}
+
+pub(super) fn apply_model_option(
+    engine: &(impl Engine + ?Sized),
+    option: &ProviderModelOption,
+) -> anyhow::Result<()> {
+    let config = engine.config();
+    anyhow::ensure!(
+        config.provider_connection == option.provider_connection,
+        "engine uses provider connection '{}', not '{}'",
+        config.provider_connection,
+        option.provider_connection
+    );
+    if let Some(reasoning_effort) = option.reasoning_effort.as_deref() {
+        anyhow::ensure!(
+            option.model.advertises_reasoning_effort(reasoning_effort),
+            "model '{}' does not advertise reasoning effort '{}'",
+            option.model.id,
+            reasoning_effort
+        );
+    }
+    engine.set_reasoning_effort(option.reasoning_effort.as_deref())?;
+    engine.switch_model(&option.model.id)?;
+    engine.set_input_modalities(option.model.input_modalities.clone());
+    engine.adopt_catalog_context_length(option.model.context_length);
+    Ok(())
 }
 
 #[cfg(test)]

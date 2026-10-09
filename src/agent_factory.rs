@@ -399,10 +399,12 @@ impl AgentFactory {
             .map(str::to_string);
         let compaction_engine = match explicit_compaction_engine_name.as_deref() {
             Some(compaction_engine_name) => {
-                engines.get(compaction_engine_name).cloned().ok_or_else(|| {
+                engines.get(compaction_engine_name).ok_or_else(|| {
                     anyhow::anyhow!(
                         "agent type '{agent_type}' references compaction engine '{compaction_engine_name}', but no such engine is configured"
                     )
+                })?.configured_copy().map_err(|error| {
+                    anyhow::anyhow!("cannot isolate compaction engine '{compaction_engine_name}': {error}")
                 })?
             }
             None => engine.clone(),
@@ -444,10 +446,12 @@ impl AgentFactory {
                             profile.explicit_compaction_engine_name_for(configured_type);
                         let summary_engine = match explicit_summary_engine {
                             Some(summary_engine_name) => {
-                                engines.get(summary_engine_name).cloned().ok_or_else(|| {
+                                engines.get(summary_engine_name).ok_or_else(|| {
                                     anyhow::anyhow!(
                                         "unknown compaction engine: {summary_engine_name}"
                                     )
+                                })?.configured_copy().map_err(|error| {
+                                    anyhow::anyhow!("cannot isolate compaction engine '{summary_engine_name}': {error}")
                                 })?
                             }
                             None => conversation_engine.clone(),
@@ -1098,12 +1102,19 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
+    #[derive(Default, Clone)]
     struct ChildSummaryProvider {
-        summary_requests: AtomicUsize,
+        summary_requests: Arc<AtomicUsize>,
     }
 
     impl Provider for ChildSummaryProvider {
+        fn with_runtime_config(
+            &self,
+            _runtime_config: crate::llm::engine::EngineRuntimeConfigHandle,
+        ) -> anyhow::Result<Arc<dyn Provider>> {
+            Ok(Arc::new(self.clone()))
+        }
+
         fn name(&self) -> &str {
             "child-summary"
         }
@@ -1137,6 +1148,15 @@ mod tests {
     }
 
     impl Provider for SelectableMockProvider {
+        fn with_runtime_config(
+            &self,
+            _runtime_config: crate::llm::engine::EngineRuntimeConfigHandle,
+        ) -> anyhow::Result<Arc<dyn Provider>> {
+            Ok(Arc::new(Self {
+                inner: self.inner.clone(),
+            }))
+        }
+
         fn name(&self) -> &str {
             "mock"
         }
@@ -1486,13 +1506,19 @@ mod tests {
     fn explicit_summarizer_stays_bound_when_conversation_engine_changes() {
         let mut profile = two_engine_profile();
         profile.compaction.engine = Some("main".to_string());
+        profile
+            .engines
+            .get_mut("main")
+            .expect("main engine")
+            .context_length = Some(98_304);
         let factory = factory_for_two_engine_profile(&profile);
         let (root, _ui_rx) = factory
             .create(&profile, "default", Role::Root)
             .expect("root agent builds");
         let engine = root.engine();
         assert!(
-            root.engine_display_info()
+            !root
+                .engine_display_info()
                 .compaction_engine
                 .as_ref()
                 .expect("explicit summarizer display")
@@ -1576,11 +1602,21 @@ mod tests {
             root.compaction_engine_config()
                 .expect("explicit summarizer remains enabled")
                 .model,
-            "main-catalog-model",
-            "an explicit summarizer follows mutations to its own named engine"
+            "main-model",
+            "an explicit summarizer keeps its configured model despite conversation mutations"
+        );
+        assert_eq!(engine.effective_context_length(), 32_000);
+        assert_eq!(
+            root.engine_display_info()
+                .compaction_engine
+                .as_ref()
+                .expect("summarizer display")
+                .context_length,
+            98_304,
         );
         assert!(
-            root.engine_display_info()
+            !root
+                .engine_display_info()
                 .compaction_engine
                 .expect("summarizer display")
                 .shares_conversation

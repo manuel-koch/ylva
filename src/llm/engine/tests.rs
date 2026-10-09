@@ -153,6 +153,10 @@ impl CatalogProvider {
 }
 
 impl Provider for CatalogProvider {
+    fn set_model(&self, _model: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     fn name(&self) -> &str {
         "catalog"
     }
@@ -240,7 +244,7 @@ fn the_compaction_budget_is_read_off_the_active_engine() {
 }
 
 #[test]
-fn a_models_switch_adopts_the_catalog_context_length_only_when_unconfigured() {
+fn a_models_switch_scopes_the_context_override_to_the_configured_model() {
     let catalog_model = ModelInfo {
         id: "catalog-model".to_string(),
         context_length: Some(8_192),
@@ -299,9 +303,22 @@ fn a_models_switch_adopts_the_catalog_context_length_only_when_unconfigured() {
         .expect("model selection succeeds");
     assert_eq!(
         engine.effective_context_length(),
-        4_096,
-        "an explicit profile context_length outranks the catalog"
+        8_192,
+        "a different model uses its catalog window instead of the configured model's override"
     );
+    assert_eq!(engine.config().context_length, None);
+    selection.model.id = "test-model".to_string();
+    engine
+        .switch_model_option(&selection)
+        .expect("return to configured model");
+    assert_eq!(engine.effective_context_length(), 4_096);
+    assert_eq!(engine.config().context_length, Some(4_096));
+    selection.model.id = "model-without-window".to_string();
+    selection.model.context_length = None;
+    engine
+        .switch_model_option(&selection)
+        .expect("select model without catalog window");
+    assert_eq!(engine.effective_context_length(), DEFAULT_CONTEXT_LENGTH);
 }
 
 #[test]

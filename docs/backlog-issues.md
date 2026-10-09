@@ -4,9 +4,13 @@
       connections and model IDs. Multi-word filters match case-insensitively
       across those fields; engine names match only named-engine shortcuts.
 
-- [ ] Why is "openrouter-dense → openrouter/openai/gpt-6-luna context: 96kb
-      reasoning: max ⚙ [IF]" incompatible with compaction engine
-      selected by tests/e2e/custom/profiles/default/config.toml ?
-      Context size is both 96kb, but the compaction-footer-line is orange.
-      When I confirm the selected model, I get the confirmation notice
-      "Switched to engine 'openrouter-dense' (openrouter/openai/gpt-6-luna). Compaction remains on 'local-dense'.", but there is no warning wrt context-size mismatch ( correct ).
+- [x] `/models` compaction detail no longer turns orange solely because the
+      highlighted engine uses a different provider connection or model. Equal
+      effective context windows (including `openrouter-dense` and `local-dense`
+      at `96kb` in `tests/e2e/custom/profiles/default/config.toml`) retain the
+      normal detail color. Fixed compaction engines with different effective
+      context windows still render orange. Catalog selections of another model
+      use that model's window, not the configured model's context override.
+      Explicit compaction engines keep their configured model and window even
+      when the conversation switches models through the same named engine.
+      Implicit compaction follows the selected conversation model and window.

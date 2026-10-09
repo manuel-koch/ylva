@@ -131,9 +131,9 @@ may be unavailable when usage is omitted or a stream is interrupted.
 _Avoid_: billed usage, exact token estimate
 
 **Context window**:
-The active model's effective token capacity, resolved per engine from the
-profile's `context_length`, then the provider catalog, then the built-in
-default.
+The active model's effective token capacity. An engine's configured
+`context_length` applies to its configured model; other model selections use
+the provider catalog or the built-in default.
 _Avoid_: max context, token limit
 
 **Compaction**:
@@ -176,8 +176,9 @@ whole response before any tool executes.
 An agent type may override the profile's compaction engine and summary timeout.
 Each omitted override inherits independently. Root and child runs use the
 settings resolved for their own agent type.
-When neither layer selects a compaction engine, the agent type's configured
-conversation engine is used.
+An explicitly selected compaction engine retains its configured model and
+settings independently of conversation model switches. When neither layer
+selects one, compaction follows the agent's active conversation engine.
 
 ## Models and providers
 

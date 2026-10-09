@@ -273,17 +273,13 @@ fn model_picker_detail_lines(
             let Some(compaction) = &engine_display.compaction_engine else {
                 return Line::from("Compaction is disabled.");
             };
-            let target_is_compaction_engine = target.engine_name.as_deref()
-                == Some(compaction.engine_name.as_str())
-                || (target.engine_name.is_none()
-                    && compaction.engine_name.is_empty()
-                    && compaction.shares_conversation);
+            let target_is_compaction_engine = compaction.shares_conversation
+                && (target.engine_name.as_deref() == Some(compaction.engine_name.as_str())
+                    || (target.engine_name.is_none() && compaction.engine_name.is_empty()));
             let selection_becomes_compaction_engine =
                 compaction.follows_conversation || target_is_compaction_engine;
             let mismatch = !selection_becomes_compaction_engine
-                && (target.provider_connection != compaction.provider_connection
-                    || target.model != compaction.model
-                    || target.context_length != compaction.context_length);
+                && target.context_length != compaction.context_length;
             let (provider_connection, model, context_length) =
                 if selection_becomes_compaction_engine {
                     (

@@ -97,7 +97,7 @@ engine = "ollama/local"
 | Key | Type | Description |
 |---|---|---|
 | `default_engine` | string | Name of the `[engines.*]` entry used when an agent type names none. Defaults to `default`. |
-| `[compaction].engine` | string (optional) | Explicit profile-level summarizer engine, overridden by an explicit per-agent compaction engine. When absent at both levels, summaries follow that agent's active conversation engine, including later `/models` switches. |
+| `[compaction].engine` | string (optional) | Explicit profile-level compaction engine, overridden by an explicit per-agent compaction engine. When absent at both levels, summaries follow that agent's active conversation engine, including later `/models` switches. |
 | `[compaction].timeout_sec` | number (optional) | Wall-clock seconds allowed for each summary request made by the selected compaction engine (default `60`; must be greater than `0`). This is separate from the active conversation engine's settings. |
 | `utility_engine` | string (optional) | Isolated engine used to generate session titles from the first user message and completed assistant reply; resolves to `default_engine` when absent. |
 | `default_model` | string (optional) | Model filled into every `[engines.*]` entry that names none of its own. |
@@ -366,7 +366,7 @@ rebuilding the provider.
 | `provider_connection` | string | Name of the connection under `[provider_connections.*]`. The connection's `provider` field must be `"mock"`, `"ollama"`, or `"openrouter"`. Ollama uses the server origin as `api_base_url` and derives both `/v1` chat and `/api` catalog endpoints; OpenRouter uses its origin as `api_base_url` and derives `/api/v1` for chat and model discovery. |
 | `model` | string | Model identifier passed to the provider. May be omitted, in which case the profile's `default_model` fills it in. |
 | `temperature` | number (optional) | Sampling temperature. Omit to use the model's own default. |
-| `context_length` | number (optional) | Maximum token context window. Omitted means the profile doesn't limit it explicitly. Accepts either a plain integer or a string with a `kb`/`mb` suffix (e.g. `"265kb"` = `265 * 1024`, `"2mb"` = `2 * 1024 * 1024`) — the same 1024-based units `/models` uses to display context lengths. The value actually used is resolved in priority order: this configured value, then the provider's advertised context length for the active model (from its `/models` catalog), then the built-in default of `128 000`. Compaction budgeting uses this resolved value as the window it measures the model view against. |
+| `context_length` | number (optional) | Maximum token context window for this engine's configured model. Omitted means the profile doesn't limit it explicitly. Accepts either a plain integer or a string with a `kb`/`mb` suffix (e.g. `"265kb"` = `265 * 1024`, `"2mb"` = `2 * 1024 * 1024`) — the same 1024-based units `/models` uses to display context lengths. For the configured model, this value takes precedence over the provider catalog. Switching to another model uses that model's catalog window, then the built-in default of `128 000`, without retaining the configured override or the previous model's window. Selecting the configured model again reapplies its override. Compaction budgeting uses the resolved window. |
 | `api_base_url` | string (optional) | Optional engine-level override for the connection's base URL. |
 | `api_key` | string (optional) | Optional engine-level override for the connection's API key. |
 | `reasoning` | string (optional) | Initial explicit reasoning effort applied when the engine is constructed. Omitted uses the provider's own default. Validated once, lazily before the first chat, against the model catalog: an advertised value is kept; a value the model does not advertise (including models that expose no selectable alternatives at all) is dropped to the provider default with a warning naming the model and effort; when the model is absent from the catalog or the catalog fetch fails, the value is kept unvalidated. Later changes go through `/models`, which validates the effort against the model's advertised options before switching. |
@@ -374,20 +374,20 @@ rebuilding the provider.
 | `soft_compaction_threshold` | number (optional) | Fraction of the effective window at or above which a completed turn or tool outcome schedules a useful completed-prefix summary (default `0.7`). Soft pressure alone does not cancel running tools. Must be `> 0` and `≤ 1`, and strictly below `hard_compaction_threshold`. |
 | `hard_compaction_threshold` | number (optional) | Fraction above which a continuation waits for an existing summary within its remaining original deadline, then recovers lossily if necessary (default `0.9`). Every request also fits the separate local safe ceiling. Must be `> 0` and `≤ 1`. |
 
-For example, select a local summarizer and allow more time for its requests:
+For example, select a local compaction engine and allow more time for its requests:
 
 ```toml
 default_engine = "local-chat"
 
 [compaction]
-engine = "local-summarizer"
+engine = "local-compaction"
 timeout_sec = 240
 
 [engines.local-chat]
 provider_connection = "ollama-local"
 model = "chat-model"
 
-[engines.local-summarizer]
+[engines.local-compaction]
 provider_connection = "ollama-local"
 model = "summary-model"
 ```
@@ -405,7 +405,7 @@ A profile groups engine selection and per-agent settings for an agent session.
 | Field | Type | Description |
 |---|---|---|
 | `default_engine` | string | Name of the engine used when no agent-level override is present (required). |
-| `[compaction].engine` | string (optional) | Explicit profile-level summarizer engine, overridden by an explicit per-agent compaction engine. When absent at both levels, summaries follow that agent's active conversation engine, including later `/models` switches. Session-title generation uses `utility_engine`. |
+| `[compaction].engine` | string (optional) | Explicit profile-level compaction engine, overridden by an explicit per-agent compaction engine. When absent at both levels, summaries follow that agent's active conversation engine, including later `/models` switches. Session-title generation uses `utility_engine`. |
 | `utility_engine` | string (optional) | Isolated engine used for utility tasks such as session-title generation. Resolves to `default_engine` when absent and does not follow Engine runtime changes through `/models`. |
 | `provider_connections` | table | Named provider connections, keyed by connection name. |
 | `engines` | table | Named model configurations, keyed by engine name. |
@@ -422,41 +422,42 @@ A profile groups engine selection and per-agent settings for an agent session.
 | `max_tool_iterations` | number (optional) | Cap on consecutive tool-use rounds one turn may spend, for this agent type's root and child loops alike. Defaults to `50` when omitted; `0` is rejected at profile load because it would trip the guard on the very first tool-use round. |
 | `persona` | string (optional) | The agent type's own persona: the single model-facing text this type contributes, composed after the global baseline (global SOUL plus trusted instruction sections) and before the tool protocol — it extends that baseline, never replaces it. Write it as `persona = "…"` in a `.toml` agent-type file, as the body of a `.md` agent-type file (the body *is* the persona), or as `persona = "…"` in an inline table, where it replaces a file-sourced persona. Applies when the type runs as root or child. |
 | `can_spawn` | boolean | When `true` (for a root agent), registers the `spawn_subagent` tool so this agent may delegate self-contained tasks to a concurrently-running child agent (one level deep; children cannot spawn further children). Use `--auto-approve-spawn` to skip the human-approval prompt for `spawn_subagent` calls. See "Child-agent delegation" in `docs/features.md`. |
-| `[agents.<type>.compaction].engine` | string (optional) | Explicit summarizer engine for this agent type's context. Overrides `[compaction].engine`; if neither is set, summaries follow the agent type's active conversation engine. Applies to root and child runs of this agent type. |
+| `[agents.<type>.compaction].engine` | string (optional) | Explicit compaction engine for this agent type's context. Overrides `[compaction].engine`; if neither is set, summaries follow the agent type's active conversation engine. Applies to root and child runs of this agent type. |
 | `[agents.<type>.compaction].timeout_sec` | number (optional) | Summary request timeout for this agent type, in seconds. Overrides `[compaction].timeout_sec` (default `60`); must be greater than `0`. |
 | `tools` | table | Per-tool sandbox rule lists scoped to this agent type only, keyed by tool name (`[agents.<type>.tools.<name>]` inline tables, or a file-authored agent-type's own top-level `[tools.<name>]`/`tools: { <name>: ... }` table). Same shape as the profile-level `[tools.<name>]` table (see "Sandbox" below), resolved with higher precedence than it for this agent type. |
 
-An agent can use a dedicated summarizer and timeout when its conversation
+An agent can use a dedicated compaction engine and timeout when its conversation
 engine has a different context capacity:
 
 ```toml
 [compaction]
-engine = "default-summarizer"
+engine = "default-compaction"
 timeout_sec = 120
 
 [agents.deep-review]
 engine = "long-context-chat"
 
 [agents.deep-review.compaction]
-engine = "long-context-summarizer"
+engine = "long-context-compaction"
 timeout_sec = 240
 ```
 
 Per-agent engine and timeout values override independently. If one is omitted,
 it inherits the matching profile-level compaction setting. A timeout-only
 override does not make the engine explicit: without either engine field, the
-summarizer shares and follows the conversation Engine runtime for that agent type.
-To keep a fixed summarizer, configure its engine explicitly. An explicit
-summarizer remains attached to that named engine even when the conversation
-switches elsewhere; if both use the same named engine, mutations to that
-engine affect subsequent summary requests. In-flight summary requests keep
+compaction engine shares and follows the conversation Engine runtime for that agent type.
+To keep a fixed compaction engine, configure it explicitly. An explicit
+compaction engine uses an independent Engine runtime initialized from that named
+engine's original configuration. Conversation model, context-window and
+reasoning changes do not alter it, even when both name the same engine.
+In-flight summary requests keep
 their original request settings and deadline.
 
 CLI and TUI warn when an agent's conversation engine's effective
 `context_length × soft_compaction_threshold`, plus the compaction prompt and
-request overhead, exceeds its selected summarizer's effective context length.
-The comparison uses the active conversation Engine runtime when summarization follows
-implicitly, otherwise the explicitly selected per-agent summarizer; both use
+request overhead, exceeds its selected compaction engine's effective context length.
+The comparison uses the active conversation Engine runtime when compaction follows
+implicitly, otherwise the explicitly selected per-agent compaction engine; both use
 catalog-derived context lengths when no explicit window is configured.
 Startup checks the selected root and every
 configured agent type, including types that have not been spawned. Equivalent
@@ -474,12 +475,13 @@ unchanged warning from startup or a model switch. The summarized
 prefix can be smaller than the soft threshold, so this is an advisory
 configuration warning, not a startup
 error. An explicitly selected compaction engine's capacity is independent of the
-conversation engine unless both are the same named engine. Use a larger summarizer, lower the conversation
-engine's soft threshold, or select a per-agent compaction engine.
+conversation engine, including when both name the same engine. Use a larger
+compaction engine, lower the
+conversation engine's soft threshold, or select a per-agent compaction engine.
 
 Each actual summary request is also estimated with its source prefix, resolved
 `COMPACTION.md`, code-owned framing, final trigger, and request overhead.
-Requests estimated to exceed the summarizer's context window produce a warning
+Requests estimated to exceed the compaction engine's context window produce a warning
 before dispatch, without changing the prefix or preventing the attempt.
 These local estimates remain advisory, not provider-token guarantees.
 
@@ -499,7 +501,8 @@ independently. If an agent needs specialized engine settings, define another
 
 Agents that resolve the same named engine share its Engine runtime selection. A
 provider/model or reasoning-effort change made through `/models` therefore
-applies to every agent using that engine, including already-running children.
+applies to every conversation agent using that engine, including already-running
+children, but not to their explicitly selected compaction engines.
 The change does not alter an in-flight LLM request; it is observed by the
 agent's next request, which may be another request in the same child run after
 a tool call. The selection is dynamic rather than pinned at spawn time. Use

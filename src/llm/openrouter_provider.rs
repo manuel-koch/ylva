@@ -64,6 +64,15 @@ impl OpenRouterProvider {
 }
 
 impl Provider for OpenRouterProvider {
+    fn with_runtime_config(
+        &self,
+        runtime_config: EngineRuntimeConfigHandle,
+    ) -> anyhow::Result<std::sync::Arc<dyn Provider>> {
+        Ok(std::sync::Arc::new(Self {
+            inner: self.inner.clone_with_runtime_config(runtime_config),
+        }))
+    }
+
     fn name(&self) -> &str {
         self.inner.name()
     }

@@ -322,14 +322,18 @@ fn project_snapshot(state: &AppState, include_content: bool) -> TuiState {
                         compaction.engine_name = child_display.engine_name.clone();
                         compaction.provider_connection = child_display.provider_connection.clone();
                         compaction.model = child_display.model.clone();
-                        if let Some(parent_compaction) =
-                            state.engine_display.compaction_engine.as_ref()
+                        if let Some(parent_compaction) = state
+                            .engine_display
+                            .compaction_engine
+                            .as_ref()
+                            .filter(|compaction| compaction.follows_conversation)
                         {
                             compaction.context_length = parent_compaction.context_length;
                         }
                         compaction.shares_conversation = true;
                     } else {
-                        compaction.shares_conversation = !compaction.engine_name.is_empty()
+                        compaction.shares_conversation = compaction.shares_conversation
+                            && !compaction.engine_name.is_empty()
                             && compaction.engine_name == child_display.engine_name;
                     }
                 }

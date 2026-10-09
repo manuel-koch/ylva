@@ -15,6 +15,215 @@
 use super::super::models::ModelListResult;
 use super::*;
 
+#[test]
+fn picker_preview_and_confirmation_keep_explicit_compaction_fixed_and_implicit_compaction_following(
+) {
+    crate::test_support::run_locked(async {
+        use crate::agent::tools::ToolRegistry;
+        use crate::agent_factory::AgentFactory;
+        use crate::llm::{EngineImpl, OpenAiCompatibleProvider, ProviderModelOption};
+        use ratatui::backend::TestBackend;
+        use ratatui::style::Color;
+
+        let make_option = |connection: &str, model: &str, context_length| ProviderModelOption {
+            provider_connection: connection.to_string(),
+            model: crate::llm::ModelInfo {
+                id: model.to_string(),
+                context_length: Some(context_length),
+                reasoning_efforts: None,
+                reasoning_default: None,
+                input_modalities: Some(Vec::new()),
+            },
+            reasoning_effort: None,
+        };
+        let catalog = vec![
+            make_option("local", "configured-local", 131_072),
+            make_option("local", "large-local", 262_144),
+            make_option("cloud", "large-cloud", 262_144),
+            make_option("cloud", "configured-cloud", 98_304),
+        ];
+        for explicit_compaction in [true, false] {
+            for (engine_name, connection, model, expected_window) in [
+                (Some("local-dense"), "local", "configured-local", 98_304),
+                (None, "local", "large-local", 262_144),
+                (None, "cloud", "large-cloud", 262_144),
+                (Some("cloud-dense"), "cloud", "configured-cloud", 98_304),
+                (None, "local", "configured-local", 98_304),
+            ] {
+                let mut profile = crate::config::ProfileConfig {
+                    default_engine: "local-dense".to_string(),
+                    ..Default::default()
+                };
+                if explicit_compaction {
+                    profile.compaction.engine = Some("local-dense".to_string());
+                }
+                let mut engines = HashMap::new();
+                for (name, connection, model) in [
+                    ("local-dense", "local", "configured-local"),
+                    ("cloud-dense", "cloud", "configured-cloud"),
+                ] {
+                    let engine_config = EngineConfig {
+                        provider_connection: connection.to_string(),
+                        model: model.to_string(),
+                        temperature: None,
+                        context_length: Some(98_304),
+                        api_base_url: Some("http://127.0.0.1:9/v1".to_string()),
+                        api_key: None,
+                        reasoning: None,
+                        compact_target_ratio: 0.4,
+                        soft_compaction_threshold: 0.5,
+                        hard_compaction_threshold: 0.8,
+                    };
+                    let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+                        Arc::new(OpenAiCompatibleProvider::new(
+                            connection.to_string(),
+                            "http://127.0.0.1:9/v1".to_string(),
+                            model.to_string(),
+                            None,
+                        )),
+                        engine_config,
+                    ));
+                    engines.insert(name.to_string(), engine);
+                }
+                let factory = AgentFactory::new(engines);
+                let (agent, _updates) = factory
+                    .create(&profile, "default", crate::agent::Role::Root)
+                    .expect("agent with configured compaction");
+                let engine = agent.engine();
+                let (mut state, mut textarea, commands, _received_commands) = setup();
+                state.engine_display = agent.engine_display_info();
+                let initial_compaction = state
+                    .engine_display
+                    .compaction_engine
+                    .clone()
+                    .expect("compaction");
+                let child_run_id = uuid::Uuid::new_v4();
+                let mut child_display = state.engine_display.clone();
+                child_display.inherits_parent_runtime = true;
+                let child_compaction = child_display
+                    .compaction_engine
+                    .as_mut()
+                    .expect("child compaction");
+                child_compaction.follows_conversation = explicit_compaction;
+                child_compaction.shares_conversation = explicit_compaction;
+                state
+                    .child_engine_displays
+                    .insert(child_run_id, child_display);
+                apply_model_list_result(
+                    &mut state,
+                    None,
+                    ModelListResult::Models(catalog.clone()),
+                    &engine,
+                );
+                let SlashOverlay::ModelPicker {
+                    choices, selected, ..
+                } = &mut state.slash_overlay
+                else {
+                    panic!("model picker");
+                };
+                *selected = choices
+                    .iter()
+                    .position(|choice| {
+                        choice.engine_name.as_deref() == engine_name
+                            && choice.selection.provider_connection == connection
+                            && choice.selection.model.id == model
+                    })
+                    .expect("requested choice");
+                let selection = choices[*selected].to_model_selection();
+                assert_eq!(
+                    choices[*selected]
+                        .selection_target
+                        .as_ref()
+                        .expect("preview")
+                        .context_length,
+                    expected_window
+                );
+
+                let mut terminal =
+                    ratatui::Terminal::new(TestBackend::new(120, 30)).expect("terminal");
+                terminal
+                    .draw(|frame| {
+                        crate::render::render(
+                            frame,
+                            &mut state,
+                            &mut textarea,
+                            None,
+                            None,
+                            &ToolRegistry::new(),
+                        );
+                    })
+                    .expect("picker frame");
+                let buffer = terminal.backend().buffer();
+                let detail = buffer
+                    .content()
+                    .chunks(buffer.area.width as usize)
+                    .find(|row| {
+                        row.iter()
+                            .map(|cell| cell.symbol())
+                            .collect::<String>()
+                            .contains("Compaction uses")
+                    })
+                    .expect("compaction detail row");
+                let color = detail
+                    .iter()
+                    .find(|cell| cell.symbol() == "C")
+                    .expect("detail start")
+                    .fg;
+                assert_eq!(
+                    color,
+                    if explicit_compaction && expected_window != 98_304 {
+                        Color::Rgb(255, 165, 0)
+                    } else {
+                        Color::DarkGray
+                    },
+                    "explicit={explicit_compaction}, selection={selection:?}"
+                );
+
+                execute_slash_effects(
+                    &mut state,
+                    vec![Effect::SwitchModel(selection)],
+                    &engine,
+                    &commands,
+                )
+                .await;
+                assert_eq!(engine.effective_context_length(), expected_window);
+                let actual_compaction = agent
+                    .engine_display_info()
+                    .compaction_engine
+                    .expect("live compaction");
+                assert_eq!(
+                    state.engine_display.compaction_engine.as_ref(),
+                    Some(&actual_compaction)
+                );
+                let child_display = &state.child_engine_displays[&child_run_id];
+                assert_eq!(child_display.model, model);
+                let child_compaction = child_display
+                    .compaction_engine
+                    .as_ref()
+                    .expect("child compaction");
+                if explicit_compaction {
+                    assert_eq!(child_compaction.model, model);
+                    assert_eq!(child_compaction.context_length, expected_window);
+                } else {
+                    assert_eq!(child_compaction.model, "configured-local");
+                    assert_eq!(child_compaction.context_length, 98_304);
+                    assert!(!child_compaction.shares_conversation);
+                }
+                if explicit_compaction {
+                    assert_eq!(actual_compaction, initial_compaction);
+                    assert!(
+                        matches!(state.chat_entries.last(), Some(crate::tui_reducer_state::ChatEntry::Notice { text }) if text.contains("Compaction remains on 'local-dense'."))
+                    );
+                } else {
+                    assert_eq!(actual_compaction.model, model);
+                    assert_eq!(actual_compaction.context_length, expected_window);
+                    assert!(actual_compaction.follows_conversation);
+                }
+            }
+        }
+    });
+}
+
 #[tokio::test(start_paused = true)]
 async fn cancelling_a_model_catalog_disables_waiting_until_a_new_request_starts() {
     let engine: Arc<dyn Engine> = StubEngine::with_models(&["small"], "small");

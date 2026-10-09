@@ -171,9 +171,9 @@ without losing anything the user can still read.
   still run and existing failure recovery is unchanged. Each agent type can
   select its own compaction engine. When neither the profile nor agent type
   explicitly selects one, the summarizer follows that agent's active
-  conversation engine. An explicit summarizer stays bound to its named engine;
-  if it shares the conversation engine, changes to that engine affect future
-  summaries too. See
+  conversation engine. An explicit summarizer retains its named engine's
+  configured model and settings in an independent Engine runtime, even when
+  the conversation uses the same engine name. See
   [per-agent configuration](./configuration.md#per-agent-configuration).
 - **Transcript vs. model view.** The transcript is the durable, ordered
   record of every message and never loses one. The *model view* is what a
@@ -307,11 +307,13 @@ The picker detail previews the provider-connection/model and effective context
 window compaction will use for the highlighted selection, without repeating
 the active conversation engine and model already shown in the TUI footer. It
 uses the form `Compaction uses <provider_connection>/<model>, context: <window>`.
-The detail turns orange when a fixed compaction engine would remain on a
-different provider-connection/model or effective context window than the
-highlighted choice. Compaction that follows the conversation selection, or a
-choice that itself changes the compaction engine, shows the resulting pair
-without a mismatch warning. Switch notices describe the resulting
+The detail turns orange when a fixed compaction engine would retain a
+different effective context window than the highlighted choice, including
+raw catalog models from the same provider connection. A different
+provider connection or model alone does not indicate a context-window mismatch.
+Compaction that follows the conversation selection shows the resulting pair
+without a mismatch warning. Explicit compaction keeps its configured model and
+window across selections, even with the same engine name. Switch notices describe the resulting
 compaction-engine selection.
 
 Model discovery also advertises optional reasoning-effort support. Ylva keeps

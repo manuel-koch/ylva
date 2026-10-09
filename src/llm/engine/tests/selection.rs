@@ -64,7 +64,7 @@ fn direct_engine_previews_the_selected_effective_context_length() {
             .preview_model_selection(&option(Some(64_000)))
             .expect("pinned model preview")
             .context_length,
-        32_000
+        64_000
     );
 
     let catalog_engine = CatalogEngine::new("mock", "current", &[]);

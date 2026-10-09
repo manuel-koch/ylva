@@ -114,6 +114,20 @@ fn default_hard_compaction_threshold() -> f64 {
 }
 
 impl EngineConfig {
+    /// Apply this configuration's override only to its configured model.
+    pub fn context_length_for_model(
+        &self,
+        model: &str,
+        catalog_context_length: Option<usize>,
+    ) -> usize {
+        let configured_context_length = (model == self.model)
+            .then_some(self.context_length)
+            .flatten();
+        configured_context_length
+            .or(catalog_context_length)
+            .unwrap_or(DEFAULT_CONTEXT_LENGTH)
+    }
+
     /// Resolve the context-length budget to use for this engine.
     ///
     /// An explicit TOML `context_length` always wins. Otherwise, falls back

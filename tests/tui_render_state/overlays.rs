@@ -714,40 +714,36 @@ fn model_picker_details_show_highlighted_compaction_effect() {
         ProviderModelOption, TuiState,
     };
 
-    let make_choice = |name: &str, provider_connection: &str, model_id: &str| {
-        let context_length = if model_id == "model-a" {
-            131_072
-        } else {
-            65_536
-        };
-        ModelChoice {
-            label: format!(
-                "{name} → {provider_connection}/{model_id}  context: {}kb",
-                context_length / 1024
-            ),
-            selection: ProviderModelOption {
-                provider_connection: provider_connection.to_string(),
-                model: ModelInfo {
-                    id: model_id.to_string(),
-                    context_length: Some(context_length),
-                    reasoning_efforts: None,
-                    reasoning_default: None,
-                    input_modalities: None,
+    let make_choice =
+        |name: &str, provider_connection: &str, model_id: &str, context_length: usize| {
+            ModelChoice {
+                label: format!(
+                    "{name} → {provider_connection}/{model_id}  context: {}kb",
+                    context_length / 1024
+                ),
+                selection: ProviderModelOption {
+                    provider_connection: provider_connection.to_string(),
+                    model: ModelInfo {
+                        id: model_id.to_string(),
+                        context_length: Some(context_length),
+                        reasoning_efforts: None,
+                        reasoning_default: None,
+                        input_modalities: None,
+                    },
+                    reasoning_effort: None,
                 },
-                reasoning_effort: None,
-            },
-            initial_reasoning_effort: None,
-            is_active: name == "engine-a",
-            engine_name: Some(name.to_string()),
-            selection_target: Some(ModelSelectionTarget {
+                initial_reasoning_effort: None,
+                is_active: name == "engine-a",
                 engine_name: Some(name.to_string()),
-                provider_connection: provider_connection.to_string(),
-                model: model_id.to_string(),
-                context_length,
-            }),
-            selection_preview_error: None,
-        }
-    };
+                selection_target: Some(ModelSelectionTarget {
+                    engine_name: Some(name.to_string()),
+                    provider_connection: provider_connection.to_string(),
+                    model: model_id.to_string(),
+                    context_length,
+                }),
+                selection_preview_error: None,
+            }
+        };
     let mut state = TuiState {
         engine_display: EngineDisplayInfo {
             engine_name: "engine-a".to_string(),
@@ -766,10 +762,16 @@ fn model_picker_details_show_highlighted_compaction_effect() {
         },
         slash_overlay: SlashOverlay::ModelPicker {
             choices: vec![
-                make_choice("engine-a", "mock", "model-a"),
-                make_choice("engine-b", "mock", "model-b"),
-                make_choice("engine-c", "mock", "model-a"),
-                make_choice("engine-d", "mock-alt", "model-a"),
+                make_choice("engine-a", "mock", "model-a", 131_072),
+                make_choice("engine-b", "mock", "model-b", 65_536),
+                make_choice("engine-c", "mock", "model-a", 131_072),
+                make_choice("engine-d", "mock-alt", "model-a", 131_072),
+                make_choice(
+                    "openrouter-dense",
+                    "openrouter",
+                    "openai/gpt-6-luna",
+                    98_304,
+                ),
             ],
             filter: String::new(),
             selected: 1,
@@ -894,6 +896,39 @@ fn model_picker_details_show_highlighted_compaction_effect() {
         .collect();
     assert!(rendered.contains("Compaction uses mock/model-a, context: 32kb"));
     assert_eq!(footer_foreground(&terminal), Color::Rgb(255, 165, 0));
+
+    for (selected, context_length) in [(4, 98_304), (2, 131_072), (3, 131_072)] {
+        state
+            .engine_display
+            .compaction_engine
+            .as_mut()
+            .expect("compaction engine display")
+            .context_length = context_length;
+        if let SlashOverlay::ModelPicker {
+            selected: highlighted,
+            ..
+        } = &mut state.slash_overlay
+        {
+            *highlighted = selected;
+        }
+        terminal
+            .draw(|frame| {
+                tui_widgets::draw(
+                    frame,
+                    &mut state,
+                    &mut textarea,
+                    None,
+                    None,
+                    &ylva::ToolRegistry::new(),
+                );
+            })
+            .expect("redraw with matching context windows");
+        assert_eq!(
+            footer_foreground(&terminal),
+            Color::DarkGray,
+            "equal context windows must not warn for choice {selected}, even when provider or model differs",
+        );
+    }
 
     state
         .engine_display

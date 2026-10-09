@@ -42,7 +42,7 @@ pub enum MockEvent {
 /// mid-stream the current sleep is interrupted via `select!` and
 /// `StreamEvent::Cancelled` is emitted promptly. The token sleeps make the mock
 /// fully deterministic under `tokio::time::pause`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MockProvider {
     script: Vec<MockEvent>,
     interval: Duration,
@@ -63,6 +63,13 @@ impl MockProvider {
 }
 
 impl Provider for MockProvider {
+    fn with_runtime_config(
+        &self,
+        _runtime_config: crate::llm::engine::EngineRuntimeConfigHandle,
+    ) -> anyhow::Result<std::sync::Arc<dyn Provider>> {
+        Ok(std::sync::Arc::new(self.clone()))
+    }
+
     fn name(&self) -> &str {
         "mock"
     }

@@ -187,7 +187,7 @@ fn redact_data_uri(value: &str) -> Option<String> {
 /// exponential backoff honoring `Retry-After`; once streaming begins no retry
 /// occurs and provider error frames or incomplete streams surface as
 /// `StreamEvent::Error`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct OpenAiCompatibleProvider {
     name: String,
     base_url: String,
@@ -206,6 +206,16 @@ pub struct OpenAiCompatibleProvider {
 }
 
 impl OpenAiCompatibleProvider {
+    pub(crate) fn clone_with_runtime_config(
+        &self,
+        runtime_config: EngineRuntimeConfigHandle,
+    ) -> Self {
+        Self {
+            runtime_config,
+            ..self.clone()
+        }
+    }
+
     /// Create a provider for an OpenAI-compatible backend.
     ///
     /// `name` is the short identifier for this provider instance (for example,
@@ -340,6 +350,15 @@ impl OpenAiCompatibleProvider {
 }
 
 impl Provider for OpenAiCompatibleProvider {
+    fn with_runtime_config(
+        &self,
+        runtime_config: EngineRuntimeConfigHandle,
+    ) -> anyhow::Result<std::sync::Arc<dyn Provider>> {
+        Ok(std::sync::Arc::new(
+            self.clone_with_runtime_config(runtime_config),
+        ))
+    }
+
     fn name(&self) -> &str {
         self.name.as_str()
     }

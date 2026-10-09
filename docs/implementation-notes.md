@@ -56,10 +56,11 @@ responsibility-specific suites under `engine/tests/`.
 request and releases the lock before network I/O. Updates therefore affect
 later requests without changing settings in an in-flight request.
 
-Catalog hydration resolves the effective context length and runs once per engine
-before its first chat. A `/models`
+Catalog hydration resolves the effective context length and runs once for a
+model selection before its first chat. A `/models`
 selection supplies that model's metadata, so hydration skips another fetch.
-The engine does not repeat a hydration lookup after its one attempt; transient
+The engine does not repeat a hydration lookup after its one attempt for that
+selection; a direct model-only switch invalidates the previous metadata. Transient
 HTTP `429`/`5xx` responses inside that attempt use the shared bounded retry
 policy below. If hydration rejects a profile reasoning value, the engine
 queues a notice; `EngineRouter` drains it and `AgentLoop` forwards
@@ -84,8 +85,13 @@ background task, so frame refreshes continue to report the configured
 compaction selection. A model-selection target carries the resolved effective
 context window with its provider-connection/model identity. The picker uses
 that preview for a following compaction engine, and colors a fixed engine's
-detail orange only when its resulting provider/model differs from the
-highlighted pair.
+detail orange only when its effective context window differs from the
+highlighted target's window, not when provider/model identity alone differs.
+`EngineConfig::context_length_for_model` scopes an override to the original
+configured model; previews and catalog adoption share that resolution.
+`EngineImpl::configured_copy` gives explicit summarizers their original settings
+with independent provider request handles, sharing HTTP clients and connection
+concurrency limits. Equal engine names no longer imply shared request settings.
 
 `llm::provider_request_limiter` owns one shared generic HTTP semaphore per
 provider connection name; provider connections use the default cap of four.
@@ -320,8 +326,9 @@ a `/models` switch re-prices the budget on the next turn. The three ratios
 are validated as `0 < target < soft < hard ≤ 1` when the profile loads
 (`validate_compaction_settings` in `src/config/profile.rs`), and
 `COMPACTION.md` resolves like `SOUL.md` where the factory wires each agent
-type's compact engine. An explicit profile/agent summarizer is bound to its
-named engine; without either engine field, the factory supplies that agent's
+type's compact engine. An explicit profile/agent summarizer uses an independent
+copy of its named engine's original configuration; without either engine field,
+the factory supplies that agent's
 conversation Engine runtime itself, so model/engine switches affect subsequent
 summaries. Per-agent engine and timeout precedence is independent. The summary
 deadline is read from `[compaction]` after

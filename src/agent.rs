@@ -481,9 +481,7 @@ impl AgentLoop {
                     .unwrap_or_default()
             };
             let shares_conversation = self.compaction_follows_conversation_engine
-                || (!display.engine_name.is_empty()
-                    && compaction_engine_name == display.engine_name)
-                || (display.engine_name.is_empty() && Arc::ptr_eq(&self.engine, compaction_engine));
+                || Arc::ptr_eq(&self.engine, compaction_engine);
             display.compaction_engine = Some(crate::llm::CompactionEngineDisplayInfo {
                 engine_name: compaction_engine_name,
                 provider_connection: compaction_config.provider_connection,

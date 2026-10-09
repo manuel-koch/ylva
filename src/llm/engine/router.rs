@@ -391,10 +391,8 @@ impl Engine for EngineRouter {
         let config = target_engine.config();
         let context_length = match selection {
             ModelSelection::NamedEngine { .. } => target_engine.effective_context_length(),
-            ModelSelection::ProviderModel(option) => config
-                .context_length
-                .or(option.model.context_length)
-                .unwrap_or_else(|| target_engine.effective_context_length()),
+            ModelSelection::ProviderModel(option) => target_engine
+                .context_length_for_model(&option.model.id, option.model.context_length),
         };
         Ok(ModelSelectionTarget {
             engine_name: Some(engine_name),

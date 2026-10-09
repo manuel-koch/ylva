@@ -194,6 +194,17 @@ pub(crate) fn format_input_modalities_for_log(
 /// `delta.tool_calls`, surfaced as [`StreamEvent::Delta`] fragments that the
 /// agent's streaming task assembles. Tool assembly never happens here.
 pub trait Provider: Send + Sync {
+    /// Share connection resources with an independent set of request settings.
+    fn with_runtime_config(
+        &self,
+        _runtime_config: EngineRuntimeConfigHandle,
+    ) -> anyhow::Result<std::sync::Arc<dyn Provider>> {
+        anyhow::bail!(
+            "provider '{}' does not support independent runtimes",
+            self.name()
+        )
+    }
+
     fn chat<'a>(
         &'a self,
         messages: Vec<Message>,

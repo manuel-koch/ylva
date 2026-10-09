@@ -15,6 +15,126 @@
 use super::*;
 
 #[test]
+fn configured_copies_keep_provider_runtimes_independent_and_restore_original_settings() {
+    for (provider, reasoning_effort) in [
+        (
+            Arc::new(OpenAiCompatibleProvider::new(
+                "test".to_string(),
+                "http://127.0.0.1:9/v1".to_string(),
+                "test-model".to_string(),
+                None,
+            )) as Arc<dyn Provider>,
+            None,
+        ),
+        (
+            Arc::new(crate::llm::OllamaProvider::new(
+                "test".to_string(),
+                "http://127.0.0.1:9".to_string(),
+                "test-model".to_string(),
+                None,
+            )),
+            Some("high"),
+        ),
+        (
+            Arc::new(crate::llm::OpenRouterProvider::new(
+                "test".to_string(),
+                "http://127.0.0.1:9".to_string(),
+                "test-model".to_string(),
+                None,
+            )),
+            Some("high"),
+        ),
+    ] {
+        let mut config = make_engine_config();
+        config.context_length = Some(98_304);
+        let engine = EngineImpl::new(provider.clone(), config);
+        engine
+            .switch_model_option(&ProviderModelOption {
+                provider_connection: "mock".to_string(),
+                model: ModelInfo {
+                    id: "larger-model".to_string(),
+                    context_length: Some(262_144),
+                    reasoning_efforts: Some(vec!["high".to_string()]),
+                    reasoning_default: None,
+                    input_modalities: Some(Vec::new()),
+                },
+                reasoning_effort: reasoning_effort.map(str::to_string),
+            })
+            .expect("switch conversation before making a configured copy");
+        let summary = engine
+            .configured_copy()
+            .expect("independent configured runtime");
+        assert_eq!(engine.effective_context_length(), 262_144);
+        assert_eq!(summary.config().model, "test-model");
+        assert_eq!(summary.effective_context_length(), 98_304);
+        assert_eq!(summary.reasoning_effort(), None);
+        summary
+            .switch_model("summary-only-model")
+            .expect("mutate the independent copy");
+        assert_eq!(engine.config().model, "larger-model");
+        assert_eq!(engine.reasoning_effort().as_deref(), reasoning_effort);
+        assert_eq!(
+            provider
+                .runtime_config_handle()
+                .expect("provider runtime")
+                .read()
+                .expect("runtime lock")
+                .model,
+            "larger-model",
+            "the original provider must not use the summary copy's request settings"
+        );
+    }
+}
+
+#[test]
+fn direct_model_switches_discard_previous_metadata_and_rehydrate_the_selected_window() {
+    crate::test_support::run_locked(async {
+        let mut configured_model = model_info_with_modalities("test-model", Some(Vec::new()));
+        configured_model.context_length = Some(131_072);
+        let mut larger_model = model_info_with_modalities("larger-model", Some(Vec::new()));
+        larger_model.context_length = Some(262_144);
+        let provider = Arc::new(CatalogProvider::new(vec![configured_model, larger_model]));
+        let mut config = make_engine_config();
+        config.context_length = Some(98_304);
+        let engine = EngineImpl::new(provider.clone(), config);
+        engine.hydrate_catalog_metadata().await;
+        assert_eq!(engine.effective_context_length(), 98_304);
+        engine
+            .switch_model("larger-model")
+            .expect("direct model switch");
+        assert_eq!(engine.effective_context_length(), DEFAULT_CONTEXT_LENGTH);
+        assert_eq!(engine.input_modalities(), None);
+        engine.hydrate_catalog_metadata().await;
+        assert_eq!(engine.effective_context_length(), 262_144);
+        engine
+            .switch_model("test-model")
+            .expect("return to configured model");
+        assert_eq!(engine.effective_context_length(), 98_304);
+        engine.hydrate_catalog_metadata().await;
+        assert_eq!(provider.list_models_calls(), 3);
+        assert_eq!(engine.effective_context_length(), 98_304);
+    });
+}
+
+#[test]
+fn catalog_selection_without_optional_metadata_does_not_fetch_again() {
+    crate::test_support::run_locked(async {
+        let provider = Arc::new(CatalogProvider::new(Vec::new()));
+        let engine = EngineImpl::new(provider.clone(), make_engine_config());
+        engine
+            .switch_model_option(&ProviderModelOption {
+                provider_connection: "mock".to_string(),
+                model: model_info_with_modalities("catalog-selection", None),
+                reasoning_effort: None,
+            })
+            .expect("catalog selection");
+        engine.hydrate_catalog_metadata().await;
+        assert_eq!(provider.list_models_calls(), 0);
+        assert_eq!(engine.effective_context_length(), DEFAULT_CONTEXT_LENGTH);
+    });
+}
+
+#[test]
 fn engine_impl_config_returns_injected_config() {
     let provider = Arc::new(MockProvider::new(vec![], Duration::from_millis(0)));
     let config = make_engine_config();
