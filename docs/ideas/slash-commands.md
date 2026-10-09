@@ -63,4 +63,5 @@ where the model's instructions came from:
       with its sentinel source e.g. `$YLVA_HOME/AGENTS.md`, `sub/AGENTS.md`)
     - tool schema description
   - tool calls ( the call and its result )
+  - assistent messages
   - user messages
