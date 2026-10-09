@@ -14,6 +14,173 @@
 
 use super::*;
 
+fn completed_subagent_messages(arguments: serde_json::Value) -> Vec<Message> {
+    let tool_call_id = Uuid::new_v4();
+    vec![
+        user_message("Inspect the module."),
+        Message::Assistant {
+            content: String::new(),
+            status: AssistantStatus::Complete,
+            tool_calls: vec![ToolCallRequest {
+                id: tool_call_id,
+                name: crate::agent::tools::agent_finish::AgentFinishTool::NAME.into(),
+                arguments,
+                persisted_title_arguments: Vec::new(),
+            }],
+        },
+        Message::ToolResult {
+            value: crate::agent::ToolResult {
+                id: tool_call_id,
+                name: crate::agent::tools::agent_finish::AgentFinishTool::NAME.into(),
+                result: "Reported outcome to the parent agent.".into(),
+                attachments: Vec::new(),
+                result_section_id: None,
+                result_metadata: None,
+                result_metadata_schema: None,
+                summary: Vec::new(),
+                content_sections: Vec::new(),
+                duration: std::time::Duration::ZERO,
+            },
+        },
+    ]
+}
+
+#[tokio::test]
+async fn subagent_titles_use_completed_outcomes_and_rebuild_them_on_resume() {
+    let directory = tempfile::tempdir().unwrap();
+    let parent = Store::create(
+        &directory.path().join("chats"),
+        directory.path(),
+        Uuid::new_v4(),
+        "mock",
+        "mock",
+        None,
+    )
+    .unwrap();
+    for (arguments, response_kind, outcome) in [
+        (
+            serde_json::json!({"status": "success", "result": "Three commands.", "error": "Ignored error."}),
+            "subagent_result",
+            "Three commands.",
+        ),
+        (
+            serde_json::json!({"status": "failure", "error": "Access denied.", "result": "Ignored result."}),
+            "subagent_error",
+            "Access denied.",
+        ),
+        (
+            serde_json::json!({"result": "Inferred success."}),
+            "subagent_result",
+            "Inferred success.",
+        ),
+        (
+            serde_json::json!({"error": "Inferred failure."}),
+            "subagent_error",
+            "Inferred failure.",
+        ),
+    ] {
+        let mut messages = completed_subagent_messages(arguments);
+        messages.insert(1, assistant_message("Intermediate commentary."));
+        let child = parent
+            .write_child_transcript_store(Some(("mock", "mock")), &messages)
+            .await
+            .unwrap();
+        let prompt = child
+            .title_prompt()
+            .expect("completed outcomes make a subagent title ready");
+        assert!(prompt.contains("<user_message>\nInspect the module.\n</user_message>"));
+        assert!(prompt.contains(&format!("<{response_kind}>\n{outcome}\n</{response_kind}>")));
+        assert!(!prompt.contains("Reported outcome"));
+        assert!(!prompt.contains("Intermediate commentary"));
+        assert!(!prompt.contains("Ignored"));
+        assert_eq!(Store::read_messages(child.path()).unwrap(), messages);
+        let identity = child.session_id();
+        drop(child);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let resumed =
+            Store::resume(&directory.path().join("chats"), directory.path(), identity).unwrap();
+        assert_eq!(resumed.title_prompt().unwrap(), prompt);
+        resumed.set_title("Existing title".into()).await.unwrap();
+        assert!(resumed.title_prompt().is_none());
+    }
+}
+
+#[tokio::test]
+async fn incomplete_or_invalid_finish_calls_do_not_make_subagent_titles_ready() {
+    let directory = tempfile::tempdir().unwrap();
+    let parent = Store::create(
+        &directory.path().join("chats"),
+        directory.path(),
+        Uuid::new_v4(),
+        "mock",
+        "mock",
+        None,
+    )
+    .unwrap();
+    let valid = serde_json::json!({"status": "success", "result": "A result."});
+    let mut incomplete = completed_subagent_messages(valid.clone());
+    incomplete.pop();
+    let mut mismatched = completed_subagent_messages(valid.clone());
+    if let Message::ToolResult { value } = &mut mismatched[2] {
+        value.id = Uuid::new_v4();
+    }
+    let mut unrelated = completed_subagent_messages(valid.clone());
+    if let Message::ToolResult { value } = &mut unrelated[2] {
+        value.name = "read".into();
+    }
+    let mut unrelated_call = completed_subagent_messages(valid);
+    if let Message::Assistant { tool_calls, .. } = &mut unrelated_call[1] {
+        tool_calls[0].name = "read".into();
+    }
+    let mut failed = completed_subagent_messages(serde_json::json!({"result": "A result."}));
+    if let Message::ToolResult { value } = &failed[2] {
+        failed[2] = Message::ToolError {
+            id: value.id,
+            name: value.name.clone(),
+            error: "Finish execution failed.".into(),
+            duration: std::time::Duration::ZERO,
+            content_sections: Vec::new(),
+        };
+    }
+    for messages in [
+        incomplete,
+        mismatched,
+        unrelated,
+        unrelated_call,
+        failed,
+        completed_subagent_messages(
+            serde_json::json!({"status": "invalid", "result": "A result."}),
+        ),
+        completed_subagent_messages(serde_json::json!({"status": "success", "result": "  "})),
+        completed_subagent_messages(serde_json::json!({"status": "failure", "error": ""})),
+    ] {
+        let child = parent
+            .write_child_transcript_store(None, &messages)
+            .await
+            .unwrap();
+        assert!(child.title_prompt().is_none());
+        assert!(child.title().is_empty());
+    }
+    for message in completed_subagent_messages(serde_json::json!({"result": "A result."})) {
+        parent.record_message(&message);
+    }
+    assert!(
+        parent.title_prompt().is_none(),
+        "root title eligibility remains text-reply based"
+    );
+    parent.flush().await;
+    let parent_identity = parent.session_id();
+    drop(parent);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let resumed = Store::resume(
+        &directory.path().join("chats"),
+        directory.path(),
+        parent_identity,
+    )
+    .unwrap();
+    assert!(resumed.title_prompt().is_none());
+}
+
 #[tokio::test]
 async fn round_trip_writes_meta_header_then_events_in_order() {
     let temp = tempfile::tempdir().expect("tempdir");

@@ -37,6 +37,7 @@ use crate::theme::{
     THINKING_BORDER_COLOR, TOOL_BUBBLE_BORDER_COLOR, USER_MESSAGE_BORDER_COLOR,
 };
 use crate::ToolRegistry;
+use tracing::Instrument;
 
 fn capitalize_first(s: &str) -> String {
     crate::agent::tools::title_case_tool_name(s)
@@ -273,6 +274,7 @@ pub struct ConsoleApp {
     prompt: String,
     writer: Box<dyn Write + Send>,
     output_options: CliOutputOptions,
+    exit_snapshot: Option<crate::app::SessionExitHandle>,
 }
 
 impl ConsoleApp {
@@ -290,12 +292,18 @@ impl ConsoleApp {
             prompt,
             writer,
             output_options: CliOutputOptions::plain(),
+            exit_snapshot: None,
         }
     }
 
     /// Enable or disable ANSI colors for the CLI status/header lines.
     pub fn with_color_output(mut self, color: bool) -> Self {
         self.output_options = CliOutputOptions::new(color);
+        self
+    }
+
+    pub fn with_exit_snapshot(mut self, snapshot: crate::app::SessionExitHandle) -> Self {
+        self.exit_snapshot = Some(snapshot);
         self
     }
 }
@@ -331,6 +339,11 @@ impl App for ConsoleApp {
         let (agent, ui_rx) = self
             .factory
             .create(&self.profile, &self.agent_type, Role::Root)?;
+        let _exit_guard = agent.exit_guard(self.exit_snapshot);
+        let session_span = agent
+            .store()
+            .map(|store| store.span())
+            .unwrap_or_else(tracing::Span::current);
         let title_driver = Some(TitleDriver {
             factory: Arc::clone(&self.factory),
             profile: self.profile.clone(),
@@ -346,6 +359,7 @@ impl App for ConsoleApp {
             self.output_options,
             title_driver,
         )
+        .instrument(session_span)
         .await
         .map(|_| 0u8)
     }

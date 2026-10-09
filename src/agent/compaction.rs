@@ -30,6 +30,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 use uuid::Uuid;
 
 pub(crate) mod recovery;
@@ -700,9 +701,12 @@ impl CompactionRuntime {
             };
             if let Err(mpsc::error::TrySendError::Full(update)) = sender.try_send(update) {
                 let sender = sender.clone();
-                tokio::spawn(async move {
-                    let _ = sender.send(update).await;
-                });
+                tokio::spawn(
+                    async move {
+                        let _ = sender.send(update).await;
+                    }
+                    .in_current_span(),
+                );
             }
         }
     }
@@ -1085,47 +1089,50 @@ impl CompactionRuntime {
         let request_id = Uuid::new_v4();
         self.request_id = Some(request_id);
         let activity_sender = self.activity_sender.clone();
-        self.summary_task = Some(tokio::spawn(async move {
-            if let Some((sender, run_id)) = &activity_sender {
-                let _ = sender
-                    .send(super::UiUpdate::CompactionActivity {
-                        run_id: *run_id,
-                        request_id,
-                        active: true,
-                    })
-                    .await;
-            }
-            let mut outcome = generate_summary_attempt(
-                engine,
-                request,
-                session_id,
-                generation,
-                boundary,
-                timeout,
-                request_dump_failure_handler,
-                activity_sender,
-            )
-            .await;
-            match &mut outcome {
-                CompactionOutcome::SummaryReady {
-                    request_id: identity,
-                    ..
+        self.summary_task = Some(tokio::spawn(
+            async move {
+                if let Some((sender, run_id)) = &activity_sender {
+                    let _ = sender
+                        .send(super::UiUpdate::CompactionActivity {
+                            run_id: *run_id,
+                            request_id,
+                            active: true,
+                        })
+                        .await;
                 }
-                | CompactionOutcome::SummaryFailed {
-                    request_id: identity,
-                    ..
-                } => {
-                    *identity = Some(request_id);
+                let mut outcome = generate_summary_attempt(
+                    engine,
+                    request,
+                    session_id,
+                    generation,
+                    boundary,
+                    timeout,
+                    request_dump_failure_handler,
+                    activity_sender,
+                )
+                .await;
+                match &mut outcome {
+                    CompactionOutcome::SummaryReady {
+                        request_id: identity,
+                        ..
+                    }
+                    | CompactionOutcome::SummaryFailed {
+                        request_id: identity,
+                        ..
+                    } => {
+                        *identity = Some(request_id);
+                    }
                 }
+                // The footer's `· Compacting…` indicator is cleared by the loop
+                // itself, through `on_outcome`/`sweep` — not here. A failure
+                // clears it immediately (there's nothing left to apply), but a
+                // success keeps it active until the pending snapshot is actually
+                // applied at a safe boundary, so the indicator never implies
+                // completion before the model view has changed.
+                let _ = outcome_tx.send(outcome).await;
             }
-            // The footer's `· Compacting…` indicator is cleared by the loop
-            // itself, through `on_outcome`/`sweep` — not here. A failure
-            // clears it immediately (there's nothing left to apply), but a
-            // success keeps it active until the pending snapshot is actually
-            // applied at a safe boundary, so the indicator never implies
-            // completion before the model view has changed.
-            let _ = outcome_tx.send(outcome).await;
-        }));
+            .in_current_span(),
+        ));
     }
 }
 

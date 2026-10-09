@@ -27,6 +27,7 @@ use ratatui::Terminal;
 use ratatui_textarea::TextArea;
 use tokio::select;
 use tokio::sync::mpsc;
+use tracing::Instrument;
 
 use crate::agent::{AgentCommand, AgentLoop, AgentMode, Role, UiUpdate};
 use crate::agent_factory::AgentFactory;
@@ -380,6 +381,7 @@ where
                         &mut state, &mut textarea, &cmd_tx, effects, &mut mouse_drag, clipboard,
                         &mut pending_run_ids,
                     )
+                    .instrument(agent.session_span())
                     .await
                         == ActionOutcome::Quit
                     {
@@ -412,6 +414,7 @@ where
                     &mut state, &mut textarea, &cmd_tx, effects, &mut mouse_drag, clipboard,
                     &mut pending_run_ids,
                 )
+                .instrument(agent.session_span())
                 .await
                     == ActionOutcome::Quit
                 {
@@ -446,6 +449,7 @@ where
                     &engine,
                     &cmd_tx,
                 )
+                .instrument(agent.session_span())
                 .await;
                 if clear_conversation_requested && title_driver.is_some() {
                     active_title_session_id = None;
@@ -471,6 +475,7 @@ where
                     &mut state, &mut textarea, &cmd_tx, &textarea_ctx, &update, &mut mouse_drag,
                     clipboard, &mut pending_run_ids,
                 )
+                .instrument(agent.session_span())
                 .await
                     == ActionOutcome::Quit
                 {
@@ -491,6 +496,7 @@ where
                                 &mut state, &mut textarea, &cmd_tx, &textarea_ctx,
                                 &next, &mut mouse_drag, clipboard, &mut pending_run_ids,
                             )
+                            .instrument(agent.session_span())
                             .await
                                 == ActionOutcome::Quit
                             {
@@ -524,6 +530,7 @@ where
                     &mut state, &mut textarea, &cmd_tx, effects, &mut mouse_drag, clipboard,
                     &mut pending_run_ids,
                 )
+                .instrument(agent.session_span())
                 .await;
             }
 
@@ -539,6 +546,7 @@ where
                     &mut state, &mut textarea, &cmd_tx, effects, &mut mouse_drag, clipboard,
                     &mut pending_run_ids,
                 )
+                .instrument(agent.session_span())
                 .await;
             }
 
@@ -636,6 +644,7 @@ pub struct TuiApp {
     agent_type: String,
     explicit_prompt: Option<String>,
     display_metadata: TuiDisplayMetadata,
+    exit_snapshot: Option<crate::app::SessionExitHandle>,
 }
 
 impl TuiApp {
@@ -651,12 +660,18 @@ impl TuiApp {
             agent_type,
             explicit_prompt,
             display_metadata: TuiDisplayMetadata::default(),
+            exit_snapshot: None,
         }
     }
 
     /// Set the active profile and workspace paths shown by the TUI.
     pub fn with_display_metadata(mut self, display_metadata: TuiDisplayMetadata) -> Self {
         self.display_metadata = display_metadata;
+        self
+    }
+
+    pub fn with_exit_snapshot(mut self, snapshot: crate::app::SessionExitHandle) -> Self {
+        self.exit_snapshot = Some(snapshot);
         self
     }
 }
@@ -673,6 +688,7 @@ impl App for TuiApp {
         let (agent, ui_rx) = self
             .factory
             .create(&self.profile, &self.agent_type, Role::Root)?;
+        let _exit_guard = agent.exit_guard(self.exit_snapshot);
         let initial_session_title = agent.store().map(|store| store.title());
         set_terminal_title(initial_session_title.as_deref())?;
         let (title_update_tx, title_update_rx) = mpsc::unbounded_channel();

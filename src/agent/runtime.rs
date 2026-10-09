@@ -54,6 +54,7 @@ struct RunState {
     pending_child_finish_reprompt: bool,
     iteration_cap_exceeded: Option<String>,
     stream_error: Option<String>,
+    execution_span: tracing::Span,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -65,6 +66,12 @@ enum LoopControl {
 
 impl RunState {
     fn start_request(&mut self) {
+        let span = self
+            .context
+            .store()
+            .map(|store| store.span())
+            .unwrap_or_else(|| self.execution_span.clone());
+        let _scope = span.enter();
         self.current_cancel = Some(start_request(
             &mut self.context,
             Some(&mut self.compaction),
@@ -84,6 +91,11 @@ impl RunState {
     }
 
     async fn advance_tool_queue(&mut self, count_iteration: bool) {
+        let session_span = self
+            .context
+            .store()
+            .map(|store| store.span())
+            .unwrap_or_else(|| self.execution_span.clone());
         advance_tool_queue(
             &mut self.pending_tools,
             &mut self.context,
@@ -108,6 +120,7 @@ impl RunState {
             self.session_id,
             Some(&mut self.compaction),
         )
+        .instrument(session_span)
         .await;
     }
 }
@@ -162,6 +175,11 @@ impl AgentLoop {
         // return as soon as it goes idle instead of waiting forever for
         // commands nobody will send (see the end of the loop body below).
         let is_child = parent_cancel.is_some();
+        let parent_span = tracing::Span::current();
+        let initial_span = store
+            .as_ref()
+            .map(|store| store.span())
+            .unwrap_or_else(|| parent_span.clone());
 
         tokio::spawn(async move {
             let mut context = match system_prompt.as_deref() {
@@ -172,7 +190,7 @@ impl AgentLoop {
             // cached while replaying use the same baseline.
             context.set_token_estimator(crate::llm::TokenEstimator::Tiktoken);
             if let Some(store) = store {
-                context.set_store(store);
+                initial_span.in_scope(|| context.set_store(store));
             }
             let (mut compaction, mut compaction_rx) = compaction::CompactionRuntime::new(
                 compaction_engine.clone(),
@@ -200,6 +218,7 @@ impl AgentLoop {
                     compaction::report_capacity_warning(&startup_ui_tx, text, own_run_id).await;
                 }
             };
+            let startup_checks = startup_checks.instrument(initial_span);
             tokio::pin!(startup_checks);
             let startup_checks_finished = false;
             let request_waiting_for_startup_checks = false;
@@ -312,9 +331,15 @@ impl AgentLoop {
                 pending_child_finish_reprompt,
                 iteration_cap_exceeded,
                 stream_error,
+                execution_span: parent_span.clone(),
             };
 
             loop {
+                let session_span = state
+                    .context
+                    .store()
+                    .map(|store| store.span())
+                    .unwrap_or_else(|| parent_span.clone());
                 tokio::select! {
                 biased;
                 _ = &mut startup_checks, if !state.startup_checks_finished => {
@@ -330,7 +355,7 @@ impl AgentLoop {
                                                 Some(check) => check.await,
                                                 None => std::future::pending().await,
                                             }
-                                        }, if state.model_change_capacity_check.is_some() => {
+                                        }.instrument(session_span.clone()), if state.model_change_capacity_check.is_some() => {
                                             state.model_change_capacity_check = None;
                                             if let Some(text) = warning {
                                                 compaction::report_capacity_warning(&state.ui_tx, text, state.own_run_id).await;
@@ -338,26 +363,26 @@ impl AgentLoop {
                                             continue;
                                         }
                 Some((event_generation, event)) = agent_rx.recv() => {
-                match state.handle_agent_event(event_generation, event).await {
+                match state.handle_agent_event(event_generation, event).instrument(session_span.clone()).await {
                 LoopControl::PollAgain => continue,
                 LoopControl::Finished => return Ok(state.context),
                 LoopControl::CheckCompletion => {}
                 }
                 }
                 Some(finish_result) = recv_finish(&mut finish_rx) => {
-                match state.handle_subagent_finish(finish_result).await {
+                match state.handle_subagent_finish(finish_result).instrument(session_span.clone()).await {
                 LoopControl::PollAgain => continue,
                 LoopControl::Finished => return Ok(state.context),
                 LoopControl::CheckCompletion => {}
                 }
                 }
-                Some(update) = recv_subagent_ui(&mut subagent_ui_rx) => { state.forward_subagent_update(update).await; }
+                Some(update) = recv_subagent_ui(&mut subagent_ui_rx) => { state.forward_subagent_update(update).instrument(session_span.clone()).await; }
                 _ = cancelled_or_pending(&state.parent_cancel) => {
                                             // The parent cancelled this child (e.g. it stopped
                                             // or was torn down). Abort whatever is in flight and
                                             // return immediately — nobody will drive this loop
                                             // with further commands.
-                                            tracing::info!("child agent cancelled by parent");
+                                            session_span.in_scope(|| tracing::info!("child agent cancelled by parent"));
                                             if let Some(cancel_token) = state.current_cancel.take() {
                                                 cancel_token.cancel();
                                             }
@@ -395,7 +420,7 @@ impl AgentLoop {
                                                         state.own_run_id,
                                                         &state.ui_tx,
                                                     )
-                                                    .await;
+                                                    .instrument(session_span.clone()).await;
                                                     if waiting_continuation || (state.is_child && prefix_dropped) {
                                                         state.resume_after_compaction();
                                                     }
@@ -403,12 +428,12 @@ impl AgentLoop {
                                                     state.advance_tool_queue(false).await;
                                                 }
                                                 if let Some(reason) = summary_failure {
-                                                    report_compaction_failure(&state.ui_tx, state.own_run_id, &reason).await;
+                                                    report_compaction_failure(&state.ui_tx, state.own_run_id, &reason).instrument(session_span.clone()).await;
                                                 }
                                             }
                                         }
                 cmd = cmd_rx.recv() => {
-                match state.handle_command(cmd).await {
+                match state.handle_command(cmd).instrument(session_span.clone()).await {
                 LoopControl::PollAgain => continue,
                 LoopControl::Finished => return Ok(state.context),
                 LoopControl::CheckCompletion => {}
@@ -444,6 +469,7 @@ impl AgentLoop {
                             state.own_run_id,
                             &state.ui_tx,
                         )
+                        .instrument(session_span.clone())
                         .await;
                         if prefix_dropped {
                             state.resume_after_compaction();

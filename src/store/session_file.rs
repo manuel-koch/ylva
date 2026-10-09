@@ -78,14 +78,114 @@ pub(super) fn file_length(path: &Path) -> Result<u64, StoreError> {
         })
 }
 
-/// A session file holding its exclusive advisory lock for as long as it is
-/// alive. On unix this is a real `flock(LOCK_EX | LOCK_NB)`;
-/// on other platforms the file is opened unlocked, since `nix` — and with it
-/// `flock` — is a unix-only dependency of this crate.
+/// A raw file and its stable identity lock, kept together until writer drain.
+/// Replacing the raw inode never releases the Unix advisory lock. Ordinary
+/// raw writers on other platforms retain their historical unlocked behavior.
+pub(super) struct LockedSessionFile {
+    file: std::fs::File,
+    _identity_lock: IdentityLock,
+}
+
+impl std::ops::Deref for LockedSessionFile {
+    type Target = std::fs::File;
+    fn deref(&self) -> &Self::Target {
+        &self.file
+    }
+}
+
+impl std::ops::DerefMut for LockedSessionFile {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.file
+    }
+}
+
+impl LockedSessionFile {
+    pub(super) fn reopen(&mut self, path: &Path) -> std::io::Result<()> {
+        self.file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)?;
+        self.file.seek(SeekFrom::End(0))?;
+        Ok(())
+    }
+}
+
 #[cfg(unix)]
-pub(super) type LockedSessionFile = nix::fcntl::Flock<std::fs::File>;
+pub(super) type IdentityLock = nix::fcntl::Flock<std::fs::File>;
 #[cfg(not(unix))]
-pub(super) type LockedSessionFile = std::fs::File;
+pub(super) type IdentityLock = std::fs::File;
+
+pub(super) fn lock_identity(path: &Path, session_id: Uuid) -> Result<IdentityLock, StoreError> {
+    let lock_path = path.with_file_name(format!("{session_id}.lock"));
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| StoreError::Io {
+            path: parent.into(),
+            source,
+        })?;
+    }
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|source| StoreError::Io {
+            path: lock_path,
+            source,
+        })?;
+    lock_session_file(file, session_id)
+}
+
+pub(super) fn probe_identity(
+    path: &Path,
+    session_id: Uuid,
+) -> Result<Option<IdentityLock>, StoreError> {
+    let lock_path = path.with_file_name(format!("{session_id}.lock"));
+    match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+    {
+        Ok(file) => lock_session_file(file, session_id).map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(StoreError::Io {
+            path: lock_path,
+            source,
+        }),
+    }
+}
+
+pub(super) fn lock_project(directory: &Path) -> Result<IdentityLock, StoreError> {
+    std::fs::create_dir_all(directory).map_err(|source| StoreError::Io {
+        path: directory.into(),
+        source,
+    })?;
+    let path = directory.join(".project.lock");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|source| StoreError::Io {
+            path: path.clone(),
+            source,
+        })?;
+    #[cfg(unix)]
+    {
+        nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusive).map_err(|(_, error)| {
+            StoreError::Io {
+                path,
+                source: std::io::Error::from(error),
+            }
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(file)
+    }
+}
 
 /// Open (creating when missing) `path` and take the exclusive, non-blocking
 /// per-session advisory lock. A conflicting open fails fast with
@@ -95,6 +195,21 @@ pub(super) fn open_locked_session_file(
     session_id: Uuid,
     must_exist: bool,
 ) -> Result<LockedSessionFile, StoreError> {
+    let identity_lock = lock_identity(path, session_id)?;
+    if super::archive::transcript_exists(path) {
+        super::archive::read_bytes(path)?;
+        if super::archive::archive_path(path).is_file()
+            || super::archive::metadata_path(path).is_file()
+        {
+            if !must_exist {
+                return Err(super::archive::invalid(
+                    path,
+                    "archived identity already exists; resume explicitly",
+                ));
+            }
+            super::archive::decompress_locked(path)?;
+        }
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|source| StoreError::Io {
             path: parent.to_path_buf(),
@@ -110,14 +225,17 @@ pub(super) fn open_locked_session_file(
             path: path.to_path_buf(),
             source,
         })?;
-    lock_session_file(file, session_id)
+    Ok(LockedSessionFile {
+        file,
+        _identity_lock: identity_lock,
+    })
 }
 
 #[cfg(unix)]
 pub(super) fn lock_session_file(
     file: std::fs::File,
     session_id: Uuid,
-) -> Result<LockedSessionFile, StoreError> {
+) -> Result<IdentityLock, StoreError> {
     use nix::fcntl::{Flock, FlockArg};
 
     Flock::lock(file, FlockArg::LockExclusiveNonblock)
@@ -128,7 +246,7 @@ pub(super) fn lock_session_file(
 pub(super) fn lock_session_file(
     file: std::fs::File,
     _session_id: Uuid,
-) -> Result<LockedSessionFile, StoreError> {
+) -> Result<IdentityLock, StoreError> {
     Ok(file)
 }
 

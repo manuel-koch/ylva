@@ -50,6 +50,83 @@ variable is set when `--color=auto` is selected. Use `--color=no` to disable
 them explicitly, or `--color=yes` to force them even for non-terminal output,
 `TERM=dumb`, or `NO_COLOR`. The flag only affects CLI output, not the TUI.
 
+## Session commands
+
+`ylva session list [--include-subagents]` lists every session for the canonicalized
+launch directory as `<timestamp> <session-id> <title>`. The timestamp is last-use
+time: the latest persisted event timestamp, with creation time as the baseline
+when no later timestamp exists. Resuming records a new startup event; committing
+messages and other timestamped activity advances last use. Listing, title
+rewrites, source cloning, and maintenance do not advance it. Titles are rendered
+on one safe line. By default only roots are shown, least recently used first.
+
+With `--include-subagents`, children appear immediately below their stored
+parent, with a `+` marker after the timestamp and two additional spaces per deeper
+nesting level:
+
+```text
+<last-used-at> <root-uuid> Root title
+<last-used-at> + <child-uuid> Child title
+<last-used-at>   + <nested-child-uuid> Nested title
+```
+
+Roots and siblings are ordered by last use, oldest first, with UUID tie-breakers. This is a
+parent-grouped listing, not a globally chronological timeline. Children with
+missing or unreadable parents remain visible with `[parent unavailable: <uuid>]`.
+Parent cycles produce warnings without hiding sessions. Grouping follows the
+stored parent identity; shared child transcripts are not duplicated under clones.
+
+Listing is read-only, includes active sessions, and reports unreadable entries
+on stderr. Session commands do not load provider configuration, read piped prompts,
+or start a conversation.
+
+`ylva session delete`, `ylva session compress`, and `ylva session decompress`
+require exactly one selector: one or more positional UUIDs, `--before <date>`,
+or `--all`. Examples:
+
+```shell
+ylva session delete <uuid> <uuid> --dry-run
+ylva session delete --before 2026-01-01
+ylva session compress --all
+ylva session decompress --before 2026-01-01T12:00:00+02:00
+```
+
+Date-only input means UTC midnight; timestamps require an RFC 3339 offset.
+Selection compares last-use times strictly before that instant, not session
+creation times. Last use is revalidated under the identity lock: a session/group
+used again after discovery is skipped if it no longer qualifies. There is no
+recent-session limit or cross-project option. Bulk compression/decompression
+includes subagent transcripts; bulk deletion selects roots and unshared
+descendants. Shared descendants referenced by surviving roots/clones are kept
+and reported, and explicit deletion of a referenced child is refused.
+
+`--dry-run` previews the selected operation without changing files, directories,
+or creating locks. Deletion prints one `would delete <uuid>` line per selected
+session, including descendants. Compression/decompression previews list selected
+sessions as `would compress <uuid>` or `would uncompress <uuid>`, respectively,
+without listing storage files. Active writers are refused even in previews. Without
+`--dry-run`, a valid selector executes; no `--yes` flag is required. Unknown
+explicit IDs fail before any target changes. Independent targets/groups
+continue after runtime failures with diagnostics on stderr and a nonzero exit
+status. No-ops print `already compressed <uuid>` or `already uncompressed <uuid>`,
+including in previews.
+
+Normal maintenance prints one `deleted <uuid>`, `compressed <uuid>`, or
+`decompressed <uuid>` line per changed session, including deleted descendants.
+Neither maintenance nor its preview lists storage files.
+Retained-descendant notices and errors remain visible; file-level errors identify
+the affected path.
+
+You do not need to close every Ylva session in the project. Other sessions may
+remain open while maintenance processes unlocked targets. To maintain an open
+target, close that session first; a locked root also blocks deletion of its
+descendant group.
+
+Logging flags work before or after session subcommands, without loading provider
+configuration. Optional logfile logging never replaces console diagnostics.
+For locking, archive recovery and platform constraints, see
+[persistence](persistence.md#manual-maintenance-and-archive-recovery).
+
 ## Resuming a session
 
 On exit — success, error, or an unrecognized-tool/provider failure, as long as
@@ -58,8 +135,13 @@ command to stderr:
 
 ```text
 Session: dbe9a693-d709-4670-89cd-6162e6ae3e11
+Title:   Example session title
 Resume with: ylva --conversation-id dbe9a693-d709-4670-89cd-6162e6ae3e11
 ```
+
+The title line is omitted while untitled. The hint identifies the session active
+at shutdown, including a replacement created by `/clear`; printing it does not
+start or wait for a new title-generation request.
 
 A resume also restores the root agent type the session last stored; an
 explicit `--agent <type>` on the resume wins instead and is persisted as the

@@ -121,6 +121,17 @@ fn main() {
         }
     };
 
+    if let Some(CliCommand::Session { command }) = &cli.command {
+        match ylva::session_command::run(command, &mut std::io::stdout(), &mut std::io::stderr()) {
+            Ok(0) => return,
+            Ok(code) => {
+                drop(log_guard.take());
+                std::process::exit(i32::from(code));
+            }
+            Err(error) => exit_with_error(&mut log_guard, error),
+        }
+    }
+
     let stdout_is_terminal = std::io::stdout().is_terminal();
     let use_tui = stdout_is_terminal && !cli.no_tui;
     let cli_color_output = !use_tui
@@ -325,7 +336,12 @@ fn main() {
         }
         // Captured before `store` moves into the factory, so it survives to
         // print the resume hint after the app returns.
-        let session_hint = Some(store.session_id());
+        let session_hint = Arc::new(std::sync::Mutex::new(Some(
+            ylva::app::SessionExitSnapshot {
+                session_id: store.session_id(),
+                title: store.title(),
+            },
+        )));
         let factory = Arc::new(factory_without_store.with_store(store));
         let result = if use_tui {
             // The TUI starts with an empty input box. An explicit `--prompt` (or
@@ -338,6 +354,7 @@ fn main() {
                 root_agent_type.agent_type.clone(),
                 explicit_prompt,
             )
+            .with_exit_snapshot(Arc::clone(&session_hint))
             .with_display_metadata(ylva::TuiDisplayMetadata {
                 profile_name: selected_profile_name.clone(),
                 profile_path: profile_path.clone(),
@@ -355,19 +372,25 @@ fn main() {
                 prompt,
                 Box::new(std::io::stdout()),
             )
+            .with_exit_snapshot(Arc::clone(&session_hint))
             .with_color_output(cli_color_output)
             .run()
             .await
         };
-        (result, session_hint)
+        let snapshot = session_hint.lock().expect("exit snapshot mutex").clone();
+        (result, snapshot)
     });
     // Printed whether the run succeeded or failed, and before any
     // `std::process::exit` below, so a user can always resume the session
     // that was just persisted (the TUI has already restored the terminal by
     // this point; the hint goes to stderr alongside every other status line).
-    if let Some(session_id) = session_hint {
-        print_resume_hint(session_id, explicit_profile_name.as_deref());
+    if let Some(snapshot) = &session_hint {
+        print_resume_hint(snapshot, explicit_profile_name.as_deref());
     }
+    let final_span = session_hint.as_ref().map(
+        |snapshot| tracing::info_span!(parent: None, "session", session_id = %snapshot.session_id),
+    );
+    let _final_scope = final_span.as_ref().map(tracing::Span::enter);
     match result {
         Ok(exit_code) => {
             if exit_code != 0 {
@@ -395,8 +418,14 @@ fn exit_with_error(log_guard: &mut Option<ylva::LogGuards>, message: impl std::f
 }
 
 /// Print the session id and a copy-pasteable command that resumes it.
-fn print_resume_hint(session_id: uuid::Uuid, explicit_profile_name: Option<&str>) {
-    eprintln!("{}", resume_hint_text(session_id, explicit_profile_name));
+fn print_resume_hint(
+    snapshot: &ylva::app::SessionExitSnapshot,
+    explicit_profile_name: Option<&str>,
+) {
+    eprintln!(
+        "{}",
+        resume_hint_text(snapshot.session_id, &snapshot.title, explicit_profile_name)
+    );
 }
 
 /// Pure core of [`print_resume_hint`], kept separate so its exact wording is
@@ -406,9 +435,18 @@ fn print_resume_hint(session_id: uuid::Uuid, explicit_profile_name: Option<&str>
 /// run: the implicit default profile needs no flag to resume with the same
 /// configuration, and echoing a name the user never typed would be
 /// misleading.
-fn resume_hint_text(session_id: uuid::Uuid, explicit_profile_name: Option<&str>) -> String {
-    let mut hint =
-        format!("\nSession: {session_id}\nResume with: ylva --conversation-id {session_id}");
+fn resume_hint_text(
+    session_id: uuid::Uuid,
+    title: &str,
+    explicit_profile_name: Option<&str>,
+) -> String {
+    let mut hint = format!("\nSession: {session_id}");
+    if !title.is_empty() {
+        hint.push_str(&format!("\nTitle:   {}", ylva::app::single_line(title)));
+    }
+    hint.push_str(&format!(
+        "\nResume with: ylva --conversation-id {session_id}"
+    ));
     if let Some(profile_name) = explicit_profile_name {
         hint.push_str(&format!(" --profile {profile_name}"));
     }
@@ -505,7 +543,10 @@ fn read_stored_agent_type(session_id: uuid::Uuid) -> Result<Option<String>, Stri
         ylva::default_chats_root().map_err(|error| format!("cannot resolve Ylva home: {error}"))?;
     let cwd = std::env::current_dir().map_err(|error| format!("cannot resolve cwd: {error}"))?;
     let path = ylva::session_path(&chats_root, &ylva::project_key(&cwd), session_id);
-    if !path.is_file() {
+    if ylva::Store::read_session_meta(&path)
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
         return Ok(None);
     }
     ylva::Store::read_latest_agent_type(&path).map_err(|error| error.to_string())
@@ -881,7 +922,7 @@ mod tests {
     #[test]
     fn resume_hint_text_without_a_profile_names_only_the_conversation_id() {
         let session_id = uuid::Uuid::nil();
-        let hint = resume_hint_text(session_id, None);
+        let hint = resume_hint_text(session_id, "", None);
         assert_eq!(
             hint,
             format!("\nSession: {session_id}\nResume with: ylva --conversation-id {session_id}")
@@ -891,12 +932,21 @@ mod tests {
     #[test]
     fn resume_hint_text_with_an_explicit_profile_includes_it() {
         let session_id = uuid::Uuid::nil();
-        let hint = resume_hint_text(session_id, Some("work"));
+        let hint = resume_hint_text(session_id, "", Some("work"));
         assert_eq!(
             hint,
             format!(
                 "\nSession: {session_id}\nResume with: ylva --conversation-id {session_id} --profile work"
             )
+        );
+    }
+
+    #[test]
+    fn resume_hint_includes_a_safe_single_line_title() {
+        let session_id = uuid::Uuid::nil();
+        assert_eq!(
+            resume_hint_text(session_id, "One\nTwo\u{1b}", Some("work")),
+            format!("\nSession: {session_id}\nTitle:   One Two \nResume with: ylva --conversation-id {session_id} --profile work")
         );
     }
 

@@ -17,6 +17,15 @@ use super::*;
 
 #[tokio::test]
 async fn replayed_child_restores_its_compaction_marker_on_first_drill_in() {
+    assert_child_compaction_replay(false).await;
+}
+
+#[tokio::test]
+async fn archived_child_restores_its_compaction_marker_and_reports_corrupt_replay() {
+    assert_child_compaction_replay(true).await;
+}
+
+async fn assert_child_compaction_replay(archived: bool) {
     use crate::agent::{AssistantStatus, Message, UserMessageKind};
     use crate::tui_reducer_state::{ChildConversation, ChildRunInfo};
 
@@ -53,6 +62,21 @@ async fn replayed_child_restores_its_compaction_marker_on_first_drill_in() {
     child_store.record_compaction(2, 1, "old summary");
     child_store.record_compaction(3, 1, "latest summary");
     child_store.flush().await;
+    let child_path = child_store.path().to_path_buf();
+    drop(child_store);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    if archived {
+        let report = crate::Store::maintain_sessions(
+            store.chats_root(),
+            store.project_key(),
+            &crate::store::SessionSelection::Ids(vec![run_id]),
+            crate::store::MaintenanceAction::Compress,
+            false,
+        )
+        .unwrap();
+        assert!(report.failures.is_empty());
+        assert!(!child_path.exists());
+    }
 
     let mut state = AppState::new();
     state.chat_entries.push(ChatEntry::UserMessage {
@@ -104,6 +128,21 @@ async fn replayed_child_restores_its_compaction_marker_on_first_drill_in() {
         Some(&store),
     );
     assert_eq!(state.child_conversations[&run_id].messages, loaded_entries);
+    if archived {
+        let info = state.child_conversations[&run_id].info.clone();
+        state
+            .child_conversations
+            .insert(run_id, ChildConversation::new_replay(info));
+        std::fs::write(child_path.with_extension("jsonl.gz"), b"corrupt").unwrap();
+        prepare_child_replay_effects(
+            &mut state,
+            vec![Effect::LoadChildTranscript { run_id }],
+            Some(&store),
+        );
+        assert!(state.child_needs_lazy_load(run_id));
+        assert!(format!("{:?}", state.child_conversations[&run_id].messages)
+            .contains("Could not load subagent transcript"));
+    }
 }
 
 #[tokio::test]

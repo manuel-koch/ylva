@@ -107,6 +107,8 @@ impl TitleAttempt {
         title_update_tx: Option<mpsc::UnboundedSender<SessionTitleUpdate>>,
     ) -> Option<tokio::task::JoinHandle<()>> {
         let session_id = store.session_id();
+        let session_span = store.span();
+        let _session_scope = session_span.enter();
         {
             let mut attempted_sessions = self
                 .attempted_sessions

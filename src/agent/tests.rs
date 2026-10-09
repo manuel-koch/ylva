@@ -853,6 +853,7 @@ impl Provider for ResubmittingBatchProvider {
 mod compaction_updates;
 mod request;
 mod runtime;
+mod session_logging;
 mod subagents;
 mod tool_execution;
 mod tool_queue;

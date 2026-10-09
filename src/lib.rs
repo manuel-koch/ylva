@@ -30,6 +30,7 @@ pub mod markdown;
 pub mod presenter;
 pub mod render;
 pub mod sandbox;
+pub mod session_command;
 pub(crate) mod session_title;
 pub mod slash_command;
 pub mod store;

@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 use crate::agent::tools::agent_finish::AgentFinishToolConfig;
 use crate::agent::tools::spawn_subagent::AgentTypeInfo;
@@ -379,7 +380,7 @@ impl AgentFactory {
                 allowed_tools.to_vec(),
                 auto_approve.clone(),
                 profile.clone(),
-                store.clone(),
+                agent_loop.current_store_handle(),
                 engine.clone(),
                 engine_name.to_string(),
                 system_prompt,
@@ -495,7 +496,7 @@ impl AgentFactory {
         allowed_tools: Vec<String>,
         auto_approve: HashSet<AutoApproveTool>,
         profile: ProfileConfig,
-        parent_store: Option<Store>,
+        parent_store: Arc<std::sync::Mutex<Option<Store>>>,
         parent_engine: Arc<dyn Engine>,
         parent_engine_name: String,
         system_prompt: Option<String>,
@@ -512,7 +513,7 @@ impl AgentFactory {
                 let auto_approve = auto_approve.clone();
                 let profile = profile.clone();
                 let finish_tx = finish_tx.clone();
-                let parent_store = parent_store.clone();
+                let parent_store = parent_store.lock().expect("current store mutex").clone();
                 let parent_engine = parent_engine.clone();
                 let parent_engine_name = parent_engine_name.clone();
                 let system_prompt = system_prompt.clone();
@@ -522,6 +523,11 @@ impl AgentFactory {
                 let run_id = request.run_id;
                 let call_id = request.call_id;
                 let session_id = parent_store.as_ref().map(Store::session_id);
+                let subagent_span = tracing::info_span!(
+                    "subagent",
+                    run_id = %run_id,
+                    parent_session_id = session_id.map(|identity| identity.to_string()).as_deref(),
+                );
                 let inherited_engine =
                     (child_engine_name == parent_engine_name).then_some(parent_engine);
 
@@ -590,24 +596,27 @@ impl AgentFactory {
 
                 let command_sender = child_loop.command_sender();
                 let task = request.task.clone();
-                let handle = tokio::spawn(async move {
-                    drive_child_to_completion(
-                        child_loop,
-                        child_ui_rx,
-                        task,
-                        run_id,
-                        call_id,
-                        cancel,
-                        finish_tx,
-                        forward_ui_tx,
-                        ChildTranscriptTarget {
-                            parent_store,
-                            engine_config: child_engine_config,
-                            utility_engine,
-                        },
-                    )
-                    .await;
-                });
+                let handle = tokio::spawn(
+                    async move {
+                        drive_child_to_completion(
+                            child_loop,
+                            child_ui_rx,
+                            task,
+                            run_id,
+                            call_id,
+                            cancel,
+                            finish_tx,
+                            forward_ui_tx,
+                            ChildTranscriptTarget {
+                                parent_store,
+                                engine_config: child_engine_config,
+                                utility_engine,
+                            },
+                        )
+                        .await;
+                    }
+                    .instrument(subagent_span),
+                );
 
                 crate::child_agent_manager::SpawnOutcome {
                     command_sender: Some(command_sender),
@@ -831,7 +840,7 @@ async fn write_child_transcript(
     {
         Ok(child_store) => {
             let child_session_id = child_store.session_id();
-            tracing::debug!(%child_session_id, "persisted child agent transcript");
+            tracing::debug!(%run_id, parent_session_id = %parent_store.session_id(), %child_session_id, "persisted child agent transcript");
             if let Some(utility_engine) = &target.utility_engine {
                 let _ = TitleAttempt::default()
                     .trigger_with_engine(child_store, utility_engine.clone());
@@ -839,7 +848,7 @@ async fn write_child_transcript(
         }
 
         Err(error) => {
-            tracing::warn!(%error, "failed to persist child agent transcript");
+            tracing::warn!(%run_id, parent_session_id = %parent_store.session_id(), %error, "failed to persist child agent transcript");
         }
     }
 }
@@ -891,11 +900,14 @@ async fn drive_child_to_completion(
     forward_ui_tx: mpsc::Sender<UiUpdate>,
     transcript_target: ChildTranscriptTarget,
 ) {
-    let forward_task = tokio::spawn(async move {
-        while let Some(update) = child_ui_rx.recv().await {
-            let _ = forward_ui_tx.send(update).await;
+    let forward_task = tokio::spawn(
+        async move {
+            while let Some(update) = child_ui_rx.recv().await {
+                let _ = forward_ui_tx.send(update).await;
+            }
         }
-    });
+        .in_current_span(),
+    );
 
     tracing::debug!(%run_id, tool_call_id = %call_id, "run_child: starting child AgentLoop");
     let handle = child_loop.run();
@@ -2569,6 +2581,222 @@ mod tests {
     fn extract_last_assistant_text_defaults_to_empty_string_when_none_present() {
         let context = Context::new();
         assert_eq!(extract_last_assistant_text(&context), "");
+    }
+
+    #[test]
+    fn subagent_logs_and_transcripts_use_the_replacement_parent_session() {
+        for format in [
+            crate::logging::LogFormat::Text,
+            crate::logging::LogFormat::Json,
+        ] {
+            let identities = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let captured_identities = identities.clone();
+            let logs = crate::test_support::capture_logs_with_format(format, async move {
+                let directory = tempfile::tempdir().unwrap();
+                let root = Store::create(
+                    directory.path(),
+                    directory.path(),
+                    Uuid::new_v4(),
+                    "mock",
+                    "mock",
+                    None,
+                )
+                .unwrap();
+                let replacement = root.start_new_session("mock", "mock", None, None).unwrap();
+                let current_store = Arc::new(std::sync::Mutex::new(Some(root.clone())));
+                let engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+                    Arc::new(MockProvider::new(
+                        vec!["PRIVATE CHILD ANSWER".into()],
+                        Duration::ZERO,
+                    )),
+                    test_engine_config(),
+                ));
+                let mut manager = AgentFactory::build_child_agent_manager(
+                    HashMap::from([
+                        ("main".into(), engine.clone()),
+                        ("fast".into(), engine.clone()),
+                    ]),
+                    vec![],
+                    HashSet::new(),
+                    two_engine_profile(),
+                    current_store.clone(),
+                    engine,
+                    "main".into(),
+                    None,
+                );
+                *current_store.lock().unwrap() = Some(replacement.clone());
+                manager.manager.set_store(Some(replacement.clone()));
+                let run_id = replacement.span().in_scope(|| {
+                    manager
+                        .manager
+                        .spawn(
+                            "PRIVATE CHILD TASK".into(),
+                            None,
+                            "quick".into(),
+                            "label".into(),
+                            Uuid::new_v4(),
+                        )
+                        .run_id()
+                });
+                let finish = tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        tokio::select! {
+                            finish = manager.finish_rx.recv() => break finish.unwrap(),
+                            _ = manager.subagent_ui_rx.recv() => {}
+                        }
+                    }
+                })
+                .await
+                .unwrap();
+                assert_eq!(finish.run_id, run_id);
+                replacement
+                    .span()
+                    .in_scope(|| manager.manager.record_child_result(&finish));
+                replacement.flush().await;
+                let child_path =
+                    crate::store::session_path(directory.path(), replacement.project_key(), run_id);
+                assert_eq!(
+                    Store::read_session_meta(&child_path)
+                        .unwrap()
+                        .unwrap()
+                        .parent_session,
+                    Some(replacement.session_id())
+                );
+                assert!(Store::read_child_runs(root.path()).unwrap().is_empty());
+                captured_identities
+                    .lock()
+                    .unwrap()
+                    .extend([replacement.session_id(), run_id]);
+                drop(manager);
+                drop(root);
+                drop(replacement);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            });
+            assert!(!logs.contains("PRIVATE CHILD TASK"));
+            assert!(!logs.contains("PRIVATE CHILD ANSWER"));
+            let identities = identities.lock().unwrap();
+            let persisted_line = logs
+                .lines()
+                .find(|line| line.contains("persisted child agent transcript"))
+                .unwrap();
+            assert!(
+                persisted_line.contains(&identities[0].to_string()),
+                "{persisted_line}"
+            );
+            assert!(
+                persisted_line.contains(&identities[1].to_string()),
+                "{persisted_line}"
+            );
+            if format == crate::logging::LogFormat::Json {
+                let event: serde_json::Value = serde_json::from_str(persisted_line).unwrap();
+                assert_eq!(event["spans"][0]["session_id"], identities[0].to_string());
+                assert_eq!(event["spans"][1]["run_id"], identities[1].to_string());
+                assert_eq!(
+                    event["spans"][1]["parent_session_id"],
+                    identities[0].to_string()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_only_child_outcomes_receive_generated_session_titles() {
+        use crate::agent::tools::agent_finish::AgentFinishTool;
+        use crate::agent::tools::Tool;
+
+        for arguments in [
+            serde_json::json!({"status": "success", "result": "The module exposes three commands."}),
+            serde_json::json!({"status": "failure", "error": "The module could not be read."}),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let chats_root = directory.path().join("chats");
+            let parent_store = Store::create(
+                &chats_root,
+                directory.path(),
+                Uuid::new_v4(),
+                "mock",
+                "mock",
+                None,
+            )
+            .unwrap();
+            let run_id = Uuid::new_v4();
+            let tool_call_id = Uuid::new_v4();
+            let (finish_tx, mut finish_rx) = mpsc::channel(1);
+            let finish_tool = AgentFinishTool::new(AgentFinishToolConfig {
+                finish_tx,
+                run_id,
+                call_id: Uuid::new_v4(),
+            });
+            let acknowledgement = finish_tool
+                .create_call(tool_call_id, arguments.clone())
+                .run()
+                .await
+                .unwrap()
+                .text();
+            assert!(finish_rx.recv().await.is_some());
+            let mut context = Context::new();
+            context.push_user("Summarize the module.".into());
+            context.push_assistant_tool_call(
+                String::new(),
+                AssistantStatus::Complete,
+                vec![crate::agent::ToolCallRequest {
+                    id: tool_call_id,
+                    name: AgentFinishTool::NAME.into(),
+                    arguments,
+                    persisted_title_arguments: Vec::new(),
+                }],
+            );
+            context.push_tool_result(crate::agent::ToolResult {
+                id: tool_call_id,
+                name: AgentFinishTool::NAME.into(),
+                result: acknowledgement,
+                attachments: Vec::new(),
+                result_section_id: None,
+                result_metadata: None,
+                result_metadata_schema: None,
+                summary: Vec::new(),
+                content_sections: Vec::new(),
+                duration: Duration::ZERO,
+            });
+            let utility_engine: Arc<dyn Engine> = Arc::new(EngineImpl::new(
+                Arc::new(MockProvider::new(
+                    vec!["Structured Task Summary".into()],
+                    Duration::ZERO,
+                )),
+                test_engine_config(),
+            ));
+            write_child_transcript(
+                &ChildTranscriptTarget {
+                    parent_store: Some(parent_store.clone()),
+                    engine_config: Some(test_engine_config()),
+                    utility_engine: Some(utility_engine),
+                },
+                run_id,
+                &context,
+            )
+            .await;
+            let child_path =
+                crate::store::session_path(&chats_root, parent_store.project_key(), run_id);
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if Store::read_session_meta(&child_path)
+                        .unwrap()
+                        .unwrap()
+                        .title
+                        == "Structured Task Summary"
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("a completed tool-only child receives a utility-generated title");
+            assert_eq!(
+                Store::read_messages(&child_path).unwrap(),
+                context.messages()
+            );
+        }
     }
 
     #[tokio::test]

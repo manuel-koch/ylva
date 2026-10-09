@@ -66,7 +66,7 @@ pub struct Cli {
     pub profile: Option<String>,
 
     /// Write logs to this file (logging is off without it)
-    #[arg(long, value_name = "path")]
+    #[arg(long, value_name = "path", global = true)]
     pub log_file: Option<PathBuf>,
 
     /// Minimum log level: trace, debug, info, warn, or error
@@ -75,6 +75,7 @@ pub struct Cli {
         value_name = "level",
         default_value = "info",
         value_parser = parse_log_level,
+        global = true,
     )]
     pub log_level: tracing::Level,
 
@@ -84,6 +85,7 @@ pub struct Cli {
         value_name = "format",
         default_value = "text",
         value_parser = parse_log_format,
+        global = true,
     )]
     pub log_format: LogFormat,
 
@@ -148,7 +150,7 @@ pub struct Cli {
     #[arg(long, hide = true)]
     pub no_color: bool,
 
-    /// Subcommands (`ylva init`)
+    /// Initialization and provider-independent session commands
     #[command(subcommand)]
     pub command: Option<CliCommand>,
 }
@@ -156,6 +158,11 @@ pub struct Cli {
 /// Subcommands of the `ylva` binary.
 #[derive(Subcommand, Debug, PartialEq, Eq)]
 pub enum CliCommand {
+    /// Discover and maintain sessions in the current launch directory
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
     /// Seed Ylva's home or workspace starter files
     Init {
         /// Seed the current workspace instead of the Ylva home
@@ -165,6 +172,41 @@ pub enum CliCommand {
         #[arg(long)]
         force: bool,
     },
+}
+
+#[derive(Subcommand, Debug, PartialEq, Eq)]
+pub enum SessionCommand {
+    /// List sessions, least recently used roots first
+    List {
+        /// Include child transcripts grouped beneath their parents
+        #[arg(long)]
+        include_subagents: bool,
+    },
+    /// Delete selected sessions and unshared descendants
+    Delete(SessionSelector),
+    /// Losslessly archive selected transcripts
+    Compress(SessionSelector),
+    /// Restore selected transcripts to raw JSONL
+    Decompress(SessionSelector),
+}
+
+#[derive(clap::Args, Debug, PartialEq, Eq)]
+#[command(group(clap::ArgGroup::new("selector").required(true).multiple(false).args(["session_ids", "before", "all"])))]
+pub struct SessionSelector {
+    #[arg(value_name = "UUID", num_args = 1..)]
+    pub session_ids: Vec<Uuid>,
+    /// Select sessions last used strictly before a UTC date or RFC 3339 instant
+    #[arg(long, value_parser = parse_session_date)]
+    pub before: Option<String>,
+    #[arg(long)]
+    pub all: bool,
+    /// Preview without changing any files
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+fn parse_session_date(value: &str) -> Result<String, String> {
+    crate::session_command::parse_date(value).map(|_| value.to_string())
 }
 
 impl Cli {

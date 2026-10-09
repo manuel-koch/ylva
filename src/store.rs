@@ -41,12 +41,15 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
+use crate::agent::tools::agent_finish::{AgentFinishArgs, AgentFinishStatus, AgentFinishTool};
 use crate::agent::{Message, UserMessageKind};
 use crate::child_agent_manager::FinishResultOrigin;
 use crate::sandbox::SandboxContext;
 use crate::ylva_home::ylva_home;
 
+mod archive;
 mod event;
+mod maintenance;
 mod replay;
 mod session_file;
 mod writer;
@@ -55,11 +58,12 @@ pub use event::{
     now_timestamp, ChildRunRecord, SessionMeta, StoreEvent, EVENT_VERSION, SCHEMA_VERSION,
     TITLE_MAX_CHARS,
 };
+pub use maintenance::{MaintenanceAction, MaintenanceReport, SessionSelection};
 pub use replay::{SessionState, SessionSummary};
 
 use session_file::{
-    append_event_line, file_length, open_locked_session_file, read_meta_line_with_length,
-    repair_trailing_corruption, write_meta_line,
+    append_event_line, file_length, lock_project, open_locked_session_file,
+    read_meta_line_with_length, repair_trailing_corruption, write_meta_line,
 };
 use writer::WriterCommand;
 
@@ -68,6 +72,10 @@ use writer::WriterCommand;
 /// pattern-matching on an opaque error string.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    #[error("invalid session representation at {}: {reason}", path.display())]
+    InvalidRepresentation { path: PathBuf, reason: String },
+    #[error("session maintenance and archive restoration require Unix")]
+    UnsupportedMaintenance,
     #[error("session '{session_id}' not found at {}", path.display())]
     SessionNotFound { session_id: Uuid, path: PathBuf },
     #[error("session '{session_id}' is open in another Ylva process")]
@@ -136,6 +144,11 @@ pub fn session_path(chats_root: &Path, project_key: &str, session_id: Uuid) -> P
 fn title_snapshot(meta: &SessionMeta, messages: &[Message]) -> TitleSnapshot {
     let mut snapshot = TitleSnapshot {
         title: meta.title.clone(),
+        completed_subagent_outcome: if meta.parent_session.is_some() {
+            subagent_title_outcome(messages)
+        } else {
+            None
+        },
         ..TitleSnapshot::default()
     };
     for message in messages {
@@ -180,6 +193,7 @@ struct StoreInner {
     path: PathBuf,
     command_tx: mpsc::Sender<WriterCommand>,
     title_snapshot: Mutex<TitleSnapshot>,
+    span: tracing::Span,
 }
 
 impl std::fmt::Debug for Store {
@@ -210,6 +224,7 @@ impl Store {
     ) -> Result<Store, StoreError> {
         let project_key = project_key(cwd);
         let path = session_path(chats_root, &project_key, session_id);
+        let _coordination = lock_project(path.parent().expect("session directory"))?;
         let mut file = open_locked_session_file(&path, session_id, false)?;
         let meta_awaiting_title = if file_length(&path)? == 0 {
             let meta = SessionMeta {
@@ -257,7 +272,7 @@ impl Store {
     pub fn resume(chats_root: &Path, cwd: &Path, session_id: Uuid) -> Result<Store, StoreError> {
         let project_key = project_key(cwd);
         let path = session_path(chats_root, &project_key, session_id);
-        if !path.is_file() {
+        if !archive::transcript_exists(&path) {
             return Err(StoreError::SessionNotFound { session_id, path });
         }
         let mut file = open_locked_session_file(&path, session_id, true)?;
@@ -312,7 +327,8 @@ impl Store {
     ) -> Result<Store, StoreError> {
         let project_key = project_key(cwd);
         let source_path = session_path(chats_root, &project_key, source_id);
-        if !source_path.is_file() {
+        let _coordination = lock_project(source_path.parent().expect("session directory"))?;
+        if !archive::transcript_exists(&source_path) {
             return Err(StoreError::SessionNotFound {
                 session_id: source_id,
                 path: source_path,
@@ -322,7 +338,7 @@ impl Store {
         let (source_meta, events) = {
             // Exclusive nonblock: a live resume of the source — or a
             // concurrent clone of it — makes this fail without touching it.
-            let _source_lock = open_locked_session_file(&source_path, source_id, true)?;
+            let _source_lock = session_file::lock_identity(&source_path, source_id)?;
             let events = Store::read_events(&source_path)?;
             let source_meta = events.iter().find_map(|event| match event {
                 StoreEvent::Meta(meta) => Some(meta.clone()),
@@ -471,6 +487,7 @@ impl Store {
     ) -> Result<Store, StoreError> {
         let directory = project_directory(&self.inner.chats_root, &self.inner.project_key);
         let path = directory.join(format!("{session_id}.jsonl"));
+        let _coordination = lock_project(&directory)?;
         let mut file = open_locked_session_file(&path, session_id, false)?;
         let meta = SessionMeta {
             version: EVENT_VERSION,
@@ -515,6 +532,10 @@ impl Store {
             .clone()
     }
 
+    pub(crate) fn span(&self) -> tracing::Span {
+        self.inner.span.clone()
+    }
+
     pub fn project_key(&self) -> &str {
         &self.inner.project_key
     }
@@ -555,8 +576,8 @@ impl Store {
         });
     }
 
-    /// Return the utility-engine prompt once the first explicit user message
-    /// and first non-empty complete assistant reply have both been committed.
+    /// Return the utility-engine prompt from the first explicit user message
+    /// and a completed reply or a subagent's structured terminal outcome.
     pub fn title_prompt(&self) -> Option<String> {
         let snapshot = self
             .inner
@@ -581,26 +602,38 @@ impl Store {
             );
             return None;
         };
-        let Some(assistant_message) = snapshot.first_complete_assistant_message.as_deref() else {
-            tracing::debug!(
-                session_id = %self.inner.session_id,
-                stage = "skipped",
-                reason = "awaiting_complete_assistant_reply",
-                "session title generation is not ready"
-            );
-            return None;
-        };
+        let (response_kind, response_message) =
+            if let Some(outcome) = &snapshot.completed_subagent_outcome {
+                let response_kind = match outcome.status {
+                    AgentFinishStatus::Success => "subagent_result",
+                    AgentFinishStatus::Failure => "subagent_error",
+                };
+                (response_kind, outcome.content.as_str())
+            } else {
+                let Some(assistant_message) = snapshot.first_complete_assistant_message.as_deref()
+                else {
+                    tracing::debug!(
+                        session_id = %self.inner.session_id,
+                        stage = "skipped",
+                        reason = "awaiting_complete_assistant_reply",
+                        "session title generation is not ready"
+                    );
+                    return None;
+                };
+                ("assistant_message", assistant_message)
+            };
         let prompt = format!(
             "Generate a concise title for this conversation.\n\
              Return only one bare title, with no markdown, quotation marks, or explanation.\
              \n\n<user_message>\n{user_message}\n</user_message>\n\
-             <assistant_message>\n{assistant_message}\n</assistant_message>",
+             <{response_kind}>\n{response_message}\n</{response_kind}>",
         );
         tracing::debug!(
             session_id = %self.inner.session_id,
             stage = "prompt_ready",
             user_message_chars = user_message.chars().count(),
-            assistant_message_chars = assistant_message.chars().count(),
+            response_kind,
+            response_message_chars = response_message.chars().count(),
             prompt_chars = prompt.chars().count(),
             "session title prompt is ready"
         );
@@ -768,7 +801,7 @@ impl Store {
     /// Write a completed child-agent transcript **once**, into its own
     /// sub-session file under the same `project_key`, with its own `meta`
     /// header titled asynchronously from the first explicit user message and
-    /// complete assistant reply in `messages`. Child
+    /// structured `agent_finish` outcome, or a complete assistant reply. Child
     /// transcripts are never streamed live.
     ///
     /// `provider_connection_and_model` is the child's own resolved engine —
@@ -855,6 +888,11 @@ impl Store {
         for message in messages {
             self.record_message(message);
         }
+        self.inner
+            .title_snapshot
+            .lock()
+            .expect("title snapshot mutex is not poisoned")
+            .completed_subagent_outcome = subagent_title_outcome(messages);
     }
 
     /// Barrier: resolves once every event enqueued before this call has been
@@ -887,11 +925,57 @@ struct TitleState {
     meta_awaiting_title: Option<(SessionMeta, u64)>,
 }
 
+struct SubagentTitleOutcome {
+    status: AgentFinishStatus,
+    content: String,
+}
+
+fn subagent_title_outcome(messages: &[Message]) -> Option<SubagentTitleOutcome> {
+    let completed_calls: std::collections::BTreeSet<_> = messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::ToolResult { value } if value.name == AgentFinishTool::NAME => Some(value.id),
+            _ => None,
+        })
+        .collect();
+    for message in messages.iter().rev() {
+        let Message::Assistant { tool_calls, .. } = message else {
+            continue;
+        };
+        for call in tool_calls.iter().rev() {
+            if call.name != AgentFinishTool::NAME || !completed_calls.contains(&call.id) {
+                continue;
+            }
+            let arguments: AgentFinishArgs = match serde_json::from_value(call.arguments.clone()) {
+                Ok(arguments) => arguments,
+                Err(_) => {
+                    // Deserialization errors can quote private outcome content.
+                    tracing::warn!(tool_call_id = %call.id, reason = "invalid_agent_finish_arguments",
+                        "completed subagent outcome could not be decoded for session title");
+                    continue;
+                }
+            };
+            let status = arguments.resolved_status();
+            let content = match status {
+                AgentFinishStatus::Success => arguments.result,
+                AgentFinishStatus::Failure => arguments.error,
+            };
+            if let Some(content) = content.filter(|content| !content.trim().is_empty()) {
+                return Some(SubagentTitleOutcome { status, content });
+            }
+            tracing::debug!(tool_call_id = %call.id, reason = "empty_subagent_outcome",
+                "completed subagent outcome contains no title input");
+        }
+    }
+    None
+}
+
 #[derive(Default)]
 struct TitleSnapshot {
     title: String,
     first_user_message: Option<String>,
     first_complete_assistant_message: Option<String>,
+    completed_subagent_outcome: Option<SubagentTitleOutcome>,
 }
 
 #[cfg(test)]

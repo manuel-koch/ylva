@@ -14,7 +14,7 @@
 
 //! One writer task owns the locked file, flush barriers and title rewrite.
 
-use super::session_file::{open_locked_session_file, LockedSessionFile};
+use super::session_file::{lock_project, LockedSessionFile};
 use super::{
     SessionMeta, Store, StoreError, StoreEvent, StoreInner, TitleSnapshot, TitleState,
     TITLE_MAX_CHARS,
@@ -23,6 +23,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
+use tracing::Instrument;
 use uuid::Uuid;
 
 /// Capacity of the channel feeding the writer task. Large enough that a burst
@@ -152,9 +153,8 @@ impl SessionWriter {
     /// now-known title, leaving every line after it untouched. Done via a
     /// temp file in the same directory plus an atomic `rename()` over the
     /// original path, so a reader never observes a half-written file and a
-    /// crash mid-rewrite never corrupts it — then the writer's own file
-    /// handle and advisory lock are reacquired against the new inode so
-    /// later appends keep landing at the same path.
+    /// crash mid-rewrite never corrupts it. Reopen the raw handle while retaining
+    /// the separate identity lock so later appends reach the published inode.
     fn rewrite_meta_line(&mut self, meta: &SessionMeta, meta_line_len: u64) -> std::io::Result<()> {
         self.file.seek(SeekFrom::Start(meta_line_len))?;
         let mut remainder = Vec::new();
@@ -172,14 +172,25 @@ impl SessionWriter {
         }
         std::fs::rename(&temp_path, &self.path)?;
 
-        let mut new_file = open_locked_session_file(&self.path, self.session_id, true)
-            .map_err(|_| std::io::Error::other("failed to re-lock session file after rewrite"))?;
-        new_file.seek(SeekFrom::End(0))?;
-        self.file = new_file;
+        self.file.reopen(&self.path)?;
         Ok(())
     }
 
     fn write_line(&mut self, event: &StoreEvent) {
+        let _coordination = if matches!(
+            event,
+            StoreEvent::ChildStart { .. } | StoreEvent::ChildResult { .. }
+        ) {
+            match lock_project(self.path.parent().expect("session directory")) {
+                Ok(lock) => Some(lock),
+                Err(error) => {
+                    tracing::error!(%error, "failed to coordinate child reference publication");
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         let line = match serde_json::to_string(event) {
             Ok(line) => line,
             Err(error) => {
@@ -194,6 +205,8 @@ impl SessionWriter {
             .and_then(|()| file.flush())
         {
             tracing::error!(path = %self.path.display(), %error, "failed to append store event");
+        } else {
+            tracing::debug!(stage = "appended", "session event persisted");
         }
     }
 }
@@ -209,13 +222,26 @@ impl Store {
         title_snapshot: TitleSnapshot,
     ) -> Store {
         let (command_tx, command_rx) = mpsc::channel::<WriterCommand>(WRITER_CHANNEL_CAPACITY);
-        tokio::spawn(run_writer(SessionWriter {
-            file,
-            path: path.clone(),
-            session_id,
-            meta_awaiting_title: title_state.meta_awaiting_title,
-            command_rx,
-        }));
+        let span = if title_state
+            .meta_awaiting_title
+            .as_ref()
+            .is_some_and(|(meta, _)| meta.parent_session.is_some())
+        {
+            tracing::info_span!("session", session_id = %session_id)
+        } else {
+            tracing::info_span!(parent: None, "session", session_id = %session_id)
+        };
+        let writer_span = tracing::debug_span!(parent: &span, "session_writer");
+        tokio::spawn(
+            run_writer(SessionWriter {
+                file,
+                path: path.clone(),
+                session_id,
+                meta_awaiting_title: title_state.meta_awaiting_title,
+                command_rx,
+            })
+            .instrument(writer_span),
+        );
         Store {
             inner: Arc::new(StoreInner {
                 session_id,
@@ -224,6 +250,7 @@ impl Store {
                 path,
                 command_tx,
                 title_snapshot: Mutex::new(title_snapshot),
+                span,
             }),
         }
     }

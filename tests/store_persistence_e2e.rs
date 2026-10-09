@@ -230,6 +230,84 @@ async fn start_mock_llm_server() -> (MockLlmServer, Vec<(String, String)>) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn archived_session_clones_read_only_and_resumes_with_the_original_transcript() {
+    let (server, provider_environment) = start_mock_llm_server().await;
+    let first = tokio::task::spawn_blocking({
+        let provider_environment = provider_environment.clone();
+        move || run_persistence_e2e(&provider_environment)
+    })
+    .await
+    .unwrap();
+    assert_session_holds_one_completed_turn(&first);
+    let original = first.sessions().remove(0);
+    let original_events = Store::read_events(&original.path).unwrap();
+    let report = Store::maintain_sessions(
+        &first.chats_root(),
+        &first.project_key,
+        &ylva::store::SessionSelection::Ids(vec![original.session_id]),
+        ylva::store::MaintenanceAction::Compress,
+        false,
+    )
+    .unwrap();
+    assert!(report.failures.is_empty());
+    let archive_path = original.path.with_extension("jsonl.gz");
+    let archive_bytes = std::fs::read(&archive_path).unwrap();
+    let cloned = tokio::task::spawn_blocking({
+        let provider_environment = provider_environment.clone();
+        move || {
+            spawn_ylva(
+                first.ylva_home,
+                &provider_environment,
+                &[
+                    "--conversation-id",
+                    &original.session_id.to_string(),
+                    "--clone",
+                ],
+            )
+        }
+    })
+    .await
+    .unwrap();
+    assert!(cloned.output.status.success(), "{}", cloned.stderr());
+    assert!(!original.path.exists());
+    assert_eq!(std::fs::read(&archive_path).unwrap(), archive_bytes);
+    let clone = cloned
+        .sessions()
+        .into_iter()
+        .find(|session| session.session_id != original.session_id)
+        .unwrap();
+    assert_eq!(
+        Store::read_session_meta(&clone.path)
+            .unwrap()
+            .unwrap()
+            .cloned_from,
+        Some(original.session_id)
+    );
+    let resumed = tokio::task::spawn_blocking(move || {
+        spawn_ylva(
+            cloned.ylva_home,
+            &provider_environment,
+            &["--conversation-id", &original.session_id.to_string()],
+        )
+    })
+    .await
+    .unwrap();
+    assert!(resumed.output.status.success(), "{}", resumed.stderr());
+    assert!(!archive_path.exists());
+    assert!(!original.path.with_extension("meta.json").exists());
+    assert!(Store::read_events(&original.path)
+        .unwrap()
+        .starts_with(&original_events));
+    assert!(resumed
+        .stderr()
+        .contains(&format!("Session: {}", original.session_id)));
+    assert!(resumed
+        .stderr()
+        .contains(&format!("Title:   {}", original.title)));
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_headless_run_persists_its_turn_to_a_session_file() {
     let (server, provider_env) = start_mock_llm_server().await;
     let run = tokio::task::spawn_blocking(move || run_persistence_e2e(&provider_env))

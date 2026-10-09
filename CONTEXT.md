@@ -220,6 +220,17 @@ delegation events.
 **Conversation ID**:
 The identifier used to reopen a persisted session for continuation.
 
+**Session archive**:
+A losslessly compressed representation of a session's complete transcript.
+It is distinct from compaction, which changes the model view rather than the
+transcript.
+_Avoid_: compacted session, pruned history
+
+**Shared subagent transcript**:
+A subagent's persisted transcript referenced by more than one root session,
+including session clones.
+_Avoid_: copied child history
+
 **Session clone**:
 A new session that replays another session's logical events under its own
 session ID, linked back by `cloned_from`. The source file is only read — it

@@ -14,26 +14,27 @@
 
 //! Read-only queries and reconstruction of session and child-run state.
 
-use super::session_file::read_meta_line_with_length;
+use super::archive;
 use super::{project_directory, ChildRunRecord, SessionMeta, Store, StoreError, StoreEvent};
 use crate::agent::{Message, UserMessageKind};
 use crate::child_agent_manager::FinishResultOrigin;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-/// Read-only summary of one persisted session, built from its `meta` header
-/// line alone — never from the full transcript.
+/// Read-only metadata and latest persisted activity timestamp of one session.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionSummary {
     pub session_id: Uuid,
     pub created_at: String,
+    /// Latest top-level event timestamp, with creation time as the baseline.
+    pub last_used_at: String,
     pub title: String,
     pub provider_connection: String,
     pub model: String,
     /// Set only for a child-agent's own session file. See
     /// [`SessionMeta::parent_session`].
     pub parent_session: Option<Uuid>,
-    /// Absolute path of the session's `.jsonl` file.
+    /// Path of the resolved raw `.jsonl` or archived `.jsonl.gz` transcript.
     pub path: PathBuf,
 }
 
@@ -59,59 +60,90 @@ pub struct SessionState {
 }
 
 impl Store {
-    /// Every persisted session of `project_key`, newest first.
+    /// Every persisted session of `project_key`, most recently used first.
     ///
-    /// Only each file's first (`meta`) line is parsed — never the transcript —
-    /// and this is a **pure read**: no lock is taken and no file is ever
+    /// Last use is derived from the full transcript's persisted timestamps.
+    /// Archives and transitional copies use shared representation resolution.
+    /// This is a **pure read**: no lock is taken and no file is ever
     /// modified, not even one whose header fails to parse (such a file is
     /// skipped with a `warn!` instead of failing the whole listing).
     pub fn list_sessions(
         chats_root: &Path,
         project_key: &str,
     ) -> Result<Vec<SessionSummary>, StoreError> {
+        let (summaries, diagnostics) =
+            Self::list_sessions_with_diagnostics(chats_root, project_key)?;
+        for diagnostic in diagnostics {
+            tracing::warn!(%diagnostic, "unreadable session");
+        }
+        Ok(summaries)
+    }
+
+    pub fn list_sessions_with_diagnostics(
+        chats_root: &Path,
+        project_key: &str,
+    ) -> Result<(Vec<SessionSummary>, Vec<String>), StoreError> {
         let directory = project_directory(chats_root, project_key);
         if !directory.is_dir() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
         let entries = std::fs::read_dir(&directory).map_err(|source| StoreError::Io {
             path: directory.clone(),
             source,
         })?;
         let mut summaries = Vec::new();
+        let mut diagnostics = Vec::new();
+        let mut identities = std::collections::BTreeSet::new();
         for entry in entries {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(error) => {
-                    tracing::warn!(directory = %directory.display(), %error, "skipping unreadable session directory entry");
+                    diagnostics.push(format!("{}: {error}", directory.display()));
                     continue;
                 }
             };
             let path = entry.path();
-            if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
-            }
-            match read_session_summary(&path) {
-                Some(summary) => summaries.push(summary),
-                None => {
-                    tracing::warn!(path = %path.display(), "skipping session file without a readable meta header");
-                }
+            };
+            let Some(identity) = name
+                .strip_suffix(".jsonl")
+                .or_else(|| name.strip_suffix(".jsonl.gz"))
+                .or_else(|| name.strip_suffix(".meta.json"))
+            else {
+                continue;
+            };
+            if let Ok(identity) = Uuid::parse_str(identity) {
+                identities.insert(identity);
+            } else {
+                diagnostics.push(format!("{}: invalid session filename", path.display()));
             }
         }
-        summaries.sort_by(|left, right| right.created_at.cmp(&left.created_at));
-        Ok(summaries)
+        for identity in identities {
+            let path = directory.join(format!("{identity}.jsonl"));
+            match read_session_summary(&path) {
+                Ok(summary) => summaries.push(summary),
+                Err(error) => diagnostics.push(error.to_string()),
+            }
+        }
+        summaries.sort_by(|left, right| {
+            chrono::DateTime::parse_from_rfc3339(&right.last_used_at)
+                .expect("validated timestamp")
+                .cmp(
+                    &chrono::DateTime::parse_from_rfc3339(&left.last_used_at)
+                        .expect("validated timestamp"),
+                )
+                .then_with(|| right.session_id.cmp(&left.session_id))
+        });
+        Ok((summaries, diagnostics))
     }
 
     /// Every committed message of a persisted session, in append order.
     /// A pure read: unparseable lines are skipped in memory, never repaired
     /// on disk.
     pub fn read_messages(path: &Path) -> Result<Vec<Message>, StoreError> {
-        let content = std::fs::read_to_string(path).map_err(|source| StoreError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        Ok(content
-            .lines()
-            .filter_map(|line| serde_json::from_str::<StoreEvent>(line).ok())
+        Ok(Self::read_events(path)?
+            .into_iter()
             .filter_map(|event| match event {
                 StoreEvent::Message { message, .. } => Some(message),
                 _ => None,
@@ -127,10 +159,8 @@ impl Store {
     /// more than the transcript (session cloning, resume-time selection
     /// restoration), never a substitute for it in the message path.
     pub fn read_events(path: &Path) -> Result<Vec<StoreEvent>, StoreError> {
-        let content = std::fs::read_to_string(path).map_err(|source| StoreError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        let content = String::from_utf8(archive::read_bytes(path)?)
+            .map_err(|error| archive::invalid(path, error))?;
         Ok(content
             .lines()
             .filter_map(|line| serde_json::from_str::<StoreEvent>(line).ok())
@@ -142,10 +172,21 @@ impl Store {
     /// modified, so it is safe to call before [`Store::resume`] decides
     /// anything about the run.
     pub fn read_session_meta(path: &Path) -> Result<Option<SessionMeta>, StoreError> {
-        if !path.is_file() {
+        if !archive::transcript_exists(path) && !archive::metadata_path(path).is_file() {
             return Ok(None);
         }
-        Ok(read_meta_line_with_length(path)?.map(|(meta, _line_length)| meta))
+        let bytes = archive::read_bytes(path)?;
+        Ok(
+            match serde_json::from_slice::<StoreEvent>(
+                bytes
+                    .split(|byte| *byte == b'\n')
+                    .next()
+                    .unwrap_or_default(),
+            ) {
+                Ok(StoreEvent::Meta(meta)) => Some(meta),
+                _ => None,
+            },
+        )
     }
 
     /// The root agent type a resumed session should continue with: the last
@@ -293,16 +334,9 @@ impl Store {
     /// modifying the file. Legacy records missing correlation metadata remain
     /// readable through serde defaults, but cannot be joined to a tool bubble.
     pub fn read_child_runs(path: &Path) -> Result<Vec<ChildRunRecord>, StoreError> {
-        let content = std::fs::read_to_string(path).map_err(|source| StoreError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
         let mut runs = Vec::new();
         let mut starts = std::collections::HashMap::<Uuid, usize>::new();
-        for line in content.lines() {
-            let Ok(event) = serde_json::from_str::<StoreEvent>(line) else {
-                continue;
-            };
+        for event in Self::read_events(path)? {
             match event {
                 StoreEvent::ChildStart {
                     created_at,
@@ -367,25 +401,84 @@ fn elapsed_duration(started_at: &str, completed_at: &str) -> Option<std::time::D
     completed_at.signed_duration_since(started_at).to_std().ok()
 }
 
-/// Parse only the first line of `path` as the session's `meta` header.
-fn read_session_summary(path: &Path) -> Option<SessionSummary> {
-    use std::io::BufRead;
-
-    let file = std::fs::File::open(path).ok()?;
-    let mut first_line = String::new();
-    std::io::BufReader::new(file)
-        .read_line(&mut first_line)
-        .ok()?;
-    match serde_json::from_str::<StoreEvent>(first_line.trim_end()) {
-        Ok(StoreEvent::Meta(meta)) => Some(SessionSummary {
-            session_id: meta.session_id,
-            created_at: meta.created_at,
-            title: meta.title,
-            provider_connection: meta.provider_connection,
-            model: meta.model,
-            parent_session: meta.parent_session,
-            path: path.to_path_buf(),
-        }),
-        _ => None,
+pub(super) fn last_used_at(
+    bytes: &[u8],
+    metadata: &SessionMeta,
+    path: &Path,
+) -> Result<String, StoreError> {
+    let mut latest = chrono::DateTime::parse_from_rfc3339(&metadata.created_at)
+        .map_err(|error| archive::invalid(path, format!("invalid creation timestamp: {error}")))?;
+    let mut latest_value = metadata.created_at.clone();
+    for (line_index, line) in bytes.split(|byte| *byte == b'\n').enumerate().skip(1) {
+        if line.is_empty() {
+            continue;
+        }
+        let event: serde_json::Value = match serde_json::from_slice(line) {
+            Ok(event) => event,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), line = line_index + 1, %error,
+                    "skipping malformed session entry while deriving last use");
+                continue;
+            }
+        };
+        for field in [
+            "timestamp",
+            "created_at",
+            "changed_at",
+            "completed_at",
+            "compacted_at",
+        ] {
+            let Some(value) = event.get(field) else {
+                continue;
+            };
+            let timestamp = value.as_str().ok_or_else(|| {
+                archive::invalid(
+                    path,
+                    format!(
+                        "invalid activity timestamp in '{field}' on line {}",
+                        line_index + 1
+                    ),
+                )
+            })?;
+            if timestamp.is_empty() {
+                continue;
+            }
+            let instant = chrono::DateTime::parse_from_rfc3339(timestamp).map_err(|error| {
+                archive::invalid(
+                    path,
+                    format!(
+                        "invalid activity timestamp in '{field}' on line {}: {error}",
+                        line_index + 1
+                    ),
+                )
+            })?;
+            if instant > latest {
+                latest = instant;
+                latest_value = timestamp.to_string();
+            }
+        }
     }
+    Ok(latest_value)
+}
+
+/// Read metadata and derive last use without changing either representation.
+fn read_session_summary(path: &Path) -> Result<SessionSummary, StoreError> {
+    let bytes = archive::read_bytes(path)?;
+    let meta = archive::header(&bytes, path)?;
+    archive::validate_identity(&meta, path)?;
+    let last_used_at = last_used_at(&bytes, &meta, path)?;
+    Ok(SessionSummary {
+        session_id: meta.session_id,
+        created_at: meta.created_at,
+        last_used_at,
+        title: meta.title,
+        provider_connection: meta.provider_connection,
+        model: meta.model,
+        parent_session: meta.parent_session,
+        path: if path.is_file() {
+            path.to_path_buf()
+        } else {
+            archive::archive_path(path)
+        },
+    })
 }

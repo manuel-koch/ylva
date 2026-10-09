@@ -78,6 +78,18 @@ pub struct AgentFinishArgs {
     pub sources: Option<Vec<String>>,
 }
 
+impl AgentFinishArgs {
+    pub(crate) fn resolved_status(&self) -> AgentFinishStatus {
+        self.status.unwrap_or_else(|| {
+            if self.error.is_some() {
+                AgentFinishStatus::Failure
+            } else {
+                AgentFinishStatus::Success
+            }
+        })
+    }
+}
+
 /// Configuration a specific child run's `agent_finish` tool needs to construct and
 /// send its [`FinishResult`].
 #[derive(Debug, Clone)]
@@ -205,13 +217,7 @@ impl ToolCall for AgentFinishCall {
             // `status` is optional on the wire: some models omit it. Infer it
             // from `error`/`result` so the call still completes instead of
             // being rejected — see `AgentFinishArgs::status` doc comment.
-            let status = args.status.unwrap_or_else(|| {
-                if args.error.is_some() {
-                    AgentFinishStatus::Failure
-                } else {
-                    AgentFinishStatus::Success
-                }
-            });
+            let status = args.resolved_status();
             let finish_result = FinishResult {
                 run_id: self.config.run_id,
                 call_id: self.config.call_id,

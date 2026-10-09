@@ -55,7 +55,13 @@ rules = [
 rules = [
     { command = ["true"],       verdict = "auto_approved" },
     { command = ["false"],      verdict = "auto_approved" },
-    { command = ["ls", "**"], verdict = "auto_approved" },
+    { command = ["ls", "**"],   verdict = "auto_approved" },
     { command = ["grep", "**"], verdict = "auto_approved" },
     { command = ["wc", "**"],   verdict = "auto_approved" },
+    { command = ["nl", "**"],   verdict = "auto_approved" },
+    { command = ["cat", "**"],  verdict = "auto_approved" },
+    { command = ["cut", "**"],  verdict = "auto_approved" },
+    { command = ["tr", "**"],   verdict = "auto_approved" },
+    { command = ["echo", "**"], verdict = "auto_approved" },
+    { command = ["test", "**"], verdict = "auto_approved" },
 ]

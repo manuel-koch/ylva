@@ -57,6 +57,7 @@ fn run_state() -> (RunState, mpsc::Receiver<UiUpdate>) {
             pending_child_finish_reprompt: false,
             iteration_cap_exceeded: None,
             stream_error: None,
+            execution_span: tracing::Span::none(),
         },
         ui_rx,
     )

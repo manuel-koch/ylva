@@ -42,6 +42,8 @@ Ylva is highly customizable to adapt to user needs.
   - [x] Automatic title generation for a session
   - [x] Root agent type selection (`--agent`), restored on resume
   - [x] Per-agent tool-use iteration limit (`max_tool_iterations`)
+  - [x] Session listing and explicit deletion with dry-run previews
+  - [x] Manual lossless archival/restoration, including archived resume and clone
 - [x] TUI drill-in view to inspect a spawned child agent's own conversation
 - [x] Slash commands in TUI
   - [x] `/models` to switch named engines or provider-catalog models

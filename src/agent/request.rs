@@ -75,13 +75,16 @@ pub(super) fn start_request(
         .map(|compaction_state| compaction_state.capacity_warning(engine.clone()));
     let send_notices = |notices: Vec<String>| {
         let sender = agent_tx.clone();
-        tokio::spawn(async move {
-            for notice in notices {
-                if !send_preflight_notice(&sender, generation, notice).await {
-                    return;
+        tokio::spawn(
+            async move {
+                for notice in notices {
+                    if !send_preflight_notice(&sender, generation, notice).await {
+                        return;
+                    }
                 }
             }
-        });
+            .in_current_span(),
+        );
     };
     if let Some(compaction) = compaction {
         if compaction.defer_request(context, engine.as_ref(), &tools) {
@@ -132,7 +135,7 @@ pub(super) fn start_request(
                 let _ = sender.send((generation, AgentEvent::StreamError(
                     "The context window cannot hold the system instructions, tool definitions and a valid task continuation. Select a model with a larger context window or start a new conversation with a shorter task.".to_string()
                 ))).await;
-            });
+            }.in_current_span());
             return cancel;
         }
         notices.push("Reduced the model view lossily to fit the context window. The task anchor remains; omitted output and the full transcript are preserved.".to_string());
@@ -179,6 +182,7 @@ pub(super) fn start_request(
                 }
             }
             if inner_cancel.is_cancelled() {
+                tracing::debug!("session request cancelled");
                 let _ = ui_tx.send(UiUpdate::StreamCancelled).await;
                 let _ = agent_tx
                     .send((
@@ -356,6 +360,9 @@ pub(super) fn start_request(
                         break;
                     }
                 }
+            }
+            if inner_cancel.is_cancelled() {
+                tracing::debug!("session request cancelled");
             }
         }
         .instrument(span),

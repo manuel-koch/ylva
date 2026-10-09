@@ -201,6 +201,8 @@ pub(super) fn prepare_child_replay_effects(
     effects: Vec<Effect>,
     store: Option<&crate::store::Store>,
 ) -> Vec<Effect> {
+    let session_span = store.map(|store| store.span());
+    let _session_scope = session_span.as_ref().map(tracing::Span::enter);
     let mut prepared = Vec::with_capacity(effects.len());
     for effect in effects {
         match effect {
@@ -225,7 +227,12 @@ pub(super) fn prepare_child_replay_effects(
                                         %run_id,
                                         "could not replay child transcript"
                                     );
-                                    (Vec::new(), None)
+                                    state.push_notice_to(
+                                        Some(run_id),
+                                        format!("Could not load subagent transcript: {error}"),
+                                    );
+                                    state.switch_to_child_view(run_id);
+                                    continue;
                                 }
                             }
                         }

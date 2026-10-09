@@ -511,6 +511,10 @@ impl RunState {
                 }
                 self.context = fresh_context;
                 self.session_id = self.context.store().map(|store| store.session_id());
+                self.store_for_commands = self.context.store();
+                if let Some(manager) = self.child_agent_manager.as_mut() {
+                    manager.set_store(self.context.store());
+                }
                 *self
                     .current_store
                     .lock()

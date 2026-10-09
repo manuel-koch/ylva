@@ -287,6 +287,10 @@ impl ChildAgentManager {
         self
     }
 
+    pub(crate) fn set_store(&mut self, store: Option<Store>) {
+        self.store = store;
+    }
+
     /// The parent session's store, when persistence is enabled. Used by the
     /// parent `AgentLoop` to persist a finished child's own transcript.
     pub fn store(&self) -> Option<Store> {

@@ -5,6 +5,42 @@ explain them: cross-module interactions, constraints or workarounds, and design
 decisions behind behavior described in [features](./features.md). Keep notes
 brief and link to user-facing docs rather than repeat their contracts.
 
+## Session lifecycle ownership
+
+`session_command.rs` dispatches provider-independent nested clap commands before
+profile/provider initialization or stdin consumption. Its CLI listing projection
+keeps the library's descending order while using last-use timestamps: roots and
+sibling groups are rendered least recently used first. With subagents included,
+an iterative traversal follows
+`parent_session`, marks nesting after each last-use timestamp, and lists each
+transcript once. Missing parents are annotated; cyclic parent links produce
+diagnostics without hiding sessions. `store/maintenance.rs`
+validates selectors, selects deterministic identity groups, and coordinates
+reference scans with clone/delegation publication. `store/archive.rs` owns shared
+representation resolution and durable, lossless transitions; all replay readers
+use it. `store/session_file.rs` retains stable identity locks independently of
+the raw file inode, including across title replacement. Writer tasks hold the
+lock until their command queue drains. `store/replay.rs::last_used_at` derives
+activity from the resolved transcript without changing metadata or consulting
+file modification times. Date-based maintenance revalidates it after exclusion,
+skipping a group if a selected root/target was used again after discovery.
+
+Drivers retain a `SessionExitGuard` observing the agent's shared current-store
+handle. It snapshots the final persisted ID/title on success or error without
+holding a stale startup identity across `/clear`. The binary prints that snapshot
+only after terminal restoration.
+
+`Store` owns an immutable session span; runtime handlers snapshot the current
+store's span for each async scope. Spawned work instruments its own future, so
+rollover never mutates an existing span. The child manager and factory share the
+current-store handle for new delegations, while each admitted run retains its
+parent store. Title tasks explicitly parent to their target store and writer
+tasks parent to their own session. Text and JSON tests verify rollover and
+subagent transcript correlation.
+
+See [persistence](persistence.md) and
+[Session commands](cli-options.md#session-commands) for the user contract.
+
 ## Layered configuration and persona assembly
 
 See [configuration](./configuration.md) for file precedence, formats, and the
@@ -519,8 +555,19 @@ Replay never owns or updates title-generation state. The writer retains its
 lock after replacing the metadata inode and drains queued events when the
 last shared handle is dropped.
 
+For finished subagents, the title snapshot correlates `agent_finish` call
+arguments with matching `ToolResult` IDs and names. Its terminal result/error
+uses `AgentFinishArgs::resolved_status`, shared with execution, and takes
+precedence over intermediate assistant text. Root title eligibility remains
+text-reply based. Child persistence and resume both reconstruct this snapshot;
+utility generation still uses `TitleAttempt`, with no transcript mutation or
+task-label substitution.
+
 `store/tests.rs` holds shared fixtures and cross-owner lifecycle assertions;
-event, session-file, writer and replay suites live under `store/tests/`.
+event, session-file, writer, replay, archive and maintenance suites live under
+`store/tests/`. Archive tests inject interruptions at publication/removal
+boundaries and verify complete-byte recovery. Command subprocess tests isolate
+the launch directory, state home and provider environment.
 
 `Store::clone_session` (`src/store.rs`) reads the source under a nonblocking
 exclusive lock held only for the read, rejects a child transcript or a

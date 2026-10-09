@@ -15,7 +15,9 @@
 use super::*;
 use crate::agent::{AssistantStatus, Message, ToolCallRequest};
 
+mod archive;
 mod event;
+mod maintenance;
 mod replay;
 mod session_file;
 mod writer;

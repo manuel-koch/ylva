@@ -174,17 +174,37 @@ pub(crate) fn run_locked_paused(body: impl std::future::Future<Output = ()>) {
 }
 
 pub(crate) fn capture_logs(body: impl std::future::Future<Output = ()>) -> String {
+    capture_logs_with_format(crate::logging::LogFormat::Text, body)
+}
+
+pub(crate) fn capture_logs_with_format(
+    format: crate::logging::LogFormat,
+    body: impl std::future::Future<Output = ()>,
+) -> String {
     let _lock = SUBSCRIBER_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let log = SharedLog::default();
     let writer = log.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(move || writer.clone())
-        .with_ansi(false)
-        .with_max_level(tracing::Level::DEBUG)
-        .finish();
+    let subscriber: Box<dyn tracing::Subscriber + Send + Sync> = match format {
+        crate::logging::LogFormat::Text => Box::new(
+            tracing_subscriber::fmt()
+                .with_writer(writer)
+                .with_ansi(false)
+                .with_max_level(tracing::Level::DEBUG)
+                .finish(),
+        ),
+        crate::logging::LogFormat::Json => Box::new(
+            tracing_subscriber::fmt()
+                .with_writer(writer)
+                .with_ansi(false)
+                .with_max_level(tracing::Level::DEBUG)
+                .json()
+                .with_current_span(false)
+                .finish(),
+        ),
+    };
     tracing::subscriber::with_default(subscriber, || {
         // Re-evaluate all callsite interests against this subscriber so
         // callsites first seen when no subscriber was active are not stuck

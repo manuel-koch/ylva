@@ -515,6 +515,26 @@ impl AgentLoop {
             .clone()
     }
 
+    pub(crate) fn exit_guard(
+        &self,
+        snapshot: Option<crate::app::SessionExitHandle>,
+    ) -> crate::app::SessionExitGuard {
+        crate::app::SessionExitGuard {
+            current_store: Arc::clone(&self.current_store),
+            snapshot,
+        }
+    }
+
+    pub(crate) fn current_store_handle(&self) -> Arc<Mutex<Option<Store>>> {
+        Arc::clone(&self.current_store)
+    }
+
+    pub(crate) fn session_span(&self) -> tracing::Span {
+        self.store()
+            .map(|store| store.span())
+            .unwrap_or_else(tracing::Span::current)
+    }
+
     pub async fn send_command(&self, cmd: AgentCommand) {
         let _ = self.cmd_tx.send(cmd).await;
     }

@@ -133,6 +133,14 @@ Span context renders inline in text and as the `spans` array in JSONL (see
 `docs/features.md`). Use spans the same way for other long-running scopes
 (e.g. a request/stream), and only for data safe to log.
 
+Persisted work uses an immutable root `session` span. `/clear` replaces the
+identity for new work; already-spawned request, tool, compaction, title and writer
+tasks retain their original span. Subagent scopes carry `run_id` and
+`parent_session_id`, including outcomes and transcript persistence. Instrument
+async futures rather than keeping a span-enter guard across an await.
+Session logging regressions capture both text and JSON through
+`test_support::capture_logs_with_format` under subscriber isolation.
+
 Sensitive values (API keys, credentials) MUST NOT be written to the log: call
 sites MUST reduce them to a presence indicator (`set`/`unset`/`???`/`***`) before passing
 them to a `tracing` macro.
@@ -258,7 +266,7 @@ with queue/approval, cancellation and subagent suites under
 Use `#[path = "<target>/<suite>.rs"] mod <suite>;` in the target parent:
 integration-test roots resolve a plain `mod <suite>;` beside the root file,
 not under its same-named directory.
-Persistence event, session-file, writer and replay suites live under
+Persistence event, session-file, writer, replay, archive-transition and maintenance suites live under
 `store/tests/`, with shared fixtures and cross-owner lifecycle assertions in
 `store/tests.rs`. Sandbox suites live beside their private rule, path, command
 and network owners under `sandbox/<owner>/tests.rs`, keeping private helpers

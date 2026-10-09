@@ -15,6 +15,83 @@
 use super::*;
 
 #[tokio::test]
+async fn last_use_takes_the_latest_top_level_timestamp_by_instant_not_line_order() {
+    let (_directory, _chats_root, _identity, path, _bytes) = super::archive::fixture().await;
+    let mut metadata = Store::read_session_meta(&path).unwrap().unwrap();
+    metadata.created_at = "2020-01-01T00:00:00Z".into();
+    let header = serde_json::to_string(&StoreEvent::Meta(metadata.clone())).unwrap();
+    let derive = |events: &[serde_json::Value]| {
+        let mut content = format!("{header}\n");
+        for event in events {
+            content.push_str(&serde_json::to_string(event).unwrap());
+            content.push('\n');
+        }
+        crate::store::replay::last_used_at(content.as_bytes(), &metadata, &path)
+    };
+    for field in [
+        "timestamp",
+        "created_at",
+        "changed_at",
+        "completed_at",
+        "compacted_at",
+    ] {
+        let mut event = serde_json::json!({"type": "future_event"});
+        event[field] = serde_json::json!("2026-01-09T08:30:00Z");
+        assert_eq!(derive(&[event]).unwrap(), "2026-01-09T08:30:00Z", "{field}");
+    }
+    assert_eq!(
+        derive(&[
+            serde_json::json!({"timestamp": "2026-01-09T10:00:00+02:00"}),
+            serde_json::json!({"created_at": "2026-01-09T08:30:00Z"}),
+            serde_json::json!({"changed_at": "2026-01-09T08:00:00Z"}),
+            serde_json::json!({"completed_at": "2026-01-09T11:00:00+02:00"}),
+            serde_json::json!({"compacted_at": "2026-01-09T08:59:59Z"}),
+        ])
+        .unwrap(),
+        "2026-01-09T11:00:00+02:00"
+    );
+    for event in [
+        serde_json::json!({"type": "message", "message": {"content": "2099-01-01T00:00:00Z", "timestamp": "2099-01-01T00:00:00Z"}}),
+        serde_json::json!({"type": "message", "timestamp": ""}),
+        serde_json::json!({"type": "model_projection", "projection": {}}),
+        serde_json::json!({"timestamp": "2019-12-31T23:00:00-01:00"}),
+    ] {
+        assert_eq!(derive(&[event]).unwrap(), metadata.created_at);
+    }
+    for invalid in [
+        serde_json::json!({"timestamp": "invalid"}),
+        serde_json::json!({"changed_at": 42}),
+    ] {
+        assert!(derive(&[invalid]).is_err());
+    }
+}
+
+#[tokio::test]
+async fn invalid_activity_timestamps_are_diagnosed_and_block_age_based_deletion() {
+    let (directory, chats_root, _, path, _) = super::archive::fixture().await;
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes.extend_from_slice(b"{\"type\":\"future_event\",\"timestamp\":\"invalid\"}\n");
+    std::fs::write(&path, &bytes).unwrap();
+    let key = project_key(directory.path());
+    let (summaries, diagnostics) =
+        Store::list_sessions_with_diagnostics(&chats_root, &key).unwrap();
+    assert!(summaries.is_empty());
+    assert_eq!(diagnostics.len(), 1);
+    assert!(diagnostics[0].contains("invalid activity timestamp in 'timestamp'"));
+    let report = Store::maintain_sessions(
+        &chats_root,
+        &key,
+        &crate::store::SessionSelection::Before(chrono::Utc::now()),
+        crate::store::MaintenanceAction::Delete,
+        false,
+    )
+    .unwrap();
+    assert_eq!(report.failures.len(), 2);
+    assert!(report.paths.is_empty());
+    assert_eq!(std::fs::read(path).unwrap(), bytes);
+}
+
+#[tokio::test]
 async fn read_only_listing_never_mutates_a_file_with_a_corrupt_tail() {
     let temp = tempfile::tempdir().expect("tempdir");
     let chats_root = temp.path().join("chats");

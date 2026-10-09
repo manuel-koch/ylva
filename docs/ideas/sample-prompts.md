@@ -221,7 +221,6 @@ Run the following task in a subagent and let it report its findings back:
 
 Analyze the `src/agent/child_agent_manager.rs` functionality
 and write a brief summary of its implementation.
-
 Use markdown table to structure your findings.
 
 ---

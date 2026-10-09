@@ -166,8 +166,9 @@ pub struct SessionMeta {
     pub model: String,
     pub session_id: Uuid,
     /// Utility-engine-generated one-line title, truncated to
-    /// [`TITLE_MAX_CHARS`]. Empty while title generation is pending or when
-    /// the session has no completed turn.
+    /// [`TITLE_MAX_CHARS`]. Root titles use a completed text reply; subagents
+    /// can use their completed structured `agent_finish` result or error.
+    /// Empty while no eligible outcome exists or generation has not succeeded.
     #[serde(default)]
     pub title: String,
     /// Set only for a child-agent's own session file, naming the parent's

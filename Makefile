@@ -58,6 +58,12 @@ create-logs-dir: logs/.gitignore
 clean:
 	cargo clean -p ylva --target-dir "$(CARGO_TARGET_DIR)"
 
+show-debug-executable:
+	@echo "$(CARGO_TARGET_DIR)/debug/ylva"
+
+show-release-executable:
+	@echo "$(CARGO_TARGET_DIR)/release/ylva"
+
 # Build debug binary (output: target/debug/ylva)
 build-debug:
 	cargo build
